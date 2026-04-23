@@ -20,7 +20,7 @@ if (!defined('DB_NAME')) {
 // ── Plugin-level constants normally set in the main plugin file ──────────
 
 if (!defined('BCC_TRUST_VERSION')) {
-    define('BCC_TRUST_VERSION', '1.1.0');
+    define('BCC_TRUST_VERSION', '1.2.0');
 }
 if (!defined('BCC_TRUST_PATH')) {
     define('BCC_TRUST_PATH', __DIR__ . '/');
@@ -28,6 +28,13 @@ if (!defined('BCC_TRUST_PATH')) {
 if (!defined('BCC_TRUST_URL')) {
     define('BCC_TRUST_URL', '/wp-content/plugins/bcc-trust/');
 }
+
+// Onchain signal-score caps + cache ttl + total-bonus cap.
+if (!defined('BCC_ONCHAIN_MAX_AGE_SCORE'))      { define('BCC_ONCHAIN_MAX_AGE_SCORE',      8); }
+if (!defined('BCC_ONCHAIN_MAX_DEPTH_SCORE'))    { define('BCC_ONCHAIN_MAX_DEPTH_SCORE',    7); }
+if (!defined('BCC_ONCHAIN_MAX_CONTRACT_SCORE')) { define('BCC_ONCHAIN_MAX_CONTRACT_SCORE', 4.8); }
+if (!defined('BCC_ONCHAIN_CACHE_HOURS'))        { define('BCC_ONCHAIN_CACHE_HOURS',        24); }
+if (!defined('BCC_ONCHAIN_MAX_TOTAL_BONUS'))    { define('BCC_ONCHAIN_MAX_TOTAL_BONUS',    20); }
 
 // ── Load config files (they define all BCC_TRUST_*, BCC_QUEST_* constants) ──
 

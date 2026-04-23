@@ -1,0 +1,23 @@
+{
+    "$schema": "https://schemas.wp.org/trunk/block.json",
+    "apiVersion": 3,
+    "name": "bcc-onchain/signals",
+    "version": "1.0.0",
+    "title": "On-Chain Signals",
+    "category": "bcc-onchain",
+    "icon": "networking",
+    "description": "Displays on-chain wallet data including wallet age, transaction depth, and smart contract activity. Place on PeepSo profile pages — auto-detects the current page. Also available as [bcc_onchain_signals] shortcode.",
+    "keywords": ["wallet", "onchain", "blockchain", "crypto", "signals", "trust"],
+    "attributes": {
+        "pageId": {
+            "type": "number",
+            "default": 0
+        }
+    },
+    "supports": {
+        "html": false,
+        "align": ["wide", "full"]
+    },
+    "textdomain": "bcc-onchain",
+    "render": "file:./render.php"
+}

@@ -1,0 +1,198 @@
+/* ================================================================
+   BCC On-Chain Signals Widget
+   ================================================================ */
+.bcc-onchain-widget {
+    --clr-surface:  var(--BCC--SURFACE,  #1a1d24);
+    --clr-border:   var(--BCC--BORDER,   rgba(255,255,255,0.10));
+    --clr-text:     var(--BCC--TEXT,     #e4e7ef);
+    --clr-muted:    var(--BCC--TEXT--MUTED, #6b7280);
+    --clr-trust:    var(--BCC--TRUST,    #3b82f6);
+
+    background: var(--clr-surface);
+    border: 1.5px solid var(--clr-border);
+    border-radius: 16px;
+    overflow: hidden;
+}
+
+.bcc-onchain-widget__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--clr-border);
+}
+
+.bcc-onchain-widget__title {
+    font-weight: 700;
+    font-size: 0.9rem;
+    color: var(--clr-text);
+}
+
+.bcc-onchain-widget__total {
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: var(--clr-trust);
+    background: rgba(59,130,246,0.12);
+    border-radius: 20px;
+    padding: 2px 10px;
+}
+
+.bcc-onchain-chain-card {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--clr-border);
+}
+.bcc-onchain-chain-card:last-child { border-bottom: none; }
+
+.bcc-onchain-chain-card__header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+.bcc-onchain-chain-label {
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: var(--clr-text);
+}
+.bcc-onchain-chain-addr {
+    font-family: monospace;
+    font-size: 0.78rem;
+    color: var(--clr-muted);
+    flex: 1;
+}
+.bcc-onchain-chain-score {
+    font-weight: 700;
+    font-size: 0.82rem;
+    color: var(--clr-trust);
+}
+
+.bcc-onchain-signals-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+}
+
+.bcc-onchain-signal {
+    background: rgba(255,255,255,0.04);
+    border-radius: 8px;
+    padding: 10px;
+}
+.bcc-onchain-signal__label {
+    font-size: 0.72rem;
+    color: var(--clr-muted);
+    margin-bottom: 4px;
+    font-weight: 500;
+}
+.bcc-onchain-signal__value {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--clr-text);
+    margin-bottom: 6px;
+}
+.bcc-onchain-signal__bar {
+    height: 4px;
+    background: rgba(255,255,255,0.08);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 4px;
+}
+.bcc-onchain-signal__bar-fill {
+    height: 100%;
+    background: var(--clr-trust);
+    border-radius: 4px;
+    min-width: 0;
+    max-width: 100%;
+    transition: width 0.4s ease;
+}
+.bcc-onchain-signal__pts {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--clr-trust);
+    text-align: right;
+}
+
+.bcc-onchain-chain-card__footer {
+    margin-top: 10px;
+    font-size: 0.72rem;
+    color: var(--clr-muted);
+}
+
+.bcc-onchain-empty {
+    padding: 16px;
+    font-size: 0.875rem;
+    color: var(--clr-muted);
+}
+
+/* ── Section headers for on-chain stats/cards ── */
+.bcc-onchain-stats__header,
+.bcc-onchain-cards__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.bcc-onchain-stats__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.bcc-onchain-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bcc-onchain-stat__label {
+  font-size: 0.72rem;
+  color: var(--clr-muted, #6b7280);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 500;
+}
+
+.bcc-onchain-stat__value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--clr-text, #e4e7ef);
+}
+
+.bcc-onchain-refresh {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--clr-border, rgba(255,255,255,0.10));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--clr-muted, #6b7280);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.bcc-onchain-refresh:hover {
+  color: var(--clr-trust, #3b82f6);
+  border-color: var(--clr-trust, #3b82f6);
+}
+
+/* ── Synced-at timestamp (shown alongside the shared badge) ── */
+.bcc-onchain-synced-at {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--clr-muted, #6b7280);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.bcc-onchain-cards__count {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--clr-muted, #6b7280);
+  margin-left: auto;
+}
+
+/* ── Mobile ── */
+@media (max-width: 480px) {
+    .bcc-onchain-signals-grid { grid-template-columns: 1fr 1fr; }
+}

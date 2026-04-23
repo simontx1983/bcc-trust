@@ -1,0 +1,373 @@
+/**
+ * BCC Wallet Connect Styles
+ */
+
+/* ── Wallet List Panel ──────────────────────────────────────────────────── */
+
+.bcc-wallet-list-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.bcc-wallet-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--BCC--SURFACE, #1a1a2e);
+    border: 1px solid var(--BCC--BORDER, rgba(255, 255, 255, 0.08));
+    border-radius: 8px;
+    transition: border-color 0.2s;
+}
+
+.bcc-wallet-row:hover {
+    border-color: var(--BCC--TRUST, #4ecdc4);
+}
+
+.bcc-wallet-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.bcc-wallet-chain {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--BCC--TEXT, #e0e0e0);
+}
+
+.bcc-wallet-address a {
+    color: var(--BCC--TRUST, #4ecdc4);
+    text-decoration: none;
+    font-family: monospace;
+    font-size: 13px;
+}
+
+.bcc-wallet-address a:hover {
+    text-decoration: underline;
+}
+
+.bcc-wallet-label {
+    font-size: 12px;
+    color: var(--BCC--TEXT-MUTED, #888);
+    font-style: italic;
+}
+
+.bcc-wallet-empty {
+    text-align: center;
+    padding: 20px;
+    color: var(--BCC--TEXT-MUTED, #888);
+    font-size: 14px;
+}
+
+/* ── Badges ─────────────────────────────────────────────────────────────── */
+
+.bcc-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.bcc-badge-primary {
+    background: var(--BCC--TRUST, #4ecdc4);
+    color: #000;
+}
+
+.bcc-badge-verified {
+    background: rgba(78, 205, 196, 0.15);
+    color: var(--BCC--TRUST, #4ecdc4);
+    border: 1px solid rgba(78, 205, 196, 0.3);
+}
+
+.bcc-badge-type {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--BCC--TEXT-MUTED, #888);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.bcc-badge--hidden {
+    background: rgba(255, 170, 0, 0.12);
+    color: var(--BCC--WARNING, #ffaa00);
+    border: 1px solid rgba(255, 170, 0, 0.25);
+}
+
+/* ── Actions ────────────────────────────────────────────────────────────── */
+
+.bcc-wallet-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.bcc-wallet-actions button {
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: transparent;
+    color: var(--BCC--TEXT-MUTED, #888);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.bcc-wallet-actions button:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--BCC--TEXT, #e0e0e0);
+}
+
+.bcc-wallet-disconnect:hover {
+    border-color: #e74c3c !important;
+    color: #e74c3c !important;
+}
+
+.bcc-wallet-actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* ── Connect Button ─────────────────────────────────────────────────────── */
+
+.bcc-wallet-connect {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--BCC--TRUST, #4ecdc4);
+    background: transparent;
+    color: var(--BCC--TRUST, #4ecdc4);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.bcc-wallet-connect:hover {
+    background: rgba(78, 205, 196, 0.1);
+}
+
+.bcc-wallet-connect:disabled {
+    opacity: 0.7;
+    cursor: wait;
+}
+
+.bcc-wallet-connect.bcc-wallet-verified {
+    border-color: var(--BCC--TRUST, #4ecdc4);
+    background: rgba(78, 205, 196, 0.15);
+    cursor: default;
+}
+
+.bcc-wallet-connect.bcc-wallet-error {
+    border-color: #e74c3c;
+    color: #e74c3c;
+}
+
+/* ── Chain Select Grid ──────────────────────────────────────────────────── */
+
+.bcc-chain-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px;
+}
+
+.bcc-chain-card {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--BCC--SURFACE, #1a1a2e);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.bcc-chain-card:hover {
+    border-color: var(--BCC--TRUST, #4ecdc4);
+}
+
+.bcc-chain-card.selected {
+    border-color: var(--BCC--TRUST, #4ecdc4);
+    background: rgba(78, 205, 196, 0.08);
+}
+
+.bcc-chain-card img {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+}
+
+.bcc-chain-card span {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--BCC--TEXT, #e0e0e0);
+}
+
+/* ── Ecosystem Buttons (MetaMask / Cosmos / Solana) ───────────────────── */
+
+.bcc-ecosystem-buttons {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.bcc-ecosystem {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1 1 0;
+    min-width: 140px;
+}
+
+.bcc-ecosystem-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 14px 18px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--BCC--SURFACE, #1a1a2e);
+    color: var(--BCC--TEXT, #e0e0e0);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+}
+
+.bcc-ecosystem-btn:hover {
+    border-color: var(--BCC--TRUST, #4ecdc4);
+    background: rgba(78, 205, 196, 0.06);
+}
+
+.bcc-ecosystem-btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
+}
+
+.bcc-ecosystem-btn.bcc-ecosystem-btn--active {
+    border-color: var(--BCC--TRUST, #4ecdc4);
+    box-shadow: 0 0 0 1px var(--BCC--TRUST, #4ecdc4);
+}
+
+.bcc-ecosystem-btn.bcc-wallet-verified {
+    border-color: var(--BCC--TRUST, #4ecdc4);
+    background: rgba(78, 205, 196, 0.12);
+    cursor: default;
+}
+
+.bcc-ecosystem-btn.bcc-wallet-error {
+    border-color: #e74c3c;
+    color: #e74c3c;
+}
+
+/* Wallet-specific accent colours on hover */
+.bcc-ecosystem-btn--metamask:hover {
+    border-color: #f6851b;
+}
+.bcc-ecosystem-btn--metamask.bcc-ecosystem-btn--active {
+    border-color: #f6851b;
+    box-shadow: 0 0 0 1px #f6851b;
+}
+
+.bcc-ecosystem-btn--cosmos:hover {
+    border-color: #6f7390;
+}
+.bcc-ecosystem-btn--cosmos.bcc-ecosystem-btn--active {
+    border-color: #6f7390;
+    box-shadow: 0 0 0 1px #6f7390;
+}
+
+.bcc-ecosystem-btn--solana:hover {
+    border-color: #9945ff;
+}
+
+.bcc-ecosystem-icon {
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+}
+
+/* ── Chain Picker Dropdown ─────────────────────────────────────────────── */
+
+.bcc-chain-picker {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--BCC--SURFACE, #1a1a2e);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    animation: bccPickerSlide 0.2s ease-out;
+}
+
+.bcc-chain-picker[hidden] {
+    display: none;
+}
+
+@keyframes bccPickerSlide {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.bcc-chain-picker__select {
+    flex: 1;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(0, 0, 0, 0.3);
+    color: var(--BCC--TEXT, #e0e0e0);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.bcc-chain-picker__select:focus {
+    outline: none;
+    border-color: var(--BCC--TRUST, #4ecdc4);
+}
+
+.bcc-chain-picker__go {
+    padding: 6px 14px;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.bcc-chain-picker__go:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+
+@media (max-width: 600px) {
+    .bcc-wallet-row {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .bcc-wallet-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+
+    .bcc-chain-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .bcc-ecosystem-buttons {
+        flex-direction: column;
+    }
+
+    .bcc-chain-picker {
+        flex-wrap: wrap;
+    }
+}
