@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Application\Disputes;
 
 use BCC\Core\Contracts\DisputeAdjudicationInterface;
+use BCC\Trust\Core\Repositories\AdjudicationClaimRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
@@ -18,84 +19,27 @@ if (!defined('ABSPATH')) {
 
 final class DisputeAdjudicator implements DisputeAdjudicationInterface
 {
-    /**
-     * wp_options-backed idempotency markers. The dispute-plugin's
-     * reconciliation cron re-enqueues the async resolve job on failure;
-     * without dedup, a second (or third) successful call would double-apply
-     * the reporter penalty. disputeId is the natural idempotency key.
-     */
-    private const IDEMPOTENCY_OPTION_PREFIX = '_bcc_adjudicated_dispute_';
-
     private VoteRepository $voteRepository;
     private ScoreRepository $scoreRepository;
     private UserInfoRepository $userInfoRepository;
+    private AdjudicationClaimRepository $claimRepository;
 
     public function __construct(
-        VoteRepository     $voteRepository,
-        ScoreRepository    $scoreRepository,
-        UserInfoRepository $userInfoRepository
+        VoteRepository              $voteRepository,
+        ScoreRepository             $scoreRepository,
+        UserInfoRepository          $userInfoRepository,
+        ?AdjudicationClaimRepository $claimRepository = null
     ) {
         $this->voteRepository     = $voteRepository;
         $this->scoreRepository    = $scoreRepository;
         $this->userInfoRepository = $userInfoRepository;
+        $this->claimRepository    = $claimRepository ?? new AdjudicationClaimRepository();
     }
 
-    /**
-     * Attempt to claim exclusive adjudication rights for $disputeId.
-     *
-     * Atomic via wp_options.option_name UNIQUE: INSERT IGNORE returns 1
-     * on first-writer win, 0 on already-adjudicated. Callers treat 0 as
-     * "already done, return success" so reconcile retries are no-ops.
-     *
-     * MUST be called INSIDE the same TransactionManager::run() that
-     * performs the mutation. A committed claim then means "mutation also
-     * committed" — not "mutation is in flight." Under REPEATABLE READ,
-     * two concurrent callers serialise on the wp_options UNIQUE key's
-     * row-level lock: the second waits for the first to commit, then
-     * sees the row and INSERT IGNORE returns 0. If the first ROLLBACKs,
-     * its claim row is rolled back too and the second then successfully
-     * INSERTs on its next attempt (TransactionManager retries deadlocks).
-     *
-     * Calling this OUTSIDE the mutation transaction reopens the bug this
-     * contract was designed to close: a reconcile retry could see the
-     * claim held by an in-flight (uncommitted) adjudication, return true
-     * as "already done," and fire side-effects before the real mutation
-     * lands.
-     */
-    private function claimAdjudication(int $disputeId, string $outcome): bool
-    {
-        global $wpdb;
-        $optionName = self::IDEMPOTENCY_OPTION_PREFIX . $disputeId;
-        $payload    = $outcome . ':' . time();
-
-        $inserted = $wpdb->query($wpdb->prepare(
-            "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload)
-             VALUES (%s, %s, 'no')",
-            $optionName,
-            $payload
-        ));
-
-        return $inserted === 1;
-    }
-
-    /**
-     * Release the idempotency marker so the caller can retry.
-     *
-     * Used only for post-commit edge cases where the transaction committed
-     * successfully but no real mutation was applied (e.g. locked-vote rows
-     * were already gone — the dispute row was vaped between status change
-     * and adjudication). In-transaction failures do NOT need this: the
-     * ROLLBACK rolls the claim back with the mutation.
-     */
-    private function releaseAdjudicationClaim(int $disputeId): void
-    {
-        global $wpdb;
-        $wpdb->delete(
-            $wpdb->options,
-            ['option_name' => self::IDEMPOTENCY_OPTION_PREFIX . $disputeId],
-            ['%s']
-        );
-    }
+    // Claim acquire/release delegate to AdjudicationClaimRepository.
+    // See class-level docblock of that repository for the design invariant
+    // (claim() must be called inside the same TransactionManager::run()
+    // closure as the mutation it gates).
 
     /**
      * Accept a dispute against a vote.
@@ -133,7 +77,7 @@ final class DisputeAdjudicator implements DisputeAdjudicationInterface
                 // eliminating the "claim held but mutation not yet
                 // applied" window that let the dispute plugin fire
                 // reporter emails prematurely.
-                if (!$this->claimAdjudication($disputeId, 'accepted')) {
+                if (!$this->claimRepository->claim($disputeId, 'accepted')) {
                     return ['claim_acquired' => false, 'locked_votes' => []];
                 }
 
@@ -181,7 +125,7 @@ final class DisputeAdjudicator implements DisputeAdjudicationInterface
             });
         } catch (\Throwable $e) {
             // Transaction rolled back — including the claim INSERT, which is
-            // now inside the closure. No explicit releaseAdjudicationClaim()
+            // now inside the closure. No explicit claimRepository->release()
             // needed; future reconcile retries will find wp_options empty
             // and successfully re-claim on their next attempt.
             \BCC\Core\Log\Logger::error('[bcc-trust] acceptVoteDispute transaction failed', [
@@ -218,7 +162,7 @@ final class DisputeAdjudicator implements DisputeAdjudicationInterface
             // Release the committed claim so a future retry can reprocess —
             // otherwise a spurious empty-lock result permanently marks
             // the dispute adjudicated despite no mutation applying.
-            $this->releaseAdjudicationClaim($disputeId);
+            $this->claimRepository->release($disputeId);
             $this->emitResolvedEvent($disputeId, $voteId, $pageId, 'accepted', $resolvedBy);
             return false;
         }
@@ -292,7 +236,7 @@ final class DisputeAdjudicator implements DisputeAdjudicationInterface
 
         try {
             $result = TransactionManager::run(function () use ($disputeId, $reporterId, $applyPenalty): array {
-                if (!$this->claimAdjudication($disputeId, 'rejected')) {
+                if (!$this->claimRepository->claim($disputeId, 'rejected')) {
                     return ['claim_acquired' => false];
                 }
 

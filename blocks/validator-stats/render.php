@@ -19,10 +19,7 @@ $per_page   = (int) ($attributes['perPage'] ?? 4);
 $show_claim = (bool) ($attributes['showClaim'] ?? true);
 
 // Fetch validators for this page.
-$data = [];
-if (class_exists('\\BCC\\Onchain\\Repositories\\ValidatorRepository')) {
-    $data = \BCC\Onchain\Repositories\ValidatorRepository::getForProject($page_id, 1, $per_page);
-}
+$data = \BCC\Trust\Onchain\Repositories\ValidatorRepository::getForProject($page_id, 1, $per_page);
 
 $validators  = $data['items'] ?? [];
 $total       = $data['total'] ?? 0;
@@ -34,9 +31,9 @@ if (empty($validators) && !is_admin()) {
 
 // Batch-load all claims for these validators (single query, not N+1).
 $claims_map = [];
-if (function_exists('bcc_onchain_claims_table') && !empty($validators)) {
+if (!empty($validators)) {
     $vids = array_map(fn($v) => (int) $v->id, $validators);
-    $all_claims = \BCC\Onchain\Repositories\ClaimRepository::getForEntityBatch('validator', $vids);
+    $all_claims = \BCC\Trust\Onchain\Repositories\ClaimRepository::getForEntityBatch('validator', $vids);
     foreach ($all_claims as $vid => $claims) {
         $claims_map[$vid] = $claims[0]; // First verified claimer per validator.
     }
@@ -75,7 +72,6 @@ $wrapper_attributes = get_block_wrapper_attributes([
                 $claimed   = isset($claims_map[$vid]);
                 $claimer   = $claimed ? $claims_map[$vid] : null;
                 $uptime    = $v->uptime_30d !== null ? round((float) $v->uptime_30d, 1) : null;
-                $gov       = $v->governance_participation !== null ? round((float) $v->governance_participation, 0) : null;
                 $commission = $v->commission_rate !== null ? round((float) $v->commission_rate, 2) : null;
                 $stake     = (float) ($v->total_stake ?? 0);
                 $stakeStr  = $stake >= 1000000 ? round($stake / 1000000, 1) . 'M' : ($stake >= 1000 ? round($stake / 1000, 1) . 'K' : number_format($stake, 0));
@@ -124,12 +120,6 @@ $wrapper_attributes = get_block_wrapper_attributes([
                     </div>
                     <?php endif; ?>
 
-                    <?php if ($gov !== null): ?>
-                    <div class="bcc-validator-card__stat">
-                        <span class="bcc-validator-card__stat-value"><?php echo esc_html($gov . '%'); ?></span>
-                        <span class="bcc-validator-card__stat-label"><?php esc_html_e('Gov Votes', 'bcc-trust'); ?></span>
-                    </div>
-                    <?php endif; ?>
                 </div>
 
                 <?php if ($v->delegator_count || $v->voting_power_rank): ?>

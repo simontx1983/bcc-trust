@@ -107,12 +107,24 @@ class XVerificationService {
                 $apiResult = $this->apiService->getUserData($accessToken);
                 if (!empty($apiResult['username'])) {
                     $xData = $apiResult;
-                    error_log('[BCC X] v2 API OK: username=' . $apiResult['username']);
+                    \BCC\Core\Log\Logger::info('x_verification_tier_succeeded', [
+                        'tier'     => 'v2',
+                        'user_id'  => $userId,
+                        'username' => $apiResult['username'],
+                    ]);
                 } else {
-                    error_log('[BCC X] v2 API returned empty username: ' . wp_json_encode($apiResult));
+                    \BCC\Core\Log\Logger::warning('x_verification_tier_empty_response', [
+                        'tier'    => 'v2',
+                        'user_id' => $userId,
+                    ]);
                 }
             } catch (\Throwable $e) {
-                error_log('[BCC X] v2 API FAILED: ' . $e->getMessage());
+                \BCC\Core\Log\Logger::warning('x_verification_tier_failed', [
+                    'tier'      => 'v2',
+                    'user_id'   => $userId,
+                    'exception' => get_class($e),
+                    'message'   => $e->getMessage(),
+                ]);
             }
         }
 
@@ -122,20 +134,28 @@ class XVerificationService {
                 $v1Data = $this->apiService->getUserDataV1Fallback($accessToken);
                 if ($v1Data && !empty($v1Data['username'])) {
                     $xData = $v1Data;
-                    \BCC\Core\Log\Logger::info('[bcc-trust] X v1.1 API succeeded', [
+                    \BCC\Core\Log\Logger::info('x_verification_tier_succeeded', [
+                        'tier'     => 'v1.1',
+                        'user_id'  => $userId,
                         'username' => $v1Data['username'],
                     ]);
                 }
             } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] X v1.1 API also failed', [
-                    'error' => $e->getMessage(),
+                \BCC\Core\Log\Logger::warning('x_verification_tier_failed', [
+                    'tier'      => 'v1.1',
+                    'user_id'   => $userId,
+                    'exception' => get_class($e),
+                    'message'   => $e->getMessage(),
                 ]);
             }
         }
 
         // Tier 4: Placeholder — OAuth proves identity regardless
         if (empty($xData['username'])) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] All X API tiers failed, using placeholder for user ' . $userId);
+            \BCC\Core\Log\Logger::error('x_verification_all_tiers_failed', [
+                'user_id' => $userId,
+                'note'    => 'OAuth succeeded but no tier returned a username; falling back to placeholder identity',
+            ]);
             $xData = $xData ?? [];
             $xData['id']       = $xData['id'] ?? ('x_' . $userId);
             $xData['username'] = $xData['username'] ?? ('user_' . $userId);

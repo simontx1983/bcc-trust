@@ -93,29 +93,28 @@ final class ValidatorLeaderboardEndpoint
             $dir = null;
         }
 
-        if (!class_exists('\\BCC\\Onchain\\Repositories\\ValidatorRepository')) {
-            return new WP_REST_Response(
-                ['code' => 'plugin_inactive', 'message' => 'Onchain signals plugin not active.'],
-                503
-            );
+        // Fail-loud: Onchain is a hard in-plugin dependency. A missing class here is a
+        // deployment bug, not a fallback case — do not reintroduce class_exists guards.
+        if (!class_exists(\BCC\Trust\Onchain\Repositories\ValidatorRepository::class)) {
+            throw new \RuntimeException('Onchain domain classes not autoloaded');
         }
 
-        $data = \BCC\Onchain\Repositories\ValidatorRepository::getTopValidators(
+        $data = \BCC\Trust\Onchain\Repositories\ValidatorRepository::getTopValidators(
             $page, $per_page, $sort, $chain_id, $time_window, $dir
         );
 
         $validators = $data['items'] ?? [];
 
-        // Batch-load claims.
+        // Batch-load claims. Only store entity_ids that actually have a first claim;
+        // skipping empty lists lets later `isset($claims_map[$vid])` imply a real object.
         $claims_map = [];
-        if (function_exists('bcc_onchain_claims_table')
-            && !empty($validators)
-            && class_exists('\\BCC\\Onchain\\Repositories\\ClaimRepository')
-        ) {
+        if (!empty($validators)) {
             $vids = array_map(fn($v) => (int) $v->id, $validators);
-            $all_claims = \BCC\Onchain\Repositories\ClaimRepository::getForEntityBatch('validator', $vids);
+            $all_claims = \BCC\Trust\Onchain\Repositories\ClaimRepository::getForEntityBatch('validator', $vids);
             foreach ($all_claims as $vid => $claims) {
-                $claims_map[$vid] = $claims[0];
+                if (!empty($claims)) {
+                    $claims_map[$vid] = $claims[0];
+                }
             }
         }
 
@@ -134,11 +133,11 @@ final class ValidatorLeaderboardEndpoint
 
         foreach ($validators as $rank => $v) {
             $vid         = (int) $v->id;
-            $claimed     = isset($claims_map[$vid]);
-            $claimer     = $claimed ? $claims_map[$vid] : null;
-            $claimer_uid = $claimed ? (int) $claimer->user_id : 0;
+            $claimer     = $claims_map[$vid] ?? null;
+            $claimed     = $claimer !== null;
+            $claimer_uid = $claimer !== null ? (int) $claimer->user_id : 0;
 
-            $avatar_url = $claimed && $claimer_uid
+            $avatar_url = $claimer_uid
                 ? get_avatar_url($claimer_uid, ['size' => 64])
                 : $site_logo_url;
 
@@ -155,12 +154,11 @@ final class ValidatorLeaderboardEndpoint
                 'commission_rate'        => $v->commission_rate !== null ? (float) $v->commission_rate : null,
                 'uptime_30d'             => $v->uptime_30d !== null ? round((float) $v->uptime_30d, 1) : null,
                 'delegator_count'        => (int) ($v->delegator_count ?? 0),
-                'governance_participation' => $v->governance_participation !== null ? round((float) $v->governance_participation, 0) : null,
                 'jailed_count'           => (int) ($v->jailed_count ?? 0),
                 'explorer_url'           => $v->explorer_url ?? '',
                 'avatar_url'             => $avatar_url ? esc_url($avatar_url) : '',
                 'claimed'                => $claimed,
-                'claimer_name'           => $claimed ? ($claimer->claimer_name ?? '') : '',
+                'claimer_name'           => $claimer !== null ? ($claimer->claimer_name ?? '') : '',
             ];
         }
 

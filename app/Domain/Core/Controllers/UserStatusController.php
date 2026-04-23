@@ -186,8 +186,6 @@ class UserStatusController {
     /**
      * Get user's fraud/trust status
      *
-     * FIX: removed reference to non-existent `pages_joined` column.
-     *
      * @return WP_REST_Response|WP_Error
      */
     public static function get_user_status(WP_REST_Request $request) {

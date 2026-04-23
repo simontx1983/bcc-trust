@@ -81,6 +81,11 @@ class PageDataAggregator {
                     $owner_id = (int) $rm->owner_id;
                 }
             } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('read_model_create_failed', [
+                    'post_id'   => $post_id,
+                    'exception' => get_class($e),
+                    'message'   => $e->getMessage(),
+                ]);
                 // Non-fatal — fall through to source-table path
             }
         }
@@ -512,9 +517,15 @@ class PageDataAggregator {
         $transactions = null;
         $contracts    = null;
 
-        if ($postId > 0 && class_exists('\\BCC\\Onchain\\Repositories\\SignalRepository')) {
+        if ($postId > 0) {
+            // Fail-loud: Onchain is a hard in-plugin dependency. A missing class here is a
+            // deployment bug, not a fallback case — class_exists guards would silently blank
+            // out signal data in production.
+            if (!class_exists(\BCC\Trust\Onchain\Repositories\SignalRepository::class)) {
+                throw new \RuntimeException('Onchain domain classes not autoloaded');
+            }
             try {
-                $signals = \BCC\Onchain\Repositories\SignalRepository::get_for_page($postId);
+                $signals = \BCC\Trust\Onchain\Repositories\SignalRepository::get_for_page($postId);
                 if (!empty($signals)) {
                     $max_age_days  = 0;
                     $total_tx      = 0;
@@ -544,22 +555,34 @@ class PageDataAggregator {
                     }
                 }
             } catch (Exception $e) {
+                \BCC\Core\Log\Logger::warning('onchain_indexer_unavailable', [
+                    'post_id'   => $postId,
+                    'exception' => get_class($e),
+                    'message'   => $e->getMessage(),
+                ]);
                 // Indexer unavailable — fields stay null.
             }
         }
 
-        // Enrich with on-chain collection data from bcc-onchain-signals when available.
+        // Enrich with on-chain collection data from the Onchain domain.
+        // Build new stdClass objects rather than mutating the repo's return
+        // value in place — the repo response is cached, and mutating it would
+        // poison subsequent cache hits from this request.
         $collections = [];
-        if (class_exists('\\BCC\\Onchain\\Services\\CollectionService')) {
-            try {
-                $result      = \BCC\Onchain\Services\CollectionService::getAllForProject($postId);
-                $collections = $result['items'];
-                foreach ($collections as $c) {
-                    $c->is_creator = true;
-                }
-            } catch (Exception $e) {
-                $collections = [];
+        try {
+            $result = \BCC\Trust\Onchain\Services\CollectionService::getAllForProject($postId);
+            foreach ($result['items'] as $c) {
+                $data               = (array) $c;
+                $data['is_creator'] = true;
+                $collections[]      = (object) $data;
             }
+        } catch (Exception $e) {
+            \BCC\Core\Log\Logger::warning('collection_enrichment_failed', [
+                'post_id'   => $postId,
+                'exception' => get_class($e),
+                'message'   => $e->getMessage(),
+            ]);
+            $collections = [];
         }
 
         return [
@@ -677,13 +700,13 @@ class PageDataAggregator {
 
         // Collection holdings: which of this page's collections does the viewer hold?
         $holds_collections = [];
-        if ($viewer_id !== $owner_id && class_exists('\\BCC\\Onchain\\Services\\CollectionService')) {
+        if ($viewer_id !== $owner_id) {
             try {
-                $result    = \BCC\Onchain\Services\CollectionService::getAllForProject($post_id);
+                $result    = \BCC\Trust\Onchain\Services\CollectionService::getAllForProject($post_id);
                 $contracts = array_map(fn($c) => $c->contract_address ?? '', $result['items']);
                 $contracts = array_filter($contracts);
-                if (!empty($contracts) && class_exists('\\BCC\\Onchain\\Repositories\\CollectionRepository')) {
-                    $holds_collections = \BCC\Onchain\Repositories\CollectionRepository::getUserHoldings($viewer_id, $contracts);
+                if (!empty($contracts)) {
+                    $holds_collections = \BCC\Trust\Onchain\Repositories\CollectionRepository::getUserHoldings($viewer_id, $contracts);
                 }
             } catch (Exception $e) {
                 self::logViewerError('collection_holdings', $viewer_id, $post_id, $e);

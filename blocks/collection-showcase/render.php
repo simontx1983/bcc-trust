@@ -19,10 +19,7 @@ $per_page   = (int) ($attributes['perPage'] ?? 6);
 $show_claim = (bool) ($attributes['showClaim'] ?? true);
 
 // Fetch collections for this page.
-$data = [];
-if (class_exists('\\BCC\\Onchain\\Repositories\\CollectionRepository')) {
-    $data = \BCC\Onchain\Repositories\CollectionRepository::getForProject($page_id, 1, $per_page);
-}
+$data = \BCC\Trust\Onchain\Repositories\CollectionRepository::getForProject($page_id, 1, $per_page);
 
 $collections = $data['items'] ?? [];
 $total       = $data['total'] ?? 0;
@@ -34,9 +31,9 @@ if (empty($collections) && !is_admin()) {
 
 // Batch-load all claims for these collections (single query, not N+1).
 $claims_map = [];
-if (function_exists('bcc_onchain_claims_table') && !empty($collections)) {
+if (!empty($collections)) {
     $cids = array_map(fn($c) => (int) $c->id, $collections);
-    $claims_map = \BCC\Onchain\Repositories\ClaimRepository::getForEntityBatch('collection', $cids);
+    $claims_map = \BCC\Trust\Onchain\Repositories\ClaimRepository::getForEntityBatch('collection', $cids);
 }
 
 $user_id     = get_current_user_id();

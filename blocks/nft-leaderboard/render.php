@@ -28,18 +28,13 @@ $chain_tabs = [
 ];
 
 // Load initial data for the default tab only.
-$collections_data = [];
-if (class_exists('\\BCC\\Onchain\\Repositories\\CollectionRepository')) {
-    $collections_data = \BCC\Onchain\Repositories\CollectionRepository::getTopCollectionsByChainType($default_chain, 1, $per_page);
-}
+$collections_data = \BCC\Trust\Onchain\Repositories\CollectionRepository::getTopCollectionsByChainType($default_chain, 1, $per_page);
 
 // Batch-load claims for initial data.
 $collection_claims = [];
-if (function_exists('bcc_onchain_claims_table') && class_exists('\\BCC\\Onchain\\Repositories\\ClaimRepository')) {
-    if (!empty($collections_data['items'])) {
-        $cids = array_map(fn($c) => (int) $c->id, $collections_data['items']);
-        $collection_claims = \BCC\Onchain\Repositories\ClaimRepository::getForEntityBatch('collection', $cids);
-    }
+if (!empty($collections_data['items'])) {
+    $cids = array_map(fn($c) => (int) $c->id, $collections_data['items']);
+    $collection_claims = \BCC\Trust\Onchain\Repositories\ClaimRepository::getForEntityBatch('collection', $cids);
 }
 
 // Helpers.

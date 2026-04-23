@@ -51,7 +51,7 @@ final class EntityClaimEndpoint
     /**
      * Handle POST /bcc/v1/claim
      */
-    public static function handle(WP_REST_Request $request): WP_REST_Response|\WP_Error
+    public static function handle(WP_REST_Request $request): WP_REST_Response
     {
         if (!\BCC\Core\Security\Throttle::allow('claim_entity', 10, 60)) {
             return new WP_REST_Response(
@@ -71,23 +71,20 @@ final class EntityClaimEndpoint
             );
         }
 
-        if (!class_exists('\\BCC\\Onchain\\Services\\ClaimService')) {
-            return new WP_REST_Response(
-                ['code' => 'plugin_inactive', 'message' => 'Onchain signals plugin not active.'],
-                503
-            );
+        // Fail-loud: Onchain is a hard in-plugin dependency. A missing class here is a
+        // deployment bug, not a fallback case — do not reintroduce class_exists guards.
+        if (!class_exists(\BCC\Trust\Onchain\Services\ClaimService::class)) {
+            throw new \RuntimeException('Onchain domain classes not autoloaded');
         }
 
-        $result = \BCC\Onchain\Services\ClaimService::claim($user_id, $entity_type, $entity_id);
+        $result = \BCC\Trust\Onchain\Services\ClaimService::claim($user_id, $entity_type, $entity_id);
 
         if ($result['success']) {
-            if (class_exists('\\BCC\\Onchain\\Logger')) {
-                \BCC\Onchain\Logger::audit('entity_claimed', [
-                    'user_id' => $user_id,
-                    'type'    => $entity_type,
-                    'id'      => $entity_id,
-                ]);
-            }
+            \BCC\Core\Log\Logger::audit('entity_claimed', [
+                'user_id' => $user_id,
+                'type'    => $entity_type,
+                'id'      => $entity_id,
+            ]);
             return rest_ensure_response($result);
         }
 

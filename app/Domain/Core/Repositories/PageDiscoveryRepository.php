@@ -315,18 +315,10 @@ final class PageDiscoveryRepository
      */
     public static function batchLoadClaims(array $pageIds): array
     {
-        if (empty($pageIds)
-            || !class_exists('\\BCC\\Onchain\\Repositories\\ClaimRepository')
-            || !function_exists('bcc_onchain_claims_table')
-        ) {
+        if (empty($pageIds)) {
             return [];
         }
 
-        global $wpdb;
-        $suppress = $wpdb->suppress_errors(true);
-        $result   = \BCC\Onchain\Repositories\ClaimRepository::getPrimaryClaimsByPageIds($pageIds);
-        $wpdb->suppress_errors($suppress);
-
-        return $wpdb->last_error ? [] : $result;
+        return \BCC\Trust\Onchain\Repositories\ClaimRepository::getPrimaryClaimsByPageIds($pageIds);
     }
 }

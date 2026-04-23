@@ -243,10 +243,12 @@ class QuestValidator {
      * wallet link (written by WalletIdentityService in bcc-core).
      */
     private static function validateWalletConnected(int $userId): bool {
-        if (!class_exists('\\BCC\\Onchain\\Repositories\\WalletRepository')) {
-            return false;
+        // Fail-loud: Onchain is a hard in-plugin dependency. A missing class here means
+        // no user can complete the connect_wallet quest — surface as a crash, not a silent false.
+        if (!class_exists(\BCC\Trust\Onchain\Repositories\WalletRepository::class)) {
+            throw new \RuntimeException('Onchain domain classes not autoloaded');
         }
-        $wallets = \BCC\Onchain\Repositories\WalletRepository::getForUser($userId, null, true);
+        $wallets = \BCC\Trust\Onchain\Repositories\WalletRepository::getForUser($userId, null, true);
         return !empty($wallets);
     }
 

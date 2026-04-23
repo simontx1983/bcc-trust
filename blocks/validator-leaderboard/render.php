@@ -34,41 +34,33 @@ if ($active_dir !== 'asc' && $active_dir !== 'desc') {
 
 // Resolve the active chain ID from slug.
 $active_chain_id   = null;
-$active_chain_obj  = null;
-if (class_exists('\\BCC\\Onchain\\Repositories\\ChainRepository')) {
-    $active_chain_obj = \BCC\Onchain\Repositories\ChainRepository::getBySlug($active_chain_slug);
-    if ($active_chain_obj) {
-        $active_chain_id = (int) $active_chain_obj->id;
-    }
-    // Fallback to cosmos if slug is invalid.
-    if (!$active_chain_id) {
-        $active_chain_obj = \BCC\Onchain\Repositories\ChainRepository::getBySlug('cosmos');
-        $active_chain_id  = $active_chain_obj ? (int) $active_chain_obj->id : null;
-        $active_chain_slug = 'cosmos';
-    }
+$active_chain_obj  = \BCC\Trust\Onchain\Repositories\ChainRepository::getBySlug($active_chain_slug);
+if ($active_chain_obj) {
+    $active_chain_id = (int) $active_chain_obj->id;
+}
+// Fallback to cosmos if slug is invalid.
+if (!$active_chain_id) {
+    $active_chain_obj = \BCC\Trust\Onchain\Repositories\ChainRepository::getBySlug('cosmos');
+    $active_chain_id  = $active_chain_obj ? (int) $active_chain_obj->id : null;
+    $active_chain_slug = 'cosmos';
 }
 
 // For backward compat in the template below.
 $default_chain_id = $active_chain_id;
 
 // Fetch validators sorted server-side across the full dataset.
-$data = [];
-if (class_exists('\\BCC\\Onchain\\Repositories\\ValidatorRepository')) {
-    $data = \BCC\Onchain\Repositories\ValidatorRepository::getTopValidators(
-        1, $per_page, $active_sort, $default_chain_id, $time_window ?: null, $active_dir
-    );
-}
+$data = \BCC\Trust\Onchain\Repositories\ValidatorRepository::getTopValidators(
+    1, $per_page, $active_sort, $default_chain_id, $time_window ?: null, $active_dir
+);
 
 $validators = $data['items'] ?? [];
 $total      = $data['total'] ?? 0;
 
 // Batch-load claims.
 $claims_map = [];
-if (function_exists('bcc_onchain_claims_table') && !empty($validators)
-    && class_exists('\\BCC\\Onchain\\Repositories\\ClaimRepository')
-) {
+if (!empty($validators)) {
     $vids = array_map(fn($v) => (int) $v->id, $validators);
-    $all_claims = \BCC\Onchain\Repositories\ClaimRepository::getForEntityBatch('validator', $vids);
+    $all_claims = \BCC\Trust\Onchain\Repositories\ClaimRepository::getForEntityBatch('validator', $vids);
     foreach ($all_claims as $vid => $claims) {
         $claims_map[$vid] = $claims[0]; // First verified claimer.
     }
@@ -85,16 +77,13 @@ if (!$site_logo_url) {
 }
 
 // Chain filter chips — only chain types that have validators.
-$chains = [];
-if (class_exists('\\BCC\\Onchain\\Repositories\\ChainRepository')) {
-    $chains = array_merge(
-        \BCC\Onchain\Repositories\ChainRepository::getActive('cosmos'),
-        \BCC\Onchain\Repositories\ChainRepository::getActive('thorchain'),
-        \BCC\Onchain\Repositories\ChainRepository::getActive('solana'),
-        \BCC\Onchain\Repositories\ChainRepository::getActive('polkadot'),
-        \BCC\Onchain\Repositories\ChainRepository::getActive('near')
-    );
-}
+$chains = array_merge(
+    \BCC\Trust\Onchain\Repositories\ChainRepository::getActive('cosmos'),
+    \BCC\Trust\Onchain\Repositories\ChainRepository::getActive('thorchain'),
+    \BCC\Trust\Onchain\Repositories\ChainRepository::getActive('solana'),
+    \BCC\Trust\Onchain\Repositories\ChainRepository::getActive('polkadot'),
+    \BCC\Trust\Onchain\Repositories\ChainRepository::getActive('near')
+);
 
 // Helpers.
 if (!function_exists('bcc_vlb_format')) {
@@ -121,11 +110,6 @@ if (!function_exists('bcc_vlb_account_addr')) {
      * Falls back to the operator address if decoding fails.
      */
     function bcc_vlb_account_addr(string $operatorAddr): string {
-        if (!class_exists('\\BCC\\Onchain\\Factories\\FetcherFactory')
-            || !class_exists('\\BCC\\Onchain\\Repositories\\ChainRepository')) {
-            return $operatorAddr;
-        }
-
         $pos = strpos($operatorAddr, 'valoper1');
         if ($pos === false) {
             return $operatorAddr;
@@ -134,9 +118,9 @@ if (!function_exists('bcc_vlb_account_addr')) {
         // Reuse a single CosmosFetcher for the bech32 utility (static cache).
         static $fetcher = null;
         if ($fetcher === null) {
-            $chains = \BCC\Onchain\Repositories\ChainRepository::getActive('cosmos');
+            $chains = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive('cosmos');
             if (!empty($chains)) {
-                $fetcher = \BCC\Onchain\Factories\FetcherFactory::make_for_chain($chains[0]);
+                $fetcher = \BCC\Trust\Onchain\Factories\FetcherFactory::make_for_chain($chains[0]);
             }
         }
 

@@ -94,7 +94,12 @@ final class DisputeResolver
             }
         } catch (\Throwable $e) {
             DisputeRepository::rollbackTransaction();
-            CoreLogger::error("[DisputeResolver] Transaction failed for dispute {$disputeId}: " . $e->getMessage());
+            CoreLogger::error('dispute_resolution_failed', [
+                'dispute_id' => $disputeId,
+                'outcome'    => $outcome,
+                'exception'  => get_class($e),
+                'message'    => $e->getMessage(),
+            ]);
             return false;
         }
 
