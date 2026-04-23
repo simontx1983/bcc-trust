@@ -90,6 +90,14 @@ class PageDataAggregator {
             }
         }
 
+        // Top-level degradation flag. True when any section of this payload
+        // was not served from the authoritative read model. Consumers MUST
+        // key UI decisions (badges, gating, "data may be stale" banners)
+        // on this flag rather than on the numeric shape of individual
+        // fields — a synthetic neutral baseline (score=50, tier='neutral')
+        // looks like real data to a naïve `if (score > 0)` check.
+        $system_degraded = !$has_rm;
+
         if (!$has_rm) {
             self::trackFallback($post_id);
         }
@@ -184,7 +192,12 @@ class PageDataAggregator {
         }
         if ($all || in_array('viewer', $sections, true)) {
             $result['viewer'] = $this->buildViewerSection($viewer_id, $post_id, $owner_id);
+            if (!empty($result['viewer']['viewer_data_degraded'])) {
+                $system_degraded = true;
+            }
         }
+
+        $result['system_degraded'] = $system_degraded;
 
         return $result;
     }
@@ -673,6 +686,13 @@ class PageDataAggregator {
 
         $vote_type    = 0;
         $has_endorsed = false;
+        // True if ANY viewer-specific lookup failed and its field is now
+        // a fallback default rather than the authoritative user state.
+        // The frontend MUST disable vote / endorse / wallet-dependent
+        // controls when this is true — defaulting vote_type to 0 and
+        // wallet_connected to false silently reverts authenticated
+        // actions and would allow double-votes if the user retries.
+        $viewer_data_degraded = false;
 
         try {
             $voteService = \BCC\Trust\Core\Plugin::instance()->voteService();
@@ -680,6 +700,7 @@ class PageDataAggregator {
             $vote_type   = $vote ? (int) $vote->vote_type : 0;
         } catch (Exception $e) {
             self::logViewerError('vote_lookup', $viewer_id, $post_id, $e);
+            $viewer_data_degraded = true;
         }
 
         try {
@@ -687,6 +708,7 @@ class PageDataAggregator {
             $has_endorsed   = $endorseService->hasEndorsedPage($post_id, $viewer_id);
         } catch (Exception $e) {
             self::logViewerError('endorsement_lookup', $viewer_id, $post_id, $e);
+            $viewer_data_degraded = true;
         }
 
         // Wallet connection status
@@ -696,6 +718,7 @@ class PageDataAggregator {
             $wallet_connected = !empty($connections);
         } catch (Exception $e) {
             self::logViewerError('wallet_lookup', $viewer_id, $post_id, $e);
+            $viewer_data_degraded = true;
         }
 
         // Collection holdings: which of this page's collections does the viewer hold?
@@ -710,6 +733,7 @@ class PageDataAggregator {
                 }
             } catch (Exception $e) {
                 self::logViewerError('collection_holdings', $viewer_id, $post_id, $e);
+                $viewer_data_degraded = true;
             }
         }
 
@@ -719,16 +743,18 @@ class PageDataAggregator {
             $quest_progress = \BCC\Trust\Core\Plugin::instance()->questProgressService()->getProgress($viewer_id);
         } catch (Exception $e) {
             self::logViewerError('quest_progress', $viewer_id, $post_id, $e);
+            $viewer_data_degraded = true;
         }
 
         return [
-            'is_owner'           => ($viewer_id === $owner_id),
-            'vote_type'          => $vote_type,
-            'has_endorsed'       => (bool) $has_endorsed,
-            'has_flagged'        => FlagService::hasUserFlagged($post_id, $viewer_id),
-            'wallet_connected'   => $wallet_connected,
-            'holds_collections'  => $holds_collections,
-            'quest_progress'     => $quest_progress,
+            'is_owner'              => ($viewer_id === $owner_id),
+            'vote_type'             => $vote_type,
+            'has_endorsed'          => (bool) $has_endorsed,
+            'has_flagged'           => FlagService::hasUserFlagged($post_id, $viewer_id),
+            'wallet_connected'      => $wallet_connected,
+            'holds_collections'     => $holds_collections,
+            'quest_progress'        => $quest_progress,
+            'viewer_data_degraded'  => $viewer_data_degraded,
         ];
     }
 

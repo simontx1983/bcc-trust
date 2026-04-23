@@ -154,13 +154,14 @@ class PageDataSchema {
         // Source: VoteService + EndorsementService + WalletRepository
         // Null when viewer is logged out.
         'viewer' => [
-            'is_owner'          => false, // bool   Viewer owns this page
-            'vote_type'         => 0,     // int    1 = positive, -1 = risk, 0 = none
-            'has_endorsed'      => false,  // bool  Viewer has active endorsement
-            'has_flagged'       => false,  // bool  Viewer has flagged this page
-            'wallet_connected'  => false,  // bool  Viewer has at least one wallet connected
-            'holds_collections' => [],     // array Collection contract addresses the viewer holds
-            'quest_progress'    => null,   // ?array Quest progress data for the viewer
+            'is_owner'             => false, // bool   Viewer owns this page
+            'vote_type'            => 0,     // int    1 = positive, -1 = risk, 0 = none
+            'has_endorsed'         => false, // bool   Viewer has active endorsement
+            'has_flagged'          => false, // bool   Viewer has flagged this page
+            'wallet_connected'     => false, // bool   Viewer has at least one wallet connected
+            'holds_collections'    => [],    // array  Collection contract addresses the viewer holds
+            'quest_progress'       => null,  // ?array Quest progress data for the viewer
+            'viewer_data_degraded' => false, // bool   At least one viewer-specific lookup failed — UI must disable viewer-dependent controls
         ],
     ];
 

@@ -14,8 +14,10 @@ if (!defined('ABSPATH')) {
  *
  * Implements the bcc-core contract so the health dashboard can surface
  * pending-recalc queue depth without reaching into Trust-domain tables.
- * Returns 0 on any failure — the health endpoint MUST NOT cascade into
- * a platform-wide outage.
+ * Returns null when the underlying COUNT query fails — the health
+ * endpoint MUST NOT cascade into a platform-wide outage, AND must not
+ * silently conflate "unreachable" with "queue empty". Downstream
+ * monitoring keys alerts on null vs. a numeric value.
  */
 final class RecalcQueueReadService implements RecalcQueueReadInterface
 {
@@ -23,7 +25,7 @@ final class RecalcQueueReadService implements RecalcQueueReadInterface
     {
     }
 
-    public function pendingCount(): int
+    public function pendingCount(): ?int
     {
         try {
             return $this->scoreRepository->countPendingRecalc();
@@ -33,7 +35,7 @@ final class RecalcQueueReadService implements RecalcQueueReadInterface
                     'error' => $e->getMessage(),
                 ]);
             }
-            return 0;
+            return null;
         }
     }
 }

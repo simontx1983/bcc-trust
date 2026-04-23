@@ -96,9 +96,17 @@ class PageEndpoint {
         // Signal degradation to the frontend when trust-engine services
         // are unavailable. The frontend should show a banner and disable
         // voting/endorsing — users must not act on default/stale scores.
-        $data['system_degraded'] = !\BCC\Core\ServiceLocator::hasRealService(
+        //
+        // OR with the aggregator's own flag so read-model fallback and
+        // viewer-section failures (already encoded in $data['system_degraded']
+        // and $data['viewer']['viewer_data_degraded']) are not overwritten
+        // by this coarser ScoreReadService check.
+        $serviceDegraded = !\BCC\Core\ServiceLocator::hasRealService(
             \BCC\Core\Contracts\ScoreReadServiceInterface::class
         );
+        $data['system_degraded'] = !empty($data['system_degraded'])
+            || !empty($data['viewer']['viewer_data_degraded'])
+            || $serviceDegraded;
 
         return new WP_REST_Response($data, 200);
     }
