@@ -1,0 +1,22 @@
+{
+    "name": "blue-collar-crypto/bcc-trust",
+    "description": "Unified reputation, dispute, and on-chain signal plugin for Blue Collar Crypto",
+    "type": "wordpress-plugin",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "BCC\\Trust\\": "app/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^2.0",
+        "szepeviktor/phpstan-wordpress": "^2.0"
+    }
+}
