@@ -16,7 +16,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-final class DisputeAdjudicationService implements DisputeAdjudicationInterface
+final class DisputeAdjudicator implements DisputeAdjudicationInterface
 {
     /**
      * wp_options-backed idempotency markers. The dispute-plugin's
@@ -100,25 +100,14 @@ final class DisputeAdjudicationService implements DisputeAdjudicationInterface
     /**
      * Accept a dispute against a vote.
      *
-     * ## Scope policy (row-only by default, all-on-page opt-in)
+     * Row-scoped: only the specific $voteId row is removed. Other
+     * active votes by the same voter on the same page (different
+     * categories) are preserved — they were not reviewed by the panel.
      *
-     * Earlier releases of this method deleted EVERY active vote by
-     * $voterId on $pageId — across all categories — when a dispute was
-     * accepted. That broad scope was a product-level landmine: a panel
-     * deliberates on one specific disputed vote with one specific
-     * reason, then the system silently invalidates votes the panel
-     * never reviewed.
-     *
-     * The new default is row-scoped: only the specific $voteId row is
-     * removed. Site operators who want the legacy "one invalid vote
-     * invalidates all votes" behaviour can opt in via the filter
-     * `bcc.trust.dispute_accepted_vote_scope` → 'all_on_page'.
-     *
-     * Valid filter values:
-     *   - 'row_only'     (default) — delete only $voteId
-     *   - 'all_on_page'  (legacy)  — delete all active votes by $voterId on $pageId
-     *
-     * Anything else falls back to 'row_only' (fail-safe to narrowest scope).
+     * The legacy 'all_on_page' opt-in (bcc.trust.dispute_accepted_vote_scope
+     * filter) was removed in M1.3 — it was a product-level landmine
+     * (invalidating votes the panel never reviewed) with no live
+     * callers.
      */
     public function acceptVoteDispute(
         int $disputeId,
@@ -127,34 +116,13 @@ final class DisputeAdjudicationService implements DisputeAdjudicationInterface
         int $voterId,
         int $resolvedBy
     ): bool {
-        /**
-         * Filter: dispute-accepted vote removal scope.
-         *
-         * @param string $scope   'row_only' (default) or 'all_on_page'
-         * @param int    $disputeId
-         * @param int    $voteId
-         * @param int    $pageId
-         * @param int    $voterId
-         */
-        $scope = (string) apply_filters(
-            'bcc.trust.dispute_accepted_vote_scope',
-            'row_only',
-            $disputeId,
-            $voteId,
-            $pageId,
-            $voterId
-        );
-        if ($scope !== 'all_on_page') {
-            $scope = 'row_only';
-        }
-
         // Wrap the entire mutation in try/catch so any exception inside the
         // transaction (deadlock, FOR UPDATE timeout, DB restart) bubbles up
         // as a caller-visible failure. The idempotency claim is now INSIDE
         // the transaction, so ROLLBACK also rolls back the claim — no
         // explicit release needed on the exception path.
         try {
-            $result = TransactionManager::run(function () use ($disputeId, $scope, $voteId, $pageId, $voterId): array {
+            $result = TransactionManager::run(function () use ($disputeId, $voteId, $pageId, $voterId): array {
                 // Claim INSIDE the transaction: a committed claim means a
                 // committed mutation. Two concurrent callers serialise on
                 // the wp_options UNIQUE key; the loser's INSERT IGNORE
@@ -169,46 +137,7 @@ final class DisputeAdjudicationService implements DisputeAdjudicationInterface
                     return ['claim_acquired' => false, 'locked_votes' => []];
                 }
 
-                if ($scope === 'all_on_page') {
-                    // Legacy multi-category removal. Locks every active vote row for
-                    // this voter on this page. Opt-in only; see filter above.
-                    $locked = $this->voteRepository->lockAllForUpdate($voterId, $pageId);
-                    if (empty($locked)) {
-                        return ['claim_acquired' => true, 'locked_votes' => []];
-                    }
-
-                    // Only decrement unique_voters on the FIRST category to avoid
-                    // over-decrementing across multi-row removals.
-                    $isFirst = true;
-                    foreach ($locked as $vote) {
-                        $this->scoreRepository->reverseVoteDelta(
-                            (int) $vote->page_id,
-                            (int) ($vote->category_id ?? 0),
-                            (float) $vote->weight,
-                            ((int) $vote->vote_type) === 1,
-                            $isFirst
-                        );
-                        $isFirst = false;
-                    }
-
-                    $this->voteRepository->deleteByDispute($voterId, $pageId);
-                    $this->scoreRepository->flagForRecalculation($pageId);
-
-                    // Fraud penalty lives inside the transaction so the
-                    // vote removal and the voter's fraud increment either
-                    // both land or neither does. Previously this ran post-
-                    // commit — the vote was gone but a transient DB error
-                    // could swallow the penalty, leaving the voter
-                    // unpunished.
-                    $this->applyFraudPenalty($voterId);
-
-                    return ['claim_acquired' => true, 'locked_votes' => $locked];
-                }
-
-                // ── row_only (default) ──────────────────────────────────────
-                // Lock only the specific disputed row. Other active votes by
-                // the same voter on the same page (different categories) are
-                // preserved — they were not reviewed by the panel.
+                // Lock only the specific disputed row.
                 $locked = $this->voteRepository->lockOneForUpdate($voteId);
                 if (empty($locked)) {
                     return ['claim_acquired' => true, 'locked_votes' => []];
@@ -240,8 +169,12 @@ final class DisputeAdjudicationService implements DisputeAdjudicationInterface
                 $this->voteRepository->deleteOneByDispute($voteId);
                 $this->scoreRepository->flagForRecalculation($pageId);
 
-                // Fraud penalty atomic with vote removal — see comment on
-                // the 'all_on_page' branch above.
+                // Fraud penalty lives inside the transaction so the
+                // vote removal and the voter's fraud increment either
+                // both land or neither does. Previously this ran post-
+                // commit — the vote was gone but a transient DB error
+                // could swallow the penalty, leaving the voter
+                // unpunished.
                 $this->applyFraudPenalty($voterId);
 
                 return ['claim_acquired' => true, 'locked_votes' => $locked];
@@ -303,7 +236,7 @@ final class DisputeAdjudicationService implements DisputeAdjudicationInterface
             'vote_id'         => $voteId,
             'voter_id'        => $voterId,
             'actor_id'        => $resolvedBy,
-            'scope'           => $scope,
+            'scope'           => 'row_only',
             'previous_vote'   => (int) $lockedVotes[0]->vote_type,
             'previous_weight' => (float) $lockedVotes[0]->weight,
             'categories'      => array_map(

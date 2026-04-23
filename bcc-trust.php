@@ -35,6 +35,21 @@ define('BCC_ONCHAIN_MAX_CONTRACT_SCORE',  4.8);
 define('BCC_ONCHAIN_CACHE_HOURS',        24);
 define('BCC_ONCHAIN_MAX_TOTAL_BONUS',    20);
 
+// Disputes domain limits.
+define('BCC_DISPUTES_PANEL_SIZE',          5);      // panelists per dispute
+define('BCC_DISPUTES_TTL_DAYS',            7);      // auto-resolve after N days
+define('BCC_DISPUTES_MAX_PER_PAGE',        3);      // max disputes per page per 30 days
+define('BCC_DISPUTES_REPORTER_MAX_ACTIVE', 5);      // max active disputes per reporter
+define('BCC_DISPUTES_MIN_REASON_LENGTH',   20);     // min chars for dispute reason
+define('BCC_DISPUTES_MAX_REASON_LENGTH',   1000);   // max chars for dispute reason
+define('BCC_DISPUTES_MIN_DETAIL_LENGTH',   10);     // min chars for admin-report detail
+// Reconciliation retry ceiling. A failed adjudication is re-run by the
+// reconcile cron up to this many times before the dispute is
+// quarantined for manual operator attention.
+if (!defined('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS')) {
+    define('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS', 10);
+}
+
 /**
  * Schema version — derived from the content hash of every
  * includes/database/schema-*.php file. Any edit to a schema definition
@@ -189,8 +204,8 @@ function bcc_onchain_ensure_schema(): void {
 }
 
 // Schema migration: re-run dbDelta when any schema file changes.
-// Covers Core + Onchain schemas (the hash is derived from every
-// schema-*.php, so both domains are re-installed on any schema edit).
+// Covers Core + Onchain + Disputes schemas (the hash is derived from
+// every schema-*.php file, so all domains are re-installed on any edit).
 add_action('plugins_loaded', function (): void {
     $stored = get_option('bcc_trust_schema_version', '');
     if ($stored !== BCC_TRUST_SCHEMA_VERSION) {
@@ -198,6 +213,7 @@ add_action('plugins_loaded', function (): void {
             bcc_trust_create_tables();
         }
         bcc_onchain_ensure_schema();
+        \BCC\Trust\Disputes\Repositories\DisputeRepository::install();
         update_option('bcc_trust_schema_version', BCC_TRUST_SCHEMA_VERSION, false);
     }
 }, 5);
@@ -242,6 +258,7 @@ add_action('bcc_trust_vote_removed', function (int $voterId): void {
 add_filter('cron_schedules', [\BCC\Trust\Core\Services\CronService::class, 'addCronIntervals']);
 add_filter('cron_schedules', [\BCC\Trust\Core\Services\PageReadModelSync::class, 'registerIntervals']);
 add_filter('cron_schedules', [\BCC\Trust\Onchain\Services\ChainRefreshService::class, 'add_cron_intervals']);
+add_filter('cron_schedules', [\BCC\Trust\Disputes\Services\DisputeScheduler::class, 'registerIntervals']);
 
 add_action('bcc_trust_daily_cleanup', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->dailyCleanup();
@@ -286,7 +303,7 @@ add_filter('bcc.resolve.dispute_adjudication', function ($service = null) {
     if ($service instanceof \BCC\Core\Contracts\DisputeAdjudicationInterface) {
         return $service;
     }
-    return \BCC\Trust\Core\Plugin::instance()->disputeAdjudicationService();
+    return \BCC\Trust\Core\Plugin::instance()->disputeAdjudicator();
 });
 
 add_filter('bcc.resolve.trust_read_service', function ($service = null) {
@@ -634,6 +651,221 @@ add_action('plugins_loaded', function (): void {
 
 /*
 |--------------------------------------------------------------------------
+| DISPUTES DOMAIN BOOT
+|--------------------------------------------------------------------------
+| Scheduler, admin, REST, blocks, shortcodes, and the PeepSo profile
+| report-button injection live here. Mirrors the original
+| bcc-disputes.php hook layout, namespace-rewritten for BCC\Trust\Disputes.
+*/
+
+add_action('plugins_loaded', function () {
+    if (is_admin()) {
+        \BCC\Trust\Disputes\Admin\DisputeAdmin::boot();
+    }
+}, 15);
+
+add_action('init', function () {
+    \BCC\Trust\Disputes\Services\DisputeScheduler::boot();
+    \BCC\Trust\Disputes\Services\DisputeNotificationService::registerAsyncHandlers();
+});
+
+// User deletion: clean up disputes, panel assignments, and reports.
+add_action('delete_user', function (int $userId): void {
+    $result = \BCC\Trust\Disputes\Repositories\DisputeRepository::cleanupForDeletedUser($userId);
+
+    if (!$result['committed']) {
+        return;
+    }
+
+    foreach ($result['affected_dispute_ids'] as $disputeId) {
+        \BCC\Trust\Disputes\Repositories\DisputeRepository::invalidateDispute((int) $disputeId);
+    }
+    wp_cache_delete('report_status_counts', 'bcc_disputes');
+}, 10, 1);
+
+// REST routes.
+add_action('rest_api_init', function () {
+    (new \BCC\Trust\Disputes\Controllers\DisputeController())->register_routes();
+});
+
+// Frontend enqueue — only on pages with the disputes shortcodes or on
+// PeepSo profile pages (where the Report User button is injected).
+add_action('wp_enqueue_scripts', function () {
+    $should_enqueue = false;
+
+    $post = get_post();
+    if ($post instanceof WP_Post) {
+        $content = $post->post_content;
+        if (has_shortcode($content, 'bcc_dispute_form')
+            || has_shortcode($content, 'bcc_dispute_queue')
+            || has_shortcode($content, 'bcc_report_button')
+        ) {
+            $should_enqueue = true;
+        }
+    }
+
+    if (!$should_enqueue && function_exists('PeepSo') && class_exists('PeepSoProfileShortcode')) {
+        $profile_page = PeepSo::get_option('page_profile');
+        if ($profile_page && (int) $profile_page === (int) get_the_ID()) {
+            $should_enqueue = true;
+        }
+    }
+
+    if (!$should_enqueue) {
+        return;
+    }
+
+    wp_enqueue_style('bcc-disputes', BCC_TRUST_URL . 'assets/css/bcc-disputes.css', [], BCC_TRUST_VERSION);
+    wp_enqueue_script('bcc-disputes', BCC_TRUST_URL . 'assets/js/bcc-disputes.js', [], BCC_TRUST_VERSION, true);
+    wp_localize_script('bcc-disputes', 'bccDisputes', [
+        'restUrl'         => esc_url_raw(rest_url('bcc/v1/disputes')),
+        'reportUserUrl'   => esc_url_raw(rest_url('bcc/v1/report-user')),
+        'nonce'           => wp_create_nonce('wp_rest'),
+        'minReasonLength' => BCC_DISPUTES_MIN_REASON_LENGTH,
+        'maxReasonLength' => BCC_DISPUTES_MAX_REASON_LENGTH,
+        'minDetailLength' => BCC_DISPUTES_MIN_DETAIL_LENGTH,
+    ]);
+});
+
+// PeepSo profile: inject the Report User button.
+add_action('peepso_user_profile_after_buttons', function ($user) {
+    if (!is_user_logged_in()) return;
+    $profile_uid  = isset($user->id) ? (int) $user->id : (int) ($user->ID ?? 0);
+    $current_uid  = get_current_user_id();
+    if (!$profile_uid || $profile_uid === $current_uid) return;
+    $ud = isset($user->display_name) ? $user : get_userdata($profile_uid);
+    $display_name = $ud ? ($ud->display_name ?? '') : '';
+    if (!$display_name) return;
+    printf(
+        '<button class="bcc-report-user-btn" data-user-id="%d" data-user-name="%s">&#9873; %s</button>',
+        $profile_uid,
+        esc_attr($display_name),
+        esc_html__('Report User', 'bcc-disputes')
+    );
+});
+
+// Disputes shortcodes.
+add_shortcode('bcc_report_button', function ($atts) {
+    if (!is_user_logged_in()) return '';
+
+    $atts        = shortcode_atts(['user_id' => 0], $atts, 'bcc_report_button');
+    $reported_id = (int) $atts['user_id'];
+    if (!$reported_id || $reported_id === get_current_user_id()) return '';
+
+    $user = get_userdata($reported_id);
+    if (!$user) return '';
+
+    return sprintf(
+        '<button class="bcc-report-user-btn" data-user-id="%d" data-user-name="%s">&#9873; %s</button>',
+        $reported_id,
+        esc_attr($user->display_name),
+        esc_html__('Report User', 'bcc-disputes')
+    );
+});
+
+add_shortcode('bcc_dispute_form', function ($atts) {
+    if (!is_user_logged_in()) {
+        return '<p class="bcc-dispute-notice">' . esc_html__('Log in to manage disputes.', 'bcc-disputes') . '</p>';
+    }
+
+    $atts = shortcode_atts(['page_id' => 0], $atts, 'bcc_dispute_form');
+    $attributes = ['pageId' => (int) $atts['page_id'] ?: get_the_ID()];
+    if (!$attributes['pageId']) {
+        return '';
+    }
+
+    ob_start();
+    include BCC_TRUST_PATH . 'blocks/dispute-form/render.php';
+    return ob_get_clean();
+});
+
+add_shortcode('bcc_dispute_queue', function () {
+    if (!is_user_logged_in()) {
+        return '';
+    }
+
+    $attributes = [];
+    ob_start();
+    include BCC_TRUST_PATH . 'blocks/dispute-queue/render.php';
+    return ob_get_clean();
+});
+
+// Gutenberg block registration for disputes.
+require_once BCC_TRUST_PATH . 'includes/disputes-blocks.php';
+
+// Disputes admin notices: schema-migration failures + panelist-pool health.
+add_action('admin_notices', function (): void {
+    if (!current_user_can('manage_options')) {
+        return;
+    }
+
+    $constraintErr = get_option('bcc_disputes_constraint_missing');
+    if (!empty($constraintErr)) {
+        printf(
+            '<div class="notice notice-error"><p><strong>BCC Trust (Disputes):</strong> '
+            . 'The DB-level unique constraint on active disputes (<code>uq_active_vote</code>) '
+            . 'could not be installed. Concurrent-dispute-per-vote protection relies on the '
+            . 'app-layer FOR UPDATE check only. Resolve duplicate reviewing rows, then run '
+            . '<code>update_option(\'bcc_trust_schema_version\', \'\')</code> to retry. '
+            . 'Error: <code>%s</code></p></div>',
+            esc_html((string) $constraintErr)
+        );
+    }
+
+    $adminNotifiedErr = get_option('bcc_disputes_admin_notified_missing');
+    if (!empty($adminNotifiedErr)) {
+        printf(
+            '<div class="notice notice-error"><p><strong>BCC Trust (Disputes):</strong> '
+            . 'The <code>admin_notified_at</code> column is missing on <code>bcc_user_reports</code>. '
+            . 'Admin-report email idempotency is broken — duplicates may send on every retry. '
+            . 'Error: <code>%s</code></p></div>',
+            esc_html((string) $adminNotifiedErr)
+        );
+    }
+});
+
+add_action('admin_notices', function (): void {
+    if (!current_user_can('manage_options')) {
+        return;
+    }
+
+    $cache_key   = 'bcc_disputes_panelist_pool_count';
+    $cache_group = 'bcc_disputes';
+    $pool_count  = wp_cache_get($cache_key, $cache_group);
+
+    if ($pool_count === false) {
+        if (!class_exists('\\BCC\\Core\\ServiceLocator')
+            || !\BCC\Core\ServiceLocator::hasRealService(\BCC\Core\Contracts\TrustReadServiceInterface::class)
+        ) {
+            return;
+        }
+
+        $trust_read  = \BCC\Core\ServiceLocator::resolveTrustReadService();
+        $eligible    = $trust_read->getEligiblePanelistUserIds([], BCC_DISPUTES_PANEL_SIZE * 3);
+        $pool_count  = is_array($eligible) ? count($eligible) : 0;
+        wp_cache_set($cache_key, $pool_count, $cache_group, HOUR_IN_SECONDS);
+    }
+
+    $minimum_healthy = BCC_DISPUTES_PANEL_SIZE * 2;
+    if ((int) $pool_count >= $minimum_healthy) {
+        return;
+    }
+
+    $level = (int) $pool_count < BCC_DISPUTES_PANEL_SIZE ? 'error' : 'warning';
+    printf(
+        '<div class="notice notice-%s"><p><strong>BCC Trust (Disputes):</strong> '
+        . 'The eligible panelist pool is critically low — only <strong>%d</strong> qualified members found. '
+        . 'At least <strong>%d</strong> are needed per dispute (and %d recommended for proper randomization). '
+        . 'Disputes cannot be filed until enough Trusted/Elite tier members with clean records are available.</p></div>',
+        esc_attr($level),
+        (int) $pool_count,
+        BCC_DISPUTES_PANEL_SIZE,
+        $minimum_healthy
+    );
+});
+
+/*
+|--------------------------------------------------------------------------
 | EMAIL VERIFICATION LINK HANDLER
 |--------------------------------------------------------------------------
 */
@@ -762,6 +994,11 @@ function bcc_trust_activate() {
     add_filter('cron_schedules', [\BCC\Trust\Onchain\Services\ChainRefreshService::class, 'add_cron_intervals']);
     \BCC\Trust\Onchain\Services\ChainRefreshService::schedule_crons();
 
+    // Disputes: install schema + schedule reconcile cron.
+    add_filter('cron_schedules', [\BCC\Trust\Disputes\Services\DisputeScheduler::class, 'registerIntervals']);
+    \BCC\Trust\Disputes\Repositories\DisputeRepository::install();
+    \BCC\Trust\Disputes\Services\DisputeScheduler::schedule();
+
     flush_rewrite_rules();
 
     update_option('bcc_trust_activated', time(), false);
@@ -793,6 +1030,11 @@ function bcc_trust_deactivate() {
     // Clear chain-refresh + enrichment crons owned by ChainRefreshService.
     if (class_exists('\\BCC\\Trust\\Onchain\\Services\\ChainRefreshService')) {
         \BCC\Trust\Onchain\Services\ChainRefreshService::deactivate();
+    }
+
+    // Clear disputes scheduler cron (auto-resolve + reconcile-orphans).
+    if (class_exists('\\BCC\\Trust\\Disputes\\Services\\DisputeScheduler')) {
+        \BCC\Trust\Disputes\Services\DisputeScheduler::unschedule();
     }
 
     flush_rewrite_rules();

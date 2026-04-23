@@ -1,0 +1,273 @@
+<?php
+
+namespace BCC\Trust\Disputes\Admin;
+
+use BCC\Trust\Disputes\DTO\AdminReportRowDTO;
+use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use WP_List_Table;
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+if (!class_exists('WP_List_Table')) {
+    require_once ABSPATH . 'wp-admin/includes/class-wp-list-table.php';
+}
+
+class ReportListTable extends WP_List_Table
+{
+    public function __construct()
+    {
+        parent::__construct([
+            'singular' => 'report',
+            'plural'   => 'reports',
+            'ajax'     => false,
+        ]);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function get_columns(): array
+    {
+        return [
+            'id'            => __('ID', 'bcc-disputes'),
+            'reported_name' => __('Reported User', 'bcc-disputes'),
+            'reporter_name' => __('Reporter', 'bcc-disputes'),
+            'reason_key'    => __('Reason', 'bcc-disputes'),
+            'reason_detail' => __('Details', 'bcc-disputes'),
+            'status'        => __('Status', 'bcc-disputes'),
+            'created_at'    => __('Created', 'bcc-disputes'),
+            'actions'       => __('Actions', 'bcc-disputes'),
+        ];
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public function get_sortable_columns(): array
+    {
+        return [
+            'id'         => ['id', true],
+            'status'     => ['status', false],
+            'created_at' => ['created_at', false],
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    protected function get_views(): array
+    {
+        $current = isset($_GET['report_status']) ? sanitize_key($_GET['report_status']) : 'all';
+        $base    = admin_url('admin.php?page=bcc-reports');
+
+        $counts = DisputeRepository::getReportStatusCounts();
+        $total  = array_sum($counts);
+
+        $views = [];
+        $views['all'] = sprintf(
+            '<a href="%s" class="%s">%s <span class="count">(%d)</span></a>',
+            esc_url($base),
+            $current === 'all' ? 'current' : '',
+            __('All', 'bcc-disputes'),
+            $total
+        );
+
+        foreach (['open', 'reviewed', 'penalized', 'dismissed'] as $s) {
+            $c = $counts[$s] ?? 0;
+            $views[$s] = sprintf(
+                '<a href="%s" class="%s">%s <span class="count">(%d)</span></a>',
+                esc_url(add_query_arg('report_status', $s, $base)),
+                $current === $s ? 'current' : '',
+                ucfirst($s),
+                $c
+            );
+        }
+
+        return $views;
+    }
+
+    public function prepare_items(): void
+    {
+        // Filters
+        $status_filter = isset($_GET['report_status']) ? sanitize_key($_GET['report_status']) : '';
+        if (!in_array($status_filter, ['open', 'reviewed', 'penalized', 'dismissed'], true)) {
+            $status_filter = '';
+        }
+
+        // Sorting
+        $allowed_orderby = ['id', 'status', 'created_at'];
+        $orderby = isset($_GET['orderby']) && in_array($_GET['orderby'], $allowed_orderby, true)
+            ? sanitize_key($_GET['orderby'])
+            : 'id';
+        $order = isset($_GET['order']) && strtoupper($_GET['order']) === 'ASC' ? 'ASC' : 'DESC';
+
+        // Count
+        $total = DisputeRepository::countReportsForAdminList($status_filter ?: null);
+
+        // Pagination
+        $per_page = 20;
+        $paged    = $this->get_pagenum();
+        $offset   = ($paged - 1) * $per_page;
+
+        $this->set_pagination_args([
+            'total_items' => $total,
+            'per_page'    => $per_page,
+            'total_pages' => (int) ceil($total / $per_page),
+        ]);
+
+        // Query via repository — explicit columns, no SELECT *.
+        $this->items = DisputeRepository::getReportsForAdminList(
+            $status_filter ?: null,
+            $orderby,
+            $order,
+            $per_page,
+            $offset
+        );
+
+        $this->_column_headers = [
+            $this->get_columns(),
+            [],
+            $this->get_sortable_columns(),
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function reason_labels(): array
+    {
+        return [
+            'spam'            => __('Spam or unsolicited content', 'bcc-disputes'),
+            'harassment'      => __('Harassment or bullying', 'bcc-disputes'),
+            'fraud'           => __('Fraudulent activity or scam', 'bcc-disputes'),
+            'misinformation'  => __('False or misleading information', 'bcc-disputes'),
+            'inappropriate'   => __('Inappropriate content', 'bcc-disputes'),
+            'impersonation'   => __('Impersonating another person', 'bcc-disputes'),
+            'other'           => __('Other', 'bcc-disputes'),
+        ];
+    }
+
+    /**
+     * @param AdminReportRowDTO $item
+     * @param string            $column_name
+     * @return string|int
+     */
+    public function column_default($item, $column_name)
+    {
+        // Narrow to DTO: prepare_items() only assigns AdminReportRowDTO rows,
+        // but WP_List_Table's untyped parent signature blocks a native hint.
+        if (!$item instanceof AdminReportRowDTO) {
+            return '';
+        }
+
+        $labels = self::reason_labels();
+
+        switch ($column_name) {
+            case 'id':
+                return $item->id;
+
+            case 'reported_name':
+                return esc_html($item->reported_name ?: __('Unknown', 'bcc-disputes'))
+                     . ' <span class="description">(#' . $item->reported_id . ')</span>';
+
+            case 'reporter_name':
+                return esc_html($item->reporter_name ?: __('Unknown', 'bcc-disputes'))
+                     . ' <span class="description">(#' . $item->reporter_id . ')</span>';
+
+            case 'reason_key':
+                return esc_html($labels[$item->reason_key] ?? $item->reason_key);
+
+            case 'reason_detail':
+                return esc_html(mb_strimwidth($item->reason_detail, 0, 80, '…'));
+
+            case 'status':
+                $colors = [
+                    'open'      => '#ed6c02',
+                    'reviewed'  => '#2e7d32',
+                    'penalized' => '#d63638',
+                    'dismissed' => '#666',
+                ];
+                $color = $colors[$item->status] ?? '#666';
+                return sprintf(
+                    '<span style="font-weight:600;color:%s;">%s</span>',
+                    esc_attr($color),
+                    esc_html(ucfirst($item->status))
+                );
+
+            case 'created_at':
+                return esc_html($item->created_at);
+
+            case 'actions':
+                $is_open = $item->status === 'open';
+                if (!$is_open) {
+                    $label = $item->status === 'penalized'
+                        ? __('Penalized', 'bcc-disputes')
+                        : ucfirst($item->status);
+                    return '<em>' . esc_html($label) . '</em>';
+                }
+
+                $penalize_nonce = wp_create_nonce('bcc_report_penalize_' . $item->id);
+
+                // SECURITY: Use POST forms instead of GET anchor tags to prevent
+                // CSRF via nonce extraction from cached/prefetched page source.
+                $reviewed_form = sprintf(
+                    '<form method="post" action="%s" style="display:inline" onsubmit="return confirm(\'%s\');">'
+                    . '<input type="hidden" name="page" value="bcc-reports">'
+                    . '<input type="hidden" name="report_id" value="%d">'
+                    . '<input type="hidden" name="report_action" value="reviewed">'
+                    . '%s'
+                    . '<button type="submit" class="button button-small">%s</button>'
+                    . '</form> ',
+                    esc_url(admin_url('admin.php')),
+                    esc_js(__('Mark this report as reviewed?', 'bcc-disputes')),
+                    $item->id,
+                    wp_nonce_field('bcc_report_action_' . $item->id, '_wpnonce', true, false),
+                    esc_html__('Reviewed', 'bcc-disputes')
+                );
+
+                $dismissed_form = sprintf(
+                    '<form method="post" action="%s" style="display:inline" onsubmit="return confirm(\'%s\');">'
+                    . '<input type="hidden" name="page" value="bcc-reports">'
+                    . '<input type="hidden" name="report_id" value="%d">'
+                    . '<input type="hidden" name="report_action" value="dismissed">'
+                    . '%s'
+                    . '<button type="submit" class="button button-small">%s</button>'
+                    . '</form>',
+                    esc_url(admin_url('admin.php')),
+                    esc_js(__('Dismiss this report?', 'bcc-disputes')),
+                    $item->id,
+                    wp_nonce_field('bcc_report_action_' . $item->id, '_wpnonce', true, false),
+                    esc_html__('Dismiss', 'bcc-disputes')
+                );
+
+                return $reviewed_form . $dismissed_form . sprintf(
+                    '<form method="post" action="%s" style="display:inline-flex;align-items:center;gap:4px;margin-top:6px;" '
+                    . 'onsubmit="return confirm(\'Reduce this user\\\'s reputation score?\');">'
+                    . '<input type="hidden" name="page" value="bcc-reports" />'
+                    . '<input type="hidden" name="report_action" value="penalize" />'
+                    . '<input type="hidden" name="report_id" value="%d" />'
+                    . '<input type="hidden" name="_wpnonce" value="%s" />'
+                    . '<label style="font-size:12px;white-space:nowrap;">Penalize:</label>'
+                    . '<input type="number" name="penalty_points" min="1" max="20" value="5" '
+                    .   'style="width:55px;height:28px;padding:2px 4px;" title="Points to deduct (1-20)" />'
+                    . '<input type="text" name="penalty_reason" placeholder="Reason..." '
+                    .   'style="width:120px;height:28px;padding:2px 4px;font-size:12px;" />'
+                    . '<button type="submit" class="button button-small" style="color:#d63638;">Apply</button>'
+                    . '</form>',
+                    esc_url(admin_url('admin.php')),
+                    $item->id,
+                    esc_attr($penalize_nonce)
+                );
+
+            default:
+                return '';
+        }
+    }
+
+    public function no_items(): void
+    {
+        esc_html_e('No user reports found.', 'bcc-disputes');
+    }
+}

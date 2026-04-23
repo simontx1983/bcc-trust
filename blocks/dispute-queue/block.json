@@ -1,0 +1,17 @@
+{
+    "$schema": "https://schemas.wp.org/trunk/block.json",
+    "apiVersion": 3,
+    "name": "bcc-disputes/dispute-queue",
+    "version": "1.1.0",
+    "title": "Dispute Panel Queue",
+    "category": "bcc-disputes",
+    "icon": "list-view",
+    "description": "Review queue for dispute panelists. Shows assigned disputes awaiting your vote. Works on any page — only visible to eligible panelists.",
+    "keywords": ["dispute", "panel", "queue", "review"],
+    "textdomain": "bcc-disputes",
+    "supports": {
+        "html": false
+    },
+    "render": "file:./render.php",
+    "editorScript": "bcc-disputes-blocks-editor"
+}

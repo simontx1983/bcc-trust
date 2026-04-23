@@ -2,7 +2,7 @@
 
 namespace BCC\Trust\Core;
 
-use BCC\Trust\Core\Application\Disputes\DisputeAdjudicationService;
+use BCC\Trust\Core\Application\Disputes\DisputeAdjudicator;
 use BCC\Trust\Core\Application\ScoreContributorService;
 use BCC\Trust\Core\Application\ScoreReadService;
 use BCC\Trust\Core\Application\TrustReadService;
@@ -198,10 +198,10 @@ final class Plugin
         );
     }
 
-    private ?DisputeAdjudicationService $disputeAdjudicationService = null;
-    public function disputeAdjudicationService(): DisputeAdjudicationService
+    private ?DisputeAdjudicator $disputeAdjudicator = null;
+    public function disputeAdjudicator(): DisputeAdjudicator
     {
-        return $this->disputeAdjudicationService ??= new DisputeAdjudicationService(
+        return $this->disputeAdjudicator ??= new DisputeAdjudicator(
             $this->voteRepository(),
             $this->scoreRepository(),
             $this->userInfoRepository()

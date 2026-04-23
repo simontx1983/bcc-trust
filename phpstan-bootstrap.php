@@ -36,6 +36,16 @@ if (!defined('BCC_ONCHAIN_MAX_CONTRACT_SCORE')) { define('BCC_ONCHAIN_MAX_CONTRA
 if (!defined('BCC_ONCHAIN_CACHE_HOURS'))        { define('BCC_ONCHAIN_CACHE_HOURS',        24); }
 if (!defined('BCC_ONCHAIN_MAX_TOTAL_BONUS'))    { define('BCC_ONCHAIN_MAX_TOTAL_BONUS',    20); }
 
+// Disputes domain limits.
+if (!defined('BCC_DISPUTES_PANEL_SIZE'))          { define('BCC_DISPUTES_PANEL_SIZE',          5); }
+if (!defined('BCC_DISPUTES_TTL_DAYS'))            { define('BCC_DISPUTES_TTL_DAYS',            7); }
+if (!defined('BCC_DISPUTES_MAX_PER_PAGE'))        { define('BCC_DISPUTES_MAX_PER_PAGE',        3); }
+if (!defined('BCC_DISPUTES_REPORTER_MAX_ACTIVE')) { define('BCC_DISPUTES_REPORTER_MAX_ACTIVE', 5); }
+if (!defined('BCC_DISPUTES_MIN_REASON_LENGTH'))   { define('BCC_DISPUTES_MIN_REASON_LENGTH',   20); }
+if (!defined('BCC_DISPUTES_MAX_REASON_LENGTH'))   { define('BCC_DISPUTES_MAX_REASON_LENGTH',   1000); }
+if (!defined('BCC_DISPUTES_MIN_DETAIL_LENGTH'))   { define('BCC_DISPUTES_MIN_DETAIL_LENGTH',   10); }
+if (!defined('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS')) { define('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS', 10); }
+
 // ── Load config files (they define all BCC_TRUST_*, BCC_QUEST_* constants) ──
 
 $configDir = __DIR__ . '/includes/config/';
