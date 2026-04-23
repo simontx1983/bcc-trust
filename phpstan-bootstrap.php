@@ -1,0 +1,163 @@
+<?php
+/**
+ * PHPStan bootstrap — makes runtime constants and optional-plugin stubs
+ * available during static analysis.
+ *
+ * Config files guard with `if (!defined('ABSPATH')) exit;` so ABSPATH is
+ * defined here to allow them to execute during analysis.
+ */
+
+if (!defined('ABSPATH')) {
+    define('ABSPATH', dirname(__DIR__, 4) . '/');
+}
+if (!defined('WPINC')) {
+    define('WPINC', 'wp-includes');
+}
+if (!defined('DB_NAME')) {
+    define('DB_NAME', 'phpstan_stub');
+}
+
+// ── Plugin-level constants normally set in the main plugin file ──────────
+
+if (!defined('BCC_TRUST_VERSION')) {
+    define('BCC_TRUST_VERSION', '1.1.0');
+}
+if (!defined('BCC_TRUST_PATH')) {
+    define('BCC_TRUST_PATH', __DIR__ . '/');
+}
+if (!defined('BCC_TRUST_URL')) {
+    define('BCC_TRUST_URL', '/wp-content/plugins/bcc-trust/');
+}
+
+// ── Load config files (they define all BCC_TRUST_*, BCC_QUEST_* constants) ──
+
+$configDir = __DIR__ . '/includes/config/';
+$configs = [
+    'tiers.php',
+    'scoring.php',
+    'trust-weights.php',
+    'fraud-detection.php',
+    'limits.php',
+    'behavioral.php',
+    'quest-rewards.php',
+];
+
+foreach ($configs as $file) {
+    $path = $configDir . $file;
+    if (file_exists($path)) {
+        require_once $path;
+    }
+}
+
+// ── ActionScheduler stub (optional WooCommerce dependency) ──────────────
+
+if (!class_exists('ActionScheduler_Store')) {
+    class ActionScheduler_Store {
+        const STATUS_PENDING = 'pending';
+        const STATUS_RUNNING = 'in-progress';
+        const STATUS_COMPLETE = 'complete';
+        const STATUS_CANCELED = 'canceled';
+        const STATUS_FAILED = 'failed';
+    }
+}
+
+// ── PeepSo class stubs (optional dependency) ────────────────────────────
+
+if (!class_exists('PeepSo')) {
+    class PeepSo {
+        public static function get_page(string $page = ''): string { return ''; }
+        public static function get_peepso_uri(): string { return ''; }
+        public static function get_asset(string $asset): string { return ''; }
+    }
+}
+
+if (!class_exists('PeepSoProfileFields')) {
+    class PeepSoProfileFields {
+        /** @var array<string, mixed>|null */
+        public $profile_fields_stats = null;
+        public function load_fields(): void {}
+    }
+}
+
+if (!class_exists('PeepSoUser')) {
+    class PeepSoUser {
+        public int $id = 0;
+        public PeepSoProfileFields $profile_fields;
+        public function __construct(int $id = 0) {
+            $this->id = $id;
+            $this->profile_fields = new PeepSoProfileFields();
+        }
+        public static function get_instance(int $id = 0): self { return new self($id); }
+        public function get_avatar(): string { return ''; }
+        public function get_fullname(): string { return ''; }
+        public function get_profileurl(): string { return ''; }
+    }
+}
+
+if (!class_exists('PeepSoUrlSegments')) {
+    class PeepSoUrlSegments {
+        public static function get_instance(): self { return new self(); }
+        public function get(int $index): ?string { return null; }
+        public static function get_view_id(int $userId = 0): int { return 0; }
+    }
+}
+
+if (!class_exists('PeepSoPagesShortcode')) {
+    class PeepSoPagesShortcode {
+        /** @var int|false */
+        public $page_id = false;
+        public static function get_instance(): self { return new self(); }
+    }
+}
+
+if (!class_exists('PeepSoPage')) {
+    class PeepSoPage {
+        public int $id = 0;
+        public function __construct(string $slug = '') {}
+    }
+}
+
+if (!class_exists('PeepSoPageCategories')) {
+    class PeepSoPageCategories {
+        /**
+         * @return array<int, object>
+         */
+        public static function get_page_categories(int $page_id): array { return []; }
+    }
+}
+
+// ── PeepSo function stubs ───────────────────────────────────────────────
+
+if (!function_exists('peepso_get_option')) {
+    /** @param mixed $default @return mixed */
+    function peepso_get_option(string $key, $default = null) { return $default; }
+}
+
+if (!class_exists('PeepSoProfileShortcode')) {
+    class PeepSoProfileShortcode {
+        public static function get_instance(): self { return new self(); }
+        public function get_view_user_id(): int { return 0; }
+    }
+}
+
+if (!class_exists('PeepSoTemplate')) {
+    class PeepSoTemplate {
+        public static function exec_template(string $template, mixed ...$args): void {}
+    }
+}
+
+// ── ActionScheduler function stubs ──────────────────────────────────────
+
+if (!function_exists('as_has_scheduled_action')) {
+    /**
+     * @param array<mixed>|null $args
+     */
+    function as_has_scheduled_action(string $hook, ?array $args = null, string $group = ''): bool { return false; }
+}
+
+if (!function_exists('as_enqueue_async_action')) {
+    /**
+     * @param array<mixed> $args
+     */
+    function as_enqueue_async_action(string $hook, array $args = [], string $group = ''): int { return 0; }
+}

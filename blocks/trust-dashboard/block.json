@@ -1,0 +1,36 @@
+{
+    "$schema": "https://schemas.wp.org/trunk/block.json",
+    "apiVersion": 3,
+    "name": "bcc-trust/trust-dashboard",
+    "version": "1.0.0",
+    "title": "My Trust Dashboard",
+    "category": "bcc-trust",
+    "icon": "dashboard",
+    "description": "Page owner dashboard for managing trust settings. Place on PeepSo profile pages — only visible to the page owner and admins.",
+    "keywords": ["dashboard", "trust", "profile", "owner", "score", "activity"],
+    "textdomain": "bcc-trust",
+    "attributes": {
+        "pageId": {
+            "type": "number",
+            "default": 0
+        },
+        "showHistory": {
+            "type": "boolean",
+            "default": true
+        },
+        "showChecklist": {
+            "type": "boolean",
+            "default": true
+        },
+        "historyLimit": {
+            "type": "number",
+            "default": 10
+        }
+    },
+    "supports": {
+        "html": false,
+        "align": ["wide", "full"]
+    },
+    "render": "file:./render.php",
+    "editorScript": "bcc-trust-blocks-editor"
+}

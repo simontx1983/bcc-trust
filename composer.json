@@ -8,7 +8,10 @@
     },
     "autoload": {
         "psr-4": {
-            "BCC\\Trust\\": "app/"
+            "BCC\\Trust\\Core\\": "app/Domain/Core/",
+            "BCC\\Trust\\Disputes\\": "app/Domain/Disputes/",
+            "BCC\\Trust\\Onchain\\": "app/Domain/Onchain/",
+            "BCC\\Trust\\Infrastructure\\": "app/Infrastructure/"
         }
     },
     "config": {

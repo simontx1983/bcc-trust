@@ -1,0 +1,1254 @@
+/**
+ * BCC Trust Engine — Admin Dashboard
+ * "Forge" Design System for WordPress Admin
+ *
+ * Dark-mode, industrial-craft aesthetic with precision data visualization.
+ * Overrides default WP admin styling on BCC dashboard pages only.
+ *
+ * Scoped via .bcc-admin-wrap to prevent global leaks.
+ */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   1. DESIGN TOKENS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap {
+    /* Surfaces */
+    --bcc-bg:                #0f1117;
+    --bcc-bg-raised:         #171a21;
+    --bcc-bg-card:           #1c1f28;
+    --bcc-bg-card-hover:     #22252f;
+    --bcc-bg-input:          #13151b;
+    --bcc-bg-overlay:        rgba(15, 17, 23, 0.85);
+
+    /* Borders */
+    --bcc-border:            rgba(255, 255, 255, 0.06);
+    --bcc-border-strong:     rgba(255, 255, 255, 0.12);
+    --bcc-border-focus:      #3b82f6;
+
+    /* Text */
+    --bcc-text:              #e2e5ed;
+    --bcc-text-secondary:    #8b92a5;
+    --bcc-text-muted:        #555d73;
+    --bcc-text-inverse:      #0f1117;
+
+    /* Accents */
+    --bcc-accent:            #3b82f6;
+    --bcc-accent-hover:      #2563eb;
+    --bcc-success:           #22c55e;
+    --bcc-success-bg:        rgba(34, 197, 94, 0.08);
+    --bcc-warning:           #f59e0b;
+    --bcc-warning-bg:        rgba(245, 158, 11, 0.08);
+    --bcc-danger:            #ef4444;
+    --bcc-danger-bg:         rgba(239, 68, 68, 0.08);
+    --bcc-info:              #06b6d4;
+    --bcc-info-bg:           rgba(6, 182, 212, 0.08);
+
+    /* Tier Colors */
+    --bcc-tier-elite:        #a78bfa;
+    --bcc-tier-trusted:      #34d399;
+    --bcc-tier-neutral:      #60a5fa;
+    --bcc-tier-caution:      #fbbf24;
+    --bcc-tier-risky:        #f87171;
+
+    /* Fraud Colors */
+    --bcc-fraud-critical:    #c084fc;
+    --bcc-fraud-high:        #f87171;
+    --bcc-fraud-medium:      #fb923c;
+    --bcc-fraud-low:         #fbbf24;
+    --bcc-fraud-minimal:     #34d399;
+
+    /* Typography */
+    --bcc-font:              'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --bcc-font-mono:         'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+    --bcc-font-display:      'Outfit', 'DM Sans', -apple-system, sans-serif;
+
+    /* Spacing */
+    --bcc-space-xs:          6px;
+    --bcc-space-sm:          10px;
+    --bcc-space-md:          16px;
+    --bcc-space-lg:          24px;
+    --bcc-space-xl:          36px;
+    --bcc-space-2xl:         48px;
+
+    /* Radius */
+    --bcc-radius-sm:         6px;
+    --bcc-radius-md:         10px;
+    --bcc-radius-lg:         14px;
+    --bcc-radius-pill:       999px;
+
+    /* Shadows */
+    --bcc-shadow-sm:         0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+    --bcc-shadow-md:         0 4px 16px rgba(0, 0, 0, 0.35);
+    --bcc-shadow-lg:         0 12px 40px rgba(0, 0, 0, 0.4);
+    --bcc-shadow-glow:       0 0 20px rgba(59, 130, 246, 0.15);
+
+    /* Transitions */
+    --bcc-ease:              cubic-bezier(0.4, 0, 0.2, 1);
+    --bcc-duration:          0.18s;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   2. BASE RESET — Scope everything under .bcc-admin-wrap
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap {
+    background: var(--bcc-bg);
+    color: var(--bcc-text);
+    font-family: var(--bcc-font);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    padding: var(--bcc-space-lg);
+    margin: 0 -20px 0 -2px;
+    min-height: calc(100vh - 32px);
+}
+
+.bcc-admin-wrap *,
+.bcc-admin-wrap *::before,
+.bcc-admin-wrap *::after {
+    box-sizing: border-box;
+}
+
+.bcc-admin-wrap a {
+    color: var(--bcc-accent);
+    text-decoration: none;
+    transition: color var(--bcc-duration) var(--bcc-ease);
+}
+
+.bcc-admin-wrap a:hover {
+    color: var(--bcc-accent-hover);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   3. PAGE HEADER
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap h1,
+.bcc-admin-wrap .bcc-page-title {
+    font-family: var(--bcc-font-display);
+    font-size: 1.65rem;
+    font-weight: 700;
+    color: var(--bcc-text);
+    letter-spacing: -0.02em;
+    margin: 0 0 var(--bcc-space-lg);
+    display: flex;
+    align-items: center;
+    gap: var(--bcc-space-sm);
+}
+
+.bcc-admin-wrap h1::before {
+    content: '';
+    display: inline-block;
+    width: 4px;
+    height: 24px;
+    background: var(--bcc-accent);
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.bcc-admin-wrap h2 {
+    font-family: var(--bcc-font-display);
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--bcc-text);
+    letter-spacing: -0.01em;
+    margin: var(--bcc-space-lg) 0 var(--bcc-space-md);
+}
+
+.bcc-admin-wrap h3,
+.bcc-admin-wrap h4 {
+    font-family: var(--bcc-font);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--bcc-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: var(--bcc-space-md) 0 var(--bcc-space-sm);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   4. TAB NAVIGATION
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .nav-tab-wrapper {
+    background: var(--bcc-bg-raised);
+    border: 1px solid var(--bcc-border);
+    border-radius: var(--bcc-radius-lg);
+    padding: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    margin-bottom: var(--bcc-space-lg);
+    overflow-x: auto;
+}
+
+.bcc-admin-wrap .nav-tab-wrapper .nav-tab {
+    background: transparent;
+    border: none;
+    border-radius: var(--bcc-radius-md);
+    color: var(--bcc-text-secondary);
+    font-family: var(--bcc-font);
+    font-size: 0.8rem;
+    font-weight: 500;
+    padding: 9px 16px;
+    transition: all var(--bcc-duration) var(--bcc-ease);
+    white-space: nowrap;
+    cursor: pointer;
+    text-decoration: none;
+    float: none;
+    margin: 0;
+}
+
+.bcc-admin-wrap .nav-tab-wrapper .nav-tab:hover {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--bcc-text);
+}
+
+.bcc-admin-wrap .nav-tab-wrapper .nav-tab-active,
+.bcc-admin-wrap .nav-tab-wrapper .nav-tab.nav-tab-active {
+    background: var(--bcc-accent);
+    color: #fff;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   5. STAT CARDS / KPI GRID
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .bcc-stat-grid,
+.bcc-admin-wrap [style*="grid-template-columns"][style*="repeat"] {
+    display: grid !important;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+    gap: var(--bcc-space-md) !important;
+    margin-bottom: var(--bcc-space-lg);
+}
+
+/* Stat cards — target common inline-styled cards */
+.bcc-admin-wrap .bcc-stat-card,
+.bcc-admin-wrap [style*="background"][style*="border-radius"][style*="padding"] {
+    background: var(--bcc-bg-card) !important;
+    border: 1px solid var(--bcc-border) !important;
+    border-radius: var(--bcc-radius-md) !important;
+    padding: var(--bcc-space-md) var(--bcc-space-lg) !important;
+    transition: border-color var(--bcc-duration) var(--bcc-ease),
+                transform var(--bcc-duration) var(--bcc-ease);
+    position: relative;
+    overflow: hidden;
+}
+
+.bcc-admin-wrap .bcc-stat-card:hover,
+.bcc-admin-wrap [style*="background"][style*="border-radius"][style*="padding"]:hover {
+    border-color: var(--bcc-border-strong) !important;
+    transform: translateY(-1px);
+}
+
+/* Accent left-border cards */
+.bcc-admin-wrap .bcc-stat-card[style*="border-left"]::before,
+.bcc-admin-wrap [style*="border-left: 4px"],
+.bcc-admin-wrap [style*="border-left: 5px"] {
+    border-left-width: 3px !important;
+    border-left-style: solid !important;
+}
+
+/* Stat values */
+.bcc-admin-wrap .bcc-stat-value {
+    font-family: var(--bcc-font-display);
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--bcc-text);
+    line-height: 1.1;
+}
+
+.bcc-admin-wrap .bcc-stat-label {
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--bcc-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 4px;
+}
+
+/* Large stat numbers in cards (target inline font-size declarations) */
+.bcc-admin-wrap [style*="font-size: 2"] {
+    font-family: var(--bcc-font-display) !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.03em !important;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   6. TABLES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .wp-list-table,
+.bcc-admin-wrap .widefat {
+    background: var(--bcc-bg-card);
+    border: 1px solid var(--bcc-border);
+    border-radius: var(--bcc-radius-md);
+    border-collapse: separate;
+    border-spacing: 0;
+    overflow: hidden;
+    width: 100%;
+    font-size: 0.82rem;
+}
+
+.bcc-admin-wrap .wp-list-table thead th,
+.bcc-admin-wrap .widefat thead th,
+.bcc-admin-wrap .wp-list-table thead td,
+.bcc-admin-wrap .widefat thead td {
+    background: var(--bcc-bg-raised);
+    border-bottom: 1px solid var(--bcc-border-strong);
+    color: var(--bcc-text-muted);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 12px var(--bcc-space-md);
+    white-space: nowrap;
+}
+
+.bcc-admin-wrap .wp-list-table thead th a {
+    color: var(--bcc-text-muted);
+}
+
+/* CRITICAL: WP core .striped uses tbody > tr:nth-child(odd) td with
+   background: #f6f7f7. Must match exact specificity + !important. */
+.bcc-admin-wrap .wp-list-table tbody td,
+.bcc-admin-wrap .wp-list-table tbody th,
+.bcc-admin-wrap .widefat tbody td,
+.bcc-admin-wrap .widefat tbody th,
+.bcc-admin-wrap .widefat.striped tbody tr td,
+.bcc-admin-wrap .widefat.striped tbody tr th,
+.bcc-admin-wrap table.striped tbody > tr:nth-child(odd) > td,
+.bcc-admin-wrap table.striped tbody > tr:nth-child(odd) > th,
+.bcc-admin-wrap table.striped tbody > tr:nth-child(even) > td,
+.bcc-admin-wrap table.striped tbody > tr:nth-child(even) > th,
+.bcc-admin-wrap .wp-list-table.striped > tbody > :nth-child(odd),
+.bcc-admin-wrap .wp-list-table.striped > tbody > :nth-child(odd) td,
+.bcc-admin-wrap .wp-list-table.striped > tbody > :nth-child(odd) th {
+    background: var(--bcc-bg-card) !important;
+    border-bottom: 1px solid var(--bcc-border) !important;
+    color: var(--bcc-text) !important;
+    padding: 11px var(--bcc-space-md);
+    vertical-align: middle;
+}
+
+/* Subtle stripe — every other row just slightly lighter */
+.bcc-admin-wrap table.striped tbody > tr:nth-child(odd) > td,
+.bcc-admin-wrap table.striped tbody > tr:nth-child(odd) > th,
+.bcc-admin-wrap .wp-list-table.striped > tbody > :nth-child(odd) td,
+.bcc-admin-wrap .wp-list-table.striped > tbody > :nth-child(odd) th {
+    background: rgba(255, 255, 255, 0.02) !important;
+}
+
+.bcc-admin-wrap .wp-list-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.bcc-admin-wrap .wp-list-table tbody tr:hover td,
+.bcc-admin-wrap .widefat tbody tr:hover td {
+    background: rgba(255, 255, 255, 0.04) !important;
+}
+
+/* Row actions */
+.bcc-admin-wrap .row-actions {
+    color: var(--bcc-text-muted);
+    font-size: 0.75rem;
+}
+
+.bcc-admin-wrap .row-actions span a {
+    color: var(--bcc-text-secondary);
+}
+
+.bcc-admin-wrap .row-actions .delete a,
+.bcc-admin-wrap .row-actions .trash a {
+    color: var(--bcc-danger);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   7. PROGRESS BARS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Override inline progress bars */
+.bcc-admin-wrap [style*="height: 8px"][style*="background: #e"],
+.bcc-admin-wrap [style*="height:8px"][style*="background:#e"],
+.bcc-admin-wrap .bcc-progress {
+    background: rgba(255, 255, 255, 0.06) !important;
+    border-radius: var(--bcc-radius-pill) !important;
+    overflow: hidden !important;
+    position: relative;
+}
+
+.bcc-admin-wrap .bcc-progress__fill,
+.bcc-admin-wrap [style*="height: 8px"] > div,
+.bcc-admin-wrap [style*="height:8px"] > div {
+    border-radius: var(--bcc-radius-pill) !important;
+    transition: width 0.6s var(--bcc-ease);
+    position: relative;
+}
+
+/* Add subtle glow to high-value fills */
+.bcc-admin-wrap [style*="height:8px"] > div[style*="width: 8"],
+.bcc-admin-wrap [style*="height:8px"] > div[style*="width: 9"],
+.bcc-admin-wrap [style*="height:8px"] > div[style*="width:10"] {
+    box-shadow: 0 0 8px currentColor;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   8. BADGES / PILLS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .bcc-badge,
+.bcc-admin-wrap [style*="border-radius: 3px"][style*="font-size: 12px"],
+.bcc-admin-wrap [style*="border-radius:3px"][style*="font-size:12px"],
+.bcc-admin-wrap [style*="padding: 2px 8px"][style*="border-radius"],
+.bcc-admin-wrap [style*="padding:2px 8px"][style*="border-radius"] {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px !important;
+    border-radius: var(--bcc-radius-pill) !important;
+    font-size: 0.68rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.04em !important;
+    text-transform: uppercase !important;
+    line-height: 1.3;
+    white-space: nowrap;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   9. BUTTONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .button,
+.bcc-admin-wrap .button-primary,
+.bcc-admin-wrap .button-secondary,
+.bcc-admin-wrap input[type="submit"] {
+    font-family: var(--bcc-font) !important;
+    font-size: 0.8rem !important;
+    font-weight: 600 !important;
+    border-radius: var(--bcc-radius-sm) !important;
+    padding: 8px 18px !important;
+    height: auto !important;
+    line-height: 1.4 !important;
+    transition: all var(--bcc-duration) var(--bcc-ease) !important;
+    cursor: pointer;
+}
+
+.bcc-admin-wrap .button-primary,
+.bcc-admin-wrap input[type="submit"].button-primary {
+    background: var(--bcc-accent) !important;
+    border-color: var(--bcc-accent) !important;
+    color: #fff !important;
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25) !important;
+    text-shadow: none !important;
+}
+
+.bcc-admin-wrap .button-primary:hover {
+    background: var(--bcc-accent-hover) !important;
+    border-color: var(--bcc-accent-hover) !important;
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35) !important;
+    transform: translateY(-1px);
+}
+
+.bcc-admin-wrap .button-secondary,
+.bcc-admin-wrap .button:not(.button-primary) {
+    background: var(--bcc-bg-card) !important;
+    border: 1px solid var(--bcc-border-strong) !important;
+    color: var(--bcc-text-secondary) !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+}
+
+.bcc-admin-wrap .button-secondary:hover,
+.bcc-admin-wrap .button:not(.button-primary):hover {
+    background: var(--bcc-bg-card-hover) !important;
+    border-color: var(--bcc-accent) !important;
+    color: var(--bcc-text) !important;
+}
+
+/* Danger buttons */
+.bcc-admin-wrap .button.bcc-btn-danger,
+.bcc-admin-wrap .button[style*="background: #f44"],
+.bcc-admin-wrap .button[style*="background:#f44"],
+.bcc-admin-wrap .button[style*="background: #c62"],
+.bcc-admin-wrap .button[style*="background:#c62"] {
+    background: var(--bcc-danger) !important;
+    border-color: var(--bcc-danger) !important;
+    color: #fff !important;
+}
+
+.bcc-admin-wrap .button.bcc-btn-danger:hover {
+    background: #dc2626 !important;
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35) !important;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   10. FORM INPUTS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap input[type="text"],
+.bcc-admin-wrap input[type="search"],
+.bcc-admin-wrap input[type="number"],
+.bcc-admin-wrap input[type="email"],
+.bcc-admin-wrap select,
+.bcc-admin-wrap textarea {
+    background: var(--bcc-bg-input) !important;
+    border: 1px solid var(--bcc-border-strong) !important;
+    border-radius: var(--bcc-radius-sm) !important;
+    color: var(--bcc-text) !important;
+    font-family: var(--bcc-font) !important;
+    font-size: 0.82rem !important;
+    padding: 8px 12px !important;
+    transition: border-color var(--bcc-duration) var(--bcc-ease),
+                box-shadow var(--bcc-duration) var(--bcc-ease) !important;
+}
+
+.bcc-admin-wrap input:focus,
+.bcc-admin-wrap select:focus,
+.bcc-admin-wrap textarea:focus {
+    border-color: var(--bcc-border-focus) !important;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15) !important;
+    outline: none !important;
+}
+
+.bcc-admin-wrap select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%238b92a5' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 10px center !important;
+    padding-right: 30px !important;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   11. NOTICES / ALERTS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .notice,
+.bcc-admin-wrap .updated,
+.bcc-admin-wrap .error {
+    background: var(--bcc-bg-card) !important;
+    border: 1px solid var(--bcc-border) !important;
+    border-left-width: 3px !important;
+    border-radius: var(--bcc-radius-sm) !important;
+    color: var(--bcc-text) !important;
+    padding: 12px var(--bcc-space-md) !important;
+    margin: 0 0 var(--bcc-space-md) !important;
+    box-shadow: var(--bcc-shadow-sm);
+}
+
+.bcc-admin-wrap .notice-success { border-left-color: var(--bcc-success) !important; }
+.bcc-admin-wrap .notice-warning { border-left-color: var(--bcc-warning) !important; }
+.bcc-admin-wrap .notice-error   { border-left-color: var(--bcc-danger) !important; }
+.bcc-admin-wrap .notice-info    { border-left-color: var(--bcc-info) !important; }
+
+.bcc-admin-wrap .notice p {
+    color: var(--bcc-text-secondary);
+    margin: 0;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   12. CARDS / PANELS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .card,
+.bcc-admin-wrap .bcc-panel,
+.bcc-admin-wrap .postbox {
+    background: var(--bcc-bg-card) !important;
+    border: 1px solid var(--bcc-border) !important;
+    border-radius: var(--bcc-radius-md) !important;
+    box-shadow: var(--bcc-shadow-sm) !important;
+    padding: var(--bcc-space-lg) !important;
+    margin-bottom: var(--bcc-space-md);
+}
+
+.bcc-admin-wrap .bcc-panel[style*="border-left"] {
+    border-left-width: 3px !important;
+}
+
+/* Card headers */
+.bcc-admin-wrap .card h2,
+.bcc-admin-wrap .card h3,
+.bcc-admin-wrap .bcc-panel h3 {
+    margin-top: 0;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   13. CHART.JS CONTAINERS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-chart-wrap {
+    background: var(--bcc-bg-card);
+    border: 1px solid var(--bcc-border);
+    border-radius: var(--bcc-radius-md);
+    padding: var(--bcc-space-lg);
+    margin-bottom: var(--bcc-space-md);
+    position: relative;
+}
+
+.bcc-chart-wrap__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--bcc-space-md);
+}
+
+.bcc-chart-wrap__title {
+    font-family: var(--bcc-font);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--bcc-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0;
+}
+
+.bcc-chart-wrap canvas {
+    max-height: 280px;
+}
+
+/* Chart grid — side by side */
+.bcc-chart-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: var(--bcc-space-md);
+    margin-bottom: var(--bcc-space-lg);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   14. QUICK ACTIONS BAR
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .bcc-quick-actions,
+.bcc-admin-wrap [style*="display: flex"][style*="flex-wrap: wrap"][style*="gap"] {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: var(--bcc-space-sm) !important;
+    padding: var(--bcc-space-md) !important;
+    background: var(--bcc-bg-raised) !important;
+    border: 1px solid var(--bcc-border) !important;
+    border-radius: var(--bcc-radius-md) !important;
+    margin-bottom: var(--bcc-space-lg);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   15. MODERATION DETAIL — TWO-COLUMN LAYOUT
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .bcc-mod-grid,
+.bcc-admin-wrap [style*="display: grid"][style*="grid-template-columns: 1fr 1fr"] {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+    gap: var(--bcc-space-lg) !important;
+}
+
+@media (max-width: 960px) {
+    .bcc-admin-wrap .bcc-mod-grid,
+    .bcc-admin-wrap [style*="display: grid"][style*="grid-template-columns: 1fr 1fr"] {
+        grid-template-columns: 1fr !important;
+    }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   16. FRAUD INDICATORS — COLOR-CODED ACCENTS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Critical: purple glow */
+.bcc-admin-wrap [style*="background: #9c27b0"],
+.bcc-admin-wrap [style*="background:#9c27b0"] {
+    background: var(--bcc-fraud-critical) !important;
+    box-shadow: 0 0 12px rgba(192, 132, 252, 0.2);
+}
+
+/* High: red */
+.bcc-admin-wrap [style*="background: #dc3545"],
+.bcc-admin-wrap [style*="background:#dc3545"],
+.bcc-admin-wrap [style*="background: #f44336"],
+.bcc-admin-wrap [style*="background:#f44336"] {
+    background: var(--bcc-fraud-high) !important;
+}
+
+/* Medium: orange */
+.bcc-admin-wrap [style*="background: #fd7e14"],
+.bcc-admin-wrap [style*="background:#fd7e14"],
+.bcc-admin-wrap [style*="background: #ff9800"],
+.bcc-admin-wrap [style*="background:#ff9800"] {
+    background: var(--bcc-fraud-medium) !important;
+}
+
+/* Low: amber */
+.bcc-admin-wrap [style*="background: #ffc107"],
+.bcc-admin-wrap [style*="background:#ffc107"] {
+    background: var(--bcc-fraud-low) !important;
+}
+
+/* Minimal/Success: green */
+.bcc-admin-wrap [style*="background: #28a745"],
+.bcc-admin-wrap [style*="background:#28a745"],
+.bcc-admin-wrap [style*="background: #4caf50"],
+.bcc-admin-wrap [style*="background:#4caf50"] {
+    background: var(--bcc-fraud-minimal) !important;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   17. PAGINATION
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .tablenav {
+    margin: var(--bcc-space-md) 0;
+}
+
+.bcc-admin-wrap .tablenav .tablenav-pages {
+    color: var(--bcc-text-secondary);
+    font-size: 0.8rem;
+}
+
+.bcc-admin-wrap .tablenav .tablenav-pages a,
+.bcc-admin-wrap .tablenav .tablenav-pages .current {
+    background: var(--bcc-bg-card) !important;
+    border: 1px solid var(--bcc-border) !important;
+    border-radius: var(--bcc-radius-sm) !important;
+    color: var(--bcc-text-secondary) !important;
+    padding: 4px 10px !important;
+    font-size: 0.78rem !important;
+    text-decoration: none !important;
+}
+
+.bcc-admin-wrap .tablenav .tablenav-pages a:hover {
+    border-color: var(--bcc-accent) !important;
+    color: var(--bcc-text) !important;
+}
+
+.bcc-admin-wrap .tablenav .tablenav-pages .current {
+    background: var(--bcc-accent) !important;
+    border-color: var(--bcc-accent) !important;
+    color: #fff !important;
+    font-weight: 600;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   18. SEARCH & FILTERS BAR
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .search-box,
+.bcc-admin-wrap .bcc-filters {
+    display: flex;
+    align-items: center;
+    gap: var(--bcc-space-sm);
+    margin-bottom: var(--bcc-space-md);
+    flex-wrap: wrap;
+}
+
+.bcc-admin-wrap .search-box input[type="search"] {
+    min-width: 240px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   19. MONOSPACE VALUES — Scores, Addresses, IDs
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap code,
+.bcc-admin-wrap .bcc-mono {
+    font-family: var(--bcc-font-mono);
+    font-size: 0.78rem;
+    color: var(--bcc-info);
+    background: rgba(6, 182, 212, 0.08);
+    padding: 2px 7px;
+    border-radius: 4px;
+    border: 1px solid rgba(6, 182, 212, 0.12);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   20. ANIMATIONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@keyframes bcc-fade-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes bcc-slide-in {
+    from { opacity: 0; transform: translateX(-8px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes bcc-pulse-glow {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+    50%      { box-shadow: 0 0 16px 4px rgba(59, 130, 246, 0.12); }
+}
+
+.bcc-admin-wrap .bcc-stat-card,
+.bcc-admin-wrap .bcc-chart-wrap,
+.bcc-admin-wrap .card {
+    animation: bcc-fade-in 0.3s var(--bcc-ease) both;
+}
+
+/* Staggered card entrance */
+.bcc-admin-wrap .bcc-stat-grid > *:nth-child(1) { animation-delay: 0s; }
+.bcc-admin-wrap .bcc-stat-grid > *:nth-child(2) { animation-delay: 0.04s; }
+.bcc-admin-wrap .bcc-stat-grid > *:nth-child(3) { animation-delay: 0.08s; }
+.bcc-admin-wrap .bcc-stat-grid > *:nth-child(4) { animation-delay: 0.12s; }
+.bcc-admin-wrap .bcc-stat-grid > *:nth-child(5) { animation-delay: 0.16s; }
+.bcc-admin-wrap .bcc-stat-grid > *:nth-child(6) { animation-delay: 0.20s; }
+
+/* Live pulse for real-time indicators */
+.bcc-admin-wrap .bcc-live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background: var(--bcc-success);
+    border-radius: 50%;
+    animation: bcc-pulse-glow 2s infinite;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .bcc-admin-wrap *,
+    .bcc-admin-wrap *::before,
+    .bcc-admin-wrap *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   21. RESPONSIVE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@media (max-width: 960px) {
+    .bcc-admin-wrap {
+        padding: var(--bcc-space-md);
+    }
+
+    .bcc-admin-wrap .bcc-stat-grid,
+    .bcc-admin-wrap [style*="grid-template-columns"][style*="repeat"] {
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)) !important;
+    }
+
+    .bcc-chart-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 600px) {
+    .bcc-admin-wrap {
+        padding: var(--bcc-space-sm);
+        margin: 0 -10px;
+    }
+
+    .bcc-admin-wrap .nav-tab-wrapper {
+        gap: 1px;
+        padding: 3px;
+    }
+
+    .bcc-admin-wrap .nav-tab-wrapper .nav-tab {
+        padding: 7px 10px;
+        font-size: 0.72rem;
+    }
+
+    .bcc-admin-wrap .bcc-stat-grid,
+    .bcc-admin-wrap [style*="grid-template-columns"][style*="repeat"] {
+        grid-template-columns: 1fr 1fr !important;
+    }
+
+    .bcc-admin-wrap .wp-list-table {
+        font-size: 0.75rem;
+    }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   22. SCROLLBAR
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+.bcc-admin-wrap ::-webkit-scrollbar-track {
+    background: var(--bcc-bg);
+}
+
+.bcc-admin-wrap ::-webkit-scrollbar-thumb {
+    background: var(--bcc-border-strong);
+    border-radius: 3px;
+}
+
+.bcc-admin-wrap ::-webkit-scrollbar-thumb:hover {
+    background: var(--bcc-text-muted);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   23. CHECKBOX OVERRIDES (wp-list-table bulk select)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap input[type="checkbox"] {
+    accent-color: var(--bcc-accent);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   24. EMPTY STATES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .bcc-empty-state {
+    text-align: center;
+    padding: var(--bcc-space-2xl) var(--bcc-space-lg);
+    color: var(--bcc-text-muted);
+}
+
+.bcc-admin-wrap .bcc-empty-state__icon {
+    font-size: 2.5rem;
+    margin-bottom: var(--bcc-space-md);
+    opacity: 0.4;
+}
+
+.bcc-admin-wrap .bcc-empty-state__text {
+    font-size: 0.88rem;
+    max-width: 360px;
+    margin: 0 auto;
+    line-height: 1.6;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   25. NUCLEAR INLINE OVERRIDE — Force dark theme on ALL inline-styled elements
+   ═══════════════════════════════════════════════════════════════════════════
+   PHP templates use hundreds of inline style="..." declarations with light
+   colors. Instead of whack-a-mole matching, we override at the element level
+   for any element that HAS a style attribute inside our wrapper.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Any element with an inline style that sets a background gets dark card bg.
+ * Excludes: elements whose inline bg is a known accent/status color.
+ * The [style*="background"] selector catches ALL inline backgrounds.
+ */
+.bcc-admin-wrap [style*="background:#fff"],
+.bcc-admin-wrap [style*="background: #fff"],
+.bcc-admin-wrap [style*="background:white"],
+.bcc-admin-wrap [style*="background: white"],
+.bcc-admin-wrap [style*="background:#f"],
+.bcc-admin-wrap [style*="background: #f"],
+.bcc-admin-wrap [style*="background:#e"],
+.bcc-admin-wrap [style*="background: #e"] {
+    background: var(--bcc-bg-card) !important;
+}
+
+/* Progress bar tracks — the #eee bars */
+.bcc-admin-wrap div[style*="background:#eee"],
+.bcc-admin-wrap div[style*="background: #eee"] {
+    background: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Expanded row backgrounds */
+.bcc-admin-wrap tr[style*="display:none"][style*="background"],
+.bcc-admin-wrap tr[style*="background:#f"] {
+    background: var(--bcc-bg-raised) !important;
+}
+
+/* Inner nested table cells */
+.bcc-admin-wrap table table td[style*="border"] {
+    border-color: var(--bcc-border) !important;
+    background: transparent !important;
+}
+
+/* Light borders → dark */
+.bcc-admin-wrap [style*="border: 1px solid #c"],
+.bcc-admin-wrap [style*="border:1px solid #c"],
+.bcc-admin-wrap [style*="border: 1px solid #d"],
+.bcc-admin-wrap [style*="border:1px solid #d"],
+.bcc-admin-wrap [style*="border: 1px solid #e"],
+.bcc-admin-wrap [style*="border:1px solid #e"] {
+    border-color: var(--bcc-border) !important;
+}
+
+/*
+ * MASTER TEXT COLOR RULE
+ * Every text element inside the wrapper gets light text.
+ * Inline color:#fff on badges is preserved because it's already light.
+ * Inline color:#666, #333, #000, #0073aa all become readable.
+ */
+.bcc-admin-wrap div[style*="color:#0"],
+.bcc-admin-wrap div[style*="color: #0"],
+.bcc-admin-wrap div[style*="color:#1"],
+.bcc-admin-wrap div[style*="color: #1"],
+.bcc-admin-wrap div[style*="color:#2"],
+.bcc-admin-wrap div[style*="color: #2"],
+.bcc-admin-wrap div[style*="color:#3"],
+.bcc-admin-wrap div[style*="color: #3"],
+.bcc-admin-wrap div[style*="color:#4"],
+.bcc-admin-wrap div[style*="color: #4"],
+.bcc-admin-wrap div[style*="color:#5"],
+.bcc-admin-wrap div[style*="color: #5"],
+.bcc-admin-wrap div[style*="color:#6"],
+.bcc-admin-wrap div[style*="color: #6"],
+.bcc-admin-wrap div[style*="color:#7"],
+.bcc-admin-wrap div[style*="color: #7"],
+.bcc-admin-wrap div[style*="color:#8"],
+.bcc-admin-wrap div[style*="color: #8"],
+.bcc-admin-wrap div[style*="color:#9"],
+.bcc-admin-wrap div[style*="color: #9"],
+.bcc-admin-wrap span[style*="color:#6"],
+.bcc-admin-wrap span[style*="color: #6"],
+.bcc-admin-wrap p[style*="color:#6"],
+.bcc-admin-wrap p[style*="color: #6"],
+.bcc-admin-wrap strong[style*="color:#3"],
+.bcc-admin-wrap strong[style*="color: #3"] {
+    color: var(--bcc-text-secondary) !important;
+}
+
+/* Large stat numbers — keep visible regardless of inline color */
+.bcc-admin-wrap [style*="font-size:32px"],
+.bcc-admin-wrap [style*="font-size: 32px"],
+.bcc-admin-wrap [style*="font-size:28px"],
+.bcc-admin-wrap [style*="font-size: 28px"],
+.bcc-admin-wrap [style*="font-size:26px"],
+.bcc-admin-wrap [style*="font-size: 26px"],
+.bcc-admin-wrap [style*="font-size:24px"],
+.bcc-admin-wrap [style*="font-size: 24px"],
+.bcc-admin-wrap [style*="font-size:22px"],
+.bcc-admin-wrap [style*="font-size: 22px"],
+.bcc-admin-wrap [style*="font-size:20px"],
+.bcc-admin-wrap [style*="font-size: 20px"] {
+    color: var(--bcc-text) !important;
+    font-family: var(--bcc-font-display) !important;
+}
+
+/* Stat card wrappers (dashboard-verified) */
+.bcc-admin-wrap .stat-card[style] {
+    background: var(--bcc-bg-card) !important;
+    border: 1px solid var(--bcc-border) !important;
+    border-radius: var(--bcc-radius-md) !important;
+    color: var(--bcc-text) !important;
+}
+
+/* Preserve white text on colored badges — don't override these */
+.bcc-admin-wrap span[style*="color:#fff"],
+.bcc-admin-wrap span[style*="color: #fff"] {
+    color: #fff !important;
+}
+
+/* Preserve colored fraud score numbers next to progress bars */
+.bcc-admin-wrap strong[style*="color:#9c27b0"],
+.bcc-admin-wrap strong[style*="color:#dc3545"],
+.bcc-admin-wrap strong[style*="color:#f44336"],
+.bcc-admin-wrap strong[style*="color:#fd7e14"],
+.bcc-admin-wrap strong[style*="color:#ff9800"],
+.bcc-admin-wrap strong[style*="color:#ffc107"],
+.bcc-admin-wrap strong[style*="color:#28a745"],
+.bcc-admin-wrap strong[style*="color:#4caf50"] {
+    color: inherit !important;
+}
+
+/* Suspended status text */
+.bcc-admin-wrap span[style*="color:#f44336"] { color: var(--bcc-danger) !important; }
+.bcc-admin-wrap span[style*="color:#4caf50"] { color: var(--bcc-success) !important; }
+.bcc-admin-wrap small[style*="color:#4caf50"] { color: var(--bcc-success) !important; }
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   26. BUTTON SPACING — Fix buttons touching each other
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .button + .button,
+.bcc-admin-wrap input[type="submit"] + .button,
+.bcc-admin-wrap .button + input[type="submit"] {
+    margin-left: 8px !important;
+}
+
+.bcc-admin-wrap div[style*="display:flex"],
+.bcc-admin-wrap div[style*="display: flex"] {
+    gap: 10px !important;
+}
+
+.bcc-admin-wrap p > .button,
+.bcc-admin-wrap p > a.button {
+    margin-right: 6px !important;
+    margin-bottom: 6px !important;
+}
+
+.bcc-admin-wrap form > .button,
+.bcc-admin-wrap form > button {
+    margin: 4px 8px 4px 0 !important;
+}
+
+.bcc-admin-wrap td .button {
+    margin: 2px 4px 2px 0 !important;
+}
+
+/* Tab attention highlight overrides */
+.bcc-admin-wrap .nav-tab-wrapper .nav-tab[style] {
+    background: transparent !important;
+}
+.bcc-admin-wrap .nav-tab-wrapper .nav-tab.nav-tab-active[style] {
+    background: var(--bcc-accent) !important;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   27. WP ADMIN CHROME — Tables, sorting, pagination, links
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .wp-list-table tfoot th,
+.bcc-admin-wrap .wp-list-table tfoot td {
+    background: var(--bcc-bg-raised) !important;
+    border-top: 1px solid var(--bcc-border-strong) !important;
+    color: var(--bcc-text-muted) !important;
+}
+
+.bcc-admin-wrap .wp-list-table th.sorted,
+.bcc-admin-wrap .wp-list-table th.sortable {
+    background: var(--bcc-bg-raised) !important;
+}
+
+.bcc-admin-wrap .wp-list-table th a { color: var(--bcc-text-muted) !important; }
+.bcc-admin-wrap .wp-list-table th a:hover { color: var(--bcc-text) !important; }
+
+.bcc-admin-wrap .wp-list-table .no-items td {
+    color: var(--bcc-text-muted) !important;
+    background: var(--bcc-bg-card) !important;
+}
+
+.bcc-admin-wrap .description,
+.bcc-admin-wrap p.description { color: var(--bcc-text-muted) !important; }
+
+.bcc-admin-wrap td a { color: var(--bcc-accent) !important; }
+.bcc-admin-wrap td a:hover { color: var(--bcc-accent-hover) !important; }
+
+.bcc-admin-wrap strong { color: inherit; }
+.bcc-admin-wrap small { color: inherit; }
+
+.bcc-admin-wrap .tablenav { background: transparent !important; color: var(--bcc-text-secondary) !important; }
+.bcc-admin-wrap .tablenav .displaying-num { color: var(--bcc-text-muted) !important; }
+.bcc-admin-wrap .tablenav-pages a { color: var(--bcc-text-secondary) !important; }
+.bcc-admin-wrap .tablenav-pages .page-numbers { color: var(--bcc-text-secondary) !important; }
+.bcc-admin-wrap .tablenav-pages .current { color: var(--bcc-text) !important; font-weight: 600; }
+
+.bcc-admin-wrap .wp-heading-inline { color: var(--bcc-text) !important; }
+
+/* Master text color for all elements */
+.bcc-admin-wrap table td,
+.bcc-admin-wrap table th { color: var(--bcc-text) !important; }
+
+/* Checkbox styling */
+.bcc-admin-wrap input[type="checkbox"] {
+    accent-color: var(--bcc-accent);
+    background: var(--bcc-bg-input) !important;
+    border-color: var(--bcc-border-strong) !important;
+}
+
+
+/* (Table stripes handled in section 6 above) */
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   28. TABLE NAV & FILTER BAR — WP admin chrome that stays white
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bcc-admin-wrap .tablenav {
+    background: transparent !important;
+    color: var(--bcc-text-secondary) !important;
+}
+
+.bcc-admin-wrap .tablenav .actions {
+    background: transparent !important;
+}
+
+.bcc-admin-wrap .tablenav .displaying-num {
+    color: var(--bcc-text-muted) !important;
+}
+
+/* WP admin table header/footer bg override */
+.bcc-admin-wrap .wp-list-table,
+.bcc-admin-wrap .widefat,
+.bcc-admin-wrap table {
+    color: var(--bcc-text) !important;
+}
+
+.bcc-admin-wrap table td,
+.bcc-admin-wrap table th {
+    color: var(--bcc-text) !important;
+}
+
+/* Any div/span inside the wrap that doesn't have explicit color */
+.bcc-admin-wrap div,
+.bcc-admin-wrap span,
+.bcc-admin-wrap p,
+.bcc-admin-wrap li,
+.bcc-admin-wrap label {
+    color: inherit;
+}
+
+/* Verified badge green text */
+.bcc-admin-wrap small[style*="color:#4caf50"],
+.bcc-admin-wrap small[style*="color: #4caf50"],
+.bcc-admin-wrap [style*="color:green"],
+.bcc-admin-wrap [style*="color: green"] {
+    color: var(--bcc-success) !important;
+}
+
+/* Score number next to progress bar */
+.bcc-admin-wrap td div[style*="display:flex"] {
+    color: var(--bcc-text) !important;
+}
+
+/* Checkbox inputs — accent on dark */
+.bcc-admin-wrap .wp-list-table input[type="checkbox"] {
+    accent-color: var(--bcc-accent);
+    background: var(--bcc-bg-input) !important;
+    border-color: var(--bcc-border-strong) !important;
+}
+
+/* Moderation user detail — activity stat cards */
+.bcc-admin-wrap [style*="background:#f8f9f9"],
+.bcc-admin-wrap [style*="background: #f8f9f9"],
+.bcc-admin-wrap div[style*="text-align:center"][style*="border-radius"] {
+    background: var(--bcc-bg-card) !important;
+    color: var(--bcc-text) !important;
+    border: 1px solid var(--bcc-border) !important;
+}
+
+/* All h1/h2/h3 in wrap context */
+.bcc-admin-wrap .wp-heading-inline {
+    color: var(--bcc-text) !important;
+}
+
+/* Pagination links */
+.bcc-admin-wrap .tablenav-pages a {
+    color: var(--bcc-text-secondary) !important;
+}
+
+.bcc-admin-wrap .tablenav-pages .page-numbers {
+    color: var(--bcc-text-secondary) !important;
+}
+
+.bcc-admin-wrap .tablenav-pages .current {
+    color: var(--bcc-text) !important;
+    font-weight: 600;
+}

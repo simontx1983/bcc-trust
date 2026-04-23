@@ -1,0 +1,127 @@
+/* =================================================================
+   Verification Badges Block
+   Horizontal flexbox bar of verification status icons.
+   ================================================================= */
+
+.bcc-vb {
+    --vb-bg:         var(--BCC--SURFACE--RAISED, #ffffff);
+    --vb-bg-soft:    var(--BCC--SURFACE--SOFT, #f1f5f9);
+    --vb-text:       inherit;
+    --vb-text-muted: var(--BCC--TEXT--MUTED, #94a3b8);
+    --vb-border:     var(--BCC--BORDER, #e2e8f0);
+    --vb-radius:     var(--BCC--RADIUS--MD, 10px);
+    --vb-ease:       0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    --vb-verified:   var(--BCC--TRUST, #16a34a);
+    --vb-unverified: var(--BCC--TEXT--MUTED, #94a3b8);
+
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--vb-bg);
+    border: 1px solid var(--vb-border);
+    border-radius: var(--vb-radius);
+    padding: 12px 16px;
+}
+
+/* ---- Badge bar ---- */
+.bcc-vb__badges {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+/* ---- Individual badge ---- */
+.bcc-vb__badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all var(--vb-ease);
+    cursor: default;
+    border: 1px solid var(--vb-border);
+    background: var(--vb-bg-soft);
+}
+
+.bcc-vb__badge--verified {
+    color: var(--vb-verified);
+    border-color: var(--vb-verified);
+    background: rgba(22, 163, 74, 0.06);
+}
+
+.bcc-vb__badge--unverified {
+    color: var(--vb-unverified);
+    opacity: 0.6;
+}
+
+/* ---- Icon ---- */
+.bcc-vb__icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+}
+
+.bcc-vb__icon svg {
+    display: block;
+}
+
+/* ---- Label ---- */
+.bcc-vb__label {
+    white-space: nowrap;
+}
+
+/* ---- Checkmark ---- */
+.bcc-vb__check {
+    flex-shrink: 0;
+    color: var(--vb-verified);
+}
+
+/* ---- Count badge ---- */
+.bcc-vb__count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--vb-bg-soft);
+    color: var(--vb-text-muted);
+    border: 1px solid var(--vb-border);
+    margin-left: auto;
+}
+
+/* ---- Compact mode ---- */
+.bcc-vb--compact .bcc-vb__badge {
+    padding: 4px 6px;
+}
+
+.bcc-vb--compact .bcc-vb__badges {
+    gap: 6px;
+}
+
+/* ================================================================
+   MOBILE  (<= 480px)
+   ================================================================ */
+@media (max-width: 480px) {
+    .bcc-vb {
+        padding: 10px 12px;
+    }
+
+    .bcc-vb__badges {
+        gap: 6px;
+    }
+
+    .bcc-vb__badge {
+        padding: 4px 7px;
+        font-size: 11px;
+    }
+
+    .bcc-vb__label {
+        display: none;
+    }
+}

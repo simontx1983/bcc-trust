@@ -1,0 +1,614 @@
+/* =================================================================
+   Project Discovery Hub – Frontend + Editor Styles
+   ================================================================= */
+
+.bcc-discovery-hub {
+    --dh-radius: 12px;
+    --dh-card-radius: 10px;
+    --dh-gap: 20px;
+    --dh-avatar-size: 48px;
+    --dh-cover-height: 140px;
+    --dh-bg: var(--bcc-surface, #ffffff);
+    --dh-text: var(--bcc-text, #1a202c);
+    --dh-text-muted: #64748b;
+    --dh-border: rgba(0, 0, 0, 0.08);
+    --dh-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+    --dh-shadow-hover: 0 10px 25px rgba(0, 0, 0, 0.12), 0 4px 10px rgba(0, 0, 0, 0.08);
+    --dh-transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: var(--dh-text);
+}
+
+/* ── Discovery Tabs (Top / Rising / Needs Evaluation) ── */
+.bcc-discovery-hub__tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 20px;
+    border-bottom: 2px solid var(--dh-border);
+}
+
+.bcc-discovery-hub__tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 20px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    background: transparent;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--dh-text-muted);
+    cursor: pointer;
+    transition: all var(--dh-transition);
+    white-space: nowrap;
+}
+
+.bcc-discovery-hub__tab:hover {
+    color: var(--dh-text);
+    background: rgba(0, 0, 0, 0.03);
+}
+
+.bcc-discovery-hub__tab.is-active {
+    color: var(--bcc-primary, #2196f3);
+    border-bottom-color: var(--bcc-primary, #2196f3);
+}
+
+.bcc-discovery-hub__tab svg {
+    flex-shrink: 0;
+    opacity: 0.6;
+}
+
+.bcc-discovery-hub__tab.is-active svg {
+    opacity: 1;
+}
+
+/* ── Toolbar ──────────────────────────────────────── */
+.bcc-discovery-hub__toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+/* ── Search ───────────────────────────────────────── */
+.bcc-discovery-hub__search {
+    position: relative;
+    flex: 1;
+    min-width: 200px;
+    max-width: 360px;
+}
+
+.bcc-discovery-hub__search-input {
+    width: 100%;
+    padding: 10px 14px 10px 40px;
+    border: 1px solid var(--dh-border);
+    border-radius: 8px;
+    background: var(--dh-bg);
+    font-size: 14px;
+    color: var(--dh-text);
+    transition: border-color var(--dh-transition), box-shadow var(--dh-transition);
+    outline: none;
+}
+
+.bcc-discovery-hub__search-input:focus {
+    border-color: var(--bcc-primary, #2196f3);
+    box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.15);
+}
+
+.bcc-discovery-hub__search-icon {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--dh-text-muted);
+    pointer-events: none;
+}
+
+/* ── Filter Tabs ──────────────────────────────────── */
+.bcc-discovery-hub__filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.bcc-discovery-hub__filter-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 7px 14px;
+    border: 1px solid var(--dh-border);
+    border-radius: 20px;
+    background: transparent;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--dh-text-muted);
+    cursor: pointer;
+    transition: all var(--dh-transition);
+    white-space: nowrap;
+}
+
+.bcc-discovery-hub__filter-tab:hover {
+    border-color: var(--bcc-primary, #2196f3);
+    color: var(--bcc-primary, #2196f3);
+}
+
+.bcc-discovery-hub__filter-tab.is-active {
+    background: var(--bcc-primary, #2196f3);
+    border-color: var(--bcc-primary, #2196f3);
+    color: #ffffff;
+}
+
+/* ── Trust Filter Chips ───────────────────────────── */
+.bcc-discovery-hub__trust-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    width: 100%;
+}
+
+.bcc-discovery-hub__trust-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 12px;
+    border: 1px dashed var(--dh-border);
+    border-radius: 16px;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--dh-text-muted);
+    cursor: pointer;
+    transition: all var(--dh-transition);
+    white-space: nowrap;
+}
+
+.bcc-discovery-hub__trust-chip:hover {
+    border-color: var(--bcc-primary, #2196f3);
+    border-style: solid;
+    color: var(--bcc-primary, #2196f3);
+    background: rgba(33, 150, 243, 0.04);
+}
+
+.bcc-discovery-hub__trust-chip.is-active {
+    border-style: solid;
+    border-color: var(--bcc-primary, #2196f3);
+    background: rgba(33, 150, 243, 0.1);
+    color: var(--bcc-primary, #2196f3);
+    font-weight: 600;
+}
+
+.bcc-discovery-hub__trust-chip-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+/* ── Sort ─────────────────────────────────────────── */
+.bcc-discovery-hub__sort {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.bcc-discovery-hub__sort-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--dh-text-muted);
+    white-space: nowrap;
+}
+
+.bcc-discovery-hub__sort-select {
+    padding: 7px 28px 7px 10px;
+    border: 1px solid var(--dh-border);
+    border-radius: 8px;
+    background: var(--dh-bg);
+    font-size: 13px;
+    color: var(--dh-text);
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2364748b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+}
+
+/* ── Grid ─────────────────────────────────────────── */
+.bcc-discovery-hub__grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--dh-gap);
+}
+
+/* ── Card ─────────────────────────────────────────── */
+.bcc-discovery-hub__card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    border-radius: var(--dh-card-radius);
+    background: var(--dh-bg);
+    box-shadow: var(--dh-shadow);
+    overflow: hidden;
+    text-decoration: none;
+    color: var(--dh-text);
+    transition: transform var(--dh-transition), box-shadow var(--dh-transition);
+}
+
+.bcc-discovery-hub__card:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--dh-shadow-hover);
+}
+
+.bcc-discovery-hub__card:focus-visible {
+    outline: 2px solid var(--bcc-primary, #2196f3);
+    outline-offset: 2px;
+}
+
+/* ── Cover ────────────────────────────────────────── */
+.bcc-discovery-hub__card-cover {
+    position: relative;
+    width: 100%;
+    height: var(--dh-cover-height);
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.bcc-discovery-hub__card-cover-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: opacity 0.3s ease;
+}
+
+.bcc-discovery-hub__card-cover-img.lazyload {
+    opacity: 0;
+}
+
+.bcc-discovery-hub__card-cover-img.lazyloaded {
+    opacity: 1;
+}
+
+.bcc-discovery-hub__card-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.55));
+    pointer-events: none;
+}
+
+.bcc-discovery-hub__card-cover--default {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+}
+
+/* ── Card Content ─────────────────────────────────── */
+.bcc-discovery-hub__card-content {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    flex: 1;
+}
+
+.bcc-discovery-hub__card.has-cover .bcc-discovery-hub__card-content {
+    position: relative;
+    margin-top: -40px;
+    z-index: 1;
+}
+
+.bcc-discovery-hub__card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+/* ── Avatar ───────────────────────────────────────── */
+.bcc-discovery-hub__card-avatar {
+    width: var(--dh-avatar-size);
+    height: var(--dh-avatar-size);
+    border-radius: 50%;
+    object-fit: cover;
+    border: 3px solid var(--dh-bg);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    flex-shrink: 0;
+    background: var(--dh-bg);
+}
+
+.bcc-discovery-hub__card-avatar.lazyload {
+    opacity: 0;
+}
+
+.bcc-discovery-hub__card-avatar.lazyloaded {
+    opacity: 1;
+    transition: opacity 0.3s ease;
+}
+
+.bcc-discovery-hub__card-avatar--placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--bcc-primary, #2196f3), #1976d2);
+    color: #ffffff;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+/* ── Title Group ──────────────────────────────────── */
+.bcc-discovery-hub__card-title-group {
+    flex: 1;
+    min-width: 0;
+    padding-top: 4px;
+}
+
+.bcc-discovery-hub__card-name {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.3;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bcc-discovery-hub__card.has-cover .bcc-discovery-hub__card-name {
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.bcc-discovery-hub__verified-badge {
+    flex-shrink: 0;
+}
+
+.bcc-discovery-hub__card-type {
+    display: inline-block;
+    margin-top: 2px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: rgba(0, 0, 0, 0.06);
+    color: var(--dh-text-muted);
+}
+
+.bcc-discovery-hub__card-type--builder   { background: rgba(33, 150, 243, 0.12); color: #1976d2; }
+.bcc-discovery-hub__card-type--validator { background: rgba(76, 175, 80, 0.12);  color: #388e3c; }
+.bcc-discovery-hub__card-type--nft       { background: rgba(156, 39, 176, 0.12); color: #7b1fa2; }
+.bcc-discovery-hub__card-type--dao       { background: rgba(255, 152, 0, 0.12);  color: #e65100; }
+
+/* ── Claim Badges ────────────────────────────────── */
+.bcc-discovery-hub__claim-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-top: 3px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.bcc-discovery-hub__claim-badge--claimed {
+    background: rgba(22, 163, 74, 0.1);
+    color: #16a34a;
+}
+
+.bcc-discovery-hub__claim-badge--unclaimed {
+    background: rgba(234, 179, 8, 0.1);
+    color: #a16207;
+    border: 1px dashed rgba(234, 179, 8, 0.3);
+}
+
+/* ── Stats ────────────────────────────────────────── */
+.bcc-discovery-hub__card-stats {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding-top: 8px;
+    border-top: 1px solid var(--dh-border);
+    margin-top: auto;
+}
+
+.bcc-discovery-hub__card-score {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+
+.bcc-discovery-hub__card-score-value {
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--tier-color, var(--bcc-tier-neutral));
+}
+
+.bcc-discovery-hub__card-score-label,
+.bcc-discovery-hub__card-stat-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--dh-text-muted);
+}
+
+.bcc-discovery-hub__card-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+
+.bcc-discovery-hub__card-stat-value {
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--dh-text);
+}
+
+/* ── Empty State ──────────────────────────────────── */
+.bcc-discovery-hub__empty {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 48px 24px;
+    color: var(--dh-text-muted);
+    font-size: 15px;
+}
+
+/* ── Footer / Load More ───────────────────────────── */
+.bcc-discovery-hub__footer {
+    display: flex;
+    justify-content: center;
+    padding-top: 32px;
+}
+
+.bcc-discovery-hub__load-more {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 32px;
+    border: 1px solid var(--dh-border);
+    border-radius: 8px;
+    background: var(--dh-bg);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--dh-text);
+    cursor: pointer;
+    transition: all var(--dh-transition);
+}
+
+.bcc-discovery-hub__load-more:hover {
+    border-color: var(--bcc-primary, #2196f3);
+    color: var(--bcc-primary, #2196f3);
+    box-shadow: 0 2px 8px rgba(33, 150, 243, 0.15);
+}
+
+.bcc-discovery-hub__load-more:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.bcc-discovery-hub__count {
+    font-weight: 400;
+    color: var(--dh-text-muted);
+    font-size: 13px;
+}
+
+/* ── Loading State ────────────────────────────────── */
+.bcc-discovery-hub.is-loading .bcc-discovery-hub__grid {
+    pointer-events: none;
+}
+
+/* ── Skeleton Cards ───────────────────────────────── */
+@keyframes bcc-skeleton-pulse {
+    0%   { opacity: 0.15; }
+    50%  { opacity: 0.3; }
+    100% { opacity: 0.15; }
+}
+
+.bcc-discovery-hub__skeleton {
+    pointer-events: none;
+}
+
+.bcc-discovery-hub__skeleton-bone {
+    background: var(--dh-text, #1a202c);
+    border-radius: 4px;
+    animation: bcc-skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+.bcc-discovery-hub__skeleton-avatar {
+    width: var(--dh-avatar-size);
+    height: var(--dh-avatar-size);
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.bcc-discovery-hub__skeleton-title {
+    width: 70%;
+    height: 14px;
+    margin-bottom: 6px;
+}
+
+.bcc-discovery-hub__skeleton-type {
+    width: 40%;
+    height: 10px;
+}
+
+.bcc-discovery-hub__skeleton-stat {
+    width: 36px;
+    height: 24px;
+}
+
+/* ── Responsive ───────────────────────────────────── */
+
+/* Tablet */
+@media (max-width: 1024px) {
+    .bcc-discovery-hub__grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+/* Mobile */
+@media (max-width: 600px) {
+    .bcc-discovery-hub__grid {
+        grid-template-columns: 1fr;
+    }
+
+    .bcc-discovery-hub__tabs {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+
+    .bcc-discovery-hub__tabs::-webkit-scrollbar {
+        display: none;
+    }
+
+    .bcc-discovery-hub__tab {
+        padding: 10px 16px;
+        font-size: 13px;
+    }
+
+    .bcc-discovery-hub__toolbar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .bcc-discovery-hub__search {
+        max-width: none;
+    }
+
+    .bcc-discovery-hub__sort {
+        margin-left: 0;
+    }
+
+    .bcc-discovery-hub__filters {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        padding-bottom: 4px;
+    }
+
+    .bcc-discovery-hub__filters::-webkit-scrollbar {
+        display: none;
+    }
+
+    .bcc-discovery-hub__trust-filters {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        padding-bottom: 4px;
+    }
+
+    .bcc-discovery-hub__trust-filters::-webkit-scrollbar {
+        display: none;
+    }
+}

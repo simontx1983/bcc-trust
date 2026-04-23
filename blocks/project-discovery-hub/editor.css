@@ -1,0 +1,27 @@
+/* =================================================================
+   Project Discovery Hub – Editor-only Styles
+   ================================================================= */
+
+.wp-block-bcc-trust-project-discovery-hub {
+    pointer-events: none;
+}
+
+.wp-block-bcc-trust-project-discovery-hub .bcc-discovery-hub__search-input,
+.wp-block-bcc-trust-project-discovery-hub .bcc-discovery-hub__filter-tab,
+.wp-block-bcc-trust-project-discovery-hub .bcc-discovery-hub__sort-select,
+.wp-block-bcc-trust-project-discovery-hub .bcc-discovery-hub__load-more {
+    pointer-events: none;
+}
+
+.wp-block-bcc-trust-project-discovery-hub .bcc-discovery-hub__card {
+    pointer-events: none;
+}
+
+.wp-block-bcc-trust-project-discovery-hub .bcc-discovery-hub__card-cover-img {
+    max-height: 140px;
+}
+
+/* Ensure lazy images show in editor (no JS observer). */
+.wp-block-bcc-trust-project-discovery-hub .lazyload[data-src] {
+    opacity: 1;
+}

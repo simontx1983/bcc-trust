@@ -1,0 +1,612 @@
+/* =================================================================
+   Entity Blocks – Shared styles for Validator Stats + Collection Showcase
+   ================================================================= */
+
+.bcc-entity-block {
+    --eb-radius: 10px;
+    --eb-gap: 16px;
+    --eb-bg: var(--bcc-surface, #ffffff);
+    --eb-text: var(--bcc-text, #1a202c);
+    --eb-text-muted: #64748b;
+    --eb-border: rgba(0, 0, 0, 0.08);
+    --eb-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    --eb-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.1);
+    --eb-transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: var(--eb-text);
+}
+
+/* ── Header ──────────────────────────────────── */
+.bcc-entity-block__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+}
+
+.bcc-entity-block__title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--eb-text);
+}
+
+.bcc-entity-block__title svg {
+    color: var(--eb-text-muted);
+}
+
+.bcc-entity-block__count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 11px;
+    background: rgba(0, 0, 0, 0.06);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--eb-text-muted);
+}
+
+/* ── Grid ────────────────────────────────────── */
+.bcc-entity-block__grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--eb-gap);
+}
+
+.bcc-entity-block__grid--collections {
+    grid-template-columns: repeat(3, 1fr);
+}
+
+/* ── Card ────────────────────────────────────── */
+.bcc-entity-block__card {
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    border-radius: var(--eb-radius);
+    background: var(--eb-bg);
+    border: 1px solid var(--eb-border);
+    transition: box-shadow var(--eb-transition), transform var(--eb-transition);
+}
+
+.bcc-entity-block__card:hover {
+    box-shadow: var(--eb-shadow-hover);
+    transform: translateY(-2px);
+}
+
+/* ── Validator Card ──────────────────────────── */
+.bcc-validator-card__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.bcc-validator-card__identity {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.bcc-validator-card__moniker {
+    font-size: 15px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.bcc-validator-card__chain {
+    font-size: 12px;
+    color: var(--eb-text-muted);
+    font-weight: 500;
+}
+
+.bcc-validator-card__stats {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.bcc-validator-card__stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.bcc-validator-card__stat-value {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--eb-text);
+}
+
+.bcc-validator-card__stat-value.is-excellent { color: #16a34a; }
+.bcc-validator-card__stat-value.is-good { color: #2563eb; }
+.bcc-validator-card__stat-value.is-warning { color: #ea580c; }
+
+.bcc-validator-card__stat-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--eb-text-muted);
+}
+
+.bcc-validator-card__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    color: var(--eb-text-muted);
+}
+
+.bcc-validator-card__jailed {
+    color: #dc2626;
+    font-weight: 600;
+}
+
+/* ── Collection Card ─────────────────────────── */
+.bcc-collection-card__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.bcc-collection-card__identity {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.bcc-collection-card__name {
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.bcc-collection-card__chain-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--eb-text-muted);
+}
+
+.bcc-collection-card__standard {
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.05);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.bcc-collection-card__stats {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.bcc-collection-card__stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.bcc-collection-card__stat-value {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--eb-text);
+}
+
+.bcc-collection-card__stat-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--eb-text-muted);
+}
+
+/* ── Shared: Badges ──────────────────────────── */
+.bcc-entity-block__badges {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.bcc-entity-block__badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.bcc-entity-block__badge--verified {
+    background: rgba(22, 163, 74, 0.1);
+    color: #16a34a;
+}
+
+.bcc-entity-block__badge--operator {
+    background: rgba(37, 99, 235, 0.1);
+    color: #2563eb;
+}
+
+.bcc-entity-block__badge--creator {
+    background: rgba(147, 51, 234, 0.1);
+    color: #9333ea;
+}
+
+.bcc-entity-block__badge--holder {
+    background: rgba(234, 88, 12, 0.1);
+    color: #ea580c;
+}
+
+.bcc-entity-block__badge--unclaimed {
+    background: rgba(234, 179, 8, 0.12);
+    color: #a16207;
+    border: 1px dashed rgba(234, 179, 8, 0.4);
+    animation: bcc-unclaimed-pulse 2.5s ease-in-out infinite;
+}
+
+@keyframes bcc-unclaimed-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.65; }
+}
+
+/* ── Shared: Actions ─────────────────────────── */
+.bcc-entity-block__actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--eb-border);
+    margin-top: auto;
+}
+
+.bcc-entity-block__link {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--eb-text-muted);
+    text-decoration: none;
+    transition: color var(--eb-transition);
+}
+
+.bcc-entity-block__link:hover {
+    color: var(--bcc-primary, #2196f3);
+}
+
+/* ── Claim Button ────────────────────────────── */
+.bcc-entity-block__claim-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: auto;
+    padding: 6px 14px;
+    border: 1px solid var(--bcc-primary, #2196f3);
+    border-radius: 6px;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--bcc-primary, #2196f3);
+    cursor: pointer;
+    transition: all var(--eb-transition);
+    white-space: nowrap;
+}
+
+.bcc-entity-block__claim-btn:hover {
+    background: var(--bcc-primary, #2196f3);
+    color: #ffffff;
+}
+
+.bcc-entity-block__claim-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.bcc-entity-block__claim-btn--verified {
+    border-color: #16a34a;
+    color: #16a34a;
+    background: rgba(22, 163, 74, 0.06);
+}
+
+/* ── Spinner ─────────────────────────────────── */
+@keyframes bcc-claim-spin {
+    to { transform: rotate(360deg); }
+}
+
+.bcc-entity-block__spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(0, 0, 0, 0.1);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: bcc-claim-spin 0.6s linear infinite;
+}
+
+/* ── Toast ────────────────────────────────────── */
+.bcc-entity-block__toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #ffffff;
+    z-index: 99999;
+    opacity: 0;
+    transition: all 0.3s ease;
+    pointer-events: none;
+}
+
+.bcc-entity-block__toast.is-visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+.bcc-entity-block__toast--error   { background: #dc2626; }
+.bcc-entity-block__toast--warning { background: #ea580c; }
+.bcc-entity-block__toast--info    { background: #2563eb; }
+
+/* ── Empty State ─────────────────────────────── */
+.bcc-entity-block__empty {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 32px 16px;
+    color: var(--eb-text-muted);
+    font-size: 14px;
+}
+
+/* ── Responsive ──────────────────────────────── */
+@media (max-width: 768px) {
+    .bcc-entity-block__grid {
+        grid-template-columns: 1fr;
+    }
+
+    .bcc-entity-block__grid--collections {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+    .bcc-entity-block__grid--collections {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+/* =================================================================
+   NFT Leaderboard – Table layout
+   ================================================================= */
+
+/* Chain tabs */
+.bcc-nft-lb__tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid var(--eb-border);
+    margin-bottom: 16px;
+}
+
+.bcc-nft-lb__tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 20px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    background: transparent;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--eb-text-muted);
+    cursor: pointer;
+    transition: all var(--eb-transition);
+}
+
+.bcc-nft-lb__tab:hover { color: var(--eb-text); }
+.bcc-nft-lb__tab.is-active {
+    color: var(--bcc-primary, #2196f3);
+    border-bottom-color: var(--bcc-primary, #2196f3);
+}
+
+.bcc-nft-lb__tab-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 10px;
+    background: rgba(0,0,0,0.06);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--eb-text-muted);
+}
+
+/* Panels */
+.bcc-nft-lb__panel { display: none; }
+.bcc-nft-lb__panel.is-active { display: block; }
+
+/* Loading spinner */
+.bcc-nft-lb__spinner {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--eb-border);
+    border-top-color: var(--bcc-primary, #2196f3);
+    border-radius: 50%;
+    animation: bcc-nft-spin 0.6s linear infinite;
+}
+.bcc-nft-lb__loading {
+    display: flex;
+    justify-content: center;
+    padding: 40px 0;
+}
+@keyframes bcc-nft-spin { to { transform: rotate(360deg); } }
+
+/* Chain filters */
+.bcc-nft-lb__chain-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 16px;
+}
+
+.bcc-nft-lb__chain-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 5px 12px;
+    border: 1px solid var(--eb-border);
+    border-radius: 16px;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--eb-text-muted);
+    cursor: pointer;
+    transition: all var(--eb-transition);
+}
+
+.bcc-nft-lb__chain-chip:hover {
+    border-color: var(--bcc-primary, #2196f3);
+    color: var(--bcc-primary, #2196f3);
+}
+
+.bcc-nft-lb__chain-chip.is-active {
+    background: var(--bcc-primary, #2196f3);
+    border-color: var(--bcc-primary, #2196f3);
+    color: #fff;
+}
+
+/* Table header */
+.bcc-nft-lb__table-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    background: rgba(0,0,0,0.02);
+    border-radius: var(--eb-radius) var(--eb-radius) 0 0;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--eb-text-muted);
+}
+
+/* Rows */
+.bcc-nft-lb__row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--eb-border);
+    transition: background var(--eb-transition);
+}
+
+.bcc-nft-lb__row:hover {
+    background: rgba(0,0,0,0.015);
+}
+
+/* Columns */
+.bcc-nft-lb__col--rank {
+    width: 32px;
+    flex-shrink: 0;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--eb-text-muted);
+    text-align: center;
+}
+
+.bcc-nft-lb__col--name {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.bcc-nft-lb__col--stat {
+    width: 90px;
+    flex-shrink: 0;
+    text-align: right;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--eb-text);
+}
+
+.bcc-nft-lb__col--action {
+    width: 200px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+/* Name group */
+.bcc-nft-lb__name-group {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.bcc-nft-lb__name-group strong {
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.bcc-nft-lb__name-group small {
+    font-size: 11px;
+    color: var(--eb-text-muted);
+}
+
+/* Avatar */
+.bcc-nft-lb__avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    object-fit: cover;
+    flex-shrink: 0;
+    background: var(--eb-border);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .bcc-nft-lb__table-header { display: none; }
+
+    .bcc-nft-lb__row {
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 12px;
+    }
+
+    .bcc-nft-lb__col--rank { width: 24px; }
+    .bcc-nft-lb__col--name { width: 100%; flex-basis: calc(100% - 36px); }
+    .bcc-nft-lb__col--stat { width: auto; text-align: left; font-size: 12px; }
+    .bcc-nft-lb__col--action { width: 100%; justify-content: flex-start; }
+
+    .bcc-nft-lb__chain-filters { overflow-x: auto; flex-wrap: nowrap; }
+}

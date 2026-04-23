@@ -1,0 +1,1124 @@
+/**
+ * BCC Trust Header — "Forge" Design System
+ *
+ * Industrial-precision trust dashboard. Dark glass panel with amber/gold
+ * accents evoking blue-collar craft. Monospaced readouts, stamped grade
+ * badge, machined vote toggles, embedded Trust Signals + Wallet blocks.
+ *
+ * @version 3.0.0
+ */
+
+/* ============================================================
+   Design Tokens
+   ============================================================ */
+
+.bcc-trust-header {
+    --forge-bg: #1a1d23;
+    --forge-bg-glass: rgba(26, 29, 35, 0.92);
+    --forge-surface: rgba(255, 255, 255, 0.04);
+    --forge-surface-hover: rgba(255, 255, 255, 0.08);
+    --forge-border: rgba(255, 255, 255, 0.08);
+    --forge-border-hover: rgba(255, 255, 255, 0.15);
+    --forge-text: #c8ccd4;
+    --forge-text-dim: #6b7280;
+    --forge-text-bright: #e8ecf2;
+    --forge-amber: #e6a817;
+    --forge-amber-glow: rgba(230, 168, 23, 0.25);
+    --forge-amber-dim: #8b6914;
+    --forge-green: #34d399;
+    --forge-green-glow: rgba(52, 211, 153, 0.2);
+    --forge-red: #f87171;
+    --forge-red-glow: rgba(248, 113, 113, 0.2);
+    --forge-blue: #60a5fa;
+    --forge-blue-glow: rgba(96, 165, 250, 0.15);
+    --forge-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+    --forge-sans: 'DM Sans', 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --forge-radius: 6px;
+    --forge-transition: 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ============================================================
+   Layout — horizontal bar
+   ============================================================ */
+
+.bcc-trust-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    margin: 10px 0 0;
+    background: var(--forge-bg-glass);
+    backdrop-filter: blur(12px) saturate(1.4);
+    -webkit-backdrop-filter: blur(12px) saturate(1.4);
+    border: 1px solid var(--forge-border);
+    border-radius: var(--forge-radius);
+    font-family: var(--forge-sans);
+    font-size: 12px;
+    color: var(--forge-text);
+    position: relative;
+    line-height: 1.3;
+    box-shadow:
+        0 1px 3px rgba(0, 0, 0, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* Subtle noise texture overlay */
+.bcc-trust-header::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 128px 128px;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.bcc-trust-header > * {
+    position: relative;
+    z-index: 1;
+}
+
+.bcc-trust-header__block {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+/* ============================================================
+   Separator — vertical hairline
+   ============================================================ */
+
+.bcc-trust-header__sep {
+    width: 1px;
+    height: 22px;
+    background: linear-gradient(
+        180deg,
+        transparent 0%,
+        var(--forge-border) 20%,
+        rgba(230, 168, 23, 0.12) 50%,
+        var(--forge-border) 80%,
+        transparent 100%
+    );
+    flex-shrink: 0;
+}
+
+/* ============================================================
+   Rating block — hidden, for JS hydration only
+   ============================================================ */
+
+.bcc-trust-header__rating {
+    display: none;
+}
+
+/* ============================================================
+   Score Gauge — SVG ring + monospaced readout
+   ============================================================ */
+
+.bcc-trust-header__gauge {
+    gap: 8px;
+}
+
+.bcc-trust-header__ring {
+    position: relative;
+    width: 38px;
+    height: 38px;
+    flex-shrink: 0;
+}
+
+.bcc-trust-header__ring-svg {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+    filter: drop-shadow(0 0 3px rgba(230, 168, 23, 0.15));
+}
+
+.bcc-trust-header__ring-fill {
+    transition: stroke-dasharray 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+                stroke 0.6s ease;
+}
+
+.bcc-trust-header__score-value {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--forge-mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--forge-text-bright);
+    letter-spacing: -0.5px;
+}
+
+.bcc-trust-header__score-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+/* Grade — stamped badge */
+.bcc-trust-header__grade {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 26px;
+    padding: 1px 5px;
+    font-family: var(--forge-mono);
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    color: var(--forge-amber);
+    background: rgba(230, 168, 23, 0.08);
+    border: 1px solid rgba(230, 168, 23, 0.2);
+    border-radius: 3px;
+    text-transform: uppercase;
+    line-height: 1.3;
+    text-shadow: 0 0 8px var(--forge-amber-glow);
+}
+
+.bcc-trust-header__confidence {
+    font-size: 10px;
+    color: var(--forge-text-dim);
+    font-family: var(--forge-mono);
+    letter-spacing: 0.3px;
+}
+
+.bcc-trust-header__confidence-val {
+    color: var(--forge-text);
+    font-weight: 600;
+}
+
+/* ============================================================
+   Embedded Block Containers
+   ============================================================ */
+
+.bcc-trust-header__block-embed {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    flex-shrink: 1;
+}
+
+/* Scope embedded blocks to inherit header typography and colors */
+.bcc-trust-header__block-embed .bcc-trust-signals,
+.bcc-trust-header__block-embed .bcc-wallet-verification {
+    font-family: var(--forge-mono);
+    font-size: 10px;
+    color: var(--forge-text);
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+}
+
+/* Compact the trust-signals list inside the header */
+.bcc-trust-header__block-embed .bcc-section-title {
+    display: none; /* hide "Trust Signals" heading inside compact header */
+}
+
+.bcc-trust-header__block-embed .bcc-trust-signal-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.bcc-trust-header__block-embed .bcc-trust-signal {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+    font-size: 10px;
+    color: var(--forge-text-dim);
+}
+
+.bcc-trust-header__block-embed .bcc-trust-signal svg {
+    color: var(--forge-amber-dim);
+    flex-shrink: 0;
+}
+
+.bcc-trust-header__block-embed .bcc-trust-signal__bar {
+    width: 40px;
+    height: 4px;
+    background: var(--forge-surface);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.bcc-trust-header__block-embed .bcc-trust-signal__bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--forge-green);
+    transition: width 0.3s ease;
+}
+
+.bcc-trust-header__block-embed .bcc-trust-signal__value {
+    font-weight: 600;
+    color: var(--forge-text);
+}
+
+.bcc-trust-header__block-embed .bcc-trust-signal__icons {
+    display: inline-flex;
+    gap: 2px;
+}
+
+.bcc-trust-header__block-embed .bcc-trust-signal__icon {
+    color: var(--forge-green);
+}
+
+/* Compact the wallet block inside the header */
+.bcc-trust-header__block-embed .bcc-verif-section-title {
+    display: none; /* hide "Wallet" heading inside compact header */
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-section {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-chain-header {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-chain-icon {
+    font-size: 12px;
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-chain-name {
+    display: none; /* icon-only in header context */
+}
+
+.bcc-trust-header__block-embed .bcc-verif-status--connected {
+    color: var(--forge-green);
+    font-size: 10px;
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-role-badge {
+    font-size: 9px;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: var(--forge-surface);
+    border: 1px solid var(--forge-border);
+    color: var(--forge-text-dim);
+    line-height: 1.4;
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-connected {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-address {
+    font-family: var(--forge-mono);
+    font-size: 9px;
+    color: var(--forge-text-dim);
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-copy-btn {
+    font-size: 8px;
+    padding: 1px 4px;
+    border: 1px solid var(--forge-border);
+    border-radius: 3px;
+    background: var(--forge-surface);
+    color: var(--forge-text-dim);
+    cursor: pointer;
+    transition: all var(--forge-transition);
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-copy-btn:hover {
+    border-color: var(--forge-border-hover);
+    color: var(--forge-text);
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-boost {
+    font-size: 9px;
+    color: var(--forge-green);
+    font-weight: 600;
+}
+
+.bcc-trust-header__block-embed .bcc-wallet-connect-area {
+    display: inline-flex;
+}
+
+.bcc-trust-header__block-embed .bcc-verif-btn--connect {
+    font-size: 9px;
+    padding: 2px 8px;
+    border: 1px solid var(--forge-border);
+    border-radius: var(--forge-radius);
+    background: var(--forge-surface);
+    color: var(--forge-text);
+    cursor: pointer;
+    transition: all var(--forge-transition);
+}
+
+.bcc-trust-header__block-embed .bcc-verif-btn--connect:hover {
+    border-color: var(--forge-amber);
+    color: var(--forge-amber);
+}
+
+/* Hide elements that are too detailed for the header */
+.bcc-trust-header__block-embed .bcc-wallet-disconnect-btn,
+.bcc-trust-header__block-embed .bcc-nft-badge-list,
+.bcc-trust-header__block-embed .bcc-wallet-empty,
+.bcc-trust-header__block-embed .bcc-wallet-status {
+    display: none;
+}
+
+/* ============================================================
+   Mode-aware visibility (defense-in-depth)
+   ============================================================ */
+
+.bcc-trust-header[data-mode="public"] .bcc-trust-header__vote-btn,
+.bcc-trust-header[data-mode="public"] .bcc-trust-header__endorse-btn {
+    display: none;
+}
+
+.bcc-trust-header[data-mode="dashboard"] .bcc-trust-header__signal-static {
+    display: none;
+}
+
+/* Re-show the supporters chip even in dashboard mode */
+.bcc-trust-header[data-mode="dashboard"] .bcc-trust-header__supporters {
+    display: inline-flex;
+}
+
+/* ============================================================
+   Vote Buttons — machined toggle style
+   ============================================================ */
+
+.bcc-trust-header__vote-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--forge-border);
+    border-radius: var(--forge-radius);
+    background: var(--forge-surface);
+    font-family: var(--forge-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--forge-text);
+    cursor: pointer;
+    transition: all var(--forge-transition);
+    line-height: 1.3;
+    white-space: nowrap;
+    letter-spacing: 0.2px;
+}
+
+.bcc-trust-header__vote-btn:hover {
+    border-color: var(--forge-border-hover);
+    background: var(--forge-surface-hover);
+}
+
+.bcc-trust-header__vote-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.bcc-trust-header__vote-btn:active:not(:disabled) {
+    transform: scale(0.96);
+}
+
+/* Positive (upvote) */
+.bcc-trust-header__vote-btn--positive .bcc-trust-header__arrow {
+    color: var(--forge-green);
+    font-size: 9px;
+    transition: transform var(--forge-transition);
+}
+
+.bcc-trust-header__vote-btn--positive:hover .bcc-trust-header__arrow {
+    transform: translateY(-1px);
+}
+
+.bcc-trust-header__vote-btn--positive.is-active {
+    border-color: rgba(52, 211, 153, 0.3);
+    background: var(--forge-green-glow);
+    color: var(--forge-green);
+    box-shadow: 0 0 8px rgba(52, 211, 153, 0.1);
+}
+
+/* Risk (downvote) */
+.bcc-trust-header__vote-btn--risk .bcc-trust-header__arrow {
+    color: var(--forge-red);
+    font-size: 9px;
+    transition: transform var(--forge-transition);
+}
+
+.bcc-trust-header__vote-btn--risk:hover .bcc-trust-header__arrow {
+    transform: translateY(1px);
+}
+
+.bcc-trust-header__vote-btn--risk.is-active {
+    border-color: rgba(248, 113, 113, 0.3);
+    background: var(--forge-red-glow);
+    color: var(--forge-red);
+    box-shadow: 0 0 8px rgba(248, 113, 113, 0.1);
+}
+
+/* ============================================================
+   Endorse Button
+   ============================================================ */
+
+.bcc-trust-header__endorse-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--forge-border);
+    border-radius: var(--forge-radius);
+    background: var(--forge-surface);
+    font-family: var(--forge-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--forge-text);
+    cursor: pointer;
+    transition: all var(--forge-transition);
+    line-height: 1.3;
+    white-space: nowrap;
+    letter-spacing: 0.2px;
+}
+
+.bcc-trust-header__endorse-btn:hover {
+    border-color: var(--forge-border-hover);
+    background: var(--forge-surface-hover);
+}
+
+.bcc-trust-header__endorse-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.bcc-trust-header__endorse-btn:active:not(:disabled) {
+    transform: scale(0.96);
+}
+
+.bcc-trust-header__endorse-icon {
+    color: var(--forge-amber-dim);
+    font-size: 12px;
+    transition: all var(--forge-transition);
+}
+
+.bcc-trust-header__endorse-btn:hover .bcc-trust-header__endorse-icon {
+    color: var(--forge-amber);
+}
+
+.bcc-trust-header__endorse-btn.is-active {
+    border-color: rgba(230, 168, 23, 0.3);
+    background: var(--forge-amber-glow);
+    color: var(--forge-amber);
+    box-shadow: 0 0 8px rgba(230, 168, 23, 0.1);
+}
+
+.bcc-trust-header__endorse-btn.is-active .bcc-trust-header__endorse-icon {
+    color: var(--forge-amber);
+    text-shadow: 0 0 6px var(--forge-amber-glow);
+}
+
+/* ============================================================
+   Static Signals (read-only / public mode)
+   ============================================================ */
+
+.bcc-trust-header__signal-static {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--forge-border);
+    border-radius: var(--forge-radius);
+    background: var(--forge-surface);
+    font-family: var(--forge-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--forge-text-dim);
+    line-height: 1.3;
+    white-space: nowrap;
+    letter-spacing: 0.2px;
+}
+
+.bcc-trust-header__signal-static .bcc-trust-header__arrow {
+    font-size: 9px;
+}
+
+/* ============================================================
+   Signal Row & Counts
+   ============================================================ */
+
+.bcc-trust-header__signals {
+    flex: 0 0 auto;
+}
+
+.bcc-trust-header__signal-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.bcc-trust-header__count {
+    font-family: var(--forge-mono);
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: -0.3px;
+}
+
+/* ============================================================
+   Supporters
+   ============================================================ */
+
+.bcc-trust-header__supporters {
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.bcc-trust-header__supporters-icon {
+    font-size: 8px;
+    line-height: 1;
+    color: var(--forge-text-dim);
+    letter-spacing: -3px;
+}
+
+.bcc-trust-header__supporters-count {
+    font-family: var(--forge-mono);
+    font-weight: 700;
+    font-size: 11px;
+    color: var(--forge-text);
+}
+
+.bcc-trust-header__supporters-label {
+    font-size: 10px;
+    color: var(--forge-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* ============================================================
+   Info Button
+   ============================================================ */
+
+.bcc-trust-header__info-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--forge-border);
+    border-radius: 50%;
+    background: var(--forge-surface);
+    font-size: 13px;
+    color: var(--forge-text-dim);
+    cursor: pointer;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: all var(--forge-transition);
+    margin-left: auto;
+}
+
+.bcc-trust-header__info-btn:hover {
+    color: var(--forge-amber);
+    border-color: rgba(230, 168, 23, 0.25);
+    background: rgba(230, 168, 23, 0.06);
+}
+
+/* ============================================================
+   Popover — frosted glass dropdown
+   ============================================================ */
+
+/* When portaled to document.body by JS, the popover uses fixed positioning
+   and a z-index above all WordPress UI layers (admin bar, modals, navbars). */
+.bcc-trust-header__popover {
+    position: fixed;
+    z-index: 999999;
+    width: 300px;
+    max-width: 90vw;
+    background: #1a1d23;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    box-shadow:
+        0 8px 32px rgba(0, 0, 0, 0.4),
+        0 0 0 1px rgba(255, 255, 255, 0.03);
+    padding: 0;
+    animation: forge-popover-in 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    /* Tokens are not inherited when portaled outside .bcc-trust-header,
+       so we redeclare the subset the popover needs. */
+    --forge-bg: #1a1d23;
+    --forge-border: rgba(255, 255, 255, 0.08);
+    --forge-radius: 6px;
+    --forge-text: #c8ccd4;
+    --forge-text-dim: #6b7280;
+    --forge-text-bright: #e8ecf2;
+    --forge-amber: #e6a817;
+    --forge-sans: 'DM Sans', 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --forge-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+    --forge-transition: 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+    font-family: var(--forge-sans);
+    font-size: 12px;
+    color: var(--forge-text);
+    line-height: 1.3;
+}
+
+@keyframes forge-popover-in {
+    from {
+        opacity: 0;
+        transform: translateY(-6px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.bcc-trust-header__popover[hidden] {
+    display: none;
+}
+
+.bcc-trust-header__popover-inner {
+    padding: 16px;
+    position: relative;
+}
+
+.bcc-trust-header__popover-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    border: none;
+    background: transparent;
+    font-size: 16px;
+    color: var(--forge-text-dim);
+    cursor: pointer;
+    padding: 2px;
+    line-height: 1;
+    transition: color var(--forge-transition);
+}
+
+.bcc-trust-header__popover-close:hover {
+    color: var(--forge-text-bright);
+}
+
+.bcc-trust-header__popover-title {
+    margin: 0 0 10px;
+    font-family: var(--forge-sans);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--forge-text-bright);
+    letter-spacing: 0.2px;
+}
+
+.bcc-trust-header__popover-inner p {
+    margin: 0 0 8px;
+    font-size: 11px;
+    color: var(--forge-text-dim);
+    line-height: 1.6;
+}
+
+.bcc-trust-header__popover-list {
+    margin: 0 0 10px;
+    padding-left: 0;
+    list-style: none;
+    font-size: 11px;
+    color: var(--forge-text);
+    line-height: 1.8;
+}
+
+.bcc-trust-header__popover-list li {
+    padding: 2px 0;
+    border-bottom: 1px solid var(--forge-border);
+}
+
+.bcc-trust-header__popover-list li:last-child {
+    border-bottom: none;
+}
+
+.bcc-trust-header__popover-list strong {
+    font-family: var(--forge-mono);
+    font-size: 11px;
+    letter-spacing: 0.3px;
+}
+
+.bcc-trust-header__popover-footer {
+    font-size: 10px;
+    color: var(--forge-text-dim);
+    margin-bottom: 0;
+    font-style: italic;
+}
+
+/* ============================================================
+   Status Message (toast)
+   ============================================================ */
+
+.bcc-trust-header__status {
+    position: absolute;
+    bottom: -22px;
+    left: 16px;
+    font-family: var(--forge-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+    transition: opacity 0.3s ease;
+    opacity: 0;
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+/* ============================================================
+   Responsive — tablet
+   ============================================================ */
+
+@media (max-width: 768px) {
+    .bcc-trust-header {
+        gap: 8px;
+        padding: 6px 12px;
+        font-size: 11px;
+    }
+
+    .bcc-trust-header__ring {
+        width: 32px;
+        height: 32px;
+    }
+
+    .bcc-trust-header__score-value {
+        font-size: 10px;
+    }
+
+    .bcc-trust-header__grade {
+        font-size: 11px;
+        padding: 1px 4px;
+    }
+
+    .bcc-trust-header__vote-btn,
+    .bcc-trust-header__endorse-btn,
+    .bcc-trust-header__signal-static {
+        padding: 3px 8px;
+        font-size: 10px;
+    }
+
+    .bcc-trust-header__supporters-label {
+        display: none;
+    }
+}
+
+/* ============================================================
+   Responsive — mobile
+   ============================================================ */
+
+@media (max-width: 480px) {
+    .bcc-trust-header {
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 8px 10px;
+    }
+
+    .bcc-trust-header__sep {
+        display: none;
+    }
+
+    /* Score gauge takes priority row */
+    .bcc-trust-header__gauge {
+        flex: 0 0 auto;
+    }
+
+    /* Embedded blocks stack on mobile */
+    .bcc-trust-header__block-embed {
+        flex: 1 1 100%;
+        order: 2;
+    }
+
+    .bcc-trust-header__signals {
+        order: 3;
+        flex: 1 1 100%;
+    }
+
+    .bcc-trust-header__signal-row {
+        flex-wrap: wrap;
+    }
+
+    .bcc-trust-header__vote-btn,
+    .bcc-trust-header__endorse-btn {
+        flex: 1 1 auto;
+        justify-content: center;
+    }
+
+    .bcc-trust-header__supporters-label {
+        display: inline;
+    }
+
+    .bcc-trust-header__info-btn {
+        order: 4;
+        margin-left: auto;
+    }
+}
+
+/* ============================================================
+   Animation — score ring fill on load
+   ============================================================ */
+
+@keyframes forge-ring-fill {
+    from {
+        stroke-dasharray: 0 100;
+    }
+}
+
+.bcc-trust-header__ring-fill {
+    animation: forge-ring-fill 0.8s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* ============================================================
+   Focus styles for accessibility
+   ============================================================ */
+
+.bcc-trust-header__vote-btn:focus-visible,
+.bcc-trust-header__endorse-btn:focus-visible,
+.bcc-trust-header__info-btn:focus-visible {
+    outline: 2px solid var(--forge-amber);
+    outline-offset: 2px;
+}
+
+/* ============================================================
+   Layout containment — prevents repaint propagation
+   ============================================================ */
+
+/* Style containment only — layout containment would clip the
+   absolutely-positioned popover that extends below the panel. */
+.bcc-trust-header {
+    contain: style;
+}
+
+.bcc-trust-header__ring-svg {
+    will-change: auto; /* promoted only during animation */
+}
+
+/* ============================================================
+   prefers-reduced-motion — respect system accessibility setting
+   ============================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+    .bcc-trust-header__ring-fill {
+        animation: none;
+    }
+
+    .bcc-trust-header__vote-btn,
+    .bcc-trust-header__endorse-btn,
+    .bcc-trust-header__info-btn,
+    .bcc-trust-header__endorse-icon,
+    .bcc-trust-header__status {
+        transition: none;
+    }
+
+    .bcc-trust-header__vote-btn:active:not(:disabled) {
+        transform: none;
+    }
+
+    .bcc-trust-header__popover {
+        animation: none;
+    }
+}
+
+/* ============================================================
+   Reduced effects on mobile — lower GPU cost
+   ============================================================ */
+
+@media (max-width: 768px) {
+    .bcc-trust-header {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        background: var(--forge-bg);
+    }
+
+    .bcc-trust-header::before {
+        display: none; /* skip noise texture on mobile */
+    }
+
+    .bcc-trust-header__ring-svg {
+        filter: none; /* skip drop-shadow on mobile */
+    }
+
+    .bcc-trust-header__grade {
+        text-shadow: none;
+    }
+
+    .bcc-trust-header__vote-btn--positive.is-active,
+    .bcc-trust-header__vote-btn--risk.is-active,
+    .bcc-trust-header__endorse-btn.is-active {
+        box-shadow: none;
+    }
+}
+
+/* ============================================================
+   Secondary Actions (Flag + Report)
+   ============================================================ */
+
+.bcc-trust-header__secondary-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.bcc-trust-header__flag-btn,
+.bcc-trust-header__report-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    font-family: var(--forge-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+    color: var(--forge-muted);
+    background: var(--forge-surface);
+    border: 1px solid var(--forge-border);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.bcc-trust-header__flag-btn:hover,
+.bcc-trust-header__report-btn:hover {
+    background: var(--forge-surface-hover);
+    color: var(--forge-text);
+    border-color: rgba(255, 255, 255, 0.15);
+}
+
+.bcc-trust-header__flag-btn.is-active {
+    color: #d97706;
+    border-color: rgba(217, 119, 6, 0.3);
+    background: rgba(217, 119, 6, 0.08);
+}
+
+.bcc-trust-header__flag-btn:disabled,
+.bcc-trust-header__report-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.bcc-trust-header__flag-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: #fff;
+    background: rgba(217, 119, 6, 0.6);
+    border-radius: 8px;
+}
+
+.bcc-trust-header__flag-notice {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    font-family: var(--forge-mono);
+    font-size: 0.7rem;
+    color: #d97706;
+    background: rgba(217, 119, 6, 0.06);
+    border: 1px solid rgba(217, 119, 6, 0.15);
+    border-radius: 4px;
+}
+
+.bcc-trust-header__report-btn {
+    color: var(--forge-muted);
+}
+
+.bcc-trust-header__report-btn:hover {
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.3);
+}
+
+/* ============================================================
+   Locked state (greyed out — user lacks permission)
+   ============================================================ */
+
+.bcc-trust-header__vote-btn.is-locked,
+.bcc-trust-header__endorse-btn.is-locked {
+    opacity: 0.35;
+    cursor: not-allowed;
+    filter: grayscale(1);
+}
+
+.bcc-trust-header__vote-btn.is-locked:hover,
+.bcc-trust-header__endorse-btn.is-locked:hover {
+    background: var(--forge-surface);
+    border-color: var(--forge-border);
+}
+
+/* ============================================================
+   Tooltips (hover popover from data-tooltip attribute)
+   ============================================================ */
+
+[data-tooltip] {
+    position: relative;
+}
+
+[data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px 12px;
+    max-width: 240px;
+    width: max-content;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 0.72rem;
+    font-weight: 400;
+    line-height: 1.4;
+    letter-spacing: normal;
+    color: #f0f0f0;
+    background: #1a1d23;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    white-space: normal;
+    text-align: center;
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+    z-index: 10000;
+}
+
+[data-tooltip]::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: #1a1d23;
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+    z-index: 10001;
+}
+
+[data-tooltip]:hover::after,
+[data-tooltip]:hover::before,
+[data-tooltip]:focus::after,
+[data-tooltip]:focus::before {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* Locked buttons get a distinct tooltip style (amber border = "earn this") */
+[data-tooltip].is-locked::after {
+    border-color: rgba(217, 119, 6, 0.3);
+    background: #1c1a15;
+}
+
+[data-tooltip].is-locked::before {
+    border-top-color: #1c1a15;
+}

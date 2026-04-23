@@ -1,0 +1,40 @@
+{
+    "$schema": "https://schemas.wp.org/trunk/block.json",
+    "apiVersion": 3,
+    "name": "bcc-trust/wallet-verification",
+    "version": "1.0.0",
+    "title": "Wallet Verification",
+    "category": "bcc-trust",
+    "icon": "money-alt",
+    "description": "Wallet connection interface for EVM, Solana, and Cosmos chains. Place on PeepSo profile pages — only visible to the page owner.",
+    "keywords": [ "wallet", "ethereum", "solana", "cosmos", "verification", "crypto" ],
+    "textdomain": "bcc-trust",
+    "attributes": {
+        "pageId": {
+            "type": "number",
+            "default": 0
+        },
+        "showEthereum": {
+            "type": "boolean",
+            "default": true
+        },
+        "showSolana": {
+            "type": "boolean",
+            "default": true
+        },
+        "showCosmos": {
+            "type": "boolean",
+            "default": true
+        },
+        "compact": {
+            "type": "boolean",
+            "default": false
+        }
+    },
+    "supports": {
+        "html": false,
+        "align": [ "wide", "full" ]
+    },
+    "render": "file:./render.php",
+    "editorScript": "bcc-trust-blocks-editor"
+}

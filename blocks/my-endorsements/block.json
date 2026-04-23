@@ -1,0 +1,33 @@
+{
+    "$schema": "https://schemas.wp.org/trunk/block.json",
+    "apiVersion": 3,
+    "name": "bcc-trust/my-endorsements",
+    "version": "1.0.0",
+    "title": "My Endorsements",
+    "category": "bcc-trust",
+    "icon": "thumbs-up",
+    "description": "Shows endorsements you've given and received. Place on PeepSo profile pages — only visible to the logged-in user.",
+    "keywords": ["endorsement", "my", "endorsed", "manage", "revoke"],
+    "textdomain": "bcc-trust",
+    "attributes": {
+        "limit": {
+            "type": "number",
+            "default": 10
+        },
+        "showStats": {
+            "type": "boolean",
+            "default": true
+        },
+        "showRevoke": {
+            "type": "boolean",
+            "default": true
+        }
+    },
+    "supports": {
+        "html": false,
+        "align": ["wide", "full"]
+    },
+    "render": "file:./render.php",
+    "viewScript": "bcc-my-endorsements",
+    "editorScript": "bcc-trust-blocks-editor"
+}
