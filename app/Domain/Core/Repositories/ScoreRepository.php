@@ -2142,6 +2142,26 @@ class ScoreRepository {
     }
 
     /**
+     * Total rows currently flagged for authoritative recalculation.
+     *
+     * Used by the bcc-core health dashboard to surface queue depth.
+     * Bounded by a single aggregate COUNT over the dedicated
+     * idx_recalculate index, so it is safe to call synchronously on
+     * admin-dashboard requests. Returns 0 on DB error — the caller
+     * (RecalcQueueReadService) is documented as non-throwing.
+     */
+    public function countPendingRecalc(): int
+    {
+        global $wpdb;
+
+        $count = $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$this->table} WHERE recalculate_required = 1"
+        );
+
+        return is_numeric($count) ? (int) $count : 0;
+    }
+
+    /**
      * Increment recalculation failure counter for a page.
      */
     public function incrementRecalcFailures(int $pageId): void

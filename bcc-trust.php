@@ -355,6 +355,15 @@ add_filter('bcc.resolve.trending_data', function ($service = null) {
     return new \BCC\Trust\Core\Application\TrendingDataService();
 });
 
+add_filter('bcc.resolve.recalc_queue_read', function ($service = null) {
+    if ($service instanceof \BCC\Core\Contracts\RecalcQueueReadInterface) {
+        return $service;
+    }
+    return new \BCC\Trust\Core\Application\RecalcQueueReadService(
+        \BCC\Trust\Core\Plugin::instance()->scoreRepository()
+    );
+});
+
 // Onchain service providers — registered at top level so the
 // ServiceLocator pre-warm below picks them up before freeze.
 add_filter('bcc.resolve.wallet_link_read', function ($service = null) {
@@ -403,6 +412,7 @@ add_filter('bcc.resolve.onchain_data_read', function ($service = null) {
 \BCC\Core\ServiceLocator::resolveWalletLinkWrite();
 \BCC\Core\ServiceLocator::resolveWalletSignalWrite();
 \BCC\Core\ServiceLocator::resolveOnchainDataRead();
+\BCC\Core\ServiceLocator::resolveRecalcQueueRead();
 
 /*
 |--------------------------------------------------------------------------
