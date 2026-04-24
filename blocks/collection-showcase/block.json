@@ -3,10 +3,10 @@
     "apiVersion": 3,
     "name": "bcc-trust/collection-showcase",
     "version": "1.0.0",
-    "title": "Collection Showcase",
+    "title": "NFT Collections",
     "category": "bcc-trust",
     "icon": "format-gallery",
-    "description": "NFT collection showcase for claimed collections. Place on PeepSo profile pages or collection detail pages.",
+    "description": "NFT collections linked to this project: floor, holders, volume, and claim status. Place on a PeepSo profile page.",
     "keywords": ["nft", "collection", "gallery", "claim", "creator", "holder"],
     "textdomain": "bcc-trust",
     "attributes": {

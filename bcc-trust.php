@@ -183,6 +183,7 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-validators.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collections.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
 require_once BCC_TRUST_PATH . 'includes/renderers/onchain-template-functions.php';
+require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**
  * Onchain table installer — called from activation and from the
@@ -629,16 +630,10 @@ add_action('plugins_loaded', function (): void {
         }
     });
 
-    // Gutenberg block.
-    add_filter('block_categories_all', function ($categories) {
-        array_unshift($categories, [
-            'slug'  => 'bcc-onchain',
-            'title' => 'BCC On-Chain',
-            'icon'  => 'networking',
-        ]);
-        return $categories;
-    });
-
+    // Gutenberg block. The `bcc-onchain` category was retired — the
+    // block now lives in the shared `bcc-trust` category, renamed to
+    // "On-Chain Score Breakdown" to distinguish it from the summary
+    // view (`bcc-trust/on-chain-signals`).
     add_action('init', function () {
         if (function_exists('register_block_type')) {
             register_block_type(BCC_TRUST_PATH . 'blocks/onchain-signals');
@@ -872,39 +867,6 @@ add_action('admin_notices', function (): void {
         BCC_DISPUTES_PANEL_SIZE,
         $minimum_healthy
     );
-});
-
-/*
-|--------------------------------------------------------------------------
-| EMAIL VERIFICATION LINK HANDLER
-|--------------------------------------------------------------------------
-*/
-
-add_action('template_redirect', function () {
-    if (
-        !isset($_GET['bcc_action'])
-        || $_GET['bcc_action'] !== 'verify'
-        || !isset($_GET['token'])
-    ) {
-        return;
-    }
-
-    $token  = sanitize_text_field(wp_unslash($_GET['token']));
-    $userId = get_current_user_id();
-
-    if (!$userId) {
-        wp_safe_redirect(wp_login_url(esc_url_raw($_SERVER['REQUEST_URI'] ?? '')));
-        exit;
-    }
-
-    try {
-        $verificationService = \BCC\Trust\Core\Plugin::instance()->verificationService();
-        $verificationService->verifyEmail($userId, $token);
-        wp_safe_redirect(add_query_arg('bcc_verified', '1', home_url('/')));
-    } catch (\Exception $e) {
-        wp_safe_redirect(add_query_arg('bcc_verify_error', '1', home_url('/')));
-    }
-    exit;
 });
 
 /*

@@ -14,7 +14,25 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-$page_id    = (int) ($attributes['pageId'] ?? get_the_ID());
+$page_id    = (int) ($attributes['pageId'] ?? 0);
+if (!$page_id) {
+    $page_id = get_the_ID();
+}
+if (!$page_id) {
+    if (defined('REST_REQUEST') && REST_REQUEST) {
+        echo bcc_trust_block_placeholder(
+            'NFT Collections',
+            'Requires a page ID. Place on a PeepSo profile page or set a Page ID in block settings.'
+        );
+        return;
+    }
+    return;
+}
+
+if (!bcc_trust_require_peepso_page($page_id, $attributes, 'NFT Collections')) {
+    return;
+}
+
 $per_page   = (int) ($attributes['perPage'] ?? 6);
 $show_claim = (bool) ($attributes['showClaim'] ?? true);
 

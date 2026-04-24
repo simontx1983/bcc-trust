@@ -17,12 +17,16 @@ if (!$page_id) {
 }
 if (!$page_id) {
     if (defined('REST_REQUEST') && REST_REQUEST) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>Trust Signals</strong><br>'
-           . '<small>Requires a page ID. Place on a PeepSo profile page.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'Trust Signals',
+            'Requires a page ID. Place on a PeepSo profile page.'
+        );
         return;
     }
+    return;
+}
+
+if (!bcc_trust_require_peepso_page($page_id, $attributes, 'Trust Signals')) {
     return;
 }
 
@@ -69,8 +73,24 @@ $wrapper_attributes = get_block_wrapper_attributes(['class' => 'bcc-trust-signal
         if ($confidence_percent > 0 && !$is_embedded): ?>
         <li class="bcc-trust-signal bcc-trust-signal--confidence">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span>Score confidence</span>
-            <div class="bcc-trust-signal__bar">
+            <?php
+            $conf_tooltip = __( 'How reliable this score is. Higher means more diverse voters and stronger signals.', 'bcc-trust' );
+            ?>
+            <span title="<?php echo esc_attr( $conf_tooltip ); ?>"><?php esc_html_e( 'Score confidence', 'bcc-trust' ); ?></span>
+            <?php
+            $conf_valuetext = sprintf(
+                /* translators: 1: confidence percentage, 2: trust tier name */
+                __( '%1$d%% confidence, %2$s tier', 'bcc-trust' ),
+                $confidence_percent,
+                ucfirst( $tier )
+            );
+            ?>
+            <div class="bcc-trust-signal__bar"
+                 role="progressbar"
+                 aria-valuemin="0"
+                 aria-valuemax="100"
+                 aria-valuenow="<?php echo esc_attr((string) $confidence_percent); ?>"
+                 aria-valuetext="<?php echo esc_attr($conf_valuetext); ?>">
                 <div class="bcc-trust-signal__bar-fill bcc-tier-bg--<?php echo esc_attr($tier); ?>" style="width:<?php echo esc_attr((string) $confidence_percent); ?>%"></div>
             </div>
             <span class="bcc-trust-signal__value"><?php echo esc_html((string) $confidence_percent); ?>%</span>

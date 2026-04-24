@@ -21,12 +21,16 @@ if (!$page_id) {
 }
 if (!$page_id) {
     if (defined('REST_REQUEST') && REST_REQUEST) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>On-Chain Signals</strong><br>'
-           . '<small>Requires a page ID and linked wallets.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'On-Chain Signals',
+            'Requires a page ID and linked wallets.'
+        );
         return;
     }
+    return;
+}
+
+if (!bcc_trust_require_peepso_page($page_id, $attributes, 'On-Chain Signals')) {
     return;
 }
 
@@ -137,7 +141,7 @@ $wrapper_attributes = get_block_wrapper_attributes(['class' => 'bcc-onchain-sign
 
     <?php if ($total_boost > 0): ?>
     <div class="bcc-onchain-total-boost">
-        <span class="bcc-onchain-total-label">Total on-chain trust boost</span>
+        <span class="bcc-onchain-total-label">Total on-chain trust</span>
         <span class="bcc-onchain-total-value">+<?php echo esc_html(number_format($total_boost, 1)); ?> pts</span>
     </div>
     <?php endif; ?>

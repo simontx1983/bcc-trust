@@ -19,12 +19,16 @@ if (!$page_id) {
 }
 if (!$page_id) {
     if (defined('REST_REQUEST') && REST_REQUEST) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>Builder Card</strong><br>'
-           . '<small>Requires a page ID. Place on a PeepSo profile page or set a Page ID in block settings.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'Builder Card',
+            'Requires a page ID. Place on a PeepSo profile page or set a Page ID in block settings.'
+        );
         return;
     }
+    return;
+}
+
+if (!bcc_trust_require_peepso_page($page_id, $attributes, 'Builder Card')) {
     return;
 }
 

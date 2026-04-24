@@ -182,9 +182,7 @@ function bcc_trust_register_block_patterns(): void {
         'categories'  => ['bcc-trust'],
         'keywords'    => ['leaderboard', 'rankings', 'validators', 'nft', 'endorsements', 'community', 'top'],
         'blockTypes'  => [
-            'bcc-trust/validator-leaderboard',
-            'bcc-trust/nft-leaderboard',
-            'bcc-trust/endorsement-leaderboard',
+            'bcc-trust/leaderboard',
         ],
         'content'     =>
             '<!-- wp:group {"align":"wide","layout":{"type":"constrained"}} -->' .
@@ -206,7 +204,7 @@ function bcc_trust_register_block_patterns(): void {
             '<!-- wp:heading {"level":3} -->' .
             '<h3 class="wp-block-heading">Top Validators</h3>' .
             '<!-- /wp:heading -->' .
-            '<!-- wp:bcc-trust/validator-leaderboard {"perPage":10,"showClaim":true,"defaultChain":"cosmos"} /-->' .
+            '<!-- wp:bcc-trust/leaderboard {"type":"validator","perPage":10,"showClaim":true,"defaultChain":"cosmos"} /-->' .
             '</div>' .
             '<!-- /wp:group -->' .
 
@@ -219,7 +217,7 @@ function bcc_trust_register_block_patterns(): void {
             '<!-- wp:heading {"level":3} -->' .
             '<h3 class="wp-block-heading">Top NFT Collections</h3>' .
             '<!-- /wp:heading -->' .
-            '<!-- wp:bcc-trust/nft-leaderboard {"perPage":10,"showClaim":true,"defaultChain":"evm"} /-->' .
+            '<!-- wp:bcc-trust/leaderboard {"type":"nft","perPage":10,"showClaim":true,"defaultChain":"evm"} /-->' .
             '</div>' .
             '<!-- /wp:column -->' .
 
@@ -228,7 +226,7 @@ function bcc_trust_register_block_patterns(): void {
             '<!-- wp:heading {"level":3} -->' .
             '<h3 class="wp-block-heading">Most Endorsed</h3>' .
             '<!-- /wp:heading -->' .
-            '<!-- wp:bcc-trust/endorsement-leaderboard {"limit":10,"showEndorserCount":true} /-->' .
+            '<!-- wp:bcc-trust/leaderboard {"type":"endorsement","limit":10,"showEndorserCount":true} /-->' .
             '</div>' .
             '<!-- /wp:column -->' .
 

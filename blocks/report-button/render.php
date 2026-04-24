@@ -3,10 +3,10 @@ if (!defined('ABSPATH')) exit;
 
 if (!is_user_logged_in()) {
     if (defined('REST_REQUEST') && REST_REQUEST) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>Report Button</strong><br>'
-           . '<small>Visible on other users\' profiles when logged in.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'Report User',
+            "Visible on other users' profiles when logged in."
+        );
         return;
     }
     return;
@@ -15,10 +15,10 @@ if (!is_user_logged_in()) {
 $reported_id = !empty($attributes['userId']) ? (int) $attributes['userId'] : 0;
 if (!$reported_id || $reported_id === get_current_user_id()) {
     if (defined('REST_REQUEST') && REST_REQUEST) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>Report Button</strong><br>'
-           . '<small>Visible on other users\' profiles when logged in.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'Report User',
+            "Visible on other users' profiles when logged in."
+        );
         return;
     }
     return;

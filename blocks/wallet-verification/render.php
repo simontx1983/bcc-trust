@@ -20,12 +20,16 @@ if (!$page_id) {
 }
 if (!$page_id) {
     if (defined('REST_REQUEST') && REST_REQUEST) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>Wallet Verification</strong><br>'
-           . '<small>Only visible to the page owner. Requires PeepSo profile context.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'Wallet Verification',
+            'Only visible to the page owner. Requires PeepSo profile context.'
+        );
         return;
     }
+    return;
+}
+
+if (!bcc_trust_require_peepso_page($page_id, $attributes, 'Wallet Verification')) {
     return;
 }
 
@@ -54,7 +58,9 @@ $wallet_chains = [
     'cosmos'   => ['label' => 'Cosmos',   'icon' => "\u{269B}", 'wallet_name' => 'Keplr',     'enabled' => (bool) ($attributes['showCosmos'] ?? true)],
 ];
 
-$role_labels = ['creator' => 'Creator', 'holder' => 'Holder', 'team' => 'Team', 'none' => 'Verified'];
+// Role badge is shown only for real NFT roles. A plain connected wallet
+// already has a checkmark — labeling it "Verified" here was misleading.
+$role_labels = ['creator' => 'Creator', 'holder' => 'Holder', 'team' => 'Team'];
 
 // Per-chain detail loaded separately (not in main cached payload — keeps it lean).
 $wallet_detail = \BCC\Trust\Core\Services\PageDataLoader::getWalletDetail($page_id);
@@ -83,16 +89,18 @@ $wrapper_attributes = get_block_wrapper_attributes([
         if (!$connected && !$is_owner) continue;
         $has_any = true;
 
-        $role      = $connected ? ($conn['wallet_role'] ?? 'none') : '';
-        $roleLabel = $role_labels[$role] ?? 'Verified';
+        $role      = $connected ? ($conn['wallet_role'] ?? '') : '';
+        $roleLabel = $role_labels[$role] ?? '';
     ?>
         <div class="bcc-wallet-section" data-chain="<?php echo esc_attr($chain); ?>">
             <div class="bcc-wallet-chain-header">
                 <span class="bcc-wallet-chain-icon"><?php echo esc_html($info['icon']); ?></span>
                 <span class="bcc-wallet-chain-name"><?php echo esc_html($info['label']); ?></span>
                 <?php if ($connected): ?>
-                    <span class="bcc-wallet-role-badge" data-role="<?php echo esc_attr($role); ?>"><?php echo esc_html($roleLabel); ?></span>
-                    <span class="bcc-verif-status bcc-verif-status--connected">&#10003;</span>
+                    <?php if ($roleLabel !== ''): ?>
+                        <span class="bcc-wallet-role-badge" data-role="<?php echo esc_attr($role); ?>"><?php echo esc_html($roleLabel); ?></span>
+                    <?php endif; ?>
+                    <span class="bcc-verif-status bcc-verif-status--connected" aria-label="Connected">&#10003;</span>
                 <?php endif; ?>
             </div>
 
@@ -164,9 +172,9 @@ $wrapper_attributes = get_block_wrapper_attributes([
     <?php
     $onchain_keys_configured = (defined('BCC_ETHERSCAN_API_KEY') && BCC_ETHERSCAN_API_KEY !== '')
         || (defined('BCC_ALCHEMY_API_KEY') && BCC_ALCHEMY_API_KEY !== '');
-    if ($has_any && !$onchain_keys_configured && !$compact_mode): ?>
+    if ($has_any && !$onchain_keys_configured && !$compact_mode && $is_owner): ?>
         <p class="bcc-wallet-degraded-notice" style="font-size:0.75em;color:#9ca3af;margin:8px 0 0;text-align:center;">
-            On-chain enrichment unavailable — trust boost may not be applied.
+            Live blockchain data is temporarily unavailable.
         </p>
     <?php endif; ?>
 

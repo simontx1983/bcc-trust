@@ -124,10 +124,13 @@ function bcc_trust_register_blocks() {
         BCC_TRUST_VERSION
     );
 
-    // NFT Leaderboard block assets
+    // Leaderboard block assets — three variants (NFT, Validator, Endorsement)
+    // share a single block (`bcc-trust/leaderboard`) and live under
+    // `blocks/leaderboard/assets/`. Each is enqueued conditionally from
+    // render.php based on the `type` attribute.
     wp_register_script(
         'bcc-nft-leaderboard',
-        $blocks_dir . 'nft-leaderboard/view.js',
+        $blocks_dir . 'leaderboard/assets/nft.js',
         ['bcc-entity-claims', 'bcc-collection-store'],
         BCC_TRUST_VERSION,
         true
@@ -137,10 +140,9 @@ function bcc_trust_register_blocks() {
         'nonce'   => wp_create_nonce('wp_rest'),
     ]);
 
-    // Validator Leaderboard block assets
     wp_register_script(
         'bcc-validator-leaderboard',
-        $blocks_dir . 'validator-leaderboard/view.js',
+        $blocks_dir . 'leaderboard/assets/validator.js',
         ['bcc-entity-claims'],
         BCC_TRUST_VERSION,
         true
@@ -151,7 +153,7 @@ function bcc_trust_register_blocks() {
     ]);
     wp_register_style(
         'bcc-validator-leaderboard-style',
-        $blocks_dir . 'validator-leaderboard/style.css',
+        $blocks_dir . 'leaderboard/assets/validator.css',
         [],
         BCC_TRUST_VERSION
     );
@@ -164,10 +166,9 @@ function bcc_trust_register_blocks() {
         BCC_TRUST_VERSION
     );
 
-    // Endorsement Leaderboard block assets
     wp_register_script(
         'bcc-endorsement-leaderboard',
-        $blocks_dir . 'endorsement-leaderboard/view.js',
+        $blocks_dir . 'leaderboard/assets/endorsement.js',
         [],
         BCC_TRUST_VERSION,
         true
@@ -178,7 +179,7 @@ function bcc_trust_register_blocks() {
     ]);
     wp_register_style(
         'bcc-endorsement-leaderboard-style',
-        $blocks_dir . 'endorsement-leaderboard/style.css',
+        $blocks_dir . 'leaderboard/assets/endorsement.css',
         [],
         BCC_TRUST_VERSION
     );
@@ -212,7 +213,10 @@ function bcc_trust_register_blocks() {
         BCC_TRUST_VERSION
     );
 
-    // Register each block from its block.json
+    // Register each block from its block.json. The three separate
+    // leaderboard blocks (nft-leaderboard, validator-leaderboard,
+    // endorsement-leaderboard) have been consolidated into a single
+    // `leaderboard` block with three editor variations.
     $blocks = [
         'builder-card',
         'wallet-verification',
@@ -221,10 +225,8 @@ function bcc_trust_register_blocks() {
         'project-discovery-hub',
         'validator-stats',
         'collection-showcase',
-        'nft-leaderboard',
-        'validator-leaderboard',
+        'leaderboard',
         'verification-badges',
-        'endorsement-leaderboard',
         'trust-breakdown',
         'trust-dashboard',
         'my-endorsements',

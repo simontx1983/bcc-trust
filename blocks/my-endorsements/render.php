@@ -19,10 +19,10 @@ if (!defined('ABSPATH')) {
 $current_user_id = get_current_user_id();
 if (!$current_user_id) {
     if (defined('REST_REQUEST') && REST_REQUEST) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>My Endorsements</strong><br>'
-           . '<small>Only visible to logged-in users on their own profile.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'My Endorsements',
+            'Only visible to logged-in users on their own profile.'
+        );
         return;
     }
     return; // Not logged in.
@@ -74,9 +74,9 @@ $wrapper_attributes = get_block_wrapper_attributes([
             <span class="bcc-me__stat-value"><?php echo esc_html((string) $unique_pages); ?></span>
             <span class="bcc-me__stat-label"><?php esc_html_e('Pages Endorsed', 'bcc-trust'); ?></span>
         </div>
-        <div class="bcc-me__stat">
+        <div class="bcc-me__stat" title="<?php esc_attr_e('How much influence your endorsements carry on average. Higher-reputation endorsers have more impact.', 'bcc-trust'); ?>">
             <span class="bcc-me__stat-value"><?php echo esc_html(number_format($avg_weight, 1)); ?></span>
-            <span class="bcc-me__stat-label"><?php esc_html_e('Avg Weight', 'bcc-trust'); ?></span>
+            <span class="bcc-me__stat-label"><?php esc_html_e('Avg Impact', 'bcc-trust'); ?></span>
         </div>
         <?php if ($last_endorsed): ?>
         <div class="bcc-me__stat">

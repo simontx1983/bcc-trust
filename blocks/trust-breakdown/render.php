@@ -23,12 +23,16 @@ if ( ! $page_id ) {
 }
 if ( ! $page_id ) {
     if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>Trust Score Breakdown</strong><br>'
-           . '<small>Requires a page ID. Place on a PeepSo profile page or set a Page ID in block settings.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'Trust Score Breakdown',
+            'Requires a page ID. Place on a PeepSo profile page or set a Page ID in block settings.'
+        );
         return;
     }
+    return;
+}
+
+if ( ! bcc_trust_require_peepso_page( $page_id, $attributes, 'Trust Score Breakdown' ) ) {
     return;
 }
 
@@ -121,7 +125,22 @@ $wrapper_attributes = get_block_wrapper_attributes( [
 
     <?php else : ?>
         <!-- Score bar -->
-        <div class="bcc-tb__score-bar">
+        <?php
+        $score_valuetext = $score !== null
+            ? sprintf(
+                /* translators: 1: numeric score out of 100, 2: tier name */
+                __( '%1$d out of 100, %2$s tier', 'bcc-trust' ),
+                (int) $score,
+                ucfirst( $tier )
+            )
+            : __( 'No score yet', 'bcc-trust' );
+        ?>
+        <div class="bcc-tb__score-bar"
+             role="progressbar"
+             aria-valuemin="0"
+             aria-valuemax="100"
+             aria-valuenow="<?php echo esc_attr( (string) ( $score ?? 0 ) ); ?>"
+             aria-valuetext="<?php echo esc_attr( $score_valuetext ); ?>">
             <div class="bcc-tb__score-fill bcc-tier-bg--<?php echo esc_attr( $tier ); ?>" style="width:<?php echo esc_attr( (string) ( $score ?? 0 ) ); ?>%" data-field="score-fill"></div>
         </div>
         <p class="bcc-tb__score-label">

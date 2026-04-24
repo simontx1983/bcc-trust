@@ -6,7 +6,7 @@
     "title": "Validator Stats",
     "category": "bcc-trust",
     "icon": "shield",
-    "description": "Detailed validator statistics for claimed blockchain validators. Place on PeepSo profile pages or validator detail pages.",
+    "description": "Validators linked to this project: commission, stake, uptime, and claim status. Place on a PeepSo profile page.",
     "keywords": ["validator", "cosmos", "staking", "claim", "operator"],
     "textdomain": "bcc-trust",
     "attributes": {

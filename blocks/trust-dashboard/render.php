@@ -26,22 +26,26 @@ if (!$page_id) {
 }
 if (!$page_id) {
     if (defined('REST_REQUEST') && REST_REQUEST) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>Trust Dashboard</strong><br>'
-           . '<small>Requires a page ID. Place on a PeepSo profile page or set a Page ID in block settings.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'Trust Dashboard',
+            'Requires a page ID. Place on a PeepSo profile page or set a Page ID in block settings.'
+        );
         return;
     }
+    return;
+}
+
+if (!bcc_trust_require_peepso_page($page_id, $attributes, 'Trust Dashboard')) {
     return;
 }
 
 $current_user_id = get_current_user_id();
 if (!$current_user_id) {
     if (defined('REST_REQUEST') && REST_REQUEST) {
-        echo '<div class="bcc-block-placeholder" style="padding:20px;background:#f0f0f0;border:1px dashed #ccc;color:#666;text-align:center;border-radius:4px;">'
-           . '<strong>Trust Dashboard</strong><br>'
-           . '<small>Only visible to the page owner on their PeepSo profile.</small>'
-           . '</div>';
+        echo bcc_trust_block_placeholder(
+            'Trust Dashboard',
+            'Only visible to the page owner on their PeepSo profile.'
+        );
         return;
     }
     return; // Not logged in — nothing to show.
@@ -163,7 +167,7 @@ $checklist[] = [
     'label'    => __('Wallet Connected', 'bcc-trust'),
     'done'     => $has_any_wallet,
     'action'   => __('Connect a blockchain wallet (Ethereum, Solana, or Cosmos).', 'bcc-trust'),
-    'impact'   => __('Unlocks on-chain trust boost and NFT verification.', 'bcc-trust'),
+    'impact'   => __('Unlocks on-chain trust bonus and NFT verification.', 'bcc-trust'),
     'detail'   => $has_any_wallet ? implode(', ', $wallet_chains_connected) : '',
 ];
 

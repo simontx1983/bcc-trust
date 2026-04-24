@@ -21,6 +21,17 @@ if (!$page_id) {
     $page_id = get_the_ID();
 }
 if (!$page_id) {
+    if (defined('REST_REQUEST') && REST_REQUEST) {
+        echo bcc_trust_block_placeholder(
+            'Verification Badges',
+            'Requires a page ID. Place on a PeepSo profile page or set a Page ID in block settings.'
+        );
+        return;
+    }
+    return;
+}
+
+if (!bcc_trust_require_peepso_page($page_id, $attributes, 'Verification Badges')) {
     return;
 }
 
@@ -42,14 +53,14 @@ $wallets_data = $data['wallets'] ?? [];
 /* --- Build badges from PageDataLoader data --- */
 $badges = [];
 
-// 1. Email verified
+// 1. Email connected
 $email_verified = (bool) ($verification['email'] ?? false);
 $badges[] = [
     'key'       => 'email',
     'label'     => __('Email', 'bcc-trust'),
     'tooltip'   => $email_verified
-        ? __('Email verified', 'bcc-trust')
-        : __('Email not verified', 'bcc-trust'),
+        ? __('Email connected', 'bcc-trust')
+        : __('Email not connected', 'bcc-trust'),
     'verified'  => $email_verified,
     'icon'      => '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>',
 ];
@@ -122,21 +133,46 @@ if ($compact) {
 
 $wrapper_attributes = get_block_wrapper_attributes(['class' => $wrapper_class]);
 ?>
+<?php
+$svg_kses = [
+    'svg'      => ['width' => [], 'height' => [], 'viewBox' => [], 'fill' => [], 'stroke' => [], 'stroke-width' => [], 'stroke-linecap' => [], 'stroke-linejoin' => [], 'aria-hidden' => [], 'focusable' => []],
+    'path'     => ['d' => [], 'fill' => []],
+    'polyline' => ['points' => []],
+    'circle'   => ['cx' => [], 'cy' => [], 'r' => []],
+    'rect'     => ['x' => [], 'y' => [], 'width' => [], 'height' => [], 'rx' => [], 'ry' => []],
+];
+// Inject aria-hidden on the outer <svg> so the decorative icon isn't
+// announced separately from the badge's aria-label.
+$decorate_svg = static function (string $svg): string {
+    return preg_replace('/<svg\b/', '<svg aria-hidden="true" focusable="false"', $svg, 1);
+};
+$count_label = sprintf(
+    /* translators: 1: connected count, 2: total badges */
+    __('%1$d of %2$d identity signals connected', 'bcc-trust'),
+    $verified_count,
+    count($badges)
+);
+?>
 <div <?php echo $wrapper_attributes; ?>>
     <div class="bcc-vb__badges">
         <?php foreach ($badges as $badge): ?>
         <span class="bcc-vb__badge <?php echo $badge['verified'] ? 'bcc-vb__badge--verified' : 'bcc-vb__badge--unverified'; ?>"
+              role="img"
+              aria-label="<?php echo esc_attr($badge['tooltip']); ?>"
               title="<?php echo esc_attr($badge['tooltip']); ?>">
-            <span class="bcc-vb__icon"><?php echo wp_kses($badge['icon'], ['svg' => ['width' => [], 'height' => [], 'viewBox' => [], 'fill' => [], 'stroke' => [], 'stroke-width' => [], 'stroke-linecap' => [], 'stroke-linejoin' => []], 'path' => ['d' => [], 'fill' => []], 'polyline' => ['points' => []], 'circle' => ['cx' => [], 'cy' => [], 'r' => []], 'rect' => ['x' => [], 'y' => [], 'width' => [], 'height' => [], 'rx' => [], 'ry' => []]]); ?></span>
+            <span class="bcc-vb__icon"><?php echo wp_kses($decorate_svg($badge['icon']), $svg_kses); ?></span>
             <?php if (!$compact): ?>
-            <span class="bcc-vb__label"><?php echo esc_html($badge['label']); ?></span>
+            <span class="bcc-vb__label" aria-hidden="true"><?php echo esc_html($badge['label']); ?></span>
             <?php endif; ?>
             <?php if ($badge['verified']): ?>
-            <svg class="bcc-vb__check" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
+            <svg class="bcc-vb__check" aria-hidden="true" focusable="false" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
             <?php endif; ?>
         </span>
         <?php endforeach; ?>
-        <span class="bcc-vb__count" title="<?php echo esc_attr(sprintf(__('%d of %d verified', 'bcc-trust'), $verified_count, count($badges))); ?>">
+        <span class="bcc-vb__count"
+              role="status"
+              aria-label="<?php echo esc_attr($count_label); ?>"
+              title="<?php echo esc_attr($count_label); ?>">
             <?php echo esc_html($verified_count . '/' . count($badges)); ?>
         </span>
     </div>

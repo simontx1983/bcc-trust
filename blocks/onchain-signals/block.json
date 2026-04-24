@@ -3,10 +3,10 @@
     "apiVersion": 3,
     "name": "bcc-onchain/signals",
     "version": "1.0.0",
-    "title": "On-Chain Signals",
-    "category": "bcc-onchain",
+    "title": "On-Chain Score Breakdown",
+    "category": "bcc-trust",
     "icon": "networking",
-    "description": "Displays on-chain wallet data including wallet age, transaction depth, and smart contract activity. Place on PeepSo profile pages — auto-detects the current page. Also available as [bcc_onchain_signals] shortcode.",
+    "description": "Detailed per-chain breakdown: wallet age, transaction depth, and smart contract activity with score contribution bars. Place on PeepSo profile pages. For the visitor-facing summary, use 'On-Chain Signals' instead. Also available as [bcc_onchain_signals] shortcode.",
     "keywords": ["wallet", "onchain", "blockchain", "crypto", "signals", "trust"],
     "attributes": {
         "pageId": {
