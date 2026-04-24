@@ -51,7 +51,6 @@ class RateLimiter {
                 'vote'    => ['limit' => BCC_TRUST_RATE_LIMIT_VOTE,    'window' => BCC_TRUST_RATE_WINDOW_VOTE],
                 'endorse' => ['limit' => BCC_TRUST_RATE_LIMIT_ENDORSE, 'window' => BCC_TRUST_RATE_WINDOW_ENDORSE],
                 'flag'    => ['limit' => BCC_TRUST_RATE_LIMIT_FLAG,    'window' => BCC_TRUST_RATE_WINDOW_FLAG],
-                'verify'  => ['limit' => BCC_TRUST_RATE_LIMIT_VERIFY,  'window' => BCC_TRUST_RATE_WINDOW_VERIFY],
                 'comment' => ['limit' => BCC_TRUST_RATE_LIMIT_COMMENT, 'window' => BCC_TRUST_RATE_WINDOW_COMMENT],
                 'message' => ['limit' => BCC_TRUST_RATE_LIMIT_MESSAGE, 'window' => BCC_TRUST_RATE_WINDOW_MESSAGE],
                 'login'   => ['limit' => BCC_TRUST_RATE_LIMIT_LOGIN,   'window' => BCC_TRUST_RATE_WINDOW_LOGIN],

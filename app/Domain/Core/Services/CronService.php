@@ -3,12 +3,9 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Plugin;
-use BCC\Trust\Core\Repositories\EdgeRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Security\AuditLogger;
-use BCC\Trust\Core\Security\DeviceFingerprinter;
-use BCC\Trust\Core\Security\TrustGraph;
 use BCC\Trust\Core\Repositories\WalletSignalRepository;
 use BCC\Trust\Core\REST\PageEndpoint;
 
@@ -45,9 +42,6 @@ class CronService
         }
 
         try {
-        // Clean expired verifications via VerificationRepository
-        Plugin::instance()->verificationRepository()->deleteExpired();
-
         // Clean old activity logs
         AuditLogger::cleanOldLogs();
 

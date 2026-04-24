@@ -161,7 +161,7 @@ class QuestValidator {
 
     /**
      * verify_github: Check that the user has a verified GitHub record
-     * in the bcc_trust_verifications table (written by GitHubOAuthService).
+     * in the bcc_trust_user_verifications table (written by GitHubVerificationService).
      */
     private static function validateGitHubVerified(int $userId): bool {
         if (!class_exists('\\BCC\\Trust\\Core\\Plugin')) {
@@ -177,7 +177,7 @@ class QuestValidator {
 
     /**
      * verify_x: Check that the user has a verified X (Twitter) record
-     * in the bcc_trust_verifications table (written by XVerificationService).
+     * in the bcc_trust_user_verifications table (written by XVerificationService).
      */
     private static function validateXVerified(int $userId): bool {
         if (!class_exists('\\BCC\\Trust\\Core\\Repositories\\XRepository')) {

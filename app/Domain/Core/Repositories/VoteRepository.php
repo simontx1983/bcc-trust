@@ -1772,6 +1772,26 @@ class VoteRepository {
                  WHERE vesting_stage = %d AND id > %d",
                 $toStage, $cursor
             )) ?: $cursor;
+
+            // Flag the page scores of votes just moved into $toStage so the read model
+            // picks up the new vested_weight. Without this, intermediate vesting
+            // transitions (0→1, 1→2, 2→3) silently change SUM(vested_weight) and
+            // pages drift until the daily full sync. The sibling call
+            // flagScoresForFullyVestedVotes() only covers stage 4, which has an
+            // additional weight_corrected_at predicate — that path stays intact.
+            $scores_table = \BCC\Trust\Core\Database\TableRegistry::scores();
+            $wpdb->query($wpdb->prepare(
+                "UPDATE {$scores_table} s
+                 INNER JOIN {$this->table} v ON v.page_id = s.page_id
+                 SET s.recalculate_required = 1
+                 WHERE v.vesting_stage = %d
+                   AND v.id > %d
+                   AND v.id <= %d
+                   AND s.recalculate_required = 0",
+                $toStage,
+                $cursor,
+                $newCursor
+            ));
         } else {
             $newCursor = $cursor;
         }

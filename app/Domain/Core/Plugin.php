@@ -27,7 +27,6 @@ use BCC\Trust\Core\Security\TrustGraph;
 use BCC\Trust\Core\Repositories\QuestProgressRepository;
 use BCC\Trust\Core\Services\EndorsementService;
 use BCC\Trust\Core\Services\Quest\QuestProgressService;
-use BCC\Trust\Core\Services\VerificationService;
 use BCC\Trust\Core\Services\VoteService;
 
 if (!defined('ABSPATH')) {
@@ -220,12 +219,6 @@ final class Plugin
     public function scoreReadService(): ScoreReadService
     {
         return $this->scoreReadService ??= new ScoreReadService();
-    }
-
-    private ?VerificationService $verificationService = null;
-    public function verificationService(): VerificationService
-    {
-        return $this->verificationService ??= new VerificationService();
     }
 
     private ?Services\wallet\WalletVerificationService $walletVerificationService = null;
@@ -505,6 +498,28 @@ final class Plugin
                 ]);
             }
         }, 10, 3);
+
+        // ── Suspension fanout ──────────────────────────────────────────
+        //
+        // Suspending/unsuspending a user changes their votes' and endorsements'
+        // effective weight (suspended weight → 0). Scheduled async from
+        // UserInfoRepository::suspendUser / unsuspendUser so admin actions
+        // don't block on potentially large fan-outs for high-volume voters.
+        add_action('bcc_trust_async_suspension_fanout', function (int $userId): void {
+            try {
+                $repo = $this->userInfoRepository();
+                $repo->markVotedPagesForRecalculation($userId);
+                $repo->markEndorsedPagesForRecalculation($userId);
+                \BCC\Core\Log\Logger::info('[bcc-trust] suspension_fanout complete', [
+                    'user_id' => $userId,
+                ]);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] suspension_fanout failed', [
+                    'user_id' => $userId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 10, 1);
 
         // ── Wallet verification ─────────────────────────────────────────
 

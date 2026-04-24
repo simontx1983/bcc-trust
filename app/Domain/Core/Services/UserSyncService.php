@@ -158,30 +158,21 @@ class UserSyncService
     /**
      * Determine if a user's email is verified.
      *
-     * Checks three sources (any true = verified):
-     *  1. Trust engine's own token-based verification (bcc_trust_email_verified meta)
-     *  2. WordPress confirmed user status (user_status = 0 means confirmed)
-     *  3. PeepSo verification status (peepso_is_verified_email meta)
-     *
-     * This ensures users who registered through WordPress or PeepSo's
-     * normal flow are treated as verified without needing a separate
-     * trust-engine verification step.
+     * PeepSo owns the verification flow; the PeepSo bridge mirrors its state
+     * into user_info.is_verified on activation. This method is used during
+     * the initial bulk sync (to seed user_info for accounts that existed
+     * before the bridge was installed) and falls back to PeepSo/WP state.
      */
     private static function isEmailVerified(int $userId): int
     {
-        // Trust engine's own flag (set via /verify-email endpoint)
-        if ((int) get_user_meta($userId, 'bcc_trust_email_verified', true)) {
+        // PeepSo email verification — authoritative when present.
+        if ((int) get_user_meta($userId, 'peepso_is_verified_email', true)) {
             return 1;
         }
 
-        // WordPress: user_status = 0 means account is active/confirmed
+        // WordPress: user_status = 0 means account is active/confirmed.
         $user = get_userdata($userId);
         if ($user && (int) $user->user_status === 0) {
-            return 1;
-        }
-
-        // PeepSo email verification
-        if ((int) get_user_meta($userId, 'peepso_is_verified_email', true)) {
             return 1;
         }
 

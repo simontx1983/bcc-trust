@@ -587,6 +587,7 @@ class UserInfoRepository {
         }
 
         $this->invalidateCache($userId);
+        $this->dispatchSuspensionFanout($userId);
     }
     
     /**
@@ -617,6 +618,21 @@ class UserInfoRepository {
         }
 
         $this->invalidateCache($userId);
+        $this->dispatchSuspensionFanout($userId);
+    }
+
+    /**
+     * Schedule an async fanout after suspend/unsuspend so pages voted/endorsed
+     * by this user get re-scored with the new discount weight.
+     *
+     * Dedup: wp_next_scheduled with the same args prevents double-scheduling
+     * within the same 10-second window. Handler lives in Plugin::registerAsyncJobs
+     * under the `bcc_trust_async_suspension_fanout` hook.
+     */
+    private function dispatchSuspensionFanout(int $userId): void {
+        if (!wp_next_scheduled('bcc_trust_async_suspension_fanout', [$userId])) {
+            wp_schedule_single_event(time(), 'bcc_trust_async_suspension_fanout', [$userId]);
+        }
     }
 
     /**
@@ -1297,6 +1313,12 @@ class UserInfoRepository {
      * Apply daily fraud score decay for idle non-suspended users.
      *
      * Score can never decay below 50% of peak_fraud_score.
+     *
+     * Also fans out to `recalculate_required` on pages voted/endorsed by the
+     * decayed users so the read-model reflects the new fraud-discount weight.
+     * Without the fanout, pages owned by active users who got votes from a
+     * decaying voter would show stale positive_score/negative_score until
+     * the daily full sync picks them up.
      */
     public function applyDailyFraudDecay(): void
     {
@@ -1306,23 +1328,41 @@ class UserInfoRepository {
         $batchSize = (int) apply_filters('bcc_trust_fraud_decay_batch', 5000);
         $maxLoops  = 40; // hard ceiling: 200k rows / daily cron / 120s budget
 
-        // Batched UPDATE so a table-wide write cannot lock the users table
-        // for minutes on sites with millions of rows. Exits early when a
-        // batch affects fewer rows than the batch size (natural end of the
-        // matching set) or when the hard ceiling is hit.
+        // Two-step per batch so we know which user_ids to fan out to:
+        //   1. SELECT the IDs we're about to decay (same predicate as UPDATE).
+        //   2. UPDATE those rows by user_id IN (...).
+        //   3. Mark their voted/endorsed pages for recalculation.
+        // The formula GREATEST(FLOOR(peak*0.5), fraud_score - 1) is idempotent
+        // under concurrent writers — if another writer bumped fraud_score
+        // between the SELECT and UPDATE, decaying the new value by 1 is still
+        // correct.
         for ($i = 0; $i < $maxLoops; $i++) {
+            $userIds = $wpdb->get_col($wpdb->prepare(
+                "SELECT user_id FROM {$this->table}
+                 WHERE fraud_score > 0
+                   AND is_suspended = 0
+                   AND updated_at < DATE_SUB(NOW(), INTERVAL %d DAY)
+                 ORDER BY user_id ASC
+                 LIMIT %d",
+                $idleDays,
+                $batchSize
+            ));
+
+            if (empty($userIds)) {
+                break;
+            }
+
+            $userIds      = array_map('intval', $userIds);
+            $placeholders = implode(',', array_fill(0, count($userIds), '%d'));
+
             $affected = $wpdb->query($wpdb->prepare(
                 "UPDATE {$this->table}
                  SET fraud_score = GREATEST(
                      FLOOR(COALESCE(peak_fraud_score, 0) * 0.5),
                      fraud_score - 1
                  )
-                 WHERE fraud_score > 0
-                   AND is_suspended = 0
-                   AND updated_at < DATE_SUB(NOW(), INTERVAL %d DAY)
-                 LIMIT %d",
-                $idleDays,
-                $batchSize
+                 WHERE user_id IN ({$placeholders})",
+                $userIds
             ));
 
             if ($affected === false) {
@@ -1335,7 +1375,16 @@ class UserInfoRepository {
                 break;
             }
 
-            if ((int) $affected < $batchSize) {
+            // Fan out: flag every page each decayed user has voted on or
+            // endorsed. Each markX method is itself batched (2000 rows/loop),
+            // so a high-volume voter won't lock the scores table.
+            foreach ($userIds as $uid) {
+                $this->markVotedPagesForRecalculation($uid);
+                $this->markEndorsedPagesForRecalculation($uid);
+                $this->invalidateCache($uid);
+            }
+
+            if (count($userIds) < $batchSize) {
                 break;
             }
         }

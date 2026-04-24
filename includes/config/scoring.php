@@ -92,9 +92,3 @@ define('BCC_TRUST_GITHUB_ORGS_MEDIUM', 5);
 define('BCC_TRUST_X_TRUST_BOOST', 10);       // Flat trust boost for verified X account
 define('BCC_TRUST_X_FRAUD_REDUCTION', 5);     // Flat fraud reduction for verified X account
 
-// ======================================================
-// VERIFICATION SETTINGS
-// ======================================================
-define('BCC_TRUST_VERIFICATION_EXPIRY_HOURS', 1);
-define('BCC_TRUST_VERIFICATION_RATE_HOURS', 24);
-define('BCC_TRUST_VERIFICATION_RATE_MAX', 5);

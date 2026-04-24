@@ -13,7 +13,6 @@ namespace BCC\Trust\Core\Repositories;
 
 use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Support\FraudClassification;
-use BCC\Core\Log\Logger;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -1226,7 +1225,6 @@ class AdminDashboardRepository
         $todayStart        = date('Y-m-d 00:00:00');
         $userInfoTable     = TableRegistry::userInfo();
         $suspensionsTable  = TableRegistry::suspensions();
-        $verificationsTable = TableRegistry::verifications();
         $votesTable        = TableRegistry::votes();
         $activityTable     = TableRegistry::activity();
 
@@ -1243,9 +1241,13 @@ class AdminDashboardRepository
             $todayStart
         ));
 
+        // Email verifications are sourced from the audit log: the PeepSo
+        // bridge (PeepSoIntegration::onEmailVerified) emits `email_verified`
+        // via AuditLogger on every successful PeepSo activation.
         $todayVerifications = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$verificationsTable}
-             WHERE verified_at >= %s",
+            "SELECT COUNT(*) FROM {$activityTable}
+             WHERE action = %s AND created_at >= %s",
+            'email_verified',
             $todayStart
         ));
 

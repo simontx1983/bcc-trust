@@ -36,12 +36,6 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_endorsements';
     }
 
-    public static function verifications(): string
-    {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_trust_verifications';
-    }
-
     public static function activity(): string
     {
         global $wpdb;
@@ -155,7 +149,6 @@ final class TableRegistry
             'votes'              => self::votes(),
             'scores'             => self::scores(),
             'endorsements'       => self::endorsements(),
-            'verifications'      => self::verifications(),
             'user_verifications' => self::userVerifications(),
             'activity'           => self::activity(),
             'activity_archive'   => self::activityArchive(),

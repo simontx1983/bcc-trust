@@ -8,7 +8,6 @@
  * @version 2.1.1
  *
  * Fixes in this version:
- *  - verify_email: user_id now sourced from authenticated session, not request params
  *  - get_user_status: removed reference to non-existent `pages_joined` column
  *  - store_fingerprint: automation_score now capped at 100 with LEAST()
  *  - get_fraud_trend: fixed AND/OR operator precedence with parentheses around OR clauses
@@ -22,10 +21,6 @@ use WP_REST_Response;
 use WP_Error;
 use Exception;
 
-use BCC\Trust\Core\Services\VoteService;
-use BCC\Trust\Core\Services\EndorsementService;
-use BCC\Trust\Core\Repositories\VoteRepository;
-use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Exceptions\VoteEligibilityException;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\RateLimiter;
@@ -134,12 +129,6 @@ class TrustRestController {
         register_rest_route('bcc-trust/v1', '/pages/top', [
             'methods'             => 'GET',
             'callback'            => [self::class, 'get_top_pages'],
-            'permission_callback' => [self::class, 'permission_check'],
-        ]);
-
-        register_rest_route('bcc-trust/v1', '/verify-email', [
-            'methods'             => 'POST',
-            'callback'            => [UserStatusController::class, 'verify_email'],
             'permission_callback' => [self::class, 'permission_check'],
         ]);
 

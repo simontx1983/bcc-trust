@@ -147,10 +147,6 @@ class AuditLogger {
         self::log('endorse_revoked_' . sanitize_key($context), $pageId, $meta, 'page');
     }
 
-    public static function verificationRequest(int $userId): void {
-        self::log('verification_requested', $userId, [], 'user');
-    }
-
     public static function verificationComplete(int $userId): void {
         self::log('email_verified', $userId, [], 'user');
     }

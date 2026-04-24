@@ -9,7 +9,6 @@ use BCC\Trust\Core\Repositories\VerificationRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\PeepSoPageResolver;
 use BCC\Trust\Core\Support\Formatting;
-use BCC\Trust\Core\ValueObjects\PageScore;
 use BCC\Core\Contracts\TrustHeaderDataInterface;
 
 if (!defined('ABSPATH')) {
@@ -49,6 +48,13 @@ class PeepSoIntegration implements TrustHeaderDataInterface
         add_action('save_post_peepso-page', [$this, 'onPageSaved'], 10, 3);
         add_filter('peepso_page_create_response', [$this, 'onPageCreateResponse']);
 
+        // Email verification is delegated to PeepSo. When a user completes
+        // activation via their shortcode flow, PeepSo fires this action with
+        // a PeepSoUser instance; we mirror the verified state into
+        // bcc_trust_user_info.is_verified so downstream trust logic
+        // (VoteEligibilityChecker, FraudDetector, blocks) sees it.
+        add_action('peepso_register_verified', [$this, 'onEmailVerified'], 10, 1);
+
         // Label swap: Pages → Projects
         add_filter('gettext', [__CLASS__, 'labelSwap'], 999, 3);
         add_filter('gettext_with_context', function ($translated, $text, $context, $domain) {
@@ -57,6 +63,50 @@ class PeepSoIntegration implements TrustHeaderDataInterface
     }
 
     // ── Lifecycle hooks ─────────────────────────────────────────────────
+
+    /**
+     * PeepSo fires `peepso_register_verified` after a successful activation
+     * (peepso/classes/registershortcode.php::activate_account). Mirror the
+     * verified state into user_info so the trust engine's own checks pass,
+     * then fan out to downstream listeners.
+     *
+     * @param mixed $wpuser PeepSoUser instance with ID/get_user_id().
+     */
+    public function onEmailVerified($wpuser): void
+    {
+        $userId = 0;
+        if (is_object($wpuser)) {
+            if (method_exists($wpuser, 'get_user_id')) {
+                $userId = (int) $wpuser->get_user_id();
+            } elseif (isset($wpuser->ID)) {
+                $userId = (int) $wpuser->ID;
+            }
+        }
+
+        if ($userId <= 0) {
+            return;
+        }
+
+        try {
+            Plugin::instance()->userInfoRepository()->updateVerificationStatus($userId, true);
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] onEmailVerified: updateVerificationStatus failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return;
+        }
+
+        AuditLogger::verificationComplete($userId);
+
+        // Fire the read-model sync action (listened to by PageReadModelSync::onOwnerDataChanged)
+        // so the owner's pages pick up the new is_verified flag without waiting for the
+        // daily full sync. Same action XVerificationService/GitHubVerificationService use.
+        do_action('bcc_trust_verification_changed', $userId);
+
+        // Domain extensibility point (kept for third-party listeners).
+        do_action('bcc_trust_user_verified', $userId);
+    }
 
     public function onPluginsLoaded(): void
     {
@@ -373,9 +423,12 @@ class PeepSoIntegration implements TrustHeaderDataInterface
 
         if ($viewerId && $showActions) {
             $viewerInfo = Plugin::instance()->userInfoRepository()->getByUserId($viewerId);
-            // Check trust-engine user_info flag first, fall back to WP/PeepSo
+            // user_info.is_verified is the source of truth; the PeepSo bridge
+            // (onEmailVerified) mirrors PeepSo's verification into that column.
+            // The PeepSo meta + WP user_status checks remain as fallbacks for
+            // users verified through non-bridge paths (e.g. pre-existing
+            // installs, admin-created accounts).
             $viewerIsVerified = ($viewerInfo && (bool) $viewerInfo->is_verified)
-                || (bool) get_user_meta($viewerId, 'bcc_trust_email_verified', true)
                 || (bool) get_user_meta($viewerId, 'peepso_is_verified_email', true)
                 || ((int) (get_userdata($viewerId)->user_status ?? 1)) === 0;
             $viewerFraudScore = $viewerInfo ? (int) $viewerInfo->fraud_score : 0;

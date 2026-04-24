@@ -249,26 +249,16 @@ function bcc_trust_create_core_tables() {
 
     /*
     ======================================================
-    EMAIL VERIFICATIONS
+    EMAIL VERIFICATIONS (retired)
     ======================================================
+    Email verification is delegated to PeepSo. The old
+    bcc_trust_verifications token table is dropped here so it
+    doesn't linger on reactivation after the switch.
     */
 
-    $verifications_table = \BCC\Trust\Core\Database\TableRegistry::verifications();
-
-    $sql = "CREATE TABLE $verifications_table (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        user_id BIGINT UNSIGNED NOT NULL,
-        verification_code VARCHAR(64) NOT NULL,
-        verified_at DATETIME NULL,
-        expires_at DATETIME NOT NULL,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        UNIQUE KEY unique_user (user_id),
-        KEY idx_code (verification_code),
-        KEY idx_expires (expires_at)
-    ) $charset_collate;";
-
-    dbDelta($sql);
+    $legacy_verifications_table = $wpdb->prefix . 'bcc_trust_verifications';
+    // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+    $wpdb->query("DROP TABLE IF EXISTS {$legacy_verifications_table}");
 
     /*
     ======================================================

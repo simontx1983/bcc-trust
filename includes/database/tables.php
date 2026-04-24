@@ -139,7 +139,6 @@ function bcc_trust_verify_all_tables() {
         'bcc_trust_votes',
         'bcc_trust_page_scores',
         'bcc_trust_endorsements',
-        'bcc_trust_verifications',
         'bcc_trust_user_verifications',
         'bcc_trust_activity',
         'bcc_trust_activity_archive',

@@ -2,7 +2,7 @@
 /**
  * User Status REST Controller
  *
- * Handles user-facing status, email verification, and device fingerprint endpoints.
+ * Handles user-facing status and device fingerprint endpoints.
  *
  * Extracted from TrustRestController — all behavior, response shapes,
  * status codes, permission rules, and security logic preserved exactly.
@@ -11,9 +11,12 @@
  * @version 2.1.1
  *
  * Security notes preserved from TrustRestController:
- *  - verify_email: user_id now sourced from authenticated session, not request params
  *  - get_user_status: removed reference to non-existent `pages_joined` column
  *  - store_fingerprint: automation_score now capped at 100 with LEAST()
+ *
+ * Email verification is handled by PeepSo; the PeepSo bridge in
+ * BCC\Trust\Core\Integration\PeepSoIntegration::onEmailVerified mirrors its
+ * state into bcc_trust_user_info.is_verified.
  */
 
 namespace BCC\Trust\Core\Controllers;
@@ -23,8 +26,6 @@ use WP_REST_Response;
 use WP_Error;
 use Exception;
 
-use BCC\Trust\Core\Services\VerificationService;
-use BCC\Trust\Core\Security\DeviceFingerprinter;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\RateLimiter;
 
@@ -33,51 +34,6 @@ if (!defined('ABSPATH')) {
 }
 
 class UserStatusController {
-
-    /**
-     * Verify email with token
-     *
-     * FIX: user_id is now taken from the authenticated session rather than
-     * the request body. This prevents a logged-in user from verifying (or
-     * probing) a token that belongs to a different account.
-     *
-     * @return WP_REST_Response|WP_Error
-     */
-    public static function verify_email(WP_REST_Request $request) {
-        // Nonce is validated automatically by WordPress via the X-WP-Nonce header.
-
-        if (!RateLimiter::allow('verify')) {
-            return self::error('Too many requests. Please try again later.', 429);
-        }
-
-        try {
-            $token  = $request->get_param('token');
-
-            // Always use the authenticated user — never trust a user_id from the request.
-            $userId = get_current_user_id();
-
-            if (!$userId) {
-                throw new Exception('User not authenticated');
-            }
-
-            if (!$token) {
-                throw new Exception('Verification token required');
-            }
-
-            $result = (new VerificationService())->verifyEmail($userId, $token);
-
-            return self::success([
-                'verified' => $result,
-                'user_id'  => $userId
-            ]);
-
-        } catch (Exception $e) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] verify_email failed', ['error' => $e->getMessage()]);
-            $safeMessages = ['User not authenticated', 'Verification token required'];
-            $message = in_array($e->getMessage(), $safeMessages, true) ? $e->getMessage() : 'Verification failed. Please try again.';
-            return self::error($message, 400);
-        }
-    }
 
     /**
      * Store device fingerprint
