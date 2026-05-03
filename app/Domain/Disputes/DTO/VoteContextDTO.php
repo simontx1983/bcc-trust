@@ -9,8 +9,8 @@ if (!defined('ABSPATH')) {
 /**
  * Immutable view of a vote row as resolved from TrustReadServiceInterface.
  *
- * **CROSS-PLUGIN BOUNDARY** — this is the only DTO in bcc-disputes that adapts
- * data produced outside this plugin (bcc-trust-engine's vote read model).
+ * **CROSS-DOMAIN BOUNDARY** — this is the only DTO in the Disputes domain that
+ * adapts data produced outside the domain (bcc-trust's Core vote read model).
  * All three fields are LOGIC fields that drive dispute-submission decisions:
  *   - page_id        → page-ownership gate (Permissions::owns_page)
  *   - voter_user_id  → self-dispute prevention gate

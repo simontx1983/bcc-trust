@@ -6,7 +6,7 @@
  * Queries page_read_model (denormalized) + page_flags for flag counts.
  * Links to Trust Debug Panel for deep-dive.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

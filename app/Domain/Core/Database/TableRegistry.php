@@ -138,6 +138,63 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_rm_dirty_queue';
     }
 
+    // V1 frontend support tables (per docs/api-contract-v1.md §6.5)
+
+    public static function pullMeta(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_pull_meta';
+    }
+
+    public static function userRanks(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_user_ranks';
+    }
+
+    public static function pullBatches(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_pull_batches';
+    }
+
+    public static function reputationEvents(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_reputation_events';
+    }
+
+    public static function contentReports(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_content_reports';
+    }
+
+    public static function hiddenActivities(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_hidden_activities';
+    }
+
+    public static function disputeParticipations(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_dispute_participations';
+    }
+
+    // V2 Phase 1: §I1 push notifications
+
+    public static function pushSubscriptions(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_push_subscriptions';
+    }
+
+    // NOTE: bcc_user_locals removed — Locals membership ledger is PeepSo's
+    // peepso_group_members; primary-Local pointer is wp_usermeta.bcc_primary_local_group_id.
+    // NOTE: bcc_page_claims removed — page claims merged into bcc_onchain_claims
+    // (entity_type='page'); recovery_pending lives there.
+
     /**
      * All table names as an associative array.
      *
@@ -165,6 +222,16 @@ final class TableRegistry
             'score_events'       => self::scoreEvents(),
             'score_velocity'     => self::scoreVelocity(),
             'dirty_queue'        => self::dirtyQueue(),
+            // V1 frontend support tables
+            'pull_meta'          => self::pullMeta(),
+            'user_ranks'         => self::userRanks(),
+            'pull_batches'       => self::pullBatches(),
+            'reputation_events'  => self::reputationEvents(),
+            'content_reports'    => self::contentReports(),
+            'hidden_activities'  => self::hiddenActivities(),
+            'dispute_participations' => self::disputeParticipations(),
+            // V2 Phase 1 push notifications
+            'push_subscriptions' => self::pushSubscriptions(),
         ];
     }
 }

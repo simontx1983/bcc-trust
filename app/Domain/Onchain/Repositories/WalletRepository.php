@@ -284,6 +284,55 @@ final class WalletRepository
     }
 
     /**
+     * Stamp the last_holdings_refresh_at column. Called by HoldingsService
+     * after a successful fresh fetch from chain — so the UI can show
+     * "refreshed N ago" without consulting the transient cache directly.
+     */
+    public static function markHoldingsRefreshed(int $walletLinkId): bool
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->update(
+            $table,
+            ['last_holdings_refresh_at' => current_time('mysql', true)],
+            ['id' => $walletLinkId],
+            ['%s'],
+            ['%d']
+        );
+
+        return $result !== false;
+    }
+
+    /**
+     * Return last_holdings_refresh_at timestamps for the user's wallets,
+     * keyed by wallet_link_id. NULL values are dropped from the result.
+     *
+     * @return array<int, string>
+     */
+    public static function getHoldingsRefreshForUser(int $userId): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{id: string, last_holdings_refresh_at: ?string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, last_holdings_refresh_at FROM {$table}
+             WHERE user_id = %d AND last_holdings_refresh_at IS NOT NULL
+             LIMIT 200",
+            $userId
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $r) {
+            if (!empty($r->last_holdings_refresh_at)) {
+                $out[(int) $r->id] = (string) $r->last_holdings_refresh_at;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Check whether a user has at least one wallet on a specific chain.
      */
     public static function hasLinkForChain(int $userId, int $chainId): bool
@@ -326,6 +375,65 @@ final class WalletRepository
         ));
 
         return array_map('intval', $ids);
+    }
+
+    /**
+     * Reverse lookup: peepso-page post_id → underlying on-chain entity.
+     *
+     * Walks wallet_links → validators / collections to find the first
+     * matching entity for the given page. Validator is preferred over
+     * collection if both exist (V1 convention; revisit if multi-entity
+     * pages become a thing).
+     *
+     * Used by CardViewService to emit a pre-baked `actions.claim` body
+     * on the card view-model so the frontend doesn't have to construct
+     * the page→entity mapping itself ("frontend is dumb" rule).
+     *
+     * Returns null when the page has no linked entity (e.g., a
+     * standalone profile page without on-chain provenance).
+     *
+     * @return array{entity_type: 'validator'|'collection', entity_id: int}|null
+     */
+    public static function resolveEntityForPage(int $postId): ?array
+    {
+        if ($postId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $walletLinks = self::table();
+        $validators  = ValidatorRepository::table();
+        $collections = CollectionRepository::table();
+
+        /** @var object{entity_id: int|numeric-string}|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT v.id AS entity_id
+               FROM {$walletLinks} w
+               INNER JOIN {$validators} v ON v.wallet_link_id = w.id
+              WHERE w.post_id = %d
+              ORDER BY w.is_primary DESC, w.created_at ASC
+              LIMIT 1",
+            $postId
+        ));
+        if ($row !== null) {
+            return ['entity_type' => 'validator', 'entity_id' => (int) $row->entity_id];
+        }
+
+        /** @var object{entity_id: int|numeric-string}|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT c.id AS entity_id
+               FROM {$walletLinks} w
+               INNER JOIN {$collections} c ON c.wallet_link_id = w.id
+              WHERE w.post_id = %d
+              ORDER BY w.is_primary DESC, w.created_at ASC
+              LIMIT 1",
+            $postId
+        ));
+        if ($row !== null) {
+            return ['entity_type' => 'collection', 'entity_id' => (int) $row->entity_id];
+        }
+
+        return null;
     }
 
     /**
@@ -374,6 +482,30 @@ final class WalletRepository
         return (bool) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(1) FROM {$table} WHERE user_id != %d AND chain_id = %d AND wallet_address = %s",
             $userId, $chainId, $walletAddress
+        ));
+    }
+
+    /**
+     * Resolve the user_id linked to a (chain, wallet) pair, or 0 when no
+     * such link exists. Used by /auth/wallet-login to identify the
+     * account a signed challenge belongs to.
+     *
+     * The (chain_id, wallet_address) pair is constrained to one user by
+     * the application layer (walletLink/walletSignup reject when
+     * existsForOtherUser fires), so any matching row is the answer.
+     * LIMIT 1 keeps the query bounded per repository convention.
+     */
+    public static function findUserIdByAddress(int $chainId, string $walletAddress): int
+    {
+        global $wpdb;
+        $table = self::table();
+        $walletAddress = strtolower($walletAddress);
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT user_id FROM {$table}
+             WHERE chain_id = %d AND wallet_address = %s
+             LIMIT 1",
+            $chainId, $walletAddress
         ));
     }
 }

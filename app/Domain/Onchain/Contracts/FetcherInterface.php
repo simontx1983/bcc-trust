@@ -20,7 +20,8 @@ interface FetcherInterface
     /**
      * Check if this driver supports a specific feature.
      *
-     * @param string $feature One of: 'validator', 'nft', 'dao', 'contracts'
+     * @param string $feature One of: 'validator', 'delegations', 'holdings_count',
+     *                        'holdings_list', 'nft', 'dao', 'contracts'
      */
     public function supports_feature(string $feature): bool;
 
@@ -31,6 +32,42 @@ interface FetcherInterface
      * @return array<string, mixed> Validator data row (empty if not found).
      */
     public function fetch_validator(string $address): array;
+
+    /**
+     * Fetch the set of validators a given delegator account stakes to.
+     *
+     * Treats the input as a delegator (account) address, not a validator
+     * operator. Drivers that don't model delegation (e.g. EVM) return [].
+     *
+     * @param string $delegatorAddress Delegator / account address.
+     * @return array<int, array{validator_address: string, shares?: string|null, amount?: float|null}>
+     */
+    public function fetch_delegations(string $delegatorAddress): array;
+
+    /**
+     * Count NFT tokens this wallet holds in a specific collection.
+     *
+     * Hot path — must be cheap. Used for gate checks on every protected
+     * page load. Drivers that don't support NFT ownership queries
+     * (e.g. Cosmos) return 0.
+     *
+     * @param string $wallet   Wallet / account address.
+     * @param string $contract Collection contract / mint address.
+     */
+    public function count_holdings(string $wallet, string $contract): int;
+
+    /**
+     * Enumerate all NFTs this wallet holds across all collections on this chain.
+     *
+     * Cold path — expensive. Runs on wallet-verify or profile-view, cached
+     * above the fetcher (see HoldingsService). Drivers paginate internally
+     * up to a safety cap and flag `truncated: true` if more exist.
+     *
+     * @param string  $wallet Wallet / account address.
+     * @param ?string $cursor Provider-specific pagination cursor. Pass null for first page.
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
+     */
+    public function list_holdings(string $wallet, ?string $cursor = null): array;
 
     /**
      * Fetch NFT collection data for a wallet (collections created by this address).

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blue Collar Crypto – Trust
  * Description: Unified reputation, dispute, and on-chain signal plugin. Merges bcc-trust-engine, bcc-disputes, and bcc-onchain-signals into a single bounded-context codebase.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Blue Collar Labs LLC
  * Text Domain: bcc-trust
  * Domain Path: /languages
@@ -180,9 +180,10 @@ require_once BCC_TRUST_PATH . 'includes/database/tables.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-chains.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-wallets.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-validators.php';
+require_once BCC_TRUST_PATH . 'includes/database/schema-delegations.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collections.php';
+require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
-require_once BCC_TRUST_PATH . 'includes/renderers/onchain-template-functions.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**
@@ -193,7 +194,9 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_chains_table();
     bcc_onchain_create_wallet_links_table();
     bcc_onchain_create_validators_table();
+    bcc_onchain_create_delegations_table();
     bcc_onchain_create_collections_table();
+    bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_claims_table();
 
     // Signals table is owned by SignalRepository — included here so its
@@ -279,6 +282,9 @@ add_action('bcc_trust_daily_vesting', function () {
 add_action('bcc_trust_process_recalculations', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->processRecalculations();
 });
+add_action('bcc_trust_weekly_digest', function () {
+    \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest();
+});
 
 function bcc_trust_schedule_cron_jobs() {
     \BCC\Trust\Core\Services\CronService::scheduleAll();
@@ -328,25 +334,11 @@ add_filter('bcc.resolve.score_read_service', function ($service = null) {
     return \BCC\Trust\Core\Plugin::instance()->scoreReadService();
 });
 
-add_filter('bcc.resolve.trust_header_data', function ($service = null) {
-    if ($service instanceof \BCC\Core\Contracts\TrustHeaderDataInterface) {
-        return $service;
-    }
-    return \BCC\Trust\Core\Plugin::instance()->peepSoIntegration();
-});
-
 add_filter('bcc.resolve.page_owner_resolver', function ($service = null) {
     if ($service instanceof \BCC\Core\Contracts\PageOwnerResolverInterface) {
         return $service;
     }
     return \BCC\Trust\Core\Plugin::instance()->pageOwnerResolver();
-});
-
-add_filter('bcc.resolve.wallet_verification_read', function ($service = null) {
-    if ($service instanceof \BCC\Core\Contracts\WalletVerificationReadInterface) {
-        return $service;
-    }
-    return new \BCC\Trust\Core\Application\WalletVerificationReadService();
 });
 
 add_filter('bcc.resolve.trending_data', function ($service = null) {
@@ -405,9 +397,7 @@ add_filter('bcc.resolve.onchain_data_read', function ($service = null) {
 \BCC\Core\ServiceLocator::resolveTrustReadService();
 \BCC\Core\ServiceLocator::resolveScoreContributor();
 \BCC\Core\ServiceLocator::resolveScoreReadService();
-\BCC\Core\ServiceLocator::resolveTrustHeaderData();
 \BCC\Core\ServiceLocator::resolvePageOwnerResolver();
-\BCC\Core\ServiceLocator::resolveWalletVerificationRead();
 \BCC\Core\ServiceLocator::resolveTrendingData();
 \BCC\Core\ServiceLocator::resolveWalletLinkRead();
 \BCC\Core\ServiceLocator::resolveWalletLinkWrite();
@@ -469,6 +459,28 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
         ]);
     }
 }, 10, 3);
+
+/*
+|--------------------------------------------------------------------------
+| HEADLESS-FRONTEND BRIDGES (CORS + Bearer-JWT auth)
+|--------------------------------------------------------------------------
+| BearerAuth → reads `Authorization: Bearer <jwt>`, verifies via
+|              JwtToken (HS256 + wp_salt('auth')), and authenticates
+|              the request as the JWT's user_id claim. WP cookie auth
+|              wins when both are present (same-origin admin tooling).
+|
+| CorsHandler → CORS for /bcc/v1/* gated by BCC_FRONTEND_ORIGIN.
+|               Same-origin only when the constant is undefined.
+*/
+
+\BCC\Trust\Core\Support\BearerAuth::register();
+\BCC\Trust\Core\Support\CorsHandler::register();
+
+// §K2 / §G1: hook PeepSo's user-search filter so users with
+// `bcc_privacy_discovery_optout = 1` are excluded from search results.
+// Registered at file load (top-level) so the filter is in place by the
+// time PeepSo's UserSearch fires — before any REST or AJAX request.
+\BCC\Trust\Core\Support\PrivacySettings::registerSearchFilter();
 
 /*
 |--------------------------------------------------------------------------
@@ -563,6 +575,7 @@ add_action('plugins_loaded', function (): void {
     // REST API.
     add_action('rest_api_init', [\BCC\Trust\Onchain\Controllers\SignalController::class, 'registerRoutes']);
     add_action('rest_api_init', [\BCC\Trust\Onchain\Controllers\CollectionController::class, 'registerRoutes']);
+    add_action('rest_api_init', [\BCC\Trust\Onchain\Controllers\NftSelectionController::class, 'register_rest_routes']);
 
     // Manual cron triggers (admin only, CSRF-protected).
     add_action('admin_init', function () {
@@ -630,28 +643,6 @@ add_action('plugins_loaded', function (): void {
         }
     });
 
-    // Gutenberg block. The `bcc-onchain` category was retired — the
-    // block now lives in the shared `bcc-trust` category, renamed to
-    // "On-Chain Score Breakdown" to distinguish it from the summary
-    // view (`bcc-trust/on-chain-signals`).
-    add_action('init', function () {
-        if (function_exists('register_block_type')) {
-            register_block_type(BCC_TRUST_PATH . 'blocks/onchain-signals');
-        }
-    });
-
-    // Shortcode.
-    add_shortcode('bcc_onchain_signals', function ($atts) {
-        $atts    = shortcode_atts(['page_id' => 0], $atts, 'bcc_onchain_signals');
-        $page_id = (int) $atts['page_id'] ?: get_the_ID();
-        if (!$page_id) return '';
-
-        $signals = \BCC\Trust\Onchain\Repositories\SignalRepository::get_for_page($page_id);
-
-        ob_start();
-        include BCC_TRUST_PATH . 'templates/signals-widget.php';
-        return ob_get_clean();
-    });
 }, 20);
 
 /*
@@ -674,6 +665,74 @@ add_action('init', function () {
     \BCC\Trust\Disputes\Services\DisputeNotificationService::registerAsyncHandlers();
 });
 
+/*
+|--------------------------------------------------------------------------
+| V2 Phase 1 — Web push subscribers + flush worker
+|--------------------------------------------------------------------------
+|
+| Three things wired here:
+|   1. The Action-Scheduler worker that drains the per-(recipient, type)
+|      queue 5 minutes after the first event lands in the window.
+|   2. A push subscriber on `bcc_disputes_email_reporter_result` —
+|      fires alongside the existing email handler. When the dispute
+|      reporter has push enabled, they get a real-time ping in addition
+|      to the email; both surfaces stay independent.
+|   3. A push subscriber on `bcc_disputes_notify_panelist` — same
+|      additive pattern for the "you've been picked for panel duty"
+|      notification.
+|
+| Review + endorse pushes are wired inside NotificationDispatcher itself
+| (alongside the bell write), not here.
+*/
+add_action('init', function () {
+    add_action(
+        \BCC\Trust\Core\Services\PushDispatcher::FLUSH_HOOK,
+        function (int $recipientId, string $eventType): void {
+            \BCC\Trust\Core\Plugin::instance()->pushDispatcher()->flush($recipientId, $eventType);
+        },
+        10,
+        2
+    );
+
+    add_action(
+        'bcc_disputes_email_reporter_result',
+        function (int $disputeId, int $reporterId, string $outcome): void {
+            \BCC\Trust\Core\Plugin::instance()->pushDispatcher()->enqueue(
+                $reporterId,
+                'dispute_outcome',
+                [
+                    'dispute_id' => $disputeId,
+                    'outcome'    => $outcome,
+                ]
+            );
+        },
+        10,
+        3
+    );
+
+    add_action(
+        'bcc_disputes_notify_panelist',
+        function (int $userId, int $disputeId, int $pageId): void {
+            $pageName = '';
+            $page = get_post($pageId);
+            if ($page instanceof \WP_Post) {
+                $pageName = (string) $page->post_title;
+            }
+            \BCC\Trust\Core\Plugin::instance()->pushDispatcher()->enqueue(
+                $userId,
+                'panelist_selected',
+                [
+                    'dispute_id' => $disputeId,
+                    'page_id'    => $pageId,
+                    'page_name'  => $pageName,
+                ]
+            );
+        },
+        10,
+        3
+    );
+});
+
 // User deletion: clean up disputes, panel assignments, and reports.
 add_action('delete_user', function (int $userId): void {
     $result = \BCC\Trust\Disputes\Repositories\DisputeRepository::cleanupForDeletedUser($userId);
@@ -693,44 +752,6 @@ add_action('rest_api_init', function () {
     (new \BCC\Trust\Disputes\Controllers\DisputeController())->register_routes();
 });
 
-// Frontend enqueue — only on pages with the disputes shortcodes or on
-// PeepSo profile pages (where the Report User button is injected).
-add_action('wp_enqueue_scripts', function () {
-    $should_enqueue = false;
-
-    $post = get_post();
-    if ($post instanceof WP_Post) {
-        $content = $post->post_content;
-        if (has_shortcode($content, 'bcc_dispute_form')
-            || has_shortcode($content, 'bcc_dispute_queue')
-            || has_shortcode($content, 'bcc_report_button')
-        ) {
-            $should_enqueue = true;
-        }
-    }
-
-    if (!$should_enqueue && function_exists('PeepSo') && class_exists('PeepSoProfileShortcode')) {
-        $profile_page = PeepSo::get_option('page_profile');
-        if ($profile_page && (int) $profile_page === (int) get_the_ID()) {
-            $should_enqueue = true;
-        }
-    }
-
-    if (!$should_enqueue) {
-        return;
-    }
-
-    wp_enqueue_style('bcc-disputes', BCC_TRUST_URL . 'assets/css/bcc-disputes.css', [], BCC_TRUST_VERSION);
-    wp_enqueue_script('bcc-disputes', BCC_TRUST_URL . 'assets/js/bcc-disputes.js', [], BCC_TRUST_VERSION, true);
-    wp_localize_script('bcc-disputes', 'bccDisputes', [
-        'restUrl'         => esc_url_raw(rest_url('bcc/v1/disputes')),
-        'reportUserUrl'   => esc_url_raw(rest_url('bcc/v1/report-user')),
-        'nonce'           => wp_create_nonce('wp_rest'),
-        'minReasonLength' => BCC_DISPUTES_MIN_REASON_LENGTH,
-        'maxReasonLength' => BCC_DISPUTES_MAX_REASON_LENGTH,
-        'minDetailLength' => BCC_DISPUTES_MIN_DETAIL_LENGTH,
-    ]);
-});
 
 // PeepSo profile: inject the Report User button.
 add_action('peepso_user_profile_after_buttons', function ($user) {
@@ -748,55 +769,6 @@ add_action('peepso_user_profile_after_buttons', function ($user) {
         esc_html__('Report User', 'bcc-disputes')
     );
 });
-
-// Disputes shortcodes.
-add_shortcode('bcc_report_button', function ($atts) {
-    if (!is_user_logged_in()) return '';
-
-    $atts        = shortcode_atts(['user_id' => 0], $atts, 'bcc_report_button');
-    $reported_id = (int) $atts['user_id'];
-    if (!$reported_id || $reported_id === get_current_user_id()) return '';
-
-    $user = get_userdata($reported_id);
-    if (!$user) return '';
-
-    return sprintf(
-        '<button class="bcc-report-user-btn" data-user-id="%d" data-user-name="%s">&#9873; %s</button>',
-        $reported_id,
-        esc_attr($user->display_name),
-        esc_html__('Report User', 'bcc-disputes')
-    );
-});
-
-add_shortcode('bcc_dispute_form', function ($atts) {
-    if (!is_user_logged_in()) {
-        return '<p class="bcc-dispute-notice">' . esc_html__('Log in to manage disputes.', 'bcc-disputes') . '</p>';
-    }
-
-    $atts = shortcode_atts(['page_id' => 0], $atts, 'bcc_dispute_form');
-    $attributes = ['pageId' => (int) $atts['page_id'] ?: get_the_ID()];
-    if (!$attributes['pageId']) {
-        return '';
-    }
-
-    ob_start();
-    include BCC_TRUST_PATH . 'blocks/dispute-form/render.php';
-    return ob_get_clean();
-});
-
-add_shortcode('bcc_dispute_queue', function () {
-    if (!is_user_logged_in()) {
-        return '';
-    }
-
-    $attributes = [];
-    ob_start();
-    include BCC_TRUST_PATH . 'blocks/dispute-queue/render.php';
-    return ob_get_clean();
-});
-
-// Gutenberg block registration for disputes.
-require_once BCC_TRUST_PATH . 'includes/disputes-blocks.php';
 
 // Disputes admin notices: schema-migration failures + panelist-pool health.
 add_action('admin_notices', function (): void {
@@ -882,6 +854,21 @@ add_action('plugins_loaded', function () {
 
 /*
 |--------------------------------------------------------------------------
+| WP-CLI commands (V2 Phase 1 onwards)
+|--------------------------------------------------------------------------
+| Registered only when WP-CLI is loaded. Each sub-namespace lives in its
+| own command class under app/Domain/Core/CLI/.
+*/
+
+if (defined('WP_CLI') && WP_CLI) {
+    \WP_CLI::add_command(
+        'bcc-trust push',
+        \BCC\Trust\Core\CLI\PushCommand::class
+    );
+}
+
+/*
+|--------------------------------------------------------------------------
 | FRONTEND
 |--------------------------------------------------------------------------
 */
@@ -889,20 +876,6 @@ add_action('plugins_loaded', function () {
 require_once BCC_TRUST_PATH . 'includes/enqueue.php';
 
 \BCC\Trust\Core\Plugin::instance()->peepSoIntegration()->register();
-
-add_shortcode('bcc_landing_page', function () {
-    ob_start();
-    include BCC_TRUST_PATH . 'templates/landing-page.php';
-    return ob_get_clean();
-});
-
-/*
-|--------------------------------------------------------------------------
-| GUTENBERG BLOCKS
-|--------------------------------------------------------------------------
-*/
-
-require_once BCC_TRUST_PATH . 'includes/blocks.php';
 
 /*
 |--------------------------------------------------------------------------

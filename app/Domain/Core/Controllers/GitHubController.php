@@ -5,7 +5,7 @@
  * Thin HTTP adapter — validates requests, delegates all domain logic to
  * GitHubVerificationService, and formats responses.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage Controllers
  * @version 2.4.0
  */
@@ -20,6 +20,7 @@ use Exception;
 use BCC\Trust\Core\Security\RateLimiter;
 use BCC\Trust\Core\Services\github\GitHubOAuthService;
 use BCC\Trust\Core\Services\github\GitHubVerificationService;
+use BCC\Trust\Core\Support\FrontendRedirect;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -68,13 +69,33 @@ class GitHubController {
     }
 
     /**
-     * Return GitHub OAuth authorisation URL
+     * Return GitHub OAuth authorisation URL.
+     *
+     * Mirrors XController::getAuthUrl — accepts an optional `return_to`
+     * query parameter on the BCC_FRONTEND_ORIGIN allowlist, persisted
+     * in user meta for the callback to read after the cross-origin
+     * round-trip from github.com.
      */
-    public static function getAuthUrl(): WP_REST_Response|WP_Error {
+    public static function getAuthUrl(WP_REST_Request $request): WP_REST_Response|WP_Error {
         try {
             $oauth = new GitHubOAuthService();
             if (!$oauth->isConfigured()) {
                 return new WP_Error('github_not_configured', 'GitHub OAuth not configured', ['status' => 500]);
+            }
+
+            $uid = get_current_user_id();
+            if ($uid) {
+                $returnToRaw = (string) $request->get_param('return_to');
+                if ($returnToRaw !== '') {
+                    $validated = FrontendRedirect::validateReturnTo($returnToRaw);
+                    if ($validated !== null) {
+                        update_user_meta($uid, '_bcc_github_return_to', $validated);
+                    } else {
+                        delete_user_meta($uid, '_bcc_github_return_to');
+                    }
+                } else {
+                    delete_user_meta($uid, '_bcc_github_return_to');
+                }
             }
 
             $authUrl = (new GitHubVerificationService())->getAuthUrl();
@@ -134,7 +155,13 @@ class GitHubController {
 
             (new GitHubVerificationService())->connect($userId, $code);
 
-            wp_safe_redirect(add_query_arg('github_verified', 'success', home_url('/profile/')));
+            $returnUrl = (string) get_user_meta($userId, '_bcc_github_return_to', true);
+            if ($returnUrl !== '') {
+                delete_user_meta($userId, '_bcc_github_return_to');
+            } else {
+                $returnUrl = FrontendRedirect::defaultReturn('/settings/identity');
+            }
+            wp_safe_redirect(add_query_arg('github_verified', 'success', $returnUrl));
             exit;
 
         } catch (Exception $e) {
@@ -145,13 +172,19 @@ class GitHubController {
                 'user_id' => $userId ?? 0,
             ]);
 
+            $errorReturnUrl = '';
             if ($userId) {
+                $errorReturnUrl = (string) get_user_meta($userId, '_bcc_github_return_to', true);
                 delete_user_meta($userId, '_bcc_github_state');
                 delete_user_meta($userId, '_bcc_github_nonce');
                 delete_user_meta($userId, '_bcc_github_state_expires');
+                delete_user_meta($userId, '_bcc_github_return_to');
+            }
+            if ($errorReturnUrl === '') {
+                $errorReturnUrl = FrontendRedirect::defaultReturn('/settings/identity');
             }
 
-            wp_safe_redirect(add_query_arg('github_verified', 'error', home_url('/')));
+            wp_safe_redirect(add_query_arg('github_verified', 'error', $errorReturnUrl));
             exit;
         }
     }
@@ -191,14 +224,14 @@ class GitHubController {
     }
 
     /**
-     * Disconnect GitHub for the current user
+     * Disconnect GitHub for the current user.
+     *
+     * Bearer JWT auth via permission_check is the CSRF guard — the
+     * previous wp_rest nonce check was incompatible with headless
+     * bearer-only callers (they have no way to mint a wp_rest nonce).
      */
     public static function disconnect(WP_REST_Request $request): WP_REST_Response|WP_Error {
-        $nonce = $request->get_header('X-WP-Nonce');
-        if (!$nonce || !wp_verify_nonce($nonce, 'wp_rest')) {
-            return new WP_Error('invalid_nonce', 'Security check failed', ['status' => 403]);
-        }
-
+        unset($request);
         try {
             $result = (new GitHubVerificationService())->disconnect(get_current_user_id());
 
@@ -214,14 +247,11 @@ class GitHubController {
     }
 
     /**
-     * Refresh GitHub data for the current user
+     * Refresh GitHub data for the current user. See ::disconnect for the
+     * nonce-check-removal rationale.
      */
     public static function refreshData(WP_REST_Request $request): WP_REST_Response|WP_Error {
-        $nonce = $request->get_header('X-WP-Nonce');
-        if (!$nonce || !wp_verify_nonce($nonce, 'wp_rest')) {
-            return new WP_Error('invalid_nonce', 'Security check failed', ['status' => 403]);
-        }
-
+        unset($request);
         try {
             $result = (new GitHubVerificationService())->refresh(get_current_user_id());
 

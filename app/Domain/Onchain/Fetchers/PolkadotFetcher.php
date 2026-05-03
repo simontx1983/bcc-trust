@@ -63,6 +63,25 @@ class PolkadotFetcher implements FetcherInterface
         return $this->mapValidator($data['info'], 0);
     }
 
+    /** @return array<int, array{validator_address: string, shares?: string|null, amount?: float|null}> */
+    public function fetch_delegations(string $delegatorAddress): array
+    {
+        return []; // Polkadot nominations discovery not implemented yet.
+    }
+
+    public function count_holdings(string $wallet, string $contract): int
+    {
+        return 0;
+    }
+
+    /**
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
+     */
+    public function list_holdings(string $wallet, ?string $cursor = null): array
+    {
+        return ['items' => [], 'truncated' => false, 'cursor' => null];
+    }
+
     /**
      * Fetch all active validators sorted by stake.
      *

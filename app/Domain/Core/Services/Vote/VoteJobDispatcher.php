@@ -151,7 +151,7 @@ class VoteJobDispatcher {
         $lockName    = 'vote_job_' . md5( $hook . wp_json_encode( $args ) );
         $lockTimeout = 10; // seconds to wait before giving up
 
-        $acquired = \BCC\Trust\Core\Repositories\DatabaseLockRepository::acquire( $lockName, $lockTimeout );
+        $acquired = \BCC\Core\DB\AdvisoryLock::acquire( $lockName, $lockTimeout );
 
         if ( ! $acquired ) {
             \BCC\Core\Log\Logger::error( sprintf(
@@ -167,7 +167,7 @@ class VoteJobDispatcher {
                 as_enqueue_async_action( $hook, $args );
             }
         } finally {
-            \BCC\Trust\Core\Repositories\DatabaseLockRepository::release( $lockName );
+            \BCC\Core\DB\AdvisoryLock::release( $lockName );
         }
     }
 }

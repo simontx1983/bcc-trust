@@ -6,7 +6,7 @@
  * A claim links a verified wallet to a specific entity with a role
  * (operator, creator, holder) validated by on-chain RPC queries.
  *
- * @package BCC_Onchain_Signals
+ * @package BCC\Trust\Onchain
  * @subpackage Database
  */
 
@@ -23,6 +23,11 @@ function bcc_onchain_create_claims_table(): void {
     $charset_collate = $wpdb->get_charset_collate();
     $table = bcc_onchain_claims_table();
 
+    // recovery_pending: per §B5, when a page-type claim's wallet is lost
+    // and the page enters lost-wallet recovery, the claim row stays
+    // verified but recovery_pending=1 so the admin queue can surface it.
+    // For non-page entity_types (validator, collection), the column is
+    // unused and stays at 0.
     $sql = "CREATE TABLE {$table} (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         user_id BIGINT UNSIGNED NOT NULL,
@@ -33,12 +38,14 @@ function bcc_onchain_create_claims_table(): void {
         claim_role VARCHAR(20) NOT NULL,
         status VARCHAR(20) NOT NULL DEFAULT 'pending',
         verified_at DATETIME NULL,
+        recovery_pending TINYINT(1) NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         UNIQUE KEY uq_user_entity (user_id, entity_type, entity_id),
         KEY idx_entity (entity_type, entity_id),
         KEY idx_user (user_id),
-        KEY idx_status (status)
+        KEY idx_status (status),
+        KEY idx_recovery_pending (recovery_pending)
     ) {$charset_collate};";
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';

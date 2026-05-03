@@ -4,7 +4,7 @@
  *
  * Lightweight public flagging system — signal only, no score impact.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if (!defined('ABSPATH')) {

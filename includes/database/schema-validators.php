@@ -5,7 +5,7 @@
  * Stores auto-fetched validator data from Cosmos LCD / beacon chain APIs.
  * Read-only from the user's perspective — updated by cron and fetchers only.
  *
- * @package BCC_Onchain_Signals
+ * @package BCC\Trust\Onchain
  * @subpackage Database
  */
 

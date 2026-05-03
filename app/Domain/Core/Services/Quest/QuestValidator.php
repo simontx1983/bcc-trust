@@ -144,9 +144,9 @@ class QuestValidator {
      * explore_projects: User must have viewed at least 3 distinct
      * PeepSo project pages. Tracked via user meta.
      *
-     * The tracking is done by bcc-trust-engine's front-end page-view
-     * hook, which records distinct page IDs in user meta. The quest
-     * signal should only fire after the counter reaches 3.
+     * The tracking is done by bcc-trust's front-end page-view hook,
+     * which records distinct page IDs in user meta. The quest signal
+     * should only fire after the counter reaches 3.
      */
     private static function validateExploreProjects(int $userId): bool {
         $visited = get_user_meta($userId, '_bcc_explored_pages', true);

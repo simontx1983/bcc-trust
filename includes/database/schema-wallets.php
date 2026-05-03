@@ -6,7 +6,7 @@
  * Supports multiple wallets per user with typed roles
  * (user, treasury, multisig, validator, contract_deployer).
  *
- * @package BCC_Onchain_Signals
+ * @package BCC\Trust\Onchain
  * @subpackage Database
  */
 
@@ -41,6 +41,7 @@ function bcc_onchain_create_wallet_links_table(): void {
         label VARCHAR(100) DEFAULT NULL,
         verified_at DATETIME DEFAULT NULL,
         is_primary TINYINT(1) NOT NULL DEFAULT 0,
+        last_holdings_refresh_at DATETIME DEFAULT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         KEY user_id (user_id),

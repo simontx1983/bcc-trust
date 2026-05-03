@@ -66,7 +66,7 @@ final class ScoreContributorService implements ScoreContributorInterface
         // Audit HIGH-9: bonus writes bypass the per-day score velocity cap
         // that protects vote-driven deltas.  Apply the same cap to bonus
         // deltas so a fraudulent on-chain signal accepted by
-        // bcc-onchain-signals cannot push onchain_bonus from 0→N in a
+        // bcc-trust's Onchain domain cannot push onchain_bonus from 0→N in a
         // single day without constraint.  The absolute bonus value is
         // also clamped to BCC_TRUST_MAX_BONUS_VALUE as a hard ceiling.
         $maxBonus = defined('BCC_TRUST_MAX_BONUS_VALUE')
@@ -139,7 +139,7 @@ final class ScoreContributorService implements ScoreContributorInterface
         // Notify read model sync that this page's score changed.
         // Without this, the read model stays stale until the next vote
         // or the daily full sync — bonuses applied by external plugins
-        // (bcc-onchain-signals) would not appear in the trust header.
+        // (bcc-trust's Onchain domain) would not appear in the trust header.
         do_action('bcc.trust.recalculate_score', $pageId);
 
         return true;

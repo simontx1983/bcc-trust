@@ -526,8 +526,8 @@ class SignalRepository
      *     downstream score aggregation.
      *
      * This is the plugin's primary future failure vector because it crosses
-     * plugin boundaries (bcc-trust-engine consumes it) and bypasses static
-     * guarantees. A shared cross-plugin DTO is the proper fix — see the note
+     * domain boundaries (bcc-trust's Core consumes it) and bypasses static
+     * guarantees. A shared cross-domain DTO is the proper fix — see the note
      * on decorateTrustSignal() for the migration direction.
      */
     public static function getTrustSignalForUserChain(int $userId, string $chain): ?\stdClass
@@ -597,8 +597,8 @@ class SignalRepository
      * ARCHITECTURAL NOTE (tracked debt): this is the plugin's weakest type boundary.
      * The returned stdClass shape is implicit — PHPStan cannot statically verify
      * that `nft_collections` / `wallet_role` are present, and external consumers
-     * (currently bcc-trust-engine via WalletSignalWriteInterface) read both.
-     * A shared cross-plugin DTO (e.g. \BCC\Core\DTO\TrustSignalDTO) should replace
+     * (currently bcc-trust's Core via WalletSignalWriteInterface) read both.
+     * A shared cross-domain DTO (e.g. \BCC\Core\DTO\TrustSignalDTO) should replace
      * this pattern once the same problem is solved for TrendingDataInterface —
      * the shape is genuinely identical there. Until then, any consumer that
      * reads `wallet_role` outside the enum {pending, none, operator, creator,

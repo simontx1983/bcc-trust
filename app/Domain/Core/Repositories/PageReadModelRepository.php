@@ -348,7 +348,7 @@ class PageReadModelRepository
                 updated_at          = NOW()",
             $pageId,
             $ownerId,
-            $score ? (float) $score->total_score : (float) BCC_TRUST_NEUTRAL_SCORE,
+            $score ? (float) $score->total_score : (float) \BCC\Trust\Core\Services\TrustScoreService::neutral(),
             $score ? $score->reputation_tier : 'neutral',
             $score ? (float) $score->confidence_score : 0.00,
             $score ? (float) ($score->positive_score ?? 0) : 0.00,

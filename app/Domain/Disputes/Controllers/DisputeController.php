@@ -6,12 +6,15 @@ use BCC\Core\Contracts\TrustReadServiceInterface;
 use BCC\Core\Log\Logger as CoreLogger;
 use BCC\Core\Permissions\Permissions;
 use BCC\Core\ServiceLocator;
+use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Disputes\DTO\DisputeCoreDTO;
 use BCC\Trust\Disputes\DTO\DisputeDetailDTO;
 use BCC\Trust\Disputes\DTO\PanelistQueueItemDTO;
 use BCC\Trust\Disputes\DTO\VoteContextDTO;
+use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Disputes\Services\DisputeNotificationService;
+use BCC\Trust\Disputes\Services\DisputeParticipationService;
 use BCC\Trust\Disputes\Services\DisputeScheduler;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -101,6 +104,15 @@ class DisputeController
             'methods'             => WP_REST_Server::READABLE,
             'callback'            => [$this, 'health'],
             'permission_callback' => function () { return current_user_can('manage_options'); },
+        ]);
+
+        // §D5 — viewer's own participation status (for the /panel header
+        // indicator). Auth-only; no admin gate. Returns the three counts
+        // a panelist needs to see their progress against the caps.
+        register_rest_route(self::NS, '/disputes/participation/me', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [$this, 'my_participation'],
+            'permission_callback' => function () { return is_user_logged_in() && Permissions::is_not_suspended(null, false); },
         ]);
     }
 
@@ -259,7 +271,7 @@ class DisputeController
 
         CoreLogger::audit('dispute_submitted', ['dispute_id' => $dispute_id, 'user_id' => $current_user_id, 'vote_id' => $vote_id, 'panelists' => count($panelists)]);
 
-        return rest_ensure_response([
+        return ApiResponse::ok([
             'dispute_id' => $dispute_id,
             'panelists'  => count($panelists),
             'message'    => 'Dispute submitted. ' . count($panelists) . ' panelists have been notified.',
@@ -298,7 +310,7 @@ class DisputeController
         $voteIds = array_map(static fn(array $vote): int => (int) $vote['id'], $votes);
         $disputedVoteIds = DisputeRepository::getDisputedVoteIds($voteIds);
 
-        $response = rest_ensure_response(array_map(function (array $vote) use ($disputedVoteIds) {
+        $response = ApiResponse::ok(array_map(function (array $vote) use ($disputedVoteIds) {
             return [
                 'id' => (int) $vote['id'],
                 'voter_name' => $vote['voter_name'] ?? 'Unknown',
@@ -339,7 +351,7 @@ class DisputeController
         $total = DisputeRepository::countByReporter($userId, $page_id);
         $rows  = DisputeRepository::getByReporterPaginated($userId, $per_page, $offset, $page_id);
 
-        $response = rest_ensure_response(array_map([$this, 'formatDispute'], $rows));
+        $response = ApiResponse::ok(array_map([$this, 'formatDispute'], $rows));
         $response->header('X-WP-Total', (string) $total);
         $response->header('X-WP-TotalPages', (string) max(1, (int) ceil($total / $per_page)));
         return $response;
@@ -361,7 +373,7 @@ class DisputeController
         $total = DisputeRepository::countPanelQueueForUser($userId);
         $rows  = DisputeRepository::getPanelQueueForUser($userId, $per_page, $offset);
 
-        $response = rest_ensure_response(array_map([$this, 'formatDispute'], $rows));
+        $response = ApiResponse::ok(array_map([$this, 'formatDispute'], $rows));
         $response->header('X-WP-Total', (string) $total);
         $response->header('X-WP-TotalPages', (string) max(1, (int) ceil($total / $per_page)));
         return $response;
@@ -487,12 +499,48 @@ class DisputeController
             }
         }
 
+        // §D5 — record the panel-vote participation OUTSIDE the vote
+        // transaction. The vote is the user's intentional act and is
+        // already committed; participation is bookkeeping. A DB hiccup
+        // or lock contention while inserting the credit must NOT roll
+        // back the vote. We log + continue on any failure here.
+        $participationBlock = [
+            'credited'         => false,
+            'reason'           => 'service_unavailable',
+            'credited_today'   => 0,
+            'credited_lifetime'=> 0,
+        ];
+        try {
+            $participationService = new DisputeParticipationService(
+                new DisputeParticipationRepository()
+            );
+            $result = $participationService->recordParticipation($userId, $dispute_id, $decision);
+            $participationBlock = [
+                'credited'          => $result['credited'],
+                'reason'            => $result['reason'],
+                'credited_today'    => $result['today'],
+                'credited_lifetime' => $result['lifetime'],
+            ];
+        } catch (\Throwable $e) {
+            // Log but never propagate — the vote is already committed
+            // and that's the user's primary action. Reconciliation can
+            // backfill missed credits if it ever becomes necessary.
+            CoreLogger::error('[bcc-disputes] participation_record_failed', [
+                'dispute_id' => $dispute_id,
+                'user_id'    => $userId,
+                'decision'   => $decision,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+
         // Tally intentionally omitted from response to preserve
         // independent deliberation — panelists must not see running
-        // totals before all votes are in.
-        return rest_ensure_response([
-            'message'  => 'Vote recorded.',
-            'decision' => $decision,
+        // totals before all votes are in. The participation block, by
+        // contrast, surfaces this user's own credit state only.
+        return ApiResponse::ok([
+            'message'       => 'Vote recorded.',
+            'decision'      => $decision,
+            'participation' => $participationBlock,
         ]);
     }
 
@@ -587,7 +635,7 @@ class DisputeController
             'decision'   => $decision,
         ]);
 
-        return rest_ensure_response([
+        return ApiResponse::ok([
             'message' => 'Resolution queued as ' . $decision . '. The dispute will update shortly.',
             'status'  => 'queued',
         ]);
@@ -828,8 +876,44 @@ class DisputeController
 
         CoreLogger::audit('user_reported', ['reporter' => $reporter_id, 'reported' => $reported_id, 'reason' => $reason_key]);
 
-        return rest_ensure_response([
+        return ApiResponse::ok([
             'message' => 'Your report has been submitted. Our team will review it shortly.',
+        ]);
+    }
+
+    // ── My participation status ────────────────────────────────────────────────
+
+    /**
+     * §D5 — return the viewer's own panel-vote participation counters.
+     *
+     * Powers the `/panel` page's header indicator: "X/5 today · Y/50
+     * lifetime · Z correct". Caps come along so the frontend never has
+     * to mirror the backend constants.
+     */
+    public function my_participation(WP_REST_Request $req): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        $service = new DisputeParticipationService(
+            new DisputeParticipationRepository()
+        );
+        $status = $service->getStatus($userId);
+
+        return ApiResponse::ok([
+            // Row-count counters for "X votes today / lifetime" UI.
+            'credited_today'    => $status['today'],
+            'credited_lifetime' => $status['lifetime'],
+            'correct_count'     => $status['correct'],
+            // Clamped trust contributions for "Y / Z trust points" UI.
+            'earned_today'      => round($status['earned_daily'], 4),
+            'earned_lifetime'   => round($status['earned_lifetime'], 4),
+            // Caps surfaced so the frontend never mirrors backend constants.
+            'caps' => [
+                'daily_trust'      => (float) BCC_DISPUTE_PARTICIPATION_DAILY_TRUST_CAP,
+                'lifetime_trust'   => (float) BCC_DISPUTE_PARTICIPATION_LIFETIME_TRUST_CAP,
+                'min_for_accuracy' => (int)   BCC_DISPUTE_PARTICIPATION_MIN_FOR_ACCURACY,
+                'base_weight'      => (float) BCC_DISPUTE_PARTICIPATION_BASE_WEIGHT,
+                'accuracy_weight'  => (float) BCC_DISPUTE_PARTICIPATION_ACCURACY_WEIGHT,
+            ],
         ]);
     }
 
@@ -924,7 +1008,7 @@ class DisputeController
             : 300;
         $stuckAsync = DisputeRepository::countStuckAsyncResolutions($stuckThreshold);
 
-        return rest_ensure_response([
+        return ApiResponse::ok([
             'status'    => 'ok',
             'timestamp' => gmdate('c'),
             'cron'      => [
@@ -972,9 +1056,14 @@ class DisputeController
         ]);
     }
 
+    /**
+     * Error responses go through the canonical {error, _meta} envelope so
+     * the frontend's `bccFetchAsClient` can parse them uniformly with
+     * success responses. The HTTP status mirrors the body's `status` field.
+     */
     private function error(string $code, string $message, int $status): WP_REST_Response
     {
-        return new WP_REST_Response(['code' => $code, 'message' => $message], $status);
+        return ApiResponse::error($code, $message, $status);
     }
 
 }

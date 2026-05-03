@@ -5,7 +5,7 @@
  * Records every trust score change with reason, delta, and actor.
  * Used for: dispute evidence, admin debugging, user-facing score history.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if (!defined('ABSPATH')) {

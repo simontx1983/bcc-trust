@@ -2,7 +2,7 @@
 /**
  * Entity Claim REST Endpoint
  *
- * Proxies entity claim requests to bcc-onchain-signals ClaimService
+ * Proxies entity claim requests to bcc-trust's Onchain ClaimService
  * via REST API, replacing the legacy admin-ajax bcc_claim_entity handler.
  *
  * Route: POST /bcc/v1/claim

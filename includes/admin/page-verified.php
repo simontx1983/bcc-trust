@@ -5,7 +5,7 @@
  * Standalone submenu page listing all users who have completed any
  * identity verification signal: GitHub, Cosmos, Ethereum, or Solana.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

@@ -489,9 +489,9 @@ class PageDataAggregator {
     /**
      * On-chain metrics.
      *
-     * Pulls wallet_age / transactions / contracts from the bcc-onchain-signals
+     * Pulls wallet_age / transactions / contracts from bcc-trust's Onchain
      * indexer (SignalRepository::get_for_page) when available. Falls back to
-     * null when the indexer hasn't run or the plugin is inactive.
+     * null when the indexer hasn't run or bcc-trust is inactive.
      *
      * total_boost and nft_collections are derived from wallet connection metadata.
      *

@@ -2,7 +2,7 @@
 /**
  * Admin Dashboard — User Trust Tab
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

@@ -162,44 +162,46 @@ class FlagService
         return (new \BCC\Trust\Core\Repositories\PageFlagRepository())->getRecentForPage($pageId, $limit);
     }
 
-    // ── Rate limiting (transient-based) ─────────────────────────────────
+    // ── Rate limiting (DB-backed via RateLimitRepository) ────────────────
+    //
+    // Counters live in wp_options as "count|expires" rows keyed by user
+    // and UTC date. RateLimitRepository::incrementBucket uses INSERT …
+    // ON DUPLICATE KEY UPDATE LAST_INSERT_ID(expr) which is atomic across
+    // FPM workers regardless of object-cache backend — the previous
+    // wp_cache_incr/wp_cache_add path was non-atomic on LiteSpeed
+    // Object Cache and let concurrent flag submissions exceed the cap.
+
+    /**
+     * wp_options key for the per-user daily flag bucket. Includes the
+     * UTC date so the bucket rolls over at midnight UTC. The `_transient_`
+     * prefix lets WP's native transient GC reap expired rows alongside
+     * the bcc-core cleanup cron.
+     */
+    private static function dailyBucketKey(int $userId): string
+    {
+        return '_transient_bcc_flag_daily_' . $userId . '_' . gmdate('Ymd');
+    }
 
     private static function getDailyFlagCount(int $userId): int
     {
-        $key = "bcc_flag_daily_{$userId}";
-
-        // Try atomic object cache first.
-        $count = wp_cache_get($key, 'bcc_page_flags');
-        if ($count !== false) {
-            return (int) $count;
-        }
-
-        // Fall back to transient for hosts without persistent object cache.
-        return (int) get_transient($key);
+        return (int) (\BCC\Trust\Core\Repositories\RateLimitRepository::getBucketCount(
+            self::dailyBucketKey($userId)
+        ) ?? 0);
     }
 
     private static function incrementDailyCount(int $userId): void
     {
-        $key = "bcc_flag_daily_{$userId}";
+        $optionKey  = self::dailyBucketKey($userId);
+        // Bucket expires at the start of the *next* UTC day plus a small
+        // overlap so a count written just before midnight is still
+        // reapable shortly after the day rolls over.
+        $expiresAt  = strtotime('tomorrow midnight UTC') ?: (time() + DAY_IN_SECONDS);
+        $freshValue = '1|' . $expiresAt;
 
-        // Attempt atomic increment via object cache to prevent race conditions.
-        $new = wp_cache_incr($key, 1, 'bcc_page_flags');
-
-        if ($new === false) {
-            // Object cache key doesn't exist yet — initialise it atomically.
-            // If another process created it in the meantime, retry the increment.
-            if (!wp_cache_add($key, 1, 'bcc_page_flags', DAY_IN_SECONDS)) {
-                $new = wp_cache_incr($key, 1, 'bcc_page_flags');
-            } else {
-                $new = 1;
-            }
-        }
-
-        // Always mirror to transient so hosts without a persistent object cache
-        // (default WP installs) still enforce the daily limit across requests.
-        // Without this, wp_cache is per-request and the counter resets every
-        // REST call, making the 5-per-day cap un-enforceable.
-        set_transient($key, (int) ($new ?: 1), DAY_IN_SECONDS);
+        \BCC\Trust\Core\Repositories\RateLimitRepository::incrementBucket(
+            $optionKey,
+            $freshValue
+        );
     }
 
     // ── Cache ───────────────────────────────────────────────────────────

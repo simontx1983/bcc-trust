@@ -6,7 +6,7 @@
  * Since we only store email and username, the scoring is simpler
  * than GitHub — a fixed boost for having a verified X account.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage X
  * @version 1.0.0
  */

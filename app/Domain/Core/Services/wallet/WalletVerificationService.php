@@ -8,7 +8,7 @@
  *   3. Calculate trust impact
  *   4. Persist via WalletRepository
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage Services/Wallet
  */
 

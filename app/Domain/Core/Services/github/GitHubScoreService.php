@@ -5,7 +5,7 @@
  * Calculates trust scores and fraud reductions based on GitHub user data
  * Uses config constants for thresholds and weights
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage GitHub
  * @version 2.3.0
  */

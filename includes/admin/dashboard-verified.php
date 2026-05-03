@@ -4,7 +4,7 @@
  *
  * Displays users with GitHub verification and their trust impact
  * 
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @version 2.0.0
  */
 

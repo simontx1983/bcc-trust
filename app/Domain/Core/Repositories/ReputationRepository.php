@@ -483,6 +483,36 @@ class ReputationRepository {
     }
 
     /**
+     * User IDs whose reputation tier is `caution` or `risky` — the §O4.1
+     * "shadow-limited" set. Used by the feed ranker to exclude these
+     * users' posts from feed inputs in a single query.
+     *
+     * Bounded by LIMIT — V1 expects this set to stay small (< few
+     * hundred). If it grows past the cap, the feed-ranker strategy
+     * needs revisiting (per-page filtering instead of preloaded list).
+     *
+     * @return list<int>
+     */
+    public function getCautionAndRiskyUserIds(int $limit = 1000): array {
+        global $wpdb;
+
+        /** @var list<object{user_id: int|numeric-string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT user_id
+               FROM {$this->table}
+              WHERE reputation_tier IN ('caution', 'risky')
+              LIMIT %d",
+            $limit
+        ));
+
+        $ids = [];
+        foreach ($rows ?: [] as $row) {
+            $ids[] = (int) $row->user_id;
+        }
+        return $ids;
+    }
+
+    /**
      * Check if user has sufficient reputation using config threshold
      */
     public function hasSufficientReputation(int $userId, ?float $minScore = null): bool {

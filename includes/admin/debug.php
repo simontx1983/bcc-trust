@@ -6,7 +6,7 @@
  * Shows stored data only — no expensive live computations on page load.
  * Live fraud analysis available via explicit button click.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage Admin
  */
 

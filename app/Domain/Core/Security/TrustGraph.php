@@ -666,7 +666,7 @@ class TrustGraph {
         // cached offset (no advance, no double-scan) which is strictly safe.
         $pageLimit   = 500;
         $lockKey     = 'bcc_ring_cursor';
-        $lockHeld    = \BCC\Trust\Core\Repositories\DatabaseLockRepository::acquire($lockKey, 0);
+        $lockHeld    = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0);
 
         try {
             $offset      = (int) (wp_cache_get('vote_ring_offset', self::CACHE_GROUP) ?: 0);
@@ -680,7 +680,7 @@ class TrustGraph {
             }
         } finally {
             if ($lockHeld) {
-                \BCC\Trust\Core\Repositories\DatabaseLockRepository::release($lockKey);
+                \BCC\Core\DB\AdvisoryLock::release($lockKey);
             }
         }
 

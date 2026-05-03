@@ -162,10 +162,10 @@ final class CollectionService
      *
      * Each returned item is a stdClass with at minimum:
      *   ->collection_name, ->contract_address, ->data_source ('onchain'|'self-reported')
-     *   On-chain items retain all DB columns. Self-reported items have ACF subfield values.
+     *   On-chain items retain all DB columns. Self-reported items use the same column-keyed shape.
      *
      * @param list<CollectionDisplay> $onchainItems  Items from CollectionService::getForProject() (objects).
-     * @param array<int, array<string, mixed>> $manualRows    ACF repeater rows (assoc arrays from get_field()).
+     * @param array<int, array<string, mixed>> $manualRows    Manual repeater rows (assoc arrays of column-keyed values).
      * @return list<\stdClass> Merged list of stdClass objects.
      */
     public static function mergeWithManual(array $onchainItems, array $manualRows): array

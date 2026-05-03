@@ -6,32 +6,33 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-use BCC\Core\Contracts\WalletVerificationReadInterface;
 use BCC\Core\ServiceLocator;
-use BCC\Trust\Core\Database\TableRegistry;
 
 /**
  * Read-only wallet verification service.
  *
  * Wallet identity data comes from bcc_wallet_links via WalletLinkReadInterface
- * (the canonical wallet store, owned by bcc-onchain-signals).
+ * (the canonical wallet store, owned by bcc-trust's Onchain domain).
  *
  * Wallet scoring intelligence lives in bcc_onchain_signals via
  * WalletSignalRepository (routed through WalletSignalWriteInterface).
  *
  * Non-wallet verifications (GitHub, X) always come from
  * bcc_trust_user_verifications directly.
+ *
+ * Concrete-only — there's no `WalletVerificationReadInterface`. The
+ * service is constructed directly by its two consumers
+ * (FeatureAccessService, VoteEligibilityChecker); the cross-plugin
+ * ServiceLocator seam was removed when no external consumer materialized.
  */
-class WalletVerificationReadService implements WalletVerificationReadInterface
+class WalletVerificationReadService
 {
-    /** {@inheritdoc} */
     public function hasVerifiedWallet(int $userId): bool
     {
         $links = ServiceLocator::resolveWalletLinkRead()->getLinksForUser($userId);
         return !empty($links);
     }
 
-    /** {@inheritdoc} */
     public function hasVerification(int $userId, string $type): bool
     {
         // Wallet types → delegate to WalletLinkReadInterface (identity store)

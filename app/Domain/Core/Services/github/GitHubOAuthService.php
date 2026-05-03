@@ -4,7 +4,7 @@
  *
  * Handles GitHub OAuth authentication flow
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage GitHub
  * @version 2.3.1
  */

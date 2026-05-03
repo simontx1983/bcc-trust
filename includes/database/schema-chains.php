@@ -5,7 +5,7 @@
  * Normalized chain lookup table — every on-chain table references chain_id
  * instead of storing chain strings. Provides RPC, explorer, and type metadata.
  *
- * @package BCC_Onchain_Signals
+ * @package BCC\Trust\Onchain
  * @subpackage Database
  */
 

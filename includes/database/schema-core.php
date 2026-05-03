@@ -2,7 +2,7 @@
 /**
  * Core Database Schema
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage Database
  * @version 2.2.0
  */

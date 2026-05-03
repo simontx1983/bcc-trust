@@ -11,7 +11,7 @@
  *   moderation-ip.php        – IP investigation view
  *   moderation-device.php    – device fingerprint investigation view
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @version 3.0.0
  */
 

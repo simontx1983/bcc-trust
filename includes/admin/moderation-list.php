@@ -4,7 +4,7 @@
  *
  * Renders the paginated, filterable user table with bulk-action support.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

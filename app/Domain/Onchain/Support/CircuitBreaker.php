@@ -116,12 +116,19 @@ final class CircuitBreaker
             ]);
         }
 
-        // Also reset the atomic counter used by recordFailure() so the
+        // Also reset the DB-backed counter used by recordFailure() so the
         // two tracking mechanisms stay in sync. Without this, a success
-        // would clear the state-struct but leave the wp_cache_incr
-        // counter at its pre-success value, and the next failure would
-        // increment from that stale value instead of 1.
-        wp_cache_set('counter:' . $chainId, 0, self::CACHE_GROUP, self::CACHE_TTL);
+        // would clear the state-struct but leave the counter at its
+        // pre-success value, and the next failure would increment from
+        // that stale value instead of 1. DELETE is sufficient because
+        // recordFailure()'s INSERT … ON DUPLICATE KEY UPDATE re-creates
+        // the row from 1 on the next failure.
+        global $wpdb;
+        $counterOption = self::counterOptionName($chainId);
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s",
+            $counterOption
+        ));
 
         // Release the probe lock so subsequent traffic flows freely.
         // Without this, a healthy chain would remain effectively blocked
@@ -199,23 +206,47 @@ final class CircuitBreaker
      */
     public static function recordFailure(int $chainId): void
     {
-        // Atomic counter via wp_cache_incr — closes the get→compute→set
-        // lost-update race. Under a parallel failure storm two workers
-        // could both read failures=4 and both write failures=5, missing
-        // an increment; the circuit stayed closed longer than designed,
-        // burning more API budget (and risking IP bans from providers).
-        $counterKey = 'counter:' . $chainId;
+        // Atomic DB-backed counter via INSERT … ON DUPLICATE KEY UPDATE
+        // — closes the get→compute→set lost-update race. The earlier
+        // implementation used wp_cache_incr which is non-atomic on
+        // some drop-ins (LiteSpeed Object Cache implements it as a
+        // request-local read-modify-write), letting parallel failure
+        // storms drop increments and keeping the circuit closed beyond
+        // its designed threshold — wasting API budget and risking IP
+        // bans from providers.
+        global $wpdb;
+        $counterOption = self::counterOptionName($chainId);
 
-        // Ensure the counter exists before incrementing; wp_cache_incr
-        // returns false on a missing key in some drop-ins.
-        wp_cache_add($counterKey, 0, self::CACHE_GROUP, self::CACHE_TTL);
-        $failures = wp_cache_incr($counterKey, 1, self::CACHE_GROUP);
-        if (!is_int($failures) || $failures <= 0) {
-            // Backend degraded — fall back to read-modify-write so we at
-            // least record SOMETHING. Still better than silently dropping
-            // the failure signal.
+        $result = $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$wpdb->options} (option_name, option_value, autoload)
+             VALUES (%s, '1', 'no')
+             ON DUPLICATE KEY UPDATE
+               option_value = LAST_INSERT_ID(CAST(option_value AS UNSIGNED) + 1)",
+            $counterOption
+        ));
+
+        if ($result === false) {
+            // DB error — fall back to read-modify-write of the state
+            // struct so we at least record SOMETHING. Still better than
+            // silently dropping the failure signal.
             $state    = self::getState($chainId) ?? ['failures' => 0, 'opened_at' => 0];
             $failures = (int) ($state['failures'] ?? 0) + 1;
+        } elseif ($result === 1) {
+            // Fresh insert — counter is exactly 1.
+            $failures = 1;
+        } else {
+            // Existing row updated; LAST_INSERT_ID(expr) exposes the new
+            // count via $wpdb->insert_id without a second round-trip.
+            $failures = (int) $wpdb->insert_id;
+            if ($failures <= 0) {
+                // Defensive: insert_id not propagated for some reason.
+                // Fall back to a SELECT rather than report 0.
+                $raw = $wpdb->get_var($wpdb->prepare(
+                    "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+                    $counterOption
+                ));
+                $failures = max(1, (int) $raw);
+            }
         }
 
         $state    = self::getState($chainId) ?? ['failures' => 0, 'opened_at' => 0];
@@ -357,6 +388,16 @@ final class CircuitBreaker
         wp_cache_set($key, $state, self::CACHE_GROUP, self::CACHE_TTL);
         // Transient fallback for environments without persistent object cache
         set_transient('bcc_cb_' . $chainId, $state, self::CACHE_TTL);
+    }
+
+    /**
+     * wp_options row name for the per-chain DB-backed failure counter.
+     * Stored as a non-autoloaded option so it never bloats the bootstrap
+     * options preload.
+     */
+    private static function counterOptionName(int $chainId): string
+    {
+        return '_bcc_cb_counter_' . $chainId;
     }
 
     private static function log(string $message): void

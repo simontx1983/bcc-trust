@@ -177,13 +177,13 @@ final class PageReadModelSync
      */
     public static function onDailySync(): void
     {
-        if (!\BCC\Trust\Core\Repositories\DatabaseLockRepository::acquire('bcc_cron_read_model_sync', 0)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire('bcc_cron_read_model_sync', 0)) {
             return;
         }
         try {
             Plugin::instance()->pageReadModelRepository()->syncAll();
         } finally {
-            \BCC\Trust\Core\Repositories\DatabaseLockRepository::release('bcc_cron_read_model_sync');
+            \BCC\Core\DB\AdvisoryLock::release('bcc_cron_read_model_sync');
         }
     }
 
@@ -233,7 +233,7 @@ final class PageReadModelSync
     public static function processDirtyPages(): void
     {
         $lockKey = 'bcc_rm_deferred_sync';
-        if (!\BCC\Trust\Core\Repositories\DatabaseLockRepository::acquire($lockKey, 0)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
             // Another worker is already processing this tick. Skip.
             return;
         }
@@ -241,7 +241,7 @@ final class PageReadModelSync
         try {
             self::processDirtyPagesInner();
         } finally {
-            \BCC\Trust\Core\Repositories\DatabaseLockRepository::release($lockKey);
+            \BCC\Core\DB\AdvisoryLock::release($lockKey);
         }
     }
 

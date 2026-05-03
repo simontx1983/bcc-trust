@@ -4,7 +4,7 @@
  *
  * Handles X OAuth 2.0 authentication flow with PKCE.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage X
  * @version 1.0.0
  */

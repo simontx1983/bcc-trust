@@ -5,7 +5,7 @@
  * Thin HTTP adapter — validates requests, delegates all domain logic to
  * XVerificationService, and formats responses.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage Controllers
  * @version 1.0.0
  */
@@ -20,6 +20,7 @@ use Exception;
 use BCC\Trust\Core\Security\RateLimiter;
 use BCC\Trust\Core\Services\x\XOAuthService;
 use BCC\Trust\Core\Services\x\XVerificationService;
+use BCC\Trust\Core\Support\FrontendRedirect;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -68,9 +69,17 @@ class XController {
     }
 
     /**
-     * Return X OAuth authorisation URL
+     * Return X OAuth authorisation URL.
+     *
+     * Accepts an optional `return_to` query parameter — a fully-qualified
+     * URL on the BCC_FRONTEND_ORIGIN allowlist. When supplied, the OAuth
+     * callback redirects the user back to that URL with the verification
+     * outcome appended; without it, the callback falls back to a default
+     * frontend path. Persisted in user meta so the callback (which arrives
+     * cross-origin from twitter.com) can read it without depending on a
+     * third-party cookie.
      */
-    public static function getAuthUrl(): WP_REST_Response|WP_Error {
+    public static function getAuthUrl(WP_REST_Request $request): WP_REST_Response|WP_Error {
         try {
             $oauth = new XOAuthService();
             if (!$oauth->isConfigured()) {
@@ -84,6 +93,22 @@ class XController {
                 delete_user_meta($uid, '_bcc_x_nonce');
                 delete_user_meta($uid, '_bcc_x_state_expires');
                 delete_user_meta($uid, '_bcc_x_code_verifier');
+
+                // Persist a validated return URL for the callback. Reject
+                // anything off-allowlist silently — the callback will fall
+                // back to the default frontend path. Never echo the raw
+                // input back, even on reject.
+                $returnToRaw = (string) $request->get_param('return_to');
+                if ($returnToRaw !== '') {
+                    $validated = FrontendRedirect::validateReturnTo($returnToRaw);
+                    if ($validated !== null) {
+                        update_user_meta($uid, '_bcc_x_return_to', $validated);
+                    } else {
+                        delete_user_meta($uid, '_bcc_x_return_to');
+                    }
+                } else {
+                    delete_user_meta($uid, '_bcc_x_return_to');
+                }
             }
 
             $authUrl = (new XVerificationService())->getAuthUrl();
@@ -142,31 +167,53 @@ class XController {
 
             (new XVerificationService())->connect($userId, $code);
 
-            // Return to the quest tab if the user came from there.
-            $returnUrl = $_COOKIE['bcc_x_return'] ?? '';
-            if ($returnUrl && wp_validate_redirect($returnUrl, '')) {
-                setcookie('bcc_x_return', '', time() - 3600, '/');
-                wp_safe_redirect(add_query_arg('x_verified', 'success', $returnUrl));
-            } else {
-                wp_safe_redirect(add_query_arg('x_verified', 'success', home_url('/profile/')));
+            // Return URL resolution order:
+            //   1. user meta `_bcc_x_return_to` (set by getAuthUrl on this user)
+            //   2. legacy cookie `bcc_x_return` (only fires for same-origin
+            //      WP-side callers — the headless frontend can't set this
+            //      cross-origin)
+            //   3. BCC_FRONTEND_ORIGIN + /settings/identity (default fallback)
+            //   4. home_url('/profile/') (when frontend origin is unconfigured)
+            $returnUrl = (string) get_user_meta($userId, '_bcc_x_return_to', true);
+            if ($returnUrl !== '') {
+                delete_user_meta($userId, '_bcc_x_return_to');
             }
+            if ($returnUrl === '') {
+                $cookieValue = $_COOKIE['bcc_x_return'] ?? '';
+                if (is_string($cookieValue) && $cookieValue !== '' && wp_validate_redirect($cookieValue, '')) {
+                    $returnUrl = $cookieValue;
+                    setcookie('bcc_x_return', '', time() - 3600, '/');
+                }
+            }
+            if ($returnUrl === '') {
+                $returnUrl = FrontendRedirect::defaultReturn('/settings/identity');
+            }
+            wp_safe_redirect(add_query_arg('x_verified', 'success', $returnUrl));
             exit;
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::error('[bcc-trust] X callback error', ['detail' => $e->getMessage()]);
 
+            $errorReturnUrl = '';
             if ($userId) {
+                $errorReturnUrl = (string) get_user_meta($userId, '_bcc_x_return_to', true);
                 delete_user_meta($userId, '_bcc_x_state');
                 delete_user_meta($userId, '_bcc_x_nonce');
                 delete_user_meta($userId, '_bcc_x_state_expires');
                 delete_user_meta($userId, '_bcc_x_code_verifier');
+                delete_user_meta($userId, '_bcc_x_return_to');
             }
 
-            // Return to quest tab with error detail so the user sees what went wrong.
-            $returnUrl = $_COOKIE['bcc_x_return'] ?? '';
-            $errorBase = ($returnUrl && wp_validate_redirect($returnUrl, ''))
-                ? $returnUrl
-                : home_url('/');
+            if ($errorReturnUrl === '') {
+                $cookieValue = $_COOKIE['bcc_x_return'] ?? '';
+                if (is_string($cookieValue) && $cookieValue !== '' && wp_validate_redirect($cookieValue, '')) {
+                    $errorReturnUrl = $cookieValue;
+                }
+            }
+            if ($errorReturnUrl === '') {
+                $errorReturnUrl = FrontendRedirect::defaultReturn('/settings/identity');
+            }
+            $errorBase = $errorReturnUrl;
             setcookie('bcc_x_return', '', time() - 3600, '/');
 
             // Never reflect raw exception messages into the redirect URL —
@@ -269,14 +316,16 @@ class XController {
     }
 
     /**
-     * Disconnect X for the current user
+     * Disconnect X for the current user.
+     *
+     * CSRF protection: bearer JWT auth (the BearerAuth middleware that
+     * runs before permission_check) is sufficient. The previous
+     * `wp_verify_nonce('wp_rest')` check was incompatible with headless
+     * bearer-only callers because they have no way to mint a wp_rest
+     * nonce. permission_check enforces logged-in + not-suspended.
      */
     public static function disconnect(WP_REST_Request $request): WP_REST_Response|WP_Error {
-        $nonce = $request->get_header('X-WP-Nonce');
-        if (!$nonce || !wp_verify_nonce($nonce, 'wp_rest')) {
-            return new WP_Error('invalid_nonce', 'Security check failed', ['status' => 403]);
-        }
-
+        unset($request);
         try {
             $result = (new XVerificationService())->disconnect(get_current_user_id());
 

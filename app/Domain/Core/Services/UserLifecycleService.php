@@ -54,13 +54,10 @@ class UserLifecycleService
         add_action('wp_ajax_bcc_trust_bulk_sync_users', [$this, 'ajaxBulkSyncUsers']);
         add_action('wp_ajax_bcc_trust_init_page_score', [$this, 'ajaxInitPageScore']);
 
-        // Quest: Share on X completion (logged-in users only via wp_ajax_)
-        add_action('wp_ajax_bcc_quest_complete_share_x', [__CLASS__, 'ajaxCompleteShareX']);
-
-        // Quest: Disconnect verification accounts
-        add_action('wp_ajax_bcc_quest_disconnect', [__CLASS__, 'ajaxQuestDisconnect']);
-
         // NOTE: bcc_trust_archive_activity_event hook removed — retired cron, never scheduled.
+        // NOTE: bcc_quest_complete_share_x and bcc_quest_disconnect AJAX handlers
+        // retired in the FSE/blocks cleanup — replace with REST endpoints if/when
+        // the quest UI returns in Next.js.
     }
 
     public function onUserRegister(int $userId): void
@@ -258,98 +255,6 @@ class UserLifecycleService
 
         $this->scoreRepo->initializeForPage($pageId, $ownerId);
         wp_send_json_success(['message' => 'Page score initialized', 'page_id' => $pageId]);
-    }
-
-    /**
-     * AJAX: Verify the "Share on X" quest via API.
-     * Called from the quest dashboard when the user clicks "I posted it!".
-     * Checks the X API for a recent tweet containing the site URL.
-     */
-    public static function ajaxCompleteShareX(): void
-    {
-        // CSRF protection — action-scoped nonce. The 'wp_rest' nonce was
-        // previously reused here, but a single broad nonce action is a
-        // weaker authorisation signal than one tied to the specific
-        // mutation. The matching nonce is localised as bccQuestShareXNonce
-        // in templates/profile-quests.php (action 'bcc_quest_share_x').
-        if (!check_ajax_referer('bcc_quest_share_x', '_wpnonce', false)) {
-            wp_send_json_error(['message' => 'Security check failed'], 403);
-        }
-
-        $userId = get_current_user_id();
-        if (!$userId) {
-            wp_send_json_error(['message' => 'Not logged in']);
-        }
-
-        // Already done?
-        $questService = Plugin::instance()->questProgressService();
-        $progress     = $questService->getProgress($userId);
-        if (!empty($progress['quests']['share_x']['done'])) {
-            wp_send_json_success(['message' => 'Already complete']);
-        }
-
-        // Fire the quest signal — validator checks the X API
-        do_action('bcc_trust_quest_signal', $userId, 'share_x');
-
-        // Check if it completed
-        $questService->invalidateCache($userId);
-        $progress = $questService->getProgress($userId);
-        if (!empty($progress['quests']['share_x']['done'])) {
-            wp_send_json_success(['message' => 'Tweet verified! Quest complete.']);
-        } else {
-            wp_send_json_error(['message' => 'Tweet not found yet. Make sure you posted the tweet with your profile link, then try again.']);
-        }
-    }
-
-    /**
-     * AJAX: Disconnect a verified account (X or GitHub) and revoke its quest.
-     */
-    public static function ajaxQuestDisconnect(): void
-    {
-        // CSRF protection — action-scoped nonce. Previously verified against
-        // the broad 'wp_rest' nonce (also used for every REST request);
-        // tightening to the dedicated 'bcc_quest_disconnect' action prevents
-        // the same nonce from authorising unrelated mutations. The matching
-        // nonce is localised as bccQuestDisconnectNonce in
-        // templates/profile-quests.php.
-        if (!check_ajax_referer('bcc_quest_disconnect', '_wpnonce', false)) {
-            wp_send_json_error(['message' => 'Security check failed'], 403);
-        }
-
-        $userId = get_current_user_id();
-        if (!$userId) {
-            wp_send_json_error(['message' => 'Not logged in']);
-        }
-
-        $slug = sanitize_key((string) ($_POST['slug'] ?? ''));
-        $allowed = ['verify_x', 'verify_github'];
-        if (!in_array($slug, $allowed, true)) {
-            wp_send_json_error(['message' => 'Invalid action']);
-        }
-
-        try {
-            if ($slug === 'verify_x') {
-                (new \BCC\Trust\Core\Services\x\XVerificationService())->disconnect($userId);
-            } elseif ($slug === 'verify_github') {
-                (new \BCC\Trust\Core\Services\github\GitHubVerificationService())->disconnect($userId);
-            }
-
-            wp_send_json_success(['message' => 'Disconnected']);
-        } catch (\Throwable $e) {
-            // Log the real error at ERROR level for operators; return a
-            // generic message to the client. Leaking raw exception text
-            // exposes internal implementation (DB errors, token-store
-            // layout, contract signatures) to any logged-in user who can
-            // trigger the failure path — a reconnaissance aid.
-            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] quest disconnect failed', [
-                    'user_id' => $userId,
-                    'slug'    => $slug,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-            wp_send_json_error(['message' => 'Failed to disconnect.']);
-        }
     }
 
     /**

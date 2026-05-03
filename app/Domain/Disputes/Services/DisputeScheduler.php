@@ -60,8 +60,8 @@ class DisputeScheduler
      * so the interval is available during the activation hook AND at cron
      * run time — independently of plugin activation order.
      *
-     * Idempotent: only adds the interval if another plugin (e.g.
-     * bcc-trust-engine's CronService) hasn't already registered it.
+     * Idempotent: only adds the interval if another caller (e.g.
+     * bcc-trust's Core CronService) hasn't already registered it.
      *
      * @param array<string, array{interval: int, display: string}> $schedules
      * @return array<string, array{interval: int, display: string}>
@@ -703,7 +703,7 @@ class DisputeScheduler
             . sprintf(
                 '%d dispute(s) have been waiting over 1 hour for trust adjudication. '
                 . 'The trust engine adjudication service may be unavailable. '
-                . 'Check the <code>bcc-trust-engine</code> plugin status.',
+                . 'Check the <code>bcc-trust</code> plugin status.',
                 (int) $staleCount
             )
             . '</p></div>'

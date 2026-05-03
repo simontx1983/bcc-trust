@@ -72,6 +72,63 @@ class ClaimRepository {
     }
 
     /**
+     * Bulk-check which user_ids hold ANY verified operator/creator
+     * claim. Used by FeedRankingService to flip the §N8 OPERATOR
+     * badge on feed-item authors without an N+1 lookup.
+     *
+     * Returns the subset of $userIds that have at least one such
+     * claim (across any entity_type / entity_id). Users with no
+     * verified operator/creator claim are simply absent from the
+     * result.
+     *
+     * Bounded by the feed-page cap (50 items, so 50 distinct authors
+     * worst case) — single GROUP BY query, no fanout.
+     *
+     * @param list<int> $userIds
+     * @return array<int, true> map keyed by user_id for O(1) lookup
+     */
+    public static function getOperatorUserIdSet(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        // Sanitize + dedupe + bound.
+        $ids = [];
+        foreach ($userIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $idList = implode(',', array_keys($ids));
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{user_id: numeric-string}>|null $rows */
+        $rows = $wpdb->get_results(
+            "SELECT DISTINCT user_id
+               FROM {$table}
+              WHERE user_id IN ({$idList})
+                AND status     = 'verified'
+                AND claim_role IN ('operator','creator')"
+        );
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $uid = (int) $row->user_id;
+            if ($uid > 0) {
+                $out[$uid] = true;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Insert or update a claim. UNIQUE on (user_id, entity_type, entity_id).
      *
      * @return array{id: int, inserted: bool}|false Claim data or false on failure.
@@ -200,6 +257,40 @@ class ClaimRepository {
         ));
 
         return $rows ?: [];
+    }
+
+    /**
+     * Bulk lookup by claim id — used by the feed-body hydrator to
+     * resolve page_claim activity rows (act_external_id is the
+     * claim id) in one round-trip.
+     *
+     * Bounded by LIMIT 100 — feed pages cap at 50, with margin.
+     *
+     * @param list<int> $ids
+     * @return array<int, ClaimRow>
+     */
+    public static function findManyByIds(array $ids): array {
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+
+        /** @var list<ClaimRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$table}
+              WHERE id IN ({$placeholders})
+              LIMIT 100",
+            ...$ids
+        ));
+
+        $map = [];
+        foreach ($rows ?: [] as $row) {
+            $map[(int) $row->id] = $row;
+        }
+        return $map;
     }
 
     /**

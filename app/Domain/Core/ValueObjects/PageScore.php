@@ -60,20 +60,14 @@ class PageScore {
     public const SCORE_TOLERANCE = 0.5;
 
     /**
-     * Canonical formula: expected total score from components.
+     * Expected total score from components.
      *
-     * This is the ONE implementation. `validateScores()` below, the debug
-     * panel's `formula_check`, the repair service's reconciliation, and the
-     * intent-guard runtime invariant ALL read from here. If you change the
-     * scoring formula, change it in this method and nowhere else — silent
-     * divergence between production code and verification tooling is
-     * exactly the failure mode this method exists to prevent.
-     *
-     * Formula:
-     *     total = clamp(0..100, NEUTRAL
-     *                           + (positive - negative) * 2
-     *                           + endorsement_bonus
-     *                           + onchain_bonus)
+     * Thin delegate over the canonical implementation in
+     * \BCC\Trust\Core\Services\TrustScoreService::compute(). Kept as a
+     * static method on this VO for backward compatibility with existing
+     * callers (validateScores() below, debug panel's `formula_check`, the
+     * repair service's reconciliation, and the intent-guard runtime
+     * invariant) — but the formula itself lives in ONE place per §A4.
      *
      * @param float $positive         positive_score column
      * @param float $negative         negative_score column
@@ -86,12 +80,12 @@ class PageScore {
         float $endorsementBonus,
         float $onchainBonus
     ): float {
-        $raw = (float) BCC_TRUST_NEUTRAL_SCORE
-             + (($positive - $negative) * 2.0)
-             + $endorsementBonus
-             + $onchainBonus;
-
-        return max(0.0, min(100.0, $raw));
+        return \BCC\Trust\Core\Services\TrustScoreService::compute(
+            $positive,
+            $negative,
+            $endorsementBonus,
+            $onchainBonus
+        );
     }
 
 

@@ -33,7 +33,7 @@ final class BonusService
     /**
      * Apply an on-chain bonus to a page's trust score.
      *
-     * Delegates to bcc-trust-engine via ScoreContributorInterface.
+     * Delegates to bcc-trust's Core domain via ScoreContributorInterface.
      * If unavailable, queues for retry.
      */
     public static function applyBonus(int $pageId, float $bonus): void

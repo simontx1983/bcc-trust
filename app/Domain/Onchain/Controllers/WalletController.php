@@ -4,6 +4,7 @@ namespace BCC\Trust\Onchain\Controllers;
 
 use BCC\Core\Wallet\WalletIdentityService;
 use BCC\Core\Wallet\WalletVerificationRequest;
+use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Core\Log\Logger;
@@ -40,7 +41,6 @@ class WalletController
         add_action('wp_ajax_bcc_wallet_list',         [__CLASS__, 'ajax_list']);
         add_action('wp_ajax_bcc_collection_toggle_profile', [__CLASS__, 'ajax_toggle_collection_profile']);
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
-        add_action('wp_enqueue_scripts', [__CLASS__, 'enqueue_assets']);
     }
 
     // ── AJAX: Generate Challenge ─────────────────────────────────────────────
@@ -288,6 +288,22 @@ class WalletController
             },
         ]);
 
+        register_rest_route('bcc/v1', '/wallets/(?P<id>\d+)', [
+            'methods'             => \WP_REST_Server::DELETABLE,
+            'callback'            => [__CLASS__, 'rest_unlink_wallet'],
+            'permission_callback' => function () {
+                return is_user_logged_in() && \BCC\Core\Permissions\Permissions::is_not_suspended();
+            },
+            'args' => [
+                'id' => [
+                    'required'          => true,
+                    'type'              => 'integer',
+                    'minimum'           => 1,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ]);
+
         register_rest_route('bcc/v1', '/wallets/project/(?P<post_id>\d+)', [
             'methods'             => \WP_REST_Server::READABLE,
             'callback'            => [__CLASS__, 'rest_project_wallets'],
@@ -305,12 +321,53 @@ class WalletController
 
     public static function rest_list_wallets(\WP_REST_Request $req): \WP_REST_Response
     {
+        unset($req);
         if (!\BCC\Core\Security\Throttle::allow('list_wallets', 30, 60)) {
-            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $wallets = WalletRepository::getForUser(get_current_user_id());
-        return rest_ensure_response(array_map([self::class, 'projectWalletFields'], $wallets));
+        $items   = array_map([self::class, 'projectWalletFields'], $wallets);
+
+        $resp = ApiResponse::ok(['items' => $items]);
+        $resp->header('Cache-Control', 'no-store');
+        return $resp;
+    }
+
+    /**
+     * DELETE /wallets/:id — unlink a wallet owned by the current user.
+     *
+     * The repository's delete enforces (id, user_id) match in the WHERE
+     * clause, so passing a foreign wallet_link_id is a no-op (returns
+     * `removed: false`). We don't 404 in that case because it would
+     * leak whether `:id` exists for someone else.
+     */
+    public static function rest_unlink_wallet(\WP_REST_Request $req): \WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+        if (!\BCC\Core\Security\Throttle::allow('unlink_wallet:' . $userId, 10, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
+        $walletLinkId = (int) $req->get_param('id');
+        if ($walletLinkId <= 0) {
+            return ApiResponse::error('bcc_invalid_request', 'Wallet id is required.', 400);
+        }
+
+        $removed = WalletRepository::delete($walletLinkId, $userId);
+
+        // Idempotent: removed=false on a foreign or already-deleted id
+        // lets a double-tap unlink succeed without confusing the UI.
+        $resp = ApiResponse::ok([
+            'ok'      => true,
+            'id'      => $walletLinkId,
+            'removed' => $removed,
+        ]);
+        $resp->header('Cache-Control', 'no-store');
+        return $resp;
     }
 
     public static function rest_project_wallets(\WP_REST_Request $req): \WP_REST_Response
@@ -392,48 +449,6 @@ class WalletController
     // ── Signature Verification ───────────────────────────────────────────────
     // All crypto verification is handled by \BCC\Core\Crypto\WalletVerifier.
 
-    // ── Frontend Assets ──────────────────────────────────────────────────────
-
-    public static function enqueue_assets(): void
-    {
-        if (!is_user_logged_in()) {
-            return;
-        }
-
-        wp_enqueue_script(
-            'bcc-wallet-connect',
-            BCC_TRUST_URL . 'assets/js/bcc-wallet-connect.js',
-            [],
-            BCC_TRUST_VERSION,
-            true
-        );
-
-        wp_localize_script('bcc-wallet-connect', 'bccWallet', [
-            'ajaxUrl' => admin_url('admin-ajax.php'),
-            'nonce'   => wp_create_nonce('bcc_wallet_nonce'),
-            'chains'  => self::getChainsForJs(),
-            'i18n'    => [
-                'connect'        => __('Connect Wallet', 'bcc-onchain'),
-                'disconnect'     => __('Disconnect', 'bcc-onchain'),
-                'verify'         => __('Verify Ownership', 'bcc-onchain'),
-                'signing'        => __('Signing…', 'bcc-onchain'),
-                'verifying'      => __('Verifying…', 'bcc-onchain'),
-                'verified'       => __('Verified', 'bcc-onchain'),
-                'failed'         => __('Verification failed', 'bcc-onchain'),
-                'expired'        => __('Challenge expired, try again', 'bcc-onchain'),
-                'no_wallet'      => __('No wallet detected', 'bcc-onchain'),
-                'already_linked' => __('This wallet is already linked', 'bcc-onchain'),
-            ],
-        ]);
-
-        wp_enqueue_style(
-            'bcc-wallet-connect',
-            BCC_TRUST_URL . 'assets/css/bcc-wallet-connect.css',
-            [],
-            BCC_TRUST_VERSION
-        );
-    }
-
     // ── AJAX: Toggle Collection Profile Visibility ─────────────────────────
 
     public static function ajax_toggle_collection_profile(): void
@@ -462,40 +477,16 @@ class WalletController
     }
 
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
-    /** @return array<int, array<string, mixed>> */
-    private static function getChainsForJs(): array
-    {
-        $chains = ChainRepository::getActive();
-        $result = [];
-
-        foreach ($chains as $chain) {
-            $result[] = [
-                'id'           => (int) $chain->id,
-                'slug'         => $chain->slug,
-                'name'         => $chain->name,
-                'chain_type'   => $chain->chain_type,
-                'chain_id_hex' => $chain->chain_id_hex,
-                'explorer_url' => $chain->explorer_url,
-                'native_token' => $chain->native_token,
-                'icon_url'     => $chain->icon_url,
-            ];
-        }
-
-        return $result;
-    }
-
     /**
      * Validate wallet address format against the chain type.
+     *
+     * Delegates to the shared validator so the V1 REST endpoint
+     * (AuthEndpoint) and the legacy AJAX path here use identical
+     * matching rules — extracting one was the contract-correction
+     * trigger; both call sites now route through the same code.
      */
     private static function validateAddressFormat(string $address, string $chainType): bool
     {
-        return match ($chainType) {
-            'evm'    => (bool) preg_match('/^0x[a-fA-F0-9]{40}$/', $address),
-            'solana' => (bool) preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/', $address),
-            'cosmos' => (bool) preg_match('/^[a-z]{1,20}1[a-z0-9]{38,58}$/', $address),
-            default  => strlen($address) >= 10 && strlen($address) <= 128,
-        };
+        return \BCC\Trust\Core\Support\WalletAddressValidator::validate($address, $chainType);
     }
 }

@@ -2,7 +2,7 @@
 /**
  * Admin Dashboard - Top Pages & All Pages Tabs
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

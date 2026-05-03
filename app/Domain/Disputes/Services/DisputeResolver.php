@@ -4,6 +4,7 @@ namespace BCC\Trust\Disputes\Services;
 
 use BCC\Core\Contracts\DisputeAdjudicationInterface;
 use BCC\Core\ServiceLocator;
+use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Disputes\Services\DisputeNotificationService;
 use BCC\Core\Log\Logger as CoreLogger;
@@ -160,6 +161,35 @@ final class DisputeResolver
                 'actual_status' => $adjStatus,
             ]);
             return false;
+        }
+
+        // §D5 — backfill outcome_match on every credited participation
+        // row attached to this dispute. We map the dispute-status enum
+        // ('accepted'/'rejected') to the panel-vote enum ('accept'/
+        // 'reject') the participation rows store. timeout_no_quorum
+        // disputes intentionally leave outcome_match NULL — there's no
+        // "correct" answer when quorum failed.
+        if ($outcome === 'accepted' || $outcome === 'rejected') {
+            $finalDecision = $outcome === 'accepted' ? 'accept' : 'reject';
+            try {
+                $participationRepo = new DisputeParticipationRepository();
+                $updated = $participationRepo->backfillOutcomeMatch($disputeId, $finalDecision);
+                CoreLogger::audit('dispute_participation_backfilled', [
+                    'dispute_id' => $disputeId,
+                    'outcome'    => $outcome,
+                    'rows'       => $updated,
+                ]);
+            } catch (\Throwable $e) {
+                // Backfill failure is non-fatal: the dispute is already
+                // resolved and the panelist's credited rows still exist —
+                // they just don't get an accuracy mark. A reconciliation
+                // sweep can pick them up later if we add one.
+                CoreLogger::error('[bcc-disputes] participation_backfill_failed', [
+                    'dispute_id' => $disputeId,
+                    'outcome'    => $outcome,
+                    'error'      => $e->getMessage(),
+                ]);
+            }
         }
 
         // Reporter penalty is now owned by the trust-engine inside its own

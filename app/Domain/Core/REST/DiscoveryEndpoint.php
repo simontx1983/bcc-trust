@@ -186,23 +186,28 @@ class DiscoveryEndpoint {
         }
 
         // Stampede lock: only one request rebuilds the cache on miss.
-        // Losers serve stale data (empty array) instead of hammering DB.
-        $lockKey = "lock_{$cacheKey}";
-        if (!wp_cache_add($lockKey, 1, 'bcc_discovery', 3)) {
+        // MySQL GET_LOCK is atomic across all DB sessions regardless of
+        // cache backend. Losers serve stale data (empty array) instead
+        // of hammering DB.
+        $lockKey = "bcc_disc_{$cacheKey}";
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
             // Another request is already rebuilding — serve stale or empty.
             $stale = wp_cache_get($cacheKey . '_stale', 'bcc_discovery');
             return new WP_REST_Response($stale !== false ? $stale : [], 200);
         }
 
-        $service = new PageDiscoveryService();
-        $result  = $service->query($params);
+        try {
+            $service = new PageDiscoveryService();
+            $result  = $service->query($params);
 
-        // Store both fresh and stale copies. Stale copy persists longer
-        // so stampede losers have something to serve during rebuilds.
-        wp_cache_set($cacheKey, $result, 'bcc_discovery', 30);
-        wp_cache_set($cacheKey . '_stale', $result, 'bcc_discovery', 120);
-        wp_cache_delete($lockKey, 'bcc_discovery');
+            // Store both fresh and stale copies. Stale copy persists longer
+            // so stampede losers have something to serve during rebuilds.
+            wp_cache_set($cacheKey, $result, 'bcc_discovery', 30);
+            wp_cache_set($cacheKey . '_stale', $result, 'bcc_discovery', 120);
 
-        return new WP_REST_Response($result, 200);
+            return new WP_REST_Response($result, 200);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lockKey);
+        }
     }
 }

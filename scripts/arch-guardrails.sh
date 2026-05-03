@@ -23,11 +23,13 @@ PLUGINS_DIR="$(cd "$SCRIPT_DIR/../../" && pwd)"
 
 JSON_MODE=false
 TARGET=""
+WITH_CONTRACT=false
 
 for arg in "$@"; do
     case "$arg" in
-        --json) JSON_MODE=true ;;
-        *)      TARGET="$arg" ;;
+        --json)          JSON_MODE=true ;;
+        --with-contract) WITH_CONTRACT=true ;;
+        *)               TARGET="$arg" ;;
     esac
 done
 
@@ -216,6 +218,172 @@ check_php_syntax() {
     done < <(find "${src_dirs[@]}" -name '*.php' 2>/dev/null | head -200)
 }
 
+# ── Rule 6: No add_shortcode( in BCC plugins ────────────────────────────────
+#
+# Per the headless architecture (CLAUDE.md §8: No UI in PHP), all user-facing
+# UI lives in bcc-frontend (Next.js). Shortcodes render HTML — they're a UI
+# surface and must not return.
+#
+# Allowed scopes for the search:
+#   app/, src/, includes/  (anywhere code is)
+# Exempt:
+#   tests/, vendor/
+
+check_no_shortcodes() {
+    local plugin="$1"
+    local plugin_dir="$PLUGINS_DIR/$plugin"
+
+    local -a search_dirs=()
+    for d in app src includes; do
+        [[ -d "$plugin_dir/$d" ]] && search_dirs+=("$plugin_dir/$d")
+    done
+    local -a root_files=()
+    while IFS= read -r f; do
+        root_files+=("$f")
+    done < <(find "$plugin_dir" -maxdepth 1 -name '*.php' 2>/dev/null)
+
+    [[ ${#search_dirs[@]} -eq 0 && ${#root_files[@]} -eq 0 ]] && return
+
+    while IFS=: read -r file line content; do
+        # Skip comments
+        if echo "$content" | grep -qE '^\s*(//|\*|#)'; then
+            continue
+        fi
+        local rel="${file#$PLUGINS_DIR/}"
+        violation "$plugin" "NO_SHORTCODES" "$rel" "$line" "— add_shortcode() forbidden (No UI in PHP)"
+    done < <(grep -rn 'add_shortcode\s*(' "${search_dirs[@]}" "${root_files[@]}" --include='*.php' 2>/dev/null || true)
+}
+
+# ── Rule 7: No register_block_type( anywhere in BCC plugins ─────────────────
+#
+# Per the headless architecture, FSE/Gutenberg blocks are not the rendering
+# layer. Registering a block surface is a regression to the hybrid path.
+
+check_no_block_registration() {
+    local plugin="$1"
+    local plugin_dir="$PLUGINS_DIR/$plugin"
+
+    [[ -d "$plugin_dir" ]] || return
+
+    while IFS=: read -r file line content; do
+        if echo "$content" | grep -qE '^\s*(//|\*|#)'; then
+            continue
+        fi
+        local rel="${file#$PLUGINS_DIR/}"
+        violation "$plugin" "NO_BLOCK_REG" "$rel" "$line" "— register_block_type() forbidden (No UI in PHP)"
+    done < <(grep -rn 'register_block_type\s*(' "$plugin_dir" --include='*.php' --exclude-dir=vendor --exclude-dir=tests 2>/dev/null || true)
+}
+
+# ── Rule 8: No templates/ directory in BCC plugins ──────────────────────────
+#
+# templates/ holds PHP-rendered HTML that gets `include`d. Even an empty
+# directory invites regressions — fail if it exists at all.
+
+check_no_templates_dir() {
+    local plugin="$1"
+    local plugin_dir="$PLUGINS_DIR/$plugin"
+
+    if [[ -d "$plugin_dir/templates" ]]; then
+        violation "$plugin" "NO_TEMPLATE_DIR" "templates/" "" "— directory forbidden (No UI in PHP); delete it"
+    fi
+}
+
+# ── Rule 9: No HTML echo in services/controllers ────────────────────────────
+#
+# Services and controllers must return arrays/DTOs/JSON. echo of HTML is a
+# rendering act that belongs in the Next.js frontend, not in PHP.
+#
+# DOCUMENTED EXCEPTION (CLAUDE.md §8): wp-admin pages and admin notices
+# render in PHP today (V2 retirement target — Next.js admin app).
+# Auto-exempt:
+#   - Files under any */Admin/ directory
+#   - Files containing an add_action('admin_notices', ...) subscription
+
+check_no_html_echo() {
+    local plugin="$1"
+    local plugin_dir="$PLUGINS_DIR/$plugin"
+
+    local -a search_dirs=()
+    for d in \
+        app/Domain/Core/Services \
+        app/Domain/Core/Controllers \
+        app/Domain/Core/REST \
+        app/Domain/Core/Application \
+        app/Domain/Disputes/Services \
+        app/Domain/Disputes/Controllers \
+        app/Domain/Onchain/Services \
+        app/Domain/Onchain/Controllers \
+        app/Services \
+        app/Controllers \
+        src \
+    ; do
+        [[ -d "$plugin_dir/$d" ]] && search_dirs+=("$plugin_dir/$d")
+    done
+
+    [[ ${#search_dirs[@]} -eq 0 ]] && return
+
+    while IFS=: read -r file line content; do
+        # Skip comments
+        if echo "$content" | grep -qE '^\s*(//|\*|#)'; then
+            continue
+        fi
+        local rel="${file#$PLUGINS_DIR/}"
+
+        # Documented admin exceptions
+        # 1. Files under any */Admin/ directory
+        if echo "$rel" | grep -q '/Admin/'; then
+            continue
+        fi
+        # 2. Files containing an admin_notices hook subscription (file-local)
+        if grep -q "admin_notices" "$file" 2>/dev/null; then
+            continue
+        fi
+        # 3. Methods named *Notice (subscribed externally to admin_notices).
+        #    Inspect 30 lines back for the most recent function declaration.
+        local fn_name
+        fn_name=$(sed -n "$((line > 30 ? line - 30 : 1)),${line}p" "$file" 2>/dev/null \
+                    | grep -oE 'function\s+[a-zA-Z_][a-zA-Z0-9_]*' \
+                    | tail -1 \
+                    | awk '{print $2}')
+        if [[ -n "$fn_name" ]] && echo "$fn_name" | grep -qi 'notice'; then
+            continue
+        fi
+
+        violation "$plugin" "NO_HTML_ECHO" "$rel" "$line" "— echo of HTML in service/controller (No UI in PHP)"
+    done < <(grep -rEn "echo\s+['\"]<" "${search_dirs[@]}" --include='*.php' 2>/dev/null || true)
+}
+
+# ── Rule 10: API contract check (opt-in via --with-contract) ────────────────
+#
+# Runs scripts/api-contract-check.sh which hits the live site and verifies
+# the response envelope, error envelope, and pagination shapes match the
+# contract locked in docs/api-contract-v1.md. Requires the local site to be
+# running. Opt-in because static rules should run without network access.
+#
+# CI MUST pass --with-contract.
+
+check_api_contract() {
+    local plugin="$1"
+
+    # Only run once, on the first plugin in the loop, since the script is
+    # ecosystem-wide (not per-plugin).
+    if [[ "$plugin" != "${PLUGINS[0]}" ]]; then
+        return
+    fi
+
+    local script_path="$SCRIPT_DIR/api-contract-check.sh"
+    if [[ ! -x "$script_path" && ! -f "$script_path" ]]; then
+        return
+    fi
+
+    $JSON_MODE || echo -e "\n${BOLD}Running API contract check${NC}"
+    if bash "$script_path" >/dev/null 2>&1; then
+        $JSON_MODE || echo -e "  ${GREEN}CLEAN${NC} (api-contract-check.sh passed)"
+    else
+        violation "ecosystem" "API_CONTRACT_CHECK" "scripts/api-contract-check.sh" "" "— contract drift detected; run script directly for details"
+    fi
+}
+
 # ── Run all checks ───────────────────────────────────────────────────────────
 
 for plugin in "${PLUGINS[@]}"; do
@@ -231,9 +399,16 @@ for plugin in "${PLUGINS[@]}"; do
     check_select_star "$plugin"
     check_template_queries "$plugin"
     check_unbounded_queries "$plugin"
+    check_no_shortcodes "$plugin"
+    check_no_block_registration "$plugin"
+    check_no_templates_dir "$plugin"
+    check_no_html_echo "$plugin"
     # PHP syntax check is slow (~2s/file) — enable for single-plugin scans only.
     if [[ -n "$TARGET" ]]; then
         check_php_syntax "$plugin"
+    fi
+    if $WITH_CONTRACT; then
+        check_api_contract "$plugin"
     fi
 
     $JSON_MODE || {

@@ -14,6 +14,7 @@ namespace BCC\Trust\Core\Services;
 
 if (!defined('ABSPATH')) exit;
 
+use BCC\Trust\Core\Repositories\ReputationEventRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 
@@ -21,12 +22,29 @@ class ReputationCalculatorService {
 
     private const DEFAULT_VOTE_WEIGHT = 1.0;
 
+    /**
+     * Minimum absolute score change to record as an event. Blocks
+     * float-drift noise from creating spurious "+0.00 / vote_recalc"
+     * rows on every recalc that produced an algebraically-equal result.
+     */
+    private const EVENT_NOISE_FLOOR = 0.01;
+
     private ReputationRepository $reputationRepo;
     private UserInfoRepository $userInfoRepo;
+    private ?ReputationEventRepository $eventRepo;
 
-    public function __construct(ReputationRepository $reputationRepo, ?UserInfoRepository $userInfoRepo = null) {
+    public function __construct(
+        ReputationRepository $reputationRepo,
+        ?UserInfoRepository $userInfoRepo = null,
+        ?ReputationEventRepository $eventRepo = null
+    ) {
         $this->reputationRepo = $reputationRepo;
         $this->userInfoRepo   = $userInfoRepo ?? new UserInfoRepository();
+        // Optional — when null, recalc still works but doesn't log
+        // events. Production wiring (Plugin.php) always passes the
+        // real repo; callers that legacy-construct without a Plugin
+        // container won't crash.
+        $this->eventRepo      = $eventRepo;
     }
 
     /**
@@ -76,8 +94,14 @@ class ReputationCalculatorService {
      * Fetches aggregate voting stats from the repository, computes a 0-100
      * reputation score from the positive/negative weight ratio, and persists
      * the result back through the repository.
+     *
+     * Also logs a bcc_reputation_events row when the score actually
+     * shifted (above EVENT_NOISE_FLOOR). The $reason argument is the
+     * caller's machine-readable code (e.g. 'vote_recalc',
+     * 'endorsement_recalc') and surfaces on the user view-model's
+     * progression.trust_score_recent_changes.
      */
-    public function recalculateUserReputation(int $userId): void {
+    public function recalculateUserReputation(int $userId, string $reason = 'manual_recalc'): void {
         $stats = $this->reputationRepo->getVotingStatsForOwner($userId);
 
         if (!$stats) {
@@ -98,9 +122,19 @@ class ReputationCalculatorService {
 
         $score = max(0.0, min(100.0, $score));
 
+        // Snapshot the BEFORE score before the persist call so we can
+        // log a delta event. If no row exists yet, getScore returns
+        // the default (NEUTRAL) — first-write deltas relative to that
+        // are accurate.
+        $scoreBefore = $this->reputationRepo->getScore($userId);
+
         $this->reputationRepo->createOrUpdate($userId, [
             'reputation_score'     => $score,
             'total_votes_received' => (int) $stats->unique_voters,
         ]);
+
+        if ($this->eventRepo !== null && abs($score - $scoreBefore) >= self::EVENT_NOISE_FLOOR) {
+            $this->eventRepo->record($userId, $scoreBefore, $score, $reason);
+        }
     }
 }

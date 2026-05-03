@@ -5,6 +5,7 @@ namespace BCC\Trust\Onchain\Services;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
+use BCC\Trust\Onchain\Repositories\DelegationRepository;
 use BCC\Trust\Onchain\Repositories\SignalRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -109,6 +110,23 @@ final class WalletSeedService
                     $validatorData = $fetcher->fetch_validator($address);
                     if (!empty($validatorData)) {
                         ValidatorRepository::upsert($validatorData, $walletLinkId, HOUR_IN_SECONDS);
+                    }
+                }
+            }
+
+            // Seed delegation set (which validators this wallet stakes to).
+            // Skip if already seeded — refreshes are owned by a separate
+            // scheduler, not the verify-time seed path.
+            if ($fetcher->supports_feature('delegations')) {
+                if (!DelegationRepository::existsForWalletLink($walletLinkId)) {
+                    $delegations = $fetcher->fetch_delegations($address);
+                    if (!empty($delegations)) {
+                        DelegationRepository::replaceForWalletLink(
+                            $walletLinkId,
+                            (int) $chainObj->id,
+                            $delegations,
+                            6 * HOUR_IN_SECONDS
+                        );
                     }
                 }
             }

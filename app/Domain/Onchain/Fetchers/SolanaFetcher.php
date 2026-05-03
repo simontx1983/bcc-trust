@@ -46,7 +46,7 @@ class SolanaFetcher implements FetcherInterface
 
     public function supports_feature(string $feature): bool
     {
-        return in_array($feature, ['validator', 'collection', 'top_collections'], true);
+        return in_array($feature, ['validator', 'collection', 'top_collections', 'holdings_count', 'holdings_list'], true);
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -69,6 +69,143 @@ class SolanaFetcher implements FetcherInterface
         }
 
         return [];
+    }
+
+    /**
+     * Delegation discovery requires getProgramAccounts against the stake
+     * program, which is disabled on public mainnet-beta RPC. Deferred until
+     * a paid RPC (Helius/QuickNode) is wired in.
+     *
+     * @return array<int, array{validator_address: string, shares?: string|null, amount?: float|null}>
+     */
+    public function fetch_delegations(string $delegatorAddress): array
+    {
+        return [];
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // HOLDINGS (per-wallet NFT ownership)
+    // ══════════════════════════════════════════════════════════════════
+
+    /**
+     * Count NFTs held in a specific collection. Client-side filters from
+     * getAssetsByOwner rather than using searchAssets — safer compatibility
+     * across DAS providers, and the HoldingsService cache means the cost
+     * lands once per refresh window, not per gate check.
+     */
+    public function count_holdings(string $wallet, string $contract): int
+    {
+        $items = $this->rpcCall('getAssetsByOwner', [
+            'ownerAddress'   => $wallet,
+            'displayOptions' => ['showCollectionMetadata' => false],
+            'limit'          => 1000,
+            'page'           => 1,
+        ]);
+
+        if (!is_array($items)) {
+            return 0;
+        }
+
+        $target = strtolower($contract);
+        $count  = 0;
+
+        foreach ($items as $raw) {
+            $asset = (object) $raw;
+            foreach ($asset->grouping ?? [] as $g) {
+                $g = (object) $g;
+                if (($g->group_key ?? '') === 'collection'
+                    && strtolower((string) ($g->group_value ?? '')) === $target
+                ) {
+                    $count++;
+                    break;
+                }
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * Enumerate per-asset NFT holdings for a wallet.
+     *
+     * Cursor is the DAS page number as a string. Filters out fungibles
+     * (token_standard != NFT) since the gallery view is NFT-specific.
+     *
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
+     */
+    public function list_holdings(string $wallet, ?string $cursor = null): array
+    {
+        $page  = max(1, (int) ($cursor ?: 1));
+        $limit = 500;
+
+        $items = $this->rpcCall('getAssetsByOwner', [
+            'ownerAddress'   => $wallet,
+            'displayOptions' => ['showCollectionMetadata' => true],
+            'limit'          => $limit,
+            'page'           => $page,
+        ]);
+
+        if (!is_array($items)) {
+            return ['items' => [], 'truncated' => false, 'cursor' => null];
+        }
+
+        $chainId = (int) $this->chain->id;
+        $nftInterfaces = ['V1_NFT', 'ProgrammableNFT', 'LEGACY_NFT', 'Custom'];
+
+        $result = [];
+        foreach ($items as $raw) {
+            $asset = (object) $raw;
+
+            $iface = $asset->interface ?? '';
+            if (!in_array($iface, $nftInterfaces, true)) {
+                continue;
+            }
+
+            $collectionAddr = null;
+            $collectionName = null;
+            foreach ($asset->grouping ?? [] as $g) {
+                $g = (object) $g;
+                if (($g->group_key ?? '') === 'collection') {
+                    $collectionAddr = $g->group_value ?? null;
+                    if (isset($g->collection_metadata)) {
+                        $collectionName = ((object) $g->collection_metadata)->name ?? null;
+                    }
+                    break;
+                }
+            }
+
+            $content  = (object) ($asset->content ?? []);
+            $metadata = (object) ($content->metadata ?? []);
+
+            $imageUrl = null;
+            $files    = $content->files ?? [];
+            if (is_array($files) && !empty($files)) {
+                $first    = (object) $files[0];
+                $imageUrl = $first->cdn_uri ?? $first->uri ?? null;
+            }
+            if (!$imageUrl && isset($metadata->image)) {
+                $imageUrl = $metadata->image;
+            }
+
+            $result[] = [
+                'contract_address' => $collectionAddr ?? (string) ($asset->id ?? ''),
+                'token_id'         => (string) ($asset->id ?? ''),
+                'chain_id'         => $chainId,
+                'collection_name'  => $collectionName,
+                'name'             => $metadata->name ?? null,
+                'image_url'        => is_string($imageUrl) ? $imageUrl : null,
+                'metadata_uri'     => isset($content->json_uri) ? (string) $content->json_uri : null,
+                'token_standard'   => 'Metaplex',
+            ];
+        }
+
+        $truncated = count($items) >= $limit;
+
+        return [
+            'items'     => $result,
+            'truncated' => $truncated,
+            'cursor'    => $truncated ? (string) ($page + 1) : null,
+        ];
     }
 
     /**

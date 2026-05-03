@@ -553,6 +553,15 @@ class CronService
                 'display'  => 'Every 5 Minutes',
             ];
         }
+        // §I1 weekly digest cadence. WP core registered `weekly` only
+        // recently and inconsistently across versions — registering our
+        // own keeps the schedule stable.
+        if (!isset($schedules['bcc_weekly'])) {
+            $schedules['bcc_weekly'] = [
+                'interval' => WEEK_IN_SECONDS,
+                'display'  => 'Once Weekly (BCC)',
+            ];
+        }
         return $schedules;
     }
 
@@ -566,6 +575,7 @@ class CronService
             'bcc_trust_daily_vesting'          => 'daily',    // vote/endorsement vesting
             'bcc_trust_process_recalculations' => 'bcc_five_minutes', // recalc queue processor
             'bcc_trust_daily_maintenance'      => 'daily',            // read model sync safety net
+            'bcc_trust_weekly_digest'          => 'bcc_weekly',       // §I1 email digest
         ];
 
         // Clear retired hooks so they don't fire orphaned actions.
@@ -620,8 +630,8 @@ class CronService
                 PageEndpoint::bustCacheForUser((int) $userId);
 
                 // Ensure an onchain_signals row exists so wallets verified via
-                // bcc-onchain-signals (AJAX path) still appear in trust scoring.
-                // Without this, only wallets verified through the trust-engine
+                // the Onchain domain's AJAX path still appear in trust scoring.
+                // Without this, only wallets verified through the Core domain's
                 // REST path would have scoring rows.
                 if ($chain && $address) {
                     $existing = WalletSignalRepository::getForUserChain((int) $userId, $chain);
@@ -709,12 +719,12 @@ class CronService
      */
     private function acquireLock(string $key, int $ttl = 0): bool
     {
-        return \BCC\Trust\Core\Repositories\DatabaseLockRepository::acquire($key, 0);
+        return \BCC\Core\DB\AdvisoryLock::acquire($key, 0);
     }
 
     private function releaseLock(string $key): void
     {
-        \BCC\Trust\Core\Repositories\DatabaseLockRepository::release($key);
+        \BCC\Core\DB\AdvisoryLock::release($key);
     }
 
 }

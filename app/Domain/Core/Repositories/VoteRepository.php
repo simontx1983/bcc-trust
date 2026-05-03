@@ -249,6 +249,94 @@ class VoteRepository {
         return $row;
     }
 
+    /**
+     * Bulk-fetch vote rows by primary key. Used by FeedRankingService
+     * to hydrate review post bodies for an entire feed page in one
+     * round trip (vs N+1).
+     *
+     * Cache is intentionally bypassed — feed-page hydration is rare
+     * enough that the per-vote cache (60s TTL) doesn't help, and the
+     * IN-list query is already a single round trip. Bounded by the
+     * feed page cap (50 items at a time).
+     *
+     * @param list<int> $voteIds
+     * @return array<int, object> vote_id → row
+     */
+    public function findManyByIds(array $voteIds): array
+    {
+        if ($voteIds === []) {
+            return [];
+        }
+
+        // Sanitize + dedupe + bound. Defensive in case a future caller
+        // passes an unbounded list.
+        $ids = [];
+        foreach ($voteIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $idList = implode(',', array_keys($ids));
+
+        global $wpdb;
+        /** @var list<object>|null $rows */
+        $rows = $wpdb->get_results(
+            "SELECT " . self::COLUMNS . " FROM {$this->table}
+              WHERE id IN ({$idList})"
+        );
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $rowId = (int) ($row->id ?? 0);
+            if ($rowId > 0) {
+                $out[$rowId] = $row;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Set the long-form `explanation` body on a single vote row.
+     *
+     * Per §D2 reviews this is the persistence path for the review's
+     * paragraph-of-text — VoteService's castPageVote / VoteWriter
+     * write the gated trust signal (vote_type + weight + reason)
+     * inside a security-critical transaction, then PostsService
+     * follows up with this method to attach the long-form body.
+     *
+     * Two-step write rationale: keeping castPageVote untouched
+     * preserves its fraud / fan-in / sybil / idempotency invariants.
+     * If this update fails, the vote still stands as a degraded
+     * signal (a bare upvote/downvote) — recoverable from the UI.
+     *
+     * Returns the number of rows affected (0 = vote_id not found).
+     */
+    public function setExplanation(int $voteId, string $explanation): int
+    {
+        if ($voteId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $rows = $wpdb->update(
+            $this->table,
+            ['explanation' => $explanation],
+            ['id' => $voteId],
+            ['%s'],
+            ['%d']
+        );
+
+        // Bust the per-vote cache so subsequent getById reflects the
+        // new body without waiting for the 60s TTL.
+        wp_cache_delete("vote_{$voteId}", self::CACHE_GROUP);
+
+        return is_int($rows) ? $rows : 0;
+    }
+
     // lockForUpdate() removed — dead code. lockAllForUpdate() is the live method.
 
     /**
@@ -809,6 +897,71 @@ class VoteRepository {
     }
 
     /**
+     * Paginated review list for the §V1.5 /users/:handle/reviews tab.
+     *
+     * Joins post_name + post_type so the service can compose `subject_handle`
+     * + `scope_label` without a follow-up query per row. `explanation`
+     * carries the long-form review body when present (reviews are the
+     * §D2 long-form variant of votes — bare votes leave it empty).
+     *
+     * @return list<object{
+     *   id: int|numeric-string,
+     *   page_id: int|numeric-string,
+     *   vote_type: int|numeric-string,
+     *   explanation: string|null,
+     *   reason: string|null,
+     *   created_at: string,
+     *   page_title: string|null,
+     *   page_name: string|null,
+     *   page_type: string|null
+     * }>
+     */
+    public function findByVoterPaginated(int $voterId, int $limit, int $offset): array
+    {
+        if ($voterId <= 0) {
+            return [];
+        }
+        global $wpdb;
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT v.id,
+                        v.page_id,
+                        v.vote_type,
+                        v.explanation,
+                        v.reason,
+                        v.created_at,
+                        p.post_title AS page_title,
+                        p.post_name  AS page_name,
+                        p.post_type  AS page_type
+                 FROM {$this->table} v
+                 LEFT JOIN {$wpdb->posts} p ON v.page_id = p.ID
+                 WHERE v.voter_user_id = %d
+                   AND v.status        = 1
+                 ORDER BY v.created_at DESC
+                 LIMIT %d OFFSET %d",
+                $voterId,
+                $limit,
+                $offset
+            )
+        );
+
+        /** @var list<object{
+         *   id: int|numeric-string,
+         *   page_id: int|numeric-string,
+         *   vote_type: int|numeric-string,
+         *   explanation: string|null,
+         *   reason: string|null,
+         *   created_at: string,
+         *   page_title: string|null,
+         *   page_name: string|null,
+         *   page_type: string|null
+         * }> $rows
+         */
+        return $rows ?: [];
+    }
+
+    /**
      * Count total active votes by voter.
      */
     public function countByVoter( int $voterId ): int {
@@ -819,6 +972,27 @@ class VoteRepository {
              WHERE voter_user_id = %d
                AND status        = 1",
             $voterId
+        ) );
+    }
+
+    /**
+     * Count active votes by voter since a MySQL DATETIME boundary.
+     * Used by the §O3 living header for today's reviews_written count.
+     */
+    public function countByVoterSince( int $voterId, string $sinceMysql ): int {
+        if ($voterId <= 0 || $sinceMysql === '') {
+            return 0;
+        }
+
+        global $wpdb;
+
+        return (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table}
+             WHERE voter_user_id = %d
+               AND status        = 1
+               AND created_at   >= %s",
+            $voterId,
+            $sinceMysql
         ) );
     }
 

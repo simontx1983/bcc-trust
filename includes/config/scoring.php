@@ -8,8 +8,9 @@ if (!defined('ABSPATH')) exit;
 // ======================================================
 // NEUTRAL (DEFAULT) TRUST SCORE
 // ======================================================
-// Baseline score for new pages. Used in TOTAL_SCORE_SQL formula,
-// default returns, and fallback values. Change here to adjust
+// Baseline score for new pages. Used by the canonical formula in
+// \BCC\Trust\Core\Services\TrustScoreService (compute + formulaSql),
+// plus default returns and fallback values. Change here to adjust
 // the neutral starting point system-wide.
 define('BCC_TRUST_NEUTRAL_SCORE', 50);
 
@@ -91,4 +92,34 @@ define('BCC_TRUST_GITHUB_ORGS_MEDIUM', 5);
 // ======================================================
 define('BCC_TRUST_X_TRUST_BOOST', 10);       // Flat trust boost for verified X account
 define('BCC_TRUST_X_FRAUD_REDUCTION', 5);     // Flat fraud reduction for verified X account
+
+// ======================================================
+// DISPUTE PARTICIPATION (§D5 — panel-vote credit)
+// ======================================================
+//
+// Reward panel voters with a small, bounded contribution to their
+// trust score. The reward is split into two parts so accuracy matters
+// more than mere attendance:
+//
+//   per-row contribution = BASE_WEIGHT
+//                        + (credited >= MIN_FOR_ACCURACY ? ACCURACY_WEIGHT * (correct? 1 : 0) : 0)
+//
+// Caps are TRUST-POINT-based, not row-count-based — they're the real
+// inflation protection:
+//
+//   total_bonus = (credited * BASE)
+//               + (credited >= MIN_FOR_ACCURACY ? correct * ACCURACY : 0)
+//   daily_clamp    = min(today's bonus,   DAILY_TRUST_CAP)
+//   lifetime_clamp = min(lifetime bonus,  LIFETIME_TRUST_CAP)
+//
+// MIN_CREDITED_FOR_ACCURACY prevents one early correct vote from
+// spiking score — accuracy starts contributing only after the floor.
+//
+// Tune by editing here only — service + scoring layers read these
+// constants, never literals.
+define('BCC_DISPUTE_PARTICIPATION_BASE_WEIGHT',         0.01);  // per credited vote
+define('BCC_DISPUTE_PARTICIPATION_ACCURACY_WEIGHT',     0.02);  // per credited+correct vote (added on top of base)
+define('BCC_DISPUTE_PARTICIPATION_DAILY_TRUST_CAP',     1.0);   // max trust contribution earnable per 24h
+define('BCC_DISPUTE_PARTICIPATION_LIFETIME_TRUST_CAP',  10.0);  // max lifetime trust contribution
+define('BCC_DISPUTE_PARTICIPATION_MIN_FOR_ACCURACY',    5);     // accuracy bonus only after this many credited rows lifetime
 

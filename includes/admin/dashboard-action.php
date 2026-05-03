@@ -4,7 +4,7 @@
  *
  * All logic lives in BCC\Trust\Core\Services\Admin\RepairService.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if (!defined('ABSPATH')) {

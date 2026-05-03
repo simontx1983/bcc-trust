@@ -2,7 +2,7 @@
 /**
  * On-Chain NFT Collections Schema
  *
- * @package BCC_Onchain_Signals
+ * @package BCC\Trust\Onchain
  * @subpackage Database
  */
 

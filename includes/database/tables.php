@@ -2,7 +2,7 @@
 /**
  * Main Database Loader
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage Database
  * @version 2.3.0
  */
@@ -24,6 +24,23 @@ require_once __DIR__ . '/schema-project.php';
 require_once __DIR__ . '/schema-quest-log.php';
 require_once __DIR__ . '/schema-page-flags.php';
 require_once __DIR__ . '/schema-score-events.php';
+
+// V1 frontend support tables (per docs/api-contract-v1.md §6.5)
+require_once __DIR__ . '/schema-pull-meta.php';
+require_once __DIR__ . '/schema-user-ranks.php';
+require_once __DIR__ . '/schema-pull-batches.php';
+require_once __DIR__ . '/schema-reputation-events.php';
+require_once __DIR__ . '/schema-content-reports.php';
+require_once __DIR__ . '/schema-hidden-activities.php';
+require_once __DIR__ . '/schema-dispute-participations.php';
+
+// V2 Phase 1: §I1 push notifications — VAPID subscriptions per user/device
+require_once __DIR__ . '/schema-push-subscriptions.php';
+// NOTE: bcc_user_locals removed — Locals membership lives in PeepSo's
+// peepso_group_members (single graph rule); primary-Local pointer in
+// wp_usermeta.bcc_primary_local_group_id.
+// NOTE: bcc_page_claims merged into bcc_onchain_claims — page claims
+// use entity_type='page'; recovery_pending column added to onchain_claims.
 
 
 /**
@@ -98,6 +115,49 @@ function bcc_trust_create_tables() {
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Score events table created', []);
     }
 
+    // V1 frontend support tables (pull meta, ranks)
+    if (function_exists('bcc_trust_create_pull_meta_table')) {
+        bcc_trust_create_pull_meta_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Pull meta table created', []);
+    }
+    if (function_exists('bcc_trust_create_user_ranks_table')) {
+        bcc_trust_create_user_ranks_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: User ranks table created', []);
+    }
+    if (function_exists('bcc_trust_create_pull_batches_table')) {
+        bcc_trust_create_pull_batches_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Pull batches table created', []);
+    }
+    if (function_exists('bcc_trust_create_reputation_events_table')) {
+        bcc_trust_create_reputation_events_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Reputation events table created', []);
+    }
+    if (function_exists('bcc_trust_create_content_reports_table')) {
+        bcc_trust_create_content_reports_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Content reports table created', []);
+    }
+    if (function_exists('bcc_trust_create_hidden_activities_table')) {
+        bcc_trust_create_hidden_activities_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Hidden activities table created', []);
+    }
+    if (function_exists('bcc_trust_create_dispute_participations_table')) {
+        bcc_trust_create_dispute_participations_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Dispute participations table created', []);
+    }
+    if (function_exists('bcc_trust_create_push_subscriptions_table')) {
+        bcc_trust_create_push_subscriptions_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Push subscriptions table created', []);
+    }
+
+    // §D5 reaction seeding — idempotent insert of the three custom
+    // reactions (Solid / Vouch / Stand behind) as peepso_reaction_user
+    // CPT posts. Re-running is safe; missing kinds get inserted,
+    // present kinds are left alone.
+    if (class_exists('\\BCC\\Trust\\Core\\Services\\Reactions\\ReactionSeeder')) {
+        (new \BCC\Trust\Core\Services\Reactions\ReactionSeeder())->seed();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Reaction seeder invoked', []);
+    }
+
     // Page-level tables (verifications, metrics, identities, endorsement types, read model)
     if (function_exists('bcc_trust_create_page_tables')) {
         bcc_trust_create_page_tables();
@@ -154,6 +214,16 @@ function bcc_trust_verify_all_tables() {
         'bcc_trust_quest_log',
         'bcc_trust_page_flags',
         'bcc_trust_score_events',
+        // V1 frontend support tables
+        'bcc_pull_meta',
+        'bcc_user_ranks',
+        'bcc_pull_batches',
+        'bcc_reputation_events',
+        'bcc_content_reports',
+        'bcc_hidden_activities',
+        'bcc_dispute_participations',
+        // V2 Phase 1 push notifications
+        'bcc_push_subscriptions',
     ];
 
     $missing = [];

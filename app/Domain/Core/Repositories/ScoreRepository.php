@@ -72,18 +72,17 @@ class ScoreRepository {
     /**
      * The canonical SQL expression for computing total_score.
      *
-     * ALL writes to total_score MUST use this formula. It includes:
+     * ALL writes to total_score MUST use the canonical formula from
+     * \BCC\Trust\Core\Services\TrustScoreService::formulaSql(). It includes:
      *   - Vote-based score: BCC_TRUST_NEUTRAL_SCORE + (positive_score - negative_score) * 2
      *   - Endorsement bonus: stored in dedicated column, survives recalculation
      *   - On-chain bonus: stored in dedicated column, survives recalculation
      *
-     * Clamped to [0, 100].
-     *
-     * NOTE: The literal 50 below MUST match BCC_TRUST_NEUTRAL_SCORE (defined in
-     * config/scoring.php). It cannot be parameterized because this is a class
-     * constant evaluated at compile time before config files are loaded.
+     * Clamped to [0, 100]. The prior `private const TOTAL_SCORE_SQL` was
+     * removed as part of the §A4 single-source consolidation —
+     * TrustScoreService is now the only place the formula's PHP and SQL
+     * representations live.
      */
-    private const TOTAL_SCORE_SQL = 'LEAST(100, GREATEST(0, 50 + (positive_score - negative_score) * 2 + endorsement_bonus + onchain_bonus))';
 
     /**
      * Get score for a page+category pair as a PageScore value object.
@@ -440,11 +439,12 @@ class ScoreRepository {
         // INSERT path: new page gets endorsement_bonus=0, onchain_bonus=0.
         // UPDATE path: endorsement_bonus and onchain_bonus are preserved (not in SET).
         //
-        // NOTE: The INSERT total_score formula must mirror TOTAL_SCORE_SQL.
-        // It uses literal 0.0 for endorsement_bonus + onchain_bonus because
-        // column references are unavailable inside VALUES on a new row.
+        // NOTE: The INSERT total_score formula must mirror
+        // TrustScoreService::formulaSql(). It uses literal 0.0 for
+        // endorsement_bonus + onchain_bonus because column references
+        // are unavailable inside VALUES on a new row.
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $totalScoreSql = self::TOTAL_SCORE_SQL;
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
         $result = $wpdb->query(
             $wpdb->prepare(
                 "INSERT INTO {$this->table}
@@ -800,7 +800,7 @@ class ScoreRepository {
         global $wpdb;
 
         $endorsementsTable = \BCC\Trust\Core\Database\TableRegistry::endorsements();
-        $totalScoreSql     = self::TOTAL_SCORE_SQL;
+        $totalScoreSql     = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
         $table             = $this->table;
 
         return \BCC\Trust\Core\Security\TransactionManager::run(function () use (
@@ -1141,7 +1141,7 @@ class ScoreRepository {
     private function deriveAndWriteEndorsementBonus(int $pageId): void {
         global $wpdb;
 
-        $totalScoreSql = self::TOTAL_SCORE_SQL;
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
 
         // Lock score rows to serialise with concurrent recalculations
         // and other delta writes (applyVoteDelta, applyBonus).
@@ -2207,7 +2207,7 @@ class ScoreRepository {
             return false;
         }
 
-        $totalScoreSql = self::TOTAL_SCORE_SQL;
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
         $roundedValue  = round($value, 2);
         $now           = current_time('mysql');
 

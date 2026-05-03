@@ -20,6 +20,7 @@ use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VerificationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\REST\DiscoveryEndpoint;
+use BCC\Trust\Core\REST\Envelope;
 use BCC\Trust\Core\REST\PageEndpoint;
 use BCC\Trust\Core\Security\BehavioralAnalyzer;
 use BCC\Trust\Core\Security\DeviceFingerprinter;
@@ -71,6 +72,13 @@ final class Plugin
     public function reputationRepository(): ReputationRepository
     {
         return $this->reputationRepository ??= new ReputationRepository();
+    }
+
+    private ?\BCC\Trust\Disputes\Repositories\DisputeParticipationRepository $disputeParticipationRepository = null;
+    public function disputeParticipationRepository(): \BCC\Trust\Disputes\Repositories\DisputeParticipationRepository
+    {
+        return $this->disputeParticipationRepository
+            ??= new \BCC\Trust\Disputes\Repositories\DisputeParticipationRepository();
     }
 
     private ?UserInfoRepository $userInfoRepository = null;
@@ -133,6 +141,29 @@ final class Plugin
         return $this->readModelHealthRepository ??= new Repositories\ReadModelHealthRepository();
     }
 
+    // ── V1 frontend support repositories ────────────────────────────────
+
+    private ?Repositories\PullMetaRepository $pullMetaRepository = null;
+    public function pullMetaRepository(): Repositories\PullMetaRepository
+    {
+        return $this->pullMetaRepository ??= new Repositories\PullMetaRepository();
+    }
+
+    private ?Repositories\UserRankRepository $userRankRepository = null;
+    public function userRankRepository(): Repositories\UserRankRepository
+    {
+        return $this->userRankRepository ??= new Repositories\UserRankRepository();
+    }
+
+    // NOTE: UserLocalRepository removed — Locals membership reads from
+    // PeepSo's peepso_group_members directly via PeepSoGroupRepository
+    // (single graph rule). LocalsService composes membership view-models
+    // from PeepSo + the bcc_primary_local_group_id user-meta pointer.
+    //
+    // NOTE: PageClaimRepository removed — page claims merged into the
+    // existing onchain ClaimRepository (entity_type='page'); the
+    // createExclusiveClaim() advisory lock enforces §B5 single-claim-wins.
+
     // ── Security services ───────────────────────────────────────────────
 
     private ?DeviceFingerprinter $deviceFingerprinter = null;
@@ -170,11 +201,19 @@ final class Plugin
         );
     }
 
+    private ?Repositories\ReputationEventRepository $reputationEventRepository = null;
+    public function reputationEventRepository(): Repositories\ReputationEventRepository
+    {
+        return $this->reputationEventRepository ??= new Repositories\ReputationEventRepository();
+    }
+
     private ?Services\ReputationCalculatorService $reputationCalculatorService = null;
     public function reputationCalculatorService(): Services\ReputationCalculatorService
     {
         return $this->reputationCalculatorService ??= new Services\ReputationCalculatorService(
-            $this->reputationRepository()
+            $this->reputationRepository(),
+            $this->userInfoRepository(),
+            $this->reputationEventRepository()
         );
     }
 
@@ -233,6 +272,342 @@ final class Plugin
         return $this->pageDiscoveryService ??= new Services\PageDiscoveryService();
     }
 
+    // ── V1 contract services (per docs/api-contract-v1.md) ──────────────
+
+    private ?Services\TrustScoreService $trustScoreService = null;
+    public function trustScoreService(): Services\TrustScoreService
+    {
+        return $this->trustScoreService ??= new Services\TrustScoreService(
+            $this->scoreRepository(),
+            $this->pageReadModelRepository()
+        );
+    }
+
+    private ?Services\FeatureAccessService $featureAccessService = null;
+    public function featureAccessService(): Services\FeatureAccessService
+    {
+        return $this->featureAccessService ??= new Services\FeatureAccessService(
+            $this->voteRepository(),
+            $this->reputationRepository()
+        );
+    }
+
+    private ?Services\RankService $rankService = null;
+    public function rankService(): Services\RankService
+    {
+        return $this->rankService ??= new Services\RankService(
+            $this->userRankRepository(),
+            $this->reputationRepository()
+        );
+    }
+
+    private ?Services\RankProgressionListener $rankProgressionListener = null;
+    public function rankProgressionListener(): Services\RankProgressionListener
+    {
+        return $this->rankProgressionListener ??= new Services\RankProgressionListener(
+            $this->rankService()
+        );
+    }
+
+    /** §C1 / §N11 / §O1.2 — fires "your card is now Rare" Heavy moment. */
+    private ?Services\TierUpgradeListener $tierUpgradeListener = null;
+    public function tierUpgradeListener(): Services\TierUpgradeListener
+    {
+        return $this->tierUpgradeListener ??= new Services\TierUpgradeListener(
+            $this->reputationRepository()
+        );
+    }
+
+    /** §O5 / §O1.2 — fires "you're now Active" / "Veteran" Heavy moment. */
+    private ?Services\LevelProgressionListener $levelProgressionListener = null;
+    public function levelProgressionListener(): Services\LevelProgressionListener
+    {
+        return $this->levelProgressionListener ??= new Services\LevelProgressionListener(
+            $this->featureAccessService()
+        );
+    }
+
+    // ── §I1 notifications ────────────────────────────────────────────
+
+    private ?Repositories\NotificationRepository $notificationRepository = null;
+    public function notificationRepository(): Repositories\NotificationRepository
+    {
+        return $this->notificationRepository ??= new Repositories\NotificationRepository();
+    }
+
+    private ?Services\NotificationViewService $notificationViewService = null;
+    public function notificationViewService(): Services\NotificationViewService
+    {
+        return $this->notificationViewService ??= new Services\NotificationViewService(
+            $this->notificationRepository()
+        );
+    }
+
+    private ?Services\NotificationDispatcher $notificationDispatcher = null;
+    public function notificationDispatcher(): Services\NotificationDispatcher
+    {
+        return $this->notificationDispatcher ??= new Services\NotificationDispatcher(
+            $this->pageOwnerResolver(),
+            $this->pushDispatcher()
+        );
+    }
+
+    private ?Services\PushDispatcher $pushDispatcher = null;
+    public function pushDispatcher(): Services\PushDispatcher
+    {
+        return $this->pushDispatcher ??= new Services\PushDispatcher(
+            new \BCC\Trust\Core\Repositories\PushSubscriptionRepository()
+        );
+    }
+
+    private ?Services\DigestService $digestService = null;
+    public function digestService(): Services\DigestService
+    {
+        return $this->digestService ??= new Services\DigestService(
+            $this->notificationRepository()
+        );
+    }
+
+    private ?Services\LocalsService $localsService = null;
+    public function localsService(): Services\LocalsService
+    {
+        return $this->localsService ??= new Services\LocalsService();
+    }
+
+    private ?Services\ShiftLogService $shiftLogService = null;
+    public function shiftLogService(): Services\ShiftLogService
+    {
+        return $this->shiftLogService ??= new Services\ShiftLogService();
+    }
+
+    private ?Repositories\PeepSoReactionRepository $peepSoReactionRepository = null;
+    public function peepSoReactionRepository(): Repositories\PeepSoReactionRepository
+    {
+        return $this->peepSoReactionRepository ??= new Repositories\PeepSoReactionRepository();
+    }
+
+    private ?Services\LivingService $livingService = null;
+    public function livingService(): Services\LivingService
+    {
+        return $this->livingService ??= new Services\LivingService(
+            $this->voteRepository(),
+            $this->flagsRepository(),
+            $this->reputationRepository(),
+            $this->peepSoReactionRepository()
+        );
+    }
+
+    private ?Services\UserViewService $userViewService = null;
+    public function userViewService(): Services\UserViewService
+    {
+        return $this->userViewService ??= new Services\UserViewService(
+            $this->voteRepository(),
+            $this->reputationRepository(),
+            $this->rankService(),
+            $this->featureAccessService(),
+            $this->flagsRepository(),
+            $this->livingService(),
+            $this->reputationEventRepository(),
+            $this->peepSoReactionRepository(),
+            $this->disputeParticipationRepository()
+        );
+    }
+
+    private ?Services\MemberProfileComposer $memberProfileComposer = null;
+    public function memberProfileComposer(): Services\MemberProfileComposer
+    {
+        return $this->memberProfileComposer ??= new Services\MemberProfileComposer(
+            $this->userViewService(),
+            $this->cardViewService(),
+            $this->shiftLogService()
+        );
+    }
+
+    private ?Services\Feed\FeedRankingService $feedRankingService = null;
+    public function feedRankingService(): Services\Feed\FeedRankingService
+    {
+        return $this->feedRankingService ??= new Services\Feed\FeedRankingService(
+            new \BCC\Core\Feed\ActivityFeedService(
+                new \BCC\Core\PeepSo\PeepSoGraphService()
+            ),
+            $this->reputationRepository(),
+            $this->pullBatchRepository(),
+            $this->pullMetaRepository(),
+            $this->binderRepository(),
+            $this->peepSoReactionRepository(),
+            $this->voteRepository(),
+            $this->hiddenActivityRepository()
+        );
+    }
+
+    private ?Services\CardViewService $cardViewService = null;
+    public function cardViewService(): Services\CardViewService
+    {
+        return $this->cardViewService ??= new Services\CardViewService(
+            $this->pageReadModelRepository(),
+            $this->reputationRepository(),
+            $this->voteRepository(),
+            $this->featureAccessService(),
+            $this->voteService(),
+            $this->endorsementService()
+        );
+    }
+
+    private ?Repositories\BinderRepository $binderRepository = null;
+    public function binderRepository(): Repositories\BinderRepository
+    {
+        return $this->binderRepository ??= new Repositories\BinderRepository();
+    }
+
+    private ?Services\BinderService $binderService = null;
+    public function binderService(): Services\BinderService
+    {
+        return $this->binderService ??= new Services\BinderService(
+            $this->binderRepository(),
+            $this->pullMetaRepository(),
+            $this->reputationRepository()
+        );
+    }
+
+    private ?Services\PostsService $postsService = null;
+    public function postsService(): Services\PostsService
+    {
+        return $this->postsService ??= new Services\PostsService(
+            $this->voteService(),
+            $this->voteRepository(),
+            $this->featureAccessService()
+        );
+    }
+
+    /** §D6 — per-user blog tab, paginated. */
+    private ?Services\BlogService $blogService = null;
+    public function blogService(): Services\BlogService
+    {
+        return $this->blogService ??= new Services\BlogService(
+            $this->hiddenActivityRepository()
+        );
+    }
+
+    /** §V1.5 — per-user reviews tab, paginated + privacy-honouring. */
+    private ?Services\UserReviewsService $userReviewsService = null;
+    public function userReviewsService(): Services\UserReviewsService
+    {
+        return $this->userReviewsService ??= new Services\UserReviewsService(
+            $this->voteRepository()
+        );
+    }
+
+    /** §V1.5 — per-user disputes tab, paginated + privacy-honouring. */
+    private ?Services\UserDisputesService $userDisputesService = null;
+    public function userDisputesService(): Services\UserDisputesService
+    {
+        return $this->userDisputesService ??= new Services\UserDisputesService(
+            $this->flagsRepository()
+        );
+    }
+
+    /** §K1 Phase A — viewer's own blocked-users list, paginated. */
+    private ?Services\MyBlocksService $myBlocksService = null;
+    public function myBlocksService(): Services\MyBlocksService
+    {
+        return $this->myBlocksService ??= new Services\MyBlocksService();
+    }
+
+    /** §K1 Phase B — content-report write side. */
+    private ?Repositories\ContentReportRepository $contentReportRepository = null;
+    public function contentReportRepository(): Repositories\ContentReportRepository
+    {
+        return $this->contentReportRepository ??= new Repositories\ContentReportRepository();
+    }
+
+    private ?Services\ContentReportService $contentReportService = null;
+    public function contentReportService(): Services\ContentReportService
+    {
+        return $this->contentReportService ??= new Services\ContentReportService(
+            $this->contentReportRepository()
+        );
+    }
+
+    /** §K1 Phase C — sidecar table marking activities hidden by moderation. */
+    private ?Repositories\HiddenActivityRepository $hiddenActivityRepository = null;
+    public function hiddenActivityRepository(): Repositories\HiddenActivityRepository
+    {
+        return $this->hiddenActivityRepository ??= new Repositories\HiddenActivityRepository();
+    }
+
+    /** §K1 Phase C — threshold-based auto-hide subscriber. */
+    private ?Services\AutoHideService $autoHideService = null;
+    public function autoHideService(): Services\AutoHideService
+    {
+        return $this->autoHideService ??= new Services\AutoHideService(
+            $this->contentReportRepository(),
+            $this->hiddenActivityRepository()
+        );
+    }
+
+    /** §K1 Phase C — admin queue read + resolve actions. */
+    private ?Services\ModerationQueueService $moderationQueueService = null;
+    public function moderationQueueService(): Services\ModerationQueueService
+    {
+        return $this->moderationQueueService ??= new Services\ModerationQueueService(
+            $this->contentReportRepository(),
+            $this->hiddenActivityRepository()
+        );
+    }
+
+    private ?Services\BinderSummaryService $binderSummaryService = null;
+    public function binderSummaryService(): Services\BinderSummaryService
+    {
+        return $this->binderSummaryService ??= new Services\BinderSummaryService(
+            $this->binderRepository(),
+            $this->voteRepository(),
+            $this->flagsRepository(),
+            $this->peepSoReactionRepository()
+        );
+    }
+
+    private ?Services\PullBatchAggregator $pullBatchAggregator = null;
+    public function pullBatchAggregator(): Services\PullBatchAggregator
+    {
+        return $this->pullBatchAggregator ??= new Services\PullBatchAggregator(
+            $this->binderRepository(),
+            $this->pullMetaRepository()
+        );
+    }
+
+    private ?Repositories\PullBatchRepository $pullBatchRepository = null;
+    public function pullBatchRepository(): Repositories\PullBatchRepository
+    {
+        return $this->pullBatchRepository ??= new Repositories\PullBatchRepository();
+    }
+
+    private ?Repositories\PeepSoActivityWriter $peepSoActivityWriter = null;
+    public function peepSoActivityWriter(): Repositories\PeepSoActivityWriter
+    {
+        return $this->peepSoActivityWriter ??= new Repositories\PeepSoActivityWriter();
+    }
+
+    private ?Services\Feed\ActivityStreamWriter $activityStreamWriter = null;
+    public function activityStreamWriter(): Services\Feed\ActivityStreamWriter
+    {
+        return $this->activityStreamWriter ??= new Services\Feed\ActivityStreamWriter(
+            $this->pullBatchRepository(),
+            $this->peepSoActivityWriter()
+        );
+    }
+
+    private ?Services\HighlightsService $highlightsService = null;
+    public function highlightsService(): Services\HighlightsService
+    {
+        return $this->highlightsService ??= new Services\HighlightsService();
+    }
+
+    private ?Services\HandleService $handleService = null;
+    public function handleService(): Services\HandleService
+    {
+        return $this->handleService ??= new Services\HandleService();
+    }
+
     // ── Phase 3 services ────────────────────────────────────────────────
 
     private ?Services\CronService $cronService = null;
@@ -282,8 +657,7 @@ final class Plugin
     {
         return $this->peepSoIntegration ??= new Integration\PeepSoIntegration(
             $this->scoreRepository(),
-            $this->userInfoRepository(),
-            $this->verificationRepository()
+            $this->userInfoRepository()
         );
     }
 
@@ -319,6 +693,12 @@ final class Plugin
      */
     public function registerRoutes(): void
     {
+        // ── Response Envelope (must register before any endpoint) ───────
+        // Wraps all bcc/v1 + bcc-trust/v1 responses in {data, _meta} per
+        // docs/api-contract-v1.md §1.4. The frontend's bccFetch wrapper
+        // requires this shape for envelope-vs-error discrimination.
+        Envelope::init();
+
         // ── REST Namespace Convention ───────────────────────────────────
         //
         // bcc-trust/v1  = Trust-engine-internal routes: mutations (vote,
@@ -327,12 +707,22 @@ final class Plugin
         //                 trust-header.js, trust-frontend.js, admin.js.
         //
         // bcc/v1        = Shared cross-plugin read API consumed by blocks,
-        //                 bcc-disputes, bcc-search, and external integrations.
+        //                 the Disputes domain, bcc-search, and external integrations.
         //                 Routes: /page/{id}, /discover, /endorsements/*,
         //                 /validators/top, /flag, /claim.
         //
         // Do NOT mix: new read endpoints → bcc/v1.
         //             New mutations     → bcc-trust/v1.
+        //
+        // Documented exception: Disputes mutations (`POST /disputes`,
+        // `POST /disputes/{id}/vote`, `POST /report-user`,
+        // `POST /disputes/{id}/resolve`) live under bcc/v1 — not
+        // bcc-trust/v1 — because they are consumed cross-plugin (the
+        // headless frontend, the legacy disputes admin surface, and
+        // the moderation tooling) and need to share the public read
+        // namespace's CORS allowlist + auth path. Treat this as the only
+        // sanctioned exception; new bcc-trust mutations still go to
+        // bcc-trust/v1. See DisputeController::register_routes (NS = 'bcc/v1').
         // ────────────────────────────────────────────────────────────────
 
         // Core trust routes — TrustRestController registers all routes
@@ -346,8 +736,13 @@ final class Plugin
         // X (Twitter) OAuth + verification
         XController::register_routes();
 
-        // Wallet verification is handled by bcc-onchain-signals (AJAX).
-        // Trust-engine listens to bcc_wallet_verified / bcc_wallet_disconnected
+        // Whitelist BCC_FRONTEND_ORIGIN host(s) for wp_safe_redirect so
+        // OAuth callbacks can return to the headless Next.js app instead
+        // of being silently rewritten to home_url().
+        \BCC\Trust\Core\Support\FrontendRedirect::register();
+
+        // Wallet verification is handled by the Onchain domain (AJAX).
+        // The Core domain listens to bcc_wallet_verified / bcc_wallet_disconnected
         // hooks in CronService::registerCacheInvalidation() for scoring updates.
 
         // Discovery feed
@@ -373,6 +768,134 @@ final class Plugin
 
         // Read model health monitoring (admin-only)
         \BCC\Trust\Core\REST\ReadModelHealthEndpoint::register();
+
+        // V1 contract: rank catalog + viewer's current rank (§4.8)
+        \BCC\Trust\Core\REST\RanksEndpoint::register();
+
+        // V1 contract: paginated Locals catalog + viewer membership (§4.7)
+        \BCC\Trust\Core\REST\LocalsEndpoint::register();
+
+        // V1 contract: per-user 52-week shift-log activity grid (§4.4)
+        \BCC\Trust\Core\REST\UsersEndpoint::register();
+
+        // V1 contract: hot feed (§F2 zero-follow fallback) — routes through
+        // the §F3 single-brain FeedRankingService.
+        \BCC\Trust\Core\REST\FeedEndpoint::register();
+
+        // V1 contract: polymorphic card view-model (§L5) — validator,
+        // project, creator, member.
+        \BCC\Trust\Core\REST\CardsEndpoint::register();
+
+        // V1 contract: paginated cards list for the §G1/§G2 directory.
+        // Same per-item shape as CardsEndpoint; filter + sort outside.
+        \BCC\Trust\Core\REST\CardsListEndpoint::register();
+
+        // V1 contract: §G1 global autocomplete. Thin wrapper over
+        // bcc-search that maps results to canonical SearchSuggestions
+        // (card_kind, card_tier, headless route prefix) per §A2.
+        \BCC\Trust\Core\REST\CardsSearchEndpoint::register();
+
+        // V1 contract: §I1 notifications. List + unread-count + mark-read.
+        // Backed by peepso_notifications scoped to BCC_NOTIFICATION_MODULE_ID
+        // (single-graph rule); writes route through PeepSoNotificationWriter.
+        \BCC\Trust\Core\REST\NotificationsEndpoint::register();
+
+        // V1 contract: §H1 NFT creator gallery. Reads from the existing
+        // bcc_onchain_collections table via CollectionService; on stale
+        // data, dispatches an async holdings-refresh per the SWR pattern.
+        \BCC\Trust\Core\REST\CreatorGalleryEndpoint::register();
+
+        // V1 contract: REST wallet auth pair for the headless Next.js
+        // frontend — GET /auth/nonce + POST /auth/wallet-link. Pure glue
+        // over WalletIdentityService (per §A4).
+        \BCC\Trust\Core\REST\AuthEndpoint::register();
+
+        // V1 contract: page claim flow (§B5 single-claim-wins) — pure
+        // orchestration over the existing onchain ClaimService.
+        \BCC\Trust\Core\REST\PagesEndpoint::register();
+
+        // V1 contract: binder (§C2 — projection of PeepSo follows +
+        // bcc_pull_meta sidecar). Phase 1: read-only GET /me/binder.
+        // Phase 2/3 add pull/unpull/batching.
+        \BCC\Trust\Core\REST\BinderEndpoint::register();
+
+        // V1 contract: highlights strip (§O2 / §O2.1) — three slots,
+        // strict priority order, max one item per slot, dismissal.
+        // V1.0 ships scaffolding with stub scorers; data fills in as
+        // aggregators land.
+        \BCC\Trust\Core\REST\HighlightsEndpoint::register();
+
+        // V1 contract: Phase 2 onboarding surface — handle change
+        // (§B6 cooldown), admin-curated first-pull suggestions (§B4),
+        // and the onboarding-complete flag flip.
+        \BCC\Trust\Core\REST\OnboardingEndpoint::register();
+
+        // V1 contract: §D5 reaction set/remove — POST /reactions and
+        // DELETE /reactions/:feed_id. Routes through PeepSoReactionWriter
+        // (single-graph rule); response shape matches FeedItem.reactions
+        // so the frontend can patch its cache without translation.
+        \BCC\Trust\Core\REST\ReactionsEndpoint::register();
+
+        // V1 contract: §D1 Composer status posts — POST /posts.
+        // Wraps PeepSoActivity::add_post via PeepSoStatusWriter
+        // (single-graph rule); fires bcc_post_created on the §A3 bus.
+        \BCC\Trust\Core\REST\PostsEndpoint::register();
+
+        // V1 contract: §O1.2 Heavy celebration delivery — pending +
+        // consume. Backs the rank-up / level-up / tier-upgrade toast;
+        // single-slot stash, last-write-wins.
+        \BCC\Trust\Core\REST\CelebrationsEndpoint::register();
+
+        // V1 contract: §K2 privacy toggles — GET + PATCH /me/privacy.
+        // Storage in wp_usermeta.bcc_privacy_*; UserViewService applies
+        // the seven profile flags to non-self responses; the eighth
+        // (discovery_optout) hooks PeepSo's search via the filter
+        // registered in registerHooks().
+        \BCC\Trust\Core\REST\MyPrivacyEndpoint::register();
+
+        // V1 contract: §K1 Phase A blocks — GET / POST / DELETE /me/blocks.
+        // Storage in PeepSo's peepso_blocks table (read/write directly,
+        // bypassing the user_blocking_enable option gate so blocks are
+        // always enforceable). FeedRankingService merges viewer blocks
+        // into the §O4.1 excluded-author list.
+        \BCC\Trust\Core\REST\MyBlocksEndpoint::register();
+
+        // V1.5: §I1 notification preferences — GET / PATCH
+        // /me/notification-prefs. Per-event bell toggles + email-digest
+        // opt-in. NotificationDispatcher::dispatch reads bell prefs to
+        // gate writes; DigestService::sendWeeklyDigest reads the
+        // email_digest flag to enumerate cron recipients.
+        \BCC\Trust\Core\REST\MyNotificationPrefsEndpoint::register();
+
+        // V1.5: §I1 one-click email-digest unsubscribe — public route
+        // that verifies a signed token (HMAC-SHA256, 90-day TTL) and
+        // flips email_digest = false. Returns HTML, not JSON.
+        \BCC\Trust\Core\REST\DigestUnsubscribeEndpoint::register();
+
+        // V1.5: §I1 admin manual-trigger for the weekly digest cron.
+        // POST /admin/digest/run-now — manage_options gated, 5-min
+        // cooldown. For smoke-test convenience and post-incident
+        // recovery when the scheduled run was missed.
+        \BCC\Trust\Core\REST\AdminDigestEndpoint::register();
+
+        // V2 Phase 1: §I1 web push subscription registration —
+        //   GET    /me/push-subscriptions/vapid-public-key
+        //   POST   /me/push-subscriptions
+        //   DELETE /me/push-subscriptions/{id}
+        // Side-effect on first POST: flips push_master = true so the
+        // dispatcher (added in sub-phase 1.3) gates correctly.
+        \BCC\Trust\Core\REST\MyPushSubscriptionEndpoint::register();
+
+        // V1 contract: §K1 Phase B content reports — POST /me/reports.
+        // Idempotent per (reporter, target) via UNIQUE constraint;
+        // throttled to FLAG limits (5 per 5 min). Phase C subscribers
+        // (auto-hide threshold, admin queue) attach to bcc_content_reported.
+        \BCC\Trust\Core\REST\MyReportsEndpoint::register();
+
+        // V1 contract: §K1 Phase C admin moderation —
+        // GET /admin/reports + POST /admin/reports/:id/resolve.
+        // Capability-gated to manage_options (V1 = admins only).
+        \BCC\Trust\Core\REST\AdminReportsEndpoint::register();
 
         // API index
         register_rest_route('bcc-trust/v1', '/', [
@@ -426,7 +949,7 @@ final class Plugin
             $ownerId = (int) Services\PeepSoPageResolver::getOwnerId((int) $vote->page_id);
             if ($ownerId) {
                 try {
-                    $this->reputationCalculatorService()->recalculateUserReputation($ownerId);
+                    $this->reputationCalculatorService()->recalculateUserReputation($ownerId, 'vote_recalc');
                 } catch (\Throwable $e) {
                     \BCC\Core\Log\Logger::error('[bcc-trust] ReputationRecalc failed', ['user_id' => $ownerId, 'error' => $e->getMessage()]);
                 }
@@ -532,6 +1055,447 @@ final class Plugin
                 );
             },
             10, 5
+        );
+
+        // ── §C3 pull-batch aggregator ───────────────────────────────────
+        //
+        // 1-minute recurring sweep that finds users whose binder
+        // batches have been quiet for ≥10 minutes and closes them.
+        // The handler is idempotent (UPDATE ... WHERE batch_id IS NULL
+        // guards races) so missed ticks under cron pressure are safe.
+        //
+        // Custom cron interval registered via the cron_schedules
+        // filter; the schedule itself is created on first init below.
+        add_filter('cron_schedules', static function (array $schedules): array {
+            if (!isset($schedules[Services\PullBatchAggregator::SWEEP_INTERVAL])) {
+                $schedules[Services\PullBatchAggregator::SWEEP_INTERVAL] = [
+                    'interval' => 60,
+                    'display'  => 'BCC: Every Minute',
+                ];
+            }
+            return $schedules;
+        });
+
+        if (!wp_next_scheduled(Services\PullBatchAggregator::SWEEP_HOOK)) {
+            wp_schedule_event(
+                time(),
+                Services\PullBatchAggregator::SWEEP_INTERVAL,
+                Services\PullBatchAggregator::SWEEP_HOOK
+            );
+        }
+
+        add_action(Services\PullBatchAggregator::SWEEP_HOOK, function (): void {
+            try {
+                $this->pullBatchAggregator()->sweep();
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] pull_batch_sweep failed', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        });
+
+        // ── §A3 activity-stream writer ──────────────────────────────────
+        //
+        // Translates BCC domain events into peepso_activities rows so
+        // the feed surfaces (/feed, /feed/hot) include BCC content
+        // alongside PeepSo-native posts. Single-source-of-truth per §A4
+        // — no other code path should INSERT into peepso_activities for
+        // BCC-owned modules (pull_batch, page_claim).
+        //
+        // bcc_card_pulled / bcc_card_unpulled are intentionally NOT
+        // subscribed: pulls are silent until the §C3 batch closes, and
+        // unpulls don't retroactively edit emitted batch items.
+
+        add_action('bcc_pull_batch_emitted', function (int $userId, string $batchId, int $cardCount, array $topCards, int $moreCount): void {
+            try {
+                $this->activityStreamWriter()->handlePullBatchEmitted(
+                    $userId, $batchId, $cardCount, $topCards, $moreCount
+                );
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream pull_batch failed', [
+                    'user_id'  => $userId,
+                    'batch_id' => $batchId,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
+        }, 10, 5);
+
+        add_action('bcc_page_claimed', function (int $userId, int $pageId, string $entityType, int $entityId, string $role): void {
+            try {
+                $this->activityStreamWriter()->handlePageClaimed(
+                    $userId, $pageId, $entityType, $entityId, $role
+                );
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream page_claim failed', [
+                    'user_id'   => $userId,
+                    'entity_id' => $entityId,
+                    'error'     => $e->getMessage(),
+                ]);
+            }
+        }, 10, 5);
+
+        add_action('bcc_review_published', function (int $authorId, int $pageId, int $voteId, string $explanation): void {
+            try {
+                $this->activityStreamWriter()->handleReviewPublished(
+                    $authorId, $pageId, $voteId, $explanation
+                );
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream review failed', [
+                    'user_id' => $authorId,
+                    'vote_id' => $voteId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 10, 4);
+
+        // §D6 — blog activity-row insertion at priority 10 (same tier as
+        // pull/claim/review). Rank progression and notifications layer on
+        // at higher priorities below.
+        add_action('bcc_blog_post_created', function (int $authorId, int $postId): void {
+            try {
+                $this->activityStreamWriter()->handleBlogPostCreated($authorId, $postId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream blog failed', [
+                    'user_id' => $authorId,
+                    'post_id' => $postId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 10, 2);
+
+        // ── §E2 / §O1.2 rank progression listener ──────────────────────
+        //
+        // Detects auto-derived rank changes off the back of activity
+        // events and stashes a Heavy celebration when the user's rank
+        // climbs. Single entry point on the listener; each subscriber
+        // funnels the right user_id through.
+        //
+        // Priority 20 (later than the activity-stream writer at 10) so
+        // the rank check sees any reputation deltas that recompute
+        // synchronously inside the originating service. For deltas
+        // that recompute via async jobs, the next activity event the
+        // user touches will catch the promotion — eventual consistency
+        // is acceptable for celebrations (see RankProgressionListener
+        // class docstring).
+
+        add_action('bcc_post_created', function (int $authorId): void {
+            try {
+                $this->rankProgressionListener()->onActivityEvent($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression post_created failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 20, 1);
+
+        add_action('bcc_review_published', function (int $authorId): void {
+            try {
+                $this->rankProgressionListener()->onActivityEvent($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression review failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 20, 1);
+
+        add_action('bcc_blog_post_created', function (int $authorId): void {
+            try {
+                $this->rankProgressionListener()->onActivityEvent($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression blog failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 20, 1);
+
+        add_action('bcc_card_pulled', function (int $viewerId): void {
+            try {
+                $this->rankProgressionListener()->onActivityEvent($viewerId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression pull failed', [
+                    'user_id' => $viewerId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 20, 1);
+
+        add_action('bcc_trust_vote_cast', function (int $voterId): void {
+            try {
+                $this->rankProgressionListener()->onActivityEvent($voterId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression vote failed', [
+                    'user_id' => $voterId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 20, 1);
+
+        // ── §C1 / §N11 / §O1.2 tier-upgrade listener ─────────────────────
+        //
+        // Detects reputation_tier crossings off the back of activity
+        // events and stashes a Heavy "Your card is now Rare" celebration
+        // when the user's tier ladder climbs. Mirrors the rank listener
+        // shape; same activity events drive both.
+        //
+        // Priority 25 — after rank progression (20) so a rank promotion
+        // and a tier upgrade emitted by the same event don't fight: the
+        // tier toast wins (last-write-wins on the single-slot stash),
+        // which matches the §N11 "your card is now Rare" copy users
+        // expect to see when both fire together.
+
+        add_action('bcc_post_created', function (int $authorId): void {
+            try {
+                $this->tierUpgradeListener()->onActivityEvent($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] tier_upgrade post_created failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 25, 1);
+
+        add_action('bcc_review_published', function (int $authorId): void {
+            try {
+                $this->tierUpgradeListener()->onActivityEvent($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] tier_upgrade review failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 25, 1);
+
+        add_action('bcc_blog_post_created', function (int $authorId): void {
+            try {
+                $this->tierUpgradeListener()->onActivityEvent($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] tier_upgrade blog failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 25, 1);
+
+        add_action('bcc_card_pulled', function (int $viewerId): void {
+            try {
+                $this->tierUpgradeListener()->onActivityEvent($viewerId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] tier_upgrade pull failed', [
+                    'user_id' => $viewerId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 25, 1);
+
+        add_action('bcc_trust_vote_cast', function (int $voterId): void {
+            try {
+                $this->tierUpgradeListener()->onActivityEvent($voterId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] tier_upgrade vote failed', [
+                    'user_id' => $voterId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 25, 1);
+
+        // ── §O5 / §O1.2 level-progression listener ───────────────────────
+        //
+        // Detects Level 1 → 2 → 3 crossings on the §O5 thresholds and
+        // stashes a Heavy "You're now Active" celebration. Mirrors the
+        // tier listener; same five activity events.
+        //
+        // Priority 26 (after tier at 25) — same single-slot stash policy:
+        // when both fire on the same event, level-up wins. In practice
+        // they rarely coincide (tier needs reputation movement; level
+        // needs activity-count movement), but the ordering is stable.
+
+        add_action('bcc_post_created', function (int $authorId): void {
+            try {
+                $this->levelProgressionListener()->onActivityEvent($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression post_created failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 26, 1);
+
+        add_action('bcc_review_published', function (int $authorId): void {
+            try {
+                $this->levelProgressionListener()->onActivityEvent($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression review failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 26, 1);
+
+        add_action('bcc_blog_post_created', function (int $authorId): void {
+            try {
+                $this->levelProgressionListener()->onActivityEvent($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression blog failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 26, 1);
+
+        add_action('bcc_card_pulled', function (int $viewerId): void {
+            try {
+                $this->levelProgressionListener()->onActivityEvent($viewerId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression pull failed', [
+                    'user_id' => $viewerId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 26, 1);
+
+        add_action('bcc_trust_vote_cast', function (int $voterId): void {
+            try {
+                $this->levelProgressionListener()->onActivityEvent($voterId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression vote failed', [
+                    'user_id' => $voterId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 26, 1);
+
+        // ── §K1 Phase C — auto-hide threshold subscriber ─────────────────
+        //
+        // Counts pending reports against the target after each new
+        // report; when the count crosses the configured threshold
+        // (default 3), inserts a bcc_hidden_activities row. The next
+        // feed read filters the act_id out for non-mods.
+        //
+        // Priority 30 — after the report row is written by the
+        // originating endpoint and after activity-stream writers (10).
+
+        add_action(
+            'bcc_content_reported',
+            function (int $reporterUserId, string $targetKind, int $targetId, int $reportId, string $reasonCode): void {
+                try {
+                    $this->autoHideService()->onContentReported(
+                        $reporterUserId, $targetKind, $targetId, $reportId, $reasonCode
+                    );
+                } catch (\Throwable $e) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] autohide_subscriber failed', [
+                        'target_kind' => $targetKind,
+                        'target_id'   => $targetId,
+                        'report_id'   => $reportId,
+                        'error'       => $e->getMessage(),
+                    ]);
+                }
+            },
+            30,
+            5
+        );
+
+        // ── §I1 notifications dispatcher ────────────────────────────────
+        //
+        // Translates BCC events into peepso_notifications rows so users
+        // see a record of activity that touched their content. Each
+        // subscriber is wrapped in try/catch inside the dispatcher
+        // method itself — failures log at warning level but never
+        // break the originating request.
+        //
+        // Priority 30 (after activity-stream writers at 10 and rank
+        // progression at 20) so the message can reference any state
+        // those subscribers wrote first.
+
+        add_action('bcc_reaction_added', function (int $actorId, int $actId, string $kind): void {
+            $this->notificationDispatcher()->onReactionAdded($actorId, $actId, $kind);
+        }, 30, 3);
+
+        add_action('bcc_review_published', function (int $authorId, int $pageId, int $voteId, string $explanation): void {
+            $this->notificationDispatcher()->onReviewPublished($authorId, $pageId, $voteId, $explanation);
+        }, 30, 4);
+
+        add_action('bcc_card_pulled', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
+            $this->notificationDispatcher()->onCardPulled($viewerId, $followId, $targetKind, $targetId);
+        }, 30, 4);
+
+        add_action('bcc_rank_awarded', function (int $userId, string $newRank, string $oldRank): void {
+            $this->notificationDispatcher()->onRankAwarded($userId, $newRank, $oldRank);
+        }, 30, 3);
+
+        // §I1 V1.5 — endorse → bell. Fired by EndorsementService::endorsePage
+        // post-commit; the dispatcher checks per-event bell prefs before writing.
+        add_action('bcc_trust_endorsement_added', function (int $endorserId, int $pageId, string $context): void {
+            $this->notificationDispatcher()->onEndorseAdded($endorserId, $pageId, $context);
+        }, 30, 3);
+
+        // ── §H1 NFT gallery refresh ─────────────────────────────────────
+        //
+        // Dispatched by CreatorGalleryEndpoint when the visible page has
+        // any expired collection rows (or the creator has wallets but no
+        // rows at all). Single-shot per request — the endpoint's
+        // 5-minute transient lock dedupes concurrent dispatches.
+        //
+        // Per fetcher behaviour (see FetcherInterface): chains without
+        // an NFT data path return [] without burning API budget. Chains
+        // that DO support fetch_collections silently no-op when the
+        // required API key constant isn't defined — this lets the
+        // architecture ship now and key wiring land later without
+        // touching the dispatcher.
+
+        add_action(
+            \BCC\Trust\Core\REST\CreatorGalleryEndpoint::REFRESH_HOOK,
+            function (int $postId): void {
+                if ($postId <= 0) {
+                    return;
+                }
+                try {
+                    $wallets = \BCC\Trust\Onchain\Repositories\WalletRepository::getForProject($postId);
+                    if (empty($wallets)) {
+                        return;
+                    }
+                    foreach ($wallets as $wallet) {
+                        $chainId = isset($wallet->chain_id) ? (int) $wallet->chain_id : 0;
+                        $address = isset($wallet->wallet_address) && is_string($wallet->wallet_address)
+                            ? $wallet->wallet_address
+                            : '';
+                        $walletId = isset($wallet->id) ? (int) $wallet->id : 0;
+                        if ($chainId <= 0 || $address === '' || $walletId <= 0) {
+                            continue;
+                        }
+
+                        $chain = \BCC\Trust\Onchain\Repositories\ChainRepository::getById($chainId);
+                        if ($chain === null) {
+                            continue;
+                        }
+                        if (!\BCC\Trust\Onchain\Factories\FetcherFactory::has_driver(
+                            (string) $chain->chain_type
+                        )) {
+                            continue;
+                        }
+                        $fetcher = \BCC\Trust\Onchain\Factories\FetcherFactory::make_for_chain($chain);
+                        if (!$fetcher->supports_feature('nft')) {
+                            continue;
+                        }
+
+                        $collections = $fetcher->fetch_collections($address, $chainId);
+                        foreach ($collections as $row) {
+                            \BCC\Trust\Onchain\Repositories\CollectionRepository::upsert(
+                                $row,
+                                $walletId
+                            );
+                        }
+                        \BCC\Trust\Onchain\Repositories\WalletRepository::markHoldingsRefreshed($walletId);
+                    }
+                } catch (\Throwable $e) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] gallery_refresh failed', [
+                        'post_id' => $postId,
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
+            }
         );
 
         // ── System health filter ───────────────────────────────────────

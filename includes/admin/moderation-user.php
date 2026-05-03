@@ -6,7 +6,7 @@
  * fraud analysis history, devices, owned pages, recent votes, IPs,
  * recent activity — plus NEW: manual trust-score override form.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

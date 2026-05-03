@@ -635,6 +635,88 @@ class EndorsementService {
     }
 
     /**
+     * Read-only eligibility check — mirrors the gates in endorsePage()
+     * but without mutating. Returns the §L5 Permission shape:
+     *
+     *   {allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     *
+     * Gate evaluation order matches endorsePage() so reason codes line
+     * up with the eventual rejection. Coordination caps and per-page
+     * race conditions are NOT preflighted — they're transient and the
+     * controller's catch block surfaces them as 400s if the user hits
+     * them at submit time.
+     *
+     * Used by CardViewService to populate `permissions.can_endorse`,
+     * giving the frontend a sensible "show button" gate without
+     * exposing internal fraud signals (reason_code is intentionally
+     * coarse).
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    public function getEndorseEligibility(int $viewerId, int $pageId): array {
+        if ($viewerId <= 0) {
+            return ['allowed' => false, 'unlock_hint' => 'Sign in to endorse.', 'reason_code' => 'auth_required'];
+        }
+
+        // Self-endorse blocked except in BCC_TRUST_TEST_MODE.
+        $testMode = defined('BCC_TRUST_TEST_MODE') && \BCC_TRUST_TEST_MODE;
+        if (!$testMode) {
+            $pageOwnerId = PeepSoPageResolver::getOwnerId($pageId);
+            if ($pageOwnerId === $viewerId) {
+                return ['allowed' => false, 'unlock_hint' => "You can't endorse your own page.", 'reason_code' => 'self_action_blocked'];
+            }
+        }
+
+        // Quest gate (identity verification).
+        if (!$testMode) {
+            $questService = \BCC\Trust\Core\Plugin::instance()->questProgressService();
+            if (!$questService->canEndorse($viewerId)) {
+                $progress = $questService->getEndorseProgress($viewerId);
+                $hint = is_string($progress['missing_reason'] ?? null) && $progress['missing_reason'] !== ''
+                    ? (string) $progress['missing_reason']
+                    : 'Verify your identity to unlock endorsements.';
+                return ['allowed' => false, 'unlock_hint' => $hint, 'reason_code' => 'identity_required'];
+            }
+        }
+
+        // Account-age gate.
+        if (!$testMode) {
+            $user = get_userdata($viewerId);
+            if ($user instanceof \WP_User) {
+                $registeredTs = strtotime($user->user_registered);
+                $accountAgeDays = $registeredTs !== false
+                    ? (int) floor((time() - $registeredTs) / DAY_IN_SECONDS)
+                    : 0;
+                /** @var int $minAgeDays */
+                $minAgeDays = (int) apply_filters('bcc_trust_endorse_min_account_age_days', 7);
+                if ($accountAgeDays < $minAgeDays) {
+                    return [
+                        'allowed' => false,
+                        'unlock_hint' => sprintf('Your account must be at least %d days old to endorse.', $minAgeDays),
+                        'reason_code' => 'account_too_new',
+                    ];
+                }
+            }
+        }
+
+        // Fraud-score gate. Defense-in-depth — endorsePage() re-checks
+        // inside the transaction.
+        if (!$testMode) {
+            $userInfo = $this->userInfoRepo->getByUserId($viewerId);
+            if ($userInfo !== null && (int) $userInfo->fraud_score >= BCC_TRUST_FRAUD_HIGH) {
+                // Coarse reason — never echo the actual fraud score.
+                return [
+                    'allowed' => false,
+                    'unlock_hint' => 'Endorsements are temporarily restricted on this account.',
+                    'reason_code' => 'account_restricted',
+                ];
+            }
+        }
+
+        return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+    }
+
+    /**
      * Get endorsements given by user with fraud data from user_info.
      *
      * Passthrough to the query service. See EndorsementQueryService::getUserEndorsements()

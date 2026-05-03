@@ -5,7 +5,7 @@
  * Split into logical modules for maintainability.
  * Each sub-file is self-contained and can be overridden independently.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @version 2.1.0
  */
 if (!defined('ABSPATH')) exit;

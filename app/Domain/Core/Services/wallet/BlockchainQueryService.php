@@ -13,7 +13,7 @@
  *
  * Supported chains: ethereum, solana, cosmos
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage Services/Wallet
  */
 

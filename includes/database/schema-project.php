@@ -4,7 +4,7 @@
  *
  * Creates the denormalized page read model for fast discovery/search reads.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage Database
  * @version 5.0.0
  */

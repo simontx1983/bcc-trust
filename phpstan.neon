@@ -9,6 +9,7 @@ parameters:
         - ../bcc-core/src/
     bootstrapFiles:
         - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
         - phpstan-bootstrap.php
     parallel:
         maximumNumberOfProcesses: 1

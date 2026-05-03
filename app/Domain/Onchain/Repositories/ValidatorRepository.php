@@ -129,6 +129,103 @@ final class ValidatorRepository
     }
 
     /**
+     * Resolve the first validator row backing a peepso-page, with its
+     * chain slug. Used by CardViewService to surface `claim_target`
+     * on the validator card view-model so the §N8 claim flow knows
+     * which entity_id + chain_slug to send back to the claim endpoint.
+     *
+     * Validator pages typically map 1:1 to a single validator row;
+     * the LIMIT 1 is defensive in case a page accidentally hosts
+     * multiple validator rows during transitional re-indexing.
+     *
+     * @return object{validator_id: numeric-string, chain_slug: string}|null
+     */
+    public static function findFirstByPageId(int $pageId): ?object
+    {
+        if ($pageId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+        $chains  = ChainRepository::table();
+
+        /** @var object{validator_id: numeric-string, chain_slug: string}|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT v.id AS validator_id, c.slug AS chain_slug
+               FROM {$table} v
+               JOIN {$wallets} w ON w.id = v.wallet_link_id
+               JOIN {$chains} c ON c.id = v.chain_id
+              WHERE w.post_id = %d
+              LIMIT 1",
+            $pageId
+        ));
+
+        return $row;
+    }
+
+    /**
+     * Enumerate every validator row backing a peepso-page, one per chain.
+     *
+     * §K3 — used by CardViewService to populate the `chains` view-model
+     * field on validator cards. When an operator runs validators on
+     * multiple chains and links each wallet to the same peepso-page,
+     * this method returns one row per chain in chain-name order.
+     *
+     * Bounded: result count is the number of distinct chains an operator
+     * runs on (single-digit in practice — Cosmos Hub + Osmosis + Injective
+     * is the realistic ceiling), no LIMIT needed but kept defensively
+     * to cap pathological data at 32.
+     *
+     * @return list<object{validator_id: int, chain_slug: string, chain_name: string, operator_address: string}>
+     */
+    public static function findAllByPageId(int $pageId): array
+    {
+        if ($pageId <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+        $chains  = ChainRepository::table();
+
+        /**
+         * @var list<object{
+         *     validator_id: numeric-string,
+         *     chain_slug: string,
+         *     chain_name: string,
+         *     operator_address: string
+         * }> $rows
+         */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT v.id AS validator_id,
+                    c.slug AS chain_slug,
+                    c.name AS chain_name,
+                    v.operator_address AS operator_address
+               FROM {$table} v
+               JOIN {$wallets} w ON w.id = v.wallet_link_id
+               JOIN {$chains}  c ON c.id = v.chain_id
+              WHERE w.post_id = %d
+              ORDER BY c.name ASC
+              LIMIT 32",
+            $pageId
+        ));
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = (object) [
+                'validator_id'     => (int) $row->validator_id,
+                'chain_slug'       => $row->chain_slug,
+                'chain_name'       => $row->chain_name,
+                'operator_address' => $row->operator_address,
+            ];
+        }
+        return $out;
+    }
+
+    /**
      * @param array<string, mixed> $data
      * @return int|false Inserted/updated row ID, or false on failure.
      */

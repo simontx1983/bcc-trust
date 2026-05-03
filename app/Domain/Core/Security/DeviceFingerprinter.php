@@ -45,7 +45,7 @@ class DeviceFingerprinter {
             return null;
         }
         // Plugin activation is gated on BCC_ENCRYPTION_KEY (see
-        // bcc-trust-engine.php:131 and bootstrap.php:15). If we reach
+        // bcc-trust.php and bootstrap.php). If we reach
         // here without it, state is unsafe — fail closed rather than
         // silently degrade to AUTH_SALT (which rotates under key
         // rotation) or, worst, a hardcoded literal.

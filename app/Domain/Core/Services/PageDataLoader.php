@@ -7,8 +7,8 @@
  * when available) so a page with five trust blocks still only runs the
  * aggregation query once.
  *
- * Cache stampede protection: uses wp_cache_add() as a lock so only one
- * request rebuilds the payload; others get stale-while-revalidate.
+ * Cache stampede protection: uses MySQL GET_LOCK (via AdvisoryLock) so
+ * only one request rebuilds the payload; others get stale-while-revalidate.
  *
  * Usage:
  *   $data = \BCC\Trust\Core\Services\PageDataLoader::get( $page_id );
@@ -38,9 +38,6 @@ class PageDataLoader {
 
     /** @var int Default TTL in seconds (5 minutes). */
     private const DEFAULT_TTL = 300;
-
-    /** @var int Lock TTL in seconds for cache stampede protection. */
-    private const LOCK_TTL = 5;
 
     /** @var PageDataAggregator|null Lazy-initialised singleton. */
     private static ?PageDataAggregator $aggregator = null;
@@ -100,11 +97,12 @@ class PageDataLoader {
         }
 
         // ── Stampede protection ──────────────────────────────
-        // wp_cache_add is atomic: only succeeds if key doesn't exist.
-        // Winner builds; losers serve stale data while waiting.
-        $lock_key  = 'lock_' . $page_id;
+        // MySQL GET_LOCK is atomic across all DB sessions and auto-releases
+        // on connection close, so a crashed worker cannot leave a stale
+        // lock. Winner builds; losers serve stale data while waiting.
+        $lock_key  = 'bcc_pdl_' . $page_id;
         $stale_key = 'stale_' . $page_id;
-        $got_lock  = wp_cache_add( $lock_key, 1, self::CACHE_GROUP, self::LOCK_TTL );
+        $got_lock  = \BCC\Core\DB\AdvisoryLock::acquire( $lock_key, 0 );
 
         if ( ! $got_lock ) {
             // Another request is building. Serve stale data if available.
@@ -127,30 +125,31 @@ class PageDataLoader {
             return null;
         }
 
-        $post = get_post( $page_id );
-        if ( ! $post || 'publish' !== $post->post_status ) {
-            wp_cache_delete( $lock_key, self::CACHE_GROUP );
-            return null;
+        try {
+            $post = get_post( $page_id );
+            if ( ! $post || 'publish' !== $post->post_status ) {
+                return null;
+            }
+
+            $raw = self::aggregator()->build( $post, 0 );
+
+            // Strip viewer section — user-specific, never cached.
+            unset( $raw['viewer'] );
+
+            $data = PageDataSchema::applyDefaults( $raw );
+
+            /** @var int $ttl Seconds. Default 300 (5 min). */
+            $ttl = (int) apply_filters( 'bcc_page_data_cache_ttl', self::DEFAULT_TTL, $page_id );
+
+            wp_cache_set( $cache_key, $data, self::CACHE_GROUP, $ttl );
+
+            // Keep a stale backup at 2x TTL for stale-while-revalidate.
+            wp_cache_set( $stale_key, $data, self::CACHE_GROUP, $ttl * 2 );
+
+            return $data;
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release( $lock_key );
         }
-
-        $raw = self::aggregator()->build( $post, 0 );
-
-        // Strip viewer section — user-specific, never cached.
-        unset( $raw['viewer'] );
-
-        $data = PageDataSchema::applyDefaults( $raw );
-
-        /** @var int $ttl Seconds. Default 300 (5 min). */
-        $ttl = (int) apply_filters( 'bcc_page_data_cache_ttl', self::DEFAULT_TTL, $page_id );
-
-        wp_cache_set( $cache_key, $data, self::CACHE_GROUP, $ttl );
-
-        // Keep a stale backup at 2x TTL for stale-while-revalidate.
-        wp_cache_set( $stale_key, $data, self::CACHE_GROUP, $ttl * 2 );
-
-        wp_cache_delete( $lock_key, self::CACHE_GROUP );
-
-        return $data;
     }
 
     /**

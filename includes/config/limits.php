@@ -34,6 +34,32 @@ define('BCC_TRUST_RATE_WINDOW_LOGIN', 300);
 define('BCC_TRUST_RATE_LIMIT_API', 60);
 define('BCC_TRUST_RATE_WINDOW_API', 60);
 
+// Status-post burst seatbelt (PostsService::createStatus).
+// Tight enough to clip accidental floods + scripted bursts; loose
+// enough that humans never hit it. NOT a primary defense — when this
+// fires repeatedly in production logs ('status burst seatbelt fired'),
+// it's the signal to layer in §K1 fingerprint/IP/fraud-score gates.
+define('BCC_TRUST_RATE_LIMIT_STATUS_POST', 5);
+define('BCC_TRUST_RATE_WINDOW_STATUS_POST', 120);
+
+// ======================================================
+// NOTIFICATIONS (§I1)
+// ======================================================
+// PeepSo's notifications API takes an integer module_id. Each native
+// PeepSo module owns a sequential constant (PeepSoGdpr = 10, etc.).
+// 9000 puts BCC well clear of the native range without cliff-ing into
+// magic-number territory — high enough to spot in queries, low enough
+// to stay an INT.
+//
+// All BCC-emitted notifications carry this module_id. Per-event
+// distinction goes on `not_type` (string) — see NotificationType.
+define('BCC_NOTIFICATION_MODULE_ID', 9000);
+
+// Default page size for /me/notifications. Tight enough that the
+// dropdown surface stays scannable; the Load-more button paginates
+// past it. Hard ceiling per request stays at 50 (set in the endpoint).
+define('BCC_NOTIFICATION_PAGE_SIZE', 20);
+
 // ======================================================
 // CACHE SETTINGS
 // ======================================================

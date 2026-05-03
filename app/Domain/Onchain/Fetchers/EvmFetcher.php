@@ -49,13 +49,124 @@ class EvmFetcher implements FetcherInterface
 
     public function supports_feature(string $feature): bool
     {
-        return in_array($feature, ['collection', 'top_collections'], true);
+        // 'holdings_list' deliberately omitted — EVM gallery requires
+        // Alchemy/Moralis, committed in a later PR. count_holdings uses
+        // plain eth_call balanceOf() and works with any RPC endpoint.
+        return in_array($feature, ['collection', 'top_collections', 'holdings_count'], true);
     }
 
     /** @return array<string, mixed> */
     public function fetch_validator(string $address): array
     {
         return []; // EVM chains don't expose validator data via Etherscan API
+    }
+
+    /** @return array<int, array{validator_address: string, shares?: string|null, amount?: float|null}> */
+    public function fetch_delegations(string $delegatorAddress): array
+    {
+        return []; // No native account-level delegation on EVM.
+    }
+
+    // ── Holdings (per-wallet ERC-721 balance) ──────────────────────────────
+
+    /**
+     * ERC-721 balanceOf(address) via eth_call. Works with any EVM RPC
+     * endpoint — admin must configure chain->rpc_url with a full API key
+     * (the seeded Alchemy URLs ship with /v2/ placeholder and will fail
+     * until a key is appended).
+     *
+     * Does NOT handle ERC-1155 (which uses balanceOf(address,uint256) and
+     * requires the token_id). For 1155-gated groups, extend later.
+     */
+    public function count_holdings(string $wallet, string $contract): int
+    {
+        $addr = strtolower($wallet);
+        if (!preg_match('/^0x[a-f0-9]{40}$/', $addr)) {
+            return 0;
+        }
+
+        $to = strtolower($contract);
+        if (!preg_match('/^0x[a-f0-9]{40}$/', $to)) {
+            return 0;
+        }
+
+        // balanceOf(address) selector = first 4 bytes of keccak256("balanceOf(address)")
+        $selector = '70a08231';
+        $paddedWallet = str_pad(substr($addr, 2), 64, '0', STR_PAD_LEFT);
+        $data = '0x' . $selector . $paddedWallet;
+
+        $result = $this->ethCall($to, $data);
+        if ($result === null) {
+            return 0;
+        }
+
+        $hex = ltrim(substr($result, 2), '0');
+        if ($hex === '') {
+            return 0;
+        }
+
+        // Realistic NFT balances fit in PHP_INT_MAX comfortably.
+        // A pathological return > 2^63 would wrap, but that's
+        // a broken contract, not user data worth preserving.
+        return (int) hexdec($hex);
+    }
+
+    /**
+     * Full NFT enumeration on EVM needs Alchemy getNFTs / Moralis / similar.
+     * Stubbed until the provider decision lands — see HoldingsService.
+     *
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
+     */
+    public function list_holdings(string $wallet, ?string $cursor = null): array
+    {
+        return ['items' => [], 'truncated' => false, 'cursor' => null];
+    }
+
+    /**
+     * Thin JSON-RPC wrapper for read-only contract calls. Returns the
+     * raw hex result string or null on any error.
+     */
+    private function ethCall(string $to, string $data): ?string
+    {
+        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
+        // Seeded Alchemy URLs ship as "https://eth-mainnet.g.alchemy.com/v2/"
+        // with no key appended. Skip rather than fire a guaranteed 401.
+        if (!$rpcUrl || str_ends_with($rpcUrl, '/v2/')) {
+            return null;
+        }
+
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 1,
+            'method'  => 'eth_call',
+            'params'  => [
+                ['to' => $to, 'data' => $data],
+                'latest',
+            ],
+        ]);
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'EVM eth_call balanceOf',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] eth_call error: ' . $response->get_error_message());
+            return null;
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json) || isset($json['error'])) {
+            return null;
+        }
+
+        $result = $json['result'] ?? null;
+        return is_string($result) && str_starts_with($result, '0x') ? $result : null;
     }
 
     /**

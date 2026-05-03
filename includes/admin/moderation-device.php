@@ -2,7 +2,7 @@
 /**
  * Moderation — Device Fingerprint Investigation View
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

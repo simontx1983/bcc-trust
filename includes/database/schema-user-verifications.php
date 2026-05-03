@@ -14,7 +14,7 @@
  * Type-specific data (e.g. followers, repos, chain) is stored
  * as a JSON-encoded string in the `meta` column.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage Database
  * @version 1.0.0
  */

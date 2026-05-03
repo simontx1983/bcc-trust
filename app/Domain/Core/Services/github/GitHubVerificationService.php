@@ -5,7 +5,7 @@
  * Orchestrates all GitHub operations: connect, disconnect, refresh, status.
  * Controllers delegate here; this class owns all domain logic.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage GitHub
  */
 

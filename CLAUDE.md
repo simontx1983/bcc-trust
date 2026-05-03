@@ -24,10 +24,17 @@ the boundary rather than adding coupling.
 helpers, permissions, logging). `bcc-trust` depends on it; it does not
 absorb it.
 
-## M1 status
+## M1 history (complete)
 
-M1 is the move. Each sub-milestone lands in a single commit labelled
-`[M1.N]` so the migration can be rewound file-by-file:
+M1 was the merge. Predecessor plugins (`bcc-trust-engine`,
+`bcc-onchain-signals`, `bcc-disputes`) were deactivated and deleted in
+M1.5; their code now lives under `app/Domain/{Core,Onchain,Disputes}/`.
+See [MIGRATED-FROM.md](MIGRATED-FROM.md) for namespace + class renames
+and pre-M1 commit hashes.
+
+The sub-milestones below are kept for archaeology only — each was a
+single commit labelled `[M1.N]` so the merge could have been rewound
+file-by-file:
 
 - **M1.0** — skeleton (this directory, plugin header, composer.json,
   phpstan.neon, CLAUDE.md). **Active plugin is still inert.**
@@ -51,6 +58,11 @@ M1 is the move. Each sub-milestone lands in a single commit labelled
 
 ## Conventions (inherited)
 
+> **§11 (Cross-Codebase Reuse Rule) runs BEFORE all others.** Do not
+> proceed to implementation until the duplicate scan is complete. See
+> §11 below and [docs/prompts/duplicate-scan.md](../../../../docs/prompts/duplicate-scan.md)
+> for the required scan report shape.
+
 Same architecture guardrails as the predecessor plugins:
 
 1. **Repository-only DB access** — all `$wpdb` lives in
@@ -67,6 +79,57 @@ Same architecture guardrails as the predecessor plugins:
    types, don't suppress them.
 7. **Named parameters forbidden in cross-plugin calls** — positional
    only, to keep compiled autoloads stable under composer dump.
+8. **No user-facing UI in PHP.** PHP returns arrays, DTOs, or JSON via
+   REST. No `add_shortcode`, no `register_block_type`, no `templates/`
+   directory, no `echo '<...'` in services or controllers. The Next.js
+   app at `bcc-frontend/` is the only user-facing renderer. wp-admin
+   pages and admin notices are a documented exception (paths under
+   `*/Admin/`, files subscribing to `admin_notices`, methods named
+   `*Notice`) until the admin app moves to Next.js. Enforced by
+   `scripts/arch-guardrails.sh` rules 6–9.
+9. **Load-bearing contract must be verified, not assumed.** Every
+   response under `/wp-json/bcc/v1/` and `/wp-json/bcc-trust/v1/`
+   conforms to `docs/api-contract-v1.md` §1.4–§1.5. The
+   [Envelope](app/Domain/Core/REST/Envelope.php) class wraps every
+   response automatically. PRs touching `app/Domain/*/REST/` or
+   view-model builders MUST run
+   `bash scripts/arch-guardrails.sh --with-contract` (which invokes
+   `scripts/api-contract-check.sh` against the live site). A contract
+   break is P0.
+
+### 11. Cross-Codebase Reuse Rule
+
+Before writing or modifying any code, you MUST perform a cross-codebase
+duplicate scan.
+
+You MUST search:
+
+1. The current repository
+2. `/bcc-global-library/` (if present)
+3. `docs/pattern-registry.md` (if present)
+4. Any explicitly referenced external repos
+
+Your objective is to determine whether the requested logic already
+exists in any form.
+
+If similar logic exists:
+
+- Prefer **REUSE** or **EXTEND**.
+- Do **NOT** create parallel implementations.
+
+Creating duplicate logic across files, domains, or repositories is a
+guardrail violation.
+
+You must produce a "CROSS-CODEBASE SCAN REPORT" before writing any new
+code. The report shape is documented in
+[docs/prompts/duplicate-scan.md](../../../../docs/prompts/duplicate-scan.md).
+
+**The scan must include at least one grep/search attempt and reference
+concrete file paths. Vague or empty reports are invalid.** "No matches
+found" without evidence of searching counts as not searching.
+
+This rule runs **before** all others (§1–§9). Do not proceed to
+implementation until the duplicate scan is complete.
 
 ## Commands
 

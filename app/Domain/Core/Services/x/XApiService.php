@@ -4,7 +4,7 @@
  *
  * Fetches user data from the X API v2.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  * @subpackage X
  * @version 1.0.0
  */

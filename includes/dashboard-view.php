@@ -5,7 +5,7 @@
  * Each tab lives in its own file under includes/admin/tabs/.
  * This file only renders the nav bar and delegates to the right tab.
  *
- * @package BCC_Trust_Engine
+ * @package BCC\Trust\Core
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -23,6 +23,7 @@ require_once $tabs_dir . 'tab-devices.php';
 require_once $tabs_dir . 'tab-rings.php';
 require_once $tabs_dir . 'tab-ml.php';
 require_once $tabs_dir . 'tab-repair.php';
+require_once $tabs_dir . 'tab-push.php';
 require_once BCC_TRUST_PATH . 'includes/admin/dashboard-verified.php';
 
 $current_tab = isset( $_GET['tab'] ) ? sanitize_key( $_GET['tab'] ) : 'overview';
@@ -40,6 +41,7 @@ $tabs = [
     'rings'     => 'Vote Rings',
     'ml'        => 'ML Insights',
     'repair'    => '🔧 Repair',
+    'push'      => 'Push Stats',
 ];
 
 // Highlight tabs that need attention
@@ -71,6 +73,7 @@ $attention_tabs = [ 'repair' => '#f0f8ff', 'verified' => '#e6f3e6' ];
         case 'rings':     bcc_trust_render_rings_tab();     break;
         case 'ml':        bcc_trust_render_ml_tab();        break;
         case 'repair':    bcc_trust_render_repair_tab();    break;
+        case 'push':      bcc_trust_render_push_tab();      break;
         default:          bcc_trust_render_overview_tab();  break;
     }
     ?>

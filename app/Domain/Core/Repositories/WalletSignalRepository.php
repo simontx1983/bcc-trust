@@ -11,7 +11,7 @@ use BCC\Core\ServiceLocator;
 
 /**
  * Delegate: routes all wallet signal operations through the
- * WalletSignalWriteInterface contract (implemented by bcc-onchain-signals).
+ * WalletSignalWriteInterface contract (implemented by bcc-trust's Onchain domain).
  *
  * Data now lives in bcc_onchain_signals (unified table). The former
  * bcc_trust_wallet_signals table is no longer written to.

@@ -55,7 +55,7 @@ class CosmosFetcher implements FetcherInterface
 
     public function supports_feature(string $feature): bool
     {
-        return in_array($feature, ['validator', 'dao', 'top_collections'], true);
+        return in_array($feature, ['validator', 'delegations', 'dao', 'top_collections'], true);
     }
 
     // ── Validator Fetching ───────────────────────────────────────────────────
@@ -286,6 +286,66 @@ class CosmosFetcher implements FetcherInterface
         }
 
         return $results;
+    }
+
+    // ── Holdings (NFT ownership) ───────────────────────────────────────────
+
+    /**
+     * Cosmos SDK chains with CW-721 NFTs (e.g. Stargaze) expose per-wallet
+     * holdings through chain-specific indexers, not the standard LCD. Not
+     * implemented for MVP.
+     */
+    public function count_holdings(string $wallet, string $contract): int
+    {
+        return 0;
+    }
+
+    /**
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
+     */
+    public function list_holdings(string $wallet, ?string $cursor = null): array
+    {
+        return ['items' => [], 'truncated' => false, 'cursor' => null];
+    }
+
+    // ── Delegations (by delegator account) ─────────────────────────────────
+
+    /**
+     * Fetch the set of validators this account delegates to.
+     *
+     * One paginated LCD call. Capped at 500 entries — well above any realistic
+     * delegator's validator count, and the LCD endpoint's own page cap.
+     *
+     * @return array<int, array{validator_address: string, shares: string|null, amount: float|null}>
+     */
+    public function fetch_delegations(string $delegatorAddress): array
+    {
+        $response = $this->lcdGet("/cosmos/staking/v1beta1/delegations/{$delegatorAddress}", [
+            'pagination.limit' => 500,
+        ]);
+
+        if (!$response || empty($response['delegation_responses'])) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($response['delegation_responses'] as $item) {
+            $validator = $item['delegation']['validator_address'] ?? null;
+            if (!$validator) {
+                continue;
+            }
+
+            $shares    = $item['delegation']['shares'] ?? null;
+            $rawAmount = $item['balance']['amount'] ?? null;
+
+            $rows[] = [
+                'validator_address' => $validator,
+                'shares'            => is_string($shares) ? $shares : null,
+                'amount'            => is_string($rawAmount) ? $this->tokensToDisplay($rawAmount) : null,
+            ];
+        }
+
+        return $rows;
     }
 
     // ── NFT Collections (Stargaze Constellations GraphQL) ─────────────────
