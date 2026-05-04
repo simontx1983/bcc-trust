@@ -137,8 +137,10 @@ final class UserViewService
             'id'                  => $userId,
             'handle'              => $handle,
             'display_name'        => $effectiveName,
-            'avatar_url'          => self::resolveAvatar($userId),
-            'joined_at'           => self::toIso8601((string) $user->user_registered),
+            'avatar_url'             => self::resolveAvatar($userId),
+            'cover_photo_url'        => self::resolveCoverPhotoUrl($userId),
+            'cover_photo_position'   => self::resolveCoverPhotoPosition($userId),
+            'joined_at'              => self::toIso8601((string) $user->user_registered),
             'is_self'             => $isSelf,
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
             'reputation_tier'     => $tier,
@@ -511,6 +513,54 @@ final class UserViewService
     private static function resolveBio(\WP_User $user): string
     {
         return (string) ($user->description ?? '');
+    }
+
+    /**
+     * §3.1 cover_photo_url — reads PeepSo's stored cover hash from
+     * user_meta and returns the absolute URL. Returns null when no
+     * custom cover is set (frontend falls back to a default treatment;
+     * spec §1.7 — absolute URLs for media).
+     *
+     * Wraps PeepSoUser::get_cover() when PeepSo is loaded; falls back
+     * to direct user_meta read if PeepSo is missing (defense — bio +
+     * the rest of the profile still work without PeepSo, only the
+     * cover photo URL is unavailable).
+     */
+    private static function resolveCoverPhotoUrl(int $userId): ?string
+    {
+        if ($userId <= 0) {
+            return null;
+        }
+        if (!class_exists('\\PeepSoUser')) {
+            return null;
+        }
+        $instance = \PeepSoUser::get_instance($userId);
+        if (!$instance->has_cover()) {
+            return null;
+        }
+        $url = $instance->get_cover();
+        return $url !== '' ? $url : null;
+    }
+
+    /**
+     * §3.1 cover_photo_position — `{x, y}` percentages (0–100) for
+     * the cover photo crop position. Stored in PeepSo's
+     * `peepso_cover_position_x` / `peepso_cover_position_y` user_meta;
+     * defaults to center (50, 50) when no row exists.
+     *
+     * @return array{x: int, y: int}
+     */
+    private static function resolveCoverPhotoPosition(int $userId): array
+    {
+        if ($userId <= 0) {
+            return ['x' => 50, 'y' => 50];
+        }
+        $x = get_user_meta($userId, 'peepso_cover_position_x', true);
+        $y = get_user_meta($userId, 'peepso_cover_position_y', true);
+        return [
+            'x' => is_numeric($x) ? max(0, min(100, (int) $x)) : 50,
+            'y' => is_numeric($y) ? max(0, min(100, (int) $y)) : 50,
+        ];
     }
 
     // ──────────────────────────────────────────────────────────────────

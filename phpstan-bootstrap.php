@@ -105,9 +105,17 @@ if (!class_exists('PeepSoUser')) {
             $this->profile_fields = new PeepSoProfileFields();
         }
         public static function get_instance(int $id = 0): self { return new self($id); }
-        public function get_avatar(): string { return ''; }
+        public function get_id(): int { return $this->id; }
+        public function get_avatar(string $suffix = 'full'): string { return ''; }
         public function get_fullname(): string { return ''; }
         public function get_profileurl(): string { return ''; }
+        public function has_cover(): bool { return false; }
+        public function get_cover(int $size = 0): string { return ''; }
+        public function move_avatar_file(string $src_file, bool $delete = false): void {}
+        public function finalize_move_avatar_file(bool $add_to_stream = true): void {}
+        public function delete_avatar(): void {}
+        public function move_cover_file(string $src_file, bool $add_to_stream = true): void {}
+        public function delete_cover_photo(string $cover_hash = ''): bool { return false; }
     }
 }
 

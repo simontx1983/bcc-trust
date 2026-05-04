@@ -867,6 +867,25 @@ final class Plugin
         // email_digest flag to enumerate cron recipients.
         \BCC\Trust\Core\REST\MyNotificationPrefsEndpoint::register();
 
+        // V2 Phase 2: §3.1 Profile + account self-edit:
+        //   PATCH  /me/profile           — bio (text)
+        //   POST   /me/profile/avatar    — upload avatar (multipart)
+        //   DELETE /me/profile/avatar
+        //   POST   /me/profile/cover     — upload cover photo (multipart)
+        //   DELETE /me/profile/cover
+        // Bio writes wp_users.description directly. Avatar + cover
+        // wrap PeepSoUser's public methods so we don't reimplement
+        // image processing (resize, multi-size, hash-named storage).
+        \BCC\Trust\Core\REST\MyProfileEndpoint::register();
+
+        // V2 Phase 2: PeepSo-backed messaging preferences:
+        //   GET   /me/messages-prefs   — read chat_enabled + chat_friends_only
+        //   PATCH /me/messages-prefs   — partial update
+        // Writes peepso_chat_enabled + peepso_chat_friends_only user_meta;
+        // peepso-messages/classes/chatmodel.php reads these to gate
+        // direct message delivery.
+        \BCC\Trust\Core\REST\MyMessagesPrefsEndpoint::register();
+
         // V1.5: §I1 one-click email-digest unsubscribe — public route
         // that verifies a signed token (HMAC-SHA256, 90-day TTL) and
         // flips email_digest = false. Returns HTML, not JSON.

@@ -369,6 +369,15 @@ run_t2() {
     t2_check "/wp-json/bcc-trust/v1/revoke-endorsement" "POST revoke-endorse"
     t2_check "/wp-json/bcc-trust/v1/report-vote"      "POST report-vote"
 
+    # V2 Phase 2 — Profile + account self-edit (bio + avatar + cover).
+    t2_check "/wp-json/bcc/v1/me/profile"             "PATCH me/profile (bio)"
+    t2_check "/wp-json/bcc/v1/me/profile/avatar"      "POST me/profile/avatar"
+    t2_check "/wp-json/bcc/v1/me/profile/cover"       "POST me/profile/cover"
+    t2_check "/wp-json/bcc/v1/me/profile/cover/position" "PATCH me/profile/cover/position"
+
+    # V2 Phase 2 — Messaging preferences (PeepSo-backed chat toggles).
+    t2_check "/wp-json/bcc/v1/me/messages-prefs"      "GET/PATCH me/messages-prefs"
+
     # ─ Field-level privacy regression tests (must be opt-in via env vars) ─
     log "  ${BOLD}Field-level privacy${NC}"
     t2_wallet_privacy

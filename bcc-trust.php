@@ -667,6 +667,46 @@ add_action('init', function () {
 
 /*
 |--------------------------------------------------------------------------
+| PeepSo email pipeline — silenced (headless interop)
+|--------------------------------------------------------------------------
+|
+| PeepSo schedules `peepso_mailqueue_send_event` every 5 minutes. The
+| handler reads `peepso_email_intensity` + `peepso_notifications` per
+| user and dispatches PeepSo's own activity emails (reactions, replies,
+| friend requests, etc.).
+|
+| Our headless transition made BCC the canonical user-facing email
+| surface (DigestService + NotificationDispatcher). PeepSo's email
+| pipeline is parallel and reads keys (`peepso_*`) that our settings
+| page does NOT write — so a user who opts out of email in our UI
+| still gets PeepSo's emails, and a user who enables our digest may
+| get duplicates.
+|
+| Fix: unschedule PeepSo's mail queue cron. Idempotent — running it
+| every request is a no-op when the cron isn't scheduled. We do NOT
+| touch PeepSo's other crons (maintenance, GDPR, inactive-user
+| cleanup, super-queue) — those are non-email infrastructure we want
+| to keep. Only the email send loop is silenced.
+|
+| If a future requirement reinstates PeepSo emails (e.g., a feature
+| we don't want to reimplement), remove this block AND wire our
+| /settings/notifications page to also write `peepso_email_intensity`
+| / `peepso_notifications` so the two surfaces stay in sync.
+*/
+add_action('init', function () {
+    if (defined('PeepSo::CRON_MAILQUEUE')) {
+        wp_clear_scheduled_hook(\PeepSo::CRON_MAILQUEUE);
+    } else {
+        // Hardcoded fallback — the constant value is stable and named
+        // the same across PeepSo versions we've seen, but if PeepSo
+        // hasn't loaded yet (race during early init) we still want
+        // the cron unscheduled.
+        wp_clear_scheduled_hook('peepso_mailqueue_send_event');
+    }
+}, 20);
+
+/*
+|--------------------------------------------------------------------------
 | V2 Phase 1 — Web push subscribers + flush worker
 |--------------------------------------------------------------------------
 |
