@@ -286,6 +286,91 @@ add_action('bcc_trust_weekly_digest', function () {
     \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest();
 });
 
+// V2: NFT-gated holder groups — daily provisioning sweep. Reads
+// wp_bcc_onchain_collections.is_verified=1 and creates a closed PeepSo
+// group for any verified collection that doesn't have one yet.
+// Idempotent — re-running creates no duplicates.
+add_action('bcc_gated_group_provision', function () {
+    $result = \BCC\Trust\Core\Plugin::instance()
+        ->gatedGroupProvisioningService()
+        ->provisionAll();
+
+    if ($result['created'] > 0 || !empty($result['errors'])) {
+        \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group provisioning sweep', $result);
+    }
+});
+
+// V2 (PR 4): NFT-gated holder groups — reconcile sweep for users who
+// opted into auto-join via `bcc_auto_join_eligible_groups` user_meta.
+// Default users are NEVER touched here (suggest-don't-auto-join is the
+// default).
+//
+// Bounded to 20 users per tick × twicedaily = 40 users/day. Each
+// reconcile makes per-(wallet, contract) RPC calls via HoldingsService,
+// which can take 20–30s on cold-start (transient cache empty). 20 ×
+// 25s = 500s, well under typical cron worker runtimes. After the 24h
+// holdings cache warms, throughput goes way up. If the active opt-in
+// pool exceeds 40 users, see the `last_reconciled_at` rotation pattern
+// (deferred follow-up) — the current ID-ASC ordering biases toward
+// older accounts which is a reasonable v1 default.
+add_action('bcc_gated_group_reconcile_sweep', function () {
+    $userIds = get_users([
+        'meta_key'   => \BCC\Trust\Onchain\Services\NftGroupGateService::USER_META_AUTO_JOIN,
+        'meta_value' => '1',
+        'fields'     => 'ID',
+        'number'     => 20,
+        'orderby'    => 'ID',
+        'order'      => 'ASC',
+    ]);
+    if (!is_array($userIds) || $userIds === []) {
+        return;
+    }
+
+    $service     = \BCC\Trust\Core\Plugin::instance()->nftGroupGateService();
+    $totalJoined = 0;
+    $usersTouched = 0;
+
+    foreach ($userIds as $uid) {
+        $result = $service->reconcileForUser((int) $uid);
+        if ($result['joined'] > 0) {
+            $totalJoined += $result['joined'];
+            $usersTouched++;
+        }
+    }
+
+    if ($usersTouched > 0) {
+        \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group reconcile sweep', [
+            'users_eligible' => count($userIds),
+            'users_touched'  => $usersTouched,
+            'joins_total'    => $totalJoined,
+        ]);
+    }
+});
+
+// V2: when PeepSo evicts a user from a group via mod action, record a
+// permanent opt-out so our reconcile sweep (PR 4) won't re-add a banned
+// user. Only writes opt-out for our holder groups; ignores others.
+add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
+    $groupId = (int) $groupId;
+    $userId  = (int) $userId;
+    if ($groupId <= 0 || $userId <= 0) {
+        return;
+    }
+    if ($userId === get_current_user_id()) {
+        // Voluntary leave (user removed self via UI) — TTL'd opt-out is
+        // recorded by the REST endpoint or the gate service. Skip here
+        // to avoid double-writing the opt-out timestamp.
+        return;
+    }
+    $config = \BCC\Trust\Onchain\Repositories\GatedGroupRepository::getGateConfig($groupId);
+    if ($config === null) {
+        return; // Not a holder group.
+    }
+    \BCC\Trust\Core\Plugin::instance()
+        ->nftGroupGateService()
+        ->recordPermanentOptOut($userId, $groupId);
+}, 10, 2);
+
 function bcc_trust_schedule_cron_jobs() {
     \BCC\Trust\Core\Services\CronService::scheduleAll();
 }
@@ -629,6 +714,7 @@ add_action('plugins_loaded', function (): void {
     add_action('admin_menu', function () {
         \BCC\Trust\Onchain\Admin\SettingsPage::register_page();
         \BCC\Trust\Onchain\Admin\ChainsPage::register_page();
+        \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_page();
     }, 20);
     \BCC\Trust\Onchain\Admin\ChainsPage::register_ajax();
 
@@ -973,6 +1059,16 @@ function bcc_trust_activate() {
     if (!wp_next_scheduled('bcc_onchain_retry_bonus')) {
         wp_schedule_event(time(), 'hourly', 'bcc_onchain_retry_bonus');
     }
+    if (!wp_next_scheduled('bcc_gated_group_provision')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_gated_group_provision');
+    }
+    if (!wp_next_scheduled('bcc_gated_group_reconcile_sweep')) {
+        // Twicedaily × 20 users per tick = 40 users/day capacity, well
+        // within cron worker timeout even on cold-start. Offset 90m past
+        // provision so any newly-provisioned groups exist before the
+        // sweep tries to auto-join opted-in users.
+        wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
+    }
 
     // Defensive: re-register custom intervals (top-level add_filter above
     // should already have done this; WP dedupes by callable signature).
@@ -1006,6 +1102,8 @@ function bcc_trust_deactivate() {
         // Onchain cron events.
         'bcc_onchain_daily_refresh',
         'bcc_onchain_retry_bonus',
+        'bcc_gated_group_provision',
+        'bcc_gated_group_reconcile_sweep',
     ];
 
     foreach ($cron_hooks as $hook) {

@@ -36,6 +36,7 @@ function bcc_onchain_create_collections_table(): void {
         metadata_storage VARCHAR(30) DEFAULT NULL,
         image_url VARCHAR(500) DEFAULT NULL,
         show_on_profile TINYINT(1) NOT NULL DEFAULT 1,
+        is_verified TINYINT(1) NOT NULL DEFAULT 0,
         fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         expires_at DATETIME NOT NULL,
         PRIMARY KEY (id),
@@ -45,7 +46,8 @@ function bcc_onchain_create_collections_table(): void {
         KEY contract_address (contract_address),
         KEY expires_at (expires_at),
         KEY idx_volume (total_volume),
-        KEY idx_floor (floor_price)
+        KEY idx_floor (floor_price),
+        KEY idx_verified (is_verified)
     ) {$charset_collate};";
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';

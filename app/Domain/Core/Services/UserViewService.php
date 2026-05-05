@@ -612,39 +612,11 @@ final class UserViewService
      */
     private function collectUserGroupIds(int $userId): array
     {
-        // Reuse findUserMemberships with a wide group_id filter — the
-        // simplest path. We pre-fetch the user's groups via WP's posts
-        // join through peepso_group_members. To avoid a second helper
-        // method on the bcc-core repo, we ask findUserMemberships for
-        // a sentinel-wide range; if the user has 0 groups, we get 0
-        // rows back. This intentionally stays inside the existing
-        // repo surface.
-        //
-        // NOTE: if user belongs to > 200 groups, this truncates (per
-        // findUserMemberships LIMIT 200). For V1 that's well above the
-        // expected per-user Local count (a user is realistically in
-        // 1-3 Locals).
-        global $wpdb;
-        $members = $wpdb->prefix . 'peepso_group_members';
-
-        $sql = $wpdb->prepare(
-            "SELECT DISTINCT gm_group_id AS group_id
-               FROM {$members}
-              WHERE gm_user_id = %d
-                AND gm_user_status LIKE %s
-              LIMIT 200",
-            $userId,
-            'member%'
-        );
-
-        /** @var list<object{group_id: numeric-string}>|null $rows */
-        $rows = $wpdb->get_results($sql);
-
-        $ids = [];
-        foreach ($rows ?: [] as $row) {
-            $ids[] = (int) $row->group_id;
-        }
-        return $ids;
+        // Delegates to the canonical bcc-core repo helper; the
+        // active-membership filter (`gm_user_status LIKE 'member%'`)
+        // and the LIMIT 200 cap are owned there. A user is realistically
+        // in 1–3 Locals + a few holder groups, well under the cap.
+        return \BCC\Core\Repositories\PeepSoGroupRepository::getUserMemberGroupIds($userId);
     }
 
     /**

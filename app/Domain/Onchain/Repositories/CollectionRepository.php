@@ -26,6 +26,7 @@ if (!defined('ABSPATH')) {
  *     metadata_storage: string|null,
  *     image_url: string|null,
  *     show_on_profile: string,
+ *     is_verified: string,
  *     fetched_at: string,
  *     expires_at: string
  * }
@@ -115,7 +116,7 @@ final class CollectionRepository
     private const COLUMNS = 'id, wallet_link_id, contract_address, chain_id, collection_name,
                  token_standard, total_supply, floor_price, floor_currency, unique_holders,
                  total_volume, listed_percentage, royalty_percentage, metadata_storage,
-                 image_url, show_on_profile, fetched_at, expires_at';
+                 image_url, show_on_profile, is_verified, fetched_at, expires_at';
 
     public static function table(): string
     {
@@ -544,6 +545,183 @@ final class CollectionRepository
             "SELECT 1 FROM {$table} WHERE wallet_link_id = %d LIMIT 1",
             $walletLinkId
         ));
+    }
+
+    /**
+     * Listing for the admin "Verify Collections" page. Ordered by
+     * unique_holders DESC so popular collections surface first for
+     * verification decisions.
+     *
+     * @return array{items: list<object{
+     *     id: string,
+     *     contract_address: string,
+     *     collection_name: string|null,
+     *     unique_holders: string|null,
+     *     image_url: string|null,
+     *     is_verified: string,
+     *     chain_slug: string
+     * }>, total: int, pages: int}
+     */
+    public static function listForAdminVerification(int $page = 1, int $perPage = 50): array
+    {
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        $page    = max(1, $page);
+        $perPage = max(1, min(100, $perPage));
+        $offset  = ($page - 1) * $perPage;
+
+        $total = (int) $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$table}"
+        );
+
+        /** @var list<object{
+         *     id: string,
+         *     contract_address: string,
+         *     collection_name: string|null,
+         *     unique_holders: string|null,
+         *     image_url: string|null,
+         *     is_verified: string,
+         *     chain_slug: string
+         * }>|null $items */
+        $items = $wpdb->get_results($wpdb->prepare(
+            "SELECT c.id, c.contract_address, c.collection_name, c.unique_holders,
+                    c.image_url, c.is_verified, ch.slug AS chain_slug
+               FROM {$table} c
+          LEFT JOIN {$chains} ch ON ch.id = c.chain_id
+              ORDER BY c.unique_holders DESC, c.id DESC
+              LIMIT %d OFFSET %d",
+            $perPage,
+            $offset
+        ));
+
+        return [
+            'items' => $items ?: [],
+            'total' => $total,
+            'pages' => $perPage > 0 ? (int) ceil($total / $perPage) : 0,
+        ];
+    }
+
+    /**
+     * Toggle the admin `is_verified` flag.
+     *
+     * Verified collections become candidates for auto-provisioning of
+     * holder groups (see GatedGroupProvisioningService). Sync paths
+     * never write this column — admin-only.
+     */
+    public static function setVerified(int $collectionId, bool $verified): bool
+    {
+        if ($collectionId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        return (bool) $wpdb->update(
+            $table,
+            ['is_verified' => $verified ? 1 : 0],
+            ['id' => $collectionId],
+            ['%d'],
+            ['%d']
+        );
+    }
+
+    /**
+     * Bulk-fetch collections by id with chain slug/type. Used by the
+     * holder-groups REST surface to enrich each gated group with its
+     * underlying collection metadata.
+     *
+     * @param int[] $ids
+     * @return array<int, object{
+     *     id: string,
+     *     chain_id: string,
+     *     contract_address: string,
+     *     collection_name: string|null,
+     *     image_url: string|null,
+     *     chain_slug: string,
+     *     chain_type: string
+     * }>
+     */
+    public static function findManyByIds(array $ids): array
+    {
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table        = self::table();
+        $chains       = ChainRepository::table();
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+
+        /** @var list<object{
+         *     id: string,
+         *     chain_id: string,
+         *     contract_address: string,
+         *     collection_name: string|null,
+         *     image_url: string|null,
+         *     chain_slug: string,
+         *     chain_type: string
+         * }>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT c.id, c.chain_id, c.contract_address, c.collection_name, c.image_url,
+                    ch.slug AS chain_slug, ch.chain_type
+               FROM {$table} c
+               JOIN {$chains} ch ON ch.id = c.chain_id
+              WHERE c.id IN ({$placeholders})
+              LIMIT 200",
+            ...$ids
+        ));
+
+        $map = [];
+        foreach ($rows ?: [] as $row) {
+            $map[(int) $row->id] = $row;
+        }
+        return $map;
+    }
+
+    /**
+     * Verified collections, joined to chains for the slug + chain_type.
+     * Drives the holder-group provisioning sweep.
+     *
+     * @return list<object{
+     *     id: string,
+     *     chain_id: string,
+     *     contract_address: string,
+     *     collection_name: string|null,
+     *     image_url: string|null,
+     *     chain_slug: string,
+     *     chain_type: string
+     * }>
+     */
+    public static function listVerified(int $limit = 200): array
+    {
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        /** @var list<object{
+         *     id: string,
+         *     chain_id: string,
+         *     contract_address: string,
+         *     collection_name: string|null,
+         *     image_url: string|null,
+         *     chain_slug: string,
+         *     chain_type: string
+         * }>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT c.id, c.chain_id, c.contract_address, c.collection_name, c.image_url,
+                    ch.slug AS chain_slug, ch.chain_type
+             FROM {$table} c
+             JOIN {$chains} ch ON ch.id = c.chain_id
+             WHERE c.is_verified = 1
+             ORDER BY c.id ASC
+             LIMIT %d",
+            $limit
+        ));
+
+        return $rows ?: [];
     }
 
     /**

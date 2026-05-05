@@ -39,8 +39,10 @@ use BCC\Trust\Core\Repositories\PullBatchRepository;
 use BCC\Trust\Core\Repositories\PullMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
+use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 
 if (!defined('ABSPATH')) {
@@ -60,7 +62,8 @@ final class FeedRankingService
         private readonly BinderRepository $binderRepo,
         private readonly PeepSoReactionRepository $reactionRepo,
         private readonly VoteRepository $voteRepo,
-        private readonly HiddenActivityRepository $hiddenRepo
+        private readonly HiddenActivityRepository $hiddenRepo,
+        private readonly GroupContextResolver $groupContextResolver
     ) {
     }
 
@@ -89,6 +92,7 @@ final class FeedRankingService
         $payload['items'] = $this->hydrateReactions($payload['items'], 0);
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], 0);
+        $payload['items'] = $this->hydrateGroupContexts($payload['items']);
         return $payload;
     }
 
@@ -129,6 +133,7 @@ final class FeedRankingService
         $payload['items'] = $this->hydrateReactions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], $viewerId);
+        $payload['items'] = $this->hydrateGroupContexts($payload['items']);
         return $payload;
     }
 
@@ -170,7 +175,90 @@ final class FeedRankingService
         $payload['items'] = $this->hydrateReactions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], $viewerId);
+        $payload['items'] = $this->hydrateGroupContexts($payload['items']);
         return $payload;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Group context hydration (Path A: emit verification metadata,
+    // no server-side ranking change)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * For each feed item whose backing wp_post is associated with a
+     * PeepSo group (via the `peepso_group_id` post-meta key PeepSo
+     * writes when a status post is created inside a group), attach a
+     * `group` block to the item:
+     *
+     *   group: {
+     *     id: int,
+     *     type: 'nft' | 'local' | 'system' | 'user',
+     *     verification: { kind: 'on_chain', label: 'On-Chain Verified' } | null
+     *   }
+     *
+     * Items with no group association get no `group` field — absence is
+     * the signal "this is not a group post." The frontend can render a
+     * verified badge per item or sort/filter client-side.
+     *
+     * Server-side ranking by verified status is intentionally not
+     * applied here — the current ranking layer is recency-only and
+     * adding a multiplier without telemetry is premature. See
+     * docs/api-contract-v1.md changelog v1.5 (Path A note).
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private function hydrateGroupContexts(array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        // Extract the underlying act_id for each item — for native
+        // PeepSo modules act_id matches wp_posts.ID, which is what
+        // PeepSo's `peepso_group_id` post-meta is keyed on. The id is
+        // encoded in the public `id` field as `feed_<act_id>`.
+        $actIdsByItem = [];
+        foreach ($items as $i => $item) {
+            $idField = isset($item['id']) && is_string($item['id']) ? $item['id'] : '';
+            if (preg_match('/^feed_(\d+)$/', $idField, $m) === 1) {
+                $actIdsByItem[$i] = (int) $m[1];
+            }
+        }
+        if ($actIdsByItem === []) {
+            return $items;
+        }
+
+        update_meta_cache('post', array_values($actIdsByItem));
+
+        $groupIdsByItem = [];
+        $allGroupIds   = [];
+        foreach ($actIdsByItem as $i => $actId) {
+            $gid = (int) get_post_meta($actId, 'peepso_group_id', true);
+            if ($gid > 0) {
+                $groupIdsByItem[$i]    = $gid;
+                $allGroupIds[$gid]     = true;
+            }
+        }
+        if ($allGroupIds === []) {
+            return $items;
+        }
+
+        $contexts = $this->groupContextResolver->forManyGroups(array_keys($allGroupIds));
+
+        foreach ($groupIdsByItem as $i => $gid) {
+            $ctx = $contexts[$gid] ?? null;
+            if (!($ctx instanceof GroupContext)) {
+                continue;
+            }
+            $items[$i]['group'] = [
+                'id'           => $ctx->groupId,
+                'type'         => $ctx->type->value,
+                'verification' => $ctx->verification?->toApiResponse(),
+            ];
+        }
+
+        return $items;
     }
 
     // ──────────────────────────────────────────────────────────────────

@@ -1,0 +1,163 @@
+<?php
+/**
+ * MyGroupsEndpoint — handles /bcc/v1/me/groups for plain (non-gated,
+ * non-Local) user/system PeepSo groups.
+ *
+ *   POST /me/groups/{id}/join     — join an open group
+ *   POST /me/groups/{id}/leave    — leave any group I'm a member of
+ *
+ * Holder groups use /me/holder-groups; Locals use /me/locals — both
+ * have their own gate/policy. This endpoint is for the residual case:
+ * plain peepso-groups (created by users via PeepSo's UI) where the
+ * frontend wants a uniform action URL on the profile Groups tab.
+ *
+ * Closed and secret groups are rejected with `bcc_permission_denied`
+ * + a hint pointing to PeepSo's group page (where the request flow
+ * with admin approval / invitation lives). We don't replicate
+ * PeepSo's pending_admin / invitation machinery here.
+ *
+ * @package BCC\Trust\Core\REST
+ * @since V2 (Profile Groups tab)
+ */
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Core\REST;
+
+use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\ValueObjects\GroupType;
+use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
+use WP_REST_Request;
+use WP_REST_Response;
+use WP_REST_Server;
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+final class MyGroupsEndpoint
+{
+    private const ROUTE_NAMESPACE = 'bcc/v1';
+
+    public static function register(): void
+    {
+        $instance = new self();
+
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/me/groups/(?P<id>\d+)/join',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'postJoin'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'id' => ['required' => true, 'sanitize_callback' => 'absint'],
+                ],
+            ]
+        );
+
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/me/groups/(?P<id>\d+)/leave',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'postLeave'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'id' => ['required' => true, 'sanitize_callback' => 'absint'],
+                ],
+            ]
+        );
+    }
+
+    /**
+     * @param WP_REST_Request<array<string, mixed>> $request
+     */
+    public function postJoin(WP_REST_Request $request): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        $groupId = (int) $request->get_param('id');
+        $context = Plugin::instance()->groupContextResolver()->forGroup($groupId);
+        if ($context === null) {
+            return ApiResponse::error('bcc_invalid_request', 'Group not found.', 404);
+        }
+
+        // Holder groups + Locals route through their own endpoints; reject
+        // here so the frontend doesn't accidentally call the wrong path.
+        if ($context->type === GroupType::Nft || $context->type === GroupType::Local) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'This community has its own join endpoint. Use /me/holder-groups or /me/locals.',
+                400
+            );
+        }
+
+        if ($context->privacy === PeepSoPrivacy::Closed) {
+            return ApiResponse::error(
+                'bcc_permission_denied',
+                'This community requires admin approval. Visit the group page to request access.',
+                403
+            );
+        }
+        if ($context->privacy === PeepSoPrivacy::Secret) {
+            return ApiResponse::error(
+                'bcc_permission_denied',
+                'This community is invite-only.',
+                403
+            );
+        }
+
+        \BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId);
+
+        return ApiResponse::ok([
+            'joined'   => true,
+            'group_id' => $groupId,
+        ]);
+    }
+
+    /**
+     * @param WP_REST_Request<array<string, mixed>> $request
+     */
+    public function postLeave(WP_REST_Request $request): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        $groupId = (int) $request->get_param('id');
+        $context = Plugin::instance()->groupContextResolver()->forGroup($groupId);
+        if ($context === null) {
+            return ApiResponse::error('bcc_invalid_request', 'Group not found.', 404);
+        }
+
+        // Holder groups need to record an opt-out; Locals have their own
+        // leave behavior. Route through this endpoint only for plain user/system groups.
+        if ($context->type === GroupType::Nft || $context->type === GroupType::Local) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'This community has its own leave endpoint. Use /me/holder-groups or /me/locals.',
+                400
+            );
+        }
+
+        $left = \BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId);
+        if (!$left) {
+            return ApiResponse::error(
+                'bcc_permission_denied',
+                'Owners cannot leave their own community. Hand off ownership or delete the group first.',
+                403
+            );
+        }
+
+        return ApiResponse::ok([
+            'left'     => true,
+            'group_id' => $groupId,
+        ]);
+    }
+}

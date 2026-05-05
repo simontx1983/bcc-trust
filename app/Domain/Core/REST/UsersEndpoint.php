@@ -36,7 +36,14 @@ if (!defined('ABSPATH')) {
 final class UsersEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
-    private const HANDLE_PATTERN  = '[a-z0-9][a-z0-9-]{1,18}[a-z0-9]';
+    /**
+     * Canonical handle pattern — lowercase alphanumeric + hyphens,
+     * 3–20 chars, must start and end with alphanumeric. Public so other
+     * REST endpoints (e.g. UserGroupsEndpoint) can route on the same
+     * shape; a single source of truth prevents accept-here-reject-there
+     * drift.
+     */
+    public const HANDLE_PATTERN  = '[a-z0-9][a-z0-9-]{1,18}[a-z0-9]';
     private const DEFAULT_WEEKS   = 52;
     private const MAX_WEEKS       = 104;
 

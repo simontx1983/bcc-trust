@@ -167,6 +167,77 @@ final class HoldingsService
     }
 
     /**
+     * Batched ownership check across multiple (chain, contract) pairs.
+     *
+     * Returns a map keyed `"<chain_slug>:<contract>"` of max-balance ints
+     * (same semantics as ownsAny — highest single-wallet balance, not
+     * sum). Pairs that resolve to unsupported chains return 0; unknown
+     * keys are absent from the result.
+     *
+     * Amortizes ChainRepository, FetcherFactory, and walletsForUserOnChain
+     * lookups across all pairs sharing a chain. The per-(wallet, contract)
+     * RPC count_holdings call is unavoidable but is the same as the
+     * unbatched path.
+     *
+     * @param list<array{0: string, 1: string}> $pairs
+     * @return array<string, int>
+     */
+    public static function ownsAnyMany(int $userId, array $pairs): array
+    {
+        if ($pairs === [] || $userId <= 0) {
+            return [];
+        }
+
+        $byChain = [];
+        foreach ($pairs as $pair) {
+            $chainSlug = (string) ($pair[0] ?? '');
+            $contract  = (string) ($pair[1] ?? '');
+            if ($chainSlug === '' || $contract === '') {
+                continue;
+            }
+            $byChain[$chainSlug][] = $contract;
+        }
+
+        $result = [];
+        foreach ($byChain as $chainSlug => $contracts) {
+            $chain = ChainRepository::getBySlug($chainSlug);
+            if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
+                foreach ($contracts as $c) {
+                    $result[$chainSlug . ':' . $c] = 0;
+                }
+                continue;
+            }
+
+            $fetcher = FetcherFactory::make_for_chain($chain);
+            if (!$fetcher->supports_feature('holdings_count')) {
+                foreach ($contracts as $c) {
+                    $result[$chainSlug . ':' . $c] = 0;
+                }
+                continue;
+            }
+
+            $wallets = self::walletsForUserOnChain($userId, (int) $chain->id);
+            foreach ($contracts as $contract) {
+                $key = $chainSlug . ':' . $contract;
+                if ($wallets === []) {
+                    $result[$key] = 0;
+                    continue;
+                }
+                $max = 0;
+                foreach ($wallets as $w) {
+                    $count = $fetcher->count_holdings($w->wallet_address, $contract);
+                    if ($count > $max) {
+                        $max = $count;
+                    }
+                }
+                $result[$key] = $max;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
      * Clear the transient cache for one wallet. Call on wallet unlink or
      * when the user hits an explicit "refresh my gallery" button.
      */

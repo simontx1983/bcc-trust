@@ -27,8 +27,12 @@ use BCC\Trust\Core\Security\DeviceFingerprinter;
 use BCC\Trust\Core\Security\TrustGraph;
 use BCC\Trust\Core\Repositories\QuestProgressRepository;
 use BCC\Trust\Core\Services\EndorsementService;
+use BCC\Trust\Core\Services\GroupActivityHeatService;
+use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Quest\QuestProgressService;
 use BCC\Trust\Core\Services\VoteService;
+use BCC\Trust\Onchain\Services\GatedGroupProvisioningService;
+use BCC\Trust\Onchain\Services\NftGroupGateService;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -436,7 +440,8 @@ final class Plugin
             $this->binderRepository(),
             $this->peepSoReactionRepository(),
             $this->voteRepository(),
-            $this->hiddenActivityRepository()
+            $this->hiddenActivityRepository(),
+            $this->groupContextResolver()
         );
     }
 
@@ -683,6 +688,32 @@ final class Plugin
         return $this->repairService ??= new Services\Admin\RepairService();
     }
 
+    // ── Onchain holder-groups (NFT-gated PeepSo groups) ─────────────────
+
+    private ?GroupContextResolver $groupContextResolver = null;
+    public function groupContextResolver(): GroupContextResolver
+    {
+        return $this->groupContextResolver ??= new GroupContextResolver();
+    }
+
+    private ?GroupActivityHeatService $groupActivityHeatService = null;
+    public function groupActivityHeatService(): GroupActivityHeatService
+    {
+        return $this->groupActivityHeatService ??= new GroupActivityHeatService();
+    }
+
+    private ?NftGroupGateService $nftGroupGateService = null;
+    public function nftGroupGateService(): NftGroupGateService
+    {
+        return $this->nftGroupGateService ??= new NftGroupGateService();
+    }
+
+    private ?GatedGroupProvisioningService $gatedGroupProvisioningService = null;
+    public function gatedGroupProvisioningService(): GatedGroupProvisioningService
+    {
+        return $this->gatedGroupProvisioningService ??= new GatedGroupProvisioningService();
+    }
+
     // ── Route registration ──────────────────────────────────────────────
 
     /**
@@ -885,6 +916,58 @@ final class Plugin
         // peepso-messages/classes/chatmodel.php reads these to gate
         // direct message delivery.
         \BCC\Trust\Core\REST\MyMessagesPrefsEndpoint::register();
+
+        // V2 Phase 2.5: PeepSo profile-fields mirror — the headless
+        // analogue of PeepSo's About sub-tab:
+        //   GET   /me/profile/fields                       — schema + values + visibility
+        //   PATCH /me/profile/fields/{key}                 — value
+        //   PATCH /me/profile/fields/{key}/visibility      — public/members/private
+        // Field catalogue lives in WP posts of type peepso_user_field
+        // (admin-configured). We never invent fields — we delegate to
+        // PeepSoField::save / save_acc so PeepSo's own surfaces
+        // (search index, completeness counter) stay coherent.
+        \BCC\Trust\Core\REST\MyProfileFieldsEndpoint::register();
+
+        // V2 Phase 2.5: Account sub-tab — email / password / delete:
+        //   PATCH  /me/account/email     — change email (requires current_password)
+        //   PATCH  /me/account/password  — change password (requires current_password)
+        //   DELETE /me/account           — delete account (requires current_password + confirm)
+        // Every route re-verifies the current password rather than
+        // relying on session elevation. Account deletion mirrors
+        // PeepSo's `site_registration_allowdelete` toggle.
+        \BCC\Trust\Core\REST\MyAccountEndpoint::register();
+
+        // V2 Phase 2.5: Preferences sub-tab — profile-wide visibility +
+        // post-privacy default + hide-birthday-year toggle:
+        //   GET   /me/profile-prefs   — read current values
+        //   PATCH /me/profile-prefs   — partial update
+        // Writes peepso_users.usr_profile_acc (profile-wide gate),
+        // peepso_profile_post_acc user_meta (wall-post default), and
+        // peepso_hide_birthday_year user_meta. PeepSo's user-search joins
+        // against usr_profile_acc, so writing through here keeps search
+        // and feed gating coherent.
+        \BCC\Trust\Core\REST\MyProfilePrefsEndpoint::register();
+
+        // V2: NFT-gated holder groups — suggest-don't-auto-join model.
+        //   GET  /me/holder-groups               — joined + eligible_to_join + opted_out
+        //   POST /me/holder-groups/{id}/join     — explicit user-initiated join
+        //   POST /me/holder-groups/{id}/leave    — leave + record TTL'd opt-out
+        // Closed-group privacy + server-side gate (defense in depth);
+        // PeepSoGroupWriter lands eligible holders directly as `member`.
+        \BCC\Trust\Onchain\REST\HolderGroupsEndpoint::register();
+
+        // V2: Profile Groups tab — cross-kind list with viewer-aware
+        // permissions and server-built action URLs (per `type`).
+        \BCC\Trust\Core\REST\UserGroupsEndpoint::register();
+
+        // V2: Plain (non-gated, non-Local) group join/leave for the
+        // residual case. Holder groups → /me/holder-groups; Locals →
+        // /me/locals; this endpoint covers user/system groups.
+        \BCC\Trust\Core\REST\MyGroupsEndpoint::register();
+
+        // V2: Group discovery surface — verified-first, then heat-aware
+        // ranking. ?verified=1 filters to On-Chain Verified groups only.
+        \BCC\Trust\Core\REST\GroupsDiscoveryEndpoint::register();
 
         // V1.5: §I1 one-click email-digest unsubscribe — public route
         // that verifies a signed token (HMAC-SHA256, 90-day TTL) and

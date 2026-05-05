@@ -378,6 +378,13 @@ run_t2() {
     # V2 Phase 2 — Messaging preferences (PeepSo-backed chat toggles).
     t2_check "/wp-json/bcc/v1/me/messages-prefs"      "GET/PATCH me/messages-prefs"
 
+    # V2 Phase 2.5 — PeepSo profile mirror (fields + prefs + account).
+    t2_check "/wp-json/bcc/v1/me/profile/fields"      "GET me/profile/fields"
+    t2_check "/wp-json/bcc/v1/me/profile-prefs"       "GET/PATCH me/profile-prefs"
+    t2_check "/wp-json/bcc/v1/me/account/email"       "PATCH me/account/email"
+    t2_check "/wp-json/bcc/v1/me/account/password"    "PATCH me/account/password"
+    t2_check "/wp-json/bcc/v1/me/account"             "DELETE me/account"
+
     # ─ Field-level privacy regression tests (must be opt-in via env vars) ─
     log "  ${BOLD}Field-level privacy${NC}"
     t2_wallet_privacy

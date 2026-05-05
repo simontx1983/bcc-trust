@@ -82,9 +82,17 @@ if (!class_exists('ActionScheduler_Store')) {
 
 if (!class_exists('PeepSo')) {
     class PeepSo {
+        public const ACCESS_PUBLIC = 10;
+        public const ACCESS_MEMBERS = 20;
+        public const ACCESS_PRIVATE = 40;
         public static function get_page(string $page = ''): string { return ''; }
         public static function get_peepso_uri(): string { return ''; }
         public static function get_asset(string $asset): string { return ''; }
+        /**
+         * @param mixed $default
+         * @return mixed
+         */
+        public static function get_option(string $key, $default = null) { return $default; }
     }
 }
 
@@ -92,7 +100,57 @@ if (!class_exists('PeepSoProfileFields')) {
     class PeepSoProfileFields {
         /** @var array<string, mixed>|null */
         public $profile_fields_stats = null;
-        public function load_fields(): void {}
+        /** @var array<string, PeepSoField> */
+        public $profile_fields = [];
+        /**
+         * @param array<string, mixed> $args
+         * @return array<string, PeepSoField>
+         */
+        public function load_fields(array $args = [], ?string $context = null): array { return []; }
+        /** @return array<string, PeepSoField> */
+        public function get_fields(): array { return []; }
+    }
+}
+
+if (!class_exists('PeepSoField')) {
+    class PeepSoField {
+        public const USER_META_FIELD_KEY = 'peepso_user_field_';
+        public int $id = 0;
+        public string $key = '';
+        public string $title = '';
+        public string $desc = '';
+        public int $published = 0;
+        /** @var mixed */
+        public $value = null;
+        public int $acc = 20;
+        public int $can_acc = 0;
+        public ?string $data_type = null;
+        /** @var \stdClass */
+        public $meta;
+        /** @var array<string, mixed> */
+        public array $validation_errors = [];
+
+        public function __construct() {
+            $this->meta = new \stdClass();
+        }
+
+        /**
+         * @param int|string $id
+         * @return static|null
+         */
+        public static function get_field_by_id($id, ?int $user_id = null): ?self { return null; }
+        public static function user_meta_key_add(string $key): string { return self::USER_META_FIELD_KEY . $key; }
+        public static function user_meta_key_trim(string $key): string { return str_ireplace(self::USER_META_FIELD_KEY, '', $key); }
+
+        /** @param mixed $value */
+        public function save($value, bool $validate_only = false): bool { return true; }
+        public function save_acc(int $acc): bool { return true; }
+        /**
+         * @param string|null $key1
+         * @param string|null $key2
+         * @return mixed
+         */
+        public function prop(string $key, $key1 = null, $key2 = null) { return null; }
     }
 }
 
@@ -116,6 +174,14 @@ if (!class_exists('PeepSoUser')) {
         public function delete_avatar(): void {}
         public function move_cover_file(string $src_file, bool $add_to_stream = true): void {}
         public function delete_cover_photo(string $cover_hash = ''): bool { return false; }
+        /** @return int|string */
+        public function get_profile_accessibility() { return 10; }
+        /** @return int|string */
+        public function get_profile_post_accessibility() { return 20; }
+        /** @return array<string, mixed> */
+        public function get_peepso_user(): array { return []; }
+        /** @param array<string, mixed> $data */
+        public function update_peepso_user(array $data): bool { return true; }
     }
 }
 
