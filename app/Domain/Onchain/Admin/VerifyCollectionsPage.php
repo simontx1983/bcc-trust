@@ -60,6 +60,16 @@ final class VerifyCollectionsPage
             joining is explicit (suggest-don't-auto-join). The provisioning sweep runs
             daily — use <em>Provision now</em> to trigger it immediately.</p>
 
+            <div class="notice notice-warning inline">
+                <p><strong>ERC-721 only for now.</strong> The holder gate is wired for
+                <code>balanceOf(address)</code> — the ERC-721 selector. Verifying an
+                <strong>ERC-1155</strong> collection will silently fail the gate (every
+                holder appears ineligible) because 1155 uses a different
+                <code>balanceOf(address, tokenId)</code> shape. ERC-1155 rows are
+                flagged below; please don't verify them until the gate adds 1155 support.
+                Solana / Cosmos collections are unaffected.</p>
+            </div>
+
             <?php foreach ($notices as $notice): ?>
                 <div class="notice notice-<?php echo esc_attr($notice['type']); ?> is-dismissible">
                     <p><?php echo esc_html($notice['message']); ?></p>
@@ -93,6 +103,10 @@ final class VerifyCollectionsPage
                                 <td colspan="6"><em>No collections synced yet. Connect a wallet to populate this list.</em></td>
                             </tr>
                         <?php else: foreach ($listing['items'] as $row): ?>
+                            <?php
+                            $tokenStandard = (string) ($row->token_standard ?? '');
+                            $isErc1155     = stripos($tokenStandard, '1155') !== false;
+                            ?>
                             <tr>
                                 <td>
                                     <input type="hidden" name="known[]" value="<?php echo (int) $row->id; ?>">
@@ -110,6 +124,16 @@ final class VerifyCollectionsPage
                                 </td>
                                 <td>
                                     <strong><?php echo esc_html($row->collection_name ?? '(no name)'); ?></strong>
+                                    <?php if ($isErc1155): ?>
+                                        <br>
+                                        <span title="ERC-1155 — gate not supported yet. Verifying this row will leave the group empty."
+                                              style="display:inline-block;background:#f0b849;color:#3c2a00;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:600;margin-top:2px;">
+                                            ⚠ ERC-1155 (gate unsupported)
+                                        </span>
+                                    <?php elseif ($tokenStandard !== ''): ?>
+                                        <br>
+                                        <span style="color:#646970;font-size:11px;"><?php echo esc_html($tokenStandard); ?></span>
+                                    <?php endif; ?>
                                 </td>
                                 <td><code><?php echo esc_html($row->chain_slug); ?></code></td>
                                 <td>

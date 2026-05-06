@@ -92,34 +92,53 @@ class SolanaFetcher implements FetcherInterface
      * getAssetsByOwner rather than using searchAssets — safer compatibility
      * across DAS providers, and the HoldingsService cache means the cost
      * lands once per refresh window, not per gate check.
+     *
+     * Pagination: walks pages up to PAGE_CAP × LIMIT_PER_PAGE assets.
+     * Earlier versions hardcoded `page=1` which silently undercounted
+     * whale wallets — a holder of the target collection whose assets
+     * didn't surface in the first 1000 results would fail the gate.
+     * Cap exists so a malicious wallet stuffed with millions of assets
+     * can't run our RPC budget into the ground.
      */
     public function count_holdings(string $wallet, string $contract): int
     {
-        $items = $this->rpcCall('getAssetsByOwner', [
-            'ownerAddress'   => $wallet,
-            'displayOptions' => ['showCollectionMetadata' => false],
-            'limit'          => 1000,
-            'page'           => 1,
-        ]);
+        $target  = strtolower($contract);
+        $count   = 0;
+        $page    = 1;
+        $limit   = 1000;
+        $maxPage = 10; // 10 × 1000 = 10,000 assets scanned per wallet — realistic upper bound.
 
-        if (!is_array($items)) {
-            return 0;
-        }
+        while ($page <= $maxPage) {
+            $items = $this->rpcCall('getAssetsByOwner', [
+                'ownerAddress'   => $wallet,
+                'displayOptions' => ['showCollectionMetadata' => false],
+                'limit'          => $limit,
+                'page'           => $page,
+            ]);
 
-        $target = strtolower($contract);
-        $count  = 0;
+            if (!is_array($items) || $items === []) {
+                break;
+            }
 
-        foreach ($items as $raw) {
-            $asset = (object) $raw;
-            foreach ($asset->grouping ?? [] as $g) {
-                $g = (object) $g;
-                if (($g->group_key ?? '') === 'collection'
-                    && strtolower((string) ($g->group_value ?? '')) === $target
-                ) {
-                    $count++;
-                    break;
+            foreach ($items as $raw) {
+                $asset = (object) $raw;
+                foreach ($asset->grouping ?? [] as $g) {
+                    $g = (object) $g;
+                    if (($g->group_key ?? '') === 'collection'
+                        && strtolower((string) ($g->group_value ?? '')) === $target
+                    ) {
+                        $count++;
+                        break;
+                    }
                 }
             }
+
+            // DAS returns up to `limit` items per page. A short page
+            // means we're at the end of the wallet's assets.
+            if (count($items) < $limit) {
+                break;
+            }
+            $page++;
         }
 
         return $count;

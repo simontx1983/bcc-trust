@@ -552,10 +552,15 @@ final class CollectionRepository
      * unique_holders DESC so popular collections surface first for
      * verification decisions.
      *
+     * `token_standard` is included so the admin UI can flag ERC-1155
+     * collections — the holder gate is ERC-721-only today, and verifying
+     * an ERC-1155 collection silently fails the gate for every holder.
+     *
      * @return array{items: list<object{
      *     id: string,
      *     contract_address: string,
      *     collection_name: string|null,
+     *     token_standard: string|null,
      *     unique_holders: string|null,
      *     image_url: string|null,
      *     is_verified: string,
@@ -580,14 +585,15 @@ final class CollectionRepository
          *     id: string,
          *     contract_address: string,
          *     collection_name: string|null,
+         *     token_standard: string|null,
          *     unique_holders: string|null,
          *     image_url: string|null,
          *     is_verified: string,
          *     chain_slug: string
          * }>|null $items */
         $items = $wpdb->get_results($wpdb->prepare(
-            "SELECT c.id, c.contract_address, c.collection_name, c.unique_holders,
-                    c.image_url, c.is_verified, ch.slug AS chain_slug
+            "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
+                    c.unique_holders, c.image_url, c.is_verified, ch.slug AS chain_slug
                FROM {$table} c
           LEFT JOIN {$chains} ch ON ch.id = c.chain_id
               ORDER BY c.unique_holders DESC, c.id DESC

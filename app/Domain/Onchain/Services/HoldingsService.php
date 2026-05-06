@@ -89,7 +89,12 @@ final class HoldingsService
 
         $max = 0;
         foreach ($wallets as $w) {
-            $count = $fetcher->count_holdings($w->wallet_address, $contract);
+            $count = self::countFromCacheOrFetch(
+                $fetcher,
+                (int) $w->id,
+                $w->wallet_address,
+                $contract
+            );
             if ($count > $max) {
                 $max = $count;
             }
@@ -225,7 +230,12 @@ final class HoldingsService
                 }
                 $max = 0;
                 foreach ($wallets as $w) {
-                    $count = $fetcher->count_holdings($w->wallet_address, $contract);
+                    $count = self::countFromCacheOrFetch(
+                        $fetcher,
+                        (int) $w->id,
+                        $w->wallet_address,
+                        $contract
+                    );
                     if ($count > $max) {
                         $max = $count;
                     }
@@ -343,6 +353,66 @@ final class HoldingsService
     private static function cacheKey(int $walletLinkId): string
     {
         return 'bcc_holdings_w_' . $walletLinkId;
+    }
+
+    /**
+     * Count target-contract holdings for a single wallet — cache-first
+     * with RPC fallback on cache miss.
+     *
+     * The gallery cache (set by getForUser/fetchWalletHoldings, 24h TTL,
+     * keyed per wallet_link) carries the enumerated NFT items for that
+     * wallet. For a token-gate check, counting target-contract matches
+     * in that already-cached list avoids a fresh RPC roundtrip per gate
+     * call — the dominant cost on profile/discovery renders + the
+     * reconcile sweep.
+     *
+     * Tradeoffs vs the old direct-RPC path:
+     *   - Cache hit: returns cached count. Up-to-24h stale; for soft-gate
+     *     (suggest-don't-auto-join) semantics this lag is acceptable.
+     *     If the user just acquired an NFT they'll appear ineligible
+     *     until next gallery refresh — they can hit the gallery refresh
+     *     button (force=true) or wait for the daily transient expiry.
+     *   - Cache hit, items truncated, 0 matches: a whale's target NFT
+     *     could live in the truncated tail. We fall through to RPC for
+     *     this case so whales aren't false-negatives.
+     *   - Cache miss: RPC fallback (same as the old path).
+     */
+    private static function countFromCacheOrFetch(
+        object $fetcher,
+        int $walletLinkId,
+        string $walletAddress,
+        string $contract
+    ): int {
+        $cached = get_transient(self::cacheKey($walletLinkId));
+        if (is_array($cached) && isset($cached['items']) && is_array($cached['items'])) {
+            $target  = strtolower($contract);
+            $matches = 0;
+            foreach ($cached['items'] as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $itemContract = $item['contract_address'] ?? null;
+                if (is_string($itemContract) && strtolower($itemContract) === $target) {
+                    $matches++;
+                }
+            }
+
+            $truncated = !empty($cached['truncated']);
+            // Trust the cache when complete, OR when it has any matches
+            // (any matches means the user already passes a default
+            // min_balance=1 gate — fine even if the truncated tail
+            // would have produced more matches). Only fall through to
+            // RPC for the false-negative-on-whales case: cache present,
+            // truncated, AND zero matches.
+            if (!$truncated || $matches > 0) {
+                return $matches;
+            }
+        }
+
+        // Cache miss (or truncated-with-zero-matches whale fallback).
+        // Fresh RPC — same path as the pre-cache implementation.
+        /** @phpstan-ignore-next-line — fetcher type is verified by caller. */
+        return (int) $fetcher->count_holdings($walletAddress, $contract);
     }
 
     /**
