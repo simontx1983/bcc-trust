@@ -123,6 +123,183 @@ class EvmFetcher implements FetcherInterface
     }
 
     /**
+     * Fetch ERC-721/1155 Transfer events between two block heights via
+     * Alchemy's `alchemy_getAssetTransfers`. Used by NftEthIndexerWorker
+     * to ingest confirmation-gated mints/transfers/burns.
+     *
+     * Per spike 1: each call costs 120 CU flat regardless of category
+     * filter or maxCount. The worker tracks CU usage in
+     * `wp_bcc_chain_checkpoints.cu_used_today`; this method does NOT
+     * track it (separation of concerns — fetcher only fetches).
+     *
+     * Pagination: a non-null `page_key` in the return value means more
+     * results exist; the caller passes it back via `$pageKey` to
+     * continue. `page_key === null` means the range is fully drained.
+     *
+     * Returns events in the indexer's normalized TransferEvent shape:
+     * see NftHoldingsIndexer phpstan-type for the contract.
+     *
+     * @return array{transfers: list<array<string, mixed>>, page_key: string|null}
+     */
+    public function fetch_transfers_since(int $fromBlock, int $toBlock, ?string $pageKey = null): array
+    {
+        $empty = ['transfers' => [], 'page_key' => null];
+
+        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
+        if (!$rpcUrl || str_ends_with($rpcUrl, '/v2/')) {
+            return $empty;
+        }
+        if ($fromBlock < 0 || $toBlock < $fromBlock) {
+            return $empty;
+        }
+
+        $chainId = (int) $this->chain->id;
+
+        $params = [
+            'fromBlock'        => '0x' . dechex($fromBlock),
+            'toBlock'          => '0x' . dechex($toBlock),
+            'category'         => ['erc721', 'erc1155'],
+            'withMetadata'     => true,
+            'excludeZeroValue' => false,
+            'maxCount'         => '0x3e8', // 1000 — self-imposed page size per spike 1
+            'order'            => 'asc',
+        ];
+        if (is_string($pageKey) && $pageKey !== '') {
+            $params['pageKey'] = $pageKey;
+        }
+
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 1,
+            'method'  => 'alchemy_getAssetTransfers',
+            'params'  => [$params],
+        ]);
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'EVM alchemy_getAssetTransfers',
+            'chain_id' => $chainId,
+        ]);
+
+        if (is_wp_error($response)) {
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers error: ' . $response->get_error_message());
+            return $empty;
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json) || !isset($json['result']) || !is_array($json['result'])) {
+            return $empty;
+        }
+
+        $rawTransfers = $json['result']['transfers'] ?? [];
+        $newPageKey   = $json['result']['pageKey'] ?? null;
+        if (!is_array($rawTransfers)) {
+            return $empty;
+        }
+
+        $transfers = [];
+        foreach ($rawTransfers as $t) {
+            if (!is_array($t)) {
+                continue;
+            }
+            $contract = strtolower((string) ($t['rawContract']['address'] ?? ''));
+            $tokenId  = (string) ($t['tokenId'] ?? '');
+            if ($contract === '' || $tokenId === '') {
+                continue;
+            }
+
+            $category = (string) ($t['category'] ?? '');
+            $tokenStd = $category === 'erc721' ? 'ERC-721'
+                : ($category === 'erc1155' ? 'ERC-1155' : null);
+
+            $blockNumHex = (string) ($t['blockNum'] ?? '0x0');
+            $blockNum    = $blockNumHex !== '' ? (int) hexdec(substr($blockNumHex, 2)) : 0;
+
+            // For 1155, value is amount; for 721, value is 1 (or 0 in some
+            // edge cases — coerce to 1 since holding a 721 means balance=1).
+            $rawValue = $t['value'] ?? 1;
+            $amount   = $category === 'erc1155'
+                ? max(1, (int) (is_numeric($rawValue) ? $rawValue : 1))
+                : 1;
+
+            $blockTimestamp = (string) ($t['metadata']['blockTimestamp'] ?? '');
+            $confirmedAt    = self::isoToMysqlUtc($blockTimestamp);
+
+            // Alchemy returns hex token_id; convert to decimal for storage
+            // consistency (standard practice — exchanges/marketplaces
+            // store token_id as decimal strings).
+            $tokenIdDecimal = self::hexToDecimalString($tokenId);
+
+            $transfers[] = [
+                'chain_id'         => $chainId,
+                'contract_address' => $contract,
+                'token_id'         => $tokenIdDecimal,
+                'token_standard'   => $tokenStd,
+                'from_address'     => strtolower((string) ($t['from'] ?? '')),
+                'to_address'       => strtolower((string) ($t['to'] ?? '')),
+                'amount'           => $amount,
+                'block_number'     => $blockNum,
+                'confirmed_at'     => $confirmedAt,
+                'collection_name'  => isset($t['asset']) ? (string) $t['asset'] : null,
+            ];
+        }
+
+        return [
+            'transfers' => $transfers,
+            'page_key'  => is_string($newPageKey) && $newPageKey !== '' ? $newPageKey : null,
+        ];
+    }
+
+    /**
+     * Convert a hex string (with or without 0x prefix) to a decimal
+     * string. Uses gmp/bcmath for arbitrary precision; falls back to
+     * intval for small values when neither extension is available.
+     */
+    private static function hexToDecimalString(string $hex): string
+    {
+        $clean = strtolower(ltrim($hex, '0x'));
+        if ($clean === '') {
+            return '0';
+        }
+        if (function_exists('gmp_strval')) {
+            return gmp_strval(gmp_init('0x' . $clean, 16), 10);
+        }
+        if (function_exists('bcadd')) {
+            $dec = '0';
+            for ($i = 0, $n = strlen($clean); $i < $n; $i++) {
+                $dec = bcadd(bcmul($dec, '16'), (string) hexdec($clean[$i]));
+            }
+            return $dec;
+        }
+        // Fallback — only safe for small token_ids.
+        return (string) hexdec($clean);
+    }
+
+    /**
+     * Convert Alchemy ISO-8601 ('2024-08-01T12:34:56.000Z') to MySQL
+     * DATETIME UTC ('2024-08-01 12:34:56'). Returns the current time
+     * if parsing fails — confirmed_at is load-bearing for
+     * indexer observability so a missing value is logged-and-defaulted
+     * rather than dropped.
+     */
+    private static function isoToMysqlUtc(string $iso): string
+    {
+        if ($iso === '') {
+            return current_time('mysql', true);
+        }
+        try {
+            $dt = new \DateTimeImmutable($iso, new \DateTimeZone('UTC'));
+            return $dt->format('Y-m-d H:i:s');
+        } catch (\Throwable $e) {
+            return current_time('mysql', true);
+        }
+    }
+
+    /**
      * Thin JSON-RPC wrapper for read-only contract calls. Returns the
      * raw hex result string or null on any error.
      */

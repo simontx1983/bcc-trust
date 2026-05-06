@@ -325,6 +325,15 @@ add_action('bcc_gated_group_provision', function () {
 // pool exceeds 40 users, see the `last_reconciled_at` rotation pattern
 // (deferred follow-up) — the current ID-ASC ordering biases toward
 // older accounts which is a reasonable v1 default.
+// V2 Phase 1a: NFT ETH indexer tick. Walks confirmed Transfer events
+// (N=12 confirmations) per chain and persists into wp_bcc_nft_holdings
+// via NftHoldingsIndexer. The handler is intentionally thin — all
+// behaviour lives in the worker class so it's testable in isolation.
+add_action(
+    \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK,
+    [\BCC\Trust\Onchain\Workers\NftEthIndexerWorker::class, 'runAllChains']
+);
+
 add_action('bcc_gated_group_reconcile_sweep', function () {
     $userIds = get_users([
         'meta_key'   => \BCC\Trust\Onchain\Services\NftGroupGateService::USER_META_AUTO_JOIN,
@@ -1082,6 +1091,12 @@ function bcc_trust_activate() {
         wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
     }
 
+    // V2 Phase 1a: NFT ETH indexer worker — confirmation-gated polling.
+    // Every minute via 'bcc_one_minute' interval registered in CronService.
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK)) {
+        wp_schedule_event(time() + 30, 'bcc_one_minute', \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK);
+    }
+
     // Defensive: re-register custom intervals (top-level add_filter above
     // should already have done this; WP dedupes by callable signature).
     add_filter('cron_schedules', [\BCC\Trust\Onchain\Services\ChainRefreshService::class, 'add_cron_intervals']);
@@ -1116,6 +1131,8 @@ function bcc_trust_deactivate() {
         'bcc_onchain_retry_bonus',
         'bcc_gated_group_provision',
         'bcc_gated_group_reconcile_sweep',
+        // V2 Phase 1a: NFT indexer tick.
+        \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK,
     ];
 
     foreach ($cron_hooks as $hook) {

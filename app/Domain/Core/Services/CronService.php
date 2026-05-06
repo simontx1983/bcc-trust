@@ -547,6 +547,16 @@ class CronService
      */
     public static function addCronIntervals(array $schedules): array
     {
+        // V2 Phase 1a: NftEthIndexerWorker ticks every minute. Tighter
+        // than wp-core's 5-min default because chain indexing is
+        // time-sensitive — also why the production-cron staleness
+        // detector runs with a 5-min threshold instead of 15.
+        if (!isset($schedules['bcc_one_minute'])) {
+            $schedules['bcc_one_minute'] = [
+                'interval' => 60,
+                'display'  => 'Every Minute',
+            ];
+        }
         if (!isset($schedules['bcc_five_minutes'])) {
             $schedules['bcc_five_minutes'] = [
                 'interval' => 300,
