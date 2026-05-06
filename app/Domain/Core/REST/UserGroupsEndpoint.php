@@ -262,6 +262,7 @@ final class UserGroupsEndpoint
             'slug'         => $display !== null ? (string) $display->post_name : '',
             'name'         => $display !== null ? (string) $display->post_title : '',
             'type'         => $ctx->type->value,
+            'type_label'   => self::typeLabel($ctx->type),
             'member_count' => $display !== null ? (int) $display->member_count : 0,
             'privacy'      => $ctx->privacy->value,
             'verification' => $ctx->verification?->toApiResponse(),
@@ -283,6 +284,27 @@ final class UserGroupsEndpoint
             GroupType::Local => 'locals',
             default          => 'groups',
         };
+    }
+
+    /**
+     * Server-authoritative display label for a group kind. Frontend
+     * renders verbatim per §A2 / §S — no client-side enum→label
+     * mapping. Filterable via `bcc_group_type_label` so the copy can
+     * be re-tuned (or localized) without a frontend release.
+     */
+    private static function typeLabel(GroupType $type): string
+    {
+        $defaults = [
+            GroupType::Nft->value    => 'On-Chain Holders',
+            GroupType::Local->value  => 'Local',
+            GroupType::System->value => 'System',
+            GroupType::User->value   => 'Group',
+        ];
+        $label = $defaults[$type->value] ?? 'Group';
+
+        /** @var string $filtered */
+        $filtered = apply_filters('bcc_group_type_label', $label, $type->value);
+        return (string) $filtered;
     }
 
     /**
