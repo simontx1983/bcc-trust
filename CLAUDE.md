@@ -95,7 +95,9 @@ Same architecture guardrails as the predecessor plugins:
    view-model builders MUST run
    `bash scripts/arch-guardrails.sh --with-contract` (which invokes
    `scripts/api-contract-check.sh` against the live site). A contract
-   break is P0.
+   break is P0. Use the `/api-contract-guard` skill mid-flow — it
+   wraps the same check plus a manual diff against the contract doc
+   and the frontend's `lib/api/types.ts`.
 
 ### 11. Cross-Codebase Reuse Rule
 
