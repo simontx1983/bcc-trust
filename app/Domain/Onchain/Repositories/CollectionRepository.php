@@ -635,9 +635,10 @@ final class CollectionRepository
     }
 
     /**
-     * Bulk-fetch collections by id with chain slug/type. Used by the
-     * holder-groups REST surface to enrich each gated group with its
-     * underlying collection metadata.
+     * Bulk-fetch collections by id with chain slug/type and market
+     * stats. Used by the holder-groups REST surface and the cross-kind
+     * groups discovery endpoint to enrich each gated group with its
+     * underlying collection metadata + decision-grade trade signals.
      *
      * @param int[] $ids
      * @return array<int, object{
@@ -646,6 +647,14 @@ final class CollectionRepository
      *     contract_address: string,
      *     collection_name: string|null,
      *     image_url: string|null,
+     *     token_standard: string|null,
+     *     total_supply: string|null,
+     *     unique_holders: string|null,
+     *     floor_price: string|null,
+     *     floor_currency: string|null,
+     *     total_volume: string|null,
+     *     listed_percentage: string|null,
+     *     royalty_percentage: string|null,
      *     chain_slug: string,
      *     chain_type: string
      * }>
@@ -667,11 +676,22 @@ final class CollectionRepository
          *     contract_address: string,
          *     collection_name: string|null,
          *     image_url: string|null,
+         *     token_standard: string|null,
+         *     total_supply: string|null,
+         *     unique_holders: string|null,
+         *     floor_price: string|null,
+         *     floor_currency: string|null,
+         *     total_volume: string|null,
+         *     listed_percentage: string|null,
+         *     royalty_percentage: string|null,
          *     chain_slug: string,
          *     chain_type: string
          * }>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT c.id, c.chain_id, c.contract_address, c.collection_name, c.image_url,
+                    c.token_standard, c.total_supply, c.unique_holders,
+                    c.floor_price, c.floor_currency, c.total_volume,
+                    c.listed_percentage, c.royalty_percentage,
                     ch.slug AS chain_slug, ch.chain_type
                FROM {$table} c
                JOIN {$chains} ch ON ch.id = c.chain_id

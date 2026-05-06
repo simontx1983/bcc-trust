@@ -176,6 +176,7 @@ final class HolderGroupsEndpoint
                 'posts_last_7d'    => 0,
                 'last_activity_at' => null,
                 'heat'             => 'cold',
+                'heat_label'       => 'Quiet',
             ];
             $item = $this->composeItem($cfg, $display, $collection, $activityBlock);
 
@@ -344,9 +345,9 @@ final class HolderGroupsEndpoint
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * @param object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}|null $display
+     * @param object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}|null $display
      * @param object{id: string, chain_id: string, contract_address: string, collection_name: string|null, image_url: string|null, chain_slug: string, chain_type: string}|null $collection
-     * @param array{posts_last_7d: int, last_activity_at: string|null, heat: string} $activity
+     * @param array{posts_last_7d: int, last_activity_at: string|null, heat: string, heat_label: string} $activity
      * @return array<string, mixed>
      */
     private function composeItem(

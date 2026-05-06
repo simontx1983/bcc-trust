@@ -37,11 +37,16 @@ final class GroupActivityHeatService {
      * `heat = cold` and `last_activity_at = null` — the field always
      * exists in the response for shape consistency.
      *
+     * `heat_label` is the server-authoritative display string for the
+     * heat bucket. The frontend renders it verbatim per §A2 / §S — no
+     * client-side `heat === "hot" ? "Hot" : ...` mapping.
+     *
      * @param int[] $groupIds
      * @return array<int, array{
      *     posts_last_7d: int,
      *     last_activity_at: string|null,
-     *     heat: string
+     *     heat: string,
+     *     heat_label: string
      * }>
      */
     public function forGroups(array $groupIds): array {
@@ -59,14 +64,36 @@ final class GroupActivityHeatService {
             $lastAt = $row !== null && $row->last_at !== null
                 ? $this->toIso8601((string) $row->last_at)
                 : null;
+            $heat = $this->bucket($posts, $warmAt, $hotAt);
 
             $out[$groupId] = [
                 'posts_last_7d'    => $posts,
                 'last_activity_at' => $lastAt,
-                'heat'             => $this->bucket($posts, $warmAt, $hotAt),
+                'heat'             => $heat,
+                'heat_label'       => $this->heatLabel($heat),
             ];
         }
         return $out;
+    }
+
+    /**
+     * Server-authoritative display string for a heat bucket. Filterable
+     * via `bcc_group_heat_label` so the copy can be re-tuned without a
+     * frontend release. Defaults match the in-tree Floor design vocab —
+     * "Quiet" reads less judgmental than "Cold" while still steering
+     * users to active rooms.
+     */
+    private function heatLabel(string $heat): string {
+        $defaults = [
+            self::HEAT_HOT  => 'Hot',
+            self::HEAT_WARM => 'Warm',
+            self::HEAT_COLD => 'Quiet',
+        ];
+        $label = $defaults[$heat] ?? 'Quiet';
+
+        /** @var string $filtered */
+        $filtered = apply_filters('bcc_group_heat_label', $label, $heat);
+        return (string) $filtered;
     }
 
     private function toIso8601(string $mysqlGmt): ?string {

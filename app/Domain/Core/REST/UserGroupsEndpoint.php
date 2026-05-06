@@ -245,7 +245,7 @@ final class UserGroupsEndpoint
     }
 
     /**
-     * @param object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}|null $display
+     * @param object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}|null $display
      * @param array{eligible: bool, min_balance: int, balance: int}|null $holderEligibility
      * @return array<string, mixed>
      */
