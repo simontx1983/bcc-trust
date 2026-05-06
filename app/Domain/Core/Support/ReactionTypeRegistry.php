@@ -1,15 +1,21 @@
 <?php
 /**
- * ReactionTypeRegistry — runtime accessor for the §D5 BCC reaction
- * type IDs (the post.IDs of the seeded peepso_reaction_user CPT posts).
+ * ReactionTypeRegistry — runtime accessor for BCC-seeded reaction
+ * type IDs (the post.IDs of the peepso_reaction_user CPT posts that
+ * BCC's ReactionSeeder writes at activation).
  *
  * Storage: WordPress option `bcc_reaction_ids`, a JSON-encoded map
- * of {kind: post_id} written by ReactionSeeder at plugin activation.
+ * of {kind: post_id} written by ReactionSeeder.
  *
- * Per §D5:
- *   - solid        — agree / "+1"
- *   - vouch        — back this
- *   - stand_behind — stake my rep
+ * Two interaction grammars seed reactions here:
+ *   - §D5 trust grammar — solid / vouch / stand_behind
+ *       solid        — agree / "+1"
+ *       vouch        — back this
+ *       stand_behind — stake my rep
+ *   - v1.5 social grammar — fire (single BCC-seeded reaction; the
+ *     other social kinds — like/love/haha/wow — are PeepSo defaults
+ *     looked up by post_title via ReactionGrammarRegistry, NOT seeded
+ *     by us).
  *
  * Returns null when the seeder hasn't run (or PeepSo isn't installed)
  * — callers MUST handle the null case as "structurally 0 reactions
@@ -20,7 +26,7 @@
  * per request. Subsequent calls hit the in-memory cache.
  *
  * @package BCC\Trust\Core\Support
- * @since V1 (2026-04, §D5 reactions)
+ * @since V1 (2026-04, §D5 reactions); v1.5 (2026-05, social fire)
  */
 
 namespace BCC\Trust\Core\Support;
@@ -38,11 +44,35 @@ final class ReactionTypeRegistry
     public const KIND_VOUCH        = 'vouch';
     public const KIND_STAND_BEHIND = 'stand_behind';
 
-    /** @var list<string> */
+    /** v1.5 social grammar — BCC-seeded; PeepSo has no Fire default. */
+    public const KIND_FIRE = 'fire';
+
+    /**
+     * Trust-grammar kinds. Stable since V1 §D5; do NOT add to this
+     * list — the trust rail's restrained presentation is part of the
+     * §D5 contract.
+     *
+     * @var list<string>
+     */
+    public const TRUST_KINDS = [
+        self::KIND_SOLID,
+        self::KIND_VOUCH,
+        self::KIND_STAND_BEHIND,
+    ];
+
+    /**
+     * BCC-seeded kinds across all grammars. Used by callers that need
+     * "every reaction-type ID BCC owns" (e.g. the seeder's per-kind
+     * skip check). Cross-grammar — do NOT use this for grammar-aware
+     * routing; ReactionGrammarRegistry owns that concern.
+     *
+     * @var list<string>
+     */
     public const ALL_KINDS = [
         self::KIND_SOLID,
         self::KIND_VOUCH,
         self::KIND_STAND_BEHIND,
+        self::KIND_FIRE,
     ];
 
     /** @var array<string, int|null>|null per-request cache; null = not loaded */
@@ -74,6 +104,7 @@ final class ReactionTypeRegistry
     public static function solidId(): ?int        { return self::idFor(self::KIND_SOLID); }
     public static function vouchId(): ?int        { return self::idFor(self::KIND_VOUCH); }
     public static function standBehindId(): ?int  { return self::idFor(self::KIND_STAND_BEHIND); }
+    public static function fireId(): ?int         { return self::idFor(self::KIND_FIRE); }
 
     /**
      * Full kind → id map. Missing or malformed entries → null.
@@ -93,6 +124,7 @@ final class ReactionTypeRegistry
             self::KIND_SOLID        => null,
             self::KIND_VOUCH        => null,
             self::KIND_STAND_BEHIND => null,
+            self::KIND_FIRE         => null,
         ];
 
         if (is_array($decoded)) {

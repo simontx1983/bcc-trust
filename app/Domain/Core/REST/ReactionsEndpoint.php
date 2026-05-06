@@ -16,14 +16,23 @@
  *     Server strips the prefix to recover the act_id; clients never
  *     see numeric IDs and never compute them.
  *
- *   - `reaction` accepts the §D5 kinds: 'solid' | 'vouch' | 'stand_behind'.
- *     The kind → reaction_type post-ID mapping lives in
- *     ReactionTypeRegistry (single source of truth).
+ *   - `reaction` accepts any kind from `ReactionGrammarMap::allKnownKinds()`
+ *     across grammars: trust ('solid' | 'vouch' | 'stand_behind') and
+ *     social ('like' | 'love' | 'haha' | 'wow' | 'fire'). The kind →
+ *     reaction_type post-ID mapping lives in ReactionGrammarRegistry,
+ *     which composes BCC-seeded IDs (ReactionTypeRegistry) with
+ *     PeepSo-default IDs (looked up by post_title).
  *
- *   - Response (both POST + DELETE):
+ *   - Cross-grammar guard: a kind that doesn't belong to the post's
+ *     grammar is rejected with `bcc_invalid_request`. Prevents writes
+ *     like "fire on a review" or "solid on a status."
+ *
+ *   - Response (both POST + DELETE) — grammar-aware shape from
+ *     api-contract-v1.md §2.11:
  *       {
- *         counts: { solid: int, vouch: int, stand_behind: int },
- *         viewer_reaction: 'solid' | 'vouch' | 'stand_behind' | null
+ *         kind_grammar: 'trust' | 'social' | 'tribal',
+ *         counts: { <kind>: int, ... },     // keys depend on grammar
+ *         viewer_reaction: <kind> | null    // belongs to grammar
  *       }
  *     Same shape as the `reactions` block on FeedItem. Frontend
  *     applies the response directly without a feed refetch.
@@ -35,15 +44,17 @@
  * never cacheable.
  *
  * @package BCC\Trust\Core\REST
- * @since V1 (2026-04, §D5 reactions)
+ * @since V1 (2026-04, §D5 reactions); v1.5 (2026-05, social grammar)
  */
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\Feed\ReactionGrammarMap;
 use BCC\Core\PeepSo\PeepSoReactionWriter;
+use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
-use BCC\Trust\Core\Support\ReactionTypeRegistry;
+use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -80,7 +91,11 @@ final class ReactionsEndpoint
                     'reaction' => [
                         'required'          => true,
                         'type'              => 'string',
-                        'enum'              => ReactionTypeRegistry::ALL_KINDS,
+                        // All known kinds across grammars (trust + social).
+                        // Cross-grammar mismatch is rejected at handler
+                        // time, not enum time, so the error message can
+                        // reference the post's actual grammar.
+                        'enum'              => ReactionGrammarMap::allKnownKinds(),
                         'sanitize_callback' => 'sanitize_key',
                     ],
                 ],
@@ -122,11 +137,25 @@ final class ReactionsEndpoint
         }
 
         $kind = (string) $request->get_param('reaction');
-        $typeId = ReactionTypeRegistry::idFor($kind);
+
+        // Cross-grammar guard: the kind MUST belong to the post's
+        // grammar. Prevents fire-on-review / solid-on-status writes
+        // that would persist as orphan rows the rail never renders.
+        $module  = PeepSoActivityRepository::getModuleIdByActId($actId) ?? '';
+        $grammar = ReactionGrammarMap::grammarForModule($module);
+        if (!ReactionGrammarMap::kindBelongsToGrammar($kind, $grammar)) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'That reaction is not available on this post.',
+                400
+            );
+        }
+
+        $typeId = ReactionGrammarRegistry::idFor($kind);
         if ($typeId === null) {
-            // ReactionSeeder hasn't run yet, or the kind isn't seeded.
-            // This is a server-state problem (admin action needed),
-            // not a client error — fail with 503.
+            // BCC seed hasn't run yet, OR the PeepSo default for this
+            // kind isn't discoverable (admin renamed/deleted the CPT
+            // post). Server-state problem, not client error — 503.
             return ApiResponse::error(
                 'bcc_unavailable',
                 'Reactions are not yet available. Try again shortly.',
@@ -144,7 +173,7 @@ final class ReactionsEndpoint
         // PeepSo hook directly. Single emission per state change.
         do_action('bcc_reaction_added', $userId, $actId, $kind);
 
-        return self::buildStateResponse($actId, $userId);
+        return self::buildStateResponse($actId, $userId, $grammar);
     }
 
     public function removeReaction(WP_REST_Request $request): WP_REST_Response
@@ -163,6 +192,11 @@ final class ReactionsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Invalid feed_id.', 400);
         }
 
+        // Resolve the post's grammar so the response is in the right
+        // shape regardless of whether the viewer had a prior reaction.
+        $module  = PeepSoActivityRepository::getModuleIdByActId($actId) ?? '';
+        $grammar = ReactionGrammarMap::grammarForModule($module);
+
         if (!PeepSoReactionWriter::removeReaction($actId)) {
             return ApiResponse::error('bcc_internal_error', 'Failed to remove reaction.', 500);
         }
@@ -172,35 +206,39 @@ final class ReactionsEndpoint
         // was sent moments ago).
         do_action('bcc_reaction_removed', $userId, $actId);
 
-        return self::buildStateResponse($actId, $userId);
+        return self::buildStateResponse($actId, $userId, $grammar);
     }
 
     /**
-     * Compose the post-mutation response: kind→count map + the
-     * viewer's current reaction. Same shape as FeedItem.reactions
-     * so the frontend applies it directly to the cache without
-     * shape translation.
+     * Compose the post-mutation response: grammar discriminator +
+     * kind→count map + the viewer's current reaction. Same shape as
+     * FeedItem.reactions (api-contract-v1.md §2.11) so the frontend
+     * applies it directly to the cache without shape translation.
+     *
+     * Caller passes the resolved grammar so we don't re-query the
+     * activity row — set/remove already looked it up for the
+     * cross-grammar guard.
      */
-    private static function buildStateResponse(int $actId, int $viewerId): WP_REST_Response
+    private static function buildStateResponse(int $actId, int $viewerId, string $grammar): WP_REST_Response
     {
         $repo = Plugin::instance()->peepSoReactionRepository();
 
-        // Kind label → numeric type ID (filtered to seeded kinds only).
+        // Build kind → type_id for THIS grammar's kinds only. Includes
+        // both BCC-seeded (trust three + Fire) and PeepSo-default
+        // (Like/Love/Haha/Wow) lookups via ReactionGrammarRegistry.
         $kindToTypeId = [];
-        foreach (ReactionTypeRegistry::ALL_KINDS as $kind) {
-            $typeId = ReactionTypeRegistry::idFor($kind);
+        foreach (ReactionGrammarMap::kindsFor($grammar) as $kind) {
+            $typeId = ReactionGrammarRegistry::idFor($kind);
             if ($typeId !== null) {
                 $kindToTypeId[$kind] = $typeId;
             }
         }
-
-        // Reverse the map for fast type-id → kind lookup on the count rows.
         $typeIdToKind = array_flip($kindToTypeId);
 
-        $counts = [];
-        foreach (array_keys($kindToTypeId) as $kind) {
-            $counts[$kind] = 0;
-        }
+        // Zero-fill the contract-required kinds for this grammar; any
+        // kind whose ID isn't resolvable just stays at 0 (degraded but
+        // still contract-correct shape).
+        $counts = ReactionGrammarMap::emptyCountsFor($grammar);
 
         $rawCounts = $repo->countsByActId($actId);
         foreach ($rawCounts as $typeId => $count) {
@@ -209,12 +247,16 @@ final class ReactionsEndpoint
             }
         }
 
-        $viewerTypeId  = $repo->viewerReactionForActId($actId, $viewerId);
+        // Cross-grammar viewer guard: ignore reactions that don't
+        // belong to this post's grammar (only possible via stale
+        // pre-validation rows or a direct DB write).
+        $viewerTypeId   = $repo->viewerReactionForActId($actId, $viewerId);
         $viewerReaction = $viewerTypeId !== null && isset($typeIdToKind[$viewerTypeId])
             ? $typeIdToKind[$viewerTypeId]
             : null;
 
         $response = ApiResponse::ok([
+            'kind_grammar'    => $grammar,
             'counts'          => $counts,
             'viewer_reaction' => $viewerReaction,
         ]);

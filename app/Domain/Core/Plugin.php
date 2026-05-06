@@ -390,6 +390,20 @@ final class Plugin
         return $this->peepSoReactionRepository ??= new Repositories\PeepSoReactionRepository();
     }
 
+    private ?Repositories\CommentRepository $commentRepository = null;
+    public function commentRepository(): Repositories\CommentRepository
+    {
+        return $this->commentRepository ??= new Repositories\CommentRepository();
+    }
+
+    private ?Services\CommentService $commentService = null;
+    public function commentService(): Services\CommentService
+    {
+        return $this->commentService ??= new Services\CommentService(
+            $this->commentRepository()
+        );
+    }
+
     private ?Services\LivingService $livingService = null;
     public function livingService(): Services\LivingService
     {
@@ -441,7 +455,8 @@ final class Plugin
             $this->peepSoReactionRepository(),
             $this->voteRepository(),
             $this->hiddenActivityRepository(),
-            $this->groupContextResolver()
+            $this->groupContextResolver(),
+            $this->commentRepository()
         );
     }
 
@@ -866,6 +881,13 @@ final class Plugin
         // (single-graph rule); response shape matches FeedItem.reactions
         // so the frontend can patch its cache without translation.
         \BCC\Trust\Core\REST\ReactionsEndpoint::register();
+
+        // v1.5 hybrid PeepSo-proxy comments — GET / POST / DELETE under
+        // /posts/:feed_id/comments. Reads peepso_activities directly via
+        // CommentRepository (joined to wp_posts + wp_users); writes
+        // route through PeepSoCommentWriter (single-graph rule, mirrors
+        // PeepSoReactionWriter). Holder-groups gate is per-parent-post.
+        \BCC\Trust\Core\REST\CommentsEndpoint::register();
 
         // V1 contract: §D1 Composer status posts — POST /posts.
         // Wraps PeepSoActivity::add_post via PeepSoStatusWriter

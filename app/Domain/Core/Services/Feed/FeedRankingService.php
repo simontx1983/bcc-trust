@@ -31,17 +31,21 @@
 namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Feed\ActivityFeedService;
+use BCC\Core\Feed\ReactionGrammarMap;
 use BCC\Core\Repositories\PeepSoBlockRepository;
+use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\BinderRepository;
+use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\PullBatchRepository;
 use BCC\Trust\Core\Repositories\PullMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Support\PageTypeMap;
-use BCC\Trust\Core\Support\ReactionTypeRegistry;
+use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 
@@ -63,7 +67,8 @@ final class FeedRankingService
         private readonly PeepSoReactionRepository $reactionRepo,
         private readonly VoteRepository $voteRepo,
         private readonly HiddenActivityRepository $hiddenRepo,
-        private readonly GroupContextResolver $groupContextResolver
+        private readonly GroupContextResolver $groupContextResolver,
+        private readonly CommentRepository $commentRepo
     ) {
     }
 
@@ -93,6 +98,7 @@ final class FeedRankingService
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], 0);
         $payload['items'] = $this->hydrateGroupContexts($payload['items']);
+        $payload['items'] = $this->hydrateCommentCounts($payload['items'], 0);
         return $payload;
     }
 
@@ -134,6 +140,7 @@ final class FeedRankingService
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateGroupContexts($payload['items']);
+        $payload['items'] = $this->hydrateCommentCounts($payload['items'], $viewerId);
         return $payload;
     }
 
@@ -176,6 +183,7 @@ final class FeedRankingService
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateGroupContexts($payload['items']);
+        $payload['items'] = $this->hydrateCommentCounts($payload['items'], $viewerId);
         return $payload;
     }
 
@@ -570,21 +578,40 @@ final class FeedRankingService
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Post-process feed items to attach the §D5 `reactions` block. One
-     * batched count query + (when viewerId>0) one batched viewer-state
-     * query covers the entire page.
+     * Post-process feed items to attach the §2.11 `reactions` block.
+     * Grammar-aware (v1.5): every item's reactions block carries a
+     * `kind_grammar` discriminator and a counts dict zero-filled for
+     * the kinds that grammar exposes. The grammar comes from the
+     * item's post_kind via ReactionGrammarMap.
      *
-     * Output shape on each item per §3.3:
+     * One batched count query + (when viewerId>0) one batched
+     * viewer-state query covers the entire page, regardless of how
+     * many distinct grammars are present — peepso_reactions stores
+     * every kind in one table, so we read all reaction-type IDs at
+     * once and group by grammar in PHP.
+     *
+     * Output shape per item (api-contract-v1.md §2.11):
      *   reactions: {
-     *     counts: { solid: int, vouch: int, stand_behind: int },
-     *     viewer_reaction: 'solid'|'vouch'|'stand_behind'|null
+     *     kind_grammar: 'trust' | 'social' | 'tribal',
+     *     counts: { <kind>: int, ... }      // keys depend on grammar
+     *     viewer_reaction: <kind> | null    // belongs to grammar
      *   }
      *
-     * Defensive posture matches LivingService: when ReactionTypeRegistry
-     * isn't seeded yet (fresh install before ReactionSeeder runs), the
-     * id→kind map is empty and every item ends up with all-zero counts +
-     * null viewer_reaction. Reactions are supplementary chrome on the
-     * feed; they MUST NOT block the page from rendering.
+     * Defensive posture matches LivingService: when reaction kinds
+     * can't be resolved (fresh install before ReactionSeeder runs;
+     * PeepSo defaults missing on a non-English locale), the id→kind
+     * map is partial or empty and items end up with the grammar's
+     * zero-filled counts + null viewer_reaction. Reactions are
+     * supplementary chrome — they MUST NOT block the page from
+     * rendering.
+     *
+     * Cross-grammar viewer_reaction guard: if a viewer reacted with
+     * a kind that doesn't belong to the post's grammar (only possible
+     * via a stale cached reaction or a direct DB write), that reaction
+     * is ignored — viewer_reaction comes back null. The rail then
+     * shows them as "not yet reacted" rather than rendering a kind
+     * that has no rail entry. The endpoint enforces grammar-correct
+     * writes going forward.
      *
      * @param list<array<string, mixed>> $items
      * @return list<array<string, mixed>>
@@ -595,10 +622,10 @@ final class FeedRankingService
             return [];
         }
 
-        // Build the type_id → kind map once. Empty when reactions
-        // haven't been seeded; the loop below leaves the default
-        // empty block intact in that case.
-        $idToKind = self::reactionIdToKindMap();
+        // Build the type_id → kind map once across BCC-seeded + PeepSo
+        // defaults. Empty (or partial) when not all kinds are
+        // resolvable; the loop below leaves missing-kind counts at 0.
+        $idToKind = ReactionGrammarRegistry::idToKindMap();
 
         // Extract act_ids from each item's normalized 'feed_<actId>' id.
         // (act_id, not external_id — external_id is module-specific.)
@@ -617,12 +644,19 @@ final class FeedRankingService
             $actById[$idx]    = $actId;
         }
 
-        if ($actIds === [] || $idToKind === []) {
+        if ($actIds === []) {
             return $items;
         }
 
-        $countsByAct = $this->reactionRepo->countsByActIds($actIds);
-        $viewerByAct = $viewerId > 0
+        // Even when $idToKind is empty (unseeded install), we still
+        // overwrite each item's reactions with the grammar-correct
+        // zero shape — leaving the contract-correct kind_grammar
+        // discriminator on every item is more important than skipping
+        // a no-op count loop.
+        $countsByAct = $idToKind === []
+            ? []
+            : $this->reactionRepo->countsByActIds($actIds);
+        $viewerByAct = ($viewerId > 0 && $idToKind !== [])
             ? $this->reactionRepo->viewerReactionsByActIds($viewerId, $actIds)
             : [];
 
@@ -634,10 +668,13 @@ final class FeedRankingService
                 continue;
             }
 
-            $counts = ['solid' => 0, 'vouch' => 0, 'stand_behind' => 0];
+            $postKind = is_string($item['post_kind'] ?? null) ? $item['post_kind'] : 'status';
+            $grammar  = ReactionGrammarMap::grammarFor($postKind);
+            $counts   = ReactionGrammarMap::emptyCountsFor($grammar);
+
             foreach ($countsByAct[$actId] ?? [] as $typeId => $count) {
                 $kind = $idToKind[$typeId] ?? null;
-                if ($kind !== null) {
+                if ($kind !== null && array_key_exists($kind, $counts)) {
                     $counts[$kind] = $count;
                 }
             }
@@ -645,45 +682,22 @@ final class FeedRankingService
             $viewerKind = null;
             $viewerType = $viewerByAct[$actId] ?? 0;
             if ($viewerType > 0) {
-                $viewerKind = $idToKind[$viewerType] ?? null;
+                $candidate = $idToKind[$viewerType] ?? null;
+                if ($candidate !== null
+                    && ReactionGrammarMap::kindBelongsToGrammar($candidate, $grammar)
+                ) {
+                    $viewerKind = $candidate;
+                }
             }
 
             $item['reactions'] = [
+                'kind_grammar'    => $grammar,
                 'counts'          => $counts,
                 'viewer_reaction' => $viewerKind,
             ];
             $hydrated[] = $item;
         }
         return $hydrated;
-    }
-
-    /**
-     * Build a {type_id: kind} reverse lookup from the registry. Returns
-     * an empty map when reactions haven't been seeded — callers treat
-     * that as "no reactions to hydrate" and leave defaults intact.
-     *
-     * @return array<int, string>
-     */
-    private static function reactionIdToKindMap(): array
-    {
-        $map = [];
-
-        $solidId = ReactionTypeRegistry::solidId();
-        if ($solidId !== null) {
-            $map[$solidId] = 'solid';
-        }
-
-        $vouchId = ReactionTypeRegistry::vouchId();
-        if ($vouchId !== null) {
-            $map[$vouchId] = 'vouch';
-        }
-
-        $standBehindId = ReactionTypeRegistry::standBehindId();
-        if ($standBehindId !== null) {
-            $map[$standBehindId] = 'stand_behind';
-        }
-
-        return $map;
     }
 
     /**
@@ -788,5 +802,98 @@ final class FeedRankingService
             }
         }
         return array_keys($set);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Comment-count hydration (v1.5)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Attach `comment_count: int` to every feed item via one batched
+     * COUNT(*) GROUP BY across all parent posts on the page.
+     *
+     * The lookup key is `external_id` — for status posts this is the
+     * parent's wp_posts.ID directly; for BCC-owned modules
+     * (review/pull_batch/page_claim/blog) this is the sidecar
+     * `peepso-activity-status` wp_posts.ID created by
+     * ActivityStreamWriter. Comments on either kind store the same
+     * `act_comment_object_id`, so the same join works.
+     *
+     * Holder-Groups defense-in-depth: items with a `group` block
+     * (set immediately upstream by hydrateGroupContexts) have their
+     * comment_count zeroed when the viewer isn't a member of that
+     * group. The upstream feed query (PeepSoActivityRepository::
+     * getActivities) doesn't filter by group membership, so without
+     * this gate a non-member could see comment-count signal on a
+     * gated post they shouldn't even be aware exists. The leak
+     * surface is only this slice (counts), but the same membership
+     * check is the right shape if/when other gated fields surface.
+     * Reuses CommentService::READ_ALLOWED_STATUSES as the single
+     * source of truth for "can this viewer read this group's
+     * content."
+     *
+     * Other defensive posture: if the repo returns no counts
+     * (peepso deactivated, or genuinely zero comments page-wide),
+     * every item just gets `comment_count: 0`. The frontend's count
+     * chip is still rendered — just with no badge — so the
+     * discoverability of the drawer is preserved.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private function hydrateCommentCounts(array $items, int $viewerId): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        // Build the gated-skip set: external_ids the viewer must NOT
+        // see comment counts for. One getMembershipStatus query per
+        // gated item; pages cap at 50 and gated items are a subset,
+        // so the worst-case query count is bounded.
+        $gatedSkip = [];
+        foreach ($items as $item) {
+            $groupId = isset($item['group']) && is_array($item['group'])
+                ? (int) ($item['group']['id'] ?? 0)
+                : 0;
+            if ($groupId <= 0) {
+                continue;
+            }
+            $eid = (int) ($item['external_id'] ?? 0);
+            if ($eid <= 0) {
+                continue;
+            }
+            if ($viewerId <= 0) {
+                $gatedSkip[$eid] = true;
+                continue;
+            }
+            $status = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
+            if ($status === null
+                || !in_array($status, CommentService::READ_ALLOWED_STATUSES, true)
+            ) {
+                $gatedSkip[$eid] = true;
+            }
+        }
+
+        $extIds = [];
+        foreach ($items as $item) {
+            $eid = (int) ($item['external_id'] ?? 0);
+            if ($eid > 0 && !isset($gatedSkip[$eid])) {
+                $extIds[] = $eid;
+            }
+        }
+        $countsByParent = $extIds === []
+            ? []
+            : $this->commentRepo->countsByParentPostIds($extIds);
+
+        $hydrated = [];
+        foreach ($items as $item) {
+            $eid = (int) ($item['external_id'] ?? 0);
+            $item['comment_count'] = isset($gatedSkip[$eid])
+                ? 0
+                : ($countsByParent[$eid] ?? 0);
+            $hydrated[] = $item;
+        }
+        return $hydrated;
     }
 }

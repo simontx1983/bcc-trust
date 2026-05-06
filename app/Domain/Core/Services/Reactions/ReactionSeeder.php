@@ -41,15 +41,26 @@ final class ReactionSeeder
      * Versioned one-time-setup flag. When set to '1', `seed()` and
      * `ensureIndexes()` short-circuit. Bumping the suffix (e.g. v2)
      * forces re-run after a contract change.
+     *
+     * v2 (v1.5): added the social-grammar Fire reaction. Bumping the
+     * suffix re-runs the seeder on existing installs; the per-kind
+     * skip check inside seedReactions() means the trust three are
+     * left intact and only Fire is inserted.
      */
-    private const SETUP_FLAG = 'bcc_reactions_seeded_v1';
+    private const SETUP_FLAG = 'bcc_reactions_seeded_v2';
 
     /**
-     * Spec for the three V1 reactions. Order here is also the default
+     * Spec for BCC-seeded reactions. Order here is also the default
      * menu_order priority within the BCC block (offset by BASE_ORDER).
      *
      * Helper labels (the §N1 plain-English descriptors) live on the
      * frontend; the post_title here is the brand-name (Solid, etc.).
+     *
+     * Trust grammar — solid/vouch/stand_behind — is the §D5 contract
+     * and is locked. Social grammar — fire — is the v1.5 single
+     * BCC-owned addition (PeepSo's defaults cover like/love/haha/wow,
+     * but no Fire); ReactionGrammarRegistry resolves the rest of the
+     * social set from PeepSo's seeded posts at lookup time.
      *
      * @var list<array{kind: string, title: string, helper: string, icon: string, content: string}>
      */
@@ -74,6 +85,13 @@ final class ReactionSeeder
             'helper'  => 'Stake my rep',
             'icon'    => 'bcc-reaction-stand-behind.svg',
             'content' => 'Stake my rep — strongest backing, ties to the user\'s reputation.',
+        ],
+        [
+            'kind'    => ReactionTypeRegistry::KIND_FIRE,
+            'title'   => 'Fire',
+            'helper'  => 'Hot',
+            'icon'    => 'bcc-reaction-fire.svg',
+            'content' => 'Hot — energy / hype / appreciation on social-grammar posts.',
         ],
     ];
 

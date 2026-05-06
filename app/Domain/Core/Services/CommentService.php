@@ -1,0 +1,518 @@
+<?php
+/**
+ * CommentService — orchestrates list / create / delete for the
+ * v1.5 hybrid PeepSo-proxy comments slice.
+ *
+ * Responsibilities (in scope):
+ *   - Resolve feed_id → parent activity row.
+ *   - Apply the holder-groups visibility gate (per-parent-post).
+ *   - Enforce the per-user create-comment throttle.
+ *   - Delegate writes to bcc-core's PeepSoCommentWriter.
+ *   - Hydrate listed comments into the contract view-model.
+ *   - Emit §A3 events (`bcc_comment_created`, `bcc_comment_deleted`)
+ *     for downstream subscribers (notification dispatcher, future
+ *     analytics).
+ *
+ * Out of scope (deferred):
+ *   - Threading. PeepSo storage is flat at the (act_comment_object_id)
+ *     index level even when its UI shows replies-to-replies — replies
+ *     point at the root post via `act_comment_object_id`, with thread
+ *     context conveyed by @-mentions in body. Surfacing that context
+ *     in the BCC UI is V1.5+ work.
+ *   - Edit. Delete + recreate is the V1 model. PeepSo's editcomment
+ *     path exists but isn't wired through to BCC.
+ *   - Per-comment reactions. Comments stay un-reactable in V1; the
+ *     parent post's reaction rail is the only reaction surface.
+ *
+ * @package BCC\Trust\Core\Services
+ * @since v1.5 (2026-05, hybrid PeepSo-proxy comments)
+ */
+
+namespace BCC\Trust\Core\Services;
+
+use BCC\Core\Log\Logger;
+use BCC\Core\PeepSo\PeepSoCommentWriter;
+use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Core\Security\Throttle;
+use BCC\Trust\Core\Repositories\CommentRepository;
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+/**
+ * @phpstan-import-type CommentRow     from CommentRepository
+ * @phpstan-import-type CommentMetaRow from CommentRepository
+ */
+final class CommentService
+{
+    /** §D2-style cap mirroring status posts; PeepSo's own cap is 4000
+     *  via site_status_limit but we tighten in BCC for the warmer
+     *  social grammar — long essays belong in blog posts. */
+    public const COMMENT_MAX_LENGTH = 2000;
+
+    /**
+     * Group-membership statuses that allow a viewer to read content
+     * (posts and their comments) on a gated post. Mirrors the
+     * semantics PeepSo's own activity stream applies (see
+     * PeepSoGroupRepository::getMembershipStatus for the full enum
+     * list).
+     *
+     * Public so cross-class consumers inside bcc-trust (notably
+     * FeedRankingService::hydrateCommentCounts, which gates the
+     * comment-count batch on viewer membership as defense-in-depth)
+     * share one source of truth for the allowed-status set.
+     *
+     * @var list<string>
+     */
+    public const READ_ALLOWED_STATUSES = [
+        'member',
+        'member_owner',
+        'member_manager',
+        'member_moderator',
+        'member_readonly',
+    ];
+
+    /**
+     * Subset of READ_ALLOWED_STATUSES that can also write comments.
+     * `member_readonly` is excluded — read but not contribute, per
+     * PeepSo's semantics for muted/quiet members.
+     *
+     * @var list<string>
+     */
+    private const WRITE_ALLOWED_STATUSES = [
+        'member',
+        'member_owner',
+        'member_manager',
+        'member_moderator',
+    ];
+
+    public function __construct(
+        private readonly CommentRepository $commentRepo
+    ) {
+    }
+
+    /**
+     * List comments on the given feed item with cursor pagination.
+     *
+     * Auth posture: anonymous viewers can list comments on
+     * non-gated posts. Gated posts require the viewer to be a
+     * member of the parent post's group; non-members get
+     * `bcc_forbidden` so the drawer can surface a "Join group to
+     * read comments" hint.
+     *
+     * @return array{
+     *   ok: true,
+     *   items: list<array<string, mixed>>,
+     *   next_cursor: string|null
+     * }|array{error: string, message: string}
+     */
+    public function listByFeedId(
+        string $feedId,
+        int $viewerId,
+        ?string $cursor,
+        int $limit
+    ): array {
+        $actId = self::parseFeedId($feedId);
+        if ($actId === null) {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Invalid feed_id.'];
+        }
+
+        $parent = PeepSoActivityRepository::getById($actId);
+        if ($parent === null) {
+            return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
+        }
+        $parentPostId = (int) $parent->act_external_id;
+
+        $gate = $this->gateForParent($viewerId, $parentPostId);
+        if (!$gate['can_read']) {
+            return ['error' => 'bcc_forbidden', 'message' => 'You do not have access to this discussion.'];
+        }
+
+        [$cursorTime, $cursorActId] = self::decodeCursor($cursor ?? '');
+
+        $rows = $this->commentRepo->listByParentPostId(
+            $parentPostId,
+            $cursorTime,
+            $cursorActId,
+            $limit
+        );
+
+        $items     = [];
+        $lastTime  = null;
+        $lastActId = null;
+        foreach ($rows as $row) {
+            $items[] = self::shapeCommentRow($row, $viewerId, $feedId);
+            $lastTime  = (string) $row->posted_at;
+            $lastActId = (int) $row->act_id;
+        }
+
+        $nextCursor = null;
+        if (count($rows) === $limit && $lastTime !== null && $lastActId !== null) {
+            $nextCursor = self::encodeCursor($lastTime, $lastActId);
+        }
+
+        return [
+            'ok'          => true,
+            'items'       => $items,
+            'next_cursor' => $nextCursor,
+        ];
+    }
+
+    /**
+     * Create a comment on the given feed item.
+     *
+     * @return array{
+     *   ok: true,
+     *   comment: array<string, mixed>
+     * }|array{error: string, message: string}
+     */
+    public function createComment(string $feedId, int $authorId, string $content): array
+    {
+        if ($authorId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        $trimmed = trim($content);
+        if ($trimmed === '') {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Comment cannot be empty.'];
+        }
+        if (mb_strlen($trimmed) > self::COMMENT_MAX_LENGTH) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => sprintf('Comments cap at %d characters.', self::COMMENT_MAX_LENGTH),
+            ];
+        }
+
+        $actId = self::parseFeedId($feedId);
+        if ($actId === null) {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Invalid feed_id.'];
+        }
+
+        $parent = PeepSoActivityRepository::getById($actId);
+        if ($parent === null) {
+            return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
+        }
+        $parentPostId   = (int) $parent->act_external_id;
+        // PeepSo stores act_module_id as SMALLINT. PeepSo's
+        // get_activity_data($post_id, $module_id) looks up the parent
+        // by the (post_id, module_id) pair; passing the wrong module
+        // (e.g. defaulting to status=1 against a photo post=4)
+        // returns null and add_comment refuses with FALSE.
+        $parentModuleId = (int) $parent->act_module_id;
+
+        $gate = $this->gateForParent($authorId, $parentPostId);
+        if (!$gate['can_create']) {
+            return ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.'];
+        }
+
+        // Burst seatbelt — same rationale as PostsService::createStatus.
+        // Tight enough to clip accidental flood / double-submit / scripted
+        // burst; loose enough that humans never hit it. NOT a primary
+        // defense — fires-in-logs is the signal to layer in §K1 abuse
+        // gates. Constants live in includes/config/limits.php.
+        $burstKey = "comment:{$authorId}:burst";
+        if (!Throttle::allow(
+            $burstKey,
+            BCC_TRUST_RATE_LIMIT_COMMENT,
+            BCC_TRUST_RATE_WINDOW_COMMENT
+        )) {
+            Logger::info('[CommentService] comment burst seatbelt fired', [
+                'user_id' => $authorId,
+                'limit'   => BCC_TRUST_RATE_LIMIT_COMMENT,
+                'window'  => BCC_TRUST_RATE_WINDOW_COMMENT,
+            ]);
+            return ['error' => 'bcc_rate_limited', 'message' => 'Too fast. Wait a moment before commenting again.'];
+        }
+
+        $newCommentPostId = PeepSoCommentWriter::addComment($parentPostId, $authorId, $trimmed, $parentModuleId);
+        if ($newCommentPostId <= 0) {
+            // PeepSo refused the write — could be:
+            //   - parent's `peepso_disable_comments` meta is set
+            //   - parent owner blocked the commenter
+            //   - content stripped to empty by PeepSo's sanitizer
+            // All three surface to the user as "can't comment here";
+            // the distinction is observability (Logger), not UX.
+            Logger::info('[CommentService] PeepSo refused comment write', [
+                'parent_act_id'  => $actId,
+                'parent_post_id' => $parentPostId,
+                'author_id'      => $authorId,
+            ]);
+            return ['error' => 'bcc_unavailable', 'message' => 'Could not post comment. Try again.'];
+        }
+
+        // Resolve the freshly-written comment back to its canonical
+        // CommentRow shape so the response matches the §3.5 contract
+        // (id = "comment_<act_id>", parent feed_id echoed). PeepSo's
+        // add_comment returned only the wp_post.ID — we look the
+        // activity row up by act_external_id to get its act_id.
+        $newRow = $this->commentRepo->getCommentRowByPostId($newCommentPostId);
+        if ($newRow === null) {
+            // Defensive: row should exist immediately — add_comment
+            // wrote both wp_post and peepso_activities synchronously.
+            // If it's somehow missing the response still must be
+            // contract-shaped; surface bcc_unavailable so the client
+            // refetches the list rather than caching a malformed row.
+            Logger::error('[CommentService] new comment row not found post-write', [
+                'comment_post_id' => $newCommentPostId,
+                'author_id'       => $authorId,
+            ]);
+            return ['error' => 'bcc_unavailable', 'message' => 'Comment was saved but could not be confirmed. Refresh to see it.'];
+        }
+
+        $shaped = self::shapeCommentRow($newRow, $authorId, $feedId);
+
+        // §A3 event — single emission per state change. Subscribers
+        // (NotificationDispatcher, future analytics) attach independently.
+        $newActId = (int) $newRow->act_id;
+        do_action('bcc_comment_created', $authorId, $actId, $newActId, $newCommentPostId);
+
+        return [
+            'ok'      => true,
+            'comment' => $shaped,
+        ];
+    }
+
+    /**
+     * Delete the viewer's own comment.
+     *
+     * Authorization: viewer MUST be the comment's author. Cross-author
+     * deletes (post owner removing a heckler, admin moderation) flow
+     * through PeepSo's existing UI in V1; a future BCC moderation
+     * endpoint can extend this service with a separate method.
+     *
+     * @return array{ok: true, comment_id: string}|array{error: string, message: string}
+     */
+    public function deleteComment(string $feedId, string $commentId, int $viewerId): array
+    {
+        if ($viewerId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+        $parentActId = self::parseFeedId($feedId);
+        if ($parentActId === null) {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Invalid feed_id.'];
+        }
+        $commentActId = self::parseCommentId($commentId);
+        if ($commentActId === null) {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Invalid comment_id.'];
+        }
+
+        $meta = $this->commentRepo->getCommentMeta($commentActId);
+        if ($meta === null) {
+            return ['error' => 'bcc_not_found', 'message' => 'Comment not found.'];
+        }
+
+        if ((int) $meta->author_id !== $viewerId) {
+            return ['error' => 'bcc_forbidden', 'message' => 'You can only delete your own comments.'];
+        }
+
+        $ok = PeepSoCommentWriter::deleteComment((int) $meta->comment_post_id);
+        if (!$ok) {
+            return ['error' => 'bcc_internal_error', 'message' => 'Could not delete comment.'];
+        }
+
+        do_action('bcc_comment_deleted', $viewerId, $parentActId, $commentActId);
+
+        return ['ok' => true, 'comment_id' => $commentId];
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Holder-groups gate
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Decide whether the viewer can read / create comments on the
+     * given parent post.
+     *
+     * Non-gated posts (no `peepso_group_id` meta or zero) → fully open
+     * for read; create still goes through PeepSo's own permission
+     * check inside add_comment.
+     *
+     * Gated posts → viewer must be a member. `member_readonly` can
+     * read but not create; banned / pending / non-member cannot read.
+     *
+     * @return array{can_read: bool, can_create: bool}
+     */
+    private function gateForParent(int $viewerId, int $parentPostId): array
+    {
+        if ($parentPostId <= 0) {
+            return ['can_read' => false, 'can_create' => false];
+        }
+
+        $groupId = (int) get_post_meta($parentPostId, 'peepso_group_id', true);
+        if ($groupId <= 0) {
+            // Open post — anyone can read; create still validates
+            // identity (PeepSo permissions handle blocked-by-author).
+            return [
+                'can_read'   => true,
+                'can_create' => $viewerId > 0,
+            ];
+        }
+
+        // Gated — read membership status. Anonymous viewers always
+        // fail the gate on gated content.
+        if ($viewerId <= 0) {
+            return ['can_read' => false, 'can_create' => false];
+        }
+
+        $status = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
+        if ($status === null) {
+            return ['can_read' => false, 'can_create' => false];
+        }
+
+        return [
+            'can_read'   => in_array($status, self::READ_ALLOWED_STATUSES, true),
+            'can_create' => in_array($status, self::WRITE_ALLOWED_STATUSES, true),
+        ];
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Shape helpers — Comment row → contract view-model
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Translate a CommentRepository row into the §3.x Comment
+     * view-model. Per §A2 (no business logic on frontend), every
+     * field on the response is server-resolved.
+     *
+     * @phpstan-param CommentRow $row Repository row matching the CommentRow shape.
+     * @param string $parentFeedId  The parent post's `feed_<act_id>` string;
+     *                              echoed back per §3.5 so the frontend can
+     *                              re-resolve the parent without an extra
+     *                              round-trip.
+     * @return array<string, mixed>
+     */
+    private static function shapeCommentRow(object $row, int $viewerId, string $parentFeedId): array
+    {
+        $authorId = (int) $row->author_id;
+        $authorHandle = (string) $row->author_login;
+        $displayName  = (string) $row->author_display_name;
+
+        return [
+            'id'          => 'comment_' . (int) $row->act_id,
+            'comment_id'  => 'comment_' . (int) $row->act_id,
+            'feed_id'     => $parentFeedId,
+            'author'      => [
+                'id'           => $authorId,
+                'handle'       => $authorHandle,
+                'display_name' => $displayName !== '' ? $displayName : $authorHandle,
+                'avatar_url'   => self::resolveAvatarUrl($authorId),
+            ],
+            'body'        => (string) $row->body,
+            'posted_at'   => self::toIso8601((string) $row->posted_at),
+            'permissions' => [
+                // Author can always delete own; cross-author + admin
+                // moderation deletes are V2.
+                'can_delete' => [
+                    'allowed'     => $viewerId > 0 && $viewerId === $authorId,
+                    'unlock_hint' => null,
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * Avatar URL for a user. Reuses WP's get_avatar_url (which is
+     * filterable by other plugins, so PeepSo's avatar override
+     * applies automatically). Returns empty string when unresolvable.
+     */
+    private static function resolveAvatarUrl(int $userId): string
+    {
+        if ($userId <= 0) {
+            return '';
+        }
+        $url = get_avatar_url($userId, ['size' => 96]);
+        return is_string($url) ? $url : '';
+    }
+
+    private static function toIso8601(string $mysqlDatetime): string
+    {
+        if ($mysqlDatetime === '' || $mysqlDatetime === '0000-00-00 00:00:00') {
+            return '';
+        }
+        $ts = strtotime($mysqlDatetime . ' UTC');
+        return $ts ? gmdate('Y-m-d\TH:i:s\Z', $ts) : '';
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Cursor helpers — mirror ActivityFeedService for cross-endpoint
+    // consistency. The frontend's lib/api/client cursor handling stays
+    // unchanged.
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * @return array{0: ?string, 1: ?int}
+     */
+    private static function decodeCursor(string $cursor): array
+    {
+        if ($cursor === '') {
+            return [null, null];
+        }
+        $decoded = base64_decode(strtr($cursor, '-_', '+/'), true);
+        if ($decoded === false) {
+            return [null, null];
+        }
+        $data = json_decode($decoded, true);
+        if (!is_array($data) || !isset($data['t'], $data['id'])) {
+            return [null, null];
+        }
+        $iso = (string) $data['t'];
+        $ts  = strtotime($iso);
+        if ($ts === false) {
+            return [null, null];
+        }
+        return [gmdate('Y-m-d H:i:s', $ts), (int) $data['id']];
+    }
+
+    private static function encodeCursor(string $mysqlDatetime, int $actId): string
+    {
+        $ts  = strtotime($mysqlDatetime . ' UTC');
+        $iso = $ts ? gmdate('Y-m-d\TH:i:s\Z', $ts) : '';
+
+        $payload = json_encode(['t' => $iso, 'id' => $actId], JSON_UNESCAPED_SLASHES);
+        return rtrim(strtr(base64_encode((string) $payload), '+/', '-_'), '=');
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // ID parsers
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Parse "feed_<n>" → numeric act_id. Mirrors ReactionsEndpoint's
+     * parser; clients always round-trip the exact id the server
+     * emitted. Returns null on any deviation from the expected shape.
+     */
+    private static function parseFeedId(string $feedId): ?int
+    {
+        if (!str_starts_with($feedId, 'feed_')) {
+            return null;
+        }
+        $rest = substr($feedId, 5);
+        if ($rest === '' || !ctype_digit($rest)) {
+            return null;
+        }
+        $value = (int) $rest;
+        return $value > 0 ? $value : null;
+    }
+
+    /**
+     * Parse "comment_<n>" → numeric comment act_id. The pseudo-id
+     * `comment_post_<n>` form (used in create-response only) is
+     * intentionally NOT accepted here — once the comment is on the
+     * server it gets a stable act_id that the frontend re-fetches.
+     */
+    private static function parseCommentId(string $commentId): ?int
+    {
+        if (!str_starts_with($commentId, 'comment_')) {
+            return null;
+        }
+        $rest = substr($commentId, 8);
+        // Reject the pseudo-id form `post_<n>`.
+        if (!ctype_digit($rest)) {
+            return null;
+        }
+        $value = (int) $rest;
+        return $value > 0 ? $value : null;
+    }
+}
