@@ -193,6 +193,15 @@ final class UserGroupsEndpoint
      * *viewer* (not the target) qualifies. Used to set
      * permissions.can_join when viewing someone else's profile.
      *
+     * Two batched lookups regardless of how many NFT groups the
+     * profile carries:
+     *   1. `GatedGroupRepository::findManyByGroupIds` — one
+     *      update_meta_cache for all NFT group_ids, no per-group DB
+     *      round-trip.
+     *   2. `ChainRepository::getById` is called once per *unique*
+     *      chain_id (typically 1–3 across a user's NFT memberships),
+     *      not once per group.
+     *
      * Returns a map keyed by group_id of (eligible: bool, balance: int).
      * Plain/Local/System groups are absent from the map.
      *
@@ -205,24 +214,41 @@ final class UserGroupsEndpoint
             return [];
         }
 
-        $gateConfigs = [];
-        $pairs       = [];
+        $nftGroupIds = [];
         foreach ($contexts as $groupId => $ctx) {
-            if ($ctx->type !== GroupType::Nft) {
-                continue;
+            if ($ctx->type === GroupType::Nft) {
+                $nftGroupIds[] = $groupId;
             }
-            $cfg = GatedGroupRepository::getGateConfig($groupId);
-            if ($cfg === null) {
+        }
+        if ($nftGroupIds === []) {
+            return [];
+        }
+
+        $configs = GatedGroupRepository::findManyByGroupIds($nftGroupIds);
+        if ($configs === []) {
+            return [];
+        }
+
+        // Resolve chain slugs once per unique chain_id, not once per group.
+        $slugByChain = [];
+        foreach ($configs as $cfg) {
+            if (isset($slugByChain[$cfg->chainId])) {
                 continue;
             }
             $chain = ChainRepository::getById($cfg->chainId);
-            if ($chain === null) {
-                continue;
+            if ($chain !== null) {
+                $slugByChain[$cfg->chainId] = (string) $chain->slug;
             }
-            $gateConfigs[$groupId] = ['cfg' => $cfg, 'slug' => (string) $chain->slug];
-            $pairs[] = [(string) $chain->slug, $cfg->contractAddress];
         }
 
+        $pairs = [];
+        foreach ($configs as $cfg) {
+            $slug = $slugByChain[$cfg->chainId] ?? null;
+            if ($slug === null) {
+                continue;
+            }
+            $pairs[] = [$slug, $cfg->contractAddress];
+        }
         if ($pairs === []) {
             return [];
         }
@@ -230,10 +256,11 @@ final class UserGroupsEndpoint
         $balances = HoldingsService::ownsAnyMany($viewerId, $pairs);
 
         $out = [];
-        foreach ($gateConfigs as $groupId => $entry) {
-            /** @var GatedGroupConfig $cfg */
-            $cfg     = $entry['cfg'];
-            $slug    = $entry['slug'];
+        foreach ($configs as $groupId => $cfg) {
+            $slug = $slugByChain[$cfg->chainId] ?? null;
+            if ($slug === null) {
+                continue;
+            }
             $balance = $balances[$slug . ':' . $cfg->contractAddress] ?? 0;
             $out[$groupId] = [
                 'eligible'    => $balance >= $cfg->minBalance,

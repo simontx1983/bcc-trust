@@ -116,16 +116,37 @@ final class GatedGroupRepository {
             return [];
         }
 
-        update_meta_cache('post', $ids);
+        return array_values(self::findManyByGroupIds($ids));
+    }
 
-        $configs = [];
-        foreach ($ids as $id) {
-            $cfg = self::getGateConfig($id);
+    /**
+     * Bulk-fetch GatedGroupConfig for a caller-supplied set of group_ids.
+     * One `update_meta_cache` warms post_meta for the whole batch; each
+     * subsequent `getGateConfig` call hits the warm cache instead of the
+     * DB. Non-holder group_ids in the input set are silently dropped.
+     *
+     * Used by the Profile Groups Tab + Holder-Groups REST surface to
+     * resolve viewer eligibility across N gated groups in one DB
+     * round-trip rather than N.
+     *
+     * @param int[] $groupIds
+     * @return array<int, GatedGroupConfig> map keyed by group_id
+     */
+    public static function findManyByGroupIds(array $groupIds): array {
+        if ($groupIds === []) {
+            return [];
+        }
+
+        update_meta_cache('post', $groupIds);
+
+        $map = [];
+        foreach ($groupIds as $groupId) {
+            $cfg = self::getGateConfig($groupId);
             if ($cfg !== null) {
-                $configs[] = $cfg;
+                $map[$cfg->groupId] = $cfg;
             }
         }
-        return $configs;
+        return $map;
     }
 
     /**
