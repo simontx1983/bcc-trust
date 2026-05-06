@@ -356,6 +356,49 @@ final class NftHoldingsRepository
     }
 
     /**
+     * Atomic batch ingest used by NftHoldingsIndexer. Wraps upsertMany +
+     * per-row deletes in a single transaction so a mid-batch DB hiccup
+     * cannot leave the chain checkpoint out of sync with row state.
+     *
+     * @param list<array<string, mixed>>                                $upserts
+     * @param list<array{wallet_link_id: int, contract: string, token_id: string}> $deletes
+     * @return array{inserts: int, deletes: int}
+     * @throws \RuntimeException when the batch fails to commit
+     */
+    public static function ingestBatch(array $upserts, array $deletes): array
+    {
+        $result = ['inserts' => 0, 'deletes' => 0];
+        if ($upserts === [] && $deletes === []) {
+            return $result;
+        }
+
+        global $wpdb;
+        $wpdb->query('START TRANSACTION');
+        try {
+            if ($upserts !== []) {
+                $result['inserts'] = self::upsertMany($upserts);
+            }
+            foreach ($deletes as $d) {
+                $linkId   = (int) ($d['wallet_link_id'] ?? 0);
+                $contract = (string) ($d['contract'] ?? '');
+                $tokenId  = (string) ($d['token_id'] ?? '');
+                if ($linkId <= 0 || $contract === '' || $tokenId === '') {
+                    continue;
+                }
+                if (self::deleteByWalletAndToken($linkId, $contract, $tokenId)) {
+                    $result['deletes']++;
+                }
+            }
+            $wpdb->query('COMMIT');
+        } catch (\Throwable $e) {
+            $wpdb->query('ROLLBACK');
+            throw new \RuntimeException('NftHoldingsRepository::ingestBatch failed: ' . $e->getMessage(), 0, $e);
+        }
+
+        return $result;
+    }
+
+    /**
      * Move a row to a specific metadata_status. Used by the spam filter
      * (downgrade pending → spam) and admin-recovery tooling (upgrade
      * spam → ok if a false positive is corrected).

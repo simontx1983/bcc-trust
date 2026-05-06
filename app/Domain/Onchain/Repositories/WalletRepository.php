@@ -508,4 +508,59 @@ final class WalletRepository
             $chainId, $walletAddress
         ));
     }
+
+    /**
+     * Batched (chain, address) → wallet_link_id resolver. Returns map
+     * keyed by lowercased address. Addresses with no link on this chain
+     * are absent from the result. Used by the NftHoldingsIndexer batch
+     * write path so per-event lookups are amortized into one query
+     * per indexer batch.
+     *
+     * @param list<string> $addresses
+     * @return array<string, int>  lowercased_address => wallet_link_id
+     */
+    public static function findIdsByChainAddresses(int $chainId, array $addresses): array
+    {
+        if ($chainId <= 0 || $addresses === []) {
+            return [];
+        }
+
+        // Lowercase + dedupe + cap at 1000 per batch (defensive bound).
+        $clean = [];
+        foreach ($addresses as $a) {
+            if (!is_string($a) || $a === '') {
+                continue;
+            }
+            $clean[strtolower($a)] = true;
+        }
+        $clean = array_keys($clean);
+        if (count($clean) > 1000) {
+            $clean = array_slice($clean, 0, 1000);
+        }
+        if ($clean === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $placeholders = implode(',', array_fill(0, count($clean), '%s'));
+        $params       = array_merge([$chainId], $clean);
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, wallet_address
+               FROM {$table}
+              WHERE chain_id = %d
+                AND wallet_address IN ({$placeholders})",
+            $params
+        ));
+
+        $out = [];
+        if (is_array($rows)) {
+            foreach ($rows as $row) {
+                $out[strtolower((string) $row->wallet_address)] = (int) $row->id;
+            }
+        }
+        return $out;
+    }
 }
