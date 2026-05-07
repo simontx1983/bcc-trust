@@ -17,6 +17,9 @@
 namespace BCC\Trust\Onchain\Admin;
 
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Onchain\Factories\FetcherFactory;
+use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 
 if (!defined('ABSPATH')) {
@@ -138,6 +141,25 @@ final class VerifyCollectionsPage
                                 <td><code><?php echo esc_html($row->chain_slug); ?></code></td>
                                 <td>
                                     <code style="font-size:11px;"><?php echo esc_html($row->contract_address); ?></code>
+                                    <?php
+                                    // V2 Phase 2: per-row CW-721 sanity-check button. Only
+                                    // shown on cosmos-typed rows because the test validates
+                                    // CW-721 `contract_info`; clicking it from a non-cosmos
+                                    // row would emit a "wrong chain type" notice (handler
+                                    // covers gracefully).
+                                    $isCosmos = (string) ($row->chain_type ?? '') === 'cosmos';
+                                    if ($isCosmos):
+                                    ?>
+                                        <br>
+                                        <button type="submit"
+                                                name="bcc_vc_action"
+                                                value="testquery_<?php echo (int) $row->id; ?>"
+                                                class="button button-small"
+                                                style="margin-top:4px;font-size:11px;"
+                                                title="Run CW-721 contract_info — confirms the contract is a real CW-721 NFT before flipping is_verified.">
+                                            Test CW-721
+                                        </button>
+                                    <?php endif; ?>
                                 </td>
                                 <td><?php echo number_format_i18n((int) ($row->unique_holders ?? 0)); ?></td>
                             </tr>
@@ -191,7 +213,90 @@ final class VerifyCollectionsPage
             return self::handleProvision();
         }
 
+        // V2 Phase 2: per-row "Test CW-721 query" button. Encodes the
+        // collection id in the action value (`testquery_<id>`) so the
+        // existing single-form + single-nonce shape stays intact.
+        if (strpos($action, 'testquery_') === 0) {
+            $collectionId = (int) substr($action, strlen('testquery_'));
+            return self::handleTestQuery($collectionId);
+        }
+
         return [];
+    }
+
+    /**
+     * V2 Phase 2: pre-verify CW-721 sanity check. Hits the contract's
+     * `contract_info` smart query via the per-chain fetcher; renders
+     * the result as an admin notice. Catches:
+     *   - non-CW-721 contracts (response shape mismatch)
+     *   - chains without CosmWasm enabled (Crypto.org returns 501)
+     *   - mis-pasted contract addresses (404 from the wasm module)
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function handleTestQuery(int $collectionId): array
+    {
+        if ($collectionId <= 0) {
+            return [['type' => 'error', 'message' => 'Test query: invalid collection id.']];
+        }
+
+        $coll = CollectionRepository::getByIdWithChain($collectionId);
+        if ($coll === null) {
+            return [['type' => 'error', 'message' => 'Test query: collection not found.']];
+        }
+
+        $contract  = (string) $coll->contract_address;
+        $chainSlug = (string) $coll->chain_slug;
+        $chainType = (string) $coll->chain_type;
+
+        if ($chainType !== 'cosmos') {
+            return [[
+                'type'    => 'warning',
+                'message' => sprintf(
+                    'Test query: %s is %s — this button only validates CW-721 (Cosmos) contracts.',
+                    $contract,
+                    $chainType
+                ),
+            ]];
+        }
+
+        $chain = ChainRepository::getById((int) $coll->chain_id);
+        if ($chain === null) {
+            return [['type' => 'error', 'message' => 'Test query: chain not found.']];
+        }
+
+        if (!FetcherFactory::has_driver($chainType)) {
+            return [['type' => 'error', 'message' => 'Test query: no fetcher driver for ' . $chainSlug]];
+        }
+
+        $fetcher = FetcherFactory::make_for_chain($chain);
+        if (!($fetcher instanceof CosmosFetcher)) {
+            return [['type' => 'error', 'message' => 'Test query: fetcher driver mismatch for ' . $chainSlug]];
+        }
+
+        $info = $fetcher->testCw721ContractInfo($contract);
+        if ($info === null) {
+            return [[
+                'type'    => 'error',
+                'message' => sprintf(
+                    'Test query: contract_info call FAILED on %s for %s. Likely causes: contract is not CW-721, contract address is wrong, or the chain has no CosmWasm enabled (Crypto.org returns 501 Not Implemented). Check the bcc-trust error log for the LCD response.',
+                    $chainSlug,
+                    $contract
+                ),
+            ]];
+        }
+
+        $name = isset($info['name']) && is_string($info['name']) ? $info['name'] : '(missing)';
+        $symbol = isset($info['symbol']) && is_string($info['symbol']) ? $info['symbol'] : '(missing)';
+        return [[
+            'type'    => 'success',
+            'message' => sprintf(
+                'Test query OK on %s — name="%s", symbol="%s". Safe to verify.',
+                $chainSlug,
+                $name,
+                $symbol
+            ),
+        ]];
     }
 
     /**

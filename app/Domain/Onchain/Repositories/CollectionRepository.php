@@ -564,7 +564,8 @@ final class CollectionRepository
      *     unique_holders: string|null,
      *     image_url: string|null,
      *     is_verified: string,
-     *     chain_slug: string
+     *     chain_slug: string,
+     *     chain_type: string
      * }>, total: int, pages: int}
      */
     public static function listForAdminVerification(int $page = 1, int $perPage = 50): array
@@ -589,11 +590,13 @@ final class CollectionRepository
          *     unique_holders: string|null,
          *     image_url: string|null,
          *     is_verified: string,
-         *     chain_slug: string
+         *     chain_slug: string,
+         *     chain_type: string
          * }>|null $items */
         $items = $wpdb->get_results($wpdb->prepare(
             "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
-                    c.unique_holders, c.image_url, c.is_verified, ch.slug AS chain_slug
+                    c.unique_holders, c.image_url, c.is_verified,
+                    ch.slug AS chain_slug, ch.chain_type
                FROM {$table} c
           LEFT JOIN {$chains} ch ON ch.id = c.chain_id
               ORDER BY c.unique_holders DESC, c.id DESC
@@ -744,6 +747,68 @@ final class CollectionRepository
              WHERE c.is_verified = 1
              ORDER BY c.id ASC
              LIMIT %d",
+            $limit
+        ));
+
+        return $rows ?: [];
+    }
+
+    /**
+     * Verified collections scoped to a single chain.
+     *
+     * Sibling of {@see listVerified()} — same JOIN + column list,
+     * scoped to one chain_id. Used by V2 Phase 2's
+     * `CosmosFetcher::list_holdings` to enumerate which CW-721
+     * contracts to query per refresh.
+     *
+     * Ordered by `unique_holders DESC` so the most popular
+     * collections are queried first when the per-refresh cap (set by
+     * caller, default 30 contracts/chain via
+     * `BCC_COSMOS_HOLDINGS_CONTRACT_CAP`) is hit. NULL holders sort
+     * last so unenriched rows don't push popular ones out of the cap.
+     *
+     * @return list<object{
+     *     id: string,
+     *     chain_id: string,
+     *     contract_address: string,
+     *     collection_name: string|null,
+     *     image_url: string|null,
+     *     chain_slug: string,
+     *     chain_type: string
+     * }>
+     */
+    public static function listVerifiedByChain(int $chainId, int $limit = 30): array
+    {
+        if ($chainId <= 0) {
+            return [];
+        }
+        $limit = max(1, min(200, $limit));
+
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        /** @var list<object{
+         *     id: string,
+         *     chain_id: string,
+         *     contract_address: string,
+         *     collection_name: string|null,
+         *     image_url: string|null,
+         *     chain_slug: string,
+         *     chain_type: string
+         * }>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT c.id, c.chain_id, c.contract_address, c.collection_name, c.image_url,
+                    ch.slug AS chain_slug, ch.chain_type
+             FROM {$table} c
+             JOIN {$chains} ch ON ch.id = c.chain_id
+             WHERE c.is_verified = 1
+               AND c.chain_id = %d
+             ORDER BY c.unique_holders IS NULL ASC,
+                      c.unique_holders DESC,
+                      c.id ASC
+             LIMIT %d",
+            $chainId,
             $limit
         ));
 
