@@ -23,7 +23,11 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\Repositories\PeepSoFollowerRepository;
+use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Core\Repositories\PeepSoPageRepository;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -224,6 +228,12 @@ final class UsersEndpoint
                         'type'              => 'string',
                         'sanitize_callback' => 'sanitize_text_field',
                     ],
+                    'type' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['validator', 'project', 'nft', 'dao'],
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
                 ],
             ]
         );
@@ -375,7 +385,47 @@ final class UsersEndpoint
         $qParam = $request->get_param('q');
         $q      = is_string($qParam) ? trim($qParam) : '';
 
+        $typeParam = $request->get_param('type');
+        $type      = is_string($typeParam) && PeepSoPageRepository::isValidType($typeParam)
+            ? $typeParam
+            : '';
+
         $viewerId = get_current_user_id();
+
+        // Global type-counts (independent of `q` / `type` filters) ride
+        // on every /members response so the frontend's chip strip can
+        // render `VALIDATORS · 5` without a second roundtrip. The
+        // counts also survive the empty-result short-circuit below —
+        // a filter-specific empty state still needs them to suggest
+        // alternative chips with non-zero results.
+        $typeCounts = PeepSoPageRepository::getGlobalOwnedPageUserCountsByType();
+
+        // When `type` is set, pre-resolve the set of user_ids who own
+        // ≥1 page of that type (one batched SQL on the page-categories
+        // join). Pass that list to WP_User_Query via `include` so the
+        // existing pagination + search logic keeps working — the
+        // intersection of (search match) AND (in this id set) is what
+        // WP_User_Query produces. Empty pre-resolved list = no rows
+        // (short-circuit before issuing the user query).
+        $typeRestrictedIds = null;
+        if ($type !== '') {
+            $typeRestrictedIds = PeepSoPageRepository::getUserIdsOwningPagesOfType($type);
+            if ($typeRestrictedIds === []) {
+                $emptyResponse = ApiResponse::ok([
+                    'items'      => [],
+                    'pagination' => [
+                        'page'        => $page,
+                        'per_page'    => $perPage,
+                        'total'       => 0,
+                        'total_pages' => 1,
+                    ],
+                    'type_counts' => $typeCounts,
+                ]);
+                $emptyResponse->header('Cache-Control', 'private, max-age=15');
+                $emptyResponse->header('Vary', 'Authorization, Cookie');
+                return $emptyResponse;
+            }
+        }
 
         // WP_User_Query handles offset pagination + search across
         // user_login + display_name + user_nicename. Email is excluded
@@ -389,6 +439,9 @@ final class UsersEndpoint
             'fields'  => 'ID',
             'count_total' => true,
         ];
+        if ($typeRestrictedIds !== null) {
+            $args['include'] = $typeRestrictedIds;
+        }
         if ($q !== '') {
             // Bound the query string to a sane length so a deliberately
             // pathological search doesn't blow up the LIKE planner.
@@ -402,10 +455,25 @@ final class UsersEndpoint
         $rawIds = $query->get_results();
         $userIds = array_map('intval', $rawIds);
 
+        // Prefetch the per-user signals that would otherwise N+1 across
+        // the page (24 rows × 3-4 single-user queries each). Each repo
+        // call below is one batched SQL keyed on `IN (userIds)`, so the
+        // total query budget for these signals is bounded regardless of
+        // `per_page`. Trust score is request-memoized on UserViewService
+        // itself (`$trustScoreCache`); we don't need a separate prefetch
+        // for it — the per-row `resolveAugmentedTrustScore` lookup is a
+        // PK-on-`bcc_reputation_scores` read, cheap.
+        $prefetched = [
+            'follower_counts'     => PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
+            'primary_locals'      => PeepSoGroupRepository::getPrimaryLocalForUsers($userIds),
+            'owned_pages_counts'  => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
+            'owned_pages_by_type' => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
+        ];
+
         $userView = Plugin::instance()->userViewService();
         $items    = [];
         foreach ($userIds as $userId) {
-            $summary = $userView->getSummary($userId, $viewerId);
+            $summary = $userView->getSummary($userId, $viewerId, $prefetched);
             if ($summary !== null) {
                 $items[] = $summary;
             }
@@ -423,6 +491,7 @@ final class UsersEndpoint
                 'total'       => $total,
                 'total_pages' => max(1, $totalPages),
             ],
+            'type_counts' => $typeCounts,
         ];
 
         $response = ApiResponse::ok($payload);

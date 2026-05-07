@@ -100,6 +100,69 @@ final class UserSyncRepository
     }
 
     /**
+     * Focused batched lookup of `pages_owned` only — for list-shape
+     * consumers (e.g. /members directory) that need just this one
+     * count and shouldn't pay for the four other queries that
+     * `batchFetchCounts` issues. Same canonical join: `member_owner`
+     * rows in `peepso_page_members`.
+     *
+     * Users with no owned pages are absent from the map; callers
+     * default to 0.
+     *
+     * Empty `$userIds` short-circuits — no SQL.
+     *
+     * @param int[] $userIds Bounded by caller (directory `per_page`
+     *                       cap, e.g. 50). The IN clause scales
+     *                       linearly with the bound.
+     * @return array<int, int> user_id → owned-pages count
+     */
+    public static function getOwnedPageCountsForUsers(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        // Sanitize + dedupe — same pattern as the other batched
+        // repo methods. Reject zero/negative ids before SQL.
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        // Prepared-statement style (vs the intval-coerce style in
+        // batchFetchCounts above). New code defaults to prepare so the
+        // SQL surface is consistent across the repos that call this.
+        /** @var list<array{user_id: string, c: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT pm_user_id AS user_id, COUNT(*) AS c
+                   FROM {$wpdb->prefix}peepso_page_members
+                  WHERE pm_user_id IN ({$placeholders})
+                    AND pm_user_status = 'member_owner'
+                  GROUP BY pm_user_id",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['user_id']] = (int) $row['c'];
+        }
+        return $out;
+    }
+
+    /**
      * Fetch counts for a single user (fallback when batch data not available).
      *
      * @return array<string, mixed> Same shape as one entry from batchFetchCounts().
