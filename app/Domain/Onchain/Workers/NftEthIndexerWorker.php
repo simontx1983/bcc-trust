@@ -49,6 +49,7 @@ final class NftEthIndexerWorker
     public const CU_PER_CALL          = 120;
     public const MAX_PAGES_PER_TICK   = 5; // safety bound on pagination loop
     public const DEFAULT_DAILY_BUDGET = 50000;
+    private const ADVISORY_LOCK_PREFIX = 'bcc_nft_indexer_chain_';
 
     /**
      * Run a tick for every active EVM chain.
@@ -89,6 +90,13 @@ final class NftEthIndexerWorker
     /**
      * Run a tick for one chain. Public so admin "Run now" buttons can
      * invoke it directly from `IndexerStatusPage`.
+     *
+     * Wrapped in a per-chain advisory lock (Phase 1c carry-over from
+     * 1a's review): with wp-cron + Helius webhook + admin "Run now"
+     * all able to invoke this method, two concurrent ticks for the
+     * same chain could double-spend CU and produce overlapping
+     * checkpoint advances. The lock is non-blocking — if another
+     * worker holds it we silently skip this tick.
      */
     public static function runForChain(int $chainId): void
     {
@@ -96,6 +104,27 @@ final class NftEthIndexerWorker
             return;
         }
 
+        $lockKey = self::ADVISORY_LOCK_PREFIX . $chainId;
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
+            \BCC\Core\Log\Logger::info('[NftEthIndexerWorker] tick skipped — concurrent run holds the lock', [
+                'chain_id' => $chainId,
+            ]);
+            return;
+        }
+        try {
+            self::runForChainInsideLock($chainId);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lockKey);
+        }
+    }
+
+    /**
+     * Locked body of {@see runForChain()}. Extracted so the lock
+     * acquire/release stays tight around the single call site that
+     * touches the chain's checkpoint and CU budget.
+     */
+    private static function runForChainInsideLock(int $chainId): void
+    {
         // Step 1: ensure checkpoint row exists (idempotent).
         ChainCheckpointRepository::ensureExists($chainId);
 

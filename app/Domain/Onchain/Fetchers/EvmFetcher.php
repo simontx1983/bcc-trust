@@ -255,6 +255,95 @@ class EvmFetcher implements FetcherInterface
     }
 
     /**
+     * Fetch enrichment metadata for a single (contract, tokenId) pair
+     * via Alchemy's `getNFTMetadata` JSON-RPC method. Used by the
+     * V2 Phase 1c NftEnrichmentService to backfill name + image_url
+     * + collection_name on persistent holdings rows.
+     *
+     * Returns null on transport / 4xx / 5xx; non-null with
+     * partially-empty fields on success (Alchemy sometimes returns a
+     * row with no media — we persist what's there and let the
+     * gallery render with a placeholder if image_url is null).
+     *
+     * @return array{name: ?string, image_url: ?string, metadata_uri: ?string, collection_name: ?string}|null
+     */
+    public function fetchMetadataForToken(string $contract, string $tokenId): ?array
+    {
+        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
+        if (!$rpcUrl || str_ends_with($rpcUrl, '/v2/')) {
+            return null;
+        }
+        $contractLc = strtolower($contract);
+        if (!preg_match('/^0x[a-f0-9]{40}$/', $contractLc) || $tokenId === '') {
+            return null;
+        }
+
+        // Alchemy expects token_id in either decimal or hex; pass our
+        // canonical decimal representation and let Alchemy normalize.
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 1,
+            'method'  => 'alchemy_getNFTMetadata',
+            'params'  => [[
+                'contractAddress' => $contractLc,
+                'tokenId'         => $tokenId,
+                'refreshCache'    => false,
+            ]],
+        ]);
+        if ($body === false) {
+            return null;
+        }
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'EVM alchemy_getNFTMetadata',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            return null;
+        }
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return null;
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json) || !isset($json['result']) || !is_array($json['result'])) {
+            return null;
+        }
+        $r = $json['result'];
+
+        $name        = is_string($r['name'] ?? null) ? $r['name'] : null;
+        $description = $r['description'] ?? null; // unused but documented for future
+        $tokenUri    = is_array($r['tokenUri'] ?? null) ? ($r['tokenUri']['gateway'] ?? null) : null;
+        $imgUrl      = null;
+        if (isset($r['media']) && is_array($r['media'])) {
+            foreach ($r['media'] as $m) {
+                if (is_array($m) && isset($m['gateway']) && is_string($m['gateway']) && $m['gateway'] !== '') {
+                    $imgUrl = $m['gateway'];
+                    break;
+                }
+            }
+        }
+        $collName = null;
+        if (isset($r['contractMetadata']) && is_array($r['contractMetadata'])) {
+            $collName = is_string($r['contractMetadata']['name'] ?? null) ? $r['contractMetadata']['name'] : null;
+        }
+
+        return [
+            'name'            => $name,
+            'image_url'       => $imgUrl,
+            'metadata_uri'    => is_string($tokenUri) ? $tokenUri : null,
+            'collection_name' => $collName,
+        ];
+    }
+
+    /**
      * Convert a hex string (with or without 0x prefix) to a decimal
      * string. Uses gmp/bcmath for arbitrary precision; falls back to
      * intval for small values when neither extension is available.

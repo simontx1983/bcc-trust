@@ -26,13 +26,23 @@ final class NftSelectionService
      * annotated with which items are already selected. Timestamp data
      * comes from WalletRepository so the UI can render "Refreshed N ago".
      *
+     * V2 Phase 1c: forwards `meta.indexer_state` and the server-pre-
+     * formatted `meta.indexer_state_label` from HoldingsService so the
+     * picker UI can render a "Syncing…" chip when the persistent path
+     * was bypassed for an indexer reason. Per §S the human-readable
+     * label is server-authoritative; the frontend renders it verbatim.
+     *
      * @return array{
      *     items: list<array<string, mixed>>,
      *     truncated: bool,
      *     wallets_checked: int,
      *     wallets_truncated: int,
      *     selected_keys: array<string, bool>,
-     *     refreshed_at: array<int, string>
+     *     refreshed_at: array<int, string>,
+     *     meta: array{
+     *         indexer_state: array<string, string>,
+     *         indexer_state_label: array<string, string>
+     *     }
      * }
      */
     public static function buildPickerData(int $userId, bool $force = false): array
@@ -50,6 +60,8 @@ final class NftSelectionService
             $annotated[] = $copy;
         }
 
+        $meta = $holdings['meta'] ?? ['indexer_state' => [], 'indexer_state_label' => []];
+
         return [
             'items'             => $annotated,
             'truncated'         => (bool) ($holdings['truncated'] ?? false),
@@ -57,6 +69,7 @@ final class NftSelectionService
             'wallets_truncated' => (int) ($holdings['wallets_truncated'] ?? 0),
             'selected_keys'     => array_fill_keys(array_keys($selected), true),
             'refreshed_at'      => WalletRepository::getHoldingsRefreshForUser($userId),
+            'meta'              => $meta,
         ];
     }
 

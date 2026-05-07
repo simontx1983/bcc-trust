@@ -150,6 +150,132 @@ class SolanaFetcher implements FetcherInterface
         return $events;
     }
 
+    /**
+     * Fetch enrichment metadata for a single Solana mint via Helius's
+     * `getAsset` DAS method. Used by V2 Phase 1c NftEnrichmentService
+     * to backfill name + image_url + collection_name on persistent
+     * holdings rows.
+     *
+     * Solana model reminder: each NFT has a unique mint pubkey; we
+     * persist mint as both contract_address and token_id, so the
+     * caller passes the same value for both. Only the mint is needed
+     * to look up the asset.
+     *
+     * Returns null on transport / non-200; non-null with
+     * partially-empty fields on success.
+     *
+     * @return array{name: ?string, image_url: ?string, metadata_uri: ?string, collection_name: ?string}|null
+     */
+    public function fetchMetadataForMint(string $mint): ?array
+    {
+        if ($mint === '') {
+            return null;
+        }
+        // Helius DAS endpoint requires the API key on the RPC URL.
+        // The chain's rpc_url field is the public Solana mainnet
+        // endpoint by default — for `getAsset` we need the Helius
+        // RPC instead, which carries the API key.
+        $rpcUrl = self::resolveHeliusRpcUrl();
+        if ($rpcUrl === null) {
+            return null;
+        }
+
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 'enrich-' . substr($mint, 0, 8),
+            'method'  => 'getAsset',
+            'params'  => ['id' => $mint],
+        ]);
+        if ($body === false) {
+            return null;
+        }
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'Helius getAsset',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            return null;
+        }
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return null;
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json) || !isset($json['result']) || !is_array($json['result'])) {
+            return null;
+        }
+        $r = $json['result'];
+
+        $content = is_array($r['content'] ?? null) ? $r['content'] : [];
+        $metadata = is_array($content['metadata'] ?? null) ? $content['metadata'] : [];
+        $links    = is_array($content['links'] ?? null) ? $content['links'] : [];
+        $files    = is_array($content['files'] ?? null) ? $content['files'] : [];
+        $grouping = is_array($r['grouping'] ?? null) ? $r['grouping'] : [];
+
+        $name = is_string($metadata['name'] ?? null) ? $metadata['name'] : null;
+
+        $imgUrl = is_string($links['image'] ?? null) ? $links['image'] : null;
+        if ($imgUrl === null && $files !== []) {
+            foreach ($files as $f) {
+                if (is_array($f) && isset($f['uri']) && is_string($f['uri']) && $f['uri'] !== '') {
+                    $imgUrl = $f['uri'];
+                    break;
+                }
+            }
+        }
+
+        $metadataUri = is_string($content['json_uri'] ?? null) ? $content['json_uri'] : null;
+
+        $collectionName = null;
+        foreach ($grouping as $g) {
+            if (is_array($g) && ($g['group_key'] ?? '') === 'collection') {
+                $collectionValue = $g['group_value'] ?? null;
+                if (is_string($collectionValue) && $collectionValue !== '') {
+                    $collectionName = $collectionValue;
+                    break;
+                }
+            }
+        }
+
+        return [
+            'name'            => $name,
+            'image_url'       => $imgUrl,
+            'metadata_uri'    => $metadataUri,
+            'collection_name' => $collectionName,
+        ];
+    }
+
+    /**
+     * Resolve the Helius DAS-compatible RPC URL. Prefers an explicit
+     * BCC_HELIUS_RPC_URL constant; falls back to the canonical
+     * `https://mainnet.helius-rpc.com/?api-key=...` shape using
+     * BCC_HELIUS_API_KEY. Returns null when neither is configured.
+     */
+    private static function resolveHeliusRpcUrl(): ?string
+    {
+        if (defined('BCC_HELIUS_RPC_URL')) {
+            $url = (string) constant('BCC_HELIUS_RPC_URL');
+            if ($url !== '') {
+                return $url;
+            }
+        }
+        if (defined('BCC_HELIUS_API_KEY')) {
+            $key = (string) constant('BCC_HELIUS_API_KEY');
+            if ($key !== '') {
+                return 'https://mainnet.helius-rpc.com/?api-key=' . rawurlencode($key);
+            }
+        }
+        return null;
+    }
+
     // ══════════════════════════════════════════════════════════════════
     // VALIDATORS
     // ══════════════════════════════════════════════════════════════════

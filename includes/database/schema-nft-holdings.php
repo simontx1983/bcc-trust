@@ -20,9 +20,17 @@
  * (findVisibleForWallet vs findAllIncludingSpam) so future callers
  * cannot accidentally surface spam.
  *
+ * V2 Phase 1c added the enrichment columns (`name`, `image_url`,
+ * `metadata_uri`, `collection_name`, `enriched_at`). Indexer writes
+ * leave them NULL on insert; NftEnrichmentService backfills them
+ * asynchronously. The read-path swap inside HoldingsService gates
+ * on `enriched_at IS NOT NULL` so a freshly-indexed (un-enriched)
+ * row falls through to the V1 transient-with-Alchemy-metadata path
+ * — no thumbnail-less gallery regression.
+ *
  * @package BCC\Trust\Onchain
  * @subpackage Database
- * @since V2 Phase 1a
+ * @since V2 Phase 1a (1c added enrichment columns)
  */
 
 if (!defined('ABSPATH')) {
@@ -54,14 +62,20 @@ function bcc_onchain_create_nft_holdings_table(): void {
         token_standard VARCHAR(16) DEFAULT NULL,
         balance INT UNSIGNED NOT NULL DEFAULT 1,
         metadata_status TINYINT UNSIGNED NOT NULL DEFAULT 0,
+        name VARCHAR(255) DEFAULT NULL,
+        image_url VARCHAR(500) DEFAULT NULL,
+        metadata_uri VARCHAR(500) DEFAULT NULL,
+        collection_name VARCHAR(255) DEFAULT NULL,
         last_seen_block BIGINT UNSIGNED NOT NULL,
         confirmed_at DATETIME NOT NULL,
         indexed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        enriched_at DATETIME DEFAULT NULL,
         PRIMARY KEY (id),
         UNIQUE KEY uk_wallet_token (wallet_link_id, contract_address, token_id),
         KEY idx_wallet_chain (wallet_link_id, chain_id),
         KEY idx_chain_contract (chain_id, contract_address),
-        KEY idx_metadata_status (metadata_status)
+        KEY idx_metadata_status (metadata_status),
+        KEY idx_enriched_at (enriched_at)
     ) {$charset_collate};";
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';

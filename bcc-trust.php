@@ -350,6 +350,15 @@ add_action('bcc_helius_dedupe_sweep', static function (): void {
     update_option('bcc_helius_dedupe_size', (int) $stats['remaining'], false);
 });
 
+// V2 Phase 1c: NFT metadata enrichment cron handler. Per-batch + per-
+// chain tick walks rows where enriched_at IS NULL and backfills name,
+// image_url, metadata_uri, collection_name via the per-chain fetcher's
+// metadata API.
+add_action(
+    \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK,
+    [\BCC\Trust\Onchain\Services\NftEnrichmentService::class, 'runAllChains']
+);
+
 add_action('bcc_gated_group_reconcile_sweep', function () {
     $userIds = get_users([
         'meta_key'   => \BCC\Trust\Onchain\Services\NftGroupGateService::USER_META_AUTO_JOIN,
@@ -1177,6 +1186,17 @@ function bcc_trust_activate() {
         wp_schedule_event(time() + 60, 'bcc_five_minutes', 'bcc_helius_dedupe_sweep');
     }
 
+    // V2 Phase 1c: NFT enrichment scheduler. Backfills name +
+    // image_url + collection_name on freshly-indexed rows so the
+    // gallery's read-path swap doesn't render thumbnail-less rows.
+    // 5-min cadence — enrichment is not time-sensitive (worst-case a
+    // newly-minted NFT shows up in the V1 transient gallery first,
+    // then renders from the persistent table on the next page load
+    // after enrichment lands).
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK)) {
+        wp_schedule_event(time() + 90, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK);
+    }
+
     // Defensive: re-register custom intervals (top-level add_filter above
     // should already have done this; WP dedupes by callable signature).
     add_filter('cron_schedules', [\BCC\Trust\Onchain\Services\ChainRefreshService::class, 'add_cron_intervals']);
@@ -1215,6 +1235,8 @@ function bcc_trust_deactivate() {
         \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK,
         // V2 Phase 1b: Helius dedupe-sweep.
         'bcc_helius_dedupe_sweep',
+        // V2 Phase 1c: NFT enrichment scheduler.
+        \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK,
     ];
 
     foreach ($cron_hooks as $hook) {
