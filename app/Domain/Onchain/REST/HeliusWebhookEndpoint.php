@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\REST;
 
+use BCC\Trust\Core\Security\IpResolver;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\SolanaFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -91,13 +92,13 @@ final class HeliusWebhookEndpoint
             return self::ok();
         }
 
-        // Step 2: parse body. Helius posts an array of enriched
-        // transactions (or a single object — we accept both).
+        // Step 2: parse body. Helius posts a list of enriched transactions
+        // (or a single object — we accept both via array_is_list).
         $params = $request->get_json_params();
         if (!is_array($params)) {
             return self::ok();
         }
-        $transactions = self::isAssoc($params) ? [$params] : $params;
+        $transactions = array_is_list($params) ? $params : [$params];
         if ($transactions === []) {
             return self::ok();
         }
@@ -116,8 +117,12 @@ final class HeliusWebhookEndpoint
             return self::ok();
         }
 
-        // Step 4: per-transaction dedupe + normalize + ingest.
-        $totalEvents = 0;
+        // Step 4: per-transaction dedupe + normalize. Accumulate events
+        // across the whole batch and ingest ONCE — every ingest call
+        // re-resolves wallets, opens its own transaction, and re-bumps
+        // generation counters, so per-transaction ingest at webhook
+        // delivery rates becomes a write-amp problem.
+        $allEvents    = [];
         $totalReplays = 0;
         foreach ($transactions as $tx) {
             if (!is_array($tx)) {
@@ -136,26 +141,33 @@ final class HeliusWebhookEndpoint
             self::bumpCounter('new_total');
 
             $events = $fetcher->normalizeWebhookPayload($tx, $chainId);
-            if ($events === []) {
-                continue;
+            if ($events !== []) {
+                array_push($allEvents, ...$events);
             }
+        }
 
+        $totalEvents = count($allEvents);
+        if ($totalEvents > 0) {
             try {
-                NftHoldingsIndexer::ingest($chainId, $events);
-                $totalEvents += count($events);
+                NftHoldingsIndexer::ingest($chainId, $allEvents);
             } catch (\Throwable $e) {
                 \BCC\Core\Log\Logger::error('[HeliusWebhookEndpoint] ingest failed', [
-                    'signature' => $signature,
-                    'error'     => $e->getMessage(),
+                    'transactions' => count($transactions),
+                    'events'       => $totalEvents,
+                    'error'        => $e->getMessage(),
                 ]);
             }
         }
 
-        \BCC\Core\Log\Logger::info('[HeliusWebhookEndpoint] delivery processed', [
-            'transactions'  => count($transactions),
-            'events_ingested' => $totalEvents,
-            'replays_blocked' => $totalReplays,
-        ]);
+        // Only log when something happened — every Helius delivery hits
+        // this endpoint, so info-level per delivery floods the log.
+        if ($totalEvents > 0 || $totalReplays > 0) {
+            \BCC\Core\Log\Logger::info('[HeliusWebhookEndpoint] delivery processed', [
+                'transactions'    => count($transactions),
+                'events_ingested' => $totalEvents,
+                'replays_blocked' => $totalReplays,
+            ]);
+        }
 
         return self::ok();
     }
@@ -168,17 +180,6 @@ final class HeliusWebhookEndpoint
         $response = new WP_REST_Response(['ok' => true], 200);
         $response->header('Cache-Control', 'no-store');
         return $response;
-    }
-
-    /**
-     * @param array<int|string, mixed> $array
-     */
-    private static function isAssoc(array $array): bool
-    {
-        if ($array === []) {
-            return false;
-        }
-        return array_keys($array) !== range(0, count($array) - 1);
     }
 
     private static function expectedAuthHeader(): string
@@ -195,7 +196,12 @@ final class HeliusWebhookEndpoint
      */
     private static function logSignatureFailure(): void
     {
-        $ip = self::resolveSourceIp();
+        // IpResolver returns CF-Connecting-IP when the request comes from a
+        // verified Cloudflare IP, otherwise REMOTE_ADDR. Critical here:
+        // the SIGFAIL transient is keyed on the IP, so collapsing every
+        // probe behind a CDN to one bucket would silently disable the
+        // attack-detection signal.
+        $ip = IpResolver::getClientIp();
         $key = self::SIGFAIL_TRANSIENT_PREFIX . md5($ip);
         $count = (int) (get_transient($key) ?: 0);
 
@@ -214,14 +220,5 @@ final class HeliusWebhookEndpoint
         $option = self::COUNTER_OPTION_PREFIX . $name;
         $current = (int) get_option($option, 0);
         update_option($option, $current + 1, false);
-    }
-
-    private static function resolveSourceIp(): string
-    {
-        // REMOTE_ADDR only — do not trust X-Forwarded-For. If the site
-        // sits behind a reverse proxy, the operator must configure
-        // PHP/wp-cli to set REMOTE_ADDR to the real client.
-        $ip = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '';
-        return $ip !== '' ? $ip : 'unknown';
     }
 }

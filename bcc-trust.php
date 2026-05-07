@@ -54,6 +54,14 @@ if (!defined('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS')) {
  * Schema version — derived from the content hash of every
  * includes/database/schema-*.php file. Any edit to a schema definition
  * automatically triggers dbDelta on the next request.
+ *
+ * Hot path. md5_file reads each file's full contents — cheap on warm OS
+ * cache, but multiplied by every PHP request (admin, REST, webhook,
+ * cron) it becomes meaningful. We cache the version keyed on a cheap
+ * filemtime+filesize signature; the content md5 is only re-computed
+ * when the signature changes. Edits to a schema file change either
+ * mtime or size, so the dev workflow still triggers dbDelta on the
+ * next request.
  */
 define('BCC_TRUST_SCHEMA_VERSION', (static function (): string {
     $files = glob(__DIR__ . '/includes/database/schema-*.php') ?: [];
@@ -61,11 +69,32 @@ define('BCC_TRUST_SCHEMA_VERSION', (static function (): string {
         return '0000000000';
     }
     sort($files);
+
+    $signature = '';
+    foreach ($files as $file) {
+        $signature .= basename($file) . ':' . filemtime($file) . ':' . filesize($file) . "\n";
+    }
+
+    $cache = get_option('bcc_trust_schema_version_cache');
+    if (is_array($cache)
+        && isset($cache['signature'], $cache['version'])
+        && $cache['signature'] === $signature
+    ) {
+        return (string) $cache['version'];
+    }
+
     $input = '';
     foreach ($files as $file) {
         $input .= basename($file) . ':' . md5_file($file) . "\n";
     }
-    return substr(md5($input), 0, 10);
+    $version = substr(md5($input), 0, 10);
+
+    update_option('bcc_trust_schema_version_cache', [
+        'signature' => $signature,
+        'version'   => $version,
+    ], false);
+
+    return $version;
 })());
 
 /*

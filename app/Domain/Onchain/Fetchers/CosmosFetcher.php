@@ -300,6 +300,7 @@ class CosmosFetcher implements FetcherInterface
 
     /** Per-(wallet, contract) defensive page-walk ceiling (matches EVM/SOL pattern). */
     private const PER_CONTRACT_TOKEN_CAP = 100;
+    private const DEFAULT_SIGNED_BLOCKS_WINDOW = 10000;
 
     /** CW-721 `tokens` query page size — Stargaze / Injective LCDs allow up to ~30. */
     private const TOKENS_PAGE_SIZE = 30;
@@ -912,7 +913,11 @@ class CosmosFetcher implements FetcherInterface
 
         $missed = (int) ($signing_info['val_signing_info']['missed_blocks_counter'] ?? 0);
 
-        $window = 10000;
+        // Cosmos `signed_blocks_window` varies per chain (e.g. Osmosis 10k,
+        // Injective 20k). 10k is the most common default; chains with a
+        // different window will read inaccurately until we fetch
+        // `/cosmos/slashing/v1beta1/params` per chain (deferred).
+        $window = self::DEFAULT_SIGNED_BLOCKS_WINDOW;
         $uptime = round((1 - ($missed / $window)) * 100, 2);
 
         return max(0, min(100, $uptime));

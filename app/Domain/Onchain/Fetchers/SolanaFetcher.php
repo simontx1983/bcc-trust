@@ -26,7 +26,6 @@ class SolanaFetcher implements FetcherInterface
 
     /** @var ChainRow */
     private object $chain;
-    private string $rpc_url;
 
     /** @var array<string, array<int, array<string, mixed>>> Cached vote accounts keyed by RPC URL (per PHP process). */
     private static array $voteAccountsCache = [];
@@ -34,8 +33,12 @@ class SolanaFetcher implements FetcherInterface
     /** @param ChainRow $chain */
     public function __construct(object $chain)
     {
-        $this->chain   = $chain;
-        $this->rpc_url = $chain->rpc_url ?? self::SOLANA_RPC;
+        $this->chain = $chain;
+    }
+
+    private function rpcUrl(): string
+    {
+        return $this->chain->rpc_url ?? self::SOLANA_RPC;
     }
 
     /** @return ChainRow */
@@ -675,7 +678,7 @@ class SolanaFetcher implements FetcherInterface
      */
     private function getVoteAccounts(): array
     {
-        $cacheKey = $this->rpc_url;
+        $cacheKey = $this->rpcUrl();
         if (isset(self::$voteAccountsCache[$cacheKey])) {
             return self::$voteAccountsCache[$cacheKey];
         }
@@ -756,7 +759,7 @@ class SolanaFetcher implements FetcherInterface
         $chainId  = (int) $this->chain->id;
         $body     = wp_json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => $method, 'params' => $params]);
 
-        $response = ApiRetry::post($this->rpc_url, [
+        $response = ApiRetry::post($this->rpcUrl(), [
             'timeout'   => self::HTTP_TIMEOUT,
             'headers'   => ['Content-Type' => 'application/json'],
             'body'      => $body,
@@ -794,7 +797,7 @@ class SolanaFetcher implements FetcherInterface
             $message = (string) ($json['error']['message'] ?? 'unknown RPC error');
             \BCC\Core\Log\Logger::warning(sprintf(
                 '[Solana Fetcher] RPC %s returned error %d: %s (endpoint=%s)',
-                $method, $code, $message, $this->rpc_url
+                $method, $code, $message, $this->rpcUrl()
             ));
 
             // Method-not-found / method-not-supported on DAS-family calls
@@ -804,7 +807,7 @@ class SolanaFetcher implements FetcherInterface
             if (in_array($code, [-32601, -32603], true)
                 && str_starts_with($method, 'getAssets')
             ) {
-                self::markDasUnsupported($chainId, $this->rpc_url, $code, $message);
+                self::markDasUnsupported($chainId, $this->rpcUrl(), $code, $message);
             }
             return null;
         }

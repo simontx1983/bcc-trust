@@ -31,6 +31,16 @@ final class HeliusSeenSignaturesRepository
     public const ALARM_THRESHOLD  = 12000;
     public const MAX_AGE_SECONDS  = 3600;
 
+    /**
+     * Sweep-derived row count, persisted so admin reads + the next
+     * sweep don't have to re-COUNT(*) the whole table. Updated only
+     * by the sweep cron (every 5 min) — a write here on every markSeen
+     * would defeat the purpose. Drift between sweeps is bounded by the
+     * insertion rate over 5 minutes; the alarm threshold (12k vs 10k cap)
+     * absorbs that drift.
+     */
+    private const SIZE_OPTION = 'bcc_helius_dedupe_size';
+
     public static function table(): string
     {
         return DB::table('helius_seen_signatures');
@@ -84,8 +94,13 @@ final class HeliusSeenSignaturesRepository
             $cutoff
         ));
 
-        // 2. If still over the cap, trim oldest-first.
-        $remaining = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+        // 2. Compute remaining without a re-COUNT(*) when the cached
+        // size is fresh. Cache miss falls back to a true COUNT(*).
+        $cachedBefore = (int) get_option(self::SIZE_OPTION, -1);
+        $remaining = $cachedBefore >= 0
+            ? max(0, $cachedBefore - $deletedAge)
+            : (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+
         $deletedOverflow = 0;
 
         if ($remaining > $maxRows) {
@@ -102,6 +117,8 @@ final class HeliusSeenSignaturesRepository
             $remaining = max(0, $remaining - $deletedOverflow);
         }
 
+        update_option(self::SIZE_OPTION, $remaining, false);
+
         return [
             'deleted_age'      => $deletedAge,
             'deleted_overflow' => $deletedOverflow,
@@ -111,8 +128,14 @@ final class HeliusSeenSignaturesRepository
 
     public static function rowCount(): int
     {
+        $cached = (int) get_option(self::SIZE_OPTION, -1);
+        if ($cached >= 0) {
+            return $cached;
+        }
+
         global $wpdb;
-        $table = self::table();
-        return (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+        $count = (int) $wpdb->get_var("SELECT COUNT(*) FROM " . self::table());
+        update_option(self::SIZE_OPTION, $count, false);
+        return $count;
     }
 }

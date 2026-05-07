@@ -59,7 +59,7 @@ final class NftIndexerHealthSnapshot
         $hook    = NftEthIndexerWorker::CRON_HOOK;
         $next    = wp_next_scheduled($hook);
         $overSec = $next ? max(0, time() - (int) $next) : 0;
-        $overdue = $next && $overSec > 300; // 5-min threshold per plan
+        $overdue = $next && $overSec > NftEthIndexerWorker::CRON_OVERDUE_THRESHOLD_SECONDS;
 
         $dailyBudget = defined('BCC_ETH_DAILY_RPC_BUDGET')
             ? (int) constant('BCC_ETH_DAILY_RPC_BUDGET')

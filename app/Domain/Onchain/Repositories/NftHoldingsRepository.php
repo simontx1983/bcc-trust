@@ -356,13 +356,58 @@ final class NftHoldingsRepository
         return $rows ?: [];
     }
 
+    /**
+     * Admin-only — pull rows by status across multiple chains in one query.
+     * Replaces N per-chain `findByStatus` calls in admin views.
+     *
+     * @param list<int> $chainIds
+     * @return list<HoldingRow>
+     */
+    public static function findByStatusAcrossChains(array $chainIds, int $status, int $limit = 100): array
+    {
+        if ($chainIds === [] || $status < 0 || $status > 3) {
+            return [];
+        }
+
+        $clean = array_values(array_filter(array_map('intval', $chainIds), static fn ($id) => $id > 0));
+        if ($clean === []) {
+            return [];
+        }
+
+        $limit = max(1, min(self::ADMIN_READ_LIMIT, $limit));
+
+        global $wpdb;
+        $table = self::table();
+        $cols  = self::COLUMNS;
+        $placeholders = implode(',', array_fill(0, count($clean), '%d'));
+
+        /** @var list<HoldingRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT {$cols}
+               FROM {$table}
+              WHERE chain_id IN ({$placeholders})
+                AND metadata_status = %d
+              ORDER BY indexed_at DESC
+              LIMIT %d",
+            array_merge($clean, [$status, $limit])
+        ));
+        return $rows ?: [];
+    }
+
     // ── Writes (NftHoldingsIndexer-only) ─────────────────────────────
 
     /**
      * Idempotent batch upsert keyed on (wallet_link_id, contract, token_id).
-     * Returns the count of rows touched (insert or update). Bumps the
-     * generation counter for every distinct wallet_link_id touched so
-     * read-side caches invalidate on the next read.
+     * Returns the count of input rows that survived validation. Caller
+     * (ingestBatch) is responsible for bumping per-wallet generation
+     * counters AFTER its transaction commits — bumping inside this
+     * method would double-bump when an upsert + delete touch the same
+     * wallet, and would advance the counter even when a downstream
+     * deletion rolled the whole batch back.
+     *
+     * Issues one batched multi-VALUES INSERT per chunk of CHUNK_SIZE
+     * rows. The legacy per-row INSERT on Alchemy's 1000-transfer page
+     * was the worst write hot-path in the indexer.
      *
      * @param list<array<string, mixed>> $rows
      */
@@ -376,8 +421,7 @@ final class NftHoldingsRepository
         $table = self::table();
         $now   = current_time('mysql', true);
 
-        $touched      = 0;
-        $touchedWallets = [];
+        $tuples = [];
         foreach ($rows as $r) {
             $walletLinkId = (int) ($r['wallet_link_id'] ?? 0);
             $chainId      = (int) ($r['chain_id'] ?? 0);
@@ -390,19 +434,42 @@ final class NftHoldingsRepository
                 continue;
             }
 
-            $tokenStd = isset($r['token_standard']) ? (string) $r['token_standard'] : null;
+            $tokenStd = isset($r['token_standard']) ? (string) $r['token_standard'] : '';
             $balance  = max(0, (int) ($r['balance'] ?? 1));
             $status   = isset($r['metadata_status']) ? (int) $r['metadata_status'] : self::STATUS_PENDING;
             if ($status < 0 || $status > 3) {
                 $status = self::STATUS_PENDING;
             }
 
-            $result = $wpdb->query($wpdb->prepare(
-                "INSERT INTO {$table}
+            $tuples[] = [
+                $walletLinkId, $chainId, $contract, $tokenId,
+                $tokenStd, $balance, $status, $lastSeenBlk,
+                $confirmedAt, $now,
+            ];
+        }
+
+        if ($tuples === []) {
+            return 0;
+        }
+
+        // 500 rows × 10 placeholders = 5000 args per prepared statement.
+        // Well under MySQL's max_allowed_packet (default 1MB) and within
+        // wpdb::prepare's args ceiling.
+        $touched = 0;
+        foreach (array_chunk($tuples, 500) as $chunk) {
+            $placeholders = [];
+            $args = [];
+            foreach ($chunk as $t) {
+                $placeholders[] = '(%d, %d, %s, %s, %s, %d, %d, %d, %s, %s)';
+                array_push($args, ...$t);
+            }
+            $args[] = self::STATUS_PENDING;
+
+            $sql = "INSERT INTO {$table}
                     (wallet_link_id, chain_id, contract_address, token_id,
                      token_standard, balance, metadata_status, last_seen_block,
                      confirmed_at, indexed_at)
-                 VALUES (%d, %d, %s, %s, %s, %d, %d, %d, %s, %s)
+                 VALUES " . implode(', ', $placeholders) . "
                  ON DUPLICATE KEY UPDATE
                     balance = VALUES(balance),
                     metadata_status = CASE
@@ -411,28 +478,12 @@ final class NftHoldingsRepository
                     END,
                     last_seen_block = GREATEST(last_seen_block, VALUES(last_seen_block)),
                     confirmed_at = GREATEST(confirmed_at, VALUES(confirmed_at)),
-                    indexed_at = VALUES(indexed_at)",
-                $walletLinkId,
-                $chainId,
-                $contract,
-                $tokenId,
-                $tokenStd ?? '',
-                $balance,
-                $status,
-                $lastSeenBlk,
-                $confirmedAt,
-                $now,
-                self::STATUS_PENDING
-            ));
+                    indexed_at = VALUES(indexed_at)";
 
+            $result = $wpdb->query($wpdb->prepare($sql, ...$args));
             if ($result !== false) {
-                $touched++;
-                $touchedWallets[$walletLinkId] = true;
+                $touched += count($chunk);
             }
-        }
-
-        foreach (array_keys($touchedWallets) as $linkId) {
-            self::bumpWalletGeneration((int) $linkId);
         }
 
         return $touched;
@@ -440,8 +491,9 @@ final class NftHoldingsRepository
 
     /**
      * Delete a holding row (called on transfer-out events). Idempotent —
-     * returns true if a row was deleted, false if no match. Bumps the
-     * generation counter on success.
+     * returns true if a row was deleted, false if no match. Caller
+     * (ingestBatch) is responsible for bumping the generation counter
+     * AFTER its transaction commits; see upsertMany for why.
      */
     public static function deleteByWalletAndToken(int $walletLinkId, string $contract, string $tokenId): bool
     {
@@ -462,17 +514,17 @@ final class NftHoldingsRepository
             ['%d', '%s', '%s']
         );
 
-        $ok = is_int($deleted) && $deleted > 0;
-        if ($ok) {
-            self::bumpWalletGeneration($walletLinkId);
-        }
-        return $ok;
+        return is_int($deleted) && $deleted > 0;
     }
 
     /**
      * Atomic batch ingest used by NftHoldingsIndexer. Wraps upsertMany +
      * per-row deletes in a single transaction so a mid-batch DB hiccup
      * cannot leave the chain checkpoint out of sync with row state.
+     *
+     * Generation-counter bumps fire ONCE per distinct wallet, AFTER
+     * COMMIT. A rolled-back batch leaves the counter untouched, and an
+     * upsert+delete on the same wallet only invalidates once.
      *
      * @param list<array<string, mixed>>                                $upserts
      * @param list<array{wallet_link_id: int, contract: string, token_id: string}> $deletes
@@ -487,10 +539,18 @@ final class NftHoldingsRepository
         }
 
         global $wpdb;
+        $touchedWallets = [];
+
         $wpdb->query('START TRANSACTION');
         try {
             if ($upserts !== []) {
                 $result['inserts'] = self::upsertMany($upserts);
+                foreach ($upserts as $r) {
+                    $linkId = (int) ($r['wallet_link_id'] ?? 0);
+                    if ($linkId > 0) {
+                        $touchedWallets[$linkId] = true;
+                    }
+                }
             }
             foreach ($deletes as $d) {
                 $linkId   = (int) ($d['wallet_link_id'] ?? 0);
@@ -501,12 +561,17 @@ final class NftHoldingsRepository
                 }
                 if (self::deleteByWalletAndToken($linkId, $contract, $tokenId)) {
                     $result['deletes']++;
+                    $touchedWallets[$linkId] = true;
                 }
             }
             $wpdb->query('COMMIT');
         } catch (\Throwable $e) {
             $wpdb->query('ROLLBACK');
             throw new \RuntimeException('NftHoldingsRepository::ingestBatch failed: ' . $e->getMessage(), 0, $e);
+        }
+
+        foreach (array_keys($touchedWallets) as $linkId) {
+            self::bumpWalletGeneration((int) $linkId);
         }
 
         return $result;
@@ -528,12 +593,9 @@ final class NftHoldingsRepository
         global $wpdb;
         $table = self::table();
 
-        // Look up the wallet first so we can invalidate even if the
-        // update returns 0 rows-affected (status already at target).
-        $walletLinkId = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT wallet_link_id FROM {$table} WHERE id = %d LIMIT 1",
-            $holdingId
-        ));
+        // Resolve wallet first so we can invalidate even when the update
+        // is a no-op (status already at target).
+        $walletLinkId = self::getWalletLinkIdForHolding($holdingId);
 
         $updated = $wpdb->update(
             $table,
@@ -609,30 +671,27 @@ final class NftHoldingsRepository
         $table = self::table();
         $now   = current_time('mysql', true);
 
-        // Look up wallet for cache invalidation BEFORE the update so
-        // we still bump even when no fields actually changed
-        // (e.g., a re-enrichment that produced the same metadata).
-        $walletLinkId = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT wallet_link_id FROM {$table} WHERE id = %d LIMIT 1",
+        // One SELECT for both wallet (cache invalidation) and current
+        // status (to gate the pending → ok flip). Three SELECTs were
+        // previously issued per-row, multiplied by BATCH_SIZE × chains
+        // every enrichment tick.
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT wallet_link_id, metadata_status FROM {$table} WHERE id = %d LIMIT 1",
             $holdingId
         ));
+        $walletLinkId  = $row !== null ? (int) $row->wallet_link_id : 0;
+        $currentStatus = $row !== null ? (int) $row->metadata_status : -1;
 
         $update = ['enriched_at' => $now];
         $format = ['%s'];
         if ($markFailed) {
             $update['metadata_status'] = self::STATUS_FAILED;
             $format[] = '%d';
-        } else {
+        } elseif ($currentStatus === self::STATUS_PENDING) {
             // Only flip pending → ok; never overwrite an admin-curated
             // spam/failed status that was set after the indexer wrote.
-            $currentStatus = (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT metadata_status FROM {$table} WHERE id = %d LIMIT 1",
-                $holdingId
-            ));
-            if ($currentStatus === self::STATUS_PENDING) {
-                $update['metadata_status'] = self::STATUS_OK;
-                $format[] = '%d';
-            }
+            $update['metadata_status'] = self::STATUS_OK;
+            $format[] = '%d';
         }
 
         $allowed = ['name', 'image_url', 'metadata_uri', 'collection_name'];
@@ -695,5 +754,22 @@ final class NftHoldingsRepository
         $key = self::GENERATION_KEY_PREFIX . $walletLinkId;
         $value = wp_cache_get($key, self::CACHE_GROUP);
         return is_numeric($value) ? (int) $value : 0;
+    }
+
+    /**
+     * Resolve the wallet_link_id for a holding row by primary key.
+     * Returns 0 when the row does not exist.
+     */
+    private static function getWalletLinkIdForHolding(int $holdingId): int
+    {
+        if ($holdingId <= 0) {
+            return 0;
+        }
+        global $wpdb;
+        $table = self::table();
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT wallet_link_id FROM {$table} WHERE id = %d LIMIT 1",
+            $holdingId
+        ));
     }
 }

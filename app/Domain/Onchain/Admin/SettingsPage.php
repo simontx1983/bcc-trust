@@ -250,7 +250,7 @@ class SettingsPage
         $tickHook = \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK;
         $nextTick = wp_next_scheduled($tickHook);
         $tickOverdueSec = $nextTick ? (time() - (int) $nextTick) : 0;
-        $tickOverdue = $nextTick && $tickOverdueSec > 300; // 5-min threshold per plan
+        $tickOverdue = $nextTick && $tickOverdueSec > \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_OVERDUE_THRESHOLD_SECONDS;
         ?>
 
         <h2>Production-Cron Health</h2>

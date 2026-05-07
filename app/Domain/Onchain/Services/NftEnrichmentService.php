@@ -135,10 +135,15 @@ final class NftEnrichmentService
             }
         }
 
-        \BCC\Core\Log\Logger::info('[NftEnrichmentService] tick complete', [
-            'chain_id' => $chainId,
-            'stats'    => $result,
-        ]);
+        // Per-tick completion fires every 5 minutes per chain — info-level
+        // would flood the log with no-ops. Only log when something
+        // actually happened OR a row failed (worth seeing).
+        if ($result['enriched'] > 0 || $result['failed'] > 0) {
+            \BCC\Core\Log\Logger::info('[NftEnrichmentService] tick complete', [
+                'chain_id' => $chainId,
+                'stats'    => $result,
+            ]);
+        }
 
         return $result;
     }

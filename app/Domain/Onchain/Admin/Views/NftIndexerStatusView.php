@@ -43,6 +43,20 @@ final class NftIndexerStatusView
             $byChain[(int) $cp->chain_id] = $cp;
         }
 
+        // §3: pre-fetch the spam preview ONCE before the render block —
+        // a single IN-clause query replaces one query per active chain
+        // and keeps the view itself a pure renderer of pre-fetched data.
+        $chainIds = [];
+        $slugByChainId = [];
+        foreach ($chains as $chain) {
+            $cid = (int) $chain->id;
+            $chainIds[]               = $cid;
+            $slugByChainId[$cid]      = (string) $chain->slug;
+        }
+        $spamRecent = $chainIds === []
+            ? []
+            : NftHoldingsRepository::findByStatusAcrossChains($chainIds, NftHoldingsRepository::STATUS_SPAM, 50);
+
         $dailyBudget = defined('BCC_ETH_DAILY_RPC_BUDGET')
             ? (int) constant('BCC_ETH_DAILY_RPC_BUDGET')
             : NftEthIndexerWorker::DEFAULT_DAILY_BUDGET;
@@ -124,7 +138,7 @@ final class NftIndexerStatusView
 
         <h3 style="margin-top:32px">Recent spam-flagged rows</h3>
         <p>Persisted with <code>metadata_status = 2</code> for review. Never visible to user-facing surfaces.</p>
-        <?php self::renderSpamRecent($chains); ?>
+        <?php self::renderSpamRecent($spamRecent, $slugByChainId); ?>
 
         <p style="margin-top:32px"><small>
             Plan reference: <code>v2-phase-1-nft-scaling.md</code> · Worker:
@@ -205,9 +219,10 @@ final class NftIndexerStatusView
     }
 
     /**
-     * @param list<ChainRow> $chains
+     * @param list<HoldingRow>     $rows
+     * @param array<int, string>   $slugByChainId
      */
-    private static function renderSpamRecent(array $chains): void
+    private static function renderSpamRecent(array $rows, array $slugByChainId): void
     {
         ?>
         <table class="widefat striped" style="max-width:900px">
@@ -221,30 +236,22 @@ final class NftIndexerStatusView
                 </tr>
             </thead>
             <tbody>
-                <?php
-                $total = 0;
-                foreach ($chains as $chain) {
-                    $cid  = (int) $chain->id;
-                    $rows = NftHoldingsRepository::findByStatus($cid, NftHoldingsRepository::STATUS_SPAM, 10);
-                    foreach ($rows as $r) {
-                        $total++;
-                        ?>
+                <?php if ($rows === []): ?>
+                    <tr><td colspan="5"><em>No spam-flagged rows persisted yet.</em></td></tr>
+                <?php else: ?>
+                    <?php foreach ($rows as $r):
+                        $cid  = (int) $r->chain_id;
+                        $slug = $slugByChainId[$cid] ?? ('chain_id=' . $cid);
+                    ?>
                         <tr>
-                            <td><?php echo esc_html((string) $chain->slug); ?></td>
+                            <td><?php echo esc_html($slug); ?></td>
                             <td><code><?php echo esc_html((string) $r->contract_address); ?></code></td>
                             <td><?php echo esc_html((string) $r->token_id); ?></td>
                             <td>#<?php echo (int) $r->wallet_link_id; ?></td>
                             <td><?php echo esc_html((string) $r->indexed_at); ?></td>
                         </tr>
-                        <?php
-                    }
-                }
-                if ($total === 0) {
-                    ?>
-                    <tr><td colspan="5"><em>No spam-flagged rows persisted yet.</em></td></tr>
-                    <?php
-                }
-                ?>
+                    <?php endforeach; ?>
+                <?php endif; ?>
             </tbody>
         </table>
         <?php
@@ -267,14 +274,8 @@ final class NftIndexerStatusView
         $chainId = isset($_GET['chain_id']) ? (int) $_GET['chain_id'] : 0;
         $nonce   = isset($_GET['_wpnonce']) ? (string) $_GET['_wpnonce'] : '';
 
-        // Recognise our actions only — silently ignore anything else
-        // so unrelated GET parameters on the same page don't trigger.
-        $known = ['run', 'set_state', 'helius_provision', 'helius_resync'];
-        if (!in_array($action, $known, true)) {
-            return;
-        }
-
-        // Per-chain actions require a valid chain_id.
+        // Per-chain actions require a valid chain_id. Each branch below
+        // also gates on $action so unknown values fall through harmlessly.
         $chainScopedActions = ['run', 'set_state'];
         if (in_array($action, $chainScopedActions, true) && $chainId <= 0) {
             return;
@@ -323,11 +324,7 @@ final class NftIndexerStatusView
             return;
         }
 
-        // The early-return guard above ($known whitelist) restricts us
-        // to one of {run, set_state, helius_provision, helius_resync};
-        // by here only helius_resync remains, so we don't need a redundant
-        // === comparison (PHPStan flags it as always-true).
-        {
+        if ($action === 'helius_resync') {
             if (!wp_verify_nonce($nonce, 'bcc_helius_resync')) {
                 return;
             }

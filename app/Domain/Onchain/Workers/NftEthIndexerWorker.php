@@ -43,12 +43,13 @@ if (!defined('ABSPATH')) {
  */
 final class NftEthIndexerWorker
 {
-    public const CRON_HOOK            = 'bcc_nft_eth_indexer_tick';
-    public const CONFIRMATIONS        = 12;
-    public const BLOCKS_PER_TICK      = 2000;
-    public const CU_PER_CALL          = 120;
-    public const MAX_PAGES_PER_TICK   = 5; // safety bound on pagination loop
-    public const DEFAULT_DAILY_BUDGET = 50000;
+    public const CRON_HOOK                       = 'bcc_nft_eth_indexer_tick';
+    public const CONFIRMATIONS                   = 12;
+    public const BLOCKS_PER_TICK                 = 2000;
+    public const CU_PER_CALL                     = 120;
+    public const MAX_PAGES_PER_TICK              = 5; // safety bound on pagination loop
+    public const DEFAULT_DAILY_BUDGET            = 50000;
+    public const CRON_OVERDUE_THRESHOLD_SECONDS  = 300;
     private const ADVISORY_LOCK_PREFIX = 'bcc_nft_indexer_chain_';
 
     /**
@@ -210,16 +211,21 @@ final class NftEthIndexerWorker
         $totalDel  = 0;
         $totalSkip = 0;
 
+        // Track remaining budget locally — addCuUsage below persists the
+        // authoritative server-side value, but we don't need to re-read
+        // it per page just to gate the loop. The pre-loop value (Step 3)
+        // is the starting point.
+        $remainingLocal = $cuRemaining;
+
         for ($pageNum = 0; $pageNum < self::MAX_PAGES_PER_TICK; $pageNum++) {
-            // Re-check budget before each page.
-            $remainingNow = ChainCheckpointRepository::cuRemainingForToday($chainId, $dailyBudget);
-            if ($remainingNow < self::CU_PER_CALL) {
+            if ($remainingLocal < self::CU_PER_CALL) {
                 break;
             }
 
             $page = $fetcher->fetch_transfers_since($rangeFrom, $rangeTo, $pageKey);
             ChainCheckpointRepository::addCuUsage($chainId, self::CU_PER_CALL);
-            $cuUsed += self::CU_PER_CALL;
+            $cuUsed         += self::CU_PER_CALL;
+            $remainingLocal -= self::CU_PER_CALL;
 
             $transfers = $page['transfers'];
             if ($transfers !== []) {
