@@ -55,7 +55,15 @@ class CosmosFetcher implements FetcherInterface
 
     public function supports_feature(string $feature): bool
     {
-        return in_array($feature, ['validator', 'delegations', 'dao', 'top_collections'], true);
+        return in_array(
+            $feature,
+            // V2 Phase 2 added 'holdings_count' + 'holdings_list' for CW-721
+            // chains (Stargaze, Injective, Kujira, Dungeon). Curated-only
+            // posture means non-NFT-active Cosmos chains naturally produce
+            // empty results — no per-chain blocklist needed in this method.
+            ['validator', 'delegations', 'dao', 'top_collections', 'holdings_count', 'holdings_list'],
+            true
+        );
     }
 
     // ── Validator Fetching ───────────────────────────────────────────────────
@@ -288,24 +296,336 @@ class CosmosFetcher implements FetcherInterface
         return $results;
     }
 
-    // ── Holdings (NFT ownership) ───────────────────────────────────────────
+    // ── Holdings (CW-721 NFT ownership, V2 Phase 2) ───────────────────────
+
+    /** Per-(wallet, contract) defensive page-walk ceiling (matches EVM/SOL pattern). */
+    private const PER_CONTRACT_TOKEN_CAP = 100;
+
+    /** CW-721 `tokens` query page size — Stargaze / Injective LCDs allow up to ~30. */
+    private const TOKENS_PAGE_SIZE = 30;
+
+    /** wp_cache TTLs. nft_info is static; tokens lists track wallet activity. */
+    private const NFT_INFO_CACHE_TTL = 7 * DAY_IN_SECONDS;
+    private const TOKENS_CACHE_TTL   = DAY_IN_SECONDS;
+
+    /** Default contract cap when BCC_COSMOS_HOLDINGS_CONTRACT_CAP is undefined. */
+    private const DEFAULT_CONTRACT_CAP = 30;
 
     /**
-     * Cosmos SDK chains with CW-721 NFTs (e.g. Stargaze) expose per-wallet
-     * holdings through chain-specific indexers, not the standard LCD. Not
-     * implemented for MVP.
+     * Count tokens this wallet holds in a single CW-721 contract on this chain.
+     *
+     * Used by the gate fast-path. Walks the `tokens { owner }` query up to
+     * PER_CONTRACT_TOKEN_CAP and returns the count. Does NOT fetch per-token
+     * metadata — count-only path stays cheap.
      */
     public function count_holdings(string $wallet, string $contract): int
     {
-        return 0;
+        if ($wallet === '' || $contract === '') {
+            return 0;
+        }
+        $tokenIds = $this->cw721AllTokensForOwner($contract, $wallet);
+        return count($tokenIds);
     }
 
     /**
+     * Enumerate this wallet's NFTs across every verified CW-721 contract on
+     * this chain. Iterates `CollectionRepository::listVerifiedByChain` and
+     * calls `cw721Tokens` per contract; for each token_id, optionally
+     * resolves metadata via `cw721NftInfo`.
+     *
+     * Curated-only posture: only `is_verified = 1` collections are
+     * iterated. A user holding NFTs from a non-verified contract sees them
+     * missing — see plan §"Decisions locked" for the framing.
+     *
+     * The `$cursor` parameter is the FetcherInterface contract; for Cosmos
+     * we don't paginate across contracts (the per-(wallet, contract) cap
+     * bounds each one). Returns null cursor on success — `truncated` flips
+     * true when any contract hit PER_CONTRACT_TOKEN_CAP.
+     *
      * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
      */
     public function list_holdings(string $wallet, ?string $cursor = null): array
     {
-        return ['items' => [], 'truncated' => false, 'cursor' => null];
+        $empty = ['items' => [], 'truncated' => false, 'cursor' => null];
+        if ($wallet === '') {
+            return $empty;
+        }
+
+        $chainId = (int) $this->chain->id;
+        $cap     = self::contractCap();
+        $verified = \BCC\Trust\Onchain\Repositories\CollectionRepository::listVerifiedByChain($chainId, $cap);
+        if ($verified === []) {
+            return $empty;
+        }
+
+        $items     = [];
+        $truncated = false;
+
+        foreach ($verified as $coll) {
+            $contract = (string) $coll->contract_address;
+            if ($contract === '') {
+                continue;
+            }
+
+            // Per-contract try/catch — one broken contract can't poison the
+            // batch (mirror Phase 1c NftEnrichmentService::runForChain
+            // structural isolation pattern).
+            try {
+                $tokenIds = $this->cw721AllTokensForOwner($contract, $wallet);
+                if ($tokenIds === []) {
+                    continue;
+                }
+                if (count($tokenIds) >= self::PER_CONTRACT_TOKEN_CAP) {
+                    $truncated = true;
+                }
+
+                $collectionName = is_string($coll->collection_name ?? null)
+                    ? (string) $coll->collection_name
+                    : null;
+                $collectionImage = is_string($coll->image_url ?? null)
+                    ? (string) $coll->image_url
+                    : null;
+
+                foreach ($tokenIds as $tokenId) {
+                    $meta = $this->cw721NftInfo($contract, $tokenId);
+                    $items[] = [
+                        'contract_address' => $contract,
+                        'token_id'         => $tokenId,
+                        'chain_id'         => $chainId,
+                        'collection_name'  => $collectionName,
+                        'name'             => $meta['name'] ?? null,
+                        'image_url'        => $meta['image_url'] ?? $collectionImage,
+                        'metadata_uri'     => $meta['metadata_uri'] ?? null,
+                        'token_standard'   => 'CW-721',
+                    ];
+                }
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::warning('[CosmosFetcher] cw721 contract failed', [
+                    'chain_id' => $chainId,
+                    'contract' => $contract,
+                    'error'    => $e->getMessage(),
+                ]);
+                continue;
+            }
+        }
+
+        return [
+            'items'     => $items,
+            'truncated' => $truncated,
+            'cursor'    => null,
+        ];
+    }
+
+    // ── CW-721 query helpers (V2 Phase 2, private) ────────────────────────
+
+    /**
+     * Generic CosmWasm contract-state smart query.
+     *
+     * Threads through {@see lcdGet} so it inherits ApiRetry + per-chain
+     * CircuitBreaker behaviour. Wire format mirrors
+     * {@see \BCC\Trust\Core\Services\wallet\BlockchainQueryService::isCosmosNftHolder}
+     * (different domain, can't call directly because it bypasses the
+     * breaker — see §11 scan finding).
+     *
+     * Returns the unwrapped `data` envelope on success, null on transport
+     * / non-200 / unparseable JSON.
+     *
+     * @param array<string, mixed> $queryArr  e.g. ['tokens' => ['owner' => '...']]
+     * @return array<string, mixed>|null
+     */
+    private function wasmSmartQuery(string $contractAddress, array $queryArr): ?array
+    {
+        if ($contractAddress === '') {
+            return null;
+        }
+
+        $json = wp_json_encode($queryArr);
+        if ($json === false) {
+            return null;
+        }
+        // Cosmos SDK wasm module expects the query JSON as URL-safe base64
+        // in the path. base64_encode (standard, with padding) is accepted
+        // by every Cosmos chain's wasm module.
+        $encoded = rtrim(strtr(base64_encode($json), '+/', '-_'), '=');
+
+        $response = $this->lcdGet(
+            '/cosmwasm/wasm/v1/contract/' . rawurlencode($contractAddress) . '/smart/' . $encoded
+        );
+        if (!is_array($response) || !isset($response['data']) || !is_array($response['data'])) {
+            return null;
+        }
+        return $response['data'];
+    }
+
+    /**
+     * CW-721 `tokens { owner, start_after, limit }` paginated fetch.
+     * Returns ONE page of token_ids. Caller is responsible for paginating
+     * via {@see cw721AllTokensForOwner}.
+     *
+     * @return list<string>
+     */
+    private function cw721Tokens(string $contract, string $owner, ?string $startAfter = null, int $limit = self::TOKENS_PAGE_SIZE): array
+    {
+        if ($contract === '' || $owner === '') {
+            return [];
+        }
+
+        // Cache key per locked rule — explicit + readable for debugging.
+        // "why does THIS wallet show stale holdings only on Stargaze page 2?"
+        // → grep `cw721_tokens_<chain>_<contract>_<wallet>_<cursor>` in
+        //   the cache dump and the answer is one row.
+        $chainId  = (int) $this->chain->id;
+        $cursorKey = $startAfter ?? '';
+        $cacheKey = sprintf(
+            'cw721_tokens_%d_%s_%s_%s',
+            $chainId,
+            strtolower($contract),
+            strtolower($owner),
+            $cursorKey
+        );
+
+        $cached = wp_cache_get($cacheKey, 'bcc_onchain');
+        if (is_array($cached)) {
+            /** @var list<string> $cached */
+            return $cached;
+        }
+
+        $query = ['tokens' => ['owner' => $owner, 'limit' => max(1, min(100, $limit))]];
+        if ($startAfter !== null && $startAfter !== '') {
+            $query['tokens']['start_after'] = $startAfter;
+        }
+
+        $data = $this->wasmSmartQuery($contract, $query);
+        if (!is_array($data) || !isset($data['tokens']) || !is_array($data['tokens'])) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($data['tokens'] as $t) {
+            if (is_string($t) && $t !== '') {
+                $out[] = $t;
+            }
+        }
+
+        wp_cache_set($cacheKey, $out, 'bcc_onchain', self::TOKENS_CACHE_TTL);
+        return $out;
+    }
+
+    /**
+     * Walk every page of `cw721Tokens` for a (contract, owner) up to
+     * PER_CONTRACT_TOKEN_CAP. Caller's `count_holdings` returns the count;
+     * caller's `list_holdings` consumes the token_ids.
+     *
+     * @return list<string>
+     */
+    private function cw721AllTokensForOwner(string $contract, string $owner): array
+    {
+        $all       = [];
+        $cursor    = null;
+        for ($page = 0; $page < ceil(self::PER_CONTRACT_TOKEN_CAP / self::TOKENS_PAGE_SIZE); $page++) {
+            $pageResult = $this->cw721Tokens($contract, $owner, $cursor, self::TOKENS_PAGE_SIZE);
+            if ($pageResult === []) {
+                break;
+            }
+            foreach ($pageResult as $tokenId) {
+                $all[] = $tokenId;
+                if (count($all) >= self::PER_CONTRACT_TOKEN_CAP) {
+                    return $all;
+                }
+            }
+            if (count($pageResult) < self::TOKENS_PAGE_SIZE) {
+                break; // Last page (less-than-full result).
+            }
+            $cursor = $pageResult[count($pageResult) - 1];
+        }
+        return $all;
+    }
+
+    /**
+     * CW-721 `nft_info { token_id }` — per-token metadata. Returns
+     * `{name, image_url, metadata_uri}` (any field nullable).
+     *
+     * Cached for 7 days because NFT metadata is effectively static (the
+     * extension on a given token_id rarely changes after mint).
+     *
+     * @return array{name: ?string, image_url: ?string, metadata_uri: ?string}
+     */
+    private function cw721NftInfo(string $contract, string $tokenId): array
+    {
+        $empty = ['name' => null, 'image_url' => null, 'metadata_uri' => null];
+        if ($contract === '' || $tokenId === '') {
+            return $empty;
+        }
+
+        $chainId  = (int) $this->chain->id;
+        $cacheKey = sprintf(
+            'cw721_nft_info_%d_%s_%s',
+            $chainId,
+            strtolower($contract),
+            $tokenId
+        );
+
+        $cached = wp_cache_get($cacheKey, 'bcc_onchain');
+        if (is_array($cached) && isset($cached['name'], $cached['image_url'], $cached['metadata_uri'])) {
+            /** @var array{name: ?string, image_url: ?string, metadata_uri: ?string} $cached */
+            return $cached;
+        }
+
+        $data = $this->wasmSmartQuery($contract, ['nft_info' => ['token_id' => $tokenId]]);
+        if ($data === null) {
+            // Don't cache transport failures — a flaky LCD shouldn't poison
+            // a 7-day cache window with empty results.
+            return $empty;
+        }
+
+        $tokenUri = is_string($data['token_uri'] ?? null) ? (string) $data['token_uri'] : null;
+        $extension = is_array($data['extension'] ?? null) ? $data['extension'] : [];
+        $name = is_string($extension['name'] ?? null) ? (string) $extension['name'] : null;
+        $imageUrl = is_string($extension['image'] ?? null) ? (string) $extension['image'] : null;
+
+        $out = [
+            'name'         => $name,
+            'image_url'    => $imageUrl,
+            'metadata_uri' => $tokenUri,
+        ];
+        wp_cache_set($cacheKey, $out, 'bcc_onchain', self::NFT_INFO_CACHE_TTL);
+        return $out;
+    }
+
+    /**
+     * Public CW-721 `contract_info` probe used by the admin
+     * "Test CW-721 query" button on `VerifyCollectionsPage`. Returns
+     * the unwrapped `data` envelope (typically `{name, symbol}`) on
+     * success, null on transport / non-200 / non-CW-721 contracts.
+     *
+     * Catches three operator-facing failure modes pre-verify:
+     *   1. Mis-pasted contract address (wasm 404 → null)
+     *   2. Non-CW-721 contract (wasm responds but data shape mismatches)
+     *   3. Chain has no CosmWasm enabled (Crypto.org → 501 → null)
+     *
+     * Stays public so it can be invoked from the admin layer without
+     * exposing the generic `wasmSmartQuery` helper.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function testCw721ContractInfo(string $contractAddress): ?array
+    {
+        return $this->wasmSmartQuery($contractAddress, ['contract_info' => new \stdClass()]);
+    }
+
+    /**
+     * Resolve the per-refresh contract cap. Defaults to
+     * DEFAULT_CONTRACT_CAP (30) when the env constant is undefined.
+     */
+    private static function contractCap(): int
+    {
+        if (defined('BCC_COSMOS_HOLDINGS_CONTRACT_CAP')) {
+            $cap = (int) constant('BCC_COSMOS_HOLDINGS_CONTRACT_CAP');
+            if ($cap > 0 && $cap <= 200) {
+                return $cap;
+            }
+        }
+        return self::DEFAULT_CONTRACT_CAP;
     }
 
     // ── Delegations (by delegator account) ─────────────────────────────────

@@ -390,6 +390,63 @@ class EndorsementRepository {
     }
 
     /**
+     * Batched: lifetime count of endorsements RECEIVED per user, where
+     * "received" means endorsements on any `peepso-page` post the user
+     * owns (`peepso_page_members.pm_user_status = 'member_owner'`).
+     *
+     * One JOIN scan replaces N×(M+1) sequential queries (per-user owned-
+     * pages lookup × per-page countForPage). Powers the /members
+     * directory back-of-card endorsements_received slot.
+     *
+     * Users who own no pages — or whose pages have no endorsements —
+     * are absent from the map; callers default to 0.
+     *
+     * @param int[] $userIds Bounded by caller (directory per_page cap).
+     * @return array<int, int> user_id → endorsement count across all owned pages
+     */
+    public function getReceivedCountsForUsers(array $userIds): array {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<array{user_id: string, c: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT pm.pm_user_id AS user_id, COUNT(*) AS c
+                   FROM {$wpdb->prefix}peepso_page_members pm
+                   INNER JOIN {$this->table} e ON e.page_id = pm.pm_page_id
+                  WHERE pm.pm_user_status = 'member_owner'
+                    AND pm.pm_user_id IN ({$placeholders})
+                    AND e.status = 1
+                  GROUP BY pm.pm_user_id",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['user_id']] = (int) $row['c'];
+        }
+        return $out;
+    }
+
+    /**
      * Count endorsements given by user
      */
     public function countByEndorser(int $endorserUserId): int {

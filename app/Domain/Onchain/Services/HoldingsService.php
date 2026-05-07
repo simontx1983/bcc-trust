@@ -3,7 +3,9 @@
 namespace BCC\Trust\Onchain\Services;
 
 use BCC\Trust\Onchain\Factories\FetcherFactory;
+use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
 if (!defined('ABSPATH')) {
@@ -110,7 +112,30 @@ final class HoldingsService
      * Each wallet is cached independently so adding/removing a wallet
      * invalidates only that entry.
      *
-     * @return array{items: list<array<string, mixed>>, truncated: bool, wallets_checked: int, wallets_truncated: int}
+     * V2 Phase 1c read-path swap (load-bearing):
+     *   - Per-wallet-per-chain decision. A fully-indexed-and-enriched
+     *     ETH wallet returns persisted rows; the same user's freshly-
+     *     connected SOL wallet falls through to the V1 transient path.
+     *   - Persistent path requires three things: (a) checkpoint state
+     *     `healthy`, (b) `enriched_at IS NOT NULL` row exists, (c)
+     *     `$force === false`. Any failure → V1 transient.
+     *   - `meta.indexer_state[chain_slug]` reports per-chain status to
+     *     the frontend so it can render a "Syncing…" chip when the
+     *     persistent path was bypassed for an indexer reason (state ≠
+     *     healthy or no enriched rows yet). Per §S the human-readable
+     *     label is server-pre-formatted in
+     *     `meta.indexer_state_label[chain_slug]`.
+     *
+     * @return array{
+     *     items: list<array<string, mixed>>,
+     *     truncated: bool,
+     *     wallets_checked: int,
+     *     wallets_truncated: int,
+     *     meta: array{
+     *         indexer_state: array<string, string>,
+     *         indexer_state_label: array<string, string>
+     *     }
+     * }
      */
     public static function getForUser(int $userId, bool $force = false): array
     {
@@ -120,6 +145,7 @@ final class HoldingsService
         $truncatedCount     = 0;
         $walletsChecked     = 0;
         $seen               = [];
+        $indexerState       = [];
 
         foreach ($wallets as $w) {
             $chain = ChainRepository::getById((int) $w->chain_id);
@@ -127,8 +153,42 @@ final class HoldingsService
                 continue;
             }
 
+            $chainSlug = (string) $chain->slug;
+            $walletLinkId = (int) $w->id;
+
+            // Per-wallet-per-chain swap decision.
+            $persistedItems = $force ? null : self::tryReadPersistent($walletLinkId, $chain);
+            if ($persistedItems !== null) {
+                $walletState = self::resolvePersistentReadState((int) $chain->id);
+                self::recordIndexerState($indexerState, $chainSlug, $walletState);
+
+                $walletsChecked++;
+                foreach ($persistedItems as $item) {
+                    $key = (int) ($item['chain_id'] ?? 0) . '|'
+                         . strtolower($item['contract_address'] . '|' . $item['token_id']);
+                    if (isset($seen[$key])) {
+                        continue;
+                    }
+                    $seen[$key] = true;
+                    $items[] = array_merge($item, [
+                        'chain_slug'     => $chainSlug,
+                        'wallet_link_id' => $walletLinkId,
+                        'wallet_address' => (string) $w->wallet_address,
+                    ]);
+                }
+                continue;
+            }
+
+            // Fall through: V1 transient path. Tag the chain as syncing
+            // when the bypass reason is indexer-related (vs. just
+            // $force=true which is a user-driven refresh).
+            if (!$force) {
+                $bypassState = self::resolveTransientFallbackState($walletLinkId, (int) $chain->id);
+                self::recordIndexerState($indexerState, $chainSlug, $bypassState);
+            }
+
             $walletCache = self::fetchWalletHoldings(
-                (int) $w->id,
+                $walletLinkId,
                 $w->wallet_address,
                 $chain,
                 $force
@@ -156,8 +216,8 @@ final class HoldingsService
                 $seen[$key] = true;
 
                 $items[] = array_merge($item, [
-                    'chain_slug'     => (string) $chain->slug,
-                    'wallet_link_id' => (int) $w->id,
+                    'chain_slug'     => $chainSlug,
+                    'wallet_link_id' => $walletLinkId,
                     'wallet_address' => (string) $w->wallet_address,
                 ]);
             }
@@ -168,6 +228,10 @@ final class HoldingsService
             'truncated'         => $truncatedCount > 0,
             'wallets_checked'   => $walletsChecked,
             'wallets_truncated' => $truncatedCount,
+            'meta'              => [
+                'indexer_state'       => $indexerState,
+                'indexer_state_label' => self::buildIndexerStateLabels($indexerState),
+            ],
         ];
     }
 
@@ -264,6 +328,165 @@ final class HoldingsService
         foreach (WalletRepository::getForUser($userId, null, true) as $w) {
             self::invalidateWallet((int) $w->id);
         }
+    }
+
+    // ── V2 Phase 1c read-path swap helpers ─────────────────────────────────
+
+    /**
+     * Try the persistent path. Returns a list of normalized holdings
+     * items (matching the fetcher item shape) when the swap criteria
+     * are met; null when caller should fall through to the V1
+     * transient path.
+     *
+     * Three gates:
+     *   1. Checkpoint state must be `healthy` for this chain.
+     *   2. Wallet must have at least one enriched, visible row on
+     *      this chain (`enriched_at IS NOT NULL` AND status IN (0,1)).
+     *   3. Caller must not have set $force = true.
+     *
+     * @param ChainRow $chain
+     * @return list<array<string, mixed>>|null
+     */
+    private static function tryReadPersistent(int $walletLinkId, object $chain): ?array
+    {
+        $chainId = (int) $chain->id;
+        if ($walletLinkId <= 0 || $chainId <= 0) {
+            return null;
+        }
+
+        $checkpoint = ChainCheckpointRepository::get($chainId);
+        if ($checkpoint === null) {
+            return null;
+        }
+        if ((string) $checkpoint->state !== ChainCheckpointRepository::STATE_HEALTHY) {
+            return null;
+        }
+        if (!NftHoldingsRepository::walletHasAnyEnriched($walletLinkId, $chainId)) {
+            return null;
+        }
+
+        $rows = NftHoldingsRepository::findVisibleEnrichedForWallet($walletLinkId, $chainId);
+        if ($rows === []) {
+            return null;
+        }
+
+        $items = [];
+        foreach ($rows as $row) {
+            $items[] = [
+                'contract_address' => (string) $row->contract_address,
+                'token_id'         => (string) $row->token_id,
+                'chain_id'         => (int) $row->chain_id,
+                'collection_name'  => $row->collection_name !== null ? (string) $row->collection_name : null,
+                'name'             => $row->name !== null ? (string) $row->name : null,
+                'image_url'        => $row->image_url !== null ? (string) $row->image_url : null,
+                'metadata_uri'     => $row->metadata_uri !== null ? (string) $row->metadata_uri : null,
+                'token_standard'   => $row->token_standard !== null ? (string) $row->token_standard : null,
+            ];
+        }
+        return $items;
+    }
+
+    /**
+     * Resolve the indexer state we'd like the frontend to see when
+     * the persistent read succeeded for this chain.
+     */
+    private static function resolvePersistentReadState(int $chainId): string
+    {
+        $checkpoint = ChainCheckpointRepository::get($chainId);
+        if ($checkpoint === null) {
+            return 'syncing';
+        }
+        $state = (string) $checkpoint->state;
+        if ($state === ChainCheckpointRepository::STATE_HEALTHY) {
+            return 'healthy';
+        }
+        if ($state === ChainCheckpointRepository::STATE_DEGRADED
+            || $state === ChainCheckpointRepository::STATE_BREAKER_OPEN) {
+            return 'degraded';
+        }
+        return 'syncing';
+    }
+
+    /**
+     * Resolve the indexer state when we fell through to the V1
+     * transient path. Distinguishes "the indexer hasn't seen this
+     * wallet yet" (syncing) from "the indexer is broken" (degraded).
+     */
+    private static function resolveTransientFallbackState(int $walletLinkId, int $chainId): string
+    {
+        $checkpoint = ChainCheckpointRepository::get($chainId);
+        if ($checkpoint === null) {
+            return 'syncing';
+        }
+        $state = (string) $checkpoint->state;
+        if ($state === ChainCheckpointRepository::STATE_DEGRADED
+            || $state === ChainCheckpointRepository::STATE_BREAKER_OPEN) {
+            return 'degraded';
+        }
+        if ($state !== ChainCheckpointRepository::STATE_HEALTHY) {
+            return 'syncing';
+        }
+        // Healthy chain, but no enriched rows for this wallet yet —
+        // either the wallet was just connected (cold-start) or the
+        // enrichment scheduler hasn't caught up.
+        return NftHoldingsRepository::walletHasAnyEnriched($walletLinkId, $chainId)
+            ? 'healthy'
+            : 'syncing';
+    }
+
+    /**
+     * Track per-chain state, escalating monotonically: degraded beats
+     * syncing beats healthy. So if one wallet on a chain reads
+     * healthy and another reads syncing, the chain reports syncing.
+     *
+     * @param array<string, string> &$indexerState
+     */
+    private static function recordIndexerState(array &$indexerState, string $chainSlug, string $state): void
+    {
+        if ($chainSlug === '') {
+            return;
+        }
+        $existing = $indexerState[$chainSlug] ?? null;
+        if ($existing === null || self::stateRank($state) > self::stateRank($existing)) {
+            $indexerState[$chainSlug] = $state;
+        }
+    }
+
+    private static function stateRank(string $state): int
+    {
+        return [
+            'healthy'  => 0,
+            'syncing'  => 1,
+            'degraded' => 2,
+        ][$state] ?? 1;
+    }
+
+    /**
+     * Server-pre-formatted human-readable labels for `meta.indexer_state`.
+     * Per §S the frontend renders these verbatim and never invents copy
+     * from the enum value.
+     *
+     * Filterable via `bcc_holdings_indexer_state_label` so the copy
+     * can be tuned without a redeploy.
+     *
+     * @param array<string, string> $indexerState
+     * @return array<string, string>
+     */
+    private static function buildIndexerStateLabels(array $indexerState): array
+    {
+        $defaults = [
+            'healthy'  => '',                                    // no chip when everything is fine
+            'syncing'  => 'Syncing on-chain holdings…',
+            'degraded' => 'On-chain indexer is degraded — showing cached holdings.',
+        ];
+
+        $out = [];
+        foreach ($indexerState as $chainSlug => $state) {
+            $label = $defaults[$state] ?? '';
+            $filtered = apply_filters('bcc_holdings_indexer_state_label', $label, $state, $chainSlug);
+            $out[$chainSlug] = is_string($filtered) ? $filtered : $label;
+        }
+        return $out;
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────

@@ -36,14 +36,17 @@ use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\BinderRepository;
 use BCC\Trust\Core\Repositories\CommentRepository;
+use BCC\Trust\Core\Repositories\GifRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
+use BCC\Trust\Core\Repositories\PhotoRepository;
 use BCC\Trust\Core\Repositories\PullBatchRepository;
 use BCC\Trust\Core\Repositories\PullMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\GroupContextResolver;
+use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
@@ -68,7 +71,10 @@ final class FeedRankingService
         private readonly VoteRepository $voteRepo,
         private readonly HiddenActivityRepository $hiddenRepo,
         private readonly GroupContextResolver $groupContextResolver,
-        private readonly CommentRepository $commentRepo
+        private readonly CommentRepository $commentRepo,
+        private readonly PhotoRepository $photoRepo,
+        private readonly GifRepository $gifRepo,
+        private readonly MentionOverlayService $mentionOverlay
     ) {
     }
 
@@ -282,6 +288,32 @@ final class FeedRankingService
      * cap at 50 items, so even worst-case the hydration adds ~3 small
      * queries (bcc_pull_batches, bcc_pull_meta, bcc_onchain_claims).
      *
+     * ┌─── post_kind precedence rules (v1.5) ─────────────────────────┐
+     * │                                                                │
+     * │ The post_kind a FeedItem ships with is resolved in two layers:│
+     * │                                                                │
+     * │   1. **Module-default mapping.** FeedItemNormalizer looks up   │
+     * │      `MODULE_TO_KIND[act_module_id]` to assign the base kind   │
+     * │      from PeepSo's stored module ID (status=1, photo=4, etc.).│
+     * │                                                                │
+     * │   2. **Metadata semantic override.** This pass reads post_meta │
+     * │      on the wp_post and may *promote* a base kind to a more   │
+     * │      specific semantic kind when discriminating metadata is   │
+     * │      present. Example: a status post (kind=1, base='status')  │
+     * │      with `peepso_giphy` post_meta is promoted to 'gif'.      │
+     * │                                                                │
+     * │ **Metadata overrides take precedence over module defaults.**  │
+     * │ This is the canonical rule — when future kinds (poll, mood,   │
+     * │ celebration, scheduled-state overlays, etc.) need similar     │
+     * │ semantic discrimination, they extend this layer rather than   │
+     * │ inventing parallel pipelines or polluting MODULE_TO_KIND with │
+     * │ meta-aware entries.                                            │
+     * │                                                                │
+     * │ The override happens BEFORE the bucket-and-bulk-load pass so  │
+     * │ promoted items get their body hydrated under the correct kind.│
+     * │                                                                │
+     * └────────────────────────────────────────────────────────────────┘
+     *
      * @param list<array<string, mixed>> $items
      * @return list<array<string, mixed>>
      */
@@ -307,15 +339,55 @@ final class FeedRankingService
             update_meta_cache('post', array_keys($extIdsAll));
         }
 
+        // ─── Layer-2: metadata semantic override ─────────────────────
+        // GIF posts arrive here with kind='status' (PeepSo's giphy
+        // plugin doesn't stamp a distinct module_id; status and GIF
+        // share act_module_id=1). Promote them to kind='gif' when
+        // the wp_post carries a `peepso_giphy` post_meta. The
+        // GifRepository batch-reads via the now-warm meta cache.
+        $statusExtIds = [];
+        foreach ($items as $item) {
+            $kind  = is_string($item['post_kind'] ?? null) ? $item['post_kind'] : '';
+            $extId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
+            if ($kind === 'status' && $extId > 0) {
+                $statusExtIds[] = $extId;
+            }
+        }
+        $gifUrlByExtId = $this->gifRepo->findByPostIds($statusExtIds);
+        if ($gifUrlByExtId !== []) {
+            foreach ($items as $i => $item) {
+                $extId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
+                if (isset($gifUrlByExtId[$extId])) {
+                    $items[$i]['post_kind'] = 'gif';
+                }
+            }
+        }
+
         // Bucket sidecar ids by kind for bulk-loading. Keep the
         // ext→sidecar map so we can stitch bodies back into items.
         $pullBatchExtToSid = [];
         $pageClaimExtToSid = [];
         $reviewExtToSid    = [];
+        // Photo posts use the wp_post.ID directly as the lookup key
+        // (no sidecar — the photo lives in peepso_photos keyed by
+        // pho_post_id = wp_post.ID). Collect external_ids only.
+        $photoExtIds = [];
+        // GIF posts (post-promotion above) — body comes from the
+        // gifUrlByExtId map already in hand; we don't need a second
+        // bucket pass, just track the ext_ids that need a body shape.
+        $gifExtIds = [];
         foreach ($items as $item) {
             $kind  = is_string($item['post_kind'] ?? null) ? $item['post_kind'] : '';
             $extId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
             if ($extId <= 0) {
+                continue;
+            }
+            if ($kind === 'photo') {
+                $photoExtIds[$extId] = true;
+                continue;
+            }
+            if ($kind === 'gif') {
+                $gifExtIds[$extId] = true;
                 continue;
             }
             $sid = (int) get_post_meta($extId, '_bcc_activity_sidecar_id', true);
@@ -334,6 +406,8 @@ final class FeedRankingService
         $pullBatchBodies = $this->loadPullBatchBodies(array_values(array_unique($pullBatchExtToSid)));
         $pageClaimBodies = $this->loadPageClaimBodies(array_values(array_unique($pageClaimExtToSid)));
         $reviewBodies    = $this->loadReviewBodies(array_values(array_unique($reviewExtToSid)));
+        $photoBodies     = $this->loadPhotoBodies(array_keys($photoExtIds));
+        $gifBodies       = $this->loadGifBodies(array_keys($gifExtIds), $gifUrlByExtId);
 
         $hydrated = [];
         foreach ($items as $item) {
@@ -346,10 +420,205 @@ final class FeedRankingService
                 $item['body'] = $pageClaimBodies[$pageClaimExtToSid[$extId]];
             } elseif ($kind === 'review' && isset($reviewExtToSid[$extId], $reviewBodies[$reviewExtToSid[$extId]])) {
                 $item['body'] = $reviewBodies[$reviewExtToSid[$extId]];
+            } elseif ($kind === 'photo' && isset($photoBodies[$extId])) {
+                $item['body'] = $photoBodies[$extId];
+            } elseif ($kind === 'gif' && isset($gifBodies[$extId])) {
+                $item['body'] = $gifBodies[$extId];
             }
             $hydrated[] = $item;
         }
-        return $hydrated;
+
+        // §3.3.12 — Layer-3: mentions[] overlay.
+        //
+        // Apply AFTER body stitching so we have the final raw text in
+        // hand (status bodies arrive pre-hydrated with `text`; photo /
+        // gif bodies just got their `caption` filled). One batched
+        // overlay across the whole page primes the user-meta cache
+        // once; per-row resolution is then in-memory.
+        //
+        // Range offsets reference the raw stored body text per the
+        // §3.3.12 invariant — the overlay never modifies the text
+        // itself, only emits ranges *into* it.
+        return $this->applyMentionOverlay($hydrated);
+    }
+
+    /**
+     * Append `mentions: Mention[]` to every status / photo / gif body,
+     * keyed off the raw text/caption field. Bodies that have no
+     * mention tokens get `mentions: []` for shape stability — clients
+     * can blindly read `body.mentions` without checking `kind`.
+     *
+     * Other post_kinds (review, pull_batch, page_claim, signal,
+     * project_drop, nft_drop, blog_excerpt, dispute_signed) do NOT
+     * carry mentions in V1d. Their bodies are unchanged.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private function applyMentionOverlay(array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        // Bucket text by pseudo-key (the index in $items) — we don't
+        // need post-id-keyed batching here because each item's body
+        // text is independent. The overlay's batched user-resolution
+        // is what saves work; per-content extraction is cheap.
+        $contentByKey = [];
+        foreach ($items as $i => $item) {
+            $kind = is_string($item['post_kind'] ?? null) ? $item['post_kind'] : '';
+            if ($kind !== 'status' && $kind !== 'photo' && $kind !== 'gif') {
+                continue;
+            }
+            $body = is_array($item['body'] ?? null) ? $item['body'] : [];
+            $text = self::resolveMentionableText($kind, $body);
+            if ($text !== '') {
+                $contentByKey[$i] = $text;
+            }
+        }
+
+        $overlayByKey = $this->mentionOverlay->buildOverlayBatch($contentByKey);
+
+        $out = [];
+        foreach ($items as $i => $item) {
+            $kind = is_string($item['post_kind'] ?? null) ? $item['post_kind'] : '';
+            if ($kind === 'status' || $kind === 'photo' || $kind === 'gif') {
+                $body = is_array($item['body'] ?? null) ? $item['body'] : [];
+                $body['mentions'] = $overlayByKey[$i] ?? [];
+                $item['body'] = $body;
+            }
+            $out[] = $item;
+        }
+        return $out;
+    }
+
+    /**
+     * Pull the mentionable raw text out of a body for overlay
+     * extraction. Status posts use `text`; photo + gif use `caption`
+     * (which can be null on photo-only / GIF-only posts — coerce to
+     * '' so the overlay extractor short-circuits).
+     *
+     * @param array<string, mixed> $body
+     */
+    private static function resolveMentionableText(string $kind, array $body): string
+    {
+        if ($kind === 'status') {
+            return is_string($body['text'] ?? null) ? $body['text'] : '';
+        }
+        // photo + gif both use `caption`, which is `string|null`.
+        $caption = $body['caption'] ?? null;
+        return is_string($caption) ? $caption : '';
+    }
+
+    /**
+     * Bulk-load photo bodies for v1.5 photo posts. Returns a map
+     * keyed by wp_post.ID → body shape per api-contract-v1.md §3.3:
+     *
+     *   {
+     *     caption:   string | null,   // wp_posts.post_content; null when whitespace-only
+     *     photo_url: string,           // canonical full image URL
+     *     alt:       null              // V2 a11y deferred
+     *   }
+     *
+     * One COUNT-bounded SELECT against peepso_photos (PhotoRepository).
+     * Caption is read off the wp_post via update_meta_cache + get_post —
+     * cheap because the parent hydrateBodies pass already primed the
+     * post-meta cache for these IDs.
+     *
+     * Defensive posture: when a photo row is missing (rare race —
+     * activity row landed but save_images hasn't completed), the body
+     * falls back to caption-only with `photo_url: ''`. The frontend
+     * gracefully omits the image when the URL is empty.
+     *
+     * @param list<int> $postIds
+     * @return array<int, array<string, mixed>>
+     */
+    private function loadPhotoBodies(array $postIds): array
+    {
+        if ($postIds === []) {
+            return [];
+        }
+        $rowsByPost = $this->photoRepo->findByPostIds($postIds);
+
+        $out = [];
+        foreach ($postIds as $postId) {
+            $caption = self::resolvePhotoCaption($postId);
+            $row     = $rowsByPost[$postId] ?? null;
+            $photoUrl = $row !== null ? PhotoRepository::resolvePhotoUrl($row) : '';
+
+            $out[$postId] = [
+                'caption'   => $caption,
+                'photo_url' => $photoUrl,
+                // Alt text is deferred to V2 a11y per Phase 1b scope.
+                // Always null here so the contract field is present
+                // and the frontend can render an empty `alt=""` (the
+                // image is then treated as decorative until the user
+                // can describe it).
+                'alt'       => null,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Read the caption for a photo post from `wp_posts.post_content`.
+     * PeepSo's add_post stores the user's caption text there; the
+     * writer pads with a single space when empty (see PeepSoPhotoWriter
+     * docblock) so the field is never NULL on the DB side. We collapse
+     * a whitespace-only post_content back to null at this layer so
+     * the frontend treats photo-only posts as caption-less.
+     */
+    private static function resolvePhotoCaption(int $postId): ?string
+    {
+        if ($postId <= 0) {
+            return null;
+        }
+        $post = get_post($postId);
+        if (!($post instanceof \WP_Post)) {
+            return null;
+        }
+        $caption = trim((string) $post->post_content);
+        return $caption === '' ? null : $caption;
+    }
+
+    /**
+     * Bulk-build GIF bodies for v1.5 GIF posts. Caller has already
+     * batch-fetched the giphy URLs via GifRepository in the layer-2
+     * promotion pass, so this is just a per-post composition step:
+     * read the wp_post for the caption, pair with the URL.
+     *
+     * Body shape (api-contract-v1.md §3.3.10):
+     *
+     *   {
+     *     caption:  string | null,    // wp_posts.post_content; null when whitespace-only
+     *     gif_url:  string,            // Giphy CDN URL
+     *     provider: 'giphy'            // forward-stable for future Tenor / sticker providers
+     *   }
+     *
+     * @param list<int> $postIds
+     * @param array<int, string> $gifUrlByExtId
+     * @return array<int, array<string, mixed>>
+     */
+    private function loadGifBodies(array $postIds, array $gifUrlByExtId): array
+    {
+        if ($postIds === []) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($postIds as $postId) {
+            $url = $gifUrlByExtId[$postId] ?? '';
+            if ($url === '') {
+                continue;
+            }
+            $out[$postId] = [
+                'caption'  => self::resolvePhotoCaption($postId),
+                'gif_url'  => $url,
+                'provider' => 'giphy',
+            ];
+        }
+        return $out;
     }
 
     /**

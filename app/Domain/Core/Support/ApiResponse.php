@@ -80,21 +80,38 @@ final class ApiResponse
 
     /**
      * Standardized error response. Always emits the
-     * `{error: {code, message, status}, _meta: {version}}` shape —
+     * `{error: {code, message, status, data?}, _meta: {version}}` shape —
      * the HTTP status code matches the body's status field.
      *
      * The `_meta` envelope rides errors as well as successes so that
      * client-side response parsers can read `_meta.version` uniformly
      * regardless of outcome.
+     *
+     * `$data` is OPTIONAL structured context for the error. Only
+     * emitted when non-null AND non-empty (so the typical error
+     * response stays unchanged). v1.5 §3.3.12 uses this for the
+     * `bcc_invalid_mention_target` `{user_id}` and
+     * `bcc_too_many_mentions` `{max}` payloads. Future error codes
+     * MUST document any keys they place here in the contract.
+     *
+     * @param array<string, mixed>|null $data
      */
-    public static function error(string $code, string $message, int $status): WP_REST_Response
-    {
+    public static function error(
+        string $code,
+        string $message,
+        int $status,
+        ?array $data = null
+    ): WP_REST_Response {
+        $error = [
+            'code'    => $code,
+            'message' => $message,
+            'status'  => $status,
+        ];
+        if (is_array($data) && $data !== []) {
+            $error['data'] = $data;
+        }
         return new WP_REST_Response([
-            'error' => [
-                'code'    => $code,
-                'message' => $message,
-                'status'  => $status,
-            ],
+            'error' => $error,
             '_meta' => ['version' => self::VERSION],
         ], $status);
     }

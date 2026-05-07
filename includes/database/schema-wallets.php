@@ -42,6 +42,7 @@ function bcc_onchain_create_wallet_links_table(): void {
         verified_at DATETIME DEFAULT NULL,
         is_primary TINYINT(1) NOT NULL DEFAULT 0,
         last_holdings_refresh_at DATETIME DEFAULT NULL,
+        helius_managed TINYINT(1) NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         KEY user_id (user_id),

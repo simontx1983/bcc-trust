@@ -50,6 +50,233 @@ class SolanaFetcher implements FetcherInterface
     }
 
     // ══════════════════════════════════════════════════════════════════
+    // WEBHOOK PAYLOAD NORMALIZATION (V2 Phase 1b)
+    // ══════════════════════════════════════════════════════════════════
+
+    /**
+     * Convert a Helius "Enhanced Transactions" payload into the indexer's
+     * TransferEvent shape. Helius webhook posts an array of enriched
+     * transactions; this method takes ONE transaction object and returns
+     * a flat list of TransferEvents (one per token in tokenTransfers[]).
+     *
+     * Solana NFT model: each mint is its own unique token (no contract /
+     * token_id pair like ERC-721). We persist the mint pubkey as both
+     * `contract_address` and `token_id` so the unique-key
+     * `(wallet_link_id, contract_address, token_id)` collapses to one
+     * row per (wallet, mint) — semantically correct for Solana.
+     *
+     * Compressed NFTs (cNFTs) live inside merkle trees and use leaf
+     * `assetId` rather than a mint pubkey; Phase 1b does NOT handle
+     * cNFTs (different state model + merkle-proof requirements). They
+     * surface in `events.compressed`; we ignore them for now.
+     *
+     * Confirmation: Helius emits at "confirmed" finality (~1 slot,
+     * ~400ms), so we treat events as already past the confirmation
+     * gate. No N=12 analog needed.
+     *
+     * @param array<string, mixed> $tx  Single Helius enriched transaction
+     * @param int                  $chainId  Resolved Solana chain id
+     * @return list<array<string, mixed>>  List of TransferEvent rows
+     */
+    public function normalizeWebhookPayload(array $tx, int $chainId): array
+    {
+        if ($chainId <= 0) {
+            return [];
+        }
+
+        $signature = isset($tx['signature']) && is_string($tx['signature']) ? $tx['signature'] : '';
+        if ($signature === '') {
+            return [];
+        }
+
+        $slot      = isset($tx['slot']) ? (int) $tx['slot'] : 0;
+        $timestamp = isset($tx['timestamp']) ? (int) $tx['timestamp'] : 0;
+        $confirmedAt = $timestamp > 0
+            ? gmdate('Y-m-d H:i:s', $timestamp)
+            : current_time('mysql', true);
+
+        $rawTransfers = $tx['tokenTransfers'] ?? [];
+        if (!is_array($rawTransfers) || $rawTransfers === []) {
+            return [];
+        }
+
+        $events = [];
+        foreach ($rawTransfers as $tt) {
+            if (!is_array($tt)) {
+                continue;
+            }
+
+            $mint = isset($tt['mint']) && is_string($tt['mint']) ? $tt['mint'] : '';
+            if ($mint === '') {
+                continue;
+            }
+
+            // Skip non-NFT token transfers. Helius marks NFT mints with
+            // tokenAmount === 1; SPL fungibles report decimal amounts
+            // (often non-1). The mint's metadata could give a
+            // definitive answer but we don't have it on the hot path —
+            // the heuristic is good enough for Phase 1b. Spam filter +
+            // metadata enrichment will refine in 1c.
+            $tokenAmount = $tt['tokenAmount'] ?? null;
+            if (is_numeric($tokenAmount) && (float) $tokenAmount !== 1.0) {
+                continue;
+            }
+
+            $from = isset($tt['fromUserAccount']) && is_string($tt['fromUserAccount']) ? $tt['fromUserAccount'] : '';
+            $to   = isset($tt['toUserAccount'])   && is_string($tt['toUserAccount'])   ? $tt['toUserAccount']   : '';
+
+            // No tracked side — drop. The indexer will redo this filter
+            // post-wallet-resolve, but pre-filtering here saves the
+            // ingest layer from looking up wallets we'll never need.
+            if ($from === '' && $to === '') {
+                continue;
+            }
+
+            $events[] = [
+                'chain_id'         => $chainId,
+                'contract_address' => $mint,
+                'token_id'         => $mint,
+                'token_standard'   => 'SPL-NFT',
+                'from_address'     => $from,
+                'to_address'       => $to,
+                'amount'           => 1,
+                'block_number'     => $slot,
+                'confirmed_at'     => $confirmedAt,
+                'collection_name'  => null, // resolved in enrichment phase
+                'tx_signature'     => $signature,
+            ];
+        }
+
+        return $events;
+    }
+
+    /**
+     * Fetch enrichment metadata for a single Solana mint via Helius's
+     * `getAsset` DAS method. Used by V2 Phase 1c NftEnrichmentService
+     * to backfill name + image_url + collection_name on persistent
+     * holdings rows.
+     *
+     * Solana model reminder: each NFT has a unique mint pubkey; we
+     * persist mint as both contract_address and token_id, so the
+     * caller passes the same value for both. Only the mint is needed
+     * to look up the asset.
+     *
+     * Returns null on transport / non-200; non-null with
+     * partially-empty fields on success.
+     *
+     * @return array{name: ?string, image_url: ?string, metadata_uri: ?string, collection_name: ?string}|null
+     */
+    public function fetchMetadataForMint(string $mint): ?array
+    {
+        if ($mint === '') {
+            return null;
+        }
+        // Helius DAS endpoint requires the API key on the RPC URL.
+        // The chain's rpc_url field is the public Solana mainnet
+        // endpoint by default — for `getAsset` we need the Helius
+        // RPC instead, which carries the API key.
+        $rpcUrl = self::resolveHeliusRpcUrl();
+        if ($rpcUrl === null) {
+            return null;
+        }
+
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 'enrich-' . substr($mint, 0, 8),
+            'method'  => 'getAsset',
+            'params'  => ['id' => $mint],
+        ]);
+        if ($body === false) {
+            return null;
+        }
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'Helius getAsset',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            return null;
+        }
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return null;
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json) || !isset($json['result']) || !is_array($json['result'])) {
+            return null;
+        }
+        $r = $json['result'];
+
+        $content = is_array($r['content'] ?? null) ? $r['content'] : [];
+        $metadata = is_array($content['metadata'] ?? null) ? $content['metadata'] : [];
+        $links    = is_array($content['links'] ?? null) ? $content['links'] : [];
+        $files    = is_array($content['files'] ?? null) ? $content['files'] : [];
+        $grouping = is_array($r['grouping'] ?? null) ? $r['grouping'] : [];
+
+        $name = is_string($metadata['name'] ?? null) ? $metadata['name'] : null;
+
+        $imgUrl = is_string($links['image'] ?? null) ? $links['image'] : null;
+        if ($imgUrl === null && $files !== []) {
+            foreach ($files as $f) {
+                if (is_array($f) && isset($f['uri']) && is_string($f['uri']) && $f['uri'] !== '') {
+                    $imgUrl = $f['uri'];
+                    break;
+                }
+            }
+        }
+
+        $metadataUri = is_string($content['json_uri'] ?? null) ? $content['json_uri'] : null;
+
+        $collectionName = null;
+        foreach ($grouping as $g) {
+            if (is_array($g) && ($g['group_key'] ?? '') === 'collection') {
+                $collectionValue = $g['group_value'] ?? null;
+                if (is_string($collectionValue) && $collectionValue !== '') {
+                    $collectionName = $collectionValue;
+                    break;
+                }
+            }
+        }
+
+        return [
+            'name'            => $name,
+            'image_url'       => $imgUrl,
+            'metadata_uri'    => $metadataUri,
+            'collection_name' => $collectionName,
+        ];
+    }
+
+    /**
+     * Resolve the Helius DAS-compatible RPC URL. Prefers an explicit
+     * BCC_HELIUS_RPC_URL constant; falls back to the canonical
+     * `https://mainnet.helius-rpc.com/?api-key=...` shape using
+     * BCC_HELIUS_API_KEY. Returns null when neither is configured.
+     */
+    private static function resolveHeliusRpcUrl(): ?string
+    {
+        if (defined('BCC_HELIUS_RPC_URL')) {
+            $url = (string) constant('BCC_HELIUS_RPC_URL');
+            if ($url !== '') {
+                return $url;
+            }
+        }
+        if (defined('BCC_HELIUS_API_KEY')) {
+            $key = (string) constant('BCC_HELIUS_API_KEY');
+            if ($key !== '') {
+                return 'https://mainnet.helius-rpc.com/?api-key=' . rawurlencode($key);
+            }
+        }
+        return null;
+    }
+
+    // ══════════════════════════════════════════════════════════════════
     // VALIDATORS
     // ══════════════════════════════════════════════════════════════════
 

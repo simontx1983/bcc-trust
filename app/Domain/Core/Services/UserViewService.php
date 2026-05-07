@@ -39,11 +39,16 @@ use BCC\Core\Permissions\Permissions;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Core\Repositories\PeepSoPageRepository;
+use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\FlagsRepository;
+use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\ReputationEventRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\RankCatalog;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
@@ -237,19 +242,94 @@ final class UserViewService
      *
      * Returns null when $userId doesn't resolve to a real wp_user.
      *
+     * `card_tier` mirrors the §C1 slug already exposed by `getUser`
+     * (full /users/:handle payload). Surfaced here so list-shaped UIs
+     * (members directory rows, member cards in feeds) can encode the
+     * tier as a color/border treatment rather than rendering the
+     * tier_label as a duplicate word next to the rank_label.
+     *
+     * `trust_score`, `followers_count`, `primary_local`, and
+     * `owned_pages_count` populate the directory card with social-proof
+     * signals (the directory was previously sparse — handle + chips
+     * only — and couldn't carry "is this a real operator" weight).
+     * Where single-user resolvers exist (trust score is per-request
+     * memoized; followers/primary_local/owned_pages have single-user
+     * fallbacks) `getSummary` will resolve these per-row when called
+     * outside a list path.
+     *
+     * **List-shape callers should pass `$prefetched`** — that's the
+     * batched-map path used by `UsersEndpoint::members`. Without it,
+     * each row triggers up to four extra SQL queries (followers count,
+     * primary-local lookup, page-owner count, plus the trust-score
+     * row), N+1ing across the page. The prefetch path collapses those
+     * to one batched SQL each (~4 queries total per page-load
+     * regardless of `per_page`).
+     *
+     * `owned_pages_by_type` carries a per-canonical-type breakdown of
+     * the user's PeepSo page ownership (validator/project/nft/dao),
+     * driven by the page-categories taxonomy. PeepSo pages are tags-not-
+     * types — a single page can carry multiple categories — so the sum
+     * across the four buckets may exceed `owned_pages_count` for a
+     * multi-categorized portfolio. Pages with no recognized category
+     * slug don't contribute to any bucket but still increment the
+     * total `owned_pages_count`.
+     *
+     * `cover_photo_url`, `verifications`, and `engagement` populate the
+     * back-of-card "trust dossier" on the directory's flippable cards.
+     * All four `engagement` counts (endorsements_received, solids_received,
+     * reviews_written, disputes_signed) come from established single-user
+     * resolvers; the prefetch path collapses the per-row N+1 to one
+     * batched SQL each. `verifications.x_*` and `verifications.github_*`
+     * are connection presence + provider username for the X / GitHub
+     * social-link panel; tokens are NEVER decrypted into this payload.
+     *
+     * @param array{
+     *   follower_counts?: array<int, int>,
+     *   primary_locals?: array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>,
+     *   owned_pages_counts?: array<int, int>,
+     *   owned_pages_by_type?: array<int, array{validator: int, project: int, nft: int, dao: int}>,
+     *   endorsements_received_counts?: array<int, int>,
+     *   solids_received_counts?: array<int, int>,
+     *   reviews_written_counts?: array<int, int>,
+     *   disputes_signed_counts?: array<int, int>,
+     *   wallets_verified_counts?: array<int, int>,
+     *   x_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>,
+     *   github_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>
+     * }|null $prefetched
+     *
      * @return array{
      *   id: int,
      *   handle: string,
      *   display_name: string,
      *   avatar_url: string,
+     *   cover_photo_url: string|null,
      *   joined_at: string,
+     *   card_tier: string|null,
      *   tier_label: string|null,
      *   rank_label: string,
      *   is_in_good_standing: bool,
-     *   flags: list<string>
+     *   flags: list<string>,
+     *   trust_score: int,
+     *   followers_count: int,
+     *   primary_local: array{id: int, slug: string, name: string, number: int|null}|null,
+     *   owned_pages_count: int,
+     *   owned_pages_by_type: array{validator: int, project: int, nft: int, dao: int},
+     *   verifications: array{
+     *     x_verified: bool,
+     *     x_username: string|null,
+     *     github_verified: bool,
+     *     github_username: string|null,
+     *     wallets_verified: int
+     *   },
+     *   engagement: array{
+     *     endorsements_received: int,
+     *     solids_received: int,
+     *     reviews_written: int,
+     *     disputes_signed: int
+     *   }
      * }|null
      */
-    public function getSummary(int $userId, int $viewerId): ?array
+    public function getSummary(int $userId, int $viewerId, ?array $prefetched = null): ?array
     {
         $user = get_userdata($userId);
         if ($user === false) {
@@ -268,16 +348,144 @@ final class UserViewService
             ? '@' . $handle
             : $displayName;
 
+        // Followers count — prefer prefetched batch, fall back to the
+        // single-user repo call so non-list callers (admin tools,
+        // tests) still work without a prefetch ceremony.
+        if ($prefetched !== null && isset($prefetched['follower_counts'])) {
+            $followersCount = $prefetched['follower_counts'][$userId] ?? 0;
+        } else {
+            $followersCount = PeepSoFollowerRepository::getCounts($userId)['followers'];
+        }
+
+        // Primary Local — same prefer-prefetched pattern. The prefetch
+        // delivers the raw group post info; we run the same shape
+        // builder (parseLocalNumber etc.) in both paths so the wire
+        // format is identical.
+        if ($prefetched !== null && array_key_exists('primary_locals', $prefetched)) {
+            $primaryLocalInfo = $prefetched['primary_locals'][$userId] ?? null;
+            $primaryLocal     = $primaryLocalInfo === null
+                ? null
+                : [
+                    'id'     => (int) $primaryLocalInfo->id,
+                    'slug'   => $primaryLocalInfo->post_name,
+                    'name'   => $primaryLocalInfo->post_title,
+                    'number' => self::parseLocalNumber($primaryLocalInfo->post_title),
+                ];
+        } else {
+            $locals       = $this->resolveLocals($userId);
+            $primaryLocal = $this->resolvePrimaryLocal($userId, $locals);
+        }
+
+        // Owned-pages count — `member_owner` rows in
+        // `peepso_page_members`. Distinguishes "regular community
+        // member" from "operator/builder" at a glance on the directory.
+        if ($prefetched !== null && isset($prefetched['owned_pages_counts'])) {
+            $ownedPagesCount = $prefetched['owned_pages_counts'][$userId] ?? 0;
+        } else {
+            $ownedPagesCount = UserSyncRepository::fetchCountsForUser($userId)['pages_owned'];
+        }
+
+        // Owned-pages typed breakdown — joins page-categories to
+        // canonical type slugs. Falls back to per-row resolution
+        // (single-element batch) when `$prefetched` doesn't include
+        // the map; non-list callers are rare enough that the extra
+        // SQL is acceptable.
+        if ($prefetched !== null && isset($prefetched['owned_pages_by_type'])) {
+            $ownedPagesByType = $prefetched['owned_pages_by_type'][$userId]
+                ?? ['validator' => 0, 'project' => 0, 'nft' => 0, 'dao' => 0];
+        } else {
+            $batched = PeepSoPageRepository::getOwnedPageTypeCountsForUsers([$userId]);
+            $ownedPagesByType = $batched[$userId]
+                ?? ['validator' => 0, 'project' => 0, 'nft' => 0, 'dao' => 0];
+        }
+
+        // Back-of-card engagement counts (endorsements_received,
+        // solids_received, reviews_written, disputes_signed). Same
+        // prefer-prefetched / fall-back-to-single-user pattern as the
+        // other batched signals above.
+        if ($prefetched !== null && isset($prefetched['endorsements_received_counts'])) {
+            $endorsementsReceived = $prefetched['endorsements_received_counts'][$userId] ?? 0;
+        } else {
+            $endorsementsReceived = (new EndorsementRepository())
+                ->getReceivedCountsForUsers([$userId])[$userId] ?? 0;
+        }
+
+        // Solids: PeepSo reaction of kind=KIND_SOLID. ReactionTypeRegistry
+        // returns null when the reaction set isn't seeded yet — surface 0
+        // rather than crash; the back-of-card row is supplementary chrome.
+        $solidId = ReactionTypeRegistry::solidId();
+        if ($prefetched !== null && isset($prefetched['solids_received_counts'])) {
+            $solidsReceived = $prefetched['solids_received_counts'][$userId] ?? 0;
+        } else {
+            $solidsReceived = $solidId === null
+                ? 0
+                : $this->reactionRepo->countReceivedByUser($userId, $solidId);
+        }
+
+        if ($prefetched !== null && isset($prefetched['reviews_written_counts'])) {
+            $reviewsWritten = $prefetched['reviews_written_counts'][$userId] ?? 0;
+        } else {
+            $reviewsWritten = $this->voteRepo->countByVoter($userId);
+        }
+
+        if ($prefetched !== null && isset($prefetched['disputes_signed_counts'])) {
+            $disputesSigned = $prefetched['disputes_signed_counts'][$userId] ?? 0;
+        } else {
+            $disputesSigned = $this->flagsRepo->countByFlagger($userId);
+        }
+
+        // Verifications. X / GitHub are batched-prefetched maps of
+        // {provider_username, verified_at}; presence in the map (with a
+        // non-null verified_at) means active+verified. Wallet count is
+        // verified-only by construction.
+        if ($prefetched !== null && isset($prefetched['x_connections'])) {
+            $xConnection = $prefetched['x_connections'][$userId] ?? null;
+        } else {
+            $xConnections = (new XRepository())->getConnectionsForUsers([$userId]);
+            $xConnection  = $xConnections[$userId] ?? null;
+        }
+        if ($prefetched !== null && isset($prefetched['github_connections'])) {
+            $githubConnection = $prefetched['github_connections'][$userId] ?? null;
+        } else {
+            $githubConnections = (new GitHubRepository())->getConnectionsForUsers([$userId]);
+            $githubConnection  = $githubConnections[$userId] ?? null;
+        }
+        if ($prefetched !== null && isset($prefetched['wallets_verified_counts'])) {
+            $walletsVerified = $prefetched['wallets_verified_counts'][$userId] ?? 0;
+        } else {
+            $walletsVerified = WalletRepository::getVerifiedCountsForUsers([$userId])[$userId] ?? 0;
+        }
+
         return [
             'id'                  => $userId,
             'handle'              => $handle,
             'display_name'        => $effectiveName,
             'avatar_url'          => self::resolveAvatar($userId),
+            'cover_photo_url'     => self::resolveCoverPhotoUrl($userId),
             'joined_at'           => self::toIso8601((string) $user->user_registered),
+            'card_tier'           => $card['key'],
             'tier_label'          => $card['label'],
             'rank_label'          => $rank['label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
+            'trust_score'         => $this->resolveAugmentedTrustScore($userId),
+            'followers_count'     => $followersCount,
+            'primary_local'       => $primaryLocal,
+            'owned_pages_count'   => $ownedPagesCount,
+            'owned_pages_by_type' => $ownedPagesByType,
+            'verifications'       => [
+                'x_verified'      => $xConnection !== null && $xConnection['verified_at'] !== null,
+                'x_username'      => $xConnection['provider_username'] ?? null,
+                'github_verified' => $githubConnection !== null && $githubConnection['verified_at'] !== null,
+                'github_username' => $githubConnection['provider_username'] ?? null,
+                'wallets_verified' => $walletsVerified,
+            ],
+            'engagement' => [
+                'endorsements_received' => $endorsementsReceived,
+                'solids_received'       => $solidsReceived,
+                'reviews_written'       => $reviewsWritten,
+                'disputes_signed'       => $disputesSigned,
+            ],
         ];
     }
 

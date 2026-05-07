@@ -8,10 +8,29 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-import-type ChainRow from \BCC\Trust\Onchain\Repositories\ChainRepository
+ * @phpstan-import-type CheckpointRow from \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository
+ */
 class SettingsPage
 {
     const PAGE_SLUG  = 'bcc-onchain-signals';
     const OPT_GROUP  = 'bcc_onchain_settings';
+
+    /**
+     * Sub-tab catalogue. Operators think "onchain system health," not
+     * "validator indexing health vs NFT indexing health." UI is unified;
+     * service boundaries underneath stay strictly separate.
+     *
+     * @var array<string, string>
+     */
+    private const TABS = [
+        'validator' => 'Validator Indexer',
+        'nft'       => 'NFT Indexer',
+        'rpc'       => 'RPC / Breakers',
+        'spam'      => 'Spam Contracts',
+        'health'    => 'Health / Lag',
+    ];
 
     public static function register_page(): void
     {
@@ -27,10 +46,64 @@ class SettingsPage
 
     public static function render_page(): void
     {
-        $key_from_config = defined('BCC_ETHERSCAN_API_KEY');
+        // GET-driven sub-tab; default to validator for backwards-compat
+        // with bookmarks/links that don't carry the tab parameter.
+        $tab = isset($_GET['tab']) && is_string($_GET['tab']) ? sanitize_key($_GET['tab']) : 'validator';
+        if (!array_key_exists($tab, self::TABS)) {
+            $tab = 'validator';
+        }
         ?>
         <div class="wrap">
             <h1>BCC On-Chain Signals</h1>
+
+            <h2 class="nav-tab-wrapper">
+                <?php foreach (self::TABS as $key => $label):
+                    $url = add_query_arg(
+                        ['page' => self::PAGE_SLUG, 'tab' => $key],
+                        admin_url('admin.php')
+                    );
+                    $cls = 'nav-tab' . ($tab === $key ? ' nav-tab-active' : '');
+                ?>
+                    <a href="<?php echo esc_url($url); ?>" class="<?php echo esc_attr($cls); ?>">
+                        <?php echo esc_html($label); ?>
+                    </a>
+                <?php endforeach; ?>
+            </h2>
+
+            <?php
+            switch ($tab) {
+                case 'nft':
+                    \BCC\Trust\Onchain\Admin\Views\NftIndexerStatusView::render();
+                    break;
+                case 'rpc':
+                    self::render_rpc_breakers_tab();
+                    break;
+                case 'spam':
+                    \BCC\Trust\Onchain\Admin\Views\NftSpamContractsView::render();
+                    break;
+                case 'health':
+                    self::render_health_lag_tab();
+                    break;
+                case 'validator':
+                default:
+                    self::render_validator_tab();
+                    break;
+            }
+            ?>
+        </div>
+        <?php
+    }
+
+    /**
+     * The legacy SettingsPage content lives here under the
+     * "Validator Indexer" tab. No behaviour change — this is purely
+     * the migration of the original render_page body into a tab.
+     */
+    private static function render_validator_tab(): void
+    {
+        $key_from_config = defined('BCC_ETHERSCAN_API_KEY');
+        ?>
+        <div class="bcc-onchain-tab-validator">
 
             <?php if ($key_from_config): ?>
                 <div class="notice notice-success inline">
@@ -123,6 +196,121 @@ class SettingsPage
             <?php self::render_signal_health(); ?>
 
         </div>
+        <?php
+    }
+
+    /**
+     * RPC / circuit-breaker state per chain. Phase 1a renders the
+     * existing CircuitBreaker state read-only; per-breaker reset
+     * controls land in Phase 1c.
+     */
+    private static function render_rpc_breakers_tab(): void
+    {
+        $chains = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive();
+        ?>
+        <h2>Per-Chain Circuit Breakers</h2>
+        <p>State of <code>BCC\Trust\Onchain\Support\CircuitBreaker</code> per chain. CLOSED = traffic flows; OPEN = blocked for the cooldown window; HALF-OPEN = one probe in flight.</p>
+        <table class="widefat striped" style="max-width:700px">
+            <thead>
+                <tr><th>Chain</th><th>State</th><th>Failures</th><th>Cooldown ends</th></tr>
+            </thead>
+            <tbody>
+                <?php if ($chains === []): ?>
+                    <tr><td colspan="4"><em>No active chains.</em></td></tr>
+                <?php else: ?>
+                    <?php foreach ($chains as $chain):
+                        $cid = (int) $chain->id;
+                        $isOpen = \BCC\Trust\Onchain\Support\CircuitBreaker::isOpen($cid);
+                        $stateLabel = $isOpen ? 'OPEN / cooldown' : 'CLOSED';
+                    ?>
+                    <tr>
+                        <td><strong><?php echo esc_html((string) $chain->slug); ?></strong></td>
+                        <td><?php echo esc_html($stateLabel); ?></td>
+                        <td>—</td>
+                        <td>—</td>
+                    </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+        <p><small>Detailed failure counters + manual reset controls land with Phase 1c.</small></p>
+        <?php
+    }
+
+    /**
+     * Health / lag overview — rolls up checkpoint state across every
+     * chain plus the production-cron staleness detector. Mirrors the
+     * canonical pattern from CronService::admin_notices.
+     */
+    private static function render_health_lag_tab(): void
+    {
+        $checkpoints = \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::getAll();
+        $cronDisabled = defined('DISABLE_WP_CRON') && constant('DISABLE_WP_CRON') === true;
+        $envProd = function_exists('wp_get_environment_type') && wp_get_environment_type() === 'production';
+        $tickHook = \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK;
+        $nextTick = wp_next_scheduled($tickHook);
+        $tickOverdueSec = $nextTick ? (time() - (int) $nextTick) : 0;
+        $tickOverdue = $nextTick && $tickOverdueSec > 300; // 5-min threshold per plan
+        ?>
+
+        <h2>Production-Cron Health</h2>
+        <?php if ($envProd && !$cronDisabled): ?>
+            <div class="notice notice-error inline" style="max-width:760px">
+                <p><strong>Indexing reliability reduced.</strong> Server cron is required in production. The site is still relying on user-request-driven wp-cron, which silently lags during low-traffic periods. Add this line to your server crontab:</p>
+                <p><code>*/1 * * * * curl -s <?php echo esc_html(site_url('/wp-cron.php?doing_wp_cron')); ?> &gt;/dev/null 2&gt;&amp;1</code></p>
+                <p>And set <code>define('DISABLE_WP_CRON', true);</code> in <code>wp-config.php</code>.</p>
+            </div>
+        <?php elseif (!$envProd): ?>
+            <div class="notice notice-info inline" style="max-width:760px">
+                <p>Environment is not production; wp-cron is acceptable here. In production, real server cron is required.</p>
+            </div>
+        <?php else: ?>
+            <div class="notice notice-success inline" style="max-width:760px">
+                <p><strong>Server cron is configured.</strong> wp-cron is disabled; ticks are driven by an external scheduler.</p>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($tickOverdue): ?>
+            <div class="notice notice-error inline" style="max-width:760px">
+                <p><strong>NFT indexer tick is overdue by <?php echo (int) ($tickOverdueSec / 60); ?> minutes.</strong> Check that the server cron is firing — the next scheduled run is <?php echo esc_html(human_time_diff((int) $nextTick, time())); ?> ago.</p>
+            </div>
+        <?php endif; ?>
+
+        <h2>Per-Chain Indexer Lag</h2>
+        <table class="widefat striped" style="max-width:900px">
+            <thead>
+                <tr>
+                    <th>Chain</th>
+                    <th>State</th>
+                    <th>Last block</th>
+                    <th>Head block</th>
+                    <th>Lag (blocks)</th>
+                    <th>CU used today</th>
+                    <th>Last error</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if ($checkpoints === []): ?>
+                    <tr><td colspan="7"><em>No checkpoints recorded yet — indexer has not started.</em></td></tr>
+                <?php else: ?>
+                    <?php foreach ($checkpoints as $cp):
+                        $last = (int) $cp->last_processed_block;
+                        $head = (int) $cp->head_block;
+                        $lag  = max(0, $head - $last);
+                    ?>
+                    <tr>
+                        <td>chain_id=<?php echo (int) $cp->chain_id; ?></td>
+                        <td><strong><?php echo esc_html((string) $cp->state); ?></strong></td>
+                        <td><?php echo $last; ?></td>
+                        <td><?php echo $head; ?></td>
+                        <td><?php echo $lag; ?></td>
+                        <td><?php echo (int) $cp->cu_used_today; ?></td>
+                        <td><?php echo $cp->last_error !== null ? esc_html((string) $cp->last_error) : '—'; ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
         <?php
     }
 

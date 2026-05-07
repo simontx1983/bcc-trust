@@ -184,6 +184,12 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-delegations.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collections.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
+// V2 Phase 1a — confirmation-gated NFT indexer
+require_once BCC_TRUST_PATH . 'includes/database/schema-nft-holdings.php';
+require_once BCC_TRUST_PATH . 'includes/database/schema-chain-checkpoints.php';
+require_once BCC_TRUST_PATH . 'includes/database/schema-nft-spam-contracts.php';
+// V2 Phase 1b — Helius webhook replay protection (LRU)
+require_once BCC_TRUST_PATH . 'includes/database/schema-helius-seen-signatures.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**
@@ -198,6 +204,12 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_collections_table();
     bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_claims_table();
+    // V2 Phase 1a NFT indexer
+    bcc_onchain_create_nft_holdings_table();
+    bcc_onchain_create_chain_checkpoints_table();
+    bcc_onchain_create_nft_spam_contracts_table();
+    // V2 Phase 1b Helius replay protection
+    bcc_onchain_create_helius_seen_signatures_table();
 
     // Signals table is owned by SignalRepository — included here so its
     // column-type migrations run on version bump, not just on fresh
@@ -313,6 +325,40 @@ add_action('bcc_gated_group_provision', function () {
 // pool exceeds 40 users, see the `last_reconciled_at` rotation pattern
 // (deferred follow-up) — the current ID-ASC ordering biases toward
 // older accounts which is a reasonable v1 default.
+// V2 Phase 1a: NFT ETH indexer tick. Walks confirmed Transfer events
+// (N=12 confirmations) per chain and persists into wp_bcc_nft_holdings
+// via NftHoldingsIndexer. The handler is intentionally thin — all
+// behaviour lives in the worker class so it's testable in isolation.
+add_action(
+    \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK,
+    [\BCC\Trust\Onchain\Workers\NftEthIndexerWorker::class, 'runAllChains']
+);
+
+// V2 Phase 1a: contribute NFT-indexer + Helius-dedupe state to the
+// bcc-core system-health endpoint. The filter is owned by bcc-core
+// (apply_filters('bcc_system_health', ...)) and this is the
+// canonical extension seam — do not invent a parallel /health/indexer.
+add_filter(
+    'bcc_system_health',
+    [\BCC\Trust\Onchain\Services\NftIndexerHealthSnapshot::class, 'contribute']
+);
+
+// V2 Phase 1b: dedupe-sweep cron handler. Bounded operationally —
+// see HeliusSeenSignaturesRepository for the cap + alarm rules.
+add_action('bcc_helius_dedupe_sweep', static function (): void {
+    $stats = \BCC\Trust\Onchain\Repositories\HeliusSeenSignaturesRepository::sweep();
+    update_option('bcc_helius_dedupe_size', (int) $stats['remaining'], false);
+});
+
+// V2 Phase 1c: NFT metadata enrichment cron handler. Per-batch + per-
+// chain tick walks rows where enriched_at IS NULL and backfills name,
+// image_url, metadata_uri, collection_name via the per-chain fetcher's
+// metadata API.
+add_action(
+    \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK,
+    [\BCC\Trust\Onchain\Services\NftEnrichmentService::class, 'runAllChains']
+);
+
 add_action('bcc_gated_group_reconcile_sweep', function () {
     $userIds = get_users([
         'meta_key'   => \BCC\Trust\Onchain\Services\NftGroupGateService::USER_META_AUTO_JOIN,
@@ -650,6 +696,58 @@ add_action('plugins_loaded', function (): void {
         }
     }, 10, 3);
 
+    // V2 Phase 1b: Solana wallet → Helius shared-webhook subscription
+    // membership. Per spike 2: one shared webhook handles up to 100k
+    // addresses; we just PATCH the address list on link/unlink.
+    // Done in a fire-and-forget async dispatch so wallet-verify AJAX
+    // never blocks on a Helius API call.
+    add_action('bcc_wallet_verified', function (int $userId, string $chainSlug, string $walletAddress): void {
+        if ($chainSlug !== 'solana') {
+            return;
+        }
+        \BCC\Core\Cron\AsyncDispatcher::enqueueAsync(
+            'bcc_helius_subscribe_wallet',
+            [$userId, $walletAddress],
+            'bcc-onchain'
+        );
+    }, 10, 3);
+
+    add_action('bcc_helius_subscribe_wallet', function (int $userId, string $walletAddress): void {
+        $chain = \BCC\Trust\Onchain\Repositories\ChainRepository::getBySlug('solana');
+        if ($chain === null) {
+            return;
+        }
+        $walletLinkId = \BCC\Trust\Onchain\Repositories\WalletRepository::findIdByUserChainAddress(
+            $userId,
+            (int) $chain->id,
+            $walletAddress
+        );
+        if ($walletLinkId <= 0) {
+            return;
+        }
+        \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::addAddress($walletLinkId, $walletAddress);
+    }, 10, 2);
+
+    add_action('bcc_wallet_disconnected', function (int $userId, string $chainSlug, string $walletAddress): void {
+        if ($chainSlug !== 'solana') {
+            return;
+        }
+        // bcc_wallet_disconnected fires AFTER WalletRepository::delete()
+        // (see WalletIdentityService::unlinkWallet at bcc-core), so the
+        // wallet_links row is already gone by the time we get here.
+        // Pass walletLinkId = 0 — removeAddress recognises the
+        // already-deleted-row case and only does remote PATCH cleanup.
+        \BCC\Core\Cron\AsyncDispatcher::enqueueAsync(
+            'bcc_helius_unsubscribe_wallet',
+            [0, $walletAddress],
+            'bcc-onchain'
+        );
+    }, 10, 3);
+
+    add_action('bcc_helius_unsubscribe_wallet', function (int $walletLinkId, string $walletAddress): void {
+        \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::removeAddress($walletLinkId, $walletAddress);
+    }, 10, 2);
+
     // User deletion: clean up wallet links, signals, and claims.
     add_action('delete_user', function (int $userId): void {
         \BCC\Trust\Onchain\Repositories\WalletRepository::deleteForUser($userId);
@@ -661,6 +759,9 @@ add_action('plugins_loaded', function (): void {
     add_action('rest_api_init', [\BCC\Trust\Onchain\Controllers\SignalController::class, 'registerRoutes']);
     add_action('rest_api_init', [\BCC\Trust\Onchain\Controllers\CollectionController::class, 'registerRoutes']);
     add_action('rest_api_init', [\BCC\Trust\Onchain\Controllers\NftSelectionController::class, 'register_rest_routes']);
+    // V2 Phase 1b: Helius webhook receiver. Always-200 + tx_signature
+    // dedupe — see HeliusWebhookEndpoint for the auth + replay model.
+    add_action('rest_api_init', [\BCC\Trust\Onchain\REST\HeliusWebhookEndpoint::class, 'register']);
 
     // Manual cron triggers (admin only, CSRF-protected).
     add_action('admin_init', function () {
@@ -1070,6 +1171,32 @@ function bcc_trust_activate() {
         wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
     }
 
+    // V2 Phase 1a: NFT ETH indexer worker — confirmation-gated polling.
+    // Every minute via 'bcc_one_minute' interval registered in CronService.
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK)) {
+        wp_schedule_event(time() + 30, 'bcc_one_minute', \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK);
+    }
+
+    // V2 Phase 1b: Helius dedupe-sweep cron. Every 5 minutes deletes
+    // signatures older than 1 hour AND trims oldest-first to keep the
+    // table at ≤ 10 000 rows. Replay-protection tables turning into
+    // infinite append-only junk drawers is a known footgun — this is
+    // the bound.
+    if (!wp_next_scheduled('bcc_helius_dedupe_sweep')) {
+        wp_schedule_event(time() + 60, 'bcc_five_minutes', 'bcc_helius_dedupe_sweep');
+    }
+
+    // V2 Phase 1c: NFT enrichment scheduler. Backfills name +
+    // image_url + collection_name on freshly-indexed rows so the
+    // gallery's read-path swap doesn't render thumbnail-less rows.
+    // 5-min cadence — enrichment is not time-sensitive (worst-case a
+    // newly-minted NFT shows up in the V1 transient gallery first,
+    // then renders from the persistent table on the next page load
+    // after enrichment lands).
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK)) {
+        wp_schedule_event(time() + 90, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK);
+    }
+
     // Defensive: re-register custom intervals (top-level add_filter above
     // should already have done this; WP dedupes by callable signature).
     add_filter('cron_schedules', [\BCC\Trust\Onchain\Services\ChainRefreshService::class, 'add_cron_intervals']);
@@ -1104,6 +1231,12 @@ function bcc_trust_deactivate() {
         'bcc_onchain_retry_bonus',
         'bcc_gated_group_provision',
         'bcc_gated_group_reconcile_sweep',
+        // V2 Phase 1a: NFT indexer tick.
+        \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK,
+        // V2 Phase 1b: Helius dedupe-sweep.
+        'bcc_helius_dedupe_sweep',
+        // V2 Phase 1c: NFT enrichment scheduler.
+        \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK,
     ];
 
     foreach ($cron_hooks as $hook) {

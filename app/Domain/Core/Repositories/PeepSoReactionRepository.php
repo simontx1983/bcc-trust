@@ -119,6 +119,63 @@ final class PeepSoReactionRepository
     }
 
     /**
+     * Batched: lifetime count of `reactionTypeId` RECEIVED per user.
+     * One GROUP BY scan keyed on `act_owner_id IN (...)`. Used by
+     * list-shape consumers (e.g. /members directory back-of-card)
+     * where 24 rows × `countReceivedByUser` would issue 24 sequential
+     * INNER-JOIN COUNTs.
+     *
+     * Empty `$userIds` short-circuits to an empty map. Users with no
+     * received reactions are absent (callers default to 0).
+     *
+     * @param int[] $userIds Bounded by caller.
+     * @return array<int, int> user_id → count
+     */
+    public function countReceivedByUsers(array $userIds, int $reactionTypeId): array
+    {
+        if ($userIds === [] || $reactionTypeId <= 0) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $reactions  = self::table();
+        $activities = self::activitiesTable();
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<array{user_id: string, c: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT a.act_owner_id AS user_id, COUNT(*) AS c
+                   FROM {$reactions} r
+                   INNER JOIN {$activities} a ON a.act_id = r.reaction_act_id
+                  WHERE a.act_owner_id IN ({$placeholders})
+                    AND r.reaction_type = %d
+                  GROUP BY a.act_owner_id",
+                ...array_merge($idList, [$reactionTypeId])
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['user_id']] = (int) $row['c'];
+        }
+        return $out;
+    }
+
+    /**
      * Counts grouped by reaction_type for a given activity. Used by
      * the post-mutation response on /reactions to return the freshly-
      * updated count map without a second roundtrip.

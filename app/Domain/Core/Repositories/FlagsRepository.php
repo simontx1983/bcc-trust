@@ -135,6 +135,57 @@ class FlagsRepository
     }
 
     /**
+     * Batched: lifetime count of flags signed per user. One GROUP BY
+     * replaces N sequential `countByFlagger` calls. Used by list-shape
+     * consumers (e.g. /members directory back-of-card disputes_signed).
+     *
+     * Users with no flags are absent from the map; callers default to 0.
+     *
+     * @param int[] $userIds Bounded by caller.
+     * @return array<int, int> flagger_user_id → count
+     */
+    public function countByFlaggers(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $table = TableRegistry::flags();
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<array{flagger_user_id: string, c: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT flagger_user_id, COUNT(*) AS c
+                   FROM {$table}
+                  WHERE flagger_user_id IN ({$placeholders})
+                  GROUP BY flagger_user_id",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['flagger_user_id']] = (int) $row['c'];
+        }
+        return $out;
+    }
+
+    /**
      * Count flags signed by this user since a MySQL DATETIME boundary.
      * Used by the §O3 living header to surface today's dispute-signing
      * activity ("today: 1 dispute signed").

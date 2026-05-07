@@ -23,9 +23,13 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Log\Logger;
+use BCC\Core\PeepSo\PeepSoGifWriter;
+use BCC\Core\PeepSo\PeepSoPhotoWriter;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\Mentions\MentionExtractor;
+use BCC\Trust\Core\Services\Mentions\MentionPolicy;
 use Exception;
 
 if (!defined('ABSPATH')) {
@@ -48,6 +52,32 @@ final class PostsService
     /** §D6 — blog excerpt cap (Floor renders this, so it's bounded). */
     public const BLOG_EXCERPT_MIN_LENGTH = 80;
     public const BLOG_EXCERPT_MAX_LENGTH = 500;
+
+    /**
+     * v1.5 photo-post caption cap. Photo posts allow caption-only OR
+     * photo-only posting; when present the caption shares the same
+     * 500-char ceiling as a status post (same composer textarea, same
+     * voice). Empty caption is allowed and becomes a photo-only post.
+     */
+    public const PHOTO_CAPTION_MAX_LENGTH = 500;
+
+    /** v1.5 GIF-post caption cap. Same shape as PHOTO_CAPTION_MAX_LENGTH. */
+    public const GIF_CAPTION_MAX_LENGTH = 500;
+
+    /**
+     * v1.5 — max @-mentions per post body / caption.
+     *
+     * Mention fanout abuse (one post mass-tagging dozens of users)
+     * is a well-known attack on social systems; uncapped fanout
+     * creates a notification-spam vector. Ten is generous for
+     * legitimate social use ("thanks @a @b @c …") and clips the
+     * abuse pattern hard. Enforced server-side in createStatus /
+     * createPhotoPost / createGifPost / CommentService.
+     *
+     * Per §3.3.12 — over-cap returns `bcc_too_many_mentions` with
+     * `{max: 10}` echoed in the error payload.
+     */
+    public const MENTIONS_PER_POST_MAX = 10;
 
     /**
      * §D6 — blog full_text cap. wp_posts.post_content is LONGTEXT
@@ -94,7 +124,7 @@ final class PostsService
      *   feed_id: string,
      *   post_id: int,
      *   act_id: int
-     * }|array{error: string, message: string}
+     * }|array{error: string, message: string, data?: array<string, mixed>}
      */
     public function createStatus(int $authorId, string $content): array
     {
@@ -143,6 +173,15 @@ final class PostsService
                 'error'   => 'bcc_rate_limited',
                 'message' => 'Too fast. Wait a moment before posting again.',
             ];
+        }
+
+        // §3.3.12 — strict-reject mention tokens that fail the
+        // privacy policy (banned/blocked/hidden/private targets) or
+        // overflow the per-post cap. Runs BEFORE the writer fires so
+        // a rejected post never lands in the activity stream.
+        $mentionError = self::validateMentions($authorId, $trimmed);
+        if ($mentionError !== null) {
+            return $mentionError;
         }
 
         $result = PeepSoStatusWriter::createSelfStatus($authorId, $trimmed);
@@ -477,6 +516,205 @@ final class PostsService
     }
 
     /**
+     * Create a §1.5 photo post on the viewer's own wall.
+     *
+     * Caption is OPTIONAL — photo-only posting is a real social use
+     * case ("here's a meme", "photo from the conference"). When
+     * present the caption rides the same 500-char status cap.
+     *
+     * Storage path:
+     *   1. PeepSoPhotoWriter::createSelfPhotoPost validates the file
+     *      (mime, size), stages it in PeepSo's tmp dir, sets the
+     *      $_POST keys PeepSo's photo filter+hook chain expects, calls
+     *      `PeepSoActivity::add_post(...)` — PeepSo handles wp_post,
+     *      activity row, image processing pipeline, S3, notifications.
+     *   2. We resolve the (post_id, act_id, photo_id) triple from the
+     *      writer's response.
+     *   3. Fire `bcc_post_created` so existing §A3 subscribers (rank
+     *      progression, future analytics) light up uniformly across
+     *      status / blog / photo paths.
+     *
+     * The burst seatbelt mirrors createStatus / createBlog — same
+     * "don't let scripts flood the wall" intent.
+     *
+     * `$file` is the loose shape WP_REST_Request->get_file_params()
+     * returns — keys defined by `$_FILES` semantics but each value is
+     * `mixed` from PHPStan's perspective, so we accept the wider
+     * shape and re-narrow at the writer boundary (which already does
+     * defensive validation: error code, tmp_name, size, mime).
+     *
+     * @param array<string, mixed> $file
+     * @return array{
+     *   ok: true,
+     *   feed_id: string,
+     *   post_id: int,
+     *   act_id: int,
+     *   photo_id: int
+     * }|array{error: string, message: string, data?: array<string, mixed>}
+     */
+    public function createPhotoPost(int $authorId, array $file, string $caption): array
+    {
+        if ($authorId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        $captionTrimmed = trim($caption);
+        if (mb_strlen($captionTrimmed) > self::PHOTO_CAPTION_MAX_LENGTH) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => sprintf(
+                    'Captions cap at %d characters.',
+                    self::PHOTO_CAPTION_MAX_LENGTH
+                ),
+            ];
+        }
+
+        // Burst seatbelt — same constant as status posts (limits +
+        // window from includes/config/limits.php). Photos are heavier
+        // writes than status but social-usage frequency is comparable.
+        // NOT a primary defense; fires-in-logs is the §K1 signal.
+        $burstKey = "photo_post:{$authorId}:burst";
+        if (!Throttle::allow(
+            $burstKey,
+            BCC_TRUST_RATE_LIMIT_STATUS_POST,
+            BCC_TRUST_RATE_WINDOW_STATUS_POST
+        )) {
+            Logger::info('[PostsService] photo burst seatbelt fired', [
+                'user_id' => $authorId,
+                'limit'   => BCC_TRUST_RATE_LIMIT_STATUS_POST,
+                'window'  => BCC_TRUST_RATE_WINDOW_STATUS_POST,
+            ]);
+            return [
+                'error'   => 'bcc_rate_limited',
+                'message' => 'Too fast. Wait a moment before posting again.',
+            ];
+        }
+
+        // §3.3.12 — same write-time validation as createStatus. Runs
+        // BEFORE the writer fires so a caption with a forbidden mention
+        // token never produces a photo activity row.
+        $mentionError = self::validateMentions($authorId, $captionTrimmed);
+        if ($mentionError !== null) {
+            return $mentionError;
+        }
+
+        $result = PeepSoPhotoWriter::createSelfPhotoPost($authorId, $file, $captionTrimmed);
+        if ($result['ok'] === false) {
+            return self::mapPhotoWriterError($result['reason']);
+        }
+
+        $postId  = $result['post_id'];
+        $actId   = $result['act_id'];
+        $photoId = $result['photo_id'];
+
+        // §A3 event bus — uniform with status / blog. Subscribers
+        // attach independently and run async via Action Scheduler.
+        do_action('bcc_post_created', $authorId, $postId, $actId);
+
+        return [
+            'ok'       => true,
+            'feed_id'  => 'feed_' . $actId,
+            'post_id'  => $postId,
+            'act_id'   => $actId,
+            'photo_id' => $photoId,
+        ];
+    }
+
+    /**
+     * Create a v1.5 GIF post on the viewer's own wall.
+     *
+     * Caption is OPTIONAL (photo-only and GIF-only posts are real
+     * social use cases — "this gif says it all"). When present the
+     * caption rides the same 500-char status cap.
+     *
+     * Storage path:
+     *   1. PeepSoGifWriter::createSelfGifPost validates the URL
+     *      (must contain `giphy.com` — matches PeepSo's own check),
+     *      sets the $_POST keys PeepSo's giphy hook chain expects,
+     *      calls `PeepSoActivity::add_post(...)`. PeepSo's
+     *      `PeepSoGiphy::after_add_post` saves the URL to post_meta
+     *      `peepso_giphy` on the wp_post. The activity row keeps
+     *      `act_module_id = 1` (status) — GIF posts are
+     *      discriminated post-hoc by the post_meta in
+     *      FeedRankingService::hydrateBodies.
+     *   2. We resolve the (post_id, act_id) tuple from the writer.
+     *   3. Fire `bcc_post_created` so existing §A3 subscribers light
+     *      up uniformly across status / photo / GIF paths.
+     *
+     * Burst seatbelt mirrors createStatus / createPhotoPost.
+     *
+     * @return array{
+     *   ok: true,
+     *   feed_id: string,
+     *   post_id: int,
+     *   act_id: int
+     * }|array{error: string, message: string, data?: array<string, mixed>}
+     */
+    public function createGifPost(int $authorId, string $url, string $caption): array
+    {
+        if ($authorId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        $captionTrimmed = trim($caption);
+        if (mb_strlen($captionTrimmed) > self::GIF_CAPTION_MAX_LENGTH) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => sprintf(
+                    'Captions cap at %d characters.',
+                    self::GIF_CAPTION_MAX_LENGTH
+                ),
+            ];
+        }
+
+        // Burst seatbelt — same constants as status / photo. Honest
+        // about social-usage frequency; GIF posts shouldn't exceed
+        // status posts in burst frequency. NOT a primary defense;
+        // fires-in-logs is the §K1 signal.
+        $burstKey = "gif_post:{$authorId}:burst";
+        if (!Throttle::allow(
+            $burstKey,
+            BCC_TRUST_RATE_LIMIT_STATUS_POST,
+            BCC_TRUST_RATE_WINDOW_STATUS_POST
+        )) {
+            Logger::info('[PostsService] gif burst seatbelt fired', [
+                'user_id' => $authorId,
+                'limit'   => BCC_TRUST_RATE_LIMIT_STATUS_POST,
+                'window'  => BCC_TRUST_RATE_WINDOW_STATUS_POST,
+            ]);
+            return [
+                'error'   => 'bcc_rate_limited',
+                'message' => 'Too fast. Wait a moment before posting again.',
+            ];
+        }
+
+        // §3.3.12 — same write-time validation as status / photo.
+        $mentionError = self::validateMentions($authorId, $captionTrimmed);
+        if ($mentionError !== null) {
+            return $mentionError;
+        }
+
+        $result = PeepSoGifWriter::createSelfGifPost($authorId, $url, $captionTrimmed);
+        if ($result['ok'] === false) {
+            return self::mapGifWriterError($result['reason']);
+        }
+
+        $postId = $result['post_id'];
+        $actId  = $result['act_id'];
+
+        // §A3 event bus — uniform with status / photo. Subscribers
+        // attach independently.
+        do_action('bcc_post_created', $authorId, $postId, $actId);
+
+        return [
+            'ok'      => true,
+            'feed_id' => 'feed_' . $actId,
+            'post_id' => $postId,
+            'act_id'  => $actId,
+        ];
+    }
+
+    /**
      * Map PeepSoStatusWriter's reason codes to the BCC error envelope.
      *
      * @return array{error: string, message: string}
@@ -490,5 +728,109 @@ final class PostsService
             'persist_failed'=> ['error' => 'bcc_unavailable',     'message' => 'Could not save your post. Try again.'],
             default         => ['error' => 'bcc_unavailable',     'message' => 'Could not save your post.'],
         };
+    }
+
+    /**
+     * Map PeepSoPhotoWriter's reason codes to the BCC error envelope.
+     * Distinct from mapWriterError because the photo path has its own
+     * failure modes (file validation, mime, size cap) that don't exist
+     * on the status path.
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function mapPhotoWriterError(string $reason): array
+    {
+        return match ($reason) {
+            'unavailable'      => ['error' => 'bcc_unavailable',     'message' => 'Photo service is offline. Try again shortly.'],
+            'forbidden'        => ['error' => 'bcc_forbidden',       'message' => 'You do not have permission to post.'],
+            'upload_failed'    => ['error' => 'bcc_invalid_request', 'message' => 'Photo upload failed. Try again.'],
+            'invalid_upload'   => ['error' => 'bcc_invalid_request', 'message' => 'Invalid photo upload.'],
+            'too_large'        => ['error' => 'bcc_invalid_request', 'message' => 'Photo is too large. 5 MB max.'],
+            'unsupported_mime' => ['error' => 'bcc_invalid_request', 'message' => 'Photo must be JPEG, PNG, WebP, or GIF.'],
+            'tmp_unavailable'  => ['error' => 'bcc_unavailable',     'message' => 'Photo storage is unavailable. Try again shortly.'],
+            'persist_failed'   => ['error' => 'bcc_unavailable',     'message' => 'Could not save your photo. Try again.'],
+            default            => ['error' => 'bcc_unavailable',     'message' => 'Could not save your photo.'],
+        };
+    }
+
+    /**
+     * Map PeepSoGifWriter's reason codes to the BCC error envelope.
+     * Distinct from mapWriterError / mapPhotoWriterError because the
+     * GIF path has only one validation failure mode (URL must contain
+     * giphy.com) — no file handling, no mime check, no size cap.
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function mapGifWriterError(string $reason): array
+    {
+        return match ($reason) {
+            'unavailable'    => ['error' => 'bcc_unavailable',     'message' => 'GIF service is offline. Try again shortly.'],
+            'forbidden'      => ['error' => 'bcc_forbidden',       'message' => 'You do not have permission to post.'],
+            'invalid_url'    => ['error' => 'bcc_invalid_request', 'message' => 'GIF URL must come from Giphy.'],
+            'persist_failed' => ['error' => 'bcc_unavailable',     'message' => 'Could not save your GIF. Try again.'],
+            default          => ['error' => 'bcc_unavailable',     'message' => 'Could not save your GIF.'],
+        };
+    }
+
+    /**
+     * §3.3.12 — write-time mention validation.
+     *
+     * Strict-reject any post body whose @-mention tokens reference
+     * banned/blocked/hidden/private users (`bcc_invalid_mention_target`)
+     * or exceed the per-post cap (`bcc_too_many_mentions`).
+     *
+     * Privacy posture: failure error payloads echo the offending
+     * `user_id` but DO NOT leak the failure reason (blocked vs hidden
+     * vs banned vs private). The frontend surfaces a generic "could
+     * not mention this user" message.
+     *
+     * Returns `null` when the body passes; an error envelope when
+     * it doesn't (so the caller can `return $err` directly).
+     *
+     * @return array{error: string, message: string, data?: array<string, mixed>}|null
+     */
+    private static function validateMentions(int $authorId, string $body): ?array
+    {
+        if ($body === '') {
+            return null;
+        }
+
+        $candidateIds = MentionExtractor::extractUserIds($body);
+        if ($candidateIds === []) {
+            return null;
+        }
+
+        // Per-post cap. PeepSo's notification dispatcher fans out one
+        // notification per mentioned id — uncapped fanout is a known
+        // mention-bombing vector. The cap fires before policy filtering
+        // so a malicious caller can't probe the policy by stuffing a
+        // body with hundreds of fake ids and observing which surface
+        // in the rejection.
+        if (count($candidateIds) > self::MENTIONS_PER_POST_MAX) {
+            return [
+                'error'   => 'bcc_too_many_mentions',
+                'message' => sprintf(
+                    'You can mention up to %d people per post.',
+                    self::MENTIONS_PER_POST_MAX
+                ),
+                'data' => ['max' => self::MENTIONS_PER_POST_MAX],
+            ];
+        }
+
+        $allowed = MentionPolicy::filterMentionable($authorId, $candidateIds);
+        $allowedSet = array_fill_keys($allowed, true);
+        foreach ($candidateIds as $cid) {
+            if (!isset($allowedSet[$cid])) {
+                // Strict reject. Single offender per error response —
+                // we don't dump the full disallowed list because that
+                // would leak the policy outcome for every id at once.
+                return [
+                    'error'   => 'bcc_invalid_mention_target',
+                    'message' => 'Could not mention that user.',
+                    'data' => ['user_id' => $cid],
+                ];
+            }
+        }
+        return null;
     }
 }

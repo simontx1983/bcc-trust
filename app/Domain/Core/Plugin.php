@@ -396,11 +396,24 @@ final class Plugin
         return $this->commentRepository ??= new Repositories\CommentRepository();
     }
 
+    private ?Repositories\PhotoRepository $photoRepository = null;
+    public function photoRepository(): Repositories\PhotoRepository
+    {
+        return $this->photoRepository ??= new Repositories\PhotoRepository();
+    }
+
+    private ?Repositories\GifRepository $gifRepository = null;
+    public function gifRepository(): Repositories\GifRepository
+    {
+        return $this->gifRepository ??= new Repositories\GifRepository();
+    }
+
     private ?Services\CommentService $commentService = null;
     public function commentService(): Services\CommentService
     {
         return $this->commentService ??= new Services\CommentService(
-            $this->commentRepository()
+            $this->commentRepository(),
+            $this->mentionOverlayService()
         );
     }
 
@@ -456,7 +469,10 @@ final class Plugin
             $this->voteRepository(),
             $this->hiddenActivityRepository(),
             $this->groupContextResolver(),
-            $this->commentRepository()
+            $this->commentRepository(),
+            $this->photoRepository(),
+            $this->gifRepository(),
+            $this->mentionOverlayService()
         );
     }
 
@@ -497,6 +513,29 @@ final class Plugin
             $this->voteRepository(),
             $this->featureAccessService()
         );
+    }
+
+    /**
+     * §3.3.12 — composer @-mention picker (search-by-prefix).
+     * Stateless service; the constructor is parameter-less today
+     * but the field stays per-request-memoized so the singleton
+     * pattern matches the rest of Plugin.
+     */
+    private ?Services\Mentions\MentionSearchService $mentionSearchService = null;
+    public function mentionSearchService(): Services\Mentions\MentionSearchService
+    {
+        return $this->mentionSearchService ??= new Services\Mentions\MentionSearchService();
+    }
+
+    /**
+     * §3.3.12 — read-side overlay builder. Used by FeedRankingService
+     * (status / photo / gif body hydration) and CommentService
+     * (per-comment overlay). Stateless; same singleton pattern.
+     */
+    private ?Services\Mentions\MentionOverlayService $mentionOverlayService = null;
+    public function mentionOverlayService(): Services\Mentions\MentionOverlayService
+    {
+        return $this->mentionOverlayService ??= new Services\Mentions\MentionOverlayService();
     }
 
     /** §D6 — per-user blog tab, paginated. */
@@ -892,7 +931,16 @@ final class Plugin
         // V1 contract: §D1 Composer status posts — POST /posts.
         // Wraps PeepSoActivity::add_post via PeepSoStatusWriter
         // (single-graph rule); fires bcc_post_created on the §A3 bus.
+        // v1.5: also handles POST /posts/photo (multipart) and
+        // POST /posts/gif (Giphy URL) for the social-grammar slices.
         \BCC\Trust\Core\REST\PostsEndpoint::register();
+
+        // v1.5 integrations surface — exposes PeepSo admin-configured
+        // integration toggles (currently Giphy) to the BCC frontend
+        // so the composer can show/hide affordances based on what
+        // the admin has actually enabled. Single source of truth:
+        // PeepSo's wp_options.
+        \BCC\Trust\Core\REST\IntegrationsEndpoint::register();
 
         // V1 contract: §O1.2 Heavy celebration delivery — pending +
         // consume. Backs the rank-up / level-up / tier-upgrade toast;
