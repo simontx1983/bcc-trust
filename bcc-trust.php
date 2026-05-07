@@ -334,6 +334,15 @@ add_action(
     [\BCC\Trust\Onchain\Workers\NftEthIndexerWorker::class, 'runAllChains']
 );
 
+// V2 Phase 1a: contribute NFT-indexer + Helius-dedupe state to the
+// bcc-core system-health endpoint. The filter is owned by bcc-core
+// (apply_filters('bcc_system_health', ...)) and this is the
+// canonical extension seam — do not invent a parallel /health/indexer.
+add_filter(
+    'bcc_system_health',
+    [\BCC\Trust\Onchain\Services\NftIndexerHealthSnapshot::class, 'contribute']
+);
+
 add_action('bcc_gated_group_reconcile_sweep', function () {
     $userIds = get_users([
         'meta_key'   => \BCC\Trust\Onchain\Services\NftGroupGateService::USER_META_AUTO_JOIN,
