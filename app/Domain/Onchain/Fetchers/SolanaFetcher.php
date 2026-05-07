@@ -50,6 +50,107 @@ class SolanaFetcher implements FetcherInterface
     }
 
     // ══════════════════════════════════════════════════════════════════
+    // WEBHOOK PAYLOAD NORMALIZATION (V2 Phase 1b)
+    // ══════════════════════════════════════════════════════════════════
+
+    /**
+     * Convert a Helius "Enhanced Transactions" payload into the indexer's
+     * TransferEvent shape. Helius webhook posts an array of enriched
+     * transactions; this method takes ONE transaction object and returns
+     * a flat list of TransferEvents (one per token in tokenTransfers[]).
+     *
+     * Solana NFT model: each mint is its own unique token (no contract /
+     * token_id pair like ERC-721). We persist the mint pubkey as both
+     * `contract_address` and `token_id` so the unique-key
+     * `(wallet_link_id, contract_address, token_id)` collapses to one
+     * row per (wallet, mint) — semantically correct for Solana.
+     *
+     * Compressed NFTs (cNFTs) live inside merkle trees and use leaf
+     * `assetId` rather than a mint pubkey; Phase 1b does NOT handle
+     * cNFTs (different state model + merkle-proof requirements). They
+     * surface in `events.compressed`; we ignore them for now.
+     *
+     * Confirmation: Helius emits at "confirmed" finality (~1 slot,
+     * ~400ms), so we treat events as already past the confirmation
+     * gate. No N=12 analog needed.
+     *
+     * @param array<string, mixed> $tx  Single Helius enriched transaction
+     * @param int                  $chainId  Resolved Solana chain id
+     * @return list<array<string, mixed>>  List of TransferEvent rows
+     */
+    public function normalizeWebhookPayload(array $tx, int $chainId): array
+    {
+        if ($chainId <= 0) {
+            return [];
+        }
+
+        $signature = isset($tx['signature']) && is_string($tx['signature']) ? $tx['signature'] : '';
+        if ($signature === '') {
+            return [];
+        }
+
+        $slot      = isset($tx['slot']) ? (int) $tx['slot'] : 0;
+        $timestamp = isset($tx['timestamp']) ? (int) $tx['timestamp'] : 0;
+        $confirmedAt = $timestamp > 0
+            ? gmdate('Y-m-d H:i:s', $timestamp)
+            : current_time('mysql', true);
+
+        $rawTransfers = $tx['tokenTransfers'] ?? [];
+        if (!is_array($rawTransfers) || $rawTransfers === []) {
+            return [];
+        }
+
+        $events = [];
+        foreach ($rawTransfers as $tt) {
+            if (!is_array($tt)) {
+                continue;
+            }
+
+            $mint = isset($tt['mint']) && is_string($tt['mint']) ? $tt['mint'] : '';
+            if ($mint === '') {
+                continue;
+            }
+
+            // Skip non-NFT token transfers. Helius marks NFT mints with
+            // tokenAmount === 1; SPL fungibles report decimal amounts
+            // (often non-1). The mint's metadata could give a
+            // definitive answer but we don't have it on the hot path —
+            // the heuristic is good enough for Phase 1b. Spam filter +
+            // metadata enrichment will refine in 1c.
+            $tokenAmount = $tt['tokenAmount'] ?? null;
+            if (is_numeric($tokenAmount) && (float) $tokenAmount !== 1.0) {
+                continue;
+            }
+
+            $from = isset($tt['fromUserAccount']) && is_string($tt['fromUserAccount']) ? $tt['fromUserAccount'] : '';
+            $to   = isset($tt['toUserAccount'])   && is_string($tt['toUserAccount'])   ? $tt['toUserAccount']   : '';
+
+            // No tracked side — drop. The indexer will redo this filter
+            // post-wallet-resolve, but pre-filtering here saves the
+            // ingest layer from looking up wallets we'll never need.
+            if ($from === '' && $to === '') {
+                continue;
+            }
+
+            $events[] = [
+                'chain_id'         => $chainId,
+                'contract_address' => $mint,
+                'token_id'         => $mint,
+                'token_standard'   => 'SPL-NFT',
+                'from_address'     => $from,
+                'to_address'       => $to,
+                'amount'           => 1,
+                'block_number'     => $slot,
+                'confirmed_at'     => $confirmedAt,
+                'collection_name'  => null, // resolved in enrichment phase
+                'tx_signature'     => $signature,
+            ];
+        }
+
+        return $events;
+    }
+
+    // ══════════════════════════════════════════════════════════════════
     // VALIDATORS
     // ══════════════════════════════════════════════════════════════════
 

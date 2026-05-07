@@ -510,6 +510,72 @@ final class WalletRepository
     }
 
     /**
+     * Set the `helius_managed` flag on a single wallet link. Used when
+     * the Helius webhook subscription's address list is mutated (PATCH
+     * /v0/webhooks/:id) so the bookkeeping never drifts from the actual
+     * remote state.
+     *
+     * Per Phase 1b spike: one shared webhook handles up to 100 000
+     * addresses, so a per-wallet boolean flag is sufficient — no
+     * separate subscriptions table is needed.
+     */
+    public static function markHeliusManaged(int $walletLinkId, bool $managed): bool
+    {
+        if ($walletLinkId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        $updated = $wpdb->update(
+            self::table(),
+            ['helius_managed' => $managed ? 1 : 0],
+            ['id' => $walletLinkId],
+            ['%d'],
+            ['%d']
+        );
+
+        return is_int($updated) && $updated >= 0;
+    }
+
+    /**
+     * @return list<array{id: int, wallet_address: string}>
+     */
+    public static function listForChainBySolanaSync(int $chainId, bool $heliusManaged): array
+    {
+        if ($chainId <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{id: string, wallet_address: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, wallet_address
+               FROM {$table}
+              WHERE chain_id = %d
+                AND helius_managed = %d
+              ORDER BY id ASC
+              LIMIT 100000",
+            $chainId,
+            $heliusManaged ? 1 : 0
+        ));
+
+        if ($rows === null) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = [
+                'id'             => (int) $row->id,
+                'wallet_address' => (string) $row->wallet_address,
+            ];
+        }
+        return $out;
+    }
+
+    /**
      * Batched (chain, address) → wallet_link_id resolver. Returns map
      * keyed by lowercased address. Addresses with no link on this chain
      * are absent from the result. Used by the NftHoldingsIndexer batch
