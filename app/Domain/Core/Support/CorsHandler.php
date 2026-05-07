@@ -50,8 +50,14 @@ final class CorsHandler
     /** Methods accepted across BCC routes. Mirrors what register_rest_route declares. */
     private const ALLOWED_METHODS = 'GET, POST, PATCH, PUT, DELETE, OPTIONS';
 
-    /** Headers the frontend is allowed to send on a credentialed CORS request. */
-    private const ALLOWED_HEADERS = 'Authorization, Content-Type, X-WP-Nonce, X-Requested-With';
+    /** Headers the frontend is allowed to send on a credentialed CORS request.
+     *  `Sentry-Trace` + `Baggage` are injected by `@sentry/nextjs` for distributed
+     *  tracing on requests matching `tracePropagationTargets` in
+     *  `bcc-frontend/src/instrumentation-client.ts`. They are not "simple" CORS
+     *  headers, so the browser issues a preflight and blocks the request when
+     *  they are not on the allowlist — surfacing as "Failed to fetch" with no
+     *  further detail. */
+    private const ALLOWED_HEADERS = 'Authorization, Content-Type, X-WP-Nonce, X-Requested-With, Sentry-Trace, Baggage';
 
     public static function register(): void
     {
