@@ -196,6 +196,60 @@ final class WalletRepository
         return $rows ?: [];
     }
 
+    /**
+     * Batched: count of verified wallets per user. One GROUP BY scan
+     * keyed on `user_id IN (...)` AND `verified_at IS NOT NULL`. Used
+     * by the /members directory back-of-card to show verified-wallet
+     * count without fetching the full wallet list per user.
+     *
+     * Users with zero verified wallets are absent from the map; callers
+     * default to 0.
+     *
+     * @param int[] $userIds Bounded by caller (directory per_page cap).
+     * @return array<int, int> user_id → verified-wallet count
+     */
+    public static function getVerifiedCountsForUsers(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $table = self::table();
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<array{user_id: string, c: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT user_id, COUNT(*) AS c
+                   FROM {$table}
+                  WHERE user_id IN ({$placeholders})
+                    AND verified_at IS NOT NULL
+                  GROUP BY user_id",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['user_id']] = (int) $row['c'];
+        }
+        return $out;
+    }
+
     /** @return list<WalletWithChain> */
     public static function getForProject(int $postId, ?string $walletType = null): array
     {

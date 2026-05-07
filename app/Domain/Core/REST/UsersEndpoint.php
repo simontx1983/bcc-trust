@@ -9,6 +9,7 @@
  *   - GET /users/:handle/disputes  — §V1.5 disputes-signed, paginated
  *   - GET /users/:handle/activity  — per-user wall (PeepSo "stream"), cursor
  *   - GET /members                 — paginated member directory (offset)
+ *   - GET /users/mention-search    — §3.3.12 composer @-mention picker
  *
  * Future Phase 1 routes (will register here when they land):
  *   - GET /users/:handle — full User view-model (§4.4)
@@ -26,9 +27,19 @@ namespace BCC\Trust\Core\REST;
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Repositories\PeepSoPageRepository;
+use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\EndorsementRepository;
+use BCC\Trust\Core\Repositories\FlagsRepository;
+use BCC\Trust\Core\Repositories\GitHubRepository;
+use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
+use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Repositories\XRepository;
+use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\ReactionTypeRegistry;
+use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -63,8 +74,60 @@ final class UsersEndpoint
     private const ACTIVITY_DEFAULT_LIMIT = 20;
     private const ACTIVITY_MAX_LIMIT     = 50;
 
+    /**
+     * §3.3.12 — composer mention-picker throttle.
+     *
+     * Keystroke autocomplete is a high-frequency endpoint; the cap
+     * is loose enough to absorb a typing burst (3–6 chars typed in
+     * a second) but tight enough that a script can't enumerate the
+     * directory through repeated 1-char prefix queries.
+     */
+    private const MENTION_SEARCH_RATE_LIMIT  = 60;  // requests per window
+    private const MENTION_SEARCH_RATE_WINDOW = 60;  // seconds
+
     public static function register(): void
     {
+        // GET /users/mention-search — §3.3.12 composer @-mention picker.
+        //
+        // Registered BEFORE the `/users/:handle` catch-all because the
+        // handle pattern (`[a-z0-9][a-z0-9-]{1,18}[a-z0-9]`) accepts
+        // the literal `mention-search` as a valid handle shape. WP
+        // dispatches the first matching route in registration order, so
+        // an out-of-order registration here routes /users/mention-search
+        // into getUser('mention-search') → 404.
+        //
+        // Slim prefix-search backing the autocomplete dropdown. Distinct
+        // from /members because keystroke autocomplete needs a tighter
+        // privacy filter (no leak of hidden/banned/blocked users), a
+        // smaller payload (8 rows × 4 fields), and a higher hit rate.
+        // Routes through PeepSoUserSearch (NOT bcc-search's dormant
+        // UserSearchRepository — that one bypasses the privacy filter
+        // set; see the Phase 1d §11 scan report).
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/users/mention-search',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [new self(), 'mentionSearch'],
+                'permission_callback' => '__return_true',
+                'args'                => [
+                    'q' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'limit' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        'default'           => MentionSearchService::DEFAULT_LIMIT,
+                        'minimum'           => 1,
+                        'maximum'           => MentionSearchService::MAX_LIMIT,
+                        'sanitize_callback' => 'absint',
+                    ],
+                ],
+            ]
+        );
+
         // GET /users/:handle — full User view-model (§4.4)
         register_rest_route(
             self::ROUTE_NAMESPACE,
@@ -463,11 +526,26 @@ final class UsersEndpoint
         // itself (`$trustScoreCache`); we don't need a separate prefetch
         // for it — the per-row `resolveAugmentedTrustScore` lookup is a
         // PK-on-`bcc_reputation_scores` read, cheap.
+        // Solid reaction id can be null when the reaction set isn't
+        // seeded yet (fresh install / dev). Skip the batch query in
+        // that case — getSummary defaults solids_received to 0.
+        $solidId = ReactionTypeRegistry::solidId();
+        $solidsReceivedCounts = $solidId === null
+            ? []
+            : (new PeepSoReactionRepository())->countReceivedByUsers($userIds, $solidId);
+
         $prefetched = [
-            'follower_counts'     => PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
-            'primary_locals'      => PeepSoGroupRepository::getPrimaryLocalForUsers($userIds),
-            'owned_pages_counts'  => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
-            'owned_pages_by_type' => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
+            'follower_counts'              => PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
+            'primary_locals'               => PeepSoGroupRepository::getPrimaryLocalForUsers($userIds),
+            'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
+            'owned_pages_by_type'          => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
+            'endorsements_received_counts' => (new EndorsementRepository())->getReceivedCountsForUsers($userIds),
+            'solids_received_counts'       => $solidsReceivedCounts,
+            'reviews_written_counts'       => (new VoteRepository())->countByVoters($userIds),
+            'disputes_signed_counts'       => (new FlagsRepository())->countByFlaggers($userIds),
+            'wallets_verified_counts'      => WalletRepository::getVerifiedCountsForUsers($userIds),
+            'x_connections'                => (new XRepository())->getConnectionsForUsers($userIds),
+            'github_connections'           => (new GitHubRepository())->getConnectionsForUsers($userIds),
         ];
 
         $userView = Plugin::instance()->userViewService();
@@ -501,6 +579,80 @@ final class UsersEndpoint
         $response->header('Cache-Control', 'private, max-age=15');
         $response->header('Vary', 'Authorization, Cookie');
 
+        return $response;
+    }
+
+    /**
+     * §3.3.12 / §4.4 — composer @-mention picker.
+     *
+     * Auth-gated: anonymous → 401. The mention picker is a composer-
+     * only surface and the composer is auth-gated, so the endpoint
+     * is too. (The picker MUST NOT be a directory-discovery surface
+     * for unauthed scrapers.)
+     *
+     * Per-viewer throttle (60/60s) bounds enumeration via repeated
+     * 1-char prefix queries.
+     */
+    public function mentionSearch(WP_REST_Request $request): WP_REST_Response
+    {
+        $viewerId = get_current_user_id();
+        if ($viewerId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        $qParam = $request->get_param('q');
+        $q      = is_string($qParam) ? trim($qParam) : '';
+        if ($q === '') {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'Query parameter "q" is required.',
+                400
+            );
+        }
+        if (mb_strlen($q) > MentionSearchService::MAX_QUERY_LEN) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                sprintf(
+                    'Query caps at %d characters.',
+                    MentionSearchService::MAX_QUERY_LEN
+                ),
+                400
+            );
+        }
+
+        // Throttle key is per-viewer, not per-(viewer + q) — a typing
+        // burst across changing prefixes (`a`, `al`, `alic`, `alice`)
+        // is the normal case. The cap counts *requests*, not unique
+        // prefixes, which is what we want for enumeration defense.
+        $throttleKey = "mention_search:{$viewerId}";
+        if (!Throttle::allow(
+            $throttleKey,
+            self::MENTION_SEARCH_RATE_LIMIT,
+            self::MENTION_SEARCH_RATE_WINDOW
+        )) {
+            return ApiResponse::error(
+                'bcc_rate_limited',
+                'Too many requests. Slow down.',
+                429
+            );
+        }
+
+        $limit = (int) $request->get_param('limit');
+        if ($limit < 1) {
+            $limit = MentionSearchService::DEFAULT_LIMIT;
+        }
+        if ($limit > MentionSearchService::MAX_LIMIT) {
+            $limit = MentionSearchService::MAX_LIMIT;
+        }
+
+        $items = Plugin::instance()->mentionSearchService()->search($viewerId, $q, $limit);
+
+        $response = ApiResponse::ok(['items' => $items]);
+        // Short TTL: long enough to absorb a typing burst at the
+        // steady-state prefix, short enough that a recent join /
+        // ban / block visibility update lands within a session.
+        $response->header('Cache-Control', 'private, max-age=10');
+        $response->header('Vary', 'Authorization, Cookie');
         return $response;
     }
 

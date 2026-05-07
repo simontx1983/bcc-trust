@@ -93,6 +93,20 @@ if (!class_exists('PeepSo')) {
          * @return mixed
          */
         public static function get_option(string $key, $default = null) { return $default; }
+        /** @return mixed */
+        public static function get_option_new(string $key) { return null; }
+    }
+}
+
+if (!class_exists('PeepSoUserSearch')) {
+    class PeepSoUserSearch {
+        /** @var list<int|numeric-string> */
+        public array $results = [];
+        public int $total = 0;
+        /**
+         * @param array<string, mixed> $args
+         */
+        public function __construct(array $args = [], ?int $user_id = null, string $search = '') {}
     }
 }
 

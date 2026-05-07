@@ -162,10 +162,15 @@ final class CommentsEndpoint
 
         $result = $this->commentService()->createComment($feedId, $authorId, $body);
         if (isset($result['error'])) {
+            // Forward the optional `data` block — §3.3.12 mention errors
+            // ride here with `{user_id}` / `{max}` payloads.
+            /** @var array<string, mixed>|null $errData */
+            $errData = isset($result['data']) && is_array($result['data']) ? $result['data'] : null;
             return ApiResponse::error(
                 $result['error'],
                 $result['message'] ?? 'Could not post comment.',
-                self::statusFor($result['error'])
+                self::statusFor($result['error']),
+                $errData
             );
         }
 
@@ -211,14 +216,16 @@ final class CommentsEndpoint
     private static function statusFor(string $code): int
     {
         return match ($code) {
-            'bcc_unauthorized'    => 401,
-            'bcc_forbidden'       => 403,
-            'bcc_not_found'       => 404,
-            'bcc_invalid_request' => 400,
-            'bcc_rate_limited'    => 429,
-            'bcc_unavailable'     => 503,
-            'bcc_internal_error'  => 500,
-            default               => 500,
+            'bcc_unauthorized'           => 401,
+            'bcc_forbidden'              => 403,
+            'bcc_not_found'              => 404,
+            'bcc_invalid_request'        => 400,
+            'bcc_invalid_mention_target' => 400,
+            'bcc_too_many_mentions'      => 400,
+            'bcc_rate_limited'           => 429,
+            'bcc_unavailable'            => 503,
+            'bcc_internal_error'         => 500,
+            default                      => 500,
         };
     }
 }

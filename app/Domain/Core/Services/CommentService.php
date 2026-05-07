@@ -36,6 +36,9 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Repositories\CommentRepository;
+use BCC\Trust\Core\Services\Mentions\MentionExtractor;
+use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
+use BCC\Trust\Core\Services\Mentions\MentionPolicy;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -51,6 +54,9 @@ final class CommentService
      *  via site_status_limit but we tighten in BCC for the warmer
      *  social grammar — long essays belong in blog posts. */
     public const COMMENT_MAX_LENGTH = 2000;
+
+    /** §3.3.12 — same per-post mention cap as PostsService. */
+    public const MENTIONS_PER_COMMENT_MAX = 10;
 
     /**
      * Group-membership statuses that allow a viewer to read content
@@ -89,7 +95,8 @@ final class CommentService
     ];
 
     public function __construct(
-        private readonly CommentRepository $commentRepo
+        private readonly CommentRepository $commentRepo,
+        private readonly MentionOverlayService $mentionOverlay
     ) {
     }
 
@@ -143,7 +150,7 @@ final class CommentService
         $lastTime  = null;
         $lastActId = null;
         foreach ($rows as $row) {
-            $items[] = self::shapeCommentRow($row, $viewerId, $feedId);
+            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId);
             $lastTime  = (string) $row->posted_at;
             $lastActId = (int) $row->act_id;
         }
@@ -166,7 +173,7 @@ final class CommentService
      * @return array{
      *   ok: true,
      *   comment: array<string, mixed>
-     * }|array{error: string, message: string}
+     * }|array{error: string, message: string, data?: array<string, mixed>}
      */
     public function createComment(string $feedId, int $authorId, string $content): array
     {
@@ -183,6 +190,15 @@ final class CommentService
                 'error'   => 'bcc_invalid_request',
                 'message' => sprintf('Comments cap at %d characters.', self::COMMENT_MAX_LENGTH),
             ];
+        }
+
+        // §3.3.12 — same write-time mention validation as PostsService.
+        // Strict reject hidden/blocked/banned/private targets; cap
+        // mention fanout at MENTIONS_PER_COMMENT_MAX before PeepSo's
+        // Tags::after_save_comment dispatcher fires.
+        $mentionError = self::validateMentions($authorId, $trimmed);
+        if ($mentionError !== null) {
+            return $mentionError;
         }
 
         $actId = self::parseFeedId($feedId);
@@ -261,7 +277,7 @@ final class CommentService
             return ['error' => 'bcc_unavailable', 'message' => 'Comment was saved but could not be confirmed. Refresh to see it.'];
         }
 
-        $shaped = self::shapeCommentRow($newRow, $authorId, $feedId);
+        $shaped = $this->shapeCommentRow($newRow, $authorId, $feedId);
 
         // §A3 event — single emission per state change. Subscribers
         // (NotificationDispatcher, future analytics) attach independently.
@@ -383,11 +399,12 @@ final class CommentService
      *                              round-trip.
      * @return array<string, mixed>
      */
-    private static function shapeCommentRow(object $row, int $viewerId, string $parentFeedId): array
+    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId): array
     {
         $authorId = (int) $row->author_id;
         $authorHandle = (string) $row->author_login;
         $displayName  = (string) $row->author_display_name;
+        $body         = (string) $row->body;
 
         return [
             'id'          => 'comment_' . (int) $row->act_id,
@@ -399,7 +416,10 @@ final class CommentService
                 'display_name' => $displayName !== '' ? $displayName : $authorHandle,
                 'avatar_url'   => self::resolveAvatarUrl($authorId),
             ],
-            'body'        => (string) $row->body,
+            'body'        => $body,
+            // §3.3.12 — overlay extracted from raw body. Always present
+            // (`[]` when no tokens) for shape stability.
+            'mentions'    => $this->mentionOverlay->buildOverlay($body),
             'posted_at'   => self::toIso8601((string) $row->posted_at),
             'permissions' => [
                 // Author can always delete own; cross-author + admin
@@ -514,5 +534,53 @@ final class CommentService
         }
         $value = (int) $rest;
         return $value > 0 ? $value : null;
+    }
+
+    /**
+     * §3.3.12 — write-time mention validation. Mirrors
+     * PostsService::validateMentions exactly; duplicated here rather
+     * than reaching into PostsService because comments are an
+     * independent service surface and the policy decision needs to
+     * be local. (If a third write-side ever needs the same check,
+     * extract a shared `MentionValidator::validate($viewerId, $body,
+     * $cap): ?array` helper — for two callers, the duplication is
+     * cheaper than the indirection.)
+     *
+     * @return array{error: string, message: string, data?: array<string, mixed>}|null
+     */
+    private static function validateMentions(int $authorId, string $body): ?array
+    {
+        if ($body === '') {
+            return null;
+        }
+
+        $candidateIds = MentionExtractor::extractUserIds($body);
+        if ($candidateIds === []) {
+            return null;
+        }
+
+        if (count($candidateIds) > self::MENTIONS_PER_COMMENT_MAX) {
+            return [
+                'error'   => 'bcc_too_many_mentions',
+                'message' => sprintf(
+                    'You can mention up to %d people per comment.',
+                    self::MENTIONS_PER_COMMENT_MAX
+                ),
+                'data' => ['max' => self::MENTIONS_PER_COMMENT_MAX],
+            ];
+        }
+
+        $allowed = MentionPolicy::filterMentionable($authorId, $candidateIds);
+        $allowedSet = array_fill_keys($allowed, true);
+        foreach ($candidateIds as $cid) {
+            if (!isset($allowedSet[$cid])) {
+                return [
+                    'error'   => 'bcc_invalid_mention_target',
+                    'message' => 'Could not mention that user.',
+                    'data' => ['user_id' => $cid],
+                ];
+            }
+        }
+        return null;
     }
 }

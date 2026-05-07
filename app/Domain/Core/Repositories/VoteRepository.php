@@ -976,6 +976,54 @@ class VoteRepository {
     }
 
     /**
+     * Batched: count of active votes per voter for a list of voter ids.
+     * Single GROUP BY replaces N sequential `countByVoter` calls.
+     * Voters with no votes are absent from the map; callers default to 0.
+     *
+     * @param int[] $voterIds Bounded by caller.
+     * @return array<int, int> voter_user_id → count
+     */
+    public function countByVoters( array $voterIds ): array {
+        if ($voterIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($voterIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<array{voter_user_id: string, c: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT voter_user_id, COUNT(*) AS c
+                   FROM {$this->table}
+                  WHERE voter_user_id IN ({$placeholders})
+                    AND status = 1
+                  GROUP BY voter_user_id",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['voter_user_id']] = (int) $row['c'];
+        }
+        return $out;
+    }
+
+    /**
      * Count active votes by voter since a MySQL DATETIME boundary.
      * Used by the §O3 living header for today's reviews_written count.
      */

@@ -40,12 +40,15 @@ use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Repositories\PeepSoPageRepository;
+use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\FlagsRepository;
+use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\ReputationEventRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\RankCatalog;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
@@ -271,11 +274,27 @@ final class UserViewService
      * slug don't contribute to any bucket but still increment the
      * total `owned_pages_count`.
      *
+     * `cover_photo_url`, `verifications`, and `engagement` populate the
+     * back-of-card "trust dossier" on the directory's flippable cards.
+     * All four `engagement` counts (endorsements_received, solids_received,
+     * reviews_written, disputes_signed) come from established single-user
+     * resolvers; the prefetch path collapses the per-row N+1 to one
+     * batched SQL each. `verifications.x_*` and `verifications.github_*`
+     * are connection presence + provider username for the X / GitHub
+     * social-link panel; tokens are NEVER decrypted into this payload.
+     *
      * @param array{
      *   follower_counts?: array<int, int>,
      *   primary_locals?: array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>,
      *   owned_pages_counts?: array<int, int>,
-     *   owned_pages_by_type?: array<int, array{validator: int, project: int, nft: int, dao: int}>
+     *   owned_pages_by_type?: array<int, array{validator: int, project: int, nft: int, dao: int}>,
+     *   endorsements_received_counts?: array<int, int>,
+     *   solids_received_counts?: array<int, int>,
+     *   reviews_written_counts?: array<int, int>,
+     *   disputes_signed_counts?: array<int, int>,
+     *   wallets_verified_counts?: array<int, int>,
+     *   x_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>,
+     *   github_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>
      * }|null $prefetched
      *
      * @return array{
@@ -283,6 +302,7 @@ final class UserViewService
      *   handle: string,
      *   display_name: string,
      *   avatar_url: string,
+     *   cover_photo_url: string|null,
      *   joined_at: string,
      *   card_tier: string|null,
      *   tier_label: string|null,
@@ -293,7 +313,20 @@ final class UserViewService
      *   followers_count: int,
      *   primary_local: array{id: int, slug: string, name: string, number: int|null}|null,
      *   owned_pages_count: int,
-     *   owned_pages_by_type: array{validator: int, project: int, nft: int, dao: int}
+     *   owned_pages_by_type: array{validator: int, project: int, nft: int, dao: int},
+     *   verifications: array{
+     *     x_verified: bool,
+     *     x_username: string|null,
+     *     github_verified: bool,
+     *     github_username: string|null,
+     *     wallets_verified: int
+     *   },
+     *   engagement: array{
+     *     endorsements_received: int,
+     *     solids_received: int,
+     *     reviews_written: int,
+     *     disputes_signed: int
+     *   }
      * }|null
      */
     public function getSummary(int $userId, int $viewerId, ?array $prefetched = null): ?array
@@ -366,11 +399,69 @@ final class UserViewService
                 ?? ['validator' => 0, 'project' => 0, 'nft' => 0, 'dao' => 0];
         }
 
+        // Back-of-card engagement counts (endorsements_received,
+        // solids_received, reviews_written, disputes_signed). Same
+        // prefer-prefetched / fall-back-to-single-user pattern as the
+        // other batched signals above.
+        if ($prefetched !== null && isset($prefetched['endorsements_received_counts'])) {
+            $endorsementsReceived = $prefetched['endorsements_received_counts'][$userId] ?? 0;
+        } else {
+            $endorsementsReceived = (new EndorsementRepository())
+                ->getReceivedCountsForUsers([$userId])[$userId] ?? 0;
+        }
+
+        // Solids: PeepSo reaction of kind=KIND_SOLID. ReactionTypeRegistry
+        // returns null when the reaction set isn't seeded yet — surface 0
+        // rather than crash; the back-of-card row is supplementary chrome.
+        $solidId = ReactionTypeRegistry::solidId();
+        if ($prefetched !== null && isset($prefetched['solids_received_counts'])) {
+            $solidsReceived = $prefetched['solids_received_counts'][$userId] ?? 0;
+        } else {
+            $solidsReceived = $solidId === null
+                ? 0
+                : $this->reactionRepo->countReceivedByUser($userId, $solidId);
+        }
+
+        if ($prefetched !== null && isset($prefetched['reviews_written_counts'])) {
+            $reviewsWritten = $prefetched['reviews_written_counts'][$userId] ?? 0;
+        } else {
+            $reviewsWritten = $this->voteRepo->countByVoter($userId);
+        }
+
+        if ($prefetched !== null && isset($prefetched['disputes_signed_counts'])) {
+            $disputesSigned = $prefetched['disputes_signed_counts'][$userId] ?? 0;
+        } else {
+            $disputesSigned = $this->flagsRepo->countByFlagger($userId);
+        }
+
+        // Verifications. X / GitHub are batched-prefetched maps of
+        // {provider_username, verified_at}; presence in the map (with a
+        // non-null verified_at) means active+verified. Wallet count is
+        // verified-only by construction.
+        if ($prefetched !== null && isset($prefetched['x_connections'])) {
+            $xConnection = $prefetched['x_connections'][$userId] ?? null;
+        } else {
+            $xConnections = (new XRepository())->getConnectionsForUsers([$userId]);
+            $xConnection  = $xConnections[$userId] ?? null;
+        }
+        if ($prefetched !== null && isset($prefetched['github_connections'])) {
+            $githubConnection = $prefetched['github_connections'][$userId] ?? null;
+        } else {
+            $githubConnections = (new GitHubRepository())->getConnectionsForUsers([$userId]);
+            $githubConnection  = $githubConnections[$userId] ?? null;
+        }
+        if ($prefetched !== null && isset($prefetched['wallets_verified_counts'])) {
+            $walletsVerified = $prefetched['wallets_verified_counts'][$userId] ?? 0;
+        } else {
+            $walletsVerified = WalletRepository::getVerifiedCountsForUsers([$userId])[$userId] ?? 0;
+        }
+
         return [
             'id'                  => $userId,
             'handle'              => $handle,
             'display_name'        => $effectiveName,
             'avatar_url'          => self::resolveAvatar($userId),
+            'cover_photo_url'     => self::resolveCoverPhotoUrl($userId),
             'joined_at'           => self::toIso8601((string) $user->user_registered),
             'card_tier'           => $card['key'],
             'tier_label'          => $card['label'],
@@ -382,6 +473,19 @@ final class UserViewService
             'primary_local'       => $primaryLocal,
             'owned_pages_count'   => $ownedPagesCount,
             'owned_pages_by_type' => $ownedPagesByType,
+            'verifications'       => [
+                'x_verified'      => $xConnection !== null && $xConnection['verified_at'] !== null,
+                'x_username'      => $xConnection['provider_username'] ?? null,
+                'github_verified' => $githubConnection !== null && $githubConnection['verified_at'] !== null,
+                'github_username' => $githubConnection['provider_username'] ?? null,
+                'wallets_verified' => $walletsVerified,
+            ],
+            'engagement' => [
+                'endorsements_received' => $endorsementsReceived,
+                'solids_received'       => $solidsReceived,
+                'reviews_written'       => $reviewsWritten,
+                'disputes_signed'       => $disputesSigned,
+            ],
         ];
     }
 

@@ -146,6 +146,64 @@ class GitHubRepository {
     |--------------------------------------------------------------------------
     */
 
+    /**
+     * Batched: lifetime GitHub-connection summary per user. Returns
+     * only the public-display fields the directory needs (provider
+     * username + verified_at). Users without an active GitHub
+     * connection are absent from the map.
+     *
+     * Empty `$userIds` short-circuits to an empty map.
+     *
+     * @param int[] $userIds Bounded by caller (directory per_page cap).
+     * @return array<int, array{provider_username: string|null, verified_at: string|null}>
+     */
+    public function getConnectionsForUsers(array $userIds): array {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<array{user_id: string, provider_username: string|null, verified_at: string|null}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT user_id, provider_username, verified_at
+                   FROM {$this->table}
+                  WHERE type = 'github'
+                    AND status = 'active'
+                    AND user_id IN ({$placeholders})",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['user_id']] = [
+                'provider_username' => $row['provider_username'] !== null
+                    ? (string) $row['provider_username']
+                    : null,
+                'verified_at' => $row['verified_at'] !== null
+                    ? (string) $row['verified_at']
+                    : null,
+            ];
+        }
+        return $out;
+    }
+
     public function getConnection(int $userId): ?GitHubConnectionDTO {
 
         global $wpdb;
