@@ -723,21 +723,14 @@ add_action('plugins_loaded', function (): void {
         if ($chainSlug !== 'solana') {
             return;
         }
-        // Resolve wallet_link_id BEFORE the row is deleted by the
-        // disconnect handler — but in practice wallet_disconnected
-        // fires before the delete. Use lookup-then-pass-through.
-        $chain = \BCC\Trust\Onchain\Repositories\ChainRepository::getBySlug('solana');
-        if ($chain === null) {
-            return;
-        }
-        $walletLinkId = \BCC\Trust\Onchain\Repositories\WalletRepository::findIdByUserChainAddress(
-            $userId,
-            (int) $chain->id,
-            $walletAddress
-        );
+        // bcc_wallet_disconnected fires AFTER WalletRepository::delete()
+        // (see WalletIdentityService::unlinkWallet at bcc-core), so the
+        // wallet_links row is already gone by the time we get here.
+        // Pass walletLinkId = 0 — removeAddress recognises the
+        // already-deleted-row case and only does remote PATCH cleanup.
         \BCC\Core\Cron\AsyncDispatcher::enqueueAsync(
             'bcc_helius_unsubscribe_wallet',
-            [$walletLinkId, $walletAddress],
+            [0, $walletAddress],
             'bcc-onchain'
         );
     }, 10, 3);

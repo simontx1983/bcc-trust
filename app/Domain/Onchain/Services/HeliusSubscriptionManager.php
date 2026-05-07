@@ -127,18 +127,28 @@ final class HeliusSubscriptionManager
 
     /**
      * Remove a Solana wallet address from the shared webhook. Idempotent.
+     *
+     * `$walletLinkId` may be 0 when the wallet_links row has already been
+     * deleted (the canonical case — `bcc_wallet_disconnected` fires AFTER
+     * `WalletRepository::delete()` per `WalletIdentityService::unlinkWallet`).
+     * In that case we still PATCH the remote address list (drift is the
+     * real risk) but skip the local-flag update because there's no row
+     * to flip. When the caller does have a valid id (e.g., manual
+     * operator action on a still-present row), we update the flag too.
      */
     public static function removeAddress(int $walletLinkId, string $walletAddress): bool
     {
-        if ($walletLinkId <= 0 || $walletAddress === '') {
+        if ($walletAddress === '') {
             return false;
         }
 
         $webhookId = (string) get_option(self::OPTION_WEBHOOK_ID, '');
         if ($webhookId === '') {
-            // No webhook provisioned — clear the flag locally so we
-            // don't leave stale bookkeeping behind.
-            WalletRepository::markHeliusManaged($walletLinkId, false);
+            // No webhook provisioned — flip the local flag if a row
+            // exists so we don't leave stale bookkeeping behind.
+            if ($walletLinkId > 0) {
+                WalletRepository::markHeliusManaged($walletLinkId, false);
+            }
             return true;
         }
 
@@ -148,15 +158,19 @@ final class HeliusSubscriptionManager
         }
         $next = array_values(array_filter($current, static fn ($a) => $a !== $walletAddress));
         if (count($next) === count($current)) {
-            // Address wasn't there — still flip the local flag.
-            WalletRepository::markHeliusManaged($walletLinkId, false);
+            // Address wasn't on the remote list — still flip the local flag.
+            if ($walletLinkId > 0) {
+                WalletRepository::markHeliusManaged($walletLinkId, false);
+            }
             return true;
         }
 
         if (!self::patchAddresses($webhookId, $next)) {
             return false;
         }
-        WalletRepository::markHeliusManaged($walletLinkId, false);
+        if ($walletLinkId > 0) {
+            WalletRepository::markHeliusManaged($walletLinkId, false);
+        }
         return true;
     }
 
