@@ -15,9 +15,11 @@ if (!defined('ABSPATH')) {
  * Read + write surface for the deny/allow rules consumed by
  * NftSpamFilter on the indexer write path.
  *
- * GET-handled add / remove with nonces. Form posts back to the same
- * sub-tab so the redirect-after-success / redirect-after-error
- * pattern keeps the URL clean for bookmarking.
+ * POST-handled add / remove. State-changing actions use POST + an
+ * action-bound nonce verified via check_admin_referer, mirroring the
+ * DisputeAdmin pattern. Forms omit the action= attribute so the
+ * browser posts back to the current admin URL (which carries
+ * ?page=bcc-onchain-signals&tab=spam in the query string).
  *
  * @phpstan-import-type ChainRow from ChainRepository
  * @phpstan-import-type SpamContractRow from NftSpamContractRepository
@@ -45,9 +47,7 @@ final class NftSpamContractsView
             for audit; user-facing reads filter them out structurally.
         </p>
 
-        <form method="get" action="<?php echo esc_url(admin_url('admin.php')); ?>" style="margin-bottom:24px">
-            <input type="hidden" name="page" value="bcc-onchain-signals">
-            <input type="hidden" name="tab" value="spam">
+        <form method="post" style="margin-bottom:24px">
             <input type="hidden" name="action" value="add">
             <?php wp_nonce_field('bcc_nft_spam_add', '_wpnonce'); ?>
             <table class="form-table" role="presentation">
@@ -103,15 +103,6 @@ final class NftSpamContractsView
                         $cid     = (int) $r->chain_id;
                         $slug    = $slugMap[$cid] ?? ('chain_id=' . $cid);
                         $contract = (string) $r->contract_address;
-                        $removeNonce = wp_create_nonce('bcc_nft_spam_remove_' . $cid . '_' . $contract);
-                        $removeUrl   = add_query_arg([
-                            'page'     => 'bcc-onchain-signals',
-                            'tab'      => 'spam',
-                            'action'   => 'remove',
-                            'chain_id' => $cid,
-                            'contract' => $contract,
-                            '_wpnonce' => $removeNonce,
-                        ], admin_url('admin.php'));
                     ?>
                     <tr>
                         <td><?php echo esc_html($slug); ?></td>
@@ -119,7 +110,15 @@ final class NftSpamContractsView
                         <td><strong><?php echo esc_html((string) $r->rule); ?></strong></td>
                         <td><?php echo $r->reason !== null ? esc_html((string) $r->reason) : '—'; ?></td>
                         <td><?php echo esc_html((string) $r->created_at); ?></td>
-                        <td><a class="button" href="<?php echo esc_url($removeUrl); ?>">Remove</a></td>
+                        <td>
+                            <form method="post" style="display:inline" onsubmit="return confirm('Remove this rule?');">
+                                <input type="hidden" name="action" value="remove">
+                                <input type="hidden" name="chain_id" value="<?php echo (int) $cid; ?>">
+                                <input type="hidden" name="contract" value="<?php echo esc_attr($contract); ?>">
+                                <?php wp_nonce_field('bcc_nft_spam_remove_' . $cid . '_' . $contract, '_wpnonce'); ?>
+                                <button type="submit" class="button">Remove</button>
+                            </form>
+                        </td>
                     </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>
@@ -130,24 +129,25 @@ final class NftSpamContractsView
 
     private static function handleActions(): void
     {
-        if (!isset($_GET['action'])) {
+        if (!isset($_POST['action'])) {
             return;
         }
         if (!current_user_can('manage_options')) {
             return;
         }
 
-        $action = sanitize_key((string) $_GET['action']);
-        $nonce  = isset($_GET['_wpnonce']) ? (string) $_GET['_wpnonce'] : '';
+        $action = sanitize_key((string) $_POST['action']);
 
         if ($action === 'add') {
-            if (!wp_verify_nonce($nonce, 'bcc_nft_spam_add')) {
-                return;
-            }
-            $cid      = isset($_GET['chain_id']) ? (int) $_GET['chain_id'] : 0;
-            $contract = isset($_GET['contract']) ? trim(sanitize_text_field((string) $_GET['contract'])) : '';
-            $rule     = isset($_GET['rule']) ? sanitize_key((string) $_GET['rule']) : '';
-            $reason   = isset($_GET['reason']) ? sanitize_text_field((string) $_GET['reason']) : '';
+            // Action-bound nonce; check_admin_referer wp_die()s on failure
+            // (403) so we never reach the write path with a forged or
+            // missing nonce. Mirrors DisputeAdmin::handle_actions.
+            check_admin_referer('bcc_nft_spam_add');
+
+            $cid      = isset($_POST['chain_id']) ? (int) $_POST['chain_id'] : 0;
+            $contract = isset($_POST['contract']) ? trim(sanitize_text_field((string) $_POST['contract'])) : '';
+            $rule     = isset($_POST['rule']) ? sanitize_key((string) $_POST['rule']) : '';
+            $reason   = isset($_POST['reason']) ? sanitize_text_field((string) $_POST['reason']) : '';
 
             if ($cid <= 0 || $contract === '' || !in_array($rule, ['deny', 'allow'], true)) {
                 add_settings_error('bcc_nft_spam', 'add_invalid', 'Missing required fields.', 'error');
@@ -161,14 +161,13 @@ final class NftSpamContractsView
         }
 
         if ($action === 'remove') {
-            $cid      = isset($_GET['chain_id']) ? (int) $_GET['chain_id'] : 0;
-            $contract = isset($_GET['contract']) ? (string) $_GET['contract'] : '';
+            $cid      = isset($_POST['chain_id']) ? (int) $_POST['chain_id'] : 0;
+            $contract = isset($_POST['contract']) ? (string) $_POST['contract'] : '';
             if ($cid <= 0 || $contract === '') {
                 return;
             }
-            if (!wp_verify_nonce($nonce, 'bcc_nft_spam_remove_' . $cid . '_' . $contract)) {
-                return;
-            }
+            check_admin_referer('bcc_nft_spam_remove_' . $cid . '_' . $contract);
+
             if (NftSpamContractRepository::removeRule($cid, $contract)) {
                 add_settings_error('bcc_nft_spam', 'remove_ok', 'Rule removed.', 'updated');
             } else {

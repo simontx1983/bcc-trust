@@ -508,8 +508,11 @@ final class UsersEndpoint
         if ($q !== '') {
             // Bound the query string to a sane length so a deliberately
             // pathological search doesn't blow up the LIKE planner.
+            // WP_User_Query::prepare_query() already applies esc_like() +
+            // $wpdb->prepare() to the `search` arg, so escaping here would
+            // double-escape and silently break inputs like "O'Brien".
             $needle = mb_substr($q, 0, 64);
-            $args['search']         = '*' . esc_sql($needle) . '*';
+            $args['search']         = '*' . $needle . '*';
             $args['search_columns'] = ['user_login', 'display_name', 'user_nicename'];
         }
 
