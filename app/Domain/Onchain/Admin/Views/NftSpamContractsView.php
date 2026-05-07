@@ -18,6 +18,9 @@ if (!defined('ABSPATH')) {
  * GET-handled add / remove with nonces. Form posts back to the same
  * sub-tab so the redirect-after-success / redirect-after-error
  * pattern keeps the URL clean for bookmarking.
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
+ * @phpstan-import-type SpamContractRow from NftSpamContractRepository
  */
 final class NftSpamContractsView
 {
@@ -31,9 +34,7 @@ final class NftSpamContractsView
         // chain_id → slug map for display.
         $slugMap = [];
         foreach ($chains as $chain) {
-            if (is_object($chain)) {
-                $slugMap[(int) ($chain->id ?? 0)] = (string) ($chain->slug ?? '');
-            }
+            $slugMap[(int) $chain->id] = (string) $chain->slug;
         }
         ?>
         <h2>NFT Spam-Contract Rules</h2>

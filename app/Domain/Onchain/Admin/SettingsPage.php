@@ -8,6 +8,10 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-import-type ChainRow from \BCC\Trust\Onchain\Repositories\ChainRepository
+ * @phpstan-import-type CheckpointRow from \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository
+ */
 class SettingsPage
 {
     const PAGE_SLUG  = 'bcc-onchain-signals';
@@ -211,17 +215,16 @@ class SettingsPage
                 <tr><th>Chain</th><th>State</th><th>Failures</th><th>Cooldown ends</th></tr>
             </thead>
             <tbody>
-                <?php if (!is_array($chains) || $chains === []): ?>
+                <?php if ($chains === []): ?>
                     <tr><td colspan="4"><em>No active chains.</em></td></tr>
                 <?php else: ?>
                     <?php foreach ($chains as $chain):
-                        if (!is_object($chain)) { continue; }
-                        $cid = (int) ($chain->id ?? 0);
+                        $cid = (int) $chain->id;
                         $isOpen = \BCC\Trust\Onchain\Support\CircuitBreaker::isOpen($cid);
                         $stateLabel = $isOpen ? 'OPEN / cooldown' : 'CLOSED';
                     ?>
                     <tr>
-                        <td><strong><?php echo esc_html((string) ($chain->slug ?? '')); ?></strong></td>
+                        <td><strong><?php echo esc_html((string) $chain->slug); ?></strong></td>
                         <td><?php echo esc_html($stateLabel); ?></td>
                         <td>—</td>
                         <td>—</td>
@@ -242,7 +245,7 @@ class SettingsPage
     private static function render_health_lag_tab(): void
     {
         $checkpoints = \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::getAll();
-        $cronDisabled = defined('DISABLE_WP_CRON') && DISABLE_WP_CRON;
+        $cronDisabled = defined('DISABLE_WP_CRON') && constant('DISABLE_WP_CRON') === true;
         $envProd = function_exists('wp_get_environment_type') && wp_get_environment_type() === 'production';
         $tickHook = \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK;
         $nextTick = wp_next_scheduled($tickHook);

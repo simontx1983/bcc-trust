@@ -46,6 +46,9 @@ final class ChainCheckpointRepository
         return DB::table('chain_checkpoints');
     }
 
+    /**
+     * @return CheckpointRow|null
+     */
     public static function get(int $chainId): ?object
     {
         if ($chainId <= 0) {
@@ -56,6 +59,7 @@ final class ChainCheckpointRepository
         $table = self::table();
         $cols  = self::COLUMNS;
 
+        /** @var CheckpointRow|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
             "SELECT {$cols}
                FROM {$table}
@@ -64,11 +68,11 @@ final class ChainCheckpointRepository
             $chainId
         ));
 
-        return is_object($row) ? $row : null;
+        return $row;
     }
 
     /**
-     * @return list<object>
+     * @return list<CheckpointRow>
      */
     public static function getAll(): array
     {
@@ -79,8 +83,9 @@ final class ChainCheckpointRepository
         // No LIMIT here is bounded by the chains table (~10 rows in
         // practice; new chains are admin-curated). This is the one
         // intentional unbounded read in the repo.
+        /** @var list<CheckpointRow>|null $rows */
         $rows = $wpdb->get_results("SELECT {$cols} FROM {$table} ORDER BY chain_id ASC");
-        return is_array($rows) ? $rows : [];
+        return $rows ?: [];
     }
 
     /**
@@ -221,6 +226,7 @@ final class ChainCheckpointRepository
         // in two steps inside one transaction.
         $wpdb->query('START TRANSACTION');
         try {
+            /** @var object{cu_used_today: int|string, cu_budget_reset_at: string}|null $row */
             $row = $wpdb->get_row($wpdb->prepare(
                 "SELECT cu_used_today, cu_budget_reset_at
                    FROM {$table}
@@ -230,7 +236,7 @@ final class ChainCheckpointRepository
                 $chainId
             ));
 
-            if (!is_object($row)) {
+            if ($row === null) {
                 $wpdb->query('ROLLBACK');
                 return 0;
             }

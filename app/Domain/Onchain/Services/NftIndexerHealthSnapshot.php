@@ -21,6 +21,8 @@ if (!defined('ABSPATH')) {
  *   - Helius dedupe table size + alarm threshold
  *
  * Hooked from bcc-trust.php at plugin bootstrap.
+ *
+ * @phpstan-import-type CheckpointRow from ChainCheckpointRepository
  */
 final class NftIndexerHealthSnapshot
 {

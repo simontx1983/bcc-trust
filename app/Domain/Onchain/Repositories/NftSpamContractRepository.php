@@ -32,7 +32,12 @@ final class NftSpamContractRepository
 
     private const COLUMNS = 'id, chain_id, contract_address, rule, reason, created_at';
 
-    /** Per-request rule cache keyed `chain_id:contract`. */
+    /**
+     * Per-request rule cache keyed `chain_id:contract`. Value is the
+     * rule string ('deny' / 'allow') or null when no rule exists.
+     *
+     * @var array<string, string|null>
+     */
     private static array $cache = [];
 
     public static function table(): string
@@ -133,7 +138,7 @@ final class NftSpamContractRepository
     /**
      * Admin-page list with pagination.
      *
-     * @return list<object>
+     * @return list<SpamContractRow>
      */
     public static function findAll(int $limit = 100, int $offset = 0): array
     {
@@ -144,6 +149,7 @@ final class NftSpamContractRepository
         $table = self::table();
         $cols  = self::COLUMNS;
 
+        /** @var list<SpamContractRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT {$cols}
                FROM {$table}
@@ -152,8 +158,7 @@ final class NftSpamContractRepository
             $limit,
             $offset
         ));
-
-        return is_array($rows) ? $rows : [];
+        return $rows ?: [];
     }
 
     /**

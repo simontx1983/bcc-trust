@@ -84,7 +84,7 @@ final class NftHoldingsRepository
      * Hard-coded `metadata_status IN (0, 1)` filter — there is no
      * include-spam variant on this method by design.
      *
-     * @return list<object>
+     * @return list<HoldingRow>
      */
     public static function findVisibleForWallet(int $walletLinkId, int $chainId): array
     {
@@ -97,6 +97,7 @@ final class NftHoldingsRepository
         $cols  = self::COLUMNS;
         $limit = self::VISIBLE_READ_LIMIT;
 
+        /** @var list<HoldingRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT {$cols}
                FROM {$table}
@@ -111,8 +112,7 @@ final class NftHoldingsRepository
             self::STATUS_OK,
             $limit
         ));
-
-        return is_array($rows) ? $rows : [];
+        return $rows ?: [];
     }
 
     /**
@@ -197,7 +197,7 @@ final class NftHoldingsRepository
      * Admin-only — every status, no filter. Consumed by IndexerStatusPage
      * and CLI recovery tooling. Never call from a public read path.
      *
-     * @return list<object>
+     * @return list<HoldingRow>
      */
     public static function findAllIncludingSpam(int $walletLinkId): array
     {
@@ -210,6 +210,7 @@ final class NftHoldingsRepository
         $cols  = self::COLUMNS;
         $limit = self::ADMIN_READ_LIMIT;
 
+        /** @var list<HoldingRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT {$cols}
                FROM {$table}
@@ -219,14 +220,13 @@ final class NftHoldingsRepository
             $walletLinkId,
             $limit
         ));
-
-        return is_array($rows) ? $rows : [];
+        return $rows ?: [];
     }
 
     /**
      * Admin-only — pull rows by status for a chain (spam-queue review).
      *
-     * @return list<object>
+     * @return list<HoldingRow>
      */
     public static function findByStatus(int $chainId, int $status, int $limit = 100): array
     {
@@ -240,6 +240,7 @@ final class NftHoldingsRepository
         $table = self::table();
         $cols  = self::COLUMNS;
 
+        /** @var list<HoldingRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT {$cols}
                FROM {$table}
@@ -251,8 +252,7 @@ final class NftHoldingsRepository
             $status,
             $limit
         ));
-
-        return is_array($rows) ? $rows : [];
+        return $rows ?: [];
     }
 
     // ── Writes (NftHoldingsIndexer-only) ─────────────────────────────

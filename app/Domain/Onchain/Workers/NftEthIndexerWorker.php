@@ -37,6 +37,9 @@ if (!defined('ABSPATH')) {
  *
  * On any failure: degrade chain state, persist last_error, do NOT
  * advance checkpoint. Next tick re-attempts the same range.
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
+ * @phpstan-import-type CheckpointRow from ChainCheckpointRepository
  */
 final class NftEthIndexerWorker
 {
@@ -53,19 +56,16 @@ final class NftEthIndexerWorker
     public static function runAllChains(): void
     {
         $chains = ChainRepository::getActive();
-        if (!is_array($chains) || $chains === []) {
+        if ($chains === []) {
             return;
         }
 
         foreach ($chains as $chain) {
-            if (!is_object($chain)) {
-                continue;
-            }
-            $chainType = (string) ($chain->chain_type ?? '');
+            $chainType = (string) $chain->chain_type;
             if ($chainType !== 'evm') {
                 continue;
             }
-            $chainId = (int) ($chain->id ?? 0);
+            $chainId = (int) $chain->id;
             if ($chainId <= 0) {
                 continue;
             }

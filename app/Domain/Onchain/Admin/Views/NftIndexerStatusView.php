@@ -18,6 +18,10 @@ if (!defined('ABSPATH')) {
  * error. Pure read view — operator controls (manual run, pause, reset
  * checkpoint) are GET-handled at the bottom and live here so the
  * SettingsPage dispatcher stays thin.
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
+ * @phpstan-import-type CheckpointRow from ChainCheckpointRepository
+ * @phpstan-import-type HoldingRow from NftHoldingsRepository
  */
 final class NftIndexerStatusView
 {
@@ -65,11 +69,11 @@ final class NftIndexerStatusView
                 </tr>
             </thead>
             <tbody>
-                <?php if (!is_array($chains) || $chains === []): ?>
+                <?php if ($chains === []): ?>
                     <tr><td colspan="9"><em>No active EVM chains.</em></td></tr>
                 <?php else: ?>
                     <?php foreach ($chains as $chain):
-                        $cid     = (int) ($chain->id ?? 0);
+                        $cid     = (int) $chain->id;
                         $cp      = $byChain[$cid] ?? null;
                         $state   = $cp ? (string) $cp->state : ChainCheckpointRepository::STATE_DISABLED;
                         $last    = $cp ? (int) $cp->last_processed_block : 0;
@@ -94,7 +98,7 @@ final class NftIndexerStatusView
                         ]);
                     ?>
                     <tr>
-                        <td><strong><?php echo esc_html((string) ($chain->slug ?? '')); ?></strong></td>
+                        <td><strong><?php echo esc_html((string) $chain->slug); ?></strong></td>
                         <td><?php echo esc_html($state); ?></td>
                         <td><?php echo $last; ?></td>
                         <td><?php echo $head; ?></td>
@@ -125,7 +129,7 @@ final class NftIndexerStatusView
     }
 
     /**
-     * @param list<object> $chains
+     * @param list<ChainRow> $chains
      */
     private static function renderSpamRecent(array $chains): void
     {
@@ -144,16 +148,13 @@ final class NftIndexerStatusView
                 <?php
                 $total = 0;
                 foreach ($chains as $chain) {
-                    if (!is_object($chain)) {
-                        continue;
-                    }
-                    $cid  = (int) ($chain->id ?? 0);
+                    $cid  = (int) $chain->id;
                     $rows = NftHoldingsRepository::findByStatus($cid, NftHoldingsRepository::STATUS_SPAM, 10);
                     foreach ($rows as $r) {
                         $total++;
                         ?>
                         <tr>
-                            <td><?php echo esc_html((string) ($chain->slug ?? '')); ?></td>
+                            <td><?php echo esc_html((string) $chain->slug); ?></td>
                             <td><code><?php echo esc_html((string) $r->contract_address); ?></code></td>
                             <td><?php echo esc_html((string) $r->token_id); ?></td>
                             <td>#<?php echo (int) $r->wallet_link_id; ?></td>

@@ -31,8 +31,6 @@ final class HeliusSeenSignaturesRepository
     public const ALARM_THRESHOLD  = 12000;
     public const MAX_AGE_SECONDS  = 3600;
 
-    private const COLUMNS = 'signature, seen_at';
-
     public static function table(): string
     {
         return DB::table('helius_seen_signatures');
