@@ -101,22 +101,37 @@ final class NftEnrichmentService
             $contract  = (string) $row->contract_address;
             $tokenId   = (string) $row->token_id;
 
-            $metadata = self::fetchMetadata($fetcher, $contract, $tokenId);
+            // Per-row try/catch makes the batch-isolation guarantee
+            // STRUCTURAL rather than a property of every fetcher's
+            // error handling. Today both fetchers convert all errors
+            // to null returns, but a future fetcher edit that lets
+            // one Throwable escape shouldn't poison the whole batch
+            // for that chain on this tick.
+            try {
+                $metadata = self::fetchMetadata($fetcher, $contract, $tokenId);
 
-            if ($metadata === null) {
-                // Permanent failure marker only after a soft retry ceiling.
-                // For 1c we just leave un-enriched and let the next tick
-                // try again. A persistent-failure counter could be added
-                // in 1d; flagged but not implemented.
+                if ($metadata === null) {
+                    // Soft fail — leave un-enriched and let the next tick
+                    // try again. A persistent-failure counter could be added
+                    // in a follow-up phase; not implemented today.
+                    $result['failed']++;
+                    continue;
+                }
+
+                $ok = NftHoldingsRepository::applyEnrichment($holdingId, $metadata);
+                if ($ok) {
+                    $result['enriched']++;
+                } else {
+                    $result['failed']++;
+                }
+            } catch (\Throwable $e) {
                 $result['failed']++;
+                \BCC\Core\Log\Logger::warning('[NftEnrichmentService] row failed', [
+                    'chain_id'    => $chainId,
+                    'holding_id'  => $holdingId,
+                    'error'       => $e->getMessage(),
+                ]);
                 continue;
-            }
-
-            $ok = NftHoldingsRepository::applyEnrichment($holdingId, $metadata);
-            if ($ok) {
-                $result['enriched']++;
-            } else {
-                $result['failed']++;
             }
         }
 
