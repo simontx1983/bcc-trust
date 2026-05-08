@@ -430,8 +430,24 @@ class BlockchainQueryService {
     }
 
     /**
-     * Check ERC-721 balanceOf(wallet) > 0.
-     * Also tries ERC-1155 balanceOf(wallet, 0) as a fallback.
+     * Check whether the wallet holds at least one token from the contract.
+     *
+     * ERC-721 path: eth_call `balanceOf(address)` (selector 0x70a08231).
+     *
+     * ERC-1155 path: ERC-1155 contracts expose `balanceOf(address, uint256)`
+     * which requires a token_id, so a single eth_call cannot answer
+     * "owns any token from this contract." We delegate to the persistent
+     * NFT-holdings index (populated by the Onchain transfer indexer
+     * with both ERC-721 and ERC-1155 transfers) — if the wallet is
+     * linked and any indexed row for (chain, contract) shows balance ≥ 1,
+     * the wallet is a holder. Cross-context lookup; intentional —
+     * BlockchainQueryService is the single role-detection entry point
+     * and must answer correctly for both standards.
+     *
+     * Returns false for unknown standards or unlinked wallets on
+     * 1155 contracts (the indexer cannot have rows for an unlinked
+     * wallet — same outcome as the previous broken fallback, just
+     * without the wasted RPC roundtrip).
      */
     private static function isEthNftHolder(string $wallet, string $contract): bool {
         $rpc = defined('BCC_ETH_RPC_URL') ? BCC_ETH_RPC_URL : self::DEFAULT_ETH_RPC;
@@ -448,7 +464,45 @@ class BlockchainQueryService {
             }
         }
 
-        return false;
+        // ERC-1155 fallback via the persistent transfer index. Only
+        // engages when the contract is known to the local index and is
+        // tagged ERC-1155 — for ERC-721 contracts the eth_call above
+        // already returned the authoritative answer.
+        return self::isEthNftHolderViaIndex($wallet, $contract);
+    }
+
+    /**
+     * Check 1155 ownership via the Onchain persistent index.
+     * No-op for unknown contracts, unknown standards, ERC-721 contracts,
+     * or unlinked wallets — all return false.
+     */
+    private static function isEthNftHolderViaIndex(string $wallet, string $contract): bool {
+        $chain = \BCC\Trust\Onchain\Repositories\ChainRepository::getBySlug('ethereum');
+        if ($chain === null) {
+            return false;
+        }
+        $chainId = (int) $chain->id;
+
+        $tokenStandard = \BCC\Trust\Onchain\Repositories\CollectionRepository::findTokenStandard($chainId, $contract);
+        if ($tokenStandard === null || stripos($tokenStandard, '1155') === false) {
+            return false;
+        }
+
+        $linkIds = \BCC\Trust\Onchain\Repositories\WalletRepository::findIdsByChainAddresses($chainId, [$wallet]);
+        if ($linkIds === []) {
+            return false;
+        }
+        $walletLinkId = (int) reset($linkIds);
+        if ($walletLinkId <= 0) {
+            return false;
+        }
+
+        $byWallet = \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::countVisibleByContract(
+            $chainId,
+            $contract,
+            [$walletLinkId]
+        );
+        return ((int) ($byWallet[$walletLinkId] ?? 0)) > 0;
     }
 
     /**

@@ -5,6 +5,7 @@ namespace BCC\Trust\Onchain\Services;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
@@ -70,6 +71,19 @@ final class HoldingsService
      * across wallets would let a user split one NFT across two wallets
      * to "double" their count, which is incorrect.
      *
+     * Token-standard branch:
+     *   - ERC-721 / unknown → existing path: gallery transient cache,
+     *     falling through to `EvmFetcher::count_holdings()` (eth_call
+     *     `balanceOf(address)`) on miss.
+     *   - ERC-1155          → reads from `NftHoldingsRepository::countVisibleByContract()`
+     *     (the persistent transfer index, populated by EvmFetcher's
+     *     `fetch_transfers_since` ingestion). Skips eth_call entirely
+     *     because ERC-1155 uses `balanceOf(address, uint256)` which
+     *     requires a token_id — and the chosen gate semantic is
+     *     "any token under the contract" so per-token-id RPC isn't
+     *     applicable. Trade-off: indexer-cadence freshness lag (~1 min);
+     *     acceptable for the soft-gate UX.
+     *
      * Returns 0 if no matching chain is connected or no wallet holds any.
      */
     public static function ownsAny(int $userId, string $chainSlug, string $contract): int
@@ -89,13 +103,18 @@ final class HoldingsService
             return 0;
         }
 
+        $chainId       = (int) $chain->id;
+        $tokenStandard = CollectionRepository::findTokenStandard($chainId, $contract);
+
         $max = 0;
         foreach ($wallets as $w) {
             $count = self::countFromCacheOrFetch(
                 $fetcher,
                 (int) $w->id,
                 $w->wallet_address,
-                $contract
+                $contract,
+                $chainId,
+                $tokenStandard
             );
             if ($count > $max) {
                 $max = $count;
@@ -285,20 +304,24 @@ final class HoldingsService
                 continue;
             }
 
-            $wallets = self::walletsForUserOnChain($userId, (int) $chain->id);
+            $chainId = (int) $chain->id;
+            $wallets = self::walletsForUserOnChain($userId, $chainId);
             foreach ($contracts as $contract) {
                 $key = $chainSlug . ':' . $contract;
                 if ($wallets === []) {
                     $result[$key] = 0;
                     continue;
                 }
+                $tokenStandard = CollectionRepository::findTokenStandard($chainId, $contract);
                 $max = 0;
                 foreach ($wallets as $w) {
                     $count = self::countFromCacheOrFetch(
                         $fetcher,
                         (int) $w->id,
                         $w->wallet_address,
-                        $contract
+                        $contract,
+                        $chainId,
+                        $tokenStandard
                     );
                     if ($count > $max) {
                         $max = $count;
@@ -599,13 +622,31 @@ final class HoldingsService
      *     could live in the truncated tail. We fall through to RPC for
      *     this case so whales aren't false-negatives.
      *   - Cache miss: RPC fallback (same as the old path).
+     *
+     * ERC-1155 short-circuit: when `$tokenStandard` matches /1155/i,
+     * skip the gallery transient and the eth_call fallback entirely
+     * and read from the persistent NFT-holdings index. The 721 RPC
+     * selector `balanceOf(address)` does not work on 1155 contracts
+     * (those expose `balanceOf(address, uint256)` and would revert /
+     * return 0), and the gate semantic is "any token under contract"
+     * which the index already aggregates via SUM(balance).
      */
     private static function countFromCacheOrFetch(
-        object $fetcher,
+        \BCC\Trust\Onchain\Contracts\FetcherInterface $fetcher,
         int $walletLinkId,
         string $walletAddress,
-        string $contract
+        string $contract,
+        int $chainId,
+        ?string $tokenStandard
     ): int {
+        if ($tokenStandard !== null && stripos($tokenStandard, '1155') !== false) {
+            if ($walletLinkId <= 0 || $chainId <= 0) {
+                return 0;
+            }
+            $byWallet = NftHoldingsRepository::countVisibleByContract($chainId, $contract, [$walletLinkId]);
+            return (int) ($byWallet[$walletLinkId] ?? 0);
+        }
+
         $cached = get_transient(self::cacheKey($walletLinkId));
         if (is_array($cached) && isset($cached['items']) && is_array($cached['items'])) {
             $target  = strtolower($contract);
@@ -634,7 +675,6 @@ final class HoldingsService
 
         // Cache miss (or truncated-with-zero-matches whale fallback).
         // Fresh RPC — same path as the pre-cache implementation.
-        /** @phpstan-ignore-next-line — fetcher type is verified by caller. */
         return (int) $fetcher->count_holdings($walletAddress, $contract);
     }
 
