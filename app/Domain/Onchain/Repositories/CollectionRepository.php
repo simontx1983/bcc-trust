@@ -552,9 +552,16 @@ final class CollectionRepository
      * unique_holders DESC so popular collections surface first for
      * verification decisions.
      *
-     * `token_standard` is included so the admin UI can flag ERC-1155
-     * collections — the holder gate is ERC-721-only today, and verifying
-     * an ERC-1155 collection silently fails the gate for every holder.
+     * `token_standard` is included so the admin UI can label rows by
+     * their on-chain standard (ERC-721 / ERC-1155). The holder gate
+     * supports both standards: ERC-721 via `EvmFetcher::count_holdings`
+     * (eth_call) and ERC-1155 via `NftHoldingsRepository::countVisibleByContract`
+     * (persistent transfer index).
+     *
+     * Optional `$chainSlug` filter scopes the listing to a single chain
+     * (e.g. "ethereum", "polygon"). Unknown slugs return an empty result
+     * rather than the unfiltered list — admins should never silently see
+     * cross-chain rows when they asked for one chain.
      *
      * @return array{items: list<object{
      *     id: string,
@@ -568,7 +575,7 @@ final class CollectionRepository
      *     chain_type: string
      * }>, total: int, pages: int}
      */
-    public static function listForAdminVerification(int $page = 1, int $perPage = 50): array
+    public static function listForAdminVerification(int $page = 1, int $perPage = 50, ?string $chainSlug = null): array
     {
         global $wpdb;
         $table  = self::table();
@@ -578,32 +585,73 @@ final class CollectionRepository
         $perPage = max(1, min(100, $perPage));
         $offset  = ($page - 1) * $perPage;
 
-        $total = (int) $wpdb->get_var(
-            "SELECT COUNT(*) FROM {$table}"
-        );
+        $chainId = null;
+        if ($chainSlug !== null && $chainSlug !== '') {
+            $chain = ChainRepository::getBySlug($chainSlug);
+            if ($chain === null) {
+                return ['items' => [], 'total' => 0, 'pages' => 0];
+            }
+            $chainId = (int) $chain->id;
+        }
 
-        /** @var list<object{
-         *     id: string,
-         *     contract_address: string,
-         *     collection_name: string|null,
-         *     token_standard: string|null,
-         *     unique_holders: string|null,
-         *     image_url: string|null,
-         *     is_verified: string,
-         *     chain_slug: string,
-         *     chain_type: string
-         * }>|null $items */
-        $items = $wpdb->get_results($wpdb->prepare(
-            "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
-                    c.unique_holders, c.image_url, c.is_verified,
-                    ch.slug AS chain_slug, ch.chain_type
-               FROM {$table} c
-          LEFT JOIN {$chains} ch ON ch.id = c.chain_id
-              ORDER BY c.unique_holders DESC, c.id DESC
-              LIMIT %d OFFSET %d",
-            $perPage,
-            $offset
-        ));
+        if ($chainId !== null) {
+            $total = (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$table} WHERE chain_id = %d",
+                $chainId
+            ));
+
+            /** @var list<object{
+             *     id: string,
+             *     contract_address: string,
+             *     collection_name: string|null,
+             *     token_standard: string|null,
+             *     unique_holders: string|null,
+             *     image_url: string|null,
+             *     is_verified: string,
+             *     chain_slug: string,
+             *     chain_type: string
+             * }>|null $items */
+            $items = $wpdb->get_results($wpdb->prepare(
+                "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
+                        c.unique_holders, c.image_url, c.is_verified,
+                        ch.slug AS chain_slug, ch.chain_type
+                   FROM {$table} c
+              LEFT JOIN {$chains} ch ON ch.id = c.chain_id
+                  WHERE c.chain_id = %d
+                  ORDER BY c.unique_holders DESC, c.id DESC
+                  LIMIT %d OFFSET %d",
+                $chainId,
+                $perPage,
+                $offset
+            ));
+        } else {
+            $total = (int) $wpdb->get_var(
+                "SELECT COUNT(*) FROM {$table}"
+            );
+
+            /** @var list<object{
+             *     id: string,
+             *     contract_address: string,
+             *     collection_name: string|null,
+             *     token_standard: string|null,
+             *     unique_holders: string|null,
+             *     image_url: string|null,
+             *     is_verified: string,
+             *     chain_slug: string,
+             *     chain_type: string
+             * }>|null $items */
+            $items = $wpdb->get_results($wpdb->prepare(
+                "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
+                        c.unique_holders, c.image_url, c.is_verified,
+                        ch.slug AS chain_slug, ch.chain_type
+                   FROM {$table} c
+              LEFT JOIN {$chains} ch ON ch.id = c.chain_id
+                  ORDER BY c.unique_holders DESC, c.id DESC
+                  LIMIT %d OFFSET %d",
+                $perPage,
+                $offset
+            ));
+        }
 
         return [
             'items' => $items ?: [],
@@ -635,6 +683,47 @@ final class CollectionRepository
             ['%d'],
             ['%d']
         );
+    }
+
+    /**
+     * Bulk-toggle is_verified across two id sets in two UPDATE statements.
+     * Each UPDATE is gated by `is_verified <> target` so unchanged rows
+     * are not touched (no recurring no-op writes).
+     *
+     * @param list<int> $idsToVerify
+     * @param list<int> $idsToUnverify
+     * @return int Total rows actually changed
+     */
+    public static function setVerifiedBulk(array $idsToVerify, array $idsToUnverify): int
+    {
+        $verify   = array_values(array_filter(array_map('intval', $idsToVerify),   static fn ($id) => $id > 0));
+        $unverify = array_values(array_filter(array_map('intval', $idsToUnverify), static fn ($id) => $id > 0));
+
+        if ($verify === [] && $unverify === []) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $changed = 0;
+
+        if ($verify !== []) {
+            $ph = implode(',', array_fill(0, count($verify), '%d'));
+            $changed += (int) $wpdb->query($wpdb->prepare(
+                "UPDATE {$table} SET is_verified = 1 WHERE id IN ({$ph}) AND is_verified <> 1",
+                ...$verify
+            ));
+        }
+
+        if ($unverify !== []) {
+            $ph = implode(',', array_fill(0, count($unverify), '%d'));
+            $changed += (int) $wpdb->query($wpdb->prepare(
+                "UPDATE {$table} SET is_verified = 0 WHERE id IN ({$ph}) AND is_verified <> 0",
+                ...$unverify
+            ));
+        }
+
+        return $changed;
     }
 
     /**

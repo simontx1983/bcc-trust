@@ -52,8 +52,14 @@ final class VerifyCollectionsPage
 
         $notices = self::handlePost();
 
-        $page    = isset($_GET['paged']) ? max(1, (int) $_GET['paged']) : 1;
-        $listing = CollectionRepository::listForAdminVerification($page, 50);
+        $page          = isset($_GET['paged']) ? max(1, (int) $_GET['paged']) : 1;
+        $selectedChain = isset($_GET['chain']) ? sanitize_text_field((string) $_GET['chain']) : '';
+        $listing       = CollectionRepository::listForAdminVerification(
+            $page,
+            50,
+            $selectedChain !== '' ? $selectedChain : null
+        );
+        $availableChains = ChainRepository::getActive();
         ?>
         <div class="wrap">
             <h1>Verify Collections</h1>
@@ -63,26 +69,37 @@ final class VerifyCollectionsPage
             joining is explicit (suggest-don't-auto-join). The provisioning sweep runs
             daily — use <em>Provision now</em> to trigger it immediately.</p>
 
-            <div class="notice notice-warning inline">
-                <p><strong>ERC-721 only for now.</strong> The holder gate is wired for
-                <code>balanceOf(address)</code> — the ERC-721 selector. Verifying an
-                <strong>ERC-1155</strong> collection will silently fail the gate (every
-                holder appears ineligible) because 1155 uses a different
-                <code>balanceOf(address, tokenId)</code> shape. ERC-1155 rows are
-                flagged below; please don't verify them until the gate adds 1155 support.
-                Solana / Cosmos collections are unaffected.</p>
-            </div>
-
             <?php foreach ($notices as $notice): ?>
                 <div class="notice notice-<?php echo esc_attr($notice['type']); ?> is-dismissible">
                     <p><?php echo esc_html($notice['message']); ?></p>
                 </div>
             <?php endforeach; ?>
 
+            <form method="get" action="" style="margin:0 0 12px 0;">
+                <input type="hidden" name="page" value="<?php echo esc_attr(self::PAGE_SLUG); ?>">
+                <label for="bcc-vc-chain-filter" style="margin-right:6px;">
+                    <strong>Chain:</strong>
+                </label>
+                <select name="chain" id="bcc-vc-chain-filter" onchange="this.form.submit()">
+                    <option value="">All chains</option>
+                    <?php foreach ($availableChains as $chainOption): ?>
+                        <option value="<?php echo esc_attr((string) $chainOption->slug); ?>"
+                            <?php selected($selectedChain, (string) $chainOption->slug); ?>>
+                            <?php echo esc_html((string) $chainOption->name); ?>
+                            (<?php echo esc_html((string) $chainOption->chain_type); ?>)
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <noscript>
+                    <button type="submit" class="button">Filter</button>
+                </noscript>
+            </form>
+
             <form method="post" action="">
                 <?php wp_nonce_field(self::NONCE_KEY, self::NONCE_NAME); ?>
                 <input type="hidden" name="bcc_vc_action" value="save">
                 <input type="hidden" name="paged" value="<?php echo (int) $page; ?>">
+                <input type="hidden" name="chain" value="<?php echo esc_attr($selectedChain); ?>">
 
                 <p class="submit" style="margin:0 0 12px 0;">
                     <button type="submit" class="button button-primary">Save Verification Changes</button>
@@ -108,7 +125,6 @@ final class VerifyCollectionsPage
                         <?php else: foreach ($listing['items'] as $row): ?>
                             <?php
                             $tokenStandard = (string) ($row->token_standard ?? '');
-                            $isErc1155     = stripos($tokenStandard, '1155') !== false;
                             ?>
                             <tr>
                                 <td>
@@ -127,13 +143,7 @@ final class VerifyCollectionsPage
                                 </td>
                                 <td>
                                     <strong><?php echo esc_html($row->collection_name ?? '(no name)'); ?></strong>
-                                    <?php if ($isErc1155): ?>
-                                        <br>
-                                        <span title="ERC-1155 — gate not supported yet. Verifying this row will leave the group empty."
-                                              style="display:inline-block;background:#f0b849;color:#3c2a00;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:600;margin-top:2px;">
-                                            ⚠ ERC-1155 (gate unsupported)
-                                        </span>
-                                    <?php elseif ($tokenStandard !== ''): ?>
+                                    <?php if ($tokenStandard !== ''): ?>
                                         <br>
                                         <span style="color:#646970;font-size:11px;"><?php echo esc_html($tokenStandard); ?></span>
                                     <?php endif; ?>
@@ -316,19 +326,28 @@ final class VerifyCollectionsPage
             $checked[(int) $id] = true;
         }
 
-        $changed = 0;
+        $verify   = [];
+        $unverify = [];
         foreach ($known as $collectionId) {
             if ($collectionId <= 0) {
                 continue;
             }
-            $shouldBeVerified = isset($checked[$collectionId]);
-            CollectionRepository::setVerified($collectionId, $shouldBeVerified);
-            $changed++;
+            if (isset($checked[$collectionId])) {
+                $verify[] = $collectionId;
+            } else {
+                $unverify[] = $collectionId;
+            }
         }
+
+        $changed = CollectionRepository::setVerifiedBulk($verify, $unverify);
 
         return [[
             'type'    => 'success',
-            'message' => sprintf('Verification flags saved (%d collections processed).', $changed),
+            'message' => sprintf(
+                'Verification flags saved (%d processed, %d actually changed).',
+                count($verify) + count($unverify),
+                $changed
+            ),
         ]];
     }
 
