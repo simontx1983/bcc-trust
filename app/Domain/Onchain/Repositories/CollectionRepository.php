@@ -661,6 +661,44 @@ final class CollectionRepository
     }
 
     /**
+     * Single-row lookup by (chain_id, contract_address). Used by the
+     * V2 Phase 6 §H1 NFT-piece view-model builder to assemble the
+     * `collection` embed (§3.7). Returns null when no row exists —
+     * the builder falls through to a read-time Cosmos fetch or
+     * returns 404 for indexed chains.
+     *
+     * Bounded by the unique key (chain_id, contract_address) + LIMIT 1.
+     *
+     * @return CollectionWithChain|null
+     */
+    public static function findByChainContract(int $chainId, string $contract): ?object
+    {
+        if ($chainId <= 0 || $contract === '') {
+            return null;
+        }
+
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        /** @var CollectionWithChain|null */
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id, c.collection_name,
+                    c.token_standard, c.total_supply, c.floor_price, c.floor_currency,
+                    c.unique_holders, c.total_volume, c.listed_percentage, c.royalty_percentage,
+                    c.metadata_storage, c.image_url, c.show_on_profile, c.fetched_at, c.expires_at,
+                    ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
+               FROM {$table} c
+               JOIN {$chains} ch ON ch.id = c.chain_id
+              WHERE c.chain_id = %d
+                AND c.contract_address = %s
+              LIMIT 1",
+            $chainId,
+            strtolower($contract)
+        ));
+    }
+
+    /**
      * Resolve the on-chain `token_standard` for a (chain, contract) pair.
      *
      * Reads from `wp_bcc_onchain_collections.token_standard` — populated by

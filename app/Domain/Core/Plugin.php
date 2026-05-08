@@ -1039,6 +1039,14 @@ final class Plugin
         // PeepSoGroupWriter lands eligible holders directly as `member`.
         \BCC\Trust\Onchain\REST\HolderGroupsEndpoint::register();
 
+        // V2 Phase 6 (§H1): NFT-piece detail surface.
+        //   GET /nft-pieces/{chain}/{contract}/{tokenId} — §3.7 NftPiece
+        // Anonymous OR Bearer; response shape is identical for both
+        // (V2 Phase 6 has no viewer-aware fields). Indexed chains hit
+        // bcc_onchain_collection_pieces; Cosmos is read-time per
+        // pattern-registry.
+        \BCC\Trust\Onchain\REST\NftPieceEndpoint::register();
+
         // V2: Profile Groups tab — cross-kind list with viewer-aware
         // permissions and server-built action URLs (per `type`).
         \BCC\Trust\Core\REST\UserGroupsEndpoint::register();

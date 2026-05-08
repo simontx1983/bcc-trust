@@ -157,7 +157,9 @@ class SolanaFetcher implements FetcherInterface
      * Fetch enrichment metadata for a single Solana mint via Helius's
      * `getAsset` DAS method. Used by V2 Phase 1c NftEnrichmentService
      * to backfill name + image_url + collection_name on persistent
-     * holdings rows.
+     * holdings rows AND by the V2 Phase 6 §H1 NFT-piece view-model
+     * builder for the §3.7 metadata superset (description,
+     * image_url_thumb, attributes[]).
      *
      * Solana model reminder: each NFT has a unique mint pubkey; we
      * persist mint as both contract_address and token_id, so the
@@ -167,7 +169,19 @@ class SolanaFetcher implements FetcherInterface
      * Returns null on transport / non-200; non-null with
      * partially-empty fields on success.
      *
-     * @return array{name: ?string, image_url: ?string, metadata_uri: ?string, collection_name: ?string}|null
+     * The Phase-6 superset is ADDITIVE — Phase-1c callers continue to
+     * read `name`, `image_url`, `metadata_uri`, `collection_name`
+     * unchanged.
+     *
+     * @return array{
+     *     name: ?string,
+     *     description: ?string,
+     *     image_url: ?string,
+     *     image_url_thumb: ?string,
+     *     metadata_uri: ?string,
+     *     collection_name: ?string,
+     *     attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>
+     * }|null
      */
     public function fetchMetadataForMint(string $mint): ?array
     {
@@ -223,7 +237,12 @@ class SolanaFetcher implements FetcherInterface
         $files    = is_array($content['files'] ?? null) ? $content['files'] : [];
         $grouping = is_array($r['grouping'] ?? null) ? $r['grouping'] : [];
 
-        $name = is_string($metadata['name'] ?? null) ? $metadata['name'] : null;
+        $name = is_string($metadata['name'] ?? null) && $metadata['name'] !== ''
+            ? $metadata['name']
+            : null;
+        $description = is_string($metadata['description'] ?? null) && $metadata['description'] !== ''
+            ? $metadata['description']
+            : null;
 
         $imgUrl = is_string($links['image'] ?? null) ? $links['image'] : null;
         if ($imgUrl === null && $files !== []) {
@@ -233,6 +252,23 @@ class SolanaFetcher implements FetcherInterface
                     break;
                 }
             }
+        }
+
+        // Helius DAS surfaces a `cdn_uri` per-file when an image is
+        // pinned through their CDN — that's our thumbnail variant.
+        // Falls back to `image_url` per the §3.7 nullability rule.
+        $imgThumb = null;
+        foreach ($files as $f) {
+            if (!is_array($f)) {
+                continue;
+            }
+            if (isset($f['cdn_uri']) && is_string($f['cdn_uri']) && $f['cdn_uri'] !== '') {
+                $imgThumb = $f['cdn_uri'];
+                break;
+            }
+        }
+        if ($imgThumb === null && $imgUrl !== null) {
+            $imgThumb = $imgUrl;
         }
 
         $metadataUri = is_string($content['json_uri'] ?? null) ? $content['json_uri'] : null;
@@ -248,11 +284,37 @@ class SolanaFetcher implements FetcherInterface
             }
         }
 
+        // attributes[]: Helius DAS surfaces these under
+        // `content.metadata.attributes` (OpenSea convention). Same
+        // mapping rules as EvmFetcher::extractAttributes — defensive
+        // type checks, scalar-only values, malformed entries dropped.
+        $attributes = [];
+        $rawAttrs = is_array($metadata['attributes'] ?? null) ? $metadata['attributes'] : [];
+        foreach ($rawAttrs as $attr) {
+            if (!is_array($attr)) {
+                continue;
+            }
+            $traitType = $attr['trait_type'] ?? null;
+            $value     = $attr['value']      ?? null;
+            if (!is_string($traitType) || $traitType === '' || $value === null) {
+                continue;
+            }
+            if (is_string($value) || is_int($value) || is_float($value) || is_bool($value)) {
+                $attributes[] = [
+                    'trait_type' => $traitType,
+                    'value'      => $value,
+                ];
+            }
+        }
+
         return [
             'name'            => $name,
+            'description'     => $description,
             'image_url'       => $imgUrl,
+            'image_url_thumb' => $imgThumb,
             'metadata_uri'    => $metadataUri,
             'collection_name' => $collectionName,
+            'attributes'      => $attributes,
         ];
     }
 

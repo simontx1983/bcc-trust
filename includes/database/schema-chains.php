@@ -43,6 +43,7 @@ function bcc_onchain_create_chains_table(): void {
         decimals TINYINT UNSIGNED NOT NULL DEFAULT 6,
         bech32_prefix VARCHAR(20) DEFAULT NULL,
         icon_url VARCHAR(500) DEFAULT NULL,
+        marketplace_template TEXT DEFAULT NULL,
         is_testnet TINYINT(1) NOT NULL DEFAULT 0,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -295,6 +296,30 @@ function bcc_onchain_create_chains_table(): void {
             $chain['native_token'] ?? null,
             $chain['decimals'] ?? 6,
             $chain['bech32_prefix'] ?? null
+        ));
+    }
+
+    // V2 Phase 6 (§H1): back-fill marketplace_template for the three
+    // chains the §4.17 NFT piece endpoint serves. Uses
+    // `WHERE marketplace_template IS NULL` so an admin-edited override
+    // is never clobbered on re-run. New chains landing later can carry
+    // their own template via a future seed extension or per-row admin
+    // edit. Stargaze takes the `cosmos` slot since the contract spec's
+    // chainSlug enum collapses Cosmos NFT chains under "cosmos" for
+    // V2 Phase 6.
+    $marketplace_defaults = [
+        'ethereum' => 'https://opensea.io/assets/ethereum/{contract}/{token_id}',
+        'solana'   => 'https://magiceden.io/item-details/{contract}',
+        'cosmos'   => 'https://www.stargaze.zone/m/{contract}/{token_id}',
+    ];
+    foreach ($marketplace_defaults as $slug => $template) {
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET marketplace_template = %s
+              WHERE slug = %s
+                AND marketplace_template IS NULL",
+            $template,
+            $slug
         ));
     }
 

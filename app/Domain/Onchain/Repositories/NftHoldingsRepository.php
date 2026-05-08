@@ -292,6 +292,66 @@ final class NftHoldingsRepository
         return $exists !== null;
     }
 
+    /**
+     * Owners of a single (chain, contract, token_id) — used by the §4.17
+     * NFT-piece detail endpoint to assemble `owner` + `owners[]` per
+     * §3.7. Ordered by `balance DESC, wallet_address ASC` per the
+     * dominant-owner tie-break rule. The first row is the dominant
+     * `owner`; subsequent rows feed `owners[]`.
+     *
+     * Filtered to visible statuses (PENDING, OK) so a token with all
+     * spam-flagged holders surfaces as zero-known-owners (correct: the
+     * frontend will render `owner: null`).
+     *
+     * Bounded by $limit. Index path: `idx_chain_contract` filters to
+     * the contract row set; `token_id` is a non-indexed filter on top
+     * of that scan (acceptable — ERC-1155 contracts rarely exceed a
+     * few thousand rows per contract, and ERC-721 yields one row).
+     *
+     * Joins `bcc_wallet_links` to surface `wallet_address` so callers
+     * don't need a second round-trip per result.
+     *
+     * @return list<object{wallet_link_id: string, wallet_address: string, balance: string}>
+     */
+    public static function findOwnersByTokenId(
+        int $chainId,
+        string $contract,
+        string $tokenId,
+        int $limit
+    ): array {
+        if ($chainId <= 0 || $contract === '' || $tokenId === '') {
+            return [];
+        }
+
+        $limit = max(1, min(self::ADMIN_READ_LIMIT, $limit));
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+
+        /** @var list<object{wallet_link_id: string, wallet_address: string, balance: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT h.wallet_link_id, w.wallet_address, h.balance
+               FROM {$table} h
+               JOIN {$wallets} w ON w.id = h.wallet_link_id
+              WHERE h.chain_id = %d
+                AND h.contract_address = %s
+                AND h.token_id = %s
+                AND h.metadata_status IN (%d, %d)
+                AND h.balance > 0
+              ORDER BY h.balance DESC, w.wallet_address ASC
+              LIMIT %d",
+            $chainId,
+            strtolower($contract),
+            $tokenId,
+            self::STATUS_PENDING,
+            self::STATUS_OK,
+            $limit
+        ));
+
+        return $rows ?: [];
+    }
+
     // ── Admin / recovery reads (any status) ─────────────────────────
 
     /**

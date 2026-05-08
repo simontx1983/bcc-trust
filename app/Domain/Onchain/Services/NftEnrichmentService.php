@@ -223,7 +223,13 @@ final class NftEnrichmentService
      * support enrichment for this chain type (e.g., a chain-type
      * with no metadata API yet).
      *
-     * @return array{name: ?string, image_url: ?string, metadata_uri: ?string, collection_name: ?string}|null
+     * Phase-1c enrichment reads only the 4 base keys (`name`,
+     * `image_url`, `metadata_uri`, `collection_name`); the V2 Phase 6
+     * superset (`description`, `image_url_thumb`, `attributes[]`) is
+     * additive on the same return shape and is harmlessly ignored
+     * here — the §H1 view-model builder consumes those keys directly.
+     *
+     * @return array<string, mixed>|null
      */
     private static function fetchMetadata(object $fetcher, string $contract, string $tokenId): ?array
     {

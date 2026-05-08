@@ -512,6 +512,48 @@ final class HoldingsService
         return $out;
     }
 
+    /**
+     * Per-chain indexer state for the V2 Phase 6 §H1 NFT-piece detail
+     * endpoint. Returns the same `meta.indexer_state` /
+     * `meta.indexer_state_label` block shape the gallery
+     * (`getForUser`) emits, scoped to ONE chain — the piece-detail
+     * view doesn't span wallets so the per-wallet rollup is moot.
+     *
+     * For Cosmos (read-time, no checkpoint) returns `healthy` — the
+     * contract treats Cosmos as always-fresh because there's no
+     * indexer to be syncing against.
+     *
+     * @return array{indexer_state: array<string, string>, indexer_state_label: array<string, string>}
+     */
+    public static function getIndexerStateForChain(string $chainSlug): array
+    {
+        if ($chainSlug === '') {
+            return ['indexer_state' => [], 'indexer_state_label' => []];
+        }
+
+        $chain = ChainRepository::getBySlug($chainSlug);
+        if ($chain === null) {
+            return ['indexer_state' => [], 'indexer_state_label' => []];
+        }
+
+        // Cosmos has no persistent indexer; healthy is the only state
+        // the read-time path can be in (transport failures surface as
+        // a 503 on the endpoint, not as a degraded-state chip).
+        if ((string) $chain->chain_type === 'cosmos') {
+            $state = 'healthy';
+        } else {
+            $state = self::resolvePersistentReadState((int) $chain->id);
+        }
+
+        $bucket = [];
+        self::recordIndexerState($bucket, $chainSlug, $state);
+
+        return [
+            'indexer_state'       => $bucket,
+            'indexer_state_label' => self::buildIndexerStateLabels($bucket),
+        ];
+    }
+
     // ── Internal helpers ───────────────────────────────────────────────────
 
     /**

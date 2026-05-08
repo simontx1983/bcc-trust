@@ -265,14 +265,29 @@ class EvmFetcher implements FetcherInterface
      * Fetch enrichment metadata for a single (contract, tokenId) pair
      * via Alchemy's `getNFTMetadata` JSON-RPC method. Used by the
      * V2 Phase 1c NftEnrichmentService to backfill name + image_url
-     * + collection_name on persistent holdings rows.
+     * + collection_name on persistent holdings rows AND by the V2 Phase 6
+     * §H1 NFT-piece view-model builder for the §3.7 metadata superset
+     * (description, image_url_thumb, attributes[]).
      *
      * Returns null on transport / 4xx / 5xx; non-null with
      * partially-empty fields on success (Alchemy sometimes returns a
      * row with no media — we persist what's there and let the
      * gallery render with a placeholder if image_url is null).
      *
-     * @return array{name: ?string, image_url: ?string, metadata_uri: ?string, collection_name: ?string}|null
+     * The Phase-6 superset is ADDITIVE — Phase-1c callers continue to
+     * read `name`, `image_url`, `metadata_uri`, `collection_name`
+     * unchanged. New keys: `description`, `image_url_thumb`,
+     * `attributes[]`.
+     *
+     * @return array{
+     *     name: ?string,
+     *     description: ?string,
+     *     image_url: ?string,
+     *     image_url_thumb: ?string,
+     *     metadata_uri: ?string,
+     *     collection_name: ?string,
+     *     attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>
+     * }|null
      */
     public function fetchMetadataForToken(string $contract, string $tokenId): ?array
     {
@@ -325,29 +340,110 @@ class EvmFetcher implements FetcherInterface
         }
         $r = $json['result'];
 
-        $name        = is_string($r['name'] ?? null) ? $r['name'] : null;
-        $description = $r['description'] ?? null; // unused but documented for future
+        $name        = is_string($r['name'] ?? null) && $r['name'] !== '' ? $r['name'] : null;
+        $description = is_string($r['description'] ?? null) && $r['description'] !== '' ? $r['description'] : null;
         $tokenUri    = is_array($r['tokenUri'] ?? null) ? ($r['tokenUri']['gateway'] ?? null) : null;
-        $imgUrl      = null;
+
+        // Pick the gateway URL of the first media entry as `image_url`,
+        // and the thumbnail (if any) as `image_url_thumb`. Alchemy's
+        // `media[]` format is `{gateway, thumbnailUrl?, raw?}` per asset.
+        $imgUrl   = null;
+        $imgThumb = null;
         if (isset($r['media']) && is_array($r['media'])) {
             foreach ($r['media'] as $m) {
-                if (is_array($m) && isset($m['gateway']) && is_string($m['gateway']) && $m['gateway'] !== '') {
+                if (!is_array($m)) {
+                    continue;
+                }
+                if ($imgUrl === null && isset($m['gateway']) && is_string($m['gateway']) && $m['gateway'] !== '') {
                     $imgUrl = $m['gateway'];
+                }
+                if ($imgThumb === null && isset($m['thumbnailUrl']) && is_string($m['thumbnailUrl']) && $m['thumbnailUrl'] !== '') {
+                    $imgThumb = $m['thumbnailUrl'];
+                }
+                if ($imgUrl !== null && $imgThumb !== null) {
                     break;
                 }
             }
         }
+        // Fall back per §3.7 rule: when no resize is available,
+        // `image_url_thumb` mirrors `image_url`.
+        if ($imgThumb === null && $imgUrl !== null) {
+            $imgThumb = $imgUrl;
+        }
+
         $collName = null;
         if (isset($r['contractMetadata']) && is_array($r['contractMetadata'])) {
             $collName = is_string($r['contractMetadata']['name'] ?? null) ? $r['contractMetadata']['name'] : null;
         }
 
+        // attributes[]: Alchemy returns these under either
+        // `metadata.attributes` (legacy) or `rawMetadata.attributes`
+        // (current). Both follow the OpenSea convention:
+        //   [{ trait_type: string, value: string|number|bool }, ...]
+        // §3.7 allows an OPTIONAL `rarity_pct`; Alchemy doesn't surface
+        // rarity by default, so we omit it and let a future enricher
+        // backfill via a separate code path.
+        $attributes = self::extractAttributes($r);
+
         return [
             'name'            => $name,
+            'description'     => $description,
             'image_url'       => $imgUrl,
+            'image_url_thumb' => $imgThumb,
             'metadata_uri'    => is_string($tokenUri) ? $tokenUri : null,
             'collection_name' => $collName,
+            'attributes'      => $attributes,
         ];
+    }
+
+    /**
+     * Map Alchemy `metadata.attributes` / `rawMetadata.attributes` to
+     * the §3.7 attribute shape. Returns `[]` when the source array is
+     * missing or malformed (per the §3.7 "never null" rule).
+     *
+     * @param array<string, mixed> $alchemyResult
+     * @return list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>
+     */
+    private static function extractAttributes(array $alchemyResult): array
+    {
+        $candidates = [];
+        if (isset($alchemyResult['rawMetadata']) && is_array($alchemyResult['rawMetadata'])) {
+            $rm = $alchemyResult['rawMetadata'];
+            if (isset($rm['attributes']) && is_array($rm['attributes'])) {
+                $candidates = $rm['attributes'];
+            }
+        }
+        if ($candidates === [] && isset($alchemyResult['metadata']) && is_array($alchemyResult['metadata'])) {
+            $md = $alchemyResult['metadata'];
+            if (isset($md['attributes']) && is_array($md['attributes'])) {
+                $candidates = $md['attributes'];
+            }
+        }
+
+        $out = [];
+        foreach ($candidates as $attr) {
+            if (!is_array($attr)) {
+                continue;
+            }
+            $traitType = $attr['trait_type'] ?? null;
+            $value     = $attr['value']      ?? null;
+            if (!is_string($traitType) || $traitType === '' || $value === null) {
+                continue;
+            }
+            // Coerce scalar values; drop anything else (objects/arrays).
+            if (is_string($value)) {
+                $coerced = $value;
+            } elseif (is_int($value) || is_float($value) || is_bool($value)) {
+                $coerced = $value;
+            } else {
+                continue;
+            }
+            $out[] = [
+                'trait_type' => $traitType,
+                'value'      => $coerced,
+            ];
+        }
+        return $out;
     }
 
     /**

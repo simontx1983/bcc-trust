@@ -215,6 +215,7 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
 // V2 Phase 1a — confirmation-gated NFT indexer
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-holdings.php';
+require_once BCC_TRUST_PATH . 'includes/database/schema-collection-pieces.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-chain-checkpoints.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-spam-contracts.php';
 // V2 Phase 1b — Helius webhook replay protection (LRU)
@@ -239,6 +240,8 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_nft_spam_contracts_table();
     // V2 Phase 1b Helius replay protection
     bcc_onchain_create_helius_seen_signatures_table();
+    // V2 Phase 6 (§H1) NFT-piece detail metadata cache
+    bcc_onchain_create_collection_pieces_table();
 
     // Signals table is owned by SignalRepository — included here so its
     // column-type migrations run on version bump, not just on fresh

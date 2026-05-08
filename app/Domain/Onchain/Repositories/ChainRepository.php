@@ -39,6 +39,7 @@ if (!defined('ABSPATH')) {
  *     decimals: string,
  *     bech32_prefix: string|null,
  *     icon_url: string|null,
+ *     marketplace_template: string|null,
  *     is_testnet: string,
  *     is_active: string,
  *     created_at: string
@@ -49,7 +50,7 @@ final class ChainRepository
     /** @var string Explicit column list — must match schema-chains.php. */
     private const COLUMNS = 'id, slug, name, chain_type, chain_id_hex, rpc_url, rest_url,
                  explorer_url, native_token, decimals, bech32_prefix, icon_url,
-                 is_testnet, is_active, created_at';
+                 marketplace_template, is_testnet, is_active, created_at';
 
     /** @var string Object-cache / transient group. */
     private const CACHE_GROUP = 'bcc_chains';

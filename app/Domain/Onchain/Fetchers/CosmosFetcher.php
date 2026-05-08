@@ -332,7 +332,7 @@ class CosmosFetcher implements FetcherInterface
      * Enumerate this wallet's NFTs across every verified CW-721 contract on
      * this chain. Iterates `CollectionRepository::listVerifiedByChain` and
      * calls `cw721Tokens` per contract; for each token_id, optionally
-     * resolves metadata via `cw721NftInfo`.
+     * resolves metadata via `fetchTokenMetadata`.
      *
      * Curated-only posture: only `is_verified = 1` collections are
      * iterated. A user holding NFTs from a non-verified contract sees them
@@ -388,7 +388,7 @@ class CosmosFetcher implements FetcherInterface
                     : null;
 
                 foreach ($tokenIds as $tokenId) {
-                    $meta = $this->cw721NftInfo($contract, $tokenId);
+                    $meta = $this->fetchTokenMetadata($contract, $tokenId);
                     $items[] = [
                         'contract_address' => $contract,
                         'token_id'         => $tokenId,
@@ -549,17 +549,41 @@ class CosmosFetcher implements FetcherInterface
     }
 
     /**
-     * CW-721 `nft_info { token_id }` — per-token metadata. Returns
-     * `{name, image_url, metadata_uri}` (any field nullable).
+     * CW-721 `nft_info { token_id }` — per-token metadata.
+     *
+     * Returns the §3.7 metadata superset: `name`, `description`,
+     * `image_url`, `image_url_thumb`, `metadata_uri`, `attributes[]`.
+     * Any field may be null; `attributes[]` is `[]` when no traits.
+     *
+     * Renamed + promoted to public in V2 Phase 6 (§H1) to match the
+     * §4.17 contract verb (`fetchTokenMetadata`); the §H1 view-model
+     * builder calls this directly read-time (Cosmos is read-time +
+     * V1-transient per pattern-registry, no persistence).
      *
      * Cached for 7 days because NFT metadata is effectively static (the
-     * extension on a given token_id rarely changes after mint).
+     * extension on a given token_id rarely changes after mint). Empty
+     * result is returned on transport failure WITHOUT caching so a
+     * flaky LCD doesn't poison the 7-day window.
      *
-     * @return array{name: ?string, image_url: ?string, metadata_uri: ?string}
+     * @return array{
+     *     name: ?string,
+     *     description: ?string,
+     *     image_url: ?string,
+     *     image_url_thumb: ?string,
+     *     metadata_uri: ?string,
+     *     attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>
+     * }
      */
-    private function cw721NftInfo(string $contract, string $tokenId): array
+    public function fetchTokenMetadata(string $contract, string $tokenId): array
     {
-        $empty = ['name' => null, 'image_url' => null, 'metadata_uri' => null];
+        $empty = [
+            'name'            => null,
+            'description'     => null,
+            'image_url'       => null,
+            'image_url_thumb' => null,
+            'metadata_uri'    => null,
+            'attributes'      => [],
+        ];
         if ($contract === '' || $tokenId === '') {
             return $empty;
         }
@@ -573,8 +597,8 @@ class CosmosFetcher implements FetcherInterface
         );
 
         $cached = wp_cache_get($cacheKey, 'bcc_onchain');
-        if (is_array($cached) && isset($cached['name'], $cached['image_url'], $cached['metadata_uri'])) {
-            /** @var array{name: ?string, image_url: ?string, metadata_uri: ?string} $cached */
+        if (is_array($cached) && array_key_exists('name', $cached) && array_key_exists('attributes', $cached)) {
+            /** @var array{name: ?string, description: ?string, image_url: ?string, image_url_thumb: ?string, metadata_uri: ?string, attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>} $cached */
             return $cached;
         }
 
@@ -585,15 +609,53 @@ class CosmosFetcher implements FetcherInterface
             return $empty;
         }
 
-        $tokenUri = is_string($data['token_uri'] ?? null) ? (string) $data['token_uri'] : null;
+        $tokenUri  = is_string($data['token_uri'] ?? null) && $data['token_uri'] !== ''
+            ? (string) $data['token_uri']
+            : null;
         $extension = is_array($data['extension'] ?? null) ? $data['extension'] : [];
-        $name = is_string($extension['name'] ?? null) ? (string) $extension['name'] : null;
-        $imageUrl = is_string($extension['image'] ?? null) ? (string) $extension['image'] : null;
+        $name = is_string($extension['name'] ?? null) && $extension['name'] !== ''
+            ? (string) $extension['name']
+            : null;
+        $description = is_string($extension['description'] ?? null) && $extension['description'] !== ''
+            ? (string) $extension['description']
+            : null;
+        $imageUrl = is_string($extension['image'] ?? null) && $extension['image'] !== ''
+            ? (string) $extension['image']
+            : null;
+
+        // CW-721 has no canonical thumbnail field; mirror image_url per §3.7.
+        $imageThumb = $imageUrl;
+
+        // attributes[]: CW-721 standard puts these under
+        // `extension.attributes[]` (Stargaze + most CW-721 contracts
+        // follow the OpenSea convention). Defensive map; malformed
+        // entries dropped silently.
+        $attributes = [];
+        $rawAttrs   = is_array($extension['attributes'] ?? null) ? $extension['attributes'] : [];
+        foreach ($rawAttrs as $attr) {
+            if (!is_array($attr)) {
+                continue;
+            }
+            $traitType = $attr['trait_type'] ?? null;
+            $value     = $attr['value']      ?? null;
+            if (!is_string($traitType) || $traitType === '' || $value === null) {
+                continue;
+            }
+            if (is_string($value) || is_int($value) || is_float($value) || is_bool($value)) {
+                $attributes[] = [
+                    'trait_type' => $traitType,
+                    'value'      => $value,
+                ];
+            }
+        }
 
         $out = [
-            'name'         => $name,
-            'image_url'    => $imageUrl,
-            'metadata_uri' => $tokenUri,
+            'name'            => $name,
+            'description'     => $description,
+            'image_url'       => $imageUrl,
+            'image_url_thumb' => $imageThumb,
+            'metadata_uri'    => $tokenUri,
+            'attributes'      => $attributes,
         ];
         wp_cache_set($cacheKey, $out, 'bcc_onchain', self::NFT_INFO_CACHE_TTL);
         return $out;
@@ -618,6 +680,113 @@ class CosmosFetcher implements FetcherInterface
     public function testCw721ContractInfo(string $contractAddress): ?array
     {
         return $this->wasmSmartQuery($contractAddress, ['contract_info' => new \stdClass()]);
+    }
+
+    /**
+     * V2 Phase 6 (§H1) — read-time CW-721 `contract_info` for the
+     * NftPiece collection embed when no `bcc_onchain_collections` row
+     * exists (Cosmos cold-cache).
+     *
+     * Returns the typed shape the §3.7 builder expects:
+     *
+     *     {name: ?string, symbol: ?string}
+     *
+     * Cached for 1 hour (collection_info is stable but not as static
+     * as per-token metadata; admins can re-deploy a contract in
+     * principle, though it's rare). Returns null on transport failure
+     * WITHOUT caching so a flaky LCD doesn't poison the window.
+     *
+     * @return array{name: ?string, symbol: ?string}|null
+     */
+    public function fetchContractInfo(string $contract): ?array
+    {
+        if ($contract === '') {
+            return null;
+        }
+
+        $chainId  = (int) $this->chain->id;
+        $cacheKey = sprintf('cw721_contract_info_%d_%s', $chainId, strtolower($contract));
+
+        $cached = wp_cache_get($cacheKey, 'bcc_onchain');
+        if (is_array($cached) && array_key_exists('name', $cached) && array_key_exists('symbol', $cached)) {
+            /** @var array{name: ?string, symbol: ?string} $cached */
+            return $cached;
+        }
+
+        $data = $this->wasmSmartQuery($contract, ['contract_info' => new \stdClass()]);
+        if ($data === null) {
+            // Don't cache transport failures.
+            return null;
+        }
+
+        $name = is_string($data['name'] ?? null) && $data['name'] !== ''
+            ? (string) $data['name']
+            : null;
+        $symbol = is_string($data['symbol'] ?? null) && $data['symbol'] !== ''
+            ? (string) $data['symbol']
+            : null;
+
+        $out = ['name' => $name, 'symbol' => $symbol];
+        wp_cache_set($cacheKey, $out, 'bcc_onchain', HOUR_IN_SECONDS);
+        return $out;
+    }
+
+    /**
+     * V2 Phase 6 (§H1) — read-time CW-721 `owner_of` for the §3.7
+     * NftPiece owner block. Cosmos has no persistent holdings index
+     * (intentionally asymmetric per the V2 Phase 2 design); this
+     * wraps the LCD round-trip with a 5-minute cache so a single
+     * piece-detail render doesn't multiply LCD calls under burst.
+     *
+     * Returns the wallet address that owns `tokenId` on `contract`,
+     * or null when the token does not exist / LCD timed out.
+     *
+     * Cache TTL is intentionally short (5m) — owners do change
+     * (transfers, sales) and a stale "owner" reading would be
+     * misleading on the piece detail page. The piece-metadata cache
+     * (7d) is fine because metadata is effectively immutable; owner
+     * is not.
+     *
+     * @return array{wallet_address: string}|null
+     */
+    public function cw721OwnerOf(string $contract, string $tokenId): ?array
+    {
+        if ($contract === '' || $tokenId === '') {
+            return null;
+        }
+
+        $chainId  = (int) $this->chain->id;
+        $cacheKey = sprintf(
+            'cw721_owner_of_%d_%s_%s',
+            $chainId,
+            strtolower($contract),
+            $tokenId
+        );
+
+        $cached = wp_cache_get($cacheKey, 'bcc_onchain');
+        if (is_array($cached) && array_key_exists('wallet_address', $cached)) {
+            /** @var array{wallet_address: string} $cached */
+            return $cached;
+        }
+
+        $data = $this->wasmSmartQuery($contract, [
+            'owner_of' => ['token_id' => $tokenId],
+        ]);
+        if ($data === null) {
+            // Don't cache transport failures.
+            return null;
+        }
+
+        $owner = is_string($data['owner'] ?? null) && $data['owner'] !== ''
+            ? (string) $data['owner']
+            : null;
+        if ($owner === null) {
+            return null;
+        }
+
+        $out = ['wallet_address' => $owner];
+        wp_cache_set($cacheKey, $out, 'bcc_onchain', 5 * MINUTE_IN_SECONDS);
+        return $out;
     }
 
     /**
