@@ -190,6 +190,16 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_push_subscriptions';
     }
 
+    // V1.5 a11y: photo alt-text sidecar (per api-contract-v1.md §3.3.9).
+    // 1:1 with peepso_photos.pho_id; PeepSo updates can't clobber it
+    // because the table is BCC-owned.
+
+    public static function photoAlts(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_photo_alts';
+    }
+
     // NOTE: bcc_user_locals removed — Locals membership ledger is PeepSo's
     // peepso_group_members; primary-Local pointer is wp_usermeta.bcc_primary_local_group_id.
     // NOTE: bcc_page_claims removed — page claims merged into bcc_onchain_claims
@@ -232,6 +242,8 @@ final class TableRegistry
             'dispute_participations' => self::disputeParticipations(),
             // V2 Phase 1 push notifications
             'push_subscriptions' => self::pushSubscriptions(),
+            // V1.5 a11y photo alt sidecar
+            'photo_alts'         => self::photoAlts(),
         ];
     }
 }

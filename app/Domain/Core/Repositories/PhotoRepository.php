@@ -124,6 +124,35 @@ final class PhotoRepository
     }
 
     /**
+     * Resolve the owner user id for a photo by its `pho_id`. Returns
+     * null when the photo doesn't exist (deleted, never uploaded, or
+     * unknown id). Used by the §3.3.9 alt-text write endpoint to
+     * verify `current_user_id() === pho_owner_id` before storing the
+     * author-supplied alt — single PK lookup, no JOIN.
+     *
+     * Note: this is a read against PeepSo's own table, mirroring the
+     * "BCC reads peepso_photos, never writes" rule documented in the
+     * file-level docblock above.
+     */
+    public function findOwnerByPhotoId(int $phoId): ?int
+    {
+        if ($phoId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $owner = $wpdb->get_var($wpdb->prepare(
+            'SELECT pho_owner_id FROM ' . self::table() . ' WHERE pho_id = %d LIMIT 1',
+            $phoId
+        ));
+
+        if ($owner === null || $owner === '') {
+            return null;
+        }
+        return (int) $owner;
+    }
+
+    /**
      * Resolve the public URL for a photo row.
      *
      * Local-storage convention: `<peepso_uri>users/<owner>/photos/<filename>`.

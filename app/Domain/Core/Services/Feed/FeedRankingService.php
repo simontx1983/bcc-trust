@@ -40,6 +40,7 @@ use BCC\Trust\Core\Repositories\GifRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\PhotoRepository;
+use BCC\Trust\Core\Repositories\PhotoAltRepository;
 use BCC\Trust\Core\Repositories\PullBatchRepository;
 use BCC\Trust\Core\Repositories\PullMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
@@ -73,6 +74,7 @@ final class FeedRankingService
         private readonly GroupContextResolver $groupContextResolver,
         private readonly CommentRepository $commentRepo,
         private readonly PhotoRepository $photoRepo,
+        private readonly PhotoAltRepository $photoAltRepo,
         private readonly GifRepository $gifRepo,
         private readonly MentionOverlayService $mentionOverlay
     ) {
@@ -518,13 +520,14 @@ final class FeedRankingService
      *   {
      *     caption:   string | null,   // wp_posts.post_content; null when whitespace-only
      *     photo_url: string,           // canonical full image URL
-     *     alt:       null              // V2 a11y deferred
+     *     alt:       string | null     // author-supplied; null when not set
      *   }
      *
-     * One COUNT-bounded SELECT against peepso_photos (PhotoRepository).
-     * Caption is read off the wp_post via update_meta_cache + get_post —
-     * cheap because the parent hydrateBodies pass already primed the
-     * post-meta cache for these IDs.
+     * Two bounded SELECTs: PhotoRepository::findByPostIds (peepso_photos)
+     * gives us pho_id + filename; PhotoAltRepository::findManyByPhotoIds
+     * (bcc_photo_alts sidecar) attaches the author-supplied alt text in a
+     * single round-trip keyed by pho_id. Photos with no alt-row return
+     * null and the frontend renders `<img alt="">` (decorative).
      *
      * Defensive posture: when a photo row is missing (rare race —
      * activity row landed but save_images hasn't completed), the body
@@ -541,21 +544,28 @@ final class FeedRankingService
         }
         $rowsByPost = $this->photoRepo->findByPostIds($postIds);
 
+        // Collect pho_ids for the alt-text sidecar lookup. Posts without
+        // a photo row (race window) contribute nothing; the alt map
+        // simply won't have an entry for them.
+        $phoIdsByPost = [];
+        foreach ($rowsByPost as $postId => $row) {
+            $phoIdsByPost[$postId] = (int) $row->pho_id;
+        }
+        $altsByPhoId = $this->photoAltRepo->findManyByPhotoIds(array_values($phoIdsByPost));
+
         $out = [];
         foreach ($postIds as $postId) {
             $caption = self::resolvePhotoCaption($postId);
             $row     = $rowsByPost[$postId] ?? null;
             $photoUrl = $row !== null ? PhotoRepository::resolvePhotoUrl($row) : '';
 
+            $phoId = $phoIdsByPost[$postId] ?? 0;
+            $alt   = $phoId > 0 ? ($altsByPhoId[$phoId] ?? null) : null;
+
             $out[$postId] = [
                 'caption'   => $caption,
                 'photo_url' => $photoUrl,
-                // Alt text is deferred to V2 a11y per Phase 1b scope.
-                // Always null here so the contract field is present
-                // and the frontend can render an empty `alt=""` (the
-                // image is then treated as decorative until the user
-                // can describe it).
-                'alt'       => null,
+                'alt'       => $alt,
             ];
         }
         return $out;

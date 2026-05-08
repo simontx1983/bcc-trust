@@ -36,6 +36,8 @@ require_once __DIR__ . '/schema-dispute-participations.php';
 
 // V2 Phase 1: §I1 push notifications — VAPID subscriptions per user/device
 require_once __DIR__ . '/schema-push-subscriptions.php';
+// V1.5 a11y: photo alt-text sidecar (per api-contract-v1.md §3.3.9)
+require_once __DIR__ . '/schema-photo-alts.php';
 // NOTE: bcc_user_locals removed — Locals membership lives in PeepSo's
 // peepso_group_members (single graph rule); primary-Local pointer in
 // wp_usermeta.bcc_primary_local_group_id.
@@ -148,6 +150,10 @@ function bcc_trust_create_tables() {
         bcc_trust_create_push_subscriptions_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Push subscriptions table created', []);
     }
+    if (function_exists('bcc_trust_create_photo_alts_table')) {
+        bcc_trust_create_photo_alts_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Photo alts table created', []);
+    }
 
     // §D5 reaction seeding — idempotent insert of the three custom
     // reactions (Solid / Vouch / Stand behind) as peepso_reaction_user
@@ -224,6 +230,8 @@ function bcc_trust_verify_all_tables() {
         'bcc_dispute_participations',
         // V2 Phase 1 push notifications
         'bcc_push_subscriptions',
+        // V1.5 a11y photo alt sidecar
+        'bcc_photo_alts',
     ];
 
     $missing = [];

@@ -402,6 +402,12 @@ final class Plugin
         return $this->photoRepository ??= new Repositories\PhotoRepository();
     }
 
+    private ?Repositories\PhotoAltRepository $photoAltRepository = null;
+    public function photoAltRepository(): Repositories\PhotoAltRepository
+    {
+        return $this->photoAltRepository ??= new Repositories\PhotoAltRepository();
+    }
+
     private ?Repositories\GifRepository $gifRepository = null;
     public function gifRepository(): Repositories\GifRepository
     {
@@ -471,6 +477,7 @@ final class Plugin
             $this->groupContextResolver(),
             $this->commentRepository(),
             $this->photoRepository(),
+            $this->photoAltRepository(),
             $this->gifRepository(),
             $this->mentionOverlayService()
         );
@@ -934,6 +941,12 @@ final class Plugin
         // v1.5: also handles POST /posts/photo (multipart) and
         // POST /posts/gif (Giphy URL) for the social-grammar slices.
         \BCC\Trust\Core\REST\PostsEndpoint::register();
+
+        // v1.5 a11y: PATCH /photos/:pho_id/alt — author-only write
+        // for the §3.3.9 alt-text deferred-debt slot. Stores into the
+        // BCC-owned bcc_photo_alts sidecar (PeepSo's peepso_photos has
+        // no native alt column).
+        \BCC\Trust\Core\REST\PhotoAltEndpoint::register();
 
         // v1.5 integrations surface — exposes PeepSo admin-configured
         // integration toggles (currently Giphy) to the BCC frontend
