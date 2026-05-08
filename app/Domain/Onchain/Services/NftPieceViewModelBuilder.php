@@ -71,7 +71,8 @@ if (!defined('ABSPATH')) {
  *     meta: array{
  *         read_time: bool,
  *         indexer_state: array<string, string>,
- *         indexer_state_label: array<string, string>
+ *         indexer_state_label: array<string, string>,
+ *         owners_summary_label: ?string
  *     }
  * }
  */
@@ -228,13 +229,38 @@ final class NftPieceViewModelBuilder
             'mint_link'        => null,        // V2 Phase 6 deferred — gallery surface
             'permissions'      => new stdClass(), // §3.7: empty in V2 Phase 6
             'meta' => [
-                'read_time'           => $isCosmos,
-                'indexer_state'       => $indexer['indexer_state'],
-                'indexer_state_label' => $indexer['indexer_state_label'],
+                'read_time'            => $isCosmos,
+                'indexer_state'        => $indexer['indexer_state'],
+                'indexer_state_label'  => $indexer['indexer_state_label'],
+                'owners_summary_label' => self::buildOwnersSummaryLabel($tokenStandard, $ownersCount),
             ],
         ];
 
         return [$viewModel, $cacheState];
+    }
+
+    /**
+     * §3.7 `meta.owners_summary_label` — server-pre-formatted multi-
+     * holder summary string. The frontend renders this verbatim and
+     * uses its presence (non-null) as the signal to also render
+     * `owners[]` co-owner tiles. Single-holder standards always get
+     * null. ERC-1155 with `owners_count <= 1` (e.g., a 1155 with
+     * effectively one holder) also gets null — the multi-holder UI
+     * is only meaningful when there are actually multiple holders.
+     *
+     * Goes through `_n()` so when i18n ships the locale-correct
+     * plural lands here without a frontend change.
+     */
+    private static function buildOwnersSummaryLabel(?string $tokenStandard, int $ownersCount): ?string
+    {
+        if (!self::isMultiHolderStandard($tokenStandard) || $ownersCount <= 1) {
+            return null;
+        }
+        return sprintf(
+            /* translators: %d is the number of distinct ERC-1155 holders. */
+            _n('Held by %d collector', 'Held by %d collectors', $ownersCount, 'bcc-trust'),
+            $ownersCount
+        );
     }
 
     /**
