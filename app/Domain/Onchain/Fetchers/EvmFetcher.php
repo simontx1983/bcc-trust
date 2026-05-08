@@ -31,6 +31,7 @@ use BCC\Trust\Onchain\Support\ApiRetry;
 class EvmFetcher implements FetcherInterface
 {
     private const HTTP_TIMEOUT = 12;
+    private const ALCHEMY_MAX_COUNT = 1000; // alchemy_getAssetTransfers per-page cap (spike 1)
 
     /** @var ChainRow */
     private object $chain;
@@ -75,8 +76,14 @@ class EvmFetcher implements FetcherInterface
      * (the seeded Alchemy URLs ship with /v2/ placeholder and will fail
      * until a key is appended).
      *
-     * Does NOT handle ERC-1155 (which uses balanceOf(address,uint256) and
-     * requires the token_id). For 1155-gated groups, extend later.
+     * ERC-721 only by design. ERC-1155 contracts expose
+     * `balanceOf(address, uint256)` which requires a token_id and a
+     * different selector (0x00fdd58e); answering "owns any token in
+     * the contract" via RPC would need either `balanceOfBatch` over
+     * a known token-id list or per-id calls — neither composes cleanly
+     * here. The holder gate sidesteps this entirely by routing 1155
+     * lookups through `NftHoldingsRepository::countVisibleByContract()`
+     * (the persistent transfer index, see HoldingsService::countFromCacheOrFetch).
      */
     public function count_holdings(string $wallet, string $contract): int
     {
@@ -161,7 +168,7 @@ class EvmFetcher implements FetcherInterface
             'category'         => ['erc721', 'erc1155'],
             'withMetadata'     => true,
             'excludeZeroValue' => false,
-            'maxCount'         => '0x3e8', // 1000 — self-imposed page size per spike 1
+            'maxCount'         => '0x' . dechex(self::ALCHEMY_MAX_COUNT),
             'order'            => 'asc',
         ];
         if (is_string($pageKey) && $pageKey !== '') {
@@ -550,103 +557,150 @@ class EvmFetcher implements FetcherInterface
      * @param int $limit Number of top collections to fetch (max 100 per call).
      * @return array<int, array<string, mixed>> Array of normalized collection data rows.
      */
-    public function fetch_top_collections(int $limit = 100): array
+    /**
+     * Contract-level metadata via Alchemy NFT API v3 `getContractMetadata`.
+     * Powers `NftEnrichmentService` collection-row backfill — holds the
+     * "what is this contract?" enrichment for the discovery rows that
+     * `CollectionRepository::ensureExistsBatch` writes when the holdings
+     * indexer first sees a contract.
+     *
+     * Endpoint: `https://{network}.g.alchemy.com/nft/v3/{key}/getContractMetadata`
+     *
+     * The chain's `rpc_url` is the JSON-RPC URL (`/v2/{key}`); we derive
+     * the NFT v3 base from it via a regex swap rather than hardcoding a
+     * per-chain map. Same key, same vendor, same circuit-breaker chain
+     * id — works for every Alchemy-backed EVM chain (ethereum, polygon,
+     * arbitrum, optimism, base) without further config. Public-RPC
+     * chains (avalanche, bsc, etc.) don't match the regex and return
+     * null — discovery rows for those chains stay un-enriched until a
+     * dedicated fetcher is added.
+     *
+     * @return array{
+     *     collection_name: ?string,
+     *     image_url: ?string,
+     *     total_supply: ?int,
+     *     floor_price: ?float,
+     *     floor_currency: ?string,
+     *     token_standard: ?string
+     * }|null
+     */
+    public function fetchContractMetadata(string $contract): ?array
     {
-        $chainId = (int) $this->chain->id;
-
-        // Map our chain slugs to Reservoir chain IDs.
-        $reservoirChains = [
-            'ethereum'  => 1,
-            'polygon'   => 137,
-            'arbitrum'  => 42161,
-            'optimism'  => 10,
-            'base'      => 8453,
-            'avalanche' => 43114,
-            'bsc'       => 56,
-        ];
-
-        $slug = $this->chain->slug ?? '';
-        $reservoirChainId = $reservoirChains[$slug] ?? null;
-
-        if (!$reservoirChainId) {
-            return [];
+        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
+        if ($rpcUrl === '') {
+            return null;
+        }
+        $contractLc = strtolower($contract);
+        if (!preg_match('/^0x[a-f0-9]{40}$/', $contractLc)) {
+            return null;
         }
 
-        $baseUrl = ($reservoirChainId === 1)
-            ? 'https://api.reservoir.tools'
-            : "https://api-{$slug}.reservoir.tools";
-
-        $url = add_query_arg([
-            'sortBy'         => 'allTimeVolume',
-            'limit'          => min($limit, 100),
-            'includeTopBid'  => 'false',
-        ], $baseUrl . '/collections/v7');
-
-        $headers = ['Accept' => 'application/json'];
-
-        // Use API key if configured (higher rate limits).
-        if (defined('BCC_RESERVOIR_API_KEY') && BCC_RESERVOIR_API_KEY) {
-            $headers['x-api-key'] = BCC_RESERVOIR_API_KEY;
+        // Derive the NFT v3 base from the JSON-RPC URL. Anchored regex
+        // so a non-Alchemy rpc_url (custom RPC, public node) returns null
+        // rather than producing a malformed request.
+        if (!preg_match(
+            '#^(https://[a-z0-9-]+\.g\.alchemy\.com)/v2/([A-Za-z0-9_-]+)/?$#',
+            $rpcUrl,
+            $m
+        )) {
+            return null;
         }
+        $nftV3Base = $m[1] . '/nft/v3/' . $m[2];
+
+        $url = $nftV3Base . '/getContractMetadata?contractAddress=' . rawurlencode($contractLc);
 
         $response = ApiRetry::get($url, [
-            'timeout' => 20,
-            'headers' => $headers,
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Accept' => 'application/json'],
+            'sslverify' => true,
         ], [
-            'label'    => 'Reservoir collections ' . $slug,
-            'chain_id' => $chainId,
+            'label'    => 'EVM alchemy_getContractMetadata',
+            'chain_id' => (int) $this->chain->id,
         ]);
 
         if (is_wp_error($response)) {
-            \BCC\Core\Log\Logger::error('[EVM Fetcher] Reservoir fetch failed: ' . $response->get_error_message());
-            return [];
+            return null;
+        }
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return null;
         }
 
-        $code = wp_remote_retrieve_response_code($response);
-        if ($code !== 200) {
-            \BCC\Core\Log\Logger::error('[EVM Fetcher] Reservoir returned ' . $code . ' for ' . $slug);
-            return [];
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json)) {
+            return null;
         }
 
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        $items = $body['collections'] ?? [];
+        // Alchemy NFT v3 returns top-level `name`, `symbol`, `tokenType`,
+        // `totalSupply`, `openSeaMetadata.collectionName`, `openSeaMetadata.imageUrl`,
+        // `openSeaMetadata.floorPrice`. Older v2 response shapes are
+        // documented but not used here — v3 is the supported endpoint.
+        $name      = is_string($json['name'] ?? null) && $json['name'] !== ''
+            ? $json['name']
+            : null;
+        $tokenType = is_string($json['tokenType'] ?? null) && $json['tokenType'] !== ''
+            ? $json['tokenType']
+            : null;
+        $supply    = isset($json['totalSupply']) && is_numeric($json['totalSupply'])
+            ? (int) $json['totalSupply']
+            : null;
 
-        if (empty($items)) {
-            return [];
+        $os = isset($json['openSeaMetadata']) && is_array($json['openSeaMetadata'])
+            ? $json['openSeaMetadata']
+            : [];
+        $imageUrl   = is_string($os['imageUrl'] ?? null) && $os['imageUrl'] !== ''
+            ? $os['imageUrl']
+            : null;
+        $floorPrice = isset($os['floorPrice']) && is_numeric($os['floorPrice'])
+            ? (float) $os['floorPrice']
+            : null;
+        $collName   = is_string($os['collectionName'] ?? null) && $os['collectionName'] !== ''
+            ? $os['collectionName']
+            : $name;
+
+        // Normalize Alchemy's tokenType (e.g. "ERC721", "ERC1155", "NOT_A_CONTRACT")
+        // to the codebase's hyphenated form used in wp_bcc_onchain_collections.
+        $standardOut = null;
+        if ($tokenType === 'ERC721') {
+            $standardOut = 'ERC-721';
+        } elseif ($tokenType === 'ERC1155') {
+            $standardOut = 'ERC-1155';
         }
 
-        $native = $this->chain->native_token ?? 'ETH';
-        $collections = [];
+        $native = is_string($this->chain->native_token ?? null) && $this->chain->native_token !== ''
+            ? (string) $this->chain->native_token
+            : 'ETH';
 
-        foreach ($items as $item) {
-            $contract = $item['primaryContract'] ?? ($item['id'] ?? '');
-            if (!$contract) {
-                continue;
-            }
+        return [
+            'collection_name' => $collName,
+            'image_url'       => $imageUrl,
+            'total_supply'    => $supply,
+            'floor_price'     => $floorPrice,
+            'floor_currency'  => $floorPrice !== null ? $native : null,
+            'token_standard'  => $standardOut,
+        ];
+    }
 
-            $floorAsk = $item['floorAsk']['price']['amount']['native'] ?? null;
-            $volume   = $item['volume']['allTime'] ?? null;
-
-            $collections[] = [
-                'contract_address'   => $contract,
-                'chain_id'           => $chainId,
-                'collection_name'    => $item['name'] ?? null,
-                'token_standard'     => $item['contractKind'] ?? 'ERC-721',
-                'total_supply'       => isset($item['tokenCount']) ? (int) $item['tokenCount'] : null,
-                'floor_price'        => $floorAsk !== null ? (float) $floorAsk : null,
-                'floor_currency'     => $native,
-                'unique_holders'     => isset($item['ownerCount']) ? (int) $item['ownerCount'] : null,
-                'total_volume'       => $volume !== null ? (float) $volume : null,
-                'listed_percentage'  => isset($item['onSaleCount'], $item['tokenCount']) && $item['tokenCount'] > 0
-                    ? round((int) $item['onSaleCount'] / (int) $item['tokenCount'] * 100, 2)
-                    : null,
-                'royalty_percentage' => isset($item['royalties']['bps']) ? (float) $item['royalties']['bps'] / 100 : null,
-                'metadata_storage'   => null,
-                'image_url'          => $item['image'] ?? null,
-            ];
-        }
-
-        return $collections;
+    public function fetch_top_collections(int $limit = 100): array
+    {
+        // Reservoir's public API (api.reservoir.tools / api-{chain}.reservoir.tools)
+        // was sunset in 2024 after the OpenSea acquisition; the DNS no longer
+        // resolves and every call returned a curl-6 WP_Error. Rather than swap
+        // in another single-vendor "top collections by volume" feed (same risk
+        // class — every NFT data API has churned hard in the last 3 years),
+        // EVM collection discovery is now driven by user holdings: the
+        // NftHoldingsIndexer ingests transfers via Alchemy and bridges new
+        // (chain, contract) pairs into wp_bcc_onchain_collections via
+        // CollectionRepository::ensureExistsBatch, then NftEnrichmentService
+        // backfills metadata using EvmFetcher::fetchContractMetadata against
+        // Alchemy NFT v3 (one vendor, already-configured key, no marketing
+        // discovery surface to maintain).
+        //
+        // This method intentionally returns [] so the existing
+        // ChainRefreshService::index_collections cron loop keeps running but
+        // is a no-op for EVM chains. Cosmos and Solana keep their own working
+        // top-collections fetchers via this same interface.
+        return [];
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

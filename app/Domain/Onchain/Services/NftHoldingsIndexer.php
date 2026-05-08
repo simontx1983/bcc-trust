@@ -2,6 +2,7 @@
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
@@ -185,6 +186,24 @@ final class NftHoldingsIndexer
         $persisted          = NftHoldingsRepository::ingestBatch($upsertRows, $deletes);
         $result['inserts']  = $persisted['inserts'];
         $result['deletes']  = $persisted['deletes'];
+
+        // Step 5: discovery bridge. Every distinct (chain, contract) we
+        // upserted into wp_bcc_nft_holdings should have a matching stub
+        // row in wp_bcc_onchain_collections so the admin Verify page sees
+        // the collection. Runs OUTSIDE the holdings transaction —
+        // collections-table writes are best-effort: a failure here must
+        // not roll back successfully-persisted holdings. NftEnrichmentService
+        // backfills name / image / floor / supply on a separate cron tick.
+        if ($upsertRows !== []) {
+            try {
+                CollectionRepository::ensureExistsBatch($upsertRows);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::warning('[NftHoldingsIndexer] collection discovery bridge failed', [
+                    'chain_id' => $chainId,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
+        }
 
         return $result;
     }

@@ -71,13 +71,31 @@ final class ApiRetry
         while ($attempt <= $maxRetries) {
             $lastResponse = $fn();
 
-            // ── Any non-WP_Error means the upstream received the request ─
-            // Budget accounting is per-attempt (5xx retries each count),
-            // not per-call, so a failing chain cannot loop through the
-            // budget for free via retries. WP_Error = pre-connect failure
-            // (DNS, SSRF block, pre-send timeout) → do not charge.
+            // ── Budget accounting ────────────────────────────────────────
+            // Charge per-attempt (5xx retries each count) so a failing
+            // chain cannot loop through the budget for free via retries.
+            // WP_Error = pre-connect failure (DNS, SSRF block, pre-send
+            // timeout) → do not charge.
+            //
+            // 4xx (except 429) → also do NOT charge: validation rejection
+            // is almost always a bug in our code (malformed payload, wrong
+            // path, missing auth). Charging budget for our own bugs lets a
+            // single regression burn through MAX_API_CALLS_PER_CHAIN in
+            // seconds and block legitimate traffic for the cache TTL —
+            // which is exactly how the Stargaze CW-721 regression
+            // (unpadded base64) presented: every test click returned
+            // chain_budget_exceeded for 10 minutes after the bug fix
+            // landed. 429 is explicitly rate-limit signalling — the
+            // server processed the request and is throttling, so it
+            // counts as legitimate consumption. 5xx still counts because
+            // most providers (Alchemy CU, etc.) bill the request even
+            // when the response is a server-side failure.
             if (!is_wp_error($lastResponse) && $chainId > 0 && class_exists('\\BCC\\Trust\\Onchain\\Services\\EnrichmentScheduler')) {
-                \BCC\Trust\Onchain\Services\EnrichmentScheduler::trackApiCall($chainId);
+                $code = (int) wp_remote_retrieve_response_code($lastResponse);
+                $isClientErrorNon429 = ($code >= 400 && $code < 500 && $code !== 429);
+                if (!$isClientErrorNon429) {
+                    \BCC\Trust\Onchain\Services\EnrichmentScheduler::trackApiCall($chainId);
+                }
             }
 
             // ── Success path ────────────────────────────────────────────

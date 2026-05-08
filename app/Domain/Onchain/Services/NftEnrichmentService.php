@@ -6,6 +6,7 @@ use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\EvmFetcher;
 use BCC\Trust\Onchain\Fetchers\SolanaFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 
 if (!defined('ABSPATH')) {
@@ -145,7 +146,76 @@ final class NftEnrichmentService
             ]);
         }
 
+        // Collection-row enrichment runs in the same tick. Discovery rows
+        // come in via NftHoldingsIndexer's bridge; this is the matching
+        // backfill path that fills name/image/supply/floor from Alchemy
+        // NFT v3 `getContractMetadata`. EVM-only for now — Cosmos and
+        // Solana already have collection rows populated by their own
+        // top_collections fetchers, so they don't depend on this seam.
+        try {
+            self::enrichCollectionsForChain($chainId, $fetcher);
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::warning('[NftEnrichmentService] collection enrichment failed', [
+                'chain_id' => $chainId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+
         return $result;
+    }
+
+    /**
+     * Backfill name / image / supply / floor on collection rows that came
+     * from the indexer's discovery bridge. Bounded by `BATCH_SIZE` per
+     * chain per tick. Per-row failures are isolated — a single Alchemy
+     * miss shouldn't poison the rest of the batch.
+     */
+    private static function enrichCollectionsForChain(int $chainId, object $fetcher): void
+    {
+        if (!($fetcher instanceof EvmFetcher)) {
+            return;
+        }
+
+        $pending = CollectionRepository::findPendingEnrichment($chainId, self::BATCH_SIZE);
+        if ($pending === []) {
+            return;
+        }
+
+        $enriched = 0;
+        $failed   = 0;
+        foreach ($pending as $row) {
+            $collectionId = (int) $row->id;
+            $contract     = (string) $row->contract_address;
+
+            try {
+                $metadata = $fetcher->fetchContractMetadata($contract);
+                if ($metadata === null) {
+                    $failed++;
+                    continue;
+                }
+                if (CollectionRepository::applyEnrichment($collectionId, $metadata)) {
+                    $enriched++;
+                } else {
+                    $failed++;
+                }
+            } catch (\Throwable $e) {
+                $failed++;
+                \BCC\Core\Log\Logger::warning('[NftEnrichmentService] collection row failed', [
+                    'chain_id'      => $chainId,
+                    'collection_id' => $collectionId,
+                    'error'         => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($enriched > 0 || $failed > 0) {
+            \BCC\Core\Log\Logger::info('[NftEnrichmentService] collections enriched', [
+                'chain_id' => $chainId,
+                'enriched' => $enriched,
+                'failed'   => $failed,
+                'pending'  => count($pending),
+            ]);
+        }
     }
 
     /**

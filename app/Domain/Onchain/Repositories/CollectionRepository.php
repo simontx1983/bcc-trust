@@ -661,6 +661,44 @@ final class CollectionRepository
     }
 
     /**
+     * Resolve the on-chain `token_standard` for a (chain, contract) pair.
+     *
+     * Reads from `wp_bcc_onchain_collections.token_standard` — populated by
+     * the indexer (Alchemy `category` field for EVM, fetcher metadata for
+     * Cosmos/Solana). Returns the raw stored string (e.g. "ERC-721",
+     * "ERC-1155", "SPL", "CW-721") or null when the row exists but the
+     * standard is unknown / when no row exists.
+     *
+     * Used by the holder-gate path to decide between the ERC-721 RPC
+     * route and the ERC-1155 persistent-index route.
+     */
+    public static function findTokenStandard(int $chainId, string $contract): ?string
+    {
+        if ($chainId <= 0 || $contract === '') {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $value = $wpdb->get_var($wpdb->prepare(
+            "SELECT token_standard
+               FROM {$table}
+              WHERE chain_id = %d
+                AND contract_address = %s
+              LIMIT 1",
+            $chainId,
+            strtolower($contract)
+        ));
+
+        if ($value === null) {
+            return null;
+        }
+        $str = trim((string) $value);
+        return $str === '' ? null : $str;
+    }
+
+    /**
      * Toggle the admin `is_verified` flag.
      *
      * Verified collections become candidates for auto-provisioning of
@@ -938,5 +976,263 @@ final class CollectionRepository
         wp_cache_set('collection_counts_by_chain', $map, 'bcc_onchain', 3600);
 
         return $map;
+    }
+
+    // ── Discovery bridge (holdings indexer → collection rows) ───────────
+
+    /**
+     * Idempotently ensure a collection row exists for every (chain_id,
+     * contract_address) pair the holdings indexer encounters. Used as a
+     * write-side bridge so collections appear in the admin Verify list as
+     * soon as a connected wallet's transfers ingest, without depending on
+     * any external "top collections" feed.
+     *
+     * Discovery rows are minimal: `wallet_link_id = NULL` (matches the
+     * chain-level pattern from `bulkUpsert`), `token_standard` populated
+     * from the transfer event when known, all market-stat fields NULL.
+     * NftEnrichmentService backfills `collection_name`, `image_url`,
+     * `total_supply`, and `floor_price` on a separate cron tick via
+     * `findPendingEnrichment` / `applyEnrichment`.
+     *
+     * On collision (row already exists) we INSERT IGNORE plus a defensive
+     * `token_standard` fill via `COALESCE(token_standard, VALUES(...))` —
+     * never overwrites an existing non-null standard. This means a row
+     * that was already enriched will not have its data clobbered, while
+     * a stub row with `token_standard = NULL` gets corrected as soon as
+     * a transfer event provides the standard.
+     *
+     * @param list<array{chain_id: int, contract_address: string, token_standard?: ?string}> $rows
+     * @param int $ttlSeconds  Initial expires_at horizon. Matches bulkUpsert default.
+     * @return int Rows actually inserted (existing rows count as 0 from `rows_affected`).
+     */
+    public static function ensureExistsBatch(array $rows, int $ttlSeconds = 4 * HOUR_IN_SECONDS): int
+    {
+        if ($rows === []) {
+            return 0;
+        }
+
+        // Dedupe by (chain_id, contract_address) — the indexer's batch
+        // typically contains many holdings rows for the same contract.
+        $deduped = [];
+        foreach ($rows as $r) {
+            $chainId  = (int) ($r['chain_id'] ?? 0);
+            $contract = strtolower((string) ($r['contract_address'] ?? ''));
+            if ($chainId <= 0 || $contract === '') {
+                continue;
+            }
+            $key = $chainId . '|' . $contract;
+            // Last-write-wins on token_standard within the dedupe pass —
+            // any non-null standard supersedes a null. Lets a single batch
+            // with both 721 and 1155 transfers for the same contract
+            // (rare but possible across token_ids) end up tagged correctly.
+            $existing = $deduped[$key]['token_standard'] ?? null;
+            $incoming = isset($r['token_standard']) && is_string($r['token_standard']) && $r['token_standard'] !== ''
+                ? $r['token_standard']
+                : null;
+            $deduped[$key] = [
+                'chain_id'         => $chainId,
+                'contract_address' => $contract,
+                'token_standard'   => $existing ?? $incoming,
+            ];
+        }
+
+        if ($deduped === []) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table     = self::table();
+        $now       = current_time('mysql', true);
+        $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
+        $inserted  = 0;
+
+        foreach ($deduped as $entry) {
+            $chainId  = $entry['chain_id'];
+            $contract = $entry['contract_address'];
+            $std      = $entry['token_standard'];
+
+            // Inline the token_standard literal so we can pass NULL when
+            // unknown without %s coercing it to an empty string. Same
+            // pattern bulkUpsert uses for nullable numeric fields.
+            $stdSql = $std !== null
+                ? $wpdb->prepare('%s', $std)
+                : 'NULL';
+
+            $result = $wpdb->query($wpdb->prepare(
+                "INSERT INTO {$table}
+                    (wallet_link_id, contract_address, chain_id, token_standard,
+                     show_on_profile, is_verified, fetched_at, expires_at)
+                 VALUES (NULL, %s, %d, {$stdSql}, 1, 0, %s, %s)
+                 ON DUPLICATE KEY UPDATE
+                    token_standard = COALESCE(token_standard, VALUES(token_standard))",
+                $contract,
+                $chainId,
+                $now,
+                $expiresAt
+            ));
+
+            // rows_affected = 1 → newly inserted; 2 → row updated via
+            // ON DUPLICATE KEY (existed); 0 → existed and update was a
+            // no-op (token_standard already populated). We only count
+            // genuine inserts so a re-ingestion sweep returns 0.
+            if ($result !== false && (int) $wpdb->rows_affected === 1) {
+                $inserted++;
+            }
+        }
+
+        return $inserted;
+    }
+
+    /**
+     * Pull rows that have not yet been enriched with collection-level
+     * metadata. "Pending" here means `collection_name IS NULL` — every
+     * row written by `ensureExistsBatch` starts with name null and only
+     * gets a name from a successful enrichment call.
+     *
+     * Bounded by `$limit` (capped at 100 to fit the per-chain enrichment
+     * cron's 5-minute cadence without runaway). Ordered by `id ASC` so
+     * the oldest discoveries enrich first — newer arrivals queue up
+     * behind them rather than starving the backlog under sustained load.
+     *
+     * @return list<object{
+     *     id: string,
+     *     chain_id: string,
+     *     contract_address: string,
+     *     token_standard: string|null
+     * }>
+     */
+    public static function findPendingEnrichment(int $chainId, int $limit = 50): array
+    {
+        if ($chainId <= 0) {
+            return [];
+        }
+        $limit = max(1, min(100, $limit));
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{id: string, chain_id: string, contract_address: string, token_standard: string|null}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, chain_id, contract_address, token_standard
+               FROM {$table}
+              WHERE chain_id = %d
+                AND collection_name IS NULL
+              ORDER BY id ASC
+              LIMIT %d",
+            $chainId,
+            $limit
+        ));
+
+        return $rows ?: [];
+    }
+
+    /**
+     * Write enrichment fields for a single collection row. Mirrors the
+     * shape `EvmFetcher::fetchContractMetadata` returns.
+     *
+     * Two write disciplines, picked per-column:
+     *
+     *   IDENTITY fields (`collection_name`, `image_url`, `token_standard`)
+     *   — preserve-on-write via COALESCE. Once a row gets a real name,
+     *   no future enrichment can wipe it. Defends against partial
+     *   Alchemy responses that return e.g. `name=null` mid-incident.
+     *
+     *   MARKET fields (`floor_price`, `floor_currency`, `total_supply`)
+     *   — overwrite when the input is non-null, leave alone when null.
+     *   These genuinely move (a floor of 0.05 ETH today may be 0.5 ETH
+     *   tomorrow); preserve-once would silently freeze stale data.
+     *   Symmetric with `bulkUpsert`'s `VALUES(floor_price)` semantics.
+     *
+     *   In both cases a null input field is omitted from the SET list,
+     *   so a partial response can't wipe a previously-good column —
+     *   the divergence is only in what happens when both old AND new
+     *   values are non-null (preserve old vs. take new).
+     *
+     * `fetched_at` is unconditionally bumped so the admin "last refresh"
+     * column reflects the attempt even when no individual column changed.
+     *
+     * @param array{
+     *     collection_name?: ?string,
+     *     image_url?: ?string,
+     *     total_supply?: ?int,
+     *     floor_price?: ?float,
+     *     floor_currency?: ?string,
+     *     token_standard?: ?string
+     * } $fields
+     */
+    public static function applyEnrichment(int $collectionId, array $fields): bool
+    {
+        if ($collectionId <= 0) {
+            return false;
+        }
+
+        $name      = isset($fields['collection_name']) && is_string($fields['collection_name']) && $fields['collection_name'] !== ''
+            ? $fields['collection_name']
+            : null;
+        $image     = isset($fields['image_url']) && is_string($fields['image_url']) && $fields['image_url'] !== ''
+            ? $fields['image_url']
+            : null;
+        $supply    = isset($fields['total_supply']) && is_numeric($fields['total_supply'])
+            ? (int) $fields['total_supply']
+            : null;
+        $floor     = isset($fields['floor_price']) && is_numeric($fields['floor_price'])
+            ? (float) $fields['floor_price']
+            : null;
+        $currency  = isset($fields['floor_currency']) && is_string($fields['floor_currency']) && $fields['floor_currency'] !== ''
+            ? $fields['floor_currency']
+            : null;
+        $standard  = isset($fields['token_standard']) && is_string($fields['token_standard']) && $fields['token_standard'] !== ''
+            ? $fields['token_standard']
+            : null;
+
+        global $wpdb;
+        $table = self::table();
+        $now   = current_time('mysql', true);
+
+        // Build SET list dynamically: omit any column whose input is null
+        // so a partial fetch never touches that column at all. Identity
+        // columns wrap the value in COALESCE; market columns overwrite.
+        $setClauses = [];
+        $params     = [];
+
+        // Identity fields (preserve-once via COALESCE).
+        if ($name !== null) {
+            $setClauses[] = 'collection_name = COALESCE(collection_name, %s)';
+            $params[]     = $name;
+        }
+        if ($image !== null) {
+            $setClauses[] = 'image_url = COALESCE(image_url, %s)';
+            $params[]     = $image;
+        }
+        if ($standard !== null) {
+            $setClauses[] = 'token_standard = COALESCE(token_standard, %s)';
+            $params[]     = $standard;
+        }
+
+        // Market fields (refresh when fresh data arrives).
+        if ($supply !== null) {
+            $setClauses[] = 'total_supply = %d';
+            $params[]     = $supply;
+        }
+        if ($floor !== null) {
+            $setClauses[] = 'floor_price = %f';
+            $params[]     = $floor;
+        }
+        if ($currency !== null) {
+            $setClauses[] = 'floor_currency = %s';
+            $params[]     = $currency;
+        }
+
+        // Always bump fetched_at — the "we tried" signal that survives
+        // an all-null partial response.
+        $setClauses[] = 'fetched_at = %s';
+        $params[]     = $now;
+
+        $params[] = $collectionId;
+
+        $sql    = "UPDATE {$table} SET " . implode(', ', $setClauses) . " WHERE id = %d";
+        $result = $wpdb->query($wpdb->prepare($sql, $params));
+
+        return $result !== false;
     }
 }

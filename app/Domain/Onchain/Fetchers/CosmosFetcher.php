@@ -444,10 +444,16 @@ class CosmosFetcher implements FetcherInterface
         if ($json === false) {
             return null;
         }
-        // Cosmos SDK wasm module expects the query JSON as URL-safe base64
-        // in the path. base64_encode (standard, with padding) is accepted
-        // by every Cosmos chain's wasm module.
-        $encoded = rtrim(strtr(base64_encode($json), '+/', '-_'), '=');
+        // Cosmos SDK wasm module expects the query JSON as base64 in the
+        // path. Two requirements:
+        //   1. URL-safe alphabet (`-_` instead of `+/`) — a literal `/` in
+        //      the encoded string would split the URL path at the wrong
+        //      segment boundary.
+        //   2. Padding `=` MUST be preserved — Stargaze's LCD (cosmos-sdk
+        //      strict parser) returns 400 "illegal base64 data" on
+        //      unpadded input; cosmos-hub's LCD happens to be lenient,
+        //      but we can't rely on that across all chains.
+        $encoded = strtr(base64_encode($json), '+/', '-_');
 
         $response = $this->lcdGet(
             '/cosmwasm/wasm/v1/contract/' . rawurlencode($contractAddress) . '/smart/' . $encoded
