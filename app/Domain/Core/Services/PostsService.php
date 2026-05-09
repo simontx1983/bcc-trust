@@ -27,6 +27,7 @@ use BCC\Core\PeepSo\PeepSoGifWriter;
 use BCC\Core\PeepSo\PeepSoPhotoWriter;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
 use BCC\Core\Security\Throttle;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
@@ -126,10 +127,21 @@ final class PostsService
      *   act_id: int
      * }|array{error: string, message: string, data?: array<string, mixed>}
      */
-    public function createStatus(int $authorId, string $content): array
+    public function createStatus(int $authorId, string $content, int $groupId = 0): array
     {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        // Group-wall validation runs BEFORE content / mention / throttle
+        // gates so a non-member never burns a throttle slot probing
+        // group existence. Returns null on success (allowed); an error
+        // envelope on failure.
+        if ($groupId > 0) {
+            $gateError = self::gateGroupPost($authorId, $groupId);
+            if ($gateError !== null) {
+                return $gateError;
+            }
         }
 
         $trimmed = trim($content);
@@ -184,7 +196,7 @@ final class PostsService
             return $mentionError;
         }
 
-        $result = PeepSoStatusWriter::createSelfStatus($authorId, $trimmed);
+        $result = PeepSoStatusWriter::createSelfStatus($authorId, $trimmed, $groupId);
         if ($result['ok'] === false) {
             return self::mapWriterError($result['reason']);
         }
@@ -552,10 +564,19 @@ final class PostsService
      *   photo_id: int
      * }|array{error: string, message: string, data?: array<string, mixed>}
      */
-    public function createPhotoPost(int $authorId, array $file, string $caption): array
+    public function createPhotoPost(int $authorId, array $file, string $caption, int $groupId = 0): array
     {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        // Group-wall validation runs BEFORE caption / throttle / file
+        // gates — same ordering as createStatus.
+        if ($groupId > 0) {
+            $gateError = self::gateGroupPost($authorId, $groupId);
+            if ($gateError !== null) {
+                return $gateError;
+            }
         }
 
         $captionTrimmed = trim($caption);
@@ -598,7 +619,7 @@ final class PostsService
             return $mentionError;
         }
 
-        $result = PeepSoPhotoWriter::createSelfPhotoPost($authorId, $file, $captionTrimmed);
+        $result = PeepSoPhotoWriter::createSelfPhotoPost($authorId, $file, $captionTrimmed, $groupId);
         if ($result['ok'] === false) {
             return self::mapPhotoWriterError($result['reason']);
         }
@@ -650,10 +671,19 @@ final class PostsService
      *   act_id: int
      * }|array{error: string, message: string, data?: array<string, mixed>}
      */
-    public function createGifPost(int $authorId, string $url, string $caption): array
+    public function createGifPost(int $authorId, string $url, string $caption, int $groupId = 0): array
     {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        // Group-wall validation runs BEFORE caption / throttle / URL
+        // gates — same ordering as createStatus / createPhotoPost.
+        if ($groupId > 0) {
+            $gateError = self::gateGroupPost($authorId, $groupId);
+            if ($gateError !== null) {
+                return $gateError;
+            }
         }
 
         $captionTrimmed = trim($caption);
@@ -694,7 +724,7 @@ final class PostsService
             return $mentionError;
         }
 
-        $result = PeepSoGifWriter::createSelfGifPost($authorId, $url, $captionTrimmed);
+        $result = PeepSoGifWriter::createSelfGifPost($authorId, $url, $captionTrimmed, $groupId);
         if ($result['ok'] === false) {
             return self::mapGifWriterError($result['reason']);
         }
@@ -831,6 +861,65 @@ final class PostsService
                 ];
             }
         }
+        return null;
+    }
+
+    /**
+     * Group-wall write gate.
+     *
+     * Two-step check that mirrors the §4.7.5 / §4.7.6 read-side
+     * defense-in-depth pattern:
+     *
+     *   1. {@see GroupsService::resolveGroupAccess} returns null when
+     *      the group does not exist OR the viewer is anonymous OR the
+     *      group is `secret` privacy and the viewer is not a member.
+     *      All three failures collapse to 404 — the error message is
+     *      identical so a probe can't distinguish "no such group" from
+     *      "secret group, not in." This matches §4.7.5's posture.
+     *
+     *   2. With access resolved we then require active membership
+     *      (READ_ALLOWED_STATUSES — same set the comment-count gate
+     *      and FeedRankingService::hydrateGroupContexts use). A non-
+     *      member of an open / closed group sees 403 with a filterable
+     *      "Join the group to post here." message.
+     *
+     * The 403 message can be customised per-deployment via the
+     * `bcc_group_post_membership_required` filter — the contract pin
+     * is the error code (`bcc_permission_denied`); the human-facing
+     * copy is filterable so V2 group-creator overrides ("Only
+     * approved members can post in #foo") slot in without contract
+     * churn.
+     *
+     * Returns null when the gate passes; an error envelope when it
+     * doesn't (so the caller can `return $err` directly).
+     *
+     * @return array{error: string, message: string}|null
+     */
+    private static function gateGroupPost(int $authorId, int $groupId): ?array
+    {
+        $access = Plugin::instance()->groupsService()->resolveGroupAccess($authorId, $groupId);
+        if ($access === null) {
+            // Group does not exist OR is secret-and-viewer-not-a-member.
+            // Single error message — defense-in-depth, no existence leak.
+            return [
+                'error'   => 'bcc_not_found',
+                'message' => 'Group not found.',
+            ];
+        }
+
+        if ($access['isMember'] !== true) {
+            $message = (string) apply_filters(
+                'bcc_group_post_membership_required',
+                'Join the group to post here.',
+                $authorId,
+                $groupId
+            );
+            return [
+                'error'   => 'bcc_permission_denied',
+                'message' => $message,
+            ];
+        }
+
         return null;
     }
 }

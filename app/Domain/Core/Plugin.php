@@ -378,6 +378,18 @@ final class Plugin
         return $this->localsService ??= new Services\LocalsService();
     }
 
+    private ?Services\GroupsService $groupsService = null;
+    public function groupsService(): Services\GroupsService
+    {
+        return $this->groupsService ??= new Services\GroupsService();
+    }
+
+    private ?Services\GroupMembersService $groupMembersService = null;
+    public function groupMembersService(): Services\GroupMembersService
+    {
+        return $this->groupMembersService ??= new Services\GroupMembersService();
+    }
+
     private ?Services\ShiftLogService $shiftLogService = null;
     public function shiftLogService(): Services\ShiftLogService
     {
@@ -420,6 +432,20 @@ final class Plugin
         return $this->commentService ??= new Services\CommentService(
             $this->commentRepository(),
             $this->mentionOverlayService()
+        );
+    }
+
+    private ?Repositories\UserMiniRepository $userMiniRepository = null;
+    public function userMiniRepository(): Repositories\UserMiniRepository
+    {
+        return $this->userMiniRepository ??= new Repositories\UserMiniRepository();
+    }
+
+    private ?Services\MessagesService $messagesService = null;
+    public function messagesService(): Services\MessagesService
+    {
+        return $this->messagesService ??= new Services\MessagesService(
+            $this->userMiniRepository()
         );
     }
 
@@ -1000,6 +1026,14 @@ final class Plugin
         // direct message delivery.
         \BCC\Trust\Core\REST\MyMessagesPrefsEndpoint::register();
 
+        // v1.5: §4.X Direct Messages — inbox + thread + send + read.
+        // Composes bcc-core PeepSoMessageWriter (single-graph rule) +
+        // PeepSoMessageRepository over PeepSo's peepso_message_*
+        // tables and the peepso-message CPT. All gating (chat_enabled,
+        // chat_friends_only + friendship, mutual blocks, rate limit)
+        // lives inside MessagesService.
+        \BCC\Trust\Core\REST\MessagesEndpoint::register();
+
         // V2 Phase 2.5: PeepSo profile-fields mirror — the headless
         // analogue of PeepSo's About sub-tab:
         //   GET   /me/profile/fields                       — schema + values + visibility
@@ -1059,6 +1093,19 @@ final class Plugin
         // V2: Group discovery surface — verified-first, then heat-aware
         // ranking. ?verified=1 filters to On-Chain Verified groups only.
         \BCC\Trust\Core\REST\GroupsDiscoveryEndpoint::register();
+
+        // V2: Cross-kind single-group detail (§4.7.5) + group-scoped
+        // feed (§4.7.6). Defense-in-depth privacy gates: secret + non-
+        // member 404s; closed/NFT-gated + non-member returns the view
+        // model with feed_visible=false (detail) or 403 + unlock_hint
+        // (feed sub-route).
+        \BCC\Trust\Core\REST\GroupsDetailEndpoint::register();
+
+        // V2: Paginated group members (§4.7.7). Same privacy model as
+        // §4.7.5 + §4.7.6 — secret-non-member 404s; closed-non-member
+        // 403s; open is public. Roster ordered by (role_rank, joined_at
+        // DESC) so offset pagination is stable.
+        \BCC\Trust\Core\REST\GroupMembersEndpoint::register();
 
         // V1.5: §I1 one-click email-digest unsubscribe — public route
         // that verifies a signed token (HMAC-SHA256, 90-day TTL) and

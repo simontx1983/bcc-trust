@@ -114,6 +114,17 @@ final class PostsEndpoint
                         'required'          => false,
                         'type'              => 'string',
                     ],
+                    // Optional group-wall target. When > 0 the post lands
+                    // on the group's wall; the service gates on existence
+                    // (404 — defense-in-depth, no existence leak) and
+                    // active membership (403). Status / blog kinds both
+                    // observe this; review kind ignores it (reviews are
+                    // page-scoped, not wall-scoped).
+                    'group_id' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
+                    ],
                 ],
             ]
         );
@@ -138,6 +149,15 @@ final class PostsEndpoint
                         'type'              => 'string',
                         // PeepSo's add_post handles content escaping;
                         // we only trim/cap in the service layer.
+                    ],
+                    // Optional group-wall target — same semantics as on
+                    // /posts (status). Multipart form field, so the
+                    // wire shape is a string-coerced integer; absint
+                    // sanitizes empty / non-numeric to 0.
+                    'group_id' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
                     ],
                 ],
             ]
@@ -176,6 +196,13 @@ final class PostsEndpoint
                         'required'          => false,
                         'type'              => 'string',
                     ],
+                    // Optional group-wall target — same semantics as on
+                    // /posts (status) and /posts/photo.
+                    'group_id' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
+                    ],
                 ],
             ]
         );
@@ -194,17 +221,32 @@ final class PostsEndpoint
         }
 
         $content = (string) $request->get_param('content');
+        $groupId = (int) ($request->get_param('group_id') ?? 0);
         $service = Plugin::instance()->postsService();
 
         if ($kind === 'status') {
-            $result = $service->createStatus($viewerId, $content);
+            $result = $service->createStatus($viewerId, $content, $groupId);
         } elseif ($kind === 'review') {
+            // Reviews are page-scoped, not wall-scoped — group_id is
+            // ignored here on purpose. Surfacing it would create a
+            // semantic conflict with target_page_id.
             $targetPageId = (int) $request->get_param('target_page_id');
             $grade        = (string) ($request->get_param('grade') ?? '');
             $result       = $service->createReview($viewerId, $targetPageId, $grade, $content);
         } elseif ($kind === 'blog') {
             // §D6 — `content` carries the full_text; `excerpt` is the
             // Floor-context teaser. Service enforces length bounds.
+            // Blog group_id support is V2 — V1 blogs always land on the
+            // author's own wall. Surface a clear error if a caller
+            // passes group_id with kind=blog so the contract stays
+            // honest about the scope mismatch.
+            if ($groupId > 0) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    'Blog posts cannot target a group wall in V1.',
+                    400
+                );
+            }
             $excerpt = (string) ($request->get_param('excerpt') ?? '');
             $result  = $service->createBlog($viewerId, $excerpt, $content);
         } else {
@@ -274,7 +316,8 @@ final class PostsEndpoint
         }
 
         $caption = (string) ($request->get_param('caption') ?? '');
-        $result  = Plugin::instance()->postsService()->createPhotoPost($viewerId, $file, $caption);
+        $groupId = (int) ($request->get_param('group_id') ?? 0);
+        $result  = Plugin::instance()->postsService()->createPhotoPost($viewerId, $file, $caption, $groupId);
 
         if (isset($result['error'])) {
             return self::forwardServiceError($result);
@@ -305,8 +348,9 @@ final class PostsEndpoint
 
         $url     = (string) $request->get_param('url');
         $caption = (string) ($request->get_param('caption') ?? '');
+        $groupId = (int) ($request->get_param('group_id') ?? 0);
 
-        $result = Plugin::instance()->postsService()->createGifPost($viewerId, $url, $caption);
+        $result = Plugin::instance()->postsService()->createGifPost($viewerId, $url, $caption, $groupId);
         if (isset($result['error'])) {
             return self::forwardServiceError($result);
         }
@@ -342,6 +386,8 @@ final class PostsEndpoint
         return match ($code) {
             'bcc_unauthorized'           => 401,
             'bcc_forbidden'              => 403,
+            'bcc_permission_denied'      => 403,
+            'bcc_not_found'              => 404,
             'bcc_invalid_request'        => 400,
             'bcc_invalid_mention_target' => 400,
             'bcc_too_many_mentions'      => 400,

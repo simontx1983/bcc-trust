@@ -87,8 +87,12 @@ final class FeedRankingService
      */
     public function getHotFeed(?string $cursor = null, int $limit = 20): array
     {
-        $excluded = $this->reputationRepo->getCautionAndRiskyUserIds();
-        $hidden   = $this->hiddenRepo->getAllHiddenIds();
+        $excluded       = $this->reputationRepo->getCautionAndRiskyUserIds();
+        $hidden         = $this->hiddenRepo->getAllHiddenIds();
+        // Anon viewer (id=0) → exclude every non-open group. Restricted-
+        // group resolution happens BEFORE the underlying SQL builds the
+        // exclude IN clause, so empty list short-circuits the LEFT JOIN.
+        $excludedGroups = self::resolveRestrictedGroupIds(0);
 
         $payload = $this->activityFeed->getFeed(
             0,
@@ -96,7 +100,9 @@ final class FeedRankingService
             $cursor,
             $limit,
             $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden
+            $hidden === []   ? null : $hidden,
+            null,
+            $excludedGroups === [] ? null : $excludedGroups
         );
 
         $payload['items'] = $this->hydrateBodies($payload['items']);
@@ -134,13 +140,21 @@ final class FeedRankingService
         // without suppressing the author's other content.
         $hidden = $this->hiddenRepo->getAllHiddenIds();
 
+        // §4.7.x main-feed leak gate — drop posts in closed/secret/
+        // NFT-gated groups the viewer is not a member of. Subtractive:
+        // (non-open groups) - (viewer's memberships). Empty list
+        // short-circuits the SQL exclude branch entirely.
+        $excludedGroups = self::resolveRestrictedGroupIds($viewerId);
+
         $payload = $this->activityFeed->getFeed(
             $viewerId,
             $scope,
             $cursor,
             $limit,
             $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden
+            $hidden === []   ? null : $hidden,
+            null,
+            $excludedGroups === [] ? null : $excludedGroups
         );
 
         $payload['items'] = $this->hydrateBodies($payload['items']);
@@ -177,13 +191,73 @@ final class FeedRankingService
 
         $hidden = $this->hiddenRepo->getAllHiddenIds();
 
+        // §4.7.x author-wall leak gate — same shape as the main feed.
+        // A wall is a one-author slice of the same activity stream, so
+        // posts the wall owner made inside a closed/secret/NFT-gated
+        // group the viewer can't see must be filtered out here too.
+        $excludedGroups = self::resolveRestrictedGroupIds($viewerId);
+
         $payload = $this->activityFeed->getActivityForAuthor(
             $authorId,
             $viewerId,
             $cursor,
             $limit,
             $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden
+            $hidden === []   ? null : $hidden,
+            $excludedGroups === [] ? null : $excludedGroups
+        );
+
+        $payload['items'] = $this->hydrateBodies($payload['items']);
+        $payload['items'] = $this->hydrateReactions($payload['items'], $viewerId);
+        $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
+        $payload['items'] = self::hydrateViewerPermissions($payload['items'], $viewerId);
+        $payload['items'] = $this->hydrateGroupContexts($payload['items']);
+        $payload['items'] = $this->hydrateCommentCounts($payload['items'], $viewerId);
+        return $payload;
+    }
+
+    /**
+     * Group-scoped feed — chronological stream of activity inside a
+     * single PeepSo group. Backs `GET /bcc/v1/groups/{id}/feed`.
+     *
+     * Same single-brain composition as `getFeed()`: shadow-limit
+     * exclusions (§O4.1), mutual-block invisibility (§K1), per-row
+     * moderation hide (§K1 Phase C), then the standard hydration
+     * chain (bodies, reactions, author badges, viewer permissions,
+     * group context, comment counts).
+     *
+     * Authorization is the caller's job. The endpoint
+     * (GroupsDetailEndpoint::feed) enforces:
+     *   - secret + non-member → 404
+     *   - closed + non-member → 403 with unlock_hint
+     *   - nft-gated + non-holder/non-member → 403 with unlock_hint
+     * before this is invoked. The SQL filter then restricts the
+     * candidate set to posts carrying `peepso_group_id` post-meta.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    public function getGroupFeed(int $viewerId, int $groupId, ?string $cursor = null, int $limit = 20): array
+    {
+        if ($groupId <= 0) {
+            return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+        }
+
+        $excluded = self::mergeExclusions(
+            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
+        );
+
+        $hidden = $this->hiddenRepo->getAllHiddenIds();
+
+        $payload = $this->activityFeed->getFeed(
+            $viewerId,
+            ActivityFeedService::SCOPE_GROUP,
+            $cursor,
+            $limit,
+            $excluded === [] ? null : $excluded,
+            $hidden === []   ? null : $hidden,
+            $groupId
         );
 
         $payload['items'] = $this->hydrateBodies($payload['items']);
@@ -1059,6 +1133,52 @@ final class FeedRankingService
             $hydrated[] = $item;
         }
         return $hydrated;
+    }
+
+    /**
+     * §4.7.x main-feed group-leak gate — compute the list of group IDs
+     * the viewer must NOT see posts from. Subtractive composition:
+     *
+     *   (every non-open group on the install) - (viewer's memberships)
+     *
+     * NB: this canonical seam is only invoked from the §F3 single brain
+     * here; bcc-core stays unaware of WHY group IDs are excluded —
+     * same coupling-avoidance pattern as the existing `excludedAuthorIds`
+     * (caution/risky tier) and `excludedActIds` (moderation hide) channels.
+     *
+     * Anon viewers (id<=0) get the full non-open list back — they
+     * cannot be a member of anything, so every closed/secret/NFT-gated
+     * group is restricted. Authed viewers get their membership list
+     * subtracted out so their own gated-group posts surface in the
+     * main feed normally.
+     *
+     * Both inputs are bounded:
+     *  - `getNonOpenGroupIds()` caps at 500 (V1 scale; ~hundreds of
+     *    groups across the install)
+     *  - `getUserMemberGroupIds()` caps at 1000 here (looser than the
+     *    default 200; we want to subtract every membership the viewer
+     *    has, not just their first 200, otherwise gated groups they
+     *    belong to but happen to fall outside the cap re-leak).
+     *
+     * Caller passes `null` to bcc-core when this returns `[]` — empty
+     * lists short-circuit the SQL exclude branch entirely.
+     *
+     * @return list<int>
+     */
+    private static function resolveRestrictedGroupIds(int $viewerId): array
+    {
+        $nonOpen = PeepSoGroupRepository::getNonOpenGroupIds();
+        if ($nonOpen === []) {
+            return [];
+        }
+        if ($viewerId <= 0) {
+            return $nonOpen;
+        }
+        $myGroups = PeepSoGroupRepository::getUserMemberGroupIds($viewerId, 1000);
+        if ($myGroups === []) {
+            return $nonOpen;
+        }
+        return array_values(array_diff($nonOpen, $myGroups));
     }
 
     /**
