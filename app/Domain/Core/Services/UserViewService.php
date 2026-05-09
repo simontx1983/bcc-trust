@@ -996,7 +996,12 @@ final class UserViewService
      * from §O5 feature gates (those live in feature_access). For V1:
      *
      *   can_follow      — true for any other authed viewer
-     *   can_message     — false (V1 has no DM system)
+     *   can_message     — true when the recipient has chat enabled
+     *                     (cheap PeepSoChatModel check). Server still
+     *                     re-runs the deeper gates (chat_friends_only +
+     *                     friendship, mutual blocks, rate limit) on
+     *                     every actual send (§4.19); this flag is a
+     *                     UI-affordance signal only.
      *   can_block       — true for any other authed viewer
      *   can_edit_profile — true only on own profile
      *
@@ -1004,15 +1009,36 @@ final class UserViewService
      */
     private static function resolvePermissions(int $userId, int $viewerId, bool $isSelf): array
     {
-        $isAuthed   = $viewerId > 0;
-        $isOther    = $isAuthed && !$isSelf;
+        $isAuthed = $viewerId > 0;
+        $isOther  = $isAuthed && !$isSelf;
+
+        // can_message — cheap presence check on PeepSoChatModel (the
+        // recipient may have toggled chat off in their settings). The
+        // friends-only / mutual-block / rate-limit gates run on the
+        // POST itself; this surface only decides whether to render the
+        // "Message" button at all.
+        $canMessage = $isOther && self::recipientChatEnabled($userId);
 
         return [
-            'can_follow'       => ['allowed' => $isOther, 'unlock_hint' => null],
-            'can_message'      => ['allowed' => false,    'unlock_hint' => null],
-            'can_block'        => ['allowed' => $isOther, 'unlock_hint' => null],
-            'can_edit_profile' => ['allowed' => $isSelf,  'unlock_hint' => null],
+            'can_follow'       => ['allowed' => $isOther,    'unlock_hint' => null],
+            'can_message'      => ['allowed' => $canMessage, 'unlock_hint' => null],
+            'can_block'        => ['allowed' => $isOther,    'unlock_hint' => null],
+            'can_edit_profile' => ['allowed' => $isSelf,     'unlock_hint' => null],
         ];
+    }
+
+    /**
+     * `peepso_chat_enabled` user_meta gate. Defensive when the
+     * peepso-messages plugin is missing — return false (UI hides the
+     * button rather than rendering a "Message" affordance that always
+     * 503s).
+     */
+    private static function recipientChatEnabled(int $userId): bool
+    {
+        if ($userId <= 0 || !class_exists('PeepSoChatModel')) {
+            return false;
+        }
+        return (bool) \PeepSoChatModel::check_chat_enabled($userId);
     }
 
     /**
