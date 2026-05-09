@@ -147,6 +147,31 @@ class GitHubRepository {
     */
 
     /**
+     * Bounded list of user_ids with an active GitHub connection. Powers
+     * the §G1 /members directory's "GitHub verified" filter pill — the
+     * caller pre-resolves the verified set, then intersects with other
+     * filter axes before passing to WP_User_Query::include.
+     *
+     * Bounded by LIMIT 5000 (mirrors XRepository::getVerifiedUserIds).
+     *
+     * @return list<int>
+     */
+    public function getVerifiedUserIds(): array {
+        global $wpdb;
+
+        /** @var list<string> $rows */
+        $rows = $wpdb->get_col(
+            "SELECT user_id
+               FROM {$this->table}
+              WHERE type = 'github'
+                AND status = 'active'
+              LIMIT 5000"
+        );
+
+        return array_map('intval', $rows);
+    }
+
+    /**
      * Batched: lifetime GitHub-connection summary per user. Returns
      * only the public-display fields the directory needs (provider
      * username + verified_at). Users without an active GitHub

@@ -33,6 +33,7 @@ use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
+use BCC\Trust\Core\Repositories\UserRankRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Repositories\XRepository;
@@ -297,6 +298,28 @@ final class UsersEndpoint
                         'enum'              => ['validator', 'project', 'nft', 'dao'],
                         'sanitize_callback' => 'sanitize_text_field',
                     ],
+                    'rank' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        // Rank slugs match RankCatalog (apprentice / journeyman /
+                        // foreman). Per UserRankRepository::getUserIdsWithRank
+                        // docblock, this filter targets EXPLICITLY-AWARDED ranks
+                        // — auto-derived Apprentice (display fallback) is not
+                        // included in the `apprentice` filter.
+                        'enum'              => ['apprentice', 'journeyman', 'foreman'],
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'verified' => [
+                        'required' => false,
+                        'type'     => 'array',
+                        // CSV-or-array body shape. Each entry is one
+                        // verification-axis slug; multiple entries combine
+                        // with AND semantics ("X AND GitHub verified").
+                        'items'    => [
+                            'type' => 'string',
+                            'enum' => ['x', 'github', 'wallet'],
+                        ],
+                    ],
                 ],
             ]
         );
@@ -453,6 +476,23 @@ final class UsersEndpoint
             ? $typeParam
             : '';
 
+        // Optional rank filter — single-select per the §G1 chip strip.
+        // Server validates against the same allowlist the route schema
+        // enforces; an unknown value is silently dropped (matches the
+        // existing `type` posture).
+        $rankParam = $request->get_param('rank');
+        $rank      = is_string($rankParam) && in_array($rankParam, ['apprentice', 'journeyman', 'foreman'], true)
+            ? $rankParam
+            : '';
+
+        // Optional verifications filter — multi-select with AND semantics.
+        // The route schema accepts an array of {x, github, wallet}; we
+        // re-validate here so direct callers + REST `verified[]=x&verified[]=…`
+        // bodies + CSV `verified=x,github` shapes all converge on the same
+        // canonical set.
+        $verifiedParam = $request->get_param('verified');
+        $verifiedAxes  = self::normaliseVerifiedAxes($verifiedParam);
+
         $viewerId = get_current_user_id();
 
         // Global type-counts (independent of `q` / `type` filters) ride
@@ -463,31 +503,64 @@ final class UsersEndpoint
         // alternative chips with non-zero results.
         $typeCounts = PeepSoPageRepository::getGlobalOwnedPageUserCountsByType();
 
-        // When `type` is set, pre-resolve the set of user_ids who own
-        // ≥1 page of that type (one batched SQL on the page-categories
-        // join). Pass that list to WP_User_Query via `include` so the
-        // existing pagination + search logic keeps working — the
-        // intersection of (search match) AND (in this id set) is what
-        // WP_User_Query produces. Empty pre-resolved list = no rows
-        // (short-circuit before issuing the user query).
-        $typeRestrictedIds = null;
+        // Each filter axis pre-resolves to a list<int> of user_ids that
+        // satisfy that axis. We collect every axis's list, then INTERSECT
+        // across axes to produce a single `include` set passed to
+        // WP_User_Query. Any axis returning an empty list short-circuits
+        // the whole response to no rows (an unsatisfiable AND).
+        //
+        // Axes that aren't being filtered contribute nothing to the
+        // intersection — null sentinel means "no constraint from this
+        // axis." Pattern matches the existing $typeRestrictedIds shape
+        // documented in this method since v1.5.
+        $restrictedSets = [];
+
         if ($type !== '') {
-            $typeRestrictedIds = PeepSoPageRepository::getUserIdsOwningPagesOfType($type);
-            if ($typeRestrictedIds === []) {
-                $emptyResponse = ApiResponse::ok([
-                    'items'      => [],
-                    'pagination' => [
-                        'page'        => $page,
-                        'per_page'    => $perPage,
-                        'total'       => 0,
-                        'total_pages' => 1,
-                    ],
-                    'type_counts' => $typeCounts,
-                ]);
-                $emptyResponse->header('Cache-Control', 'private, max-age=15');
-                $emptyResponse->header('Vary', 'Authorization, Cookie');
-                return $emptyResponse;
+            $typeIds = PeepSoPageRepository::getUserIdsOwningPagesOfType($type);
+            if ($typeIds === []) {
+                return self::membersEmptyResponse($page, $perPage, $typeCounts);
             }
+            $restrictedSets[] = $typeIds;
+        }
+
+        if ($rank !== '') {
+            $rankIds = (new UserRankRepository())->getUserIdsWithRank($rank);
+            if ($rankIds === []) {
+                return self::membersEmptyResponse($page, $perPage, $typeCounts);
+            }
+            $restrictedSets[] = $rankIds;
+        }
+
+        foreach ($verifiedAxes as $axis) {
+            $axisIds = match ($axis) {
+                'x'      => (new XRepository())->getVerifiedUserIds(),
+                'github' => (new GitHubRepository())->getVerifiedUserIds(),
+                'wallet' => WalletRepository::getVerifiedUserIds(),
+                default  => [],
+            };
+            if ($axisIds === []) {
+                return self::membersEmptyResponse($page, $perPage, $typeCounts);
+            }
+            $restrictedSets[] = $axisIds;
+        }
+
+        // Intersect all restricted sets. `array_intersect` over int lists
+        // is O(n*m) but the lists are bounded at 5000 each per repository
+        // contract; the directory's realistic sizes keep this trivial.
+        $typeRestrictedIds = null;
+        if ($restrictedSets !== []) {
+            $first = array_shift($restrictedSets);
+            $intersected = $first;
+            foreach ($restrictedSets as $set) {
+                $intersected = array_values(array_intersect($intersected, $set));
+                if ($intersected === []) {
+                    break;
+                }
+            }
+            if ($intersected === []) {
+                return self::membersEmptyResponse($page, $perPage, $typeCounts);
+            }
+            $typeRestrictedIds = $intersected;
         }
 
         // WP_User_Query handles offset pagination + search across
@@ -583,6 +656,68 @@ final class UsersEndpoint
         $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
+    }
+
+    /**
+     * Empty `/members` response shared between the type-restricted, rank-
+     * restricted, and verified-restricted short-circuit paths. Keeps the
+     * `type_counts` payload + cache headers identical regardless of which
+     * filter axis produced the empty intersection so the frontend's chip
+     * strip can still suggest non-zero alternatives.
+     *
+     * @param array<string, int> $typeCounts
+     */
+    private static function membersEmptyResponse(int $page, int $perPage, array $typeCounts): WP_REST_Response
+    {
+        $resp = ApiResponse::ok([
+            'items'      => [],
+            'pagination' => [
+                'page'        => $page,
+                'per_page'    => $perPage,
+                'total'       => 0,
+                'total_pages' => 1,
+            ],
+            'type_counts' => $typeCounts,
+        ]);
+        $resp->header('Cache-Control', 'private, max-age=15');
+        $resp->header('Vary', 'Authorization, Cookie');
+        return $resp;
+    }
+
+    /**
+     * Normalise the `verified` query param to a deduped, allowlist-
+     * filtered list of axis slugs. Accepts:
+     *   - WP REST array form: `verified[]=x&verified[]=github`
+     *   - CSV: `verified=x,github`
+     *   - single string: `verified=x`
+     *
+     * Unknown axes are silently dropped (consistent with the route
+     * schema's `enum`); empty / non-stringy inputs collapse to `[]`.
+     *
+     * @param mixed $raw
+     * @return list<string>
+     */
+    private static function normaliseVerifiedAxes($raw): array
+    {
+        if (is_string($raw)) {
+            $parts = array_map('trim', explode(',', $raw));
+        } elseif (is_array($raw)) {
+            $parts = array_map(static fn ($v): string => is_string($v) ? trim($v) : '', $raw);
+        } else {
+            return [];
+        }
+
+        $allowed = ['x', 'github', 'wallet'];
+        $seen    = [];
+        $out     = [];
+        foreach ($parts as $p) {
+            if ($p === '' || isset($seen[$p]) || !in_array($p, $allowed, true)) {
+                continue;
+            }
+            $seen[$p] = true;
+            $out[]    = $p;
+        }
+        return $out;
     }
 
     /**

@@ -127,6 +127,33 @@ class XRepository {
     */
 
     /**
+     * Bounded list of user_ids with an active X connection. Powers
+     * the §G1 /members directory's "X verified" filter pill — the
+     * caller pre-resolves the verified set, then intersects with
+     * other filter axes before passing to WP_User_Query::include.
+     *
+     * Bounded by LIMIT 5000 — covers the realistic V1.5 directory size
+     * with abundant headroom while keeping the IN() clause sane when
+     * passed downstream to WP_User_Query.
+     *
+     * @return list<int>
+     */
+    public function getVerifiedUserIds(): array {
+        global $wpdb;
+
+        /** @var list<string> $rows */
+        $rows = $wpdb->get_col(
+            "SELECT user_id
+               FROM {$this->table}
+              WHERE type = 'x'
+                AND status = 'active'
+              LIMIT 5000"
+        );
+
+        return array_map('intval', $rows);
+    }
+
+    /**
      * Batched: lifetime X-connection summary per user. Returns only
      * the public-display fields the directory needs (provider username
      * + verified_at) — never decrypts tokens or surfaces email. Users

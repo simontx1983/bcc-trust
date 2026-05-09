@@ -53,6 +53,46 @@ class UserRankRepository
     }
 
     /**
+     * Bounded list of user_ids whose currently-active rank matches
+     * `$rankKey` (active = `revoked_at IS NULL`). Powers the §G1
+     * /members directory's rank filter pill.
+     *
+     * Note: this is the EXPLICITLY-AWARDED rank only — the auto-derived
+     * fallback (apprentice for unranked users) is computed by
+     * RankService at view time and is NOT stored here. Filtering by
+     * `apprentice` returns only users with an explicit `apprentice`
+     * award; unranked users won't surface even though their displayed
+     * rank label is `Apprentice`. V1 acceptable: the directory's
+     * existing implicit-Apprentice population is overwhelmingly the
+     * baseline — surfacing it via the filter would defeat the filter's
+     * purpose (find people higher up the ladder).
+     *
+     * Bounded by LIMIT 5000.
+     *
+     * @return list<int>
+     */
+    public function getUserIdsWithRank(string $rankKey): array
+    {
+        if ($rankKey === '') {
+            return [];
+        }
+
+        global $wpdb;
+
+        /** @var list<string> $rows */
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT user_id
+               FROM {$this->table}
+              WHERE rank_key = %s
+                AND revoked_at IS NULL
+              LIMIT 5000",
+            $rankKey
+        ));
+
+        return array_map('intval', $rows);
+    }
+
+    /**
      * Find the user's currently active rank (WHERE revoked_at IS NULL).
      * Returns null if the user has no active rank row (which means they
      * fall back to the auto-derived rank — that lookup lives in the

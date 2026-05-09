@@ -197,6 +197,34 @@ final class WalletRepository
     }
 
     /**
+     * Bounded list of user_ids with at least one verified wallet. Powers
+     * the §G1 /members directory's "Wallet verified" filter pill — the
+     * caller pre-resolves the verified set, then intersects with other
+     * filter axes before passing to WP_User_Query::include.
+     *
+     * DISTINCT keeps the result one row per user even though a user can
+     * own multiple wallets. Bounded by LIMIT 5000 (mirrors XRepository /
+     * GitHubRepository::getVerifiedUserIds).
+     *
+     * @return list<int>
+     */
+    public static function getVerifiedUserIds(): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<string> $rows */
+        $rows = $wpdb->get_col(
+            "SELECT DISTINCT user_id
+               FROM {$table}
+              WHERE verified_at IS NOT NULL
+              LIMIT 5000"
+        );
+
+        return array_map('intval', $rows);
+    }
+
+    /**
      * Batched: count of verified wallets per user. One GROUP BY scan
      * keyed on `user_id IN (...)` AND `verified_at IS NOT NULL`. Used
      * by the /members directory back-of-card to show verified-wallet
