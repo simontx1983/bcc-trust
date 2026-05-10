@@ -104,6 +104,13 @@ class PageDiscoveryService {
         if ($this->useReadModel === null) {
             $this->useReadModel = Plugin::instance()->pageReadModelRepository()->hasData();
         }
+        if ($this->useReadModel === false) {
+            // Observability counter: legacy-aggregation fallback active.
+            // Expected immediately after fresh install (read model not
+            // yet populated), or transiently after a bulk delete/cache
+            // bust. Sustained activation = a sync cron is broken.
+            \BCC\Core\Observability\DegradationMetrics::record('read_model_fallback', 'legacy_aggregation');
+        }
         return $this->useReadModel;
     }
 
