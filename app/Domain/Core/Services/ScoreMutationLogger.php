@@ -195,7 +195,14 @@ final class ScoreMutationLogger
                 ];
             }
         } catch (\Exception $e) {
-            // silent
+            // Silent by design — audit-log writes must never break the
+            // score-mutation hot path (Constitution §VIII.30). The caller
+            // proceeds with a null "before" snapshot rather than aborting
+            // the mutation. Recorded so operators can detect "we've been
+            // logging score mutations without before-snapshots for N
+            // hours" — sustained activation = ScoreRepository read path
+            // is unhealthy on what's supposed to be a hot read.
+            \BCC\Core\Observability\DegradationMetrics::record('audit_log_swallow', 'score_mutation_before_snapshot');
         }
         return null;
     }
