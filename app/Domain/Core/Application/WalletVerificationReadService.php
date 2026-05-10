@@ -24,6 +24,11 @@ use BCC\Core\ServiceLocator;
  * service is constructed directly by its two consumers
  * (FeatureAccessService, VoteEligibilityChecker); the cross-plugin
  * ServiceLocator seam was removed when no external consumer materialized.
+ *
+ * @status alive — canonical wallet-verification read facade for
+ *                 FeatureAccessService + VoteEligibilityChecker. Phase B
+ *                 V-18 classification 2026-05-09. See
+ *                 docs/pattern-registry.md "Phase B inventory addendum".
  */
 class WalletVerificationReadService
 {

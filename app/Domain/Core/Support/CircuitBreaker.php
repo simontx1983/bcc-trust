@@ -25,6 +25,20 @@
  * DB otherwise). Values survive a worker crash; the cooldown TTL bounds
  * how long the breaker can stay open on a truly dead dependency.
  *
+ * Same-name sibling: this class shares its short name with
+ * {@see \BCC\Trust\Onchain\Support\CircuitBreaker}, the per-chain variant
+ * used by the NFT/wallet fetcher pipeline. They are NOT interchangeable:
+ *   - This (Core) variant: transient storage, generic external
+ *     dependencies, named-key API.
+ *   - Onchain variant: `wp_cache` storage with transient fallback,
+ *     per-chain int-keyed, 6-hour TTL to outlast batch cron runs,
+ *     incident-driven legacy-key tolerance, 5-minute log-rate-limit on
+ *     persistent corruption.
+ *
+ * **Do NOT use this Core variant for chain RPC** — the Onchain copy
+ * carries hardening this one does not. See
+ * docs/pattern-registry.md "Same-name-different-class index".
+ *
  * @package BCC\Trust\Core\Support
  */
 

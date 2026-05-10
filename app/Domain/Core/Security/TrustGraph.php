@@ -8,6 +8,12 @@
  * @package BCC\Trust
  * @subpackage Security
  * @version 2.1.1
+ * @status alive — canonical PageRank + vote/endorsement ring detector.
+ *                 Powers the `bcc_trust_daily_graph_update` cron
+ *                 (CronService.php:584). Tunables: `bcc_trust_graph_edge_chunk`,
+ *                 `bcc_trust_graph_max_chunks` filters; `BCC_TRUST_GRAPH_*`
+ *                 / `BCC_TRUST_RING_*` defines. Phase B V-18 classification
+ *                 2026-05-09. See docs/pattern-registry.md "Phase B inventory addendum".
  */
 
 namespace BCC\Trust\Core\Security;

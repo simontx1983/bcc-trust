@@ -14,6 +14,14 @@
  *
  * Storage: wp_cache (Redis-backed when available, transient fallback).
  *
+ * Same-name sibling: this class shares its short name with
+ * {@see \BCC\Trust\Core\Support\CircuitBreaker} (the generic
+ * transient-backed external-dependency breaker). This Onchain variant
+ * carries chain-specific hardening (6-hour TTL, legacy-key tolerance,
+ * rate-limited corruption logging) that Core does not. See
+ * docs/pattern-registry.md "Same-name-different-class index" — the
+ * two are intentionally not collapsed.
+ *
  * @package BCC\Trust\Onchain\Support
  */
 

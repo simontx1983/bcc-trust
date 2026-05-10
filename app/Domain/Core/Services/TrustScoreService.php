@@ -39,6 +39,15 @@ if (!defined('ABSPATH')) {
  *      → PageReadModelRepository.bcc_page_read_model
  *
  * If you change the formula, change it ONLY in compute() and formulaSql().
+ *
+ * @status alive (locked-canonical) — single source of trust-score formula
+ *                 truth. Constitutional anchor for §III.10 / §III.11.
+ *                 PageScore::computeExpectedTotal delegates here;
+ *                 ScoreRepository::TOTAL_SCORE_SQL was removed in favor of
+ *                 formulaSql(). Do NOT add a parallel compute path. Phase B
+ *                 V-18 classification 2026-05-09. See
+ *                 docs/pattern-registry.md "Phase B inventory addendum"
+ *                 + the canonical entry under "Reputation".
  */
 final class TrustScoreService
 {

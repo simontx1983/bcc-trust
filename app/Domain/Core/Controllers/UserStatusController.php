@@ -17,6 +17,15 @@
  * Email verification is handled by PeepSo; the PeepSo bridge in
  * BCC\Trust\Core\Integration\PeepSoIntegration::onEmailVerified mirrors its
  * state into bcc_trust_user_info.is_verified.
+ *
+ * @status alive — extracted-handler class wired by
+ *                 {@see \BCC\Trust\Core\Controllers\TrustRestController}
+ *                 (`POST /bcc-trust/v1/device-fingerprint` →
+ *                 `store_fingerprint`; `GET /bcc-trust/v1/user/status` →
+ *                 `get_user_status`, registered at TrustRestController.php:135
+ *                 + :141). Not a duplicate handler — V-27 was a false positive.
+ *                 Phase B V-18 classification 2026-05-09.
+ *                 See docs/pattern-registry.md "Phase B inventory addendum".
  */
 
 namespace BCC\Trust\Core\Controllers;

@@ -590,7 +590,7 @@ class CronService
 
         // Clear retired hooks so they don't fire orphaned actions.
         $retired = [
-            'bcc_trust_hourly_graph_update',    // legacy alias for daily_graph_update
+            'bcc_trust_hourly_graph_update',    // legacy alias for daily_graph_update — @retire-after: production confirms zero scheduled instances for 30+ days
             'bcc_trust_hourly_ring_detection',  // merged into daily_graph_update
             'bcc_trust_hourly_risk_refresh',    // user_risk table merged into user_info
             'bcc_trust_backfill_edges',         // fresh system, no history to backfill

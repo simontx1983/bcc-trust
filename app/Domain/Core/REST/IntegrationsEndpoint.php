@@ -31,6 +31,13 @@
  *
  * @package BCC\Trust\Core\REST
  * @since v1.5 (2026-05, Phase 1c GIF picker)
+ * @status alive — frontend-consumed via
+ *                 `bcc-frontend/src/lib/api/integrations-endpoints.ts`
+ *                 (`getGiphyIntegration` adapter feeding the
+ *                 `useGiphyIntegration` React Query hook). V-25
+ *                 verification 2026-05-09 confirmed the endpoint and the
+ *                 typed adapter are both wired and contract-aligned.
+ *                 See docs/pattern-registry.md "Phase B inventory addendum".
  */
 
 namespace BCC\Trust\Core\REST;

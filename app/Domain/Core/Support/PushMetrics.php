@@ -27,6 +27,12 @@
  *
  * @package BCC\Trust\Core\Support
  * @since V2 Phase 1
+ * @status alive — V2 Phase 1 §P1.F push-delivery observability counters.
+ *                 Consumers: PushDispatcher (write path) + admin "Push
+ *                 delivery stats" tab (read path). Per-(outcome, event_type)
+ *                 hourly buckets; atomic via wp_cache_add/incr with
+ *                 transient fallback. Phase B V-18 classification 2026-05-09.
+ *                 See docs/pattern-registry.md "Phase B inventory addendum".
  */
 
 declare(strict_types=1);
