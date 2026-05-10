@@ -73,6 +73,36 @@ final class AdminReportsEndpoint
                         'maximum'           => self::MAX_PER_PAGE,
                         'sanitize_callback' => 'absint',
                     ],
+                    // ── Filter args (contract extension; response shape unchanged) ──
+                    'reason' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['spam', 'harassment', 'hate', 'violence', 'misinformation', 'other'],
+                        'sanitize_callback' => 'sanitize_key',
+                    ],
+                    'reporter_handle' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'post_kind' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['status', 'blog', 'review', 'photo', 'gif'],
+                        'sanitize_callback' => 'sanitize_key',
+                    ],
+                    'since' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'format'            => 'date-time',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'until' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'format'            => 'date-time',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
                 ],
             ]
         );
@@ -125,7 +155,15 @@ final class AdminReportsEndpoint
             $perPage = self::DEFAULT_PER_PAGE;
         }
 
-        $payload = Plugin::instance()->moderationQueueService()->getQueue($statusInt, $page, $perPage);
+        $filters = [
+            'reason'          => self::optionalString($request->get_param('reason')),
+            'reporter_handle' => self::optionalString($request->get_param('reporter_handle')),
+            'post_kind'       => self::optionalString($request->get_param('post_kind')),
+            'since'           => self::optionalString($request->get_param('since')),
+            'until'           => self::optionalString($request->get_param('until')),
+        ];
+
+        $payload = Plugin::instance()->moderationQueueService()->getQueue($statusInt, $page, $perPage, $filters);
 
         $resp = ApiResponse::ok($payload);
         $resp->header('Cache-Control', 'no-store');
@@ -186,6 +224,20 @@ final class AdminReportsEndpoint
             'dismissed' => ModerationQueueService::STATUS_DISMISSED,
             default     => null, // 'all' or any unknown -> no filter
         };
+    }
+
+    /**
+     * Coerce an optional REST query param to either a non-empty string
+     * or null. Treats empty/whitespace strings as "absent" so the
+     * service doesn't need to second-guess `?reason=` (no value).
+     */
+    private static function optionalString(mixed $value): ?string
+    {
+        if (!is_string($value)) {
+            return null;
+        }
+        $trimmed = trim($value);
+        return $trimmed === '' ? null : $trimmed;
     }
 
     private static function statusForCode(string $code): int

@@ -58,8 +58,38 @@ final class ModerationQueueService
     }
 
     /**
+     * Hard ceiling on reporter_handle → user_id resolution. Mirrors
+     * ContentReportRepository::REPORTER_IDS_MAX so the service and the
+     * repo stay in lockstep on the IN-clause cap.
+     */
+    private const REPORTER_HANDLE_MAX_MATCHES = 50;
+
+    /**
      * Hydrated paginated list for the admin queue.
      *
+     * `$filters` accepts the raw user inputs from the endpoint:
+     *
+     *   - reason           string|null  one of the report reason codes
+     *   - reporter_handle  string|null  partial bcc_handle (LIKE)
+     *   - post_kind        string|null  one of status|blog|review|photo|gif
+     *   - since            string|null  ISO 8601 datetime
+     *   - until            string|null  ISO 8601 datetime
+     *
+     * The service:
+     *   - resolves reporter_handle → up to 50 user_ids (early-empty on 0 matches)
+     *   - validates ISO 8601 datetimes and converts them to UTC MySQL strings
+     *   - drops invalid filter values silently (keeps the queue useful even
+     *     when the caller sends garbage; the contract enum still rejects
+     *     unknown values up front)
+     *   - hands a cleaned filter bag to the repo
+     *
+     * @param array{
+     *   reason?: string|null,
+     *   reporter_handle?: string|null,
+     *   post_kind?: string|null,
+     *   since?: string|null,
+     *   until?: string|null
+     * } $filters
      * @return array{
      *   items: list<array<string, mixed>>,
      *   pagination: array{
@@ -70,13 +100,29 @@ final class ModerationQueueService
      *   }
      * }
      */
-    public function getQueue(?int $status, int $page, int $perPage): array
+    public function getQueue(?int $status, int $page, int $perPage, array $filters = []): array
     {
         $page    = max(1, $page);
         $perPage = max(1, min(self::MAX_PER_PAGE, $perPage));
         $offset  = ($page - 1) * $perPage;
 
-        $total = $this->reportRepo->countForAdmin($status);
+        $repoFilters = $this->normalizeFilters($filters);
+
+        // Early-empty when handle resolution returned no users — saves a
+        // SQL roundtrip whose answer is guaranteed to be []/0.
+        if ($repoFilters === null) {
+            return [
+                'items'      => [],
+                'pagination' => [
+                    'page'        => $page,
+                    'per_page'    => $perPage,
+                    'total'       => 0,
+                    'total_pages' => 0,
+                ],
+            ];
+        }
+
+        $total = $this->reportRepo->countForAdmin($status, $repoFilters);
         if ($total === 0) {
             return [
                 'items'      => [],
@@ -89,7 +135,7 @@ final class ModerationQueueService
             ];
         }
 
-        $rows = $this->reportRepo->findForAdmin($status, $perPage, $offset);
+        $rows = $this->reportRepo->findForAdmin($status, $perPage, $offset, $repoFilters);
 
         $items = $this->hydrateRows($rows);
 
@@ -102,6 +148,123 @@ final class ModerationQueueService
                 'total_pages' => (int) ceil($total / $perPage),
             ],
         ];
+    }
+
+    /**
+     * Translate the endpoint-shaped filter bag into the repo-shaped one.
+     *
+     * Returns null when reporter_handle was provided but resolved to
+     * zero users — caller treats that as a guaranteed-empty result and
+     * skips both SQL queries.
+     *
+     * @param array{
+     *   reason?: string|null,
+     *   reporter_handle?: string|null,
+     *   post_kind?: string|null,
+     *   since?: string|null,
+     *   until?: string|null
+     * } $filters
+     * @return array{
+     *   reason: string|null,
+     *   reporter_user_ids: list<int>|null,
+     *   post_kind: string|null,
+     *   since_mysql: string|null,
+     *   until_mysql: string|null
+     * }|null
+     */
+    private function normalizeFilters(array $filters): ?array
+    {
+        $reason = isset($filters['reason']) && is_string($filters['reason']) && $filters['reason'] !== ''
+            ? $filters['reason']
+            : null;
+
+        $postKind = isset($filters['post_kind']) && is_string($filters['post_kind']) && $filters['post_kind'] !== ''
+            ? $filters['post_kind']
+            : null;
+
+        $sinceMysql = isset($filters['since']) && is_string($filters['since'])
+            ? self::isoToMysqlUtc($filters['since'])
+            : null;
+        $untilMysql = isset($filters['until']) && is_string($filters['until'])
+            ? self::isoToMysqlUtc($filters['until'])
+            : null;
+
+        $reporterUserIds = null;
+        $handleRaw       = $filters['reporter_handle'] ?? null;
+        if (is_string($handleRaw) && trim($handleRaw) !== '') {
+            $resolved = self::resolveHandleToUserIds(trim($handleRaw));
+            if ($resolved === []) {
+                // Sentinel: caller skips the SQL entirely.
+                return null;
+            }
+            $reporterUserIds = $resolved;
+        }
+
+        return [
+            'reason'            => $reason,
+            'reporter_user_ids' => $reporterUserIds,
+            'post_kind'         => $postKind,
+            'since_mysql'       => $sinceMysql,
+            'until_mysql'       => $untilMysql,
+        ];
+    }
+
+    /**
+     * Look up user_ids whose bcc_handle LIKEs $handle. Bounded at
+     * REPORTER_HANDLE_MAX_MATCHES so the repo's IN-clause cap is never
+     * exceeded.
+     *
+     * @return list<int>
+     */
+    private static function resolveHandleToUserIds(string $handle): array
+    {
+        // get_users with meta_compare=LIKE — the meta_value passed to
+        // get_users is treated as the LIKE pattern body (caller must
+        // include % wildcards if substring match is desired). We wrap it
+        // ourselves for partial-match semantics so admins can type any
+        // fragment of a handle.
+        $pattern = '%' . $handle . '%';
+        $users = get_users([
+            'meta_key'     => 'bcc_handle',
+            'meta_compare' => 'LIKE',
+            'meta_value'   => $pattern,
+            'fields'       => 'ID',
+            'number'       => self::REPORTER_HANDLE_MAX_MATCHES,
+        ]);
+
+        $out = [];
+        foreach ($users as $u) {
+            // get_users(fields=ID) returns scalars — could be int or
+            // numeric-string depending on WP version. Coerce both ways.
+            if (is_numeric($u)) {
+                $id = (int) $u;
+                if ($id > 0) {
+                    $out[] = $id;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Convert a caller-supplied ISO 8601 datetime to a 'Y-m-d H:i:s'
+     * UTC string suitable for compare against bcc_content_reports.created_at.
+     * Returns null when the input doesn't parse — caller drops the filter.
+     */
+    private static function isoToMysqlUtc(string $iso): ?string
+    {
+        $iso = trim($iso);
+        if ($iso === '') {
+            return null;
+        }
+        // Try strict ISO 8601 first (handles 'Z' and ±HH:MM offsets).
+        try {
+            $dt = new \DateTimeImmutable($iso);
+        } catch (\Exception $e) {
+            return null;
+        }
+        $dt = $dt->setTimezone(new \DateTimeZone('UTC'));
+        return $dt->format('Y-m-d H:i:s');
     }
 
     /**
