@@ -29,6 +29,11 @@
  *                                   — gives an audit trail beyond the
  *                                   §O1.2 Heavy toast)
  *   - bcc_trust_endorsement_added → notify page owner (V1.5 follow-up)
+ *   - user_register              → self-notification welcome on signup
+ *                                   (V2 Phase 2 retention slice — proves
+ *                                   the bell channel works within
+ *                                   seconds of opting in; idempotent via
+ *                                   `bcc_welcomed` user_meta)
  *
  * Deferred (per §P parking lot): @mentions (composer v2),
  * follow-posts (cross-graph, expensive), comments (PeepSo native
@@ -298,6 +303,63 @@ final class NotificationDispatcher
             Logger::warning('[NotificationDispatcher] rank dispatch failed', [
                 'user_id' => $userId,
                 'rank'    => $newRank,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // user_register — first-touch welcome on signup
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Drop a welcome bell notification when a new user account is
+     * created. Self-notification (from_user = to_user = the new user)
+     * — same shape as `onRankAwarded`. The point isn't to surface a
+     * social event; it's to prove the notification channel works the
+     * moment the user reaches the bell, so opt-ins they made during
+     * onboarding aren't met by silence for days.
+     *
+     * Idempotency: `bcc_welcomed` user_meta gates the dispatch. Once
+     * set, the welcome will never fire again for this user — even if
+     * `user_register` somehow re-fires (it shouldn't, but defense in
+     * depth). The meta value is the signup timestamp, which doubles
+     * as a "when did this account join" marker for future cohort
+     * analysis without touching wp_users.
+     *
+     * Hooks into the WordPress core `user_register` action so it
+     * fires for ANY user creation path — /auth/signup, wp-admin Add
+     * User, wp-cli, partner integrations. New BCC users get the
+     * welcome regardless of how they were created.
+     */
+    public function onUserSignup(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+
+        // Idempotency guard — meta_key write is atomic via WordPress's
+        // wp_options-style upsert. A duplicate user_register event would
+        // see the meta and bail.
+        $existing = get_user_meta($userId, 'bcc_welcomed', true);
+        if ($existing !== '' && $existing !== false) {
+            return;
+        }
+
+        try {
+            $message = 'Welcome to The Floor. Pull cards, post reviews, build trust.';
+            $this->dispatch(
+                $userId,
+                $userId,
+                $message,
+                NotificationType::WELCOME,
+                $userId,
+                0
+            );
+            update_user_meta($userId, 'bcc_welcomed', (string) time());
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] welcome dispatch failed', [
+                'user_id' => $userId,
                 'error'   => $e->getMessage(),
             ]);
         }

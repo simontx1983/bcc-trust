@@ -48,6 +48,7 @@ final class NotificationPrefs
         NotificationType::CARD_PULLED,
         NotificationType::RANK_UP,
         NotificationType::ENDORSE,
+        NotificationType::WELCOME,
     ];
 
     /**
@@ -85,6 +86,7 @@ final class NotificationPrefs
         'bell_bcc_card_pulled'             => true,
         'bell_bcc_rank_up'                 => true,
         'bell_bcc_endorse'                 => true,
+        'bell_bcc_welcome'                 => true,
         'push_master'                      => false,
         'push_event_review'                => true,
         'push_event_endorse'               => true,

@@ -191,6 +191,11 @@ final class NotificationViewService
             NotificationType::REVIEW      => self::resolvePageLink($externalId),
             NotificationType::CARD_PULLED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             NotificationType::RANK_UP     => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
+            // Welcome notification routes to the floor — the user is
+            // probably already there when they see it (it fires within
+            // seconds of signup), but tapping the bell row should still
+            // do something coherent.
+            NotificationType::WELCOME     => '/',
             default                       => '/',
         };
     }

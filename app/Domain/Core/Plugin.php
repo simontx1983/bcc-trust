@@ -1671,6 +1671,17 @@ final class Plugin
             $this->notificationDispatcher()->onEndorseAdded($endorserId, $pageId, $context);
         }, 30, 3);
 
+        // V2 Phase 2 retention slice — first-touch welcome on signup.
+        // Hooks WordPress core's user_register so it fires for ANY new
+        // user creation path (/auth/signup, wp-admin Add User, wp-cli,
+        // partner integrations). The dispatcher self-gates on the
+        // `bcc_welcomed` user_meta idempotency flag, so a duplicate
+        // user_register event would no-op. Priority 30 keeps it
+        // consistent with the other notification dispatchers.
+        add_action('user_register', function (int $userId): void {
+            $this->notificationDispatcher()->onUserSignup($userId);
+        }, 30, 1);
+
         // ── §H1 NFT gallery refresh ─────────────────────────────────────
         //
         // Dispatched by CreatorGalleryEndpoint when the visible page has

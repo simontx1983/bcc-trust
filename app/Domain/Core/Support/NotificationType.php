@@ -21,6 +21,10 @@
  *   - CARD_PULLED    — someone pulled (followed) your validator/etc
  *   - RANK_UP        — you earned a new rank
  *   - ENDORSE        — someone endorsed a page you own (V1.5 follow-up)
+ *   - WELCOME        — first-touch system notification on signup
+ *                     (V2 Phase 2 retention slice — proves the bell
+ *                     channel works within seconds of opting in;
+ *                     idempotent via `bcc_welcomed` user_meta).
  *
  * Deferred (per §P): @mentions, follow-posts, comments. Each will
  * extend this catalogue when its dispatcher subscriber lands.
@@ -42,6 +46,7 @@ final class NotificationType
     public const CARD_PULLED = 'bcc_card_pulled';
     public const RANK_UP     = 'bcc_rank_up';
     public const ENDORSE     = 'bcc_endorse';
+    public const WELCOME     = 'bcc_welcome';
 
     /**
      * Whitelist of valid type slugs. Used by the read-side validation
@@ -56,6 +61,7 @@ final class NotificationType
         self::CARD_PULLED,
         self::RANK_UP,
         self::ENDORSE,
+        self::WELCOME,
     ];
 
     public static function isValid(string $type): bool
