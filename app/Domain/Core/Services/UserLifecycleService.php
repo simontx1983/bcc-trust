@@ -194,6 +194,12 @@ class UserLifecycleService
 
     public function ajaxSyncUser(): void
     {
+        // Phase 1.7 dead-code observability (2026-05-09): no caller found
+        // in any JS / PHP / TS in the codebase. The admin Repair tab uses
+        // `admin_post_bcc_trust_sync_users` (PLURAL, different handler);
+        // this singular AJAX handler appears orphaned. 30-day zero-hit
+        // window → safe to retire per V-08 Phase D.
+        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'trust_sync_user');
         check_ajax_referer('bcc_trust_admin_nonce', 'nonce');
 
         if (!current_user_can('manage_options')) {
@@ -211,6 +217,8 @@ class UserLifecycleService
 
     public function ajaxBulkSyncUsers(): void
     {
+        // Phase 1.7 dead-code observability (2026-05-09) — see ajaxSyncUser above.
+        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'trust_bulk_sync_users');
         check_ajax_referer('bcc_trust_admin_nonce', 'nonce');
 
         if (!current_user_can('manage_options')) {
@@ -232,6 +240,8 @@ class UserLifecycleService
 
     public function ajaxInitPageScore(): void
     {
+        // Phase 1.7 dead-code observability (2026-05-09) — see ajaxSyncUser above.
+        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'trust_init_page_score');
         check_ajax_referer('bcc_trust_admin_nonce', 'nonce');
 
         if (!current_user_can('manage_options')) {

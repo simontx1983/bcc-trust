@@ -47,6 +47,12 @@ class WalletController
 
     public static function ajax_challenge(): void
     {
+        // Phase 1.7 dead-code observability (2026-05-09): no caller found
+        // in any JS / PHP / TS in the codebase; SPA flows go through REST.
+        // Recording before the nonce check so we capture failed-nonce hits
+        // too (attackers / cached pre-deploy pages / external scripts).
+        // 30-day zero-hit window → safe to retire per V-08 Phase D.
+        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_challenge');
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
         $user_id = get_current_user_id();
@@ -94,6 +100,8 @@ class WalletController
 
     public static function ajax_verify(): void
     {
+        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
+        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_verify');
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
         if (!\BCC\Core\Security\Throttle::allow('wallet_verify', 5, 60)) {
@@ -179,6 +187,8 @@ class WalletController
 
     public static function ajax_disconnect(): void
     {
+        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
+        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_disconnect');
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
         if (!\BCC\Core\Security\Throttle::allow('wallet_disconnect', 5, 60)) {
@@ -218,6 +228,8 @@ class WalletController
 
     public static function ajax_set_primary(): void
     {
+        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
+        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_set_primary');
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
         if (!\BCC\Core\Security\Throttle::allow('wallet_primary', 10, 60)) {
@@ -244,6 +256,8 @@ class WalletController
 
     public static function ajax_list(): void
     {
+        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
+        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_list');
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
         if (!\BCC\Core\Security\Throttle::allow('wallet_list', 20, 60)) {
@@ -453,6 +467,8 @@ class WalletController
 
     public static function ajax_toggle_collection_profile(): void
     {
+        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
+        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'collection_toggle_profile');
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
         if (!\BCC\Core\Security\Throttle::allow('collection_toggle', 10, 60)) {
