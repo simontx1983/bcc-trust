@@ -1756,6 +1756,34 @@ final class Plugin
                     : 0.0,
             ];
 
+            // Phase 3 observability: per-canonical-cron next-run timestamps.
+            // `null` means "not currently scheduled" — that's the alarm
+            // signal (a hook should ALWAYS have a wp_next_scheduled when
+            // the activation registry is healthy). Operators correlate
+            // these against the current time + the registered interval
+            // (see docs/cron-registry.md) to detect missed cron windows.
+            $now = time();
+            $nextRun = static function (string $hook) use ($now): ?array {
+                $ts = wp_next_scheduled($hook);
+                if ($ts === false) {
+                    return null;
+                }
+                return [
+                    'next_run_ts'   => (int) $ts,
+                    'in_seconds'    => (int) $ts - $now,
+                ];
+            };
+            $health['cron_status'] = [
+                'bcc_disputes_reconcile'         => $nextRun('bcc_disputes_reconcile'),
+                'bcc_gated_group_provision'      => $nextRun('bcc_gated_group_provision'),
+                'bcc_gated_group_reconcile_sweep' => $nextRun('bcc_gated_group_reconcile_sweep'),
+                'bcc_nft_eth_indexer_tick'       => $nextRun(\BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK),
+                'bcc_nft_enrichment_tick'        => $nextRun(\BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK),
+                'bcc_helius_dedupe_sweep'        => $nextRun('bcc_helius_dedupe_sweep'),
+                'bcc_trust_daily_graph_update'   => $nextRun('bcc_trust_daily_graph_update'),
+                'bcc_trust_process_recalculations' => $nextRun('bcc_trust_process_recalculations'),
+            ];
+
             return $health;
         });
 
