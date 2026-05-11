@@ -25,6 +25,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
@@ -114,6 +115,15 @@ final class MyGroupsEndpoint
 
         \BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId);
 
+        // Disambiguated from holder_group_join (Onchain/REST/HolderGroupsEndpoint)
+        // so admin queries can segment NFT-gated joins from plain peepso-group
+        // joins. Privacy = open was already enforced above; closed/secret were
+        // rejected before reaching the writer.
+        AuditLogger::log('group_join', $groupId, [
+            'group_type' => $context->type->value,
+            'privacy'    => $context->privacy->value,
+        ], 'group', $userId);
+
         return ApiResponse::ok([
             'joined'   => true,
             'group_id' => $groupId,
@@ -154,6 +164,14 @@ final class MyGroupsEndpoint
                 403
             );
         }
+
+        // Disambiguated from holder_group_leave — plain group leaves do not
+        // record an opt-out (no 90-day cooldown), so they're a distinct
+        // signal in admin queries.
+        AuditLogger::log('group_leave', $groupId, [
+            'group_type' => $context->type->value,
+            'privacy'    => $context->privacy->value,
+        ], 'group', $userId);
 
         return ApiResponse::ok([
             'left'     => true,

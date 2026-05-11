@@ -6,6 +6,7 @@ use BCC\Core\Contracts\TrustReadServiceInterface;
 use BCC\Core\Log\Logger as CoreLogger;
 use BCC\Core\Permissions\Permissions;
 use BCC\Core\ServiceLocator;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Disputes\DTO\DisputeCoreDTO;
 use BCC\Trust\Disputes\DTO\DisputeDetailDTO;
@@ -271,6 +272,15 @@ class DisputeController
 
         CoreLogger::audit('dispute_submitted', ['dispute_id' => $dispute_id, 'user_id' => $current_user_id, 'vote_id' => $vote_id, 'panelists' => count($panelists)]);
 
+        // DB audit trail (separate from the bcc-core filesystem Logger above).
+        // The filesystem log is for ops grep; the DB row drives admin queries
+        // and incident review. We persist both so neither path is single-point.
+        AuditLogger::log('dispute_submitted', $dispute_id, [
+            'vote_id'   => $vote_id,
+            'page_id'   => $page_id,
+            'panelists' => count($panelists),
+        ], 'dispute', $current_user_id);
+
         return ApiResponse::ok([
             'dispute_id' => $dispute_id,
             'panelists'  => count($panelists),
@@ -444,6 +454,14 @@ class DisputeController
         $verdict = DisputeRepository::computeVerdict($accepts, $rejects, $panel_size);
 
         CoreLogger::audit('dispute_vote_cast', ['dispute_id' => $dispute_id, 'user_id' => $userId, 'decision' => $decision]);
+
+        // DB audit trail. Decision is captured in meta so admin queries can
+        // segment by accept vs reject without joining bcc_dispute_panel.
+        // Logged AFTER the atomic vote commit, before the async resolve
+        // enqueue, so a logged action always reflects committed state.
+        AuditLogger::log('dispute_panel_vote_cast', $dispute_id, [
+            'decision' => $decision,
+        ], 'dispute', $userId);
 
         // Resolve asynchronously. Previously the deciding vote paid for
         // DB transaction + adjudicator call + penalty hook + email enqueue
