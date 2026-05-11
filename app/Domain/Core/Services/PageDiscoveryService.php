@@ -381,7 +381,12 @@ class PageDiscoveryService {
             $owner_info = $this->users->getByUserId($owner_id);
             $verified   = $owner_info ? (bool) $owner_info->is_verified : false;
         } catch (\Exception $e) {
-            // Silent.
+            // Silent fallback (degrades to $verified = false). Pattern-
+            // registry §"Observability — audit_log_swallow": sustained
+            // activation = UserRepository read path is unhealthy on a
+            // request-bounded discovery hot path; admins see it via
+            // /system/health before users notice missing badges.
+            \BCC\Core\Observability\DegradationMetrics::record('audit_log_swallow', 'discovery_owner_verified_status');
         }
 
         // Followers.

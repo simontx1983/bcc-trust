@@ -97,7 +97,14 @@ final class EndorsementLeaderboardEndpoint
             if (!$row_owner_id) {
                 try {
                     $row_owner_id = (int) Plugin::instance()->pageOwnerResolver()->getPageOwner($row_page_id);
-                } catch (\Exception $e) { /* silent */ }
+                } catch (\Exception $e) {
+                    // Silent fallback (no avatar rendered). Pattern-
+                    // registry §"Observability — audit_log_swallow":
+                    // hit when the read model owner_id is null AND the
+                    // resolver throws. Sustained activation = read
+                    // model is drifting on the leaderboard hot path.
+                    \BCC\Core\Observability\DegradationMetrics::record('audit_log_swallow', 'leaderboard_owner_fallback');
+                }
             }
             $avatar_url = $row_owner_id ? get_avatar_url($row_owner_id, ['size' => 64]) : '';
 
