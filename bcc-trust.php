@@ -1349,7 +1349,7 @@ add_action('admin_notices', function () {
     }
 
     if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')
-        && class_exists('\\BCC\\Trust\\Onchain\\Support\\CircuitBreaker')
+        && class_exists('\\BCC\\Trust\\Onchain\\Support\\OnchainCircuitBreaker')
     ) {
         $activeChains = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive();
         $chainIds     = array_map(fn($c) => (int) $c->id, $activeChains);
@@ -1358,7 +1358,7 @@ add_action('admin_notices', function () {
             $chainNames[(int) $c->id] = $c->name;
         }
 
-        $staleChains = \BCC\Trust\Onchain\Support\CircuitBreaker::getStaleChains($chainIds);
+        $staleChains = \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::getStaleChains($chainIds);
 
         if (!empty($staleChains)) {
             $parts = [];

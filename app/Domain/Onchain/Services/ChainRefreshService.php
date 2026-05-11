@@ -12,7 +12,7 @@ use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Services\CollectionService;
-use BCC\Trust\Onchain\Support\CircuitBreaker;
+use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
 /**
  * Chain Refresh Cron
@@ -155,7 +155,7 @@ class ChainRefreshService
                 $chainId = (int) $chain->id;
 
                 // Skip chains whose circuit breaker is open (consistently failing).
-                if (CircuitBreaker::isOpen($chainId)) {
+                if (OnchainCircuitBreaker::isOpen($chainId)) {
                     \BCC\Core\Log\Logger::info('[Onchain] Skipping index for ' . $chain->name . ' — circuit breaker open');
                     continue;
                 }
@@ -221,17 +221,17 @@ class ChainRefreshService
                         ));
 
                         if (!$isPartialFetch) {
-                            CircuitBreaker::recordSuccess($chainId);
+                            OnchainCircuitBreaker::recordSuccess($chainId);
                         }
                     } else {
                         // Empty result from an active chain is suspicious
                         $hasPartialFetch = true;
-                        CircuitBreaker::recordFailure($chainId);
+                        OnchainCircuitBreaker::recordFailure($chainId);
                         \BCC\Core\Log\Logger::warning('[Onchain] Validator index returned empty for ' . $chain->name);
                     }
                 } catch (\Exception $e) {
                     $hasPartialFetch = true;
-                    CircuitBreaker::recordFailure($chainId);
+                    OnchainCircuitBreaker::recordFailure($chainId);
                     \BCC\Core\Log\Logger::error('[Onchain] Validator index failed for ' . $chain->name . ': ' . $e->getMessage());
                 }
             }
@@ -277,7 +277,7 @@ class ChainRefreshService
                 foreach ($chains as $chain) {
                     $chainId = (int) $chain->id;
 
-                    if (CircuitBreaker::isOpen($chainId)) {
+                    if (OnchainCircuitBreaker::isOpen($chainId)) {
                         \BCC\Core\Log\Logger::info('[Onchain] Skipping collection index for ' . $chain->name . ' — circuit breaker open');
                         continue;
                     }
@@ -298,10 +298,10 @@ class ChainRefreshService
                         if (!empty($collections)) {
                             $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
                             \BCC\Core\Log\Logger::info('[Onchain] Indexed ' . $count . ' collections for ' . $chain->name);
-                            CircuitBreaker::recordSuccess($chainId);
+                            OnchainCircuitBreaker::recordSuccess($chainId);
                         }
                     } catch (\Exception $e) {
-                        CircuitBreaker::recordFailure($chainId);
+                        OnchainCircuitBreaker::recordFailure($chainId);
                         \BCC\Core\Log\Logger::error('[Onchain] Collection index failed for ' . $chain->name . ': ' . $e->getMessage());
                     }
                 }
@@ -391,7 +391,7 @@ class ChainRefreshService
                         CollectionRepository::backoffRow((int) $row->id);
                     }
                 } catch (\Exception $e) {
-                    CircuitBreaker::recordFailure((int) $row->chain_id);
+                    OnchainCircuitBreaker::recordFailure((int) $row->chain_id);
                     \BCC\Core\Log\Logger::error('[Onchain] Collection ' . $row->contract_address . ' refresh failed: ' . $e->getMessage());
                     CollectionRepository::backoffRow((int) $row->id);
                 }

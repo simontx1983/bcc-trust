@@ -8,7 +8,7 @@ use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Services\NftHoldingsIndexer;
 use BCC\Trust\Onchain\Support\ApiRetry;
-use BCC\Trust\Onchain\Support\CircuitBreaker;
+use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -138,7 +138,7 @@ final class NftEthIndexerWorker
         }
 
         // Step 2: circuit-breaker gate.
-        if (CircuitBreaker::isOpen($chainId)) {
+        if (OnchainCircuitBreaker::isOpen($chainId)) {
             ChainCheckpointRepository::recordFailure(
                 $chainId,
                 ChainCheckpointRepository::STATE_BREAKER_OPEN,
@@ -177,7 +177,7 @@ final class NftEthIndexerWorker
         // Step 5: discover head + safe_head.
         $headBlock = self::fetchHeadBlock($fetcher);
         if ($headBlock <= 0) {
-            CircuitBreaker::recordFailure($chainId);
+            OnchainCircuitBreaker::recordFailure($chainId);
             ChainCheckpointRepository::recordFailure(
                 $chainId,
                 ChainCheckpointRepository::STATE_DEGRADED,
@@ -246,7 +246,7 @@ final class NftEthIndexerWorker
         // covered everything in [rangeFrom, rangeTo] — pagination is
         // within the range, not across it.
         ChainCheckpointRepository::recordSuccess($chainId, $rangeTo, $headBlock);
-        CircuitBreaker::recordSuccess($chainId);
+        OnchainCircuitBreaker::recordSuccess($chainId);
 
         \BCC\Core\Log\Logger::info('[NftEthIndexerWorker] tick complete', [
             'chain_id'      => $chainId,

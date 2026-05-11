@@ -24,7 +24,7 @@ if (!defined('ABSPATH')) {
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
-use BCC\Trust\Onchain\Support\CircuitBreaker;
+use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
 /**
  * @phpstan-import-type ValidatorRow from ValidatorRepository
@@ -136,7 +136,7 @@ final class EnrichmentScheduler
                 // Per-chain fairness: skip validators whose chain has exhausted
                 // its budget or whose circuit breaker is open.
                 $chainId = (int) ($row->chain_id ?? 0);
-                if ($chainId > 0 && (self::isChainBudgetExceeded($chainId) || CircuitBreaker::isOpen($chainId))) {
+                if ($chainId > 0 && (self::isChainBudgetExceeded($chainId) || OnchainCircuitBreaker::isOpen($chainId))) {
                     $result['skipped']++;
                     continue;
                 }
@@ -170,7 +170,7 @@ final class EnrichmentScheduler
         // Log circuit breaker status for chains that have open breakers.
         $chains = ChainRepository::getActive();
         $chainIds = array_map(fn($c) => (int) $c->id, $chains);
-        $cbStatus = CircuitBreaker::getAllStatus($chainIds);
+        $cbStatus = OnchainCircuitBreaker::getAllStatus($chainIds);
         $openChains = array_filter($cbStatus, fn($s) => $s['status'] !== 'closed');
         if (!empty($openChains)) {
             $openNames = [];

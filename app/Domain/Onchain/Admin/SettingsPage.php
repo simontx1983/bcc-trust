@@ -2,7 +2,7 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
-use BCC\Trust\Onchain\Support\CircuitBreaker;
+use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -209,7 +209,7 @@ class SettingsPage
         $chains = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive();
         ?>
         <h2>Per-Chain Circuit Breakers</h2>
-        <p>State of <code>BCC\Trust\Onchain\Support\CircuitBreaker</code> per chain. CLOSED = traffic flows; OPEN = blocked for the cooldown window; HALF-OPEN = one probe in flight.</p>
+        <p>State of <code>BCC\Trust\Onchain\Support\OnchainCircuitBreaker</code> per chain. CLOSED = traffic flows; OPEN = blocked for the cooldown window; HALF-OPEN = one probe in flight.</p>
         <table class="widefat striped" style="max-width:700px">
             <thead>
                 <tr><th>Chain</th><th>State</th><th>Failures</th><th>Cooldown ends</th></tr>
@@ -220,7 +220,7 @@ class SettingsPage
                 <?php else: ?>
                     <?php foreach ($chains as $chain):
                         $cid = (int) $chain->id;
-                        $isOpen = \BCC\Trust\Onchain\Support\CircuitBreaker::isOpen($cid);
+                        $isOpen = \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::isOpen($cid);
                         $stateLabel = $isOpen ? 'OPEN / cooldown' : 'CLOSED';
                     ?>
                     <tr>
@@ -503,8 +503,8 @@ class SettingsPage
                             default        => '#666',
                         };
 
-                        $breakerOpen = $failures >= CircuitBreaker::FAILURE_THRESHOLD && isset($health['last_failure'])
-                            && (time() - (int) $health['last_failure']) < CircuitBreaker::COOLDOWN_SECONDS;
+                        $breakerOpen = $failures >= OnchainCircuitBreaker::FAILURE_THRESHOLD && isset($health['last_failure'])
+                            && (time() - (int) $health['last_failure']) < OnchainCircuitBreaker::COOLDOWN_SECONDS;
                     ?>
                     <tr>
                         <td><strong><?php echo esc_html(ucfirst($chain)); ?></strong></td>
@@ -517,7 +517,7 @@ class SettingsPage
                         <td>
                             <?php if ($breakerOpen): ?>
                                 <span style="color:#d63638;font-weight:600">&#9940; OPEN</span>
-                                <br><small>Cooldown: <?php echo CircuitBreaker::COOLDOWN_SECONDS - (time() - (int) $health['last_failure']); ?>s remaining</small>
+                                <br><small>Cooldown: <?php echo OnchainCircuitBreaker::COOLDOWN_SECONDS - (time() - (int) $health['last_failure']); ?>s remaining</small>
                             <?php else: ?>
                                 <span style="color:#00a32a">&#9989; Closed</span>
                             <?php endif; ?>

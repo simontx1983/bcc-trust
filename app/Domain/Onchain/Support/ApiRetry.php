@@ -49,7 +49,7 @@ final class ApiRetry
         $chainId    = (int) ($options['chain_id'] ?? 0);
 
         // Circuit breaker: check before attempting
-        if ($chainId > 0 && CircuitBreaker::isOpen($chainId)) {
+        if ($chainId > 0 && OnchainCircuitBreaker::isOpen($chainId)) {
             self::log("BLOCKED by circuit breaker: {$label} (chain {$chainId})");
             return new \WP_Error('circuit_breaker_open', "Circuit breaker open for chain {$chainId}");
         }
@@ -105,7 +105,7 @@ final class ApiRetry
                 if ($code >= 200 && $code < 300) {
                     // Success — record for circuit breaker
                     if ($chainId > 0) {
-                        CircuitBreaker::recordSuccess($chainId);
+                        OnchainCircuitBreaker::recordSuccess($chainId);
                     }
                     return $lastResponse;
                 }
@@ -119,7 +119,7 @@ final class ApiRetry
                     ));
 
                     if ($chainId > 0) {
-                        CircuitBreaker::recordFailure($chainId);
+                        OnchainCircuitBreaker::recordFailure($chainId);
                     }
 
                     // Do NOT sleep — return immediately and let the caller
@@ -136,7 +136,7 @@ final class ApiRetry
                     ));
 
                     if ($chainId > 0) {
-                        CircuitBreaker::recordFailure($chainId);
+                        OnchainCircuitBreaker::recordFailure($chainId);
                     }
 
                     // Retryable: exhaust attempts before returning the failure.
@@ -178,7 +178,7 @@ final class ApiRetry
             ));
 
             if ($chainId > 0) {
-                CircuitBreaker::recordFailure($chainId);
+                OnchainCircuitBreaker::recordFailure($chainId);
             }
 
             // Retryable: exhaust attempts before returning the failure.
@@ -208,7 +208,7 @@ final class ApiRetry
             // minutes. release() is idempotent so the double-release
             // when recordSuccess/recordFailure already ran is harmless.
             if ($chainId > 0) {
-                CircuitBreaker::releaseProbe($chainId);
+                OnchainCircuitBreaker::releaseProbe($chainId);
             }
         }
     }

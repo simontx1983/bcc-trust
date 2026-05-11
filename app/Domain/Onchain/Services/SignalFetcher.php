@@ -9,7 +9,7 @@ if (!defined('ABSPATH')) {
 use BCC\Core\ServiceLocator;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
-use BCC\Trust\Onchain\Support\CircuitBreaker;
+use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
 /**
  * Fetches raw on-chain signals from Etherscan (Ethereum) and Solana public RPC.
@@ -121,7 +121,7 @@ class SignalFetcher
                 continue;
             }
 
-            $cbStatus = CircuitBreaker::getAllStatus([$chainId])[$chainId] ?? null;
+            $cbStatus = OnchainCircuitBreaker::getAllStatus([$chainId])[$chainId] ?? null;
             if ($cbStatus === null) {
                 $statuses[$chain] = [];
                 continue;

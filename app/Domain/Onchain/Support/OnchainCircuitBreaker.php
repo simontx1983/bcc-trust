@@ -1,6 +1,6 @@
 <?php
 /**
- * Circuit Breaker
+ * Onchain Circuit Breaker
  *
  * Per-chain circuit breaker that pauses API fetching when a chain's
  * endpoint is consistently failing. Prevents wasting API budget on
@@ -14,13 +14,17 @@
  *
  * Storage: wp_cache (Redis-backed when available, transient fallback).
  *
- * Same-name sibling: this class shares its short name with
- * {@see \BCC\Trust\Core\Support\CircuitBreaker} (the generic
- * transient-backed external-dependency breaker). This Onchain variant
- * carries chain-specific hardening (6-hour TTL, legacy-key tolerance,
- * rate-limited corruption logging) that Core does not. See
- * docs/pattern-registry.md "Same-name-different-class index" — the
- * two are intentionally not collapsed.
+ * Renamed from `CircuitBreaker` (V-04 of the Constitutional Violation
+ * Scan). The old short name collided with bcc-trust's generic
+ * {@see \BCC\Trust\Core\Support\CircuitBreaker}. The two breakers are
+ * NOT interchangeable: Core is string-keyed + transient-backed +
+ * minimal hardening for flaky external HTTP endpoints (Alchemy,
+ * Cosmos RPC); this Onchain variant is integer-keyed (chain_id) with
+ * 6-hour TTL, atomic DB counter, HALF-OPEN probe-lock state machine,
+ * stale-chain detection, and rate-limited corruption logging — every
+ * one of those a scar from a prior on-chain indexing incident. See
+ * docs/pattern-registry.md "Same-name-different-class index" for the
+ * V-04 resolution note.
  *
  * @package BCC\Trust\Onchain\Support
  */
@@ -31,7 +35,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-final class CircuitBreaker
+final class OnchainCircuitBreaker
 {
     const FAILURE_THRESHOLD = 5;            // Consecutive failures to trip
     const COOLDOWN_SECONDS  = 300;          // 5 minutes before half-open probe
@@ -382,7 +386,7 @@ final class CircuitBreaker
         set_transient($dedupKey, 1, 5 * MINUTE_IN_SECONDS);
 
         if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-            \BCC\Core\Log\Logger::warning('[CircuitBreaker] malformed state — re-initialising', [
+            \BCC\Core\Log\Logger::warning('[OnchainCircuitBreaker] malformed state — re-initialising', [
                 'chain_id' => $chainId,
                 'note'     => 'Repeated re-inits weaken protection. Investigate cache backend.',
             ]);
@@ -411,7 +415,7 @@ final class CircuitBreaker
     private static function log(string $message): void
     {
         if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-            \BCC\Core\Log\Logger::warning('[CircuitBreaker] ' . $message);
+            \BCC\Core\Log\Logger::warning('[OnchainCircuitBreaker] ' . $message);
         }
     }
 }
