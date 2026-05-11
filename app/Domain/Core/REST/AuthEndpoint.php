@@ -47,6 +47,7 @@ use BCC\Core\ServiceLocator;
 use BCC\Core\Wallet\WalletIdentityService;
 use BCC\Core\Wallet\WalletVerificationRequest;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\JwtToken;
@@ -467,6 +468,15 @@ final class AuthEndpoint
             'address' => $walletAddress,
             'via'     => 'rest',
         ]);
+
+        // DB audit trail (separate from the bcc-core filesystem Logger above).
+        // The filesystem log is for ops grep; the DB row is for admin queries
+        // and incident review. We persist both so a missing filesystem rotation
+        // does not lose the record, and the DB row drives admin tooling.
+        AuditLogger::log('wallet_linked', $result['wallet_link_id'], [
+            'chain'   => (string) $chain->slug,
+            'via'     => 'rest',
+        ], 'wallet', $userId);
 
         $response = ApiResponse::ok([
             'wallet_link_id' => $result['wallet_link_id'],

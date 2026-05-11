@@ -32,6 +32,7 @@ namespace BCC\Trust\Onchain\REST;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\ValueObjects\GroupVerification;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -227,6 +228,14 @@ final class HolderGroupsEndpoint
         $result  = Plugin::instance()->nftGroupGateService()->joinIfEligible($userId, $groupId);
 
         if ($result->success) {
+            // §CRIT-05 accountability surface — holder-group joins are the
+            // primary trusted-backend door (PeepSoGroupWriter::join bypasses
+            // PeepSo's UI approval check). Every successful join records who
+            // joined what and the gate-service code that authorized it.
+            AuditLogger::log('holder_group_join', $groupId, [
+                'code' => $result->code,
+            ], 'group', $userId);
+
             return ApiResponse::ok([
                 'joined'   => true,
                 'group_id' => $groupId,
@@ -273,6 +282,10 @@ final class HolderGroupsEndpoint
         }
 
         Plugin::instance()->nftGroupGateService()->recordOptOut($userId, $groupId);
+
+        // §CRIT-05 — mirror of holder_group_join; records the 90-day opt-out
+        // that prevents the reconcile sweep from re-adding the user.
+        AuditLogger::log('holder_group_leave', $groupId, [], 'group', $userId);
 
         return ApiResponse::ok([
             'left'     => true,
@@ -330,6 +343,18 @@ final class HolderGroupsEndpoint
         $reconciled = ['joined' => 0, 'skipped' => 0];
         if ($enabled) {
             $reconciled = $service->reconcileForUser($userId);
+
+            // Audit the user-triggered reconcile only when it actually joined
+            // groups — toggling the flag with zero eligible groups is not a
+            // mutation worth a log line. The cron sweep that performs the
+            // same operation is intentionally NOT audited here because it is
+            // a server-side reconciliation, not a Next.js mutation.
+            if ($reconciled['joined'] > 0) {
+                AuditLogger::log('holder_group_auto_reconciled', $userId, [
+                    'joined'  => $reconciled['joined'],
+                    'skipped' => $reconciled['skipped'],
+                ], 'user', $userId);
+            }
         }
 
         $response = ApiResponse::ok([

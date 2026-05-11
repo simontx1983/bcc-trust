@@ -71,6 +71,13 @@ class FlagService
 
         $count = self::getFlagCount($pageId);
 
+        // Audit log the page-flag creation. Distinct from vote-flag (`flag_created`,
+        // target_type='vote') so admin queries can separate the two signal streams.
+        // §VIII.30: AuditLogger swallows write failures; mutation path is unaffected.
+        \BCC\Trust\Core\Security\AuditLogger::log('page_flag_created', $pageId, [
+            'reason' => $reason !== null ? sanitize_text_field($reason) : null,
+        ], 'page', $userId);
+
         return ['success' => true, 'message' => 'Page flagged.', 'flag_count' => $count];
     }
 
@@ -112,6 +119,9 @@ class FlagService
 
         self::invalidateCache($pageId);
         $count = self::getFlagCount($pageId);
+
+        // Audit log the page-flag removal (mirrors page_flag_created).
+        \BCC\Trust\Core\Security\AuditLogger::log('page_flag_removed', $pageId, [], 'page', $userId);
 
         return ['success' => true, 'message' => 'Flag removed.', 'flag_count' => $count];
     }

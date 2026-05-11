@@ -25,6 +25,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Core\PeepSo\PeepSoBlockWriter;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -159,6 +160,13 @@ final class MyBlocksEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Invalid block target.', 400);
         }
 
+        // Audit only the state transition (the first successful block), not
+        // the idempotent re-block — the latter is a no-op in storage and a
+        // repeated log entry would inflate the trail without new information.
+        if ($result === 'created') {
+            AuditLogger::log('user_blocked', $targetId, [], 'user', $viewerId);
+        }
+
         $resp = ApiResponse::ok([
             'ok'      => true,
             'user_id' => $targetId,
@@ -183,6 +191,13 @@ final class MyBlocksEndpoint
         }
 
         $deleted = PeepSoBlockWriter::unblock($viewerId, $targetId);
+
+        // Audit only the state transition (an actual row deletion); a
+        // double-tap unblock against a no-longer-existing row yields
+        // $deleted = false and gets no log line.
+        if ($deleted) {
+            AuditLogger::log('user_unblocked', $targetId, [], 'user', $viewerId);
+        }
 
         // Idempotent: returning ok=true even when no row existed lets a
         // double-tap unblock succeed without confusing the UI.

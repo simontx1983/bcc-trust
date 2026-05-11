@@ -4,6 +4,7 @@ namespace BCC\Trust\Onchain\Controllers;
 
 use BCC\Core\Wallet\WalletIdentityService;
 use BCC\Core\Wallet\WalletVerificationRequest;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -371,7 +372,23 @@ class WalletController
             return ApiResponse::error('bcc_invalid_request', 'Wallet id is required.', 400);
         }
 
+        // Capture chain context BEFORE the delete so the audit-log meta
+        // remains informative even though the wallet row is gone after the
+        // call returns. We do NOT 404 on a foreign id here — see comment
+        // above re: leaking existence; absent rows just produce removed=false.
+        $existing = WalletRepository::getById($walletLinkId);
+
         $removed = WalletRepository::delete($walletLinkId, $userId);
+
+        // Audit only on a true state transition (own-wallet deletion) — a
+        // double-tap unlink against an already-gone row yields removed=false
+        // and gets no log line, mirroring the unblock pattern.
+        if ($removed && $existing !== null && (int) $existing->user_id === $userId) {
+            AuditLogger::log('wallet_unlinked', $walletLinkId, [
+                'chain' => (string) ($existing->chain_slug ?? ''),
+                'via'   => 'rest',
+            ], 'wallet', $userId);
+        }
 
         // Idempotent: removed=false on a foreign or already-deleted id
         // lets a double-tap unlink succeed without confusing the UI.

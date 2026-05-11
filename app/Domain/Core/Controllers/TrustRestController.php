@@ -273,6 +273,13 @@ class TrustRestController {
                 $voteService->storeIdempotency($userId, $pageId, $voteType, $clientKey, $result);
             }
 
+            // Audit log the successful vote (after writes commit, before response).
+            // §VIII.30: audit logging must never break the mutation path — AuditLogger
+            // already swallows insert failures internally.
+            AuditLogger::log('vote_cast', $pageId, [
+                'vote_type' => $voteType,
+            ], 'page');
+
             return self::success($result);
 
         } catch (VoteEligibilityException $e) {

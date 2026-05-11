@@ -38,6 +38,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -143,6 +144,11 @@ final class MyAccountEndpoint
             );
         }
 
+        // Account-state mutation — log after the write commits. We do NOT
+        // record the new email in meta to avoid duplicating PII in two
+        // tables; the wp_users row is the source of truth.
+        AuditLogger::log('account_email_changed', $userId, [], 'user', $userId);
+
         $resp = ApiResponse::ok(['email' => $email]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
@@ -191,6 +197,9 @@ final class MyAccountEndpoint
             wp_set_current_user($userId);
             wp_set_auth_cookie($userId, false);
         }
+
+        // Credential rotation — log without the password value (obviously).
+        AuditLogger::log('account_password_changed', $userId, [], 'user', $userId);
 
         $resp = ApiResponse::ok(['ok' => true]);
         $resp->header('Cache-Control', 'no-store');
@@ -247,6 +256,13 @@ final class MyAccountEndpoint
                 500
             );
         }
+
+        // Audit log the successful account deletion. Logged BEFORE wp_logout()
+        // so get_current_user_id() is still meaningful, with explicit $userId
+        // passed because the wp_users row is already gone — AuditLogger writes
+        // the integer id directly to its own audit_log table, which persists
+        // independently of the now-deleted user record.
+        AuditLogger::log('account_deleted', $userId, [], 'user', $userId);
 
         // Kill the session before responding so the auth cookie no longer
         // resolves to a valid user.
