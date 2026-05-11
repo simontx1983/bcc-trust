@@ -1682,6 +1682,47 @@ final class Plugin
             $this->notificationDispatcher()->onUserSignup($userId);
         }, 30, 1);
 
+        // §I1 V2 — @-mention bell + push dispatch. Two subscribers,
+        // both ORIGINAL-WRITE ONLY (no `*_edited` action exists in
+        // bcc-trust by design, so an edit-as-ping abuse vector cannot
+        // fire). The dispatcher orchestrator extracts mentions fresh
+        // from the post body, re-applies MentionPolicy (defense in
+        // depth — write-time validation already filtered, but a future
+        // path that skips it would still be safe), and dedupes via
+        // MentionExtractor::extractUserIds' unique-id contract.
+        add_action('bcc_post_created', function (int $authorId, int $postId, int $actId): void {
+            $post = get_post($postId);
+            if (!$post instanceof \WP_Post) {
+                return;
+            }
+            $this->notificationDispatcher()->dispatchMentionsFor(
+                $authorId,
+                $postId,
+                (string) $post->post_content,
+                $actId,
+                false
+            );
+        }, 30, 3);
+
+        // Comment mentions deep-link to the PARENT post (act_id =
+        // $parentActId), not the comment activity row — the FE has no
+        // comment-anchor consumer in V1. The user lands on the post on
+        // the floor and scrolls to find the comment.
+        add_action('bcc_comment_created', function (int $authorId, int $parentActId, int $newActId, int $newCommentPostId): void {
+            unset($newActId);
+            $comment = get_post($newCommentPostId);
+            if (!$comment instanceof \WP_Post) {
+                return;
+            }
+            $this->notificationDispatcher()->dispatchMentionsFor(
+                $authorId,
+                $newCommentPostId,
+                (string) $comment->post_content,
+                $parentActId,
+                true
+            );
+        }, 30, 4);
+
         // ── §H1 NFT gallery refresh ─────────────────────────────────────
         //
         // Dispatched by CreatorGalleryEndpoint when the visible page has

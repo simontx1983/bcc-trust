@@ -130,6 +130,50 @@ final class PushPayload
     }
 
     /**
+     * @param array<string, mixed> $first First queued payload — provides
+     *   actor handle + activity row id for the single-event body + url.
+     *   Aggregated bodies (count > 1) drop the actor + surface
+     *   "N new mentions" because the queue can mix mention sources
+     *   (a post mention AND a comment mention land in the same
+     *   `(recipient, 'mention')` debounce window).
+     * @return array{title: string, body: string, url: string, tag?: string}
+     */
+    public static function forMention(int $count, array $first): array
+    {
+        $actor    = self::stringFrom($first, 'actor_handle');
+        $actId    = self::intFrom($first, 'act_id');
+        $isComment = isset($first['is_comment']) && $first['is_comment'] === true;
+
+        $title = 'Blue Collar Crypto';
+        if ($count > 1) {
+            $body = sprintf('%d new mentions.', $count);
+        } elseif ($actor !== '') {
+            $body = $isComment
+                ? sprintf('@%s mentioned you in a comment.', $actor)
+                : sprintf('@%s mentioned you in a post.', $actor);
+        } else {
+            $body = 'You were mentioned.';
+        }
+
+        // count==1 with a known activity row → deep-link to the floor
+        // focused on it (mirrors NotificationViewService::resolveLink for
+        // REACTION). count>1 (mixed sources) → floor.
+        $url = ($count === 1 && $actId > 0)
+            ? sprintf('/?focus=%d', $actId)
+            : '/';
+
+        return [
+            'title' => $title,
+            'body'  => $body,
+            'url'   => $url,
+            // Per-recipient tag (no id needed since the debounce window
+            // is already per (recipient, eventType) — only one mention
+            // push can be on-screen for a given recipient at a time).
+            'tag'   => 'bcc-mention',
+        ];
+    }
+
+    /**
      * @param array<string, mixed> $first
      * @return array{title: string, body: string, url: string, tag?: string}
      */

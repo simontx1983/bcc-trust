@@ -25,9 +25,14 @@
  *                     (V2 Phase 2 retention slice — proves the bell
  *                     channel works within seconds of opting in;
  *                     idempotent via `bcc_welcomed` user_meta).
+ *   - MENTION        — someone @-tagged you in a post or comment
+ *                     (original-write only — edits do not re-dispatch;
+ *                     dedup'd to one bell row per (post, mentioner,
+ *                     mentionee) by MentionExtractor::extractUserIds'
+ *                     unique-id contract).
  *
- * Deferred (per §P): @mentions, follow-posts, comments. Each will
- * extend this catalogue when its dispatcher subscriber lands.
+ * Deferred (per §P): follow-posts. Each will extend this catalogue
+ * when its dispatcher subscriber lands.
  *
  * @package BCC\Trust\Core\Support
  * @since V1 (2026-04, §I1)
@@ -47,6 +52,7 @@ final class NotificationType
     public const RANK_UP     = 'bcc_rank_up';
     public const ENDORSE     = 'bcc_endorse';
     public const WELCOME     = 'bcc_welcome';
+    public const MENTION     = 'bcc_mention';
 
     /**
      * Whitelist of valid type slugs. Used by the read-side validation
@@ -62,6 +68,7 @@ final class NotificationType
         self::RANK_UP,
         self::ENDORSE,
         self::WELCOME,
+        self::MENTION,
     ];
 
     public static function isValid(string $type): bool

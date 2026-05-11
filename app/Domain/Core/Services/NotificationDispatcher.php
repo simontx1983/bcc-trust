@@ -35,9 +35,19 @@
  *                                   seconds of opting in; idempotent via
  *                                   `bcc_welcomed` user_meta)
  *
- * Deferred (per §P parking lot): @mentions (composer v2),
- * follow-posts (cross-graph, expensive), comments (PeepSo native
- * surface). Each will land as its source event reaches V1.
+ * @mention dispatch (V2 retention slice, locked 2026-05-11):
+ *   - onMentioned + dispatchMentionsFor land bell + push events when
+ *     @{handle} tokens are present in a post or comment body. Wired
+ *     via `bcc_post_created` / `bcc_comment_created` subscribers in
+ *     Plugin.php — original-write only. NO edit hook is subscribed;
+ *     the edit-as-ping abuse vector is structurally closed.
+ *   - Dedup is structural: MentionExtractor::extractUserIds returns
+ *     unique-by-first-occurrence ids, so three `@bob` tokens in one
+ *     post produce exactly one bell row for Bob.
+ *
+ * Deferred (per §P parking lot): follow-posts (cross-graph, expensive).
+ * Comments are notified via the mention dispatcher only — a future
+ * "someone replied to your post" subscriber would extend this catalogue.
  *
  * @package BCC\Trust\Core\Services
  * @since V1 (2026-04, §I1)
@@ -48,6 +58,8 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Log\Logger;
 use BCC\Core\PeepSo\PeepSoNotificationWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Trust\Core\Services\Mentions\MentionExtractor;
+use BCC\Trust\Core\Services\Mentions\MentionPolicy;
 use BCC\Trust\Core\Support\NotificationPrefs;
 use BCC\Trust\Core\Support\NotificationType;
 use BCC\Trust\Core\Support\RankCatalog;
@@ -361,6 +373,142 @@ final class NotificationDispatcher
             Logger::warning('[NotificationDispatcher] welcome dispatch failed', [
                 'user_id' => $userId,
                 'error'   => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // bcc_post_created / bcc_comment_created — @-mention dispatch
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Extract every @-mention from $body, apply the policy filter (same
+     * gate as write-time validation in PostsService::validateMentions /
+     * CommentService::validateMentions — banned/blocked/private targets
+     * are silently dropped), then drop a bell + push for each surviving
+     * mentionee.
+     *
+     * Dedup is structural: MentionExtractor::extractUserIds returns
+     * unique-by-first-occurrence ids, so three `@bob` tokens in one
+     * body produce exactly one bell row for Bob. The 10-mentions-per-
+     * post cap is already enforced at write-time validation — we don't
+     * re-cap here (a hand-crafted body that smuggled past the
+     * validator would still be bounded by the MentionPolicy filter,
+     * which is the load-bearing privacy gate).
+     *
+     * Wrapped in try/catch at the orchestrator level so a single bad
+     * mentionee never aborts the rest of the batch and never bubbles
+     * to the originating write. Per-mentionee failures are already
+     * caught inside onMentioned.
+     *
+     * @param int    $authorId   user_id of the post/comment author
+     * @param int    $postId     wp_post.ID of the post containing the body
+     *                           (used as `external_id` in the bell row)
+     * @param string $body       raw `wp_posts.post_content` (untouched —
+     *                           the extractor strips PeepSo's token shape)
+     * @param int    $actId      activity row id whose URL the bell should
+     *                           deep-link to. For post mentions this is
+     *                           the post's own act_id; for comment
+     *                           mentions this is the PARENT post's act_id
+     *                           so the user lands on the post on the
+     *                           floor (the FE has no comment-anchor
+     *                           consumer in V1 — see api-contract §4.18).
+     * @param bool   $isComment  true when the body is a comment, false
+     *                           for status/photo/gif post bodies
+     */
+    public function dispatchMentionsFor(
+        int $authorId,
+        int $postId,
+        string $body,
+        int $actId,
+        bool $isComment
+    ): void {
+        if ($authorId <= 0 || $postId <= 0 || $body === '') {
+            return;
+        }
+        try {
+            $candidates = MentionExtractor::extractUserIds($body);
+            if ($candidates === []) {
+                return;
+            }
+            // Re-apply the same policy gate as write-time validation.
+            // In a sync request this is identical to the validator's
+            // pass (no race); the second call costs one bounded
+            // WP_User_Query but keeps the dispatcher safe even if a
+            // future code path skips validateMentions.
+            $allowed = MentionPolicy::filterMentionable($authorId, $candidates);
+            if ($allowed === []) {
+                return;
+            }
+            foreach ($allowed as $mentioneeId) {
+                $this->onMentioned($authorId, $mentioneeId, $postId, $actId, $isComment);
+            }
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] mention dispatch orchestrator failed', [
+                'author_id'  => $authorId,
+                'post_id'    => $postId,
+                'is_comment' => $isComment,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Dispatch a single mention bell + push. Mirrors onReactionAdded
+     * shape — sync write, self-skip, per-recipient error log. The
+     * shared dispatch() helper applies the bell pref gate; the push
+     * dispatcher self-gates on the push pref + 5-min debounce.
+     *
+     * Marked public so it can be exercised by unit tests; the
+     * orchestrator above is the canonical entry point in production.
+     */
+    public function onMentioned(
+        int $authorId,
+        int $mentioneeId,
+        int $postId,
+        int $actId,
+        bool $isComment
+    ): void {
+        if ($authorId <= 0 || $mentioneeId <= 0 || $postId <= 0) {
+            return;
+        }
+        if ($mentioneeId === $authorId) {
+            // Self-mention: same posture as self-reactions. The composer
+            // doesn't currently strip self-tokens, so this is the
+            // load-bearing skip.
+            return;
+        }
+        try {
+            $actorHandle = self::resolveHandle($authorId);
+            $message     = $isComment
+                ? sprintf('@%s mentioned you in a comment.', $actorHandle)
+                : sprintf('@%s mentioned you in a post.', $actorHandle);
+
+            $this->dispatch(
+                $authorId,
+                $mentioneeId,
+                $message,
+                NotificationType::MENTION,
+                $postId,
+                $actId
+            );
+
+            // Parallel push enqueue — debounced to one push per
+            // (recipient, 'mention') per 5 min, count-aggregated.
+            // PushDispatcher::enqueue self-gates on push prefs.
+            $this->pushDispatcher->enqueue($mentioneeId, 'mention', [
+                'actor_handle' => $actorHandle,
+                'post_id'      => $postId,
+                'act_id'       => $actId,
+                'is_comment'   => $isComment,
+            ]);
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] mention dispatch failed', [
+                'author_id'    => $authorId,
+                'mentionee_id' => $mentioneeId,
+                'post_id'      => $postId,
+                'is_comment'   => $isComment,
+                'error'        => $e->getMessage(),
             ]);
         }
     }

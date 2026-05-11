@@ -16,6 +16,12 @@
  *   - CARD_PULLED    → `/u/<actor_handle>` (the puller's profile)
  *   - RANK_UP        → `/u/<recipient_handle>` (your own profile —
  *                       progression strip lives there)
+ *   - MENTION        → `/?focus=<act_id>` (jump to the floor focused
+ *                       on the post containing the mention; mirrors
+ *                       REACTION). For comment mentions, act_id is the
+ *                       PARENT post's act_id so the user lands on the
+ *                       post on the floor — the FE has no comment-anchor
+ *                       consumer in V1.
  *
  * Rows whose type is unrecognized (e.g. a future migration or a
  * corrupt row) are filtered out rather than surfaced as "Unknown" —
@@ -196,6 +202,11 @@ final class NotificationViewService
             // seconds of signup), but tapping the bell row should still
             // do something coherent.
             NotificationType::WELCOME     => '/',
+            // Mention links to the floor focused on the post containing
+            // the @-tag. For comment mentions the dispatcher passes the
+            // PARENT post's act_id so this lands on the post; the FE
+            // has no comment-anchor consumer in V1.
+            NotificationType::MENTION     => $actId > 0 ? '/?focus=' . $actId : '/',
             default                       => '/',
         };
     }
