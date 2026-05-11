@@ -136,7 +136,7 @@ final class SignalRefreshService
      */
     public static function dailyRefresh(): void
     {
-        if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire('bcc_onchain_daily_refresh', 0)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire('bcc_onchain_daily_refresh', 0)) {
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error('[bcc-onchain-signals] daily_refresh_lock_held', [
                     'message' => 'Could not acquire advisory lock — previous run may still be active.',
@@ -153,7 +153,7 @@ final class SignalRefreshService
             delete_option('bcc_onchain_refresh_offset');
             self::processBatch();
         } finally {
-            \BCC\Trust\Onchain\Repositories\LockRepository::release('bcc_onchain_daily_refresh');
+            \BCC\Core\DB\AdvisoryLock::release('bcc_onchain_daily_refresh');
         }
     }
 
@@ -170,7 +170,7 @@ final class SignalRefreshService
     {
         // Acquire advisory lock to prevent overlapping batch runs from
         // concurrent continuation events.
-        if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire('bcc_onchain_refresh_batch', 0)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire('bcc_onchain_refresh_batch', 0)) {
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::info('[SignalRefresh] processBatch lock held — skipping to avoid overlap');
             }
@@ -246,7 +246,7 @@ final class SignalRefreshService
         }
 
         } finally {
-            \BCC\Trust\Onchain\Repositories\LockRepository::release('bcc_onchain_refresh_batch');
+            \BCC\Core\DB\AdvisoryLock::release('bcc_onchain_refresh_batch');
         }
     }
 

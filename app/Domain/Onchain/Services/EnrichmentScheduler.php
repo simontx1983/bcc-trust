@@ -389,12 +389,12 @@ final class EnrichmentScheduler
      */
     private static function acquireLock(): bool
     {
-        return \BCC\Trust\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 0);
+        return \BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_KEY, 0);
     }
 
     private static function releaseLock(): void
     {
-        \BCC\Trust\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
+        \BCC\Core\DB\AdvisoryLock::release(self::LOCK_KEY);
     }
 
     /**

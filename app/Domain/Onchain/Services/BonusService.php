@@ -2,8 +2,8 @@
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Core\DB\AdvisoryLock;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
-use BCC\Trust\Onchain\Repositories\LockRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\SignalRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
@@ -122,12 +122,12 @@ final class BonusService
      */
     private static function acquireBonusLock(int $pageId, int $timeoutSeconds = 5): bool
     {
-        return LockRepository::acquire('bcc_onchain_bonus_' . $pageId, $timeoutSeconds);
+        return AdvisoryLock::acquire('bcc_onchain_bonus_' . $pageId, $timeoutSeconds);
     }
 
     private static function releaseBonusLock(int $pageId): void
     {
-        LockRepository::release('bcc_onchain_bonus_' . $pageId);
+        AdvisoryLock::release('bcc_onchain_bonus_' . $pageId);
     }
 
     /**

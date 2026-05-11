@@ -99,7 +99,7 @@ final class WalletSeedService
 
         // Advisory lock prevents concurrent cron runs from double-seeding the same wallet.
         $lockKey = 'bcc_seed_entities_' . $walletLinkId;
-        if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire($lockKey, 0)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
             return;
         }
 
@@ -144,7 +144,7 @@ final class WalletSeedService
                 }
             }
         } finally {
-            \BCC\Trust\Onchain\Repositories\LockRepository::release($lockKey);
+            \BCC\Core\DB\AdvisoryLock::release($lockKey);
         }
     }
 }

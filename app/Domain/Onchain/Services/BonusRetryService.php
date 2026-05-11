@@ -29,7 +29,7 @@ final class BonusRetryService
      */
     public static function queue(int $pageId, float $bonus): void
     {
-        if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_KEY, 5)) {
             return; // Could not acquire lock — will be picked up by retry cron.
         }
 
@@ -51,7 +51,7 @@ final class BonusRetryService
                 ]);
             }
         } finally {
-            \BCC\Trust\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
+            \BCC\Core\DB\AdvisoryLock::release(self::LOCK_KEY);
         }
     }
 
@@ -62,7 +62,7 @@ final class BonusRetryService
      */
     public static function clear(int $pageId): void
     {
-        if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_KEY, 5)) {
             return;
         }
 
@@ -73,7 +73,7 @@ final class BonusRetryService
                 update_option(self::OPTION_KEY, $pending, false);
             }
         } finally {
-            \BCC\Trust\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
+            \BCC\Core\DB\AdvisoryLock::release(self::LOCK_KEY);
         }
     }
 
@@ -95,19 +95,19 @@ final class BonusRetryService
         // Exclusive processing lock — prevents concurrent processAll() calls
         // from applying the same bonuses twice. Separate from LOCK_KEY which
         // protects the queue option read/write.
-        if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire(self::PROCESS_LOCK_KEY, 0)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::PROCESS_LOCK_KEY, 0)) {
             return; // Another processAll() is already running.
         }
 
         try {
 
         // ── Step 1: snapshot pending entries under queue lock ────────────
-        if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_KEY, 5)) {
             return;
         }
 
         $pending = get_option(self::OPTION_KEY, []);
-        \BCC\Trust\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
+        \BCC\Core\DB\AdvisoryLock::release(self::LOCK_KEY);
 
         if (empty($pending)) {
             return;
@@ -155,7 +155,7 @@ final class BonusRetryService
             // cycle (no attempts bump) — the queue entry stays put and we
             // retry next tick when contention has cleared.
             $pageIdInt = (int) $pageId;
-            if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire('bcc_onchain_bonus_' . $pageIdInt, 5)) {
+            if (!\BCC\Core\DB\AdvisoryLock::acquire('bcc_onchain_bonus_' . $pageIdInt, 5)) {
                 continue;
             }
 
@@ -185,12 +185,12 @@ final class BonusRetryService
                     $failed[$pageId] = ($entry['attempts'] ?? 0) + 1;
                 }
             } finally {
-                \BCC\Trust\Onchain\Repositories\LockRepository::release('bcc_onchain_bonus_' . $pageIdInt);
+                \BCC\Core\DB\AdvisoryLock::release('bcc_onchain_bonus_' . $pageIdInt);
             }
         }
 
         // ── Step 3: write results back under lock ───────────────────────
-        $lockAcquired = \BCC\Trust\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5);
+        $lockAcquired = \BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_KEY, 5);
         if (!$lockAcquired) {
             return; // Could not re-acquire — results will be picked up next cycle.
         }
@@ -234,11 +234,11 @@ final class BonusRetryService
 
             update_option(self::OPTION_KEY, $current, false);
         } finally {
-            \BCC\Trust\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
+            \BCC\Core\DB\AdvisoryLock::release(self::LOCK_KEY);
         }
 
         } finally {
-            \BCC\Trust\Onchain\Repositories\LockRepository::release(self::PROCESS_LOCK_KEY);
+            \BCC\Core\DB\AdvisoryLock::release(self::PROCESS_LOCK_KEY);
         }
     }
 
@@ -254,7 +254,7 @@ final class BonusRetryService
     {
         // Acquire advisory lock to prevent concurrent get_option + update_option
         // from losing entries under concurrency (lost-update race).
-        if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_KEY, 5)) {
             return; // Will be retried next cycle.
         }
 
@@ -269,7 +269,7 @@ final class BonusRetryService
             ];
             update_option(self::QUARANTINE_KEY, $quarantined, false);
         } finally {
-            \BCC\Trust\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
+            \BCC\Core\DB\AdvisoryLock::release(self::LOCK_KEY);
         }
     }
 
@@ -286,7 +286,7 @@ final class BonusRetryService
      */
     public static function pruneQuarantine(): void
     {
-        if (!\BCC\Trust\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_KEY, 5)) {
             return; // Contention — daily cron will retry tomorrow.
         }
 
@@ -314,7 +314,7 @@ final class BonusRetryService
                 update_option(self::QUARANTINE_KEY, $pruned, false);
             }
         } finally {
-            \BCC\Trust\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
+            \BCC\Core\DB\AdvisoryLock::release(self::LOCK_KEY);
         }
     }
 }

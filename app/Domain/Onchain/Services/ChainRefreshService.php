@@ -106,7 +106,7 @@ class ChainRefreshService
      */
     private static function acquireLock(string $job): bool
     {
-        $acquired = \BCC\Trust\Onchain\Repositories\LockRepository::acquire(self::LOCK_GROUP . ':' . $job, 0);
+        $acquired = \BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_GROUP . ':' . $job, 0);
 
         if (!$acquired) {
             \BCC\Core\Log\Logger::info('[Onchain] Skipping ' . $job . ' — previous run still locked.');
@@ -118,7 +118,7 @@ class ChainRefreshService
 
     private static function releaseLock(string $job): void
     {
-        \BCC\Trust\Onchain\Repositories\LockRepository::release(self::LOCK_GROUP . ':' . $job);
+        \BCC\Core\DB\AdvisoryLock::release(self::LOCK_GROUP . ':' . $job);
     }
 
     // ── Validator Indexing (bulk — all validators per chain) ────────────────

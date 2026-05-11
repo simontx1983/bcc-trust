@@ -9,6 +9,8 @@
 
 namespace BCC\Trust\Onchain\Repositories;
 
+use BCC\Core\DB\AdvisoryLock;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -432,7 +434,7 @@ class ClaimRepository {
     ): array {
         // Advisory lock scoped to this specific entity+role.
         $lockKey = "bcc_claim:{$entityType}:{$entityId}:{$role}";
-        if (!LockRepository::acquire($lockKey, 5)) {
+        if (!AdvisoryLock::acquire($lockKey, 5)) {
             return ['success' => false, 'message' => 'Could not acquire claim lock. Please try again.'];
         }
 
@@ -480,7 +482,7 @@ class ClaimRepository {
                 'message' => 'Temporary database error — please try again in a moment.',
             ];
         } finally {
-            LockRepository::release($lockKey);
+            AdvisoryLock::release($lockKey);
         }
     }
 
