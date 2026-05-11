@@ -134,6 +134,33 @@ final class AdminReportsEndpoint
                 ],
             ]
         );
+
+        // §K1 moderation recovery affordance — see pattern-registry.md
+        // "Moderation recovery affordances". Single 30-second window
+        // tied to a server-issued token. NOT a generalised /admin/undo
+        // surface: belongs to this endpoint specifically because only
+        // the resolve flow issues tokens.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/admin/reports/undo',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'undo'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'token' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        // 32-char hex from bin2hex(random_bytes(16)).
+                        // Bounded validation here is belt-and-suspenders
+                        // — the service rejects anything not matching
+                        // the same shape.
+                        'pattern'           => '^[a-f0-9]{32}$',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                ],
+            ]
+        );
     }
 
     public function list(WP_REST_Request $request): WP_REST_Response
@@ -182,6 +209,36 @@ final class AdminReportsEndpoint
         $viewerId = get_current_user_id();
 
         $result = Plugin::instance()->moderationQueueService()->resolve($reportId, $action, $viewerId);
+        if (isset($result['error'])) {
+            $code   = (string) $result['error'];
+            $status = self::statusForCode($code);
+            return ApiResponse::error($code, (string) ($result['message'] ?? ''), $status);
+        }
+
+        $resp = ApiResponse::ok($result);
+        $resp->header('Cache-Control', 'no-store');
+        return $resp;
+    }
+
+    /**
+     * Reverse the moderator's most recent resolve action within the
+     * 30-second window. The token returned by the prior `resolve()`
+     * call is the entire authorisation envelope — see service docs
+     * and pattern-registry.md "Moderation recovery affordances".
+     *
+     * Fails closed on missing/expired/forbidden/stale-state.
+     */
+    public function undo(WP_REST_Request $request): WP_REST_Response
+    {
+        $gateError = self::adminGate();
+        if ($gateError !== null) {
+            return $gateError;
+        }
+
+        $token    = (string) $request->get_param('token');
+        $viewerId = get_current_user_id();
+
+        $result = Plugin::instance()->moderationQueueService()->undo($token, $viewerId);
         if (isset($result['error'])) {
             $code   = (string) $result['error'];
             $status = self::statusForCode($code);
@@ -243,12 +300,16 @@ final class AdminReportsEndpoint
     private static function statusForCode(string $code): int
     {
         return match ($code) {
-            'bcc_unauthorized'    => 401,
-            'bcc_forbidden'       => 403,
-            'bcc_not_found'       => 404,
-            'bcc_invalid_request' => 400,
-            'bcc_unavailable'     => 503,
-            default               => 400,
+            'bcc_unauthorized'      => 401,
+            'bcc_forbidden'         => 403,
+            'bcc_undo_forbidden'    => 403,
+            'bcc_not_found'         => 404,
+            'bcc_invalid_request'   => 400,
+            'bcc_undo_expired'      => 410, // Gone — accurately describes a consumed/expired token
+            'bcc_undo_already_used' => 410, // (Currently folded into _expired by the service for parity.)
+            'bcc_undo_stale_state'  => 409, // Conflict — another moderator's action invalidated the token
+            'bcc_unavailable'       => 503,
+            default                 => 400,
         };
     }
 }

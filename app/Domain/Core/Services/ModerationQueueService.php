@@ -28,6 +28,7 @@ use BCC\Core\Log\Logger;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\ContentReportRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Security\AuditLogger;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -50,6 +51,36 @@ final class ModerationQueueService
     public const ACTION_HIDE     = 'hide';
     public const ACTION_DISMISS  = 'dismiss';
     public const ACTION_RESTORE  = 'restore';
+
+    /**
+     * Bounded recovery affordance for the §K1 admin queue.
+     *
+     * IMPORTANT — pattern-registry.md "Moderation recovery affordances":
+     *   Undo is a moderation recovery affordance, NOT a historical
+     *   correctness mechanism.
+     *
+     * The transient stores everything the inverse action needs and
+     * NOTHING ELSE. It is single-use; it self-consumes (immediately
+     * deleted on read regardless of whether the inverse succeeds —
+     * see `consumeUndoToken()`). It is short-lived (UNDO_TTL_SECONDS).
+     * It validates current-state-matches-expected-post-action-state
+     * before executing; on any divergence it FAILS CLOSED with
+     * `bcc_undo_stale_state`. That stale-state guard is what prevents
+     * recovery from becoming race-condition stomping.
+     *
+     * Failure modes — ALL fail closed:
+     *   - missing transient        → bcc_undo_expired
+     *   - expired transient TTL    → bcc_undo_expired (same path; WP auto-deletes)
+     *   - token bound to a different admin → bcc_undo_forbidden
+     *   - current state diverges from expected → bcc_undo_stale_state
+     *   - second consumption attempt → bcc_undo_already_used
+     *
+     * Resist later pressure to grow this into a multi-step undo stack,
+     * a persistence-across-reloads system, a generalised /admin/undo
+     * endpoint, or any retry worker.
+     */
+    private const UNDO_TRANSIENT_PREFIX = 'bcc_mod_undo_';
+    private const UNDO_TTL_SECONDS      = 30;
 
     public function __construct(
         private readonly ContentReportRepository $reportRepo,
@@ -280,7 +311,8 @@ final class ModerationQueueService
      *   ok: true,
      *   report_id: int,
      *   action: string,
-     *   currently_hidden: bool
+     *   currently_hidden: bool,
+     *   undo: array{token: string, expires_at: string, ttl_seconds: int}|null
      * }|array{error: string, message: string}
      */
     public function resolve(int $reportId, string $action, int $resolverUserId): array
@@ -303,13 +335,25 @@ final class ModerationQueueService
         if ($targetKind !== 'feed_item' || $targetId <= 0) {
             // V1 only knows feed_item targets — extend here when more
             // kinds land. Defensive: dismiss a report whose target
-            // we don't understand rather than 500.
+            // we don't understand rather than 500. NO undo token is
+            // issued for this fallback path — the original action was
+            // not the one the admin selected, so an inverse would be
+            // misleading. Audit-log the defensive call so the trail
+            // is unambiguous.
             $this->reportRepo->updateStatus($reportId, self::STATUS_DISMISSED, $resolverUserId);
+            AuditLogger::log(
+                'admin_dismiss_report_defensive',
+                $reportId,
+                ['target_kind' => $targetKind, 'requested_action' => $action],
+                'content_report',
+                $resolverUserId
+            );
             return [
                 'ok'               => true,
                 'report_id'        => $reportId,
                 'action'           => self::ACTION_DISMISS,
                 'currently_hidden' => false,
+                'undo'             => null,
             ];
         }
 
@@ -328,39 +372,369 @@ final class ModerationQueueService
                 return ['error' => 'bcc_unavailable', 'message' => 'Could not hide the post.'];
             }
             $this->reportRepo->updateStatus($reportId, self::STATUS_RESOLVED, $resolverUserId);
+            AuditLogger::log(
+                'admin_hide_report',
+                $reportId,
+                ['target_id' => $targetId],
+                'content_report',
+                $resolverUserId
+            );
             do_action('bcc_content_hidden_by_admin', $targetId, $resolverUserId, $reportId);
+
+            $undo = $this->issueUndoToken(
+                $reportId,
+                $resolverUserId,
+                self::ACTION_HIDE,
+                self::STATUS_RESOLVED,
+                true,
+                $targetId,
+                null, // hide-undo doesn't need prior hidden-row metadata
+                null
+            );
 
             return [
                 'ok'               => true,
                 'report_id'        => $reportId,
                 'action'           => self::ACTION_HIDE,
                 'currently_hidden' => true,
+                'undo'             => $undo,
             ];
         }
 
         if ($action === self::ACTION_RESTORE) {
+            // Capture the prior hidden row BEFORE remove() deletes it.
+            // The undo path uses these to re-hide with the original
+            // hider's identity + reason, not the undoing admin's.
+            $prior = $this->hiddenRepo->findByActId($targetId);
+            $priorHiderUserId = $prior !== null && isset($prior->hidden_by_user_id) ? (int) $prior->hidden_by_user_id : null;
+            $priorReasonCode  = $prior !== null && isset($prior->reason_code)       ? (string) $prior->reason_code : null;
+
             $this->hiddenRepo->remove($targetId);
             $this->reportRepo->updateStatus($reportId, self::STATUS_RESOLVED, $resolverUserId);
+            AuditLogger::log(
+                'admin_restore_report',
+                $reportId,
+                ['target_id' => $targetId],
+                'content_report',
+                $resolverUserId
+            );
             do_action('bcc_content_restored_by_admin', $targetId, $resolverUserId, $reportId);
+
+            $undo = $this->issueUndoToken(
+                $reportId,
+                $resolverUserId,
+                self::ACTION_RESTORE,
+                self::STATUS_RESOLVED,
+                false,
+                $targetId,
+                $priorHiderUserId,
+                $priorReasonCode
+            );
 
             return [
                 'ok'               => true,
                 'report_id'        => $reportId,
                 'action'           => self::ACTION_RESTORE,
                 'currently_hidden' => false,
+                'undo'             => $undo,
             ];
         }
 
         // Dismiss — leave the activity alone, just close the report.
         $this->reportRepo->updateStatus($reportId, self::STATUS_DISMISSED, $resolverUserId);
+        AuditLogger::log(
+            'admin_dismiss_report',
+            $reportId,
+            ['target_id' => $targetId],
+            'content_report',
+            $resolverUserId
+        );
         do_action('bcc_content_report_dismissed', $reportId, $resolverUserId);
+
+        $undo = $this->issueUndoToken(
+            $reportId,
+            $resolverUserId,
+            self::ACTION_DISMISS,
+            self::STATUS_DISMISSED,
+            $this->hiddenRepo->exists($targetId),
+            $targetId,
+            null,
+            null
+        );
 
         return [
             'ok'               => true,
             'report_id'        => $reportId,
             'action'           => self::ACTION_DISMISS,
             'currently_hidden' => $this->hiddenRepo->exists($targetId),
+            'undo'             => $undo,
         ];
+    }
+
+    /**
+     * Reverse a moderation action issued in the last UNDO_TTL_SECONDS.
+     *
+     * MUST FAIL CLOSED on any uncertainty (see class-level constants
+     * doc above). The four explicit failure codes (`bcc_undo_expired`,
+     * `bcc_undo_forbidden`, `bcc_undo_stale_state`, `bcc_undo_already_used`)
+     * collapse to: this token is no longer the right key for the
+     * report's current state — the admin must re-evaluate visually.
+     *
+     * The transient is consumed (deleted) immediately on read, BEFORE
+     * the inverse runs. That single-use guarantee survives even a
+     * failed inverse — the alternative (delete only on success) would
+     * let a misbehaving client retry forever.
+     *
+     * @return array{
+     *   ok: true,
+     *   report_id: int,
+     *   undone_action: string,
+     *   currently_hidden: bool
+     * }|array{error: string, message: string}
+     */
+    public function undo(string $token, int $adminUserId): array
+    {
+        if ($token === '') {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Undo token required.'];
+        }
+
+        $undo = $this->consumeUndoToken($token);
+        if ($undo === null) {
+            // Either never existed or already consumed / expired. Treat
+            // the two cases identically — leaking the difference would
+            // let a caller distinguish "you already undid this" from
+            // "you waited too long" and that distinction has zero
+            // operational value while being a small information leak.
+            return ['error' => 'bcc_undo_expired', 'message' => 'Undo window expired or token already used.'];
+        }
+
+        if ((int) ($undo['admin_user_id'] ?? 0) !== $adminUserId) {
+            return ['error' => 'bcc_undo_forbidden', 'message' => 'This undo token belongs to a different admin.'];
+        }
+
+        $reportId = (int) ($undo['report_id'] ?? 0);
+        if ($reportId <= 0) {
+            return ['error' => 'bcc_undo_expired', 'message' => 'Undo token is malformed.'];
+        }
+
+        $report = $this->reportRepo->findById($reportId);
+        if ($report === null) {
+            // The report disappeared between forward and undo. Rare;
+            // would require concurrent deletion. Treat as stale.
+            return ['error' => 'bcc_undo_stale_state', 'message' => 'Report no longer exists.'];
+        }
+
+        // Stale-state guard — load-bearing. If anyone else acted on
+        // this report between the forward action and now, refuse and
+        // tell the admin to re-evaluate.
+        $expectedStatus     = (int) ($undo['expected_status'] ?? -1);
+        $expectedHidden     = (bool) ($undo['expected_currently_hidden'] ?? false);
+        $currentStatus      = (int) $report->status;
+        $targetId           = (int) $report->target_id;
+        $currentlyHiddenNow = $targetId > 0 && $this->hiddenRepo->exists($targetId);
+
+        if ($currentStatus !== $expectedStatus || $currentlyHiddenNow !== $expectedHidden) {
+            AuditLogger::log(
+                'admin_undo_stale_state',
+                $reportId,
+                [
+                    'action'          => (string) ($undo['action'] ?? ''),
+                    'expected_status' => $expectedStatus,
+                    'current_status'  => $currentStatus,
+                    'expected_hidden' => $expectedHidden,
+                    'current_hidden'  => $currentlyHiddenNow,
+                ],
+                'content_report',
+                $adminUserId
+            );
+            return ['error' => 'bcc_undo_stale_state', 'message' => 'Another moderator has acted on this report.'];
+        }
+
+        $action = (string) ($undo['action'] ?? '');
+
+        if ($action === self::ACTION_HIDE) {
+            // Inverse: un-hide the activity AND return the report to
+            // the queue (PENDING, resolved_at NULL).
+            $this->hiddenRepo->remove($targetId);
+            $this->reportRepo->setPending($reportId);
+            AuditLogger::log(
+                'admin_undo_hide',
+                $reportId,
+                ['target_id' => $targetId],
+                'content_report',
+                $adminUserId
+            );
+            do_action('bcc_content_moderation_undone', $reportId, $adminUserId, self::ACTION_HIDE);
+
+            return [
+                'ok'               => true,
+                'report_id'        => $reportId,
+                'undone_action'    => self::ACTION_HIDE,
+                'currently_hidden' => false,
+            ];
+        }
+
+        if ($action === self::ACTION_DISMISS) {
+            // Inverse: just flip the report back to PENDING. No
+            // activity state to restore — dismiss never touched the
+            // activity in the first place.
+            $this->reportRepo->setPending($reportId);
+            AuditLogger::log(
+                'admin_undo_dismiss',
+                $reportId,
+                ['target_id' => $targetId],
+                'content_report',
+                $adminUserId
+            );
+            do_action('bcc_content_moderation_undone', $reportId, $adminUserId, self::ACTION_DISMISS);
+
+            return [
+                'ok'               => true,
+                'report_id'        => $reportId,
+                'undone_action'    => self::ACTION_DISMISS,
+                'currently_hidden' => $currentlyHiddenNow,
+            ];
+        }
+
+        if ($action === self::ACTION_RESTORE) {
+            // Inverse: re-hide the activity AND return the report to
+            // PENDING. Re-attribute the hidden row to the undoing
+            // admin with reason_code='admin_undo_restore'; the prior
+            // hider's identity is not preserved (this is recovery,
+            // not historical reconstruction — see pattern-registry
+            // "Moderation recovery affordances"). The transient
+            // captured the prior values only as forensic metadata;
+            // they are logged but not re-stamped onto the row.
+            $priorHider  = isset($undo['prior_hider_user_id']) ? (int) $undo['prior_hider_user_id'] : 0;
+            $priorReason = isset($undo['prior_reason_code'])   ? (string) $undo['prior_reason_code'] : '';
+
+            $this->hiddenRepo->add(
+                $targetId,
+                $adminUserId,
+                'admin_undo_restore',
+                $reportId
+            );
+            $this->reportRepo->setPending($reportId);
+            AuditLogger::log(
+                'admin_undo_restore',
+                $reportId,
+                [
+                    'target_id'           => $targetId,
+                    'prior_hider_user_id' => $priorHider,
+                    'prior_reason_code'   => $priorReason,
+                ],
+                'content_report',
+                $adminUserId
+            );
+            do_action('bcc_content_moderation_undone', $reportId, $adminUserId, self::ACTION_RESTORE);
+
+            return [
+                'ok'               => true,
+                'report_id'        => $reportId,
+                'undone_action'    => self::ACTION_RESTORE,
+                'currently_hidden' => true,
+            ];
+        }
+
+        // Unknown action stored in the transient — should be impossible
+        // (issueUndoToken validates), so fail loud rather than guess.
+        Logger::warning('[ModerationQueueService] undo token with unknown action', [
+            'report_id' => $reportId,
+            'action'    => $action,
+        ]);
+        return ['error' => 'bcc_undo_expired', 'message' => 'Undo token is malformed.'];
+    }
+
+    /**
+     * Build + store a 30s single-use undo descriptor. Returns the
+     * client-visible {token, expires_at, ttl_seconds} block or null
+     * when the transient write fails (forward action still committed —
+     * the affordance just doesn't render).
+     *
+     * @return array{token: string, expires_at: string, ttl_seconds: int}|null
+     */
+    private function issueUndoToken(
+        int $reportId,
+        int $adminUserId,
+        string $action,
+        int $expectedStatus,
+        bool $expectedCurrentlyHidden,
+        int $targetActId,
+        ?int $priorHiderUserId,
+        ?string $priorReasonCode
+    ): ?array {
+        // 32 hex chars = 128 bits of randomness. wp_generate_password
+        // with special_chars=false yields [A-Za-z0-9]; bin2hex(random_bytes(16))
+        // is equally strong and shorter to validate. We use the latter
+        // so the token character set is hex-only (easier to log + grep).
+        try {
+            $token = bin2hex(random_bytes(16));
+        } catch (\Throwable $e) {
+            Logger::warning('[ModerationQueueService] random_bytes failed; skipping undo token', [
+                'report_id' => $reportId,
+            ]);
+            return null;
+        }
+
+        $now = time();
+        $payload = [
+            'token'                     => $token,
+            'report_id'                 => $reportId,
+            'admin_user_id'             => $adminUserId,
+            'action'                    => $action,
+            'expected_status'           => $expectedStatus,
+            'expected_currently_hidden' => $expectedCurrentlyHidden,
+            'target_act_id'             => $targetActId,
+            'prior_hider_user_id'       => $priorHiderUserId,
+            'prior_reason_code'         => $priorReasonCode,
+            'issued_at'                 => $now,
+        ];
+
+        $stored = set_transient(self::UNDO_TRANSIENT_PREFIX . $token, $payload, self::UNDO_TTL_SECONDS);
+        if (!$stored) {
+            // Forward action already committed; just no undo affordance.
+            // NEVER attempt to roll back the forward action on token-write
+            // failure — that turns a recovery affordance into a foot-cannon.
+            Logger::warning('[ModerationQueueService] failed to persist undo token; affordance suppressed', [
+                'report_id' => $reportId,
+            ]);
+            return null;
+        }
+
+        return [
+            'token'       => $token,
+            'expires_at'  => gmdate('Y-m-d\TH:i:s\Z', $now + self::UNDO_TTL_SECONDS),
+            'ttl_seconds' => self::UNDO_TTL_SECONDS,
+        ];
+    }
+
+    /**
+     * Read + delete the undo transient atomically.
+     *
+     * The delete is unconditional and happens BEFORE the inverse
+     * action runs — single-use, even on inverse-action failure. The
+     * alternative (delete-on-success) would allow infinite retries of
+     * a failing inverse, which the codebase has no operational reason
+     * to support.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function consumeUndoToken(string $token): ?array
+    {
+        // Cheap structural validation so a garbage string doesn't
+        // become a transient-key probe vector.
+        if (!preg_match('/^[a-f0-9]{32}$/', $token)) {
+            return null;
+        }
+
+        $key = self::UNDO_TRANSIENT_PREFIX . $token;
+        $payload = get_transient($key);
+        delete_transient($key);
+
+        if (!is_array($payload)) {
+            return null;
+        }
+        return $payload;
     }
 
     // ─────────────────────────────────────────────────────────────────

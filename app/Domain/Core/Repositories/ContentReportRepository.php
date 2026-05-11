@@ -371,6 +371,10 @@ final class ContentReportRepository
     /**
      * Update a report's status + record who resolved it. Returns true
      * when the row existed and was updated.
+     *
+     * Do NOT call this with `$status = STATUS_PENDING` to "un-resolve"
+     * a report — that would stamp `resolved_at` with the un-resolution
+     * time, which is semantically wrong. Use `setPending()` instead.
      */
     public function updateStatus(int $id, int $status, int $resolvedByUserId): bool
     {
@@ -386,6 +390,43 @@ final class ContentReportRepository
                 'status'      => $status,
                 'resolved_by' => $resolvedByUserId > 0 ? $resolvedByUserId : null,
                 'resolved_at' => current_time('mysql'),
+            ],
+            ['id' => $id],
+            ['%d', '%d', '%s'],
+            ['%d']
+        );
+
+        return $updated !== false && $updated > 0;
+    }
+
+    /**
+     * Flip a report back to PENDING and clear the resolution columns.
+     *
+     * The bounded recovery path (§K1 admin-queue undo affordance —
+     * see pattern-registry.md "Moderation recovery affordances")
+     * uses this to return a report to the queue after a moderator
+     * reverses a hide/dismiss/restore within the 30-second window.
+     *
+     * `resolved_at` and `resolved_by` are explicitly set to NULL so a
+     * future audit / list query reading those columns sees an un-acted
+     * report rather than a misleading "resolved at T-5s by admin A"
+     * stamp. The audit trail of the round-trip lives in
+     * `bcc_trust_audit_log` (`admin_undo_*`), not in column drift.
+     */
+    public function setPending(int $id): bool
+    {
+        if ($id <= 0) {
+            return false;
+        }
+        global $wpdb;
+        $table = TableRegistry::contentReports();
+
+        $updated = $wpdb->update(
+            $table,
+            [
+                'status'      => 0,    // STATUS_PENDING — kept literal to avoid
+                'resolved_by' => null, // a cross-namespace const dep here.
+                'resolved_at' => null,
             ],
             ['id' => $id],
             ['%d', '%d', '%s'],
