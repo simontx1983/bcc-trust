@@ -6,8 +6,11 @@
  *   - GET /feed/hot — global trending / zero-follow fallback (§F2)
  *   - GET /feed     — personalized feed, three scopes (§N6)
  *
- * Future Phase 1 routes (will register here when they land):
- *   - GET /locals/:id/feed — Local-scoped feed
+ * Locals do NOT get their own feed route. A Local is a semantic wrapper
+ * around a PeepSo group; the Local detail page consumes
+ * GET /bcc/v1/groups/:id/feed (registered in GroupsDetailEndpoint) via
+ * the same FeedRankingService::getGroupFeed() path. See §4.7 composition
+ * note in docs/api-contract-v1.md.
  *
  * All feed routes route through FeedRankingService (per §F3 — one brain).
  *
