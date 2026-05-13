@@ -107,6 +107,15 @@ final class MyAccountEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Rate-limit BEFORE verifyCurrentPassword. The endpoint is gated on
+        // the current_password check — without a throttle, an attacker with
+        // a session token but not the password could brute-force the gate
+        // unboundedly. 5/60s per user mirrors the wallet_verify ceiling
+        // (AuthEndpoint::VERIFY_RATE_LIMIT).
+        if (!\BCC\Core\Security\Throttle::allow('account_email:' . $userId, 5, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
         $passwordCheck = self::verifyCurrentPassword($request, $userId);
         if ($passwordCheck instanceof WP_REST_Response) {
             return $passwordCheck;
@@ -168,6 +177,14 @@ final class MyAccountEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Credential-rotation surface — must rate-limit BEFORE the
+        // verifyCurrentPassword brute-force surface. Without this, a
+        // session-hijacked attacker could brute-force the current_password
+        // gate at machine speed.
+        if (!\BCC\Core\Security\Throttle::allow('account_password:' . $userId, 5, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
         $passwordCheck = self::verifyCurrentPassword($request, $userId);
         if ($passwordCheck instanceof WP_REST_Response) {
             return $passwordCheck;
@@ -218,6 +235,15 @@ final class MyAccountEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // Account deletion is irreversible — tightest bucket of the three
+        // account routes. 3/60s per user is more than enough for legit
+        // typos on the confirmation flow but blunt for any brute-force.
+        // BEFORE verifyCurrentPassword so the credential gate is also
+        // brute-force protected.
+        if (!\BCC\Core\Security\Throttle::allow('account_delete:' . $userId, 3, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         if (!self::accountDeletionAllowed()) {

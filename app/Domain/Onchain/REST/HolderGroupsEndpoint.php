@@ -224,17 +224,33 @@ final class HolderGroupsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Rate-limit the trusted-backend join door. The gate service already
+        // does eligibility / opt-out / chain / balance checks, but each call
+        // touches the holdings RPC — so unbounded retry by a buggy client
+        // amplifies upstream load. Per-user bucket prevents one viewer from
+        // flooding without affecting others.
+        if (!\BCC\Core\Security\Throttle::allow('holder_group_join:' . $userId, 10, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
         $groupId = (int) $request->get_param('id');
         $result  = Plugin::instance()->nftGroupGateService()->joinIfEligible($userId, $groupId);
 
         if ($result->success) {
             // §CRIT-05 accountability surface — holder-group joins are the
             // primary trusted-backend door (PeepSoGroupWriter::join bypasses
-            // PeepSo's UI approval check). Every successful join records who
-            // joined what and the gate-service code that authorized it.
-            AuditLogger::log('holder_group_join', $groupId, [
-                'code' => $result->code,
-            ], 'group', $userId);
+            // PeepSo's UI approval check). Audit only on an actual state
+            // transition (CODE_OK): joinIfEligible returns success=true with
+            // CODE_ALREADY_MEMBER for no-op re-join attempts (no PeepSo
+            // write happened), and we don't want those inflating the audit
+            // trail. The 200 OK response shape is unchanged either way so
+            // the SPA can still surface "you're in this community" without
+            // distinguishing first-join from re-join.
+            if ($result->code === JoinResult::CODE_OK) {
+                AuditLogger::log('holder_group_join', $groupId, [
+                    'code' => $result->code,
+                ], 'group', $userId);
+            }
 
             return ApiResponse::ok([
                 'joined'   => true,
@@ -258,6 +274,10 @@ final class HolderGroupsEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        if (!\BCC\Core\Security\Throttle::allow('holder_group_leave:' . $userId, 10, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $groupId = (int) $request->get_param('id');
@@ -322,6 +342,14 @@ final class HolderGroupsEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // PATCH preferences can trigger reconcileForUser which fires N
+        // PeepSoGroupWriter::join calls — flooding this endpoint amplifies
+        // RPC + audit-log writes. Higher bucket than join/leave since the
+        // toggle itself is cheap; the cost is in the optional reconcile.
+        if (!\BCC\Core\Security\Throttle::allow('holder_group_prefs:' . $userId, 20, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $autoJoinRaw = $request->get_param('auto_join');

@@ -136,6 +136,14 @@ final class MyBlocksEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Per-viewer rate limit. Block is a social-graph mutation that fans
+        // out into feed visibility, mention rendering, DM eligibility, etc.
+        // A flood could mass-block enough users to silently dampen a
+        // viewer's reach across the platform without anyone noticing.
+        if (!\BCC\Core\Security\Throttle::allow('block_create:' . $viewerId, 20, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
         $targetId = (int) $request->get_param('user_id');
         if ($targetId <= 0) {
             return ApiResponse::error('bcc_invalid_request', 'Target user is required.', 400);
@@ -183,6 +191,10 @@ final class MyBlocksEndpoint
         $viewerId = get_current_user_id();
         if ($viewerId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        if (!\BCC\Core\Security\Throttle::allow('block_remove:' . $viewerId, 20, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $targetId = (int) $request->get_param('user_id');
