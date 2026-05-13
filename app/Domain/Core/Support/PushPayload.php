@@ -174,6 +174,48 @@ final class PushPayload
     }
 
     /**
+     * @param array<string, mixed> $first First queued payload — provides
+     *   actor handle, group_id, Local name, and slug for the body + url.
+     *   Aggregated bodies (count > 1) drop the actor + surface
+     *   "N new posts in {Local}." because the queue can mix authors
+     *   (a single 5-min debounce window can include posts from
+     *   multiple authors in the same Local).
+     * @return array{title: string, body: string, url: string, tag?: string}
+     */
+    public static function forLocalPost(int $count, array $first): array
+    {
+        $actor     = self::stringFrom($first, 'actor_handle');
+        $groupId   = self::intFrom($first, 'group_id');
+        $localName = self::stringFrom($first, 'local_name');
+        $localSlug = self::stringFrom($first, 'local_slug');
+
+        $title = $localName !== '' ? $localName : 'Blue Collar Crypto';
+        $body  = $count > 1
+            ? ($localName !== ''
+                ? sprintf('%d new posts in %s.', $count, $localName)
+                : sprintf('%d new posts in your Local.', $count))
+            : ($actor !== ''
+                ? ($localName !== ''
+                    ? sprintf('@%s posted in %s.', $actor, $localName)
+                    : sprintf('@%s posted in your Local.', $actor))
+                : 'New post in your Local.');
+
+        $payload = [
+            'title' => $title,
+            'body'  => $body,
+            'url'   => $localSlug !== ''
+                ? '/locals/' . $localSlug
+                : '/locals',
+        ];
+        if ($groupId > 0) {
+            // Per-Local OS-level tag — multiple Locals push concurrently
+            // without collapsing into each other on the OS shell.
+            $payload['tag'] = 'bcc-local-post-' . $groupId;
+        }
+        return $payload;
+    }
+
+    /**
      * @param array<string, mixed> $first
      * @return array{title: string, body: string, url: string, tag?: string}
      */

@@ -22,6 +22,10 @@
  *                       PARENT post's act_id so the user lands on the
  *                       post on the floor — the FE has no comment-anchor
  *                       consumer in V1.
+ *   - LOCAL_POST     → `/locals/<slug>` resolved from `external_id`
+ *                       (the Local's group_id). Falls back to
+ *                       `/locals` if the group is no longer a Local
+ *                       (deleted, renamed off-prefix).
  *
  * Rows whose type is unrecognized (e.g. a future migration or a
  * corrupt row) are filtered out rather than surfaced as "Unknown" —
@@ -33,6 +37,7 @@
 
 namespace BCC\Trust\Core\Services;
 
+use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\NotificationRepository;
 use BCC\Trust\Core\Support\NotificationType;
 use BCC\Trust\Core\Support\PageTypeMap;
@@ -207,8 +212,35 @@ final class NotificationViewService
             // PARENT post's act_id so this lands on the post; the FE
             // has no comment-anchor consumer in V1.
             NotificationType::MENTION     => $actId > 0 ? '/?focus=' . $actId : '/',
+            // LOCAL_POST: bell row's external_id is the Local's group_id.
+            // Deep-link to /locals/{slug} so the user lands on the Local
+            // detail page (where they'll see the new post in the feed
+            // section). Falls back to /locals (the directory) if the
+            // group is no longer resolvable.
+            NotificationType::LOCAL_POST  => self::resolveLocalLink($externalId),
             default                       => '/',
         };
+    }
+
+    /**
+     * Resolve the deep-link for a LOCAL_POST bell row. `external_id` is
+     * the Local's group_id; we look up the slug via the shared
+     * PeepSoGroupRepository (which automatically filters by Local
+     * title-pattern — null means "not a Local anymore" or "deleted").
+     * Falls back to /locals on any resolution failure so the bell row
+     * never produces a 404 URL.
+     */
+    private static function resolveLocalLink(int $groupId): string
+    {
+        if ($groupId <= 0) {
+            return '/locals';
+        }
+        $group = PeepSoGroupRepository::findOneById($groupId);
+        if ($group === null) {
+            return '/locals';
+        }
+        $slug = isset($group->post_name) ? (string) $group->post_name : '';
+        return $slug !== '' ? '/locals/' . $slug : '/locals';
     }
 
     private static function resolvePageLink(int $pageId): string

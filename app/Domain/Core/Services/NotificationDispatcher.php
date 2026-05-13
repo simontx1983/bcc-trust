@@ -45,6 +45,23 @@
  *     unique-by-first-occurrence ids, so three `@bob` tokens in one
  *     post produce exactly one bell row for Bob.
  *
+ * Primary-Local post dispatch (V2 retention slice, locked 2026-05-11):
+ *   - dispatchPrimaryLocalPostFor + onPostInPrimaryLocal fan out
+ *     `LOCAL_POST` bell + push events to every user whose
+ *     `bcc_primary_local_group_id` matches the post's group_id.
+ *   - Wired via a SECOND `bcc_post_created` subscriber in Plugin.php
+ *     at priority 31 (after the mention subscriber at 30) — both
+ *     events can fire for the same post (intentional independence;
+ *     mention = "you were called out", local-post = "activity in
+ *     your Local"). Mention and Local-post each carry their own
+ *     pref toggle.
+ *   - Always async via AsyncDispatcher — a popular Local could fan
+ *     out to thousands of recipients; sync would blow the §L1 300ms
+ *     request budget. The originating post-create returns
+ *     immediately; the async worker handles the dispatcher loop.
+ *   - Coalesced via 5-min per-(recipient, group) transient on bell
+ *     and the existing PushDispatcher debounce on push.
+ *
  * Deferred (per §P parking lot): follow-posts (cross-graph, expensive).
  * Comments are notified via the mention dispatcher only — a future
  * "someone replied to your post" subscriber would extend this catalogue.
@@ -58,6 +75,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Log\Logger;
 use BCC\Core\PeepSo\PeepSoNotificationWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
 use BCC\Trust\Core\Support\NotificationPrefs;
@@ -508,6 +526,172 @@ final class NotificationDispatcher
                 'mentionee_id' => $mentioneeId,
                 'post_id'      => $postId,
                 'is_comment'   => $isComment,
+                'error'        => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // bcc_primary_local_post_fanout (async) — primary-Local post dispatch
+    // ──────────────────────────────────────────────────────────────────
+
+    /** 5-min per-(recipient, group) bell-coalescing window. */
+    private const LOCAL_POST_BELL_WINDOW_SECS = 300;
+
+    /** Recipient hard cap per fan-out — revisit when a real Local crosses ~500. */
+    private const LOCAL_POST_RECIPIENT_CAP = 1000;
+
+    /**
+     * Fan out a "new post in your primary Local" event to every user
+     * whose `bcc_primary_local_group_id` user_meta points at this group.
+     * Called from the `bcc_primary_local_post_fanout` async worker
+     * (Plugin.php) — Plugin.php pre-gates that the group is a Local
+     * before enqueueing, so the orchestrator can trust the caller most
+     * of the time but re-verifies (defense in depth — a Local could be
+     * deleted between enqueue and worker pickup).
+     *
+     * Recipient cap of LOCAL_POST_RECIPIENT_CAP prevents a runaway
+     * "Local with 50k members" from blowing the worker. Today no Local
+     * approaches this; cursor pagination across multiple async jobs is
+     * the future move when one does.
+     *
+     * Wrapped in try/catch so a single bad recipient never aborts the
+     * batch and never bubbles to the async worker.
+     */
+    public function dispatchPrimaryLocalPostFor(
+        int $authorId,
+        int $postId,
+        int $actId,
+        int $groupId
+    ): void {
+        if ($authorId <= 0 || $postId <= 0 || $groupId <= 0) {
+            return;
+        }
+        try {
+            // Re-verify the group is still a Local. PeepSoGroupRepository::
+            // findOneById applies the `post_title LIKE 'Local %'` filter,
+            // so a null return means it was deleted, renamed off-prefix,
+            // or never was a Local. Either way: don't dispatch.
+            $group = PeepSoGroupRepository::findOneById($groupId);
+            if ($group === null) {
+                return;
+            }
+            $localName = isset($group->post_title) ? (string) $group->post_title : '';
+            $localSlug = isset($group->post_name)  ? (string) $group->post_name  : '';
+
+            $recipients = PeepSoGroupRepository::findUsersByPrimaryLocal(
+                $groupId,
+                self::LOCAL_POST_RECIPIENT_CAP
+            );
+            if ($recipients === []) {
+                return;
+            }
+
+            $authorHandle = self::resolveHandle($authorId);
+
+            foreach ($recipients as $recipientId) {
+                $this->onPostInPrimaryLocal(
+                    $authorId,
+                    $recipientId,
+                    $postId,
+                    $actId,
+                    $groupId,
+                    $authorHandle,
+                    $localName,
+                    $localSlug
+                );
+            }
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] local-post orchestrator failed', [
+                'author_id' => $authorId,
+                'post_id'   => $postId,
+                'group_id'  => $groupId,
+                'error'     => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Dispatch a single primary-Local post bell + push. Mirrors
+     * onReactionAdded shape — self-skip, per-recipient error log,
+     * shared dispatch() helper for bell write, PushDispatcher::enqueue
+     * for push.
+     *
+     * Bell coalescing: a 5-min per-(recipient, group) transient gates
+     * the bell write. The transient is set BEFORE the dispatch call
+     * even if the bell pref is disabled — this keeps coalescing
+     * consistent regardless of pref state, so toggling the pref
+     * mid-window doesn't produce a surprise burst when re-enabled.
+     *
+     * Push: always enqueued (PushDispatcher self-debounces on its own
+     * 5-min (recipient, eventType) window and self-gates on push prefs).
+     *
+     * Marked public so it can be exercised by unit tests; the
+     * orchestrator above is the canonical entry point in production.
+     */
+    public function onPostInPrimaryLocal(
+        int $authorId,
+        int $recipientId,
+        int $postId,
+        int $actId,
+        int $groupId,
+        string $authorHandle,
+        string $localName,
+        string $localSlug
+    ): void {
+        if ($authorId <= 0 || $recipientId <= 0 || $groupId <= 0) {
+            return;
+        }
+        if ($recipientId === $authorId) {
+            // Self-skip: the author posted, they know. Defensively
+            // duplicated by dispatch()'s $toUserId !== $fromUserId check.
+            return;
+        }
+        try {
+            $transientKey = sprintf(
+                'bcc_local_post_notified_%d_%d',
+                $recipientId,
+                $groupId
+            );
+
+            $coalesced = get_transient($transientKey) !== false;
+            if (!$coalesced) {
+                // Set the gate BEFORE the dispatch so a second concurrent
+                // post for the same (recipient, group) sees the lock
+                // even if the bell write is still in flight.
+                set_transient($transientKey, 1, self::LOCAL_POST_BELL_WINDOW_SECS);
+
+                $message = $localName !== ''
+                    ? sprintf('@%s posted in %s.', $authorHandle, $localName)
+                    : sprintf('@%s posted in your Local.', $authorHandle);
+
+                $this->dispatch(
+                    $authorId,
+                    $recipientId,
+                    $message,
+                    NotificationType::LOCAL_POST,
+                    $groupId,   // external_id → the Local group
+                    $actId
+                );
+            }
+
+            // Push always enqueues — its own 5-min debounce coalesces
+            // rapid bursts into "N new posts in {Local}." The bell
+            // coalescing is independent of push aggregation; both align
+            // on the same 5-min window so a user sees at most one bell +
+            // one push per Local per window.
+            $this->pushDispatcher->enqueue($recipientId, 'local_post', [
+                'actor_handle' => $authorHandle,
+                'group_id'     => $groupId,
+                'local_name'   => $localName,
+                'local_slug'   => $localSlug,
+                'act_id'       => $actId,
+            ]);
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] local-post dispatch failed', [
+                'author_id'    => $authorId,
+                'recipient_id' => $recipientId,
+                'group_id'     => $groupId,
                 'error'        => $e->getMessage(),
             ]);
         }

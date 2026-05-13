@@ -1723,6 +1723,44 @@ final class Plugin
             );
         }, 30, 4);
 
+        // §I1 V2 — primary-Local post fan-out. Second bcc_post_created
+        // subscriber at priority 31 so it runs AFTER the mention
+        // dispatcher (priority 30). Pre-gates the post on
+        // (group_id > 0) AND (group is a Local) before paying the
+        // async-enqueue cost — non-Local posts (NFT-gated holder groups,
+        // plain user groups, system groups, personal-wall posts) never
+        // touch the dispatcher. Always async via AsyncDispatcher because
+        // a popular Local could fan out to thousands of recipients;
+        // sync would blow the §L1 300ms request budget.
+        add_action('bcc_post_created', function (int $authorId, int $postId, int $actId): void {
+            $groupId = (int) get_post_meta($postId, 'peepso_group_id', true);
+            if ($groupId <= 0) {
+                return;
+            }
+            // Pre-gate: is this group actually a Local? PeepSoGroupRepository's
+            // findOneById applies `post_title LIKE 'Local %'` automatically.
+            $group = \BCC\Core\Repositories\PeepSoGroupRepository::findOneById($groupId);
+            if ($group === null) {
+                return;
+            }
+            \BCC\Core\Cron\AsyncDispatcher::enqueueAsync(
+                'bcc_primary_local_post_fanout',
+                [$authorId, $postId, $actId, $groupId]
+            );
+        }, 31, 3);
+
+        // Async worker — invoked by the Action Scheduler / wp-cron
+        // event scheduled above. Hands off to the dispatcher orchestrator
+        // which resolves the recipient set + per-recipient bell + push.
+        add_action('bcc_primary_local_post_fanout', function (int $authorId, int $postId, int $actId, int $groupId): void {
+            $this->notificationDispatcher()->dispatchPrimaryLocalPostFor(
+                $authorId,
+                $postId,
+                $actId,
+                $groupId
+            );
+        }, 10, 4);
+
         // ── §H1 NFT gallery refresh ─────────────────────────────────────
         //
         // Dispatched by CreatorGalleryEndpoint when the visible page has

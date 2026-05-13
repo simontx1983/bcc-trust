@@ -50,6 +50,7 @@ final class NotificationPrefs
         NotificationType::ENDORSE,
         NotificationType::WELCOME,
         NotificationType::MENTION,
+        NotificationType::LOCAL_POST,
     ];
 
     /**
@@ -67,6 +68,7 @@ final class NotificationPrefs
         'dispute_outcome',
         'panelist_selected',
         'mention',
+        'local_post',
     ];
 
     /** wp_usermeta key prefix. Renaming requires a migration. */
@@ -90,12 +92,14 @@ final class NotificationPrefs
         'bell_bcc_endorse'                 => true,
         'bell_bcc_welcome'                 => true,
         'bell_bcc_mention'                 => true,
+        'bell_bcc_local_post'              => true,
         'push_master'                      => false,
         'push_event_review'                => true,
         'push_event_endorse'               => true,
         'push_event_dispute_outcome'       => true,
         'push_event_panelist_selected'     => true,
         'push_event_mention'               => true,
+        'push_event_local_post'            => true,
     ];
 
     /**

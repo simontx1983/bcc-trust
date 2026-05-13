@@ -275,6 +275,7 @@ final class PushDispatcher
             'dispute_outcome'    => PushPayload::forDisputeOutcome($count, $first),
             'panelist_selected'  => PushPayload::forPanelistSelected($count, $first),
             'mention'            => PushPayload::forMention($count, $first),
+            'local_post'         => PushPayload::forLocalPost($count, $first),
             default              => [
                 'title' => 'Blue Collar Crypto',
                 'body'  => 'You have new activity.',

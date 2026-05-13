@@ -30,6 +30,13 @@
  *                     dedup'd to one bell row per (post, mentioner,
  *                     mentionee) by MentionExtractor::extractUserIds'
  *                     unique-id contract).
+ *   - LOCAL_POST     — someone posted in the Local you've designated
+ *                     as your primary (`bcc_primary_local_group_id`).
+ *                     Fan-out to all primary-members; async via
+ *                     AsyncDispatcher; bell coalesced to one row per
+ *                     (recipient, group) per 5-min window via
+ *                     transient; push coalesced via existing
+ *                     PushDispatcher debounce.
  *
  * Deferred (per §P): follow-posts. Each will extend this catalogue
  * when its dispatcher subscriber lands.
@@ -53,6 +60,7 @@ final class NotificationType
     public const ENDORSE     = 'bcc_endorse';
     public const WELCOME     = 'bcc_welcome';
     public const MENTION     = 'bcc_mention';
+    public const LOCAL_POST  = 'bcc_local_post';
 
     /**
      * Whitelist of valid type slugs. Used by the read-side validation
@@ -69,6 +77,7 @@ final class NotificationType
         self::ENDORSE,
         self::WELCOME,
         self::MENTION,
+        self::LOCAL_POST,
     ];
 
     public static function isValid(string $type): bool
