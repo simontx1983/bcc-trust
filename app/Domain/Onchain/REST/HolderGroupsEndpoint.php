@@ -249,6 +249,7 @@ final class HolderGroupsEndpoint
             if ($result->code === JoinResult::CODE_OK) {
                 AuditLogger::log('holder_group_join', $groupId, [
                     'code' => $result->code,
+                    'via'  => 'explicit',
                 ], 'group', $userId);
             }
 

@@ -19,6 +19,7 @@
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\ValueObjects\GatedGroupConfig;
@@ -181,8 +182,33 @@ final class NftGroupGateService {
 
         $joined = 0;
         foreach ($eligible as $cfg) {
-            \BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $cfg->groupId);
+            // Capture the writer return value so a PeepSo-absence false
+            // doesn't generate a "joined" audit row when no real transition
+            // happened. findEligibleGroups already excluded already-joined
+            // members, so a true return here is a real state transition
+            // (modulo a benign concurrent-writer race that PeepSo's UNIQUE
+            // KEY collapses to a no-op).
+            $ok = \BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $cfg->groupId);
+            if (!$ok) {
+                continue;
+            }
             $this->clearOptOut($userId, $cfg->groupId);
+
+            // Per-group audit row so admin queries can answer "why was
+            // user X added to group Y" for reconcile-driven joins (both
+            // the explicit user toggle and the cron sweep flow through
+            // here). The aggregate holder_group_auto_reconciled row in
+            // HolderGroupsEndpoint::patchPreferences remains as a
+            // separate analytical signal — these two rows are
+            // complementary, not duplicate. Action name matches the
+            // explicit-join path so historical queries on
+            // 'holder_group_join' return both flows; 'via' meta lets
+            // admin segment.
+            AuditLogger::log('holder_group_join', $cfg->groupId, [
+                'code' => 'ok',
+                'via'  => 'reconcile',
+            ], 'group', $userId);
+
             $joined++;
         }
         return ['joined' => $joined, 'skipped' => 0];
