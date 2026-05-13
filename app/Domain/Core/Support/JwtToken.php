@@ -57,6 +57,19 @@ final class JwtToken
     public const TTL_SECONDS = 604800;
 
     /**
+     * Refresh grace window — how long PAST exp `decodeForRefresh()` will
+     * still accept a token for re-mint. 86400s = 1 day. Bounded so that
+     * a stolen post-expiry token can't be perpetually re-minted; the
+     * user must re-authenticate after the grace window closes.
+     *
+     * The grace stacks on SKEW_SECONDS (60s). Effective survivability of
+     * one "session" before forced re-login: TTL_SECONDS (7d) + this (1d)
+     * = 8 days. Per-user revocation via revokeAllForUser() invalidates
+     * every outstanding token regardless of grace.
+     */
+    public const REFRESH_GRACE_SECONDS = 86400;
+
+    /**
      * Per-user revocation counter. Stored as wp_usermeta integer; a
      * mint embeds the current value as the `tv` claim, decode rejects
      * mismatches. Bumping the counter (via revokeAllForUser) invalidates
@@ -140,7 +153,8 @@ final class JwtToken
     }
 
     /**
-     * Decode + verify a token.
+     * Decode + verify a token (canonical path; rejects expired tokens
+     * with the standard 60-second skew window).
      *
      * Returns a tagged result so the caller branches on a single
      * predicate. PHPStan-friendly tagged-union shape:
@@ -151,6 +165,36 @@ final class JwtToken
      * @return array{ok: true, payload: array<string, mixed>}|array{ok: false, error: string}
      */
     public static function decode(string $token): array
+    {
+        return self::decodeWithExpiryWindow($token, self::SKEW_SECONDS);
+    }
+
+    /**
+     * Decode + verify a token, allowing expiration up to REFRESH_GRACE_SECONDS
+     * past `exp`. Every OTHER check (signature, issuer, audience, version,
+     * revocation, user_id) is still enforced canonically.
+     *
+     * Used exclusively by /auth/refresh to mint a fresh token from a
+     * recently-expired one without forcing a full re-login. The caller
+     * (AuthEndpoint::refresh) is responsible for the additional
+     * "not suspended" check before re-minting.
+     *
+     * @return array{ok: true, payload: array<string, mixed>}|array{ok: false, error: string}
+     */
+    public static function decodeForRefresh(string $token): array
+    {
+        return self::decodeWithExpiryWindow($token, self::SKEW_SECONDS + self::REFRESH_GRACE_SECONDS);
+    }
+
+    /**
+     * Shared decode core. The only difference between decode() and
+     * decodeForRefresh() is how far past `exp` we still accept a token.
+     * Every security-critical check (algorithm, signature, issuer,
+     * audience, version, revocation) is identical across both callers.
+     *
+     * @return array{ok: true, payload: array<string, mixed>}|array{ok: false, error: string}
+     */
+    private static function decodeWithExpiryWindow(string $token, int $maxSecondsPastExp): array
     {
         $parts = explode('.', $token);
         if (count($parts) !== 3) {
@@ -188,7 +232,11 @@ final class JwtToken
         if ($exp <= 0) {
             return ['ok' => false, 'error' => self::ERR_MISSING_CLAIM];
         }
-        if ($now > $exp + self::SKEW_SECONDS) {
+        // $maxSecondsPastExp is SKEW_SECONDS on the canonical decode path,
+        // larger (SKEW + REFRESH_GRACE_SECONDS) when called via
+        // decodeForRefresh() — the ONLY semantic difference between the
+        // two public entry points.
+        if ($now > $exp + $maxSecondsPastExp) {
             return ['ok' => false, 'error' => self::ERR_EXPIRED];
         }
 

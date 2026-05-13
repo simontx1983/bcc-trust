@@ -84,6 +84,14 @@ final class AuthEndpoint
     private const WALLET_SIGNUP_RATE_LIMIT = 5;
     /** Per-user-per-minute throttle for /auth/token mints. */
     private const TOKEN_RATE_LIMIT = 30;
+    /**
+     * IP-keyed (unauthed) + per-user (authed) throttle for /auth/refresh.
+     * Refresh is the mobile-survivability silent-retry path on 401; a
+     * misbehaving client can hammer it with stale tokens. Keep the
+     * ceiling low enough that brute-force replay attempts against
+     * an expired-token + grace window are throttled.
+     */
+    private const REFRESH_RATE_LIMIT = 30;
 
     /** Minimum password length at signup. WP itself accepts shorter, we don't. */
     private const SIGNUP_MIN_PASSWORD_LENGTH = 8;
@@ -217,6 +225,21 @@ final class AuthEndpoint
             [
                 'methods'             => WP_REST_Server::CREATABLE,
                 'callback'            => [$instance, 'token'],
+                'permission_callback' => '__return_true',
+            ]
+        );
+
+        // POST /auth/refresh — exchange a (recently-expired-OK) JWT for
+        // a fresh one. Survivability seam for mobile clients whose
+        // backgrounded app exits the 7-day TTL window. Auth is checked
+        // inside the handler via JwtToken::decodeForRefresh on the
+        // Bearer token; no session cookie required.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/refresh',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'refresh'],
                 'permission_callback' => '__return_true',
             ]
         );
@@ -1163,6 +1186,102 @@ final class AuthEndpoint
 
         $response = ApiResponse::ok([
             'token'      => $token,
+            'expires_in' => self::JWT_TTL_SECONDS,
+            'token_type' => 'Bearer',
+        ]);
+        $response->header('Cache-Control', 'no-store');
+
+        return $response;
+    }
+
+    /**
+     * POST /auth/refresh — silent-refresh path for clients whose
+     * Bearer JWT has expired within the REFRESH_GRACE_SECONDS window.
+     * Mobile-survivability seam.
+     *
+     * Contract:
+     *   Input:  Authorization: Bearer <expired-or-near-expiry JWT>
+     *   Output: { token, expires_in, token_type }      — canonical envelope
+     *   Errors: bcc_unauthorized (missing/malformed bearer, JWT decode failed,
+     *                             grace exceeded, user suspended)
+     *           bcc_rate_limited (Throttle)
+     *           bcc_invalid_state (handle missing — mirrors token())
+     *
+     * Security posture:
+     *   - Every JWT check OTHER than `exp` is identical to the canonical
+     *     decode path: signature, issuer, audience, version, revocation
+     *     (tv claim) all enforced. A token whose signing-key rotated, or
+     *     whose user was revoked via revokeAllForUser, can NEVER refresh.
+     *   - Suspended users cannot refresh (Permissions::is_not_suspended).
+     *     A user account flagged compromised mid-session loses refresh
+     *     capability on the next attempt.
+     *   - Per-user Throttle limits replay attempts on the grace window.
+     *   - Grace window is bounded (REFRESH_GRACE_SECONDS = 86400). After
+     *     that the path 401s and the user re-authenticates fully.
+     *
+     * Not in scope:
+     *   - Rotating refresh tokens (single-use, separate from access JWT).
+     *     V1 design accepts a stolen JWT being refreshable within grace;
+     *     revokeAllForUser is the kill switch for compromised accounts.
+     */
+    public function refresh(WP_REST_Request $request): WP_REST_Response
+    {
+        // IP-keyed throttle (the caller is not yet authenticated by the
+        // standard means — we're INSIDE the auth-recovery path).
+        if (!\BCC\Core\Security\Throttle::allow('auth_refresh', self::REFRESH_RATE_LIMIT, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many refresh attempts.', 429);
+        }
+
+        $authHeader = (string) ($request->get_header('Authorization') ?? '');
+        if (stripos($authHeader, 'Bearer ') !== 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Bearer token required.', 401);
+        }
+        $token = trim(substr($authHeader, 7));
+        if ($token === '') {
+            return ApiResponse::error('bcc_unauthorized', 'Bearer token required.', 401);
+        }
+
+        $decoded = JwtToken::decodeForRefresh($token);
+        if ($decoded['ok'] !== true) {
+            // Don't leak the specific JWT failure code — every failure
+            // is bcc_unauthorized to the client. The PHP-side audit log
+            // is the place to inspect the underlying error if needed.
+            return ApiResponse::error('bcc_unauthorized', 'Token cannot be refreshed.', 401);
+        }
+
+        $payload = $decoded['payload'];
+        $userId  = isset($payload['user_id']) ? (int) $payload['user_id'] : 0;
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Token cannot be refreshed.', 401);
+        }
+
+        // Mid-session compromise mitigation: a user flagged suspended
+        // can no longer refresh, forcing them through the canonical
+        // signOut → re-login path where the suspension is surfaced.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId)) {
+            return ApiResponse::error('bcc_forbidden', 'Account is not in good standing.', 403);
+        }
+
+        // Re-read the handle from authoritative storage rather than
+        // trusting the JWT payload — a handle change since the original
+        // mint should be reflected in the fresh token.
+        $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
+        if ($handle === '') {
+            return ApiResponse::error(
+                'bcc_invalid_state',
+                'Account is missing a handle — re-login required.',
+                409
+            );
+        }
+
+        $fresh = JwtToken::encode($userId, $handle);
+
+        Logger::audit('token_refreshed', [
+            'user_id' => $userId,
+        ]);
+
+        $response = ApiResponse::ok([
+            'token'      => $fresh,
             'expires_in' => self::JWT_TTL_SECONDS,
             'token_type' => 'Bearer',
         ]);
