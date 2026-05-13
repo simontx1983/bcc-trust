@@ -222,4 +222,90 @@ final class UserSyncRepository
             'peepso_user'    => $peepso_user,
         ];
     }
+
+    /**
+     * IDs of users whose `usr_last_activity` (PeepSo's canonical
+     * last-seen timestamp on `peepso_users`) falls inside the last
+     * `$intervalDays`. Optionally excludes a viewer so a self-viewing
+     * cold-start panel doesn't surface the viewer themselves.
+     *
+     * Bounded (§4): caller-provided `$limit` is clamped to [1, 100].
+     * Index posture (§4 cont'd): `peepso_users` carries
+     * `usr_last_activity_index` (single-column BTREE) — the WHERE
+     * clause + ORDER BY hits it; the `usr_id != %d` self-exclusion is
+     * range-compatible. `EXPLAIN` shows `range` on `usr_last_activity_index`
+     * with `Using where` (the != filter is applied after index seek but
+     * before LIMIT, so the candidate scan stays bounded by the time
+     * cutoff, not the table size).
+     *
+     * Used by FeedColdStartService for the home-feed empty-state
+     * "recently active operators" block — see that service's class
+     * doctype for why recency is the only honest order here.
+     *
+     * @return list<int>
+     */
+    public static function getRecentlyActiveUserIds(
+        int $intervalDays,
+        int $limit,
+        int $excludeUserId = 0
+    ): array {
+        if ($intervalDays <= 0 || $limit <= 0) {
+            return [];
+        }
+        if ($limit > 100) {
+            $limit = 100;
+        }
+        if ($intervalDays > 365) {
+            // Defensive cap. Anything over a year is "all active users"
+            // and the caller should not be using this method for that.
+            $intervalDays = 365;
+        }
+
+        global $wpdb;
+        $cutoff = gmdate('Y-m-d H:i:s', time() - ($intervalDays * 86_400));
+
+        // Explicit column. The `usr_role IS NULL OR usr_role != 'banned'`
+        // filter intentionally omitted — banned/suspended posture is
+        // surfaced via the trust layer (Permissions / flags) at hydration
+        // time, not at candidate-selection time. We don't want to leak
+        // moderation state through ordering decisions here.
+        if ($excludeUserId > 0) {
+            $sql = $wpdb->prepare(
+                "SELECT usr_id
+                   FROM {$wpdb->prefix}peepso_users
+                  WHERE usr_last_activity >= %s
+                    AND usr_id != %d
+                  ORDER BY usr_last_activity DESC
+                  LIMIT %d",
+                $cutoff,
+                $excludeUserId,
+                $limit
+            );
+        } else {
+            $sql = $wpdb->prepare(
+                "SELECT usr_id
+                   FROM {$wpdb->prefix}peepso_users
+                  WHERE usr_last_activity >= %s
+                  ORDER BY usr_last_activity DESC
+                  LIMIT %d",
+                $cutoff,
+                $limit
+            );
+        }
+
+        /** @var list<string>|null $rows */
+        $rows = $wpdb->get_col($sql);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $raw) {
+            $userId = (int) $raw;
+            if ($userId > 0) {
+                $out[] = $userId;
+            }
+        }
+        return $out;
+    }
 }

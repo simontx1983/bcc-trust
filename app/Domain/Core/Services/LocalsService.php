@@ -426,7 +426,15 @@ final class LocalsService
         return null;
     }
 
-    private static function parseChain(string $title): ?string
+    /**
+     * Extract a chain slug from a Local's post title using
+     * {@see CHAIN_KEYWORDS}. Public so the cold-start surface
+     * (FeedColdStartService) can reuse the SAME chain detection that
+     * /locals uses — keeping a single source of truth for "which Locals
+     * count as Cosmos / Solana / etc." Returns null when the title
+     * doesn't match any known chain keyword.
+     */
+    public static function parseChain(string $title): ?string
     {
         $lower = strtolower($title);
         foreach (self::CHAIN_KEYWORDS as $chain) {

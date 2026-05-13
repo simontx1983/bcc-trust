@@ -776,6 +776,21 @@ final class Plugin
         return $this->handleService ??= new Services\HandleService();
     }
 
+    private ?Services\FeedColdStartService $feedColdStartService = null;
+    public function feedColdStartService(): Services\FeedColdStartService
+    {
+        // Cold-start bridge surface (home-feed empty state). Composes
+        // locals + recently-active operators + hot posts without
+        // duplicating any primitive — reuses UserViewService for
+        // operator hydration and FeedRankingService for the hot block.
+        // See Services/FeedColdStartService.php doctype for the
+        // load-bearing rules (civic map, not a recommendation engine).
+        return $this->feedColdStartService ??= new Services\FeedColdStartService(
+            $this->userViewService(),
+            $this->feedRankingService()
+        );
+    }
+
     // ── Phase 3 services ────────────────────────────────────────────────
 
     private ?Services\CronService $cronService = null;
@@ -975,6 +990,14 @@ final class Plugin
         // V1 contract: hot feed (§F2 zero-follow fallback) — routes through
         // the §F3 single-brain FeedRankingService.
         \BCC\Trust\Core\REST\FeedEndpoint::register();
+
+        // Sprint 3 cold-start bridge surface — GET /feed/cold-start.
+        // Composes three blocks for the home-feed empty state (locals +
+        // recently-active operators + hot posts). Auth-permissive; anon
+        // viewers get the same shape minus chain-alignment personalization.
+        // See Services/FeedColdStartService.php doctype for the load-
+        // bearing civic-map (NOT recommendation-engine) rules.
+        \BCC\Trust\Core\REST\FeedColdStartEndpoint::register();
 
         // V1 contract: polymorphic card view-model (§L5) — validator,
         // project, creator, member.
