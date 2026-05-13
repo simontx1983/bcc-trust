@@ -42,8 +42,14 @@ class CronService
         }
 
         try {
-        // Clean old activity logs
-        AuditLogger::cleanOldLogs();
+        // Audit-log retention is handled by archiveActivity() below (line ~74),
+        // which archives 90+ day rows into bcc_trust_activity_archive in 5000-row
+        // batches and only then DELETEs from the source table. A prior standalone
+        // AuditLogger::cleanOldLogs() call lived here and preempted the archive
+        // path (hard-deleted the same rows the archive would have copied), so
+        // the archive table was silently empty in production. cleanOldLogs()
+        // remains as a callable helper on AuditLogger but is no longer in the
+        // production hot path.
 
         // Clean old fingerprint records
         Plugin::instance()->deviceFingerprinter()->cleanOldRecords();
