@@ -41,6 +41,8 @@
 
 namespace BCC\Trust\Core\Services;
 
+use BCC\Trust\Core\Support\RankCatalog;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -50,6 +52,27 @@ final class HighlightsService
     public const SLOT_NEGATIVE = 'negative';
     public const SLOT_POSITIVE = 'positive';
     public const SLOT_EXTERNAL = 'external';
+
+    /**
+     * LivingService is the canonical source of per-user activity signal
+     * (`today` counters, streak, network percentile). The POSITIVE slot
+     * reuses that computation rather than duplicating queries — each
+     * highlight is a presentation of data the user already has on
+     * their living-header block.
+     *
+     * Nullable to keep existing call sites that construct the service
+     * bare working (the resolver falls back to its V1.0 null stub).
+     * Plugin.php wires the live dependency.
+     *
+     * RankService is consulted only to fetch the current auto-derived
+     * rank label so the welcome highlight for cold users can reference
+     * it by name without re-deriving on the frontend.
+     */
+    public function __construct(
+        private readonly ?LivingService $livingService = null,
+        private readonly ?RankService $rankService = null
+    ) {
+    }
 
     /** @var list<string> */
     public const VALID_SLOTS = [self::SLOT_NEGATIVE, self::SLOT_POSITIVE, self::SLOT_EXTERNAL];
@@ -175,11 +198,25 @@ final class HighlightsService
     /**
      * Slot 2 — positive milestone for the viewer.
      *
-     * V1.0 STUB: returns null in production. Implementation roadmap:
-     *   - bcc_user_ranks promotion events (Apprentice → Journeyman)
-     *   - card tier upgrades (reputation_tier change)
-     *   - milestone reactions on viewer's content (≥ 50 Solids on a review)
-     *   - peepso_activities aggregation by act_owner_id = viewer
+     * V1.5 implementation (2026-05-13): reuses the LivingService signals
+     * already composed for the user's profile header. No new queries.
+     * Returns the strongest non-null signal in priority order:
+     *
+     *   1. Reviews written today        — highest-effort daily action
+     *   2. Disputes signed today        — civic-duty action
+     *   3. Solids received today        — passive recognition
+     *   4. Top X% this week comparison  — network gravity
+     *   5. Streak ≥ 3 days              — sustained-presence cue
+     *   6. Cold-user welcome            — "first shift open" for users
+     *                                     with no streak and no `today`
+     *                                     activity (i.e. fresh accounts)
+     *
+     * Returns null when all six are unavailable (e.g. mid-tenure users
+     * having a quiet day — better to show nothing than fabricate signal).
+     *
+     * Dependency: requires `livingService` to have been injected. When
+     * the service is bare-constructed (legacy code paths, tests), the
+     * resolver returns null — same behaviour as the V1.0 stub.
      *
      * @return array<string, mixed>|null
      */
@@ -194,7 +231,158 @@ final class HighlightsService
                 'Demo entry — replace once bcc_user_ranks promotion events flow.'
             );
         }
+
+        if ($this->livingService === null || $this->rankService === null) {
+            return null;
+        }
+
+        $rankKey = $this->rankService->autoDerivedRank($viewerId);
+        $rankLabel = RankCatalog::getLabel($rankKey) ?? 'Member';
+
+        $living = $this->livingService->compose($viewerId, $rankKey);
+
+        $today = $living['today'];
+        $todayKey = gmdate('Y-m-d');
+
+        // Priority 1 — reviews written today.
+        if ($today['reviews'] > 0) {
+            return self::positiveHighlight(
+                $viewerId,
+                'reviews_today',
+                $todayKey,
+                $today['reviews'] === 1
+                    ? 'You wrote a review today.'
+                    : sprintf('You wrote %d reviews today.', $today['reviews']),
+                "It's on the record. Your weight built a little."
+            );
+        }
+
+        // Priority 2 — disputes signed today (panel duty).
+        if ($today['disputes_signed'] > 0) {
+            return self::positiveHighlight(
+                $viewerId,
+                'disputes_signed_today',
+                $todayKey,
+                $today['disputes_signed'] === 1
+                    ? 'You signed a dispute today.'
+                    : sprintf('You signed %d disputes today.', $today['disputes_signed']),
+                'Panel duty logged. The floor relies on calls like yours.'
+            );
+        }
+
+        // Priority 3 — solids received (recognition for prior work).
+        if ($today['solids_received'] > 0) {
+            return self::positiveHighlight(
+                $viewerId,
+                'solids_today',
+                $todayKey,
+                $today['solids_received'] === 1
+                    ? '1 solid landed on your work today.'
+                    : sprintf('%d solids landed on your work today.', $today['solids_received']),
+                'Someone read what you wrote and put their name on it.'
+            );
+        }
+
+        // Priority 4 — top-percentile network comparison (already
+        // soft-phrased server-side; null for bottom 50%).
+        if (is_array($living['comparison']) && isset($living['comparison']['headline'])) {
+            $headline = (string) $living['comparison']['headline'];
+            $asOf = (string) ($living['comparison']['as_of'] ?? $todayKey);
+            return self::positiveHighlight(
+                $viewerId,
+                'network_percentile',
+                $asOf,
+                $headline . '.',
+                'The floor sees the shifts you put in.'
+            );
+        }
+
+        // Priority 5 — sustained streak (3+ days). Re-uses the existing
+        // streak counter; doesn't fabricate one. Cool-down: dismissals
+        // re-apply within the same 24h window.
+        $streakDays = (int) $living['streak_days'];
+        if ($streakDays >= 3) {
+            return self::positiveHighlight(
+                $viewerId,
+                'streak',
+                $todayKey,
+                sprintf('%d-day shift run.', $streakDays),
+                'You keep showing up. The floor remembers.'
+            );
+        }
+
+        // Priority 6 — cold-user welcome. Fires for fresh accounts with
+        // no streak and a quiet day. Stable per-user (not per-day) so
+        // dismissing it once retires it for the 24h TTL; on day 2 it
+        // surfaces again only if the user is STILL fully quiet.
+        if ($streakDays === 0 && $today['reviews'] === 0 && $today['disputes_signed'] === 0 && $today['solids_received'] === 0) {
+            return self::positiveHighlight(
+                $viewerId,
+                'first_shift_open',
+                $todayKey,
+                sprintf('First shift open. %s rank.', $rankLabel),
+                'Anything you do here shows up in this slot. Cards on your watch list, reviews you write, disputes you sign.'
+            );
+        }
+
         return null;
+    }
+
+    /**
+     * Build a contract-compliant POSITIVE-slot highlight payload. The
+     * id is keyed by `viewer + category + scope` so dismissals stick
+     * within the slot's TTL (24h) but the next day's signal re-surfaces
+     * with a fresh id.
+     *
+     * The scope segment is the per-signal natural cohort key:
+     *   - daily signals (reviews/disputes/solids/streak): YYYY-MM-DD
+     *   - percentile: ISO week the comparison was computed for
+     *   - welcome: YYYY-MM-DD (renews per UTC day; users get one welcome
+     *     reminder per day until they actually do something)
+     *
+     * @return array<string, mixed>
+     */
+    private static function positiveHighlight(
+        int $viewerId,
+        string $category,
+        string $scope,
+        string $title,
+        string $body
+    ): array {
+        $id = sprintf('h-%s-%s-%s-%d', self::SLOT_POSITIVE, $category, $scope, $viewerId);
+        return [
+            'id'       => $id,
+            'slot'     => self::SLOT_POSITIVE,
+            'category' => $category,
+            'title'    => $title,
+            'body'     => $body,
+            'cta'      => [
+                'label' => 'View profile',
+                'href'  => '/u/' . self::handleFromUser($viewerId),
+            ],
+            'actions'  => [
+                'dismiss' => [
+                    'method'        => 'POST',
+                    'href'          => '/wp-json/bcc/v1/me/highlights/' . $id . '/dismiss',
+                    'idempotent'    => true,
+                    'requires_auth' => true,
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * Resolve a user's handle for CTA href construction. Falls back to
+     * an empty path when the handle is missing — the frontend renders
+     * the CTA verbatim, so an empty handle results in /u/ which the
+     * server-side route handler returns 404 for. That's acceptable for
+     * the cold-edge case (very fresh accounts mid-onboarding) where
+     * the highlight is itself sparse.
+     */
+    private static function handleFromUser(int $userId): string
+    {
+        $handle = get_user_meta($userId, 'bcc_handle', true);
+        return is_string($handle) ? $handle : '';
     }
 
     /**

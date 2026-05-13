@@ -313,6 +313,17 @@ final class Plugin
         );
     }
 
+    /**
+     * §O1.2 first-action celebrations — one-shot Heavy stashing on first
+     * post / first review / first blog. See FirstActionListener docstring
+     * for the deferred kinds (first_watcher, first_local_joined, etc.).
+     */
+    private ?Services\FirstActionListener $firstActionListener = null;
+    public function firstActionListener(): Services\FirstActionListener
+    {
+        return $this->firstActionListener ??= new Services\FirstActionListener();
+    }
+
     /** §C1 / §N11 / §O1.2 — fires "your card is now Rare" Heavy moment. */
     private ?Services\TierUpgradeListener $tierUpgradeListener = null;
     public function tierUpgradeListener(): Services\TierUpgradeListener
@@ -691,7 +702,16 @@ final class Plugin
     private ?Services\HighlightsService $highlightsService = null;
     public function highlightsService(): Services\HighlightsService
     {
-        return $this->highlightsService ??= new Services\HighlightsService();
+        // §O2 retention wiring (2026-05-13): inject LivingService +
+        // RankService so the POSITIVE slot resolver can surface real
+        // viewer signals (today's reviews, solids received, top-%
+        // comparison, streak, cold-user welcome) without duplicating
+        // queries. The deps are nullable on the service for legacy
+        // bare-construct paths but always populated in production.
+        return $this->highlightsService ??= new Services\HighlightsService(
+            $this->livingService(),
+            $this->rankService()
+        );
     }
 
     private ?Services\HandleService $handleService = null;
@@ -1468,6 +1488,53 @@ final class Plugin
             } catch (\Throwable $e) {
                 \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression vote failed', [
                     'user_id' => $voterId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 20, 1);
+
+        // ── §O1.2 first-action celebrations (retention pass 2026-05-13) ──
+        //
+        // One-shot stashings for first_post / first_review / first_blog.
+        // Each is gated by a dedicated user_meta flag so they fire at
+        // most once per user lifetime. See FirstActionListener docstring
+        // for the deferred kinds (first_watcher, first_local_joined,
+        // first_reply_received) — those need hook changes or owner-of-
+        // target lookups not available with the current actor-only
+        // signatures.
+        //
+        // Priority 20 matches the rank-progression listener block — same
+        // semantics: fires after the originating service has committed
+        // its mutation; failures here never break the request path.
+
+        add_action('bcc_post_created', function (int $authorId): void {
+            try {
+                $this->firstActionListener()->onPostCreated($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] first_action post failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 20, 1);
+
+        add_action('bcc_review_published', function (int $authorId): void {
+            try {
+                $this->firstActionListener()->onReviewPublished($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] first_action review failed', [
+                    'user_id' => $authorId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 20, 1);
+
+        add_action('bcc_blog_post_created', function (int $authorId): void {
+            try {
+                $this->firstActionListener()->onBlogPostCreated($authorId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] first_action blog failed', [
+                    'user_id' => $authorId,
                     'error'   => $e->getMessage(),
                 ]);
             }
