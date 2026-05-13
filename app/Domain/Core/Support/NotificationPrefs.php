@@ -109,10 +109,18 @@ final class NotificationPrefs
     /**
      * Read every flag for the GET /me/notification-prefs response shape.
      *
+     * `push_available` is a server-side capability flag — true when
+     * BCC_PUSH_VAPID_PUBLIC_KEY is configured. Frontends should gate
+     * the "Enable push" CTA on it so users on instances without VAPID
+     * keys don't see an enable-then-fail flow on cold start. Additive
+     * field; older clients ignore it and fall through to the existing
+     * browser-support check.
+     *
      * @return array{
      *   email_digest: bool,
      *   bell: array<string, bool>,
-     *   push: array{enabled: bool, events: array<string, bool>}
+     *   push: array{enabled: bool, events: array<string, bool>},
+     *   push_available: bool
      * }
      */
     public static function readAll(int $userId): array
@@ -126,13 +134,32 @@ final class NotificationPrefs
             $pushEvents[$type] = self::flag($userId, 'push_event_' . $type);
         }
         return [
-            'email_digest' => self::flag($userId, 'email_digest'),
-            'bell'         => $bell,
-            'push'         => [
+            'email_digest'   => self::flag($userId, 'email_digest'),
+            'bell'           => $bell,
+            'push'           => [
                 'enabled' => self::flag($userId, 'push_master'),
                 'events'  => $pushEvents,
             ],
+            'push_available' => self::pushAvailable(),
         ];
+    }
+
+    /**
+     * Server-side push capability check — true when VAPID keys are
+     * configured via the BCC_PUSH_VAPID_PUBLIC_KEY constant in
+     * wp-config.php. Mirrors MyPushSubscriptionEndpoint::vapidPublicKey()
+     * without exposing the key value itself.
+     *
+     * Public so future call sites (e.g. an admin dashboard banner)
+     * can probe the same signal without re-implementing the check.
+     */
+    public static function pushAvailable(): bool
+    {
+        if (!defined('BCC_PUSH_VAPID_PUBLIC_KEY')) {
+            return false;
+        }
+        $value = constant('BCC_PUSH_VAPID_PUBLIC_KEY');
+        return is_string($value) && $value !== '';
     }
 
     /**
