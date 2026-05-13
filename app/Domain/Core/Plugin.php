@@ -26,7 +26,9 @@ use BCC\Trust\Core\Security\BehavioralAnalyzer;
 use BCC\Trust\Core\Security\DeviceFingerprinter;
 use BCC\Trust\Core\Security\TrustGraph;
 use BCC\Trust\Core\Repositories\QuestProgressRepository;
+use BCC\Trust\Core\Services\AttestationService;
 use BCC\Trust\Core\Services\EndorsementService;
+use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Services\GroupActivityHeatService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Quest\QuestProgressService;
@@ -229,6 +231,25 @@ final class Plugin
             $this->scoreRepository(),
             $this->userInfoRepository(),
             $this->verificationRepository()
+        );
+    }
+
+    // V2 Trust Attestation Layer — generalized successor to
+    // EndorsementService per §J.11 endorse→vouch migration.
+    // EndorsementService stays in place during Phase 1; this owns
+    // the new bcc_trust_attestations table.
+
+    private ?AttestationRepository $attestationRepository = null;
+    public function attestationRepository(): AttestationRepository
+    {
+        return $this->attestationRepository ??= new AttestationRepository();
+    }
+
+    private ?AttestationService $attestationService = null;
+    public function attestationService(): AttestationService
+    {
+        return $this->attestationService ??= new AttestationService(
+            $this->attestationRepository()
         );
     }
 
@@ -493,7 +514,8 @@ final class Plugin
         return $this->memberProfileComposer ??= new Services\MemberProfileComposer(
             $this->userViewService(),
             $this->cardViewService(),
-            $this->shiftLogService()
+            $this->shiftLogService(),
+            $this->attestationService()
         );
     }
 
@@ -529,7 +551,8 @@ final class Plugin
             $this->voteRepository(),
             $this->featureAccessService(),
             $this->voteService(),
-            $this->endorsementService()
+            $this->endorsementService(),
+            $this->attestationService()
         );
     }
 
@@ -1539,6 +1562,41 @@ final class Plugin
                 ]);
             }
         }, 20, 1);
+
+        // Social-gravity celebrations (2026-05-13 retention pass):
+        // first_watcher fires on the RECIPIENT (page owner) when their
+        // page or user-self is followed for the first time. The hook
+        // carries 4 args; we capture all so the resolver can branch on
+        // targetKind. Self-pulls and corrupted events no-op inside the
+        // listener.
+        add_action('bcc_card_pulled', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
+            try {
+                $this->firstActionListener()->onCardPulled($viewerId, $followId, $targetKind, $targetId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] first_action card_pulled failed', [
+                    'viewer_id'   => $viewerId,
+                    'target_kind' => $targetKind,
+                    'target_id'   => $targetId,
+                    'error'       => $e->getMessage(),
+                ]);
+            }
+        }, 20, 4);
+
+        // first_endorsement_received fires on the page owner. Hook
+        // carries 3 args (endorser, page, context); we use the first
+        // two. The listener looks up the owner internally and no-ops
+        // on self-endorsements + missing owners.
+        add_action('bcc_trust_endorsement_added', function (int $endorserUserId, int $pageId): void {
+            try {
+                $this->firstActionListener()->onEndorsementAdded($endorserUserId, $pageId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] first_action endorsement_added failed', [
+                    'endorser_id' => $endorserUserId,
+                    'page_id'     => $pageId,
+                    'error'       => $e->getMessage(),
+                ]);
+            }
+        }, 20, 2);
 
         // ── §C1 / §N11 / §O1.2 tier-upgrade listener ─────────────────────
         //
