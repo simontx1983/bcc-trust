@@ -54,14 +54,46 @@ final class ApiRetry
             return new \WP_Error('circuit_breaker_open', "Circuit breaker open for chain {$chainId}");
         }
 
-        // Per-chain budget: check before attempting
-        if ($chainId > 0
-            && class_exists('\\BCC\\Trust\\Onchain\\Services\\EnrichmentScheduler')
-            && \BCC\Trust\Onchain\Services\EnrichmentScheduler::isChainBudgetExceeded($chainId)
-        ) {
-            self::log("BLOCKED by chain budget: {$label} (chain {$chainId})");
-            return new \WP_Error('chain_budget_exceeded', "API budget exceeded for chain {$chainId}");
-        }
+        // ┌─ PHASE X2 REMOVAL — DO NOT REINTRODUCE ─────────────────────────┐
+        // │ Pre-2026-05-13: an `EnrichmentScheduler::isChainBudgetExceeded` │
+        // │ pre-check used to live here. That check belongs INSIDE the     │
+        // │ scheduler's own loop, not in transport — see the explanation  │
+        // │ in `EnrichmentScheduler::scheduleEnrichmentBatch` and the      │
+        // │ matching X2-removal comment on the post-response block below. │
+        // │                                                                │
+        // │ Original intent (correct, but at the wrong layer):             │
+        // │   per-cycle fairness — no single chain should monopolize ONE  │
+        // │   scheduler batch.                                             │
+        // │                                                                │
+        // │ How the abstraction leaked:                                    │
+        // │   the gate was lifted into `ApiRetry::request` as a "general  │
+        // │   per-chain rate limit." That conflated two responsibilities  │
+        // │   at the wrong layer — transport should not consult a         │
+        // │   scheduler-fairness counter.                                  │
+        // │                                                                │
+        // │ Why it was operationally dangerous:                            │
+        // │   every ApiRetry caller (V1 fetch_collections, V2 worker,     │
+        // │   ChainRefreshService) consulted a counter sized for ONE       │
+        // │   scheduler batch (50/10min). V2 worker retries against a     │
+        // │   degraded chain blew the counter, then V1 fetches on the     │
+        // │   same chain pre-blocked here with `chain_budget_exceeded`    │
+        // │   WITHOUT making the HTTP call.                                │
+        // │                                                                │
+        // │ User-facing symptom (discovered 2026-05-13 during the V1      │
+        // │ Etherscan→Alchemy migration verification):                    │
+        // │   V1 ownership discovery silently returned empty results      │
+        // │   under degraded-chain retry pressure. Gallery refreshes      │
+        // │   showed zero NFTs for wallets that visibly held them on the  │
+        // │   chain explorer. No operator-visible signal — `fetch_        │
+        // │   collections` returned `[]` in 5ms because ApiRetry          │
+        // │   short-circuited before the HTTP call.                       │
+        // │                                                                │
+        // │ The transport-level guard that remains here is OnchainCircuit │
+        // │ Breaker above. That one IS a transport concern — a circuit-  │
+        // │ broken chain should fail-fast on every transport, regardless │
+        // │ of caller. Per-chain fairness budget is not transport, it's   │
+        // │ scheduler internals; do not re-add it here.                   │
+        // └────────────────────────────────────────────────────────────────┘
 
         $attempt     = 0;
         $lastResponse = null;
@@ -71,32 +103,37 @@ final class ApiRetry
         while ($attempt <= $maxRetries) {
             $lastResponse = $fn();
 
-            // ── Budget accounting ────────────────────────────────────────
-            // Charge per-attempt (5xx retries each count) so a failing
-            // chain cannot loop through the budget for free via retries.
-            // WP_Error = pre-connect failure (DNS, SSRF block, pre-send
-            // timeout) → do not charge.
-            //
-            // 4xx (except 429) → also do NOT charge: validation rejection
-            // is almost always a bug in our code (malformed payload, wrong
-            // path, missing auth). Charging budget for our own bugs lets a
-            // single regression burn through MAX_API_CALLS_PER_CHAIN in
-            // seconds and block legitimate traffic for the cache TTL —
-            // which is exactly how the Stargaze CW-721 regression
-            // (unpadded base64) presented: every test click returned
-            // chain_budget_exceeded for 10 minutes after the bug fix
-            // landed. 429 is explicitly rate-limit signalling — the
-            // server processed the request and is throttling, so it
-            // counts as legitimate consumption. 5xx still counts because
-            // most providers (Alchemy CU, etc.) bill the request even
-            // when the response is a server-side failure.
-            if (!is_wp_error($lastResponse) && $chainId > 0 && class_exists('\\BCC\\Trust\\Onchain\\Services\\EnrichmentScheduler')) {
-                $code = (int) wp_remote_retrieve_response_code($lastResponse);
-                $isClientErrorNon429 = ($code >= 400 && $code < 500 && $code !== 429);
-                if (!$isClientErrorNon429) {
-                    \BCC\Trust\Onchain\Services\EnrichmentScheduler::trackApiCall($chainId);
-                }
-            }
+            // ┌─ PHASE X2 REMOVAL — DO NOT REINTRODUCE ─────────────────────┐
+            // │ Pre-2026-05-13: a per-response `EnrichmentScheduler::      │
+            // │ trackApiCall($chainId)` call lived here, charging the      │
+            // │ scheduler's per-chain counter for EVERY ApiRetry response │
+            // │ (success / 429 / 5xx — anything except WP_Error + 4xx).   │
+            // │                                                            │
+            // │ Pairing this with the pre-call gate at the top of this    │
+            // │ method made `ApiRetry::request` the transport-layer       │
+            // │ enforcer of a counter sized for scheduler fairness. The   │
+            // │ counter is now owned exclusively by                       │
+            // │ `EnrichmentScheduler::scheduleEnrichmentBatch` which      │
+            // │ calls `trackApiCall` once per `enrichRow` invocation —    │
+            // │ semantically "rows processed this cycle," not "HTTP calls │
+            // │ made anywhere on this chain." Fairness behaviour is       │
+            // │ preserved at the scope it was designed for; V1/V2 are    │
+            // │ now coupled ONLY through the shared physical CU budget   │
+            // │ (`wp_bcc_chain_checkpoints.cu_used_today`).               │
+            // │                                                            │
+            // │ The historic policy comment is preserved here for         │
+            // │ archaeology — it remains correct guidance for any future │
+            // │ counter that lives at this layer (none currently does):  │
+            // │                                                            │
+            // │   Charge per-attempt (5xx retries each count) so a       │
+            // │   failing chain cannot loop through the budget for free. │
+            // │   WP_Error = pre-connect failure → do not charge.        │
+            // │   4xx (except 429) = code bug, not provider load → do    │
+            // │   not charge (the Stargaze CW-721 unpadded-base64        │
+            // │   regression burned through 50 calls in seconds and      │
+            // │   blocked legitimate traffic for the cache TTL after the │
+            // │   fix landed). 429 + 5xx = legitimate consumption.       │
+            // └────────────────────────────────────────────────────────────┘
 
             // ── Success path ────────────────────────────────────────────
             if (!is_wp_error($lastResponse)) {

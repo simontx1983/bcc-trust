@@ -135,6 +135,19 @@ final class EnrichmentScheduler
 
                 // Per-chain fairness: skip validators whose chain has exhausted
                 // its budget or whose circuit breaker is open.
+                //
+                // ┌─ PHASE X2 — gate now lives here only (load-bearing) ───┐
+                // │ Before 2026-05-13 this gate ALSO existed in            │
+                // │ `ApiRetry::request` as a transport-layer pre-check.   │
+                // │ Removed there because it conflated scheduler fairness │
+                // │ with transport policy and caused silent V1 ownership-  │
+                // │ discovery failures under V2 retry pressure. The fix:   │
+                // │ this scheduler is the ONLY producer + ONLY consumer   │
+                // │ of `isChainBudgetExceeded` going forward. Do not     │
+                // │ reintroduce a parallel gate at transport — that's    │
+                // │ what the load-bearing block in `ApiRetry::request`    │
+                // │ explicitly warns against.                              │
+                // └────────────────────────────────────────────────────────┘
                 $chainId = (int) ($row->chain_id ?? 0);
                 if ($chainId > 0 && (self::isChainBudgetExceeded($chainId) || OnchainCircuitBreaker::isOpen($chainId))) {
                     $result['skipped']++;
@@ -142,16 +155,32 @@ final class EnrichmentScheduler
                 }
 
                 try {
-                    $callsBefore = self::getApiCount();
-                    $enriched    = self::enrichRow($row);
+                    $enriched = self::enrichRow($row);
 
                     if (!$enriched) {
                         $result['skipped']++;
                         continue;
                     }
 
-                    $callsUsed = self::getApiCount() - $callsBefore;
-                    self::markSuccess($row, $callsUsed);
+                    // ┌─ PHASE X2 — scheduler-owned counter increment ─────┐
+                    // │ Before 2026-05-13 `ApiRetry::request` charged the │
+                    // │ counter for every HTTP response. After X2 this    │
+                    // │ scheduler is the sole producer — one increment    │
+                    // │ per successful `enrichRow`. Semantic shift: the   │
+                    // │ counter now measures "rows processed this cycle"  │
+                    // │ rather than "HTTP calls made anywhere," which is │
+                    // │ the right granularity for per-cycle fairness     │
+                    // │ (the original design intent). Each enrichRow may │
+                    // │ make >1 HTTP call internally; we don't care for   │
+                    // │ fairness purposes — what matters is that one     │
+                    // │ chain can't run away with more than                │
+                    // │ MAX_API_CALLS_PER_CHAIN rows in a single cycle.   │
+                    // │ MAX_API_CALLS_PER_RUN cap still works for the    │
+                    // │ same reason at the global scope.                  │
+                    // └────────────────────────────────────────────────────┘
+                    self::trackApiCall($chainId);
+
+                    self::markSuccess($row, 1);
                     $result['processed']++;
                 } catch (\Throwable $e) {
                     self::markFailure($row, $e->getMessage());

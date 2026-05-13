@@ -79,11 +79,13 @@ final class NftIndexerHealthSnapshot
      * means.
      *
      * Rules:
-     *   RED    — cron not scheduled, cron overdue, OR 0 active chains
-     *            (the silent-failure modes operators most often miss).
-     *   YELLOW — at least one active chain but something needs attention:
-     *            stalled tick, degraded/breaker_open state, CU pressure,
-     *            or overgrown Helius dedupe table.
+     *   RED    — cron not scheduled, cron overdue, 0 active chains, OR
+     *            every active chain in degraded/breaker_open (operationally
+     *            offline regardless of nominal enable-state).
+     *   YELLOW — at least one healthy active chain but something needs
+     *            attention: some chains degraded, stalled tick, CU
+     *            pressure, scheduler call-count pressure, or overgrown
+     *            Helius dedupe table.
      *   GREEN  — at least one active chain, no outstanding issues.
      *
      * `issues` is an ordered list of human-readable lines safe to render
@@ -231,7 +233,21 @@ final class NftIndexerHealthSnapshot
         if ($totalEvmChains === 0) {
             $issues[] = 'No active EVM chains exist in `wp_bcc_chains`. The indexer has nothing to walk.';
         }
-        if ($degradedChains !== []) {
+        // Detect the "all active chains degraded" state separately from
+        // the generic degraded-chains line. When every nominally-enabled
+        // chain is in `degraded` or `breaker_open`, the subsystem is
+        // operationally offline regardless of enable state — RED severity.
+        // The most common shared cause is project-wide provider quota
+        // exhaustion (distinct from per-chain CU budget). See
+        // `project_v1_v2_nft_path_separation.md` follow-up.
+        $allActiveDegraded = $activeCount > 0 && count($degradedChains) === $activeCount;
+        if ($allActiveDegraded) {
+            $issues[] = sprintf(
+                'All %d active EVM chains are degraded or breaker_open: %s. The subsystem is operationally offline regardless of chain enable-state. Per-chain CU budget is unaffected; check the shared `last_error` in the per-chain table — a uniform error across every chain points at project-wide provider quota exhaustion (Alchemy app-level cap), credentials, or network outage.',
+                $activeCount,
+                implode(', ', $degradedChains)
+            );
+        } elseif ($degradedChains !== []) {
             $issues[] = 'Chains in degraded state: ' . implode(', ', $degradedChains) . '. Check `last_error` in the per-chain table below.';
         }
         if ($stalledChains !== []) {
@@ -272,7 +288,8 @@ final class NftIndexerHealthSnapshot
         $isRed = !$cronScheduled
             || $cronOverdue
             || $totalEvmChains === 0
-            || $activeCount === 0;
+            || $activeCount === 0
+            || $allActiveDegraded;
         $isYellow = !$isRed && (
             $stalledChains !== []
             || $degradedChains !== []
