@@ -1144,6 +1144,16 @@ final class Plugin
         // destructive-mutation-hardening invariants.
         \BCC\Trust\Core\REST\MeAttestationsEndpoint::register();
 
+        // V2 Trust Attestation Layer — Slice D roster read surface:
+        //   GET /entities/{target_kind}/{target_id}/attestations  (§4.20 §J.4)
+        // Paged + sorted roster for any of the four target kinds
+        // (user_profile / validator_card / project_card / creator_card).
+        // Auth-optional; anonymous viewers see the same row shape since
+        // §J.4 rows carry no per-viewer state. Server-side ORDER BY by
+        // decayed_weight / recency / reliability; numeric weights NEVER
+        // surface in the response per §J.4.1 synthesis invisibility.
+        \BCC\Trust\Core\REST\EntityAttestationsEndpoint::register();
+
         // V2 Phase 6 (§H1): NFT-piece detail surface.
         //   GET /nft-pieces/{chain}/{contract}/{tokenId} — §3.7 NftPiece
         // Anonymous OR Bearer; response shape is identical for both

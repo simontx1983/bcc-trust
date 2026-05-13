@@ -429,6 +429,288 @@ final class AttestationRepository
     }
 
     /**
+     * Allowed kind filter values for the §J.4 roster query. 'all' maps
+     * to "no kind filter applied"; the other two pin the result set
+     * to one kind.
+     *
+     * @var list<string>
+     */
+    public const LIST_KIND_FILTERS = ['vouch', 'stand_behind', 'all'];
+
+    /**
+     * Allowed sort modes for the §J.4 roster query. All three are
+     * server-side ORDER BY clauses; the response NEVER exposes the
+     * numeric weight that drives the sort (§J.4.1 synthesis
+     * invisibility).
+     *
+     * @var list<string>
+     */
+    public const LIST_SORT_MODES = ['decayed_weight', 'recency', 'reliability'];
+
+    /** Maximum rows the slot_holders picker payload returns. §J.1 ceiling = 10. */
+    private const SLOT_HOLDERS_HARD_CAP = 10;
+
+    /**
+     * Paged roster query for `GET /entities/:target_kind/:target_id/
+     * attestations` per §J.4. Returns raw rows (caller composes the
+     * §J.4 view-model + hydrates the attestor mini-view via
+     * UserViewService::getSummary).
+     *
+     * Pagination is page-based (1-indexed) per the locked contract
+     * shape; the repo translates to offset/limit internally.
+     *
+     * Sort modes (V1):
+     *   - decayed_weight (default): weight_at_time DESC, created_at DESC.
+     *     V1 has no decay function; this is the same ordering decay
+     *     would produce on a roster where every row has age = 0. Slice E
+     *     replaces with the read-time decay function.
+     *   - recency: created_at DESC, id DESC. Stable tiebreaker on id
+     *     so two rows with identical second-precision created_at
+     *     don't flicker between paginations.
+     *   - reliability: V1 collapses to decayed_weight semantics —
+     *     reliability ordering requires the Operator Reliability
+     *     synthesis (Slice E). Documented + filterable so consumers
+     *     can still pass the param; the order they receive matches
+     *     decayed_weight until Slice E ships.
+     *
+     * include_revoked controls whether soft-deleted rows are returned.
+     * Default false (active-only roster); when true, revoked rows
+     * append AFTER active rows regardless of sort (revoked is
+     * archival, not interleaved with the active list).
+     *
+     * @param array{
+     *   kind?: string,
+     *   include_revoked?: bool,
+     *   sort?: string,
+     *   page?: int,
+     *   per_page?: int
+     * } $options
+     * @return list<object>
+     */
+    public function listByTarget(
+        string $targetKind,
+        int $targetId,
+        array $options = []
+    ): array {
+        if (!in_array($targetKind, self::TARGET_KINDS, true)) {
+            return [];
+        }
+        if ($targetId <= 0) {
+            return [];
+        }
+
+        $kind            = isset($options['kind']) && is_string($options['kind'])
+            ? $options['kind']
+            : 'all';
+        if (!in_array($kind, self::LIST_KIND_FILTERS, true)) {
+            $kind = 'all';
+        }
+
+        $includeRevoked  = !empty($options['include_revoked']);
+
+        $sort = isset($options['sort']) && is_string($options['sort'])
+            ? $options['sort']
+            : 'decayed_weight';
+        if (!in_array($sort, self::LIST_SORT_MODES, true)) {
+            $sort = 'decayed_weight';
+        }
+
+        $page     = isset($options['page']) ? max(1, (int) $options['page']) : 1;
+        $perPage  = isset($options['per_page']) ? (int) $options['per_page'] : 24;
+        if ($perPage < 1) {
+            $perPage = 24;
+        }
+        if ($perPage > 50) {
+            $perPage = 50;
+        }
+        $offset = ($page - 1) * $perPage;
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        // Sort + revoked-handling order:
+        //   - active-only: pure ORDER BY by sort mode.
+        //   - include-revoked: active rows first, revoked rows after.
+        //     Phillip's note: revoked is archival; preserves "no hiding
+        //     the past" without interleaving the dead with the living.
+        // V1 sort: only 'recency' produces a distinct ORDER BY.
+        // 'reliability' and 'decayed_weight' both collapse to the
+        // weight-then-recency ordering until Slice E ships real
+        // decay + reliability synthesis. We accept all three from
+        // the contract surface; the FE renders the order it gets.
+        $orderBy = $sort === 'recency'
+            ? 'created_at DESC, id DESC'
+            : 'weight_at_time DESC, created_at DESC';
+        if ($includeRevoked) {
+            // Active-first secondary: rows with revoked_at IS NULL
+            // come before revoked rows. ISNULL(col) returns 1 for
+            // NULL values, so we order by it DESC to put NULLs first.
+            $orderBy = 'ISNULL(revoked_at) DESC, ' . $orderBy;
+        }
+
+        $where = ['target_kind = %s', 'target_id = %d'];
+        $args  = [$targetKind, $targetId];
+
+        if ($kind !== 'all') {
+            $where[] = 'kind = %s';
+            $args[]  = $kind;
+        }
+        if (!$includeRevoked) {
+            $where[] = 'revoked_at IS NULL';
+        }
+
+        $whereSql = 'WHERE ' . implode(' AND ', $where);
+
+        $sql = 'SELECT ' . self::COLUMNS
+            . " FROM `{$table}`"
+            . ' ' . $whereSql
+            . ' ORDER BY ' . $orderBy
+            . ' LIMIT %d OFFSET %d';
+
+        $args[] = $perPage;
+        $args[] = $offset;
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, ...$args);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (is_object($row)) {
+                $out[] = $row;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Single-query aggregate for the §J.4 summary block. Returns
+     * { vouch_count, stand_behind_count, total } — counts ACTIVE
+     * attestations only (revoked rows are excluded from the summary
+     * regardless of `include_revoked` on the list query; the summary
+     * represents living evidence, not historical).
+     *
+     * @return array{vouch_count: int, stand_behind_count: int, total: int}
+     */
+    public function countByTarget(string $targetKind, int $targetId): array
+    {
+        $empty = ['vouch_count' => 0, 'stand_behind_count' => 0, 'total' => 0];
+        if (!in_array($targetKind, self::TARGET_KINDS, true)) {
+            return $empty;
+        }
+        if ($targetId <= 0) {
+            return $empty;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT kind, COUNT(*) AS c"
+            . " FROM `{$table}`"
+            . ' WHERE target_kind = %s'
+            . ' AND target_id = %d'
+            . ' AND revoked_at IS NULL'
+            . ' GROUP BY kind'
+            . ' LIMIT 10';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $targetKind, $targetId);
+        if (!is_string($prepared)) {
+            return $empty;
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return $empty;
+        }
+
+        $result = $empty;
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->kind, $row->c)) {
+                continue;
+            }
+            $kind  = (string) $row->kind;
+            $count = (int) $row->c;
+            if ($kind === 'vouch') {
+                $result['vouch_count'] = $count;
+            } elseif ($kind === 'stand_behind') {
+                $result['stand_behind_count'] = $count;
+            }
+        }
+        $result['total'] = $result['vouch_count'] + $result['stand_behind_count'];
+        return $result;
+    }
+
+    /**
+     * List active stand_behind attestations cast BY this operator.
+     * Drives the §J.2 `slot_holders[]` picker payload returned when
+     * a cast hits `bcc_attestation_bandwidth_exhausted`. Bounded by
+     * the §J.1 ceiling (Elite=7 baseline + 3 graduated = max 10 ever).
+     *
+     * Sort: created_at ASC so the user sees their oldest commitment
+     * first in the picker. Phillip's note: the picker should feel
+     * reflective, not inventory-like — showing oldest first nudges
+     * "which of these has changed since I cast it" rather than
+     * "which is least valuable to keep."
+     *
+     * @return list<object>
+     */
+    public function listActiveStandBehindByAttestor(
+        int $attestorUserId,
+        int $limit = self::SLOT_HOLDERS_HARD_CAP
+    ): array {
+        if ($attestorUserId <= 0) {
+            return [];
+        }
+        if ($limit < 1) {
+            $limit = 1;
+        }
+        if ($limit > self::SLOT_HOLDERS_HARD_CAP) {
+            $limit = self::SLOT_HOLDERS_HARD_CAP;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = 'SELECT ' . self::COLUMNS
+            . " FROM `{$table}`"
+            . ' WHERE attestor_user_id = %d'
+            . " AND kind = 'stand_behind'"
+            . ' AND revoked_at IS NULL'
+            . ' ORDER BY created_at ASC, id ASC'
+            . ' LIMIT %d';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $attestorUserId, $limit);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (is_object($row)) {
+                $out[] = $row;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Mark an attestation as reaffirmed by setting reaffirmed_at = NOW().
      * Scoped to `revoked_at IS NULL` so reaffirming a revoked row is
      * structurally impossible — caller should already have surfaced

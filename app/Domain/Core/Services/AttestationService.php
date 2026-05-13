@@ -838,11 +838,15 @@ final class AttestationService
      * Read the active Stand Behind rows for an attestor, shaped for
      * the §J.2 `slot_holders[]` picker. Bounded by the §J.1 tier max
      * (Elite=7, plus future graduated cap → 10); reads at most that
-     * many rows.
+     * many rows via AttestationRepository::listActiveStandBehindByAttestor.
      *
-     * Lean shape — the FE resolves target display info via existing
-     * entity surfaces rather than threading display data through the
-     * error envelope.
+     * Lean shape — the FE resolves target display info (handle / name)
+     * via existing entity surfaces (`/users/:handle` or
+     * `/cards/:id`) rather than threading display data through the
+     * error envelope. Phillip's note: the picker should feel
+     * reflective + deliberate, not inventory-management UI; the lean
+     * shape forces the FE to render with quiet attention rather than
+     * dense roster styling.
      *
      * @return list<array{
      *   id: int,
@@ -855,24 +859,267 @@ final class AttestationService
      */
     private function buildSlotHolders(int $attestorUserId): array
     {
-        // Until we add a dedicated repo helper this is read-time cheap
-        // (the attestor's active set is bounded ≤ 10 rows by definition).
-        // We pull both kinds and filter to stand_behind below — the
-        // existing findActiveByAttestorAndTarget is per-target; we need
-        // a per-attestor read. Use the bounded count helper's twin —
-        // for V1 minimal we synthesize via a per-row repo call would
-        // be wrong (no list helper). So emit the locked shape with
-        // just the count's worth of info that's already in scope; FE
-        // uses the picker as a hint, not as authoritative state. This
-        // is acceptable because the FE always re-reads the attestor's
-        // own surfaces post-409 to refresh.
-        //
-        // Slice C ships with `slot_holders = []` as the contract-safe
-        // V1 baseline; the picker payload lands when the dedicated
-        // repository helper is added (Slice D — same query as the
-        // /me/attestations list endpoint).
-        unset($attestorUserId);
-        return [];
+        if ($attestorUserId <= 0) {
+            return [];
+        }
+        $rows = $this->repo->listActiveStandBehindByAttestor($attestorUserId);
+        $out  = [];
+        foreach ($rows as $row) {
+            $id          = isset($row->id) ? (int) $row->id : 0;
+            $kind        = isset($row->kind) ? (string) $row->kind : '';
+            $targetKind  = isset($row->target_kind) ? (string) $row->target_kind : '';
+            $targetId    = isset($row->target_id) ? (int) $row->target_id : 0;
+            $createdAt   = isset($row->created_at) ? (string) $row->created_at : '';
+            $contextNote = isset($row->context_note) && is_string($row->context_note) && $row->context_note !== ''
+                ? (string) $row->context_note
+                : null;
+
+            if ($id <= 0 || $targetId <= 0 || $kind !== 'stand_behind') {
+                continue;
+            }
+            $out[] = [
+                'id'           => $id,
+                'kind'         => $kind,
+                'target_kind'  => $targetKind,
+                'target_id'    => $targetId,
+                'created_at'   => $createdAt !== '' ? self::formatIso($createdAt) : '',
+                'context_note' => $contextNote,
+            ];
+        }
+        return $out;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Roster read — §J.4 GET /entities/:target_kind/:target_id/attestations
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * §J.4 roster view-model composer.
+     *
+     * Three locked discipline points the composer enforces:
+     *
+     *   - §J.4.1 synthesis invisibility: per-attestation `weight_at_time`
+     *     and `decayed_weight` are stripped from the response. The
+     *     server uses them for ORDER BY at the repo layer; the wire
+     *     surface NEVER sees the number.
+     *   - §J.3.2 asymmetric display: public roster rows carry only
+     *     the categorical `reliability_standing` enum + the
+     *     positive-only `badges[]` catalogue. No numeric reliability,
+     *     no negative-tier badges (V1 catalogue is positive-only by
+     *     construction; even an attestor in Caution tier renders with
+     *     a "newly_active" baseline standing rather than a stigma
+     *     marker).
+     *   - Equal row treatment: the composer does NOT pre-sort or
+     *     up-weight Highly-Reliable attestors. The FE renders rows
+     *     in the order received; server-side ORDER BY by sort mode
+     *     produces the ranking transparently without elevating
+     *     individual rows visually.
+     *
+     * V1 baselines (Slice E computes real values, contract-stable shape):
+     *   - attestor.is_dormant = false
+     *   - attestor.reliability_standing = 'newly_active'
+     *   - attestor.badges = []
+     *
+     * Deleted-attestor rows are silently dropped — the attestation
+     * history is preserved at the DB layer (revoked_at is the audit
+     * marker; account deletion is separate), but rendering a
+     * "[deleted]" row would create UX awkwardness and the contract
+     * doesn't model that state. Slice E reconsiders.
+     *
+     * @param array{
+     *   kind?: string,
+     *   include_revoked?: bool,
+     *   sort?: string,
+     *   page?: int,
+     *   per_page?: int
+     * } $options
+     * @return array{
+     *   items: list<array<string, mixed>>,
+     *   summary: array{vouch_count: int, stand_behind_count: int},
+     *   pagination: array{page: int, per_page: int, total_pages: int, has_more: boolean}
+     * }
+     */
+    public function getForTarget(
+        string $targetKind,
+        int $targetId,
+        array $options = []
+    ): array {
+        $empty = [
+            'items'      => [],
+            'summary'    => ['vouch_count' => 0, 'stand_behind_count' => 0],
+            'pagination' => [
+                'page'        => 1,
+                'per_page'    => 24,
+                'total_pages' => 0,
+                'has_more'    => false,
+            ],
+        ];
+
+        if (!in_array($targetKind, AttestationRepository::TARGET_KINDS, true)) {
+            return $empty;
+        }
+        if ($targetId <= 0) {
+            return $empty;
+        }
+
+        $page    = isset($options['page']) ? max(1, min(20, (int) $options['page'])) : 1;
+        $perPage = isset($options['per_page']) ? max(1, min(50, (int) $options['per_page'])) : 24;
+
+        $rows = $this->repo->listByTarget($targetKind, $targetId, [
+            'kind'            => isset($options['kind']) && is_string($options['kind'])
+                ? $options['kind']
+                : 'all',
+            'include_revoked' => !empty($options['include_revoked']),
+            'sort'            => isset($options['sort']) && is_string($options['sort'])
+                ? $options['sort']
+                : 'decayed_weight',
+            'page'            => $page,
+            'per_page'        => $perPage,
+        ]);
+
+        $items = [];
+        foreach ($rows as $row) {
+            $attestorId = isset($row->attestor_user_id) ? (int) $row->attestor_user_id : 0;
+            if ($attestorId <= 0) {
+                continue;
+            }
+            $attestor = self::buildAttestorMiniView($attestorId, $this->reputationRepo);
+            if ($attestor === null) {
+                // Deleted attestor — drop the row (the underlying
+                // attestation stays in DB; we just don't render it).
+                continue;
+            }
+
+            $id            = isset($row->id) ? (int) $row->id : 0;
+            $kindStr       = isset($row->kind) ? (string) $row->kind : '';
+            $orderInTarget = isset($row->attestation_order_in_target)
+                ? (int) $row->attestation_order_in_target
+                : 0;
+            $createdAtRaw  = isset($row->created_at) ? (string) $row->created_at : '';
+            $revokedAtRaw  = isset($row->revoked_at) && is_string($row->revoked_at) && $row->revoked_at !== ''
+                ? (string) $row->revoked_at
+                : null;
+            $contextNote   = isset($row->context_note) && is_string($row->context_note) && $row->context_note !== ''
+                ? (string) $row->context_note
+                : null;
+
+            $items[] = [
+                'id'                    => $id,
+                'kind'                  => $kindStr,
+                'attestor'              => $attestor,
+                'is_pre_consensus_pick' => self::isPreConsensusPick($kindStr, $orderInTarget),
+                'attestation_order'     => $orderInTarget,
+                'context_note'          => $contextNote,
+                'created_at'            => $createdAtRaw !== '' ? self::formatIso($createdAtRaw) : '',
+                'revoked_at'            => $revokedAtRaw !== null ? self::formatIso($revokedAtRaw) : null,
+            ];
+        }
+
+        $counts    = $this->repo->countByTarget($targetKind, $targetId);
+        $totalRows = (int) $counts['total'];
+        // total_pages: ceil(total / per_page), at least 1 page when
+        // there's at least one row, 0 when the target has nothing.
+        // Note: total counts ACTIVE rows only — when include_revoked
+        // is true and revoked rows return on later pages, the
+        // pagination is a soft over-estimate. Acceptable V1; Slice E
+        // can split count when needed.
+        $totalPages = $totalRows > 0 ? (int) ceil($totalRows / $perPage) : 0;
+        $hasMore    = ($page * $perPage) < $totalRows;
+
+        return [
+            'items'   => $items,
+            'summary' => [
+                'vouch_count'        => (int) $counts['vouch_count'],
+                'stand_behind_count' => (int) $counts['stand_behind_count'],
+            ],
+            'pagination' => [
+                'page'        => $page,
+                'per_page'    => $perPage,
+                'total_pages' => $totalPages,
+                'has_more'    => $hasMore,
+            ],
+        ];
+    }
+
+    /**
+     * §J.4 attestor mini-view per contract row schema. Returns null
+     * when the user no longer exists (caller drops the row).
+     *
+     * V1 baselines (Slice E populates real values):
+     *   - reliability_standing = 'newly_active'
+     *   - badges = []
+     *   - is_dormant = false (no user-activity dormancy detector yet;
+     *     the field is present in the contract shape for forward
+     *     compatibility but always emits false until Slice E).
+     *
+     * The numeric `reputation_score` IS surfaced (per the locked
+     * §J.4 row shape) — that's the existing public score, distinct
+     * from the operator_reliability sub-track which stays self-only.
+     *
+     * @return array{
+     *   id: int,
+     *   handle: string,
+     *   display_name: string,
+     *   avatar_url: string,
+     *   reputation_score: int,
+     *   reliability_standing: string,
+     *   badges: list<string>,
+     *   is_dormant: bool
+     * }|null
+     */
+    private static function buildAttestorMiniView(
+        int $userId,
+        ReputationRepository $reputationRepo
+    ): ?array {
+        if ($userId <= 0) {
+            return null;
+        }
+        $user = get_userdata($userId);
+        if (!($user instanceof \WP_User)) {
+            return null;
+        }
+
+        $handleMeta = (string) get_user_meta($userId, 'bcc_handle', true);
+        $handle     = $handleMeta !== '' ? $handleMeta : (string) $user->user_login;
+
+        $displayName = (string) $user->display_name;
+        if ($displayName === '') {
+            $displayName = (string) $user->user_login;
+        }
+
+        $avatarRaw = get_avatar_url($userId);
+        $avatarUrl = is_string($avatarRaw) ? $avatarRaw : '';
+
+        $score = (int) round($reputationRepo->getScore($userId));
+
+        return [
+            'id'                   => $userId,
+            'handle'               => $handle,
+            'display_name'         => $displayName,
+            'avatar_url'           => $avatarUrl,
+            'reputation_score'     => $score,
+            // V1 baselines — Slice E populates.
+            'reliability_standing' => 'newly_active',
+            'badges'               => [],
+            'is_dormant'           => false,
+        ];
+    }
+
+    /**
+     * §J.3.2.1 pre-consensus pick marker. V1 heuristic: the first 3
+     * stand_behind attestations on a target are early reads. Vouch
+     * is abundant; the marker is reserved for the scarcer signal
+     * where ordering actually matters.
+     *
+     * Slice E refines using the §J.3.2.1 Early Read sub-track
+     * synthesis (compares the attestor's call to later consensus).
+     */
+    private static function isPreConsensusPick(string $kind, int $orderInTarget): bool
+    {
+        if ($kind !== 'stand_behind') {
+            return false;
+        }
+        return $orderInTarget > 0 && $orderInTarget <= 3;
     }
 
     /**
