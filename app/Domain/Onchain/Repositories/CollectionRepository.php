@@ -161,11 +161,18 @@ final class CollectionRepository
             'listed_percentage' => $data['listed_percentage'] ?? null,
             'royalty_percentage' => $data['royalty_percentage'] ?? null,
             'metadata_storage'  => isset($data['metadata_storage']) ? sanitize_text_field($data['metadata_storage']) : null,
+            // Persisted from V1 NFT discovery (Alchemy `openSeaMetadata.imageUrl`)
+            // — schema column existed since Phase 1c but the V1 path dropped it
+            // on the floor pre-migration. `esc_url_raw` because the value is
+            // ultimately rendered as `<img src>` on the Verify Collections page.
+            'image_url'         => isset($data['image_url']) && is_string($data['image_url'])
+                ? esc_url_raw($data['image_url'])
+                : null,
             'fetched_at'        => current_time('mysql', true),
             'expires_at'        => $expiresAt,
         ];
 
-        $format = ['%d', '%s', '%d', '%s', '%s', '%d', '%f', '%s', '%d', '%f', '%f', '%f', '%s', '%s', '%s'];
+        $format = ['%d', '%s', '%d', '%s', '%s', '%d', '%f', '%s', '%d', '%f', '%f', '%f', '%s', '%s', '%s', '%s'];
 
         if ($existing) {
             $wpdb->update($table, $row, ['id' => (int) $existing], $format, ['%d']);
@@ -571,11 +578,17 @@ final class CollectionRepository
      *     unique_holders: string|null,
      *     image_url: string|null,
      *     is_verified: string,
+     *     chain_id: string,
      *     chain_slug: string,
      *     chain_type: string
      * }>, total: int, pages: int}
      */
-    public static function listForAdminVerification(int $page = 1, int $perPage = 50, ?string $chainSlug = null): array
+    public static function listForAdminVerification(
+        int $page = 1,
+        int $perPage = 50,
+        ?string $chainSlug = null,
+        ?string $tokenStandard = null
+    ): array
     {
         global $wpdb;
         $table  = self::table();
@@ -594,70 +607,95 @@ final class CollectionRepository
             $chainId = (int) $chain->id;
         }
 
+        // Build WHERE fragments + matching params. Each fragment is a
+        // hardcoded string with %d/%s placeholders only — user input
+        // flows through $wpdb->prepare placeholders, never into the SQL
+        // string itself.
+        $conditions = [];
+        $params     = [];
+
         if ($chainId !== null) {
-            $total = (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*) FROM {$table} WHERE chain_id = %d",
-                $chainId
-            ));
+            $conditions[] = 'c.chain_id = %d';
+            $params[]     = $chainId;
+        }
 
-            /** @var list<object{
-             *     id: string,
-             *     contract_address: string,
-             *     collection_name: string|null,
-             *     token_standard: string|null,
-             *     unique_holders: string|null,
-             *     image_url: string|null,
-             *     is_verified: string,
-             *     chain_slug: string,
-             *     chain_type: string
-             * }>|null $items */
-            $items = $wpdb->get_results($wpdb->prepare(
-                "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
-                        c.unique_holders, c.image_url, c.is_verified,
-                        ch.slug AS chain_slug, ch.chain_type
-                   FROM {$table} c
-              LEFT JOIN {$chains} ch ON ch.id = c.chain_id
-                  WHERE c.chain_id = %d
-                  ORDER BY c.unique_holders DESC, c.id DESC
-                  LIMIT %d OFFSET %d",
-                $chainId,
-                $perPage,
-                $offset
-            ));
-        } else {
+        if ($tokenStandard !== null && $tokenStandard !== '') {
+            $conditions[] = 'c.token_standard = %s';
+            $params[]     = $tokenStandard;
+        }
+
+        $whereSql = $conditions === [] ? '' : 'WHERE ' . implode(' AND ', $conditions);
+
+        if ($params === []) {
             $total = (int) $wpdb->get_var(
-                "SELECT COUNT(*) FROM {$table}"
+                "SELECT COUNT(*) FROM {$table} c {$whereSql}"
             );
-
-            /** @var list<object{
-             *     id: string,
-             *     contract_address: string,
-             *     collection_name: string|null,
-             *     token_standard: string|null,
-             *     unique_holders: string|null,
-             *     image_url: string|null,
-             *     is_verified: string,
-             *     chain_slug: string,
-             *     chain_type: string
-             * }>|null $items */
-            $items = $wpdb->get_results($wpdb->prepare(
-                "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
-                        c.unique_holders, c.image_url, c.is_verified,
-                        ch.slug AS chain_slug, ch.chain_type
-                   FROM {$table} c
-              LEFT JOIN {$chains} ch ON ch.id = c.chain_id
-                  ORDER BY c.unique_holders DESC, c.id DESC
-                  LIMIT %d OFFSET %d",
-                $perPage,
-                $offset
+        } else {
+            $total = (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$table} c {$whereSql}",
+                ...$params
             ));
         }
+
+        /** @var list<object{
+         *     id: string,
+         *     contract_address: string,
+         *     collection_name: string|null,
+         *     token_standard: string|null,
+         *     unique_holders: string|null,
+         *     image_url: string|null,
+         *     is_verified: string,
+         *     chain_id: string,
+         *     chain_slug: string,
+         *     chain_type: string
+         * }>|null $items */
+        $items = $wpdb->get_results($wpdb->prepare(
+            "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
+                    c.unique_holders, c.image_url, c.is_verified, c.chain_id,
+                    ch.slug AS chain_slug, ch.chain_type
+               FROM {$table} c
+          LEFT JOIN {$chains} ch ON ch.id = c.chain_id
+               {$whereSql}
+               ORDER BY c.unique_holders DESC, c.id DESC
+               LIMIT %d OFFSET %d",
+            ...array_merge($params, [$perPage, $offset])
+        ));
 
         return [
             'items' => $items ?: [],
             'total' => $total,
             'pages' => $perPage > 0 ? (int) ceil($total / $perPage) : 0,
         ];
+    }
+
+    /**
+     * DISTINCT non-empty `token_standard` values currently present in
+     * the collections table. Used to populate the admin "Verify
+     * Collections" page's token-standard filter dropdown so new
+     * standards added by the indexer appear automatically.
+     *
+     * Bounded by an explicit LIMIT — there are only a handful of
+     * standards in existence (ERC721, ERC1155, SPL, CW721, …), so 50
+     * is well above any realistic cardinality but caps pathological
+     * cases (corrupted data, fuzzing).
+     *
+     * @return list<string>
+     */
+    public static function getDistinctTokenStandards(): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<string>|null $rows */
+        $rows = $wpdb->get_col(
+            "SELECT DISTINCT token_standard
+               FROM {$table}
+              WHERE token_standard IS NOT NULL AND token_standard <> ''
+              ORDER BY token_standard ASC
+              LIMIT 50"
+        );
+
+        return $rows ?: [];
     }
 
     /**

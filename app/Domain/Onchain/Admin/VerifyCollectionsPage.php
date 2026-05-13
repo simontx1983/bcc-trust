@@ -16,11 +16,13 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
+use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -31,6 +33,19 @@ final class VerifyCollectionsPage
     public const PAGE_SLUG  = 'bcc-verify-collections';
     public const NONCE_KEY  = 'bcc_verify_collections_nonce';
     public const NONCE_NAME = '_bcc_vc_nonce';
+
+    /**
+     * Chain slugs surfaced as quick-filter pills above the dropdown.
+     * Pills only render if the slug also appears in the active chains
+     * registry — a missing/disabled chain silently drops its pill
+     * rather than producing a broken link.
+     *
+     * Filterable via `bcc_verify_collections_pill_chains` for future
+     * tuning without code changes.
+     *
+     * @var list<string>
+     */
+    private const PILL_CHAIN_SLUGS = ['ethereum', 'solana', 'stargaze'];
 
     public static function register_page(): void
     {
@@ -52,14 +67,50 @@ final class VerifyCollectionsPage
 
         $notices = self::handlePost();
 
-        $page          = isset($_GET['paged']) ? max(1, (int) $_GET['paged']) : 1;
-        $selectedChain = isset($_GET['chain']) ? sanitize_text_field((string) $_GET['chain']) : '';
-        $listing       = CollectionRepository::listForAdminVerification(
+        $page                  = isset($_GET['paged']) ? max(1, (int) $_GET['paged']) : 1;
+        $selectedChain         = isset($_GET['chain']) ? sanitize_text_field((string) $_GET['chain']) : '';
+        $selectedTokenStandard = isset($_GET['token_standard'])
+            ? sanitize_text_field((string) $_GET['token_standard'])
+            : '';
+
+        $availableChains    = ChainRepository::getActive();
+        $availableStandards = CollectionRepository::getDistinctTokenStandards();
+
+        // Validate token_standard against the auto-derived whitelist
+        // before passing it on — defends against a malformed query
+        // string slipping a non-existent value into the SQL (it would
+        // be safely placeholdered either way, but rejecting unknowns
+        // keeps the dropdown's selected-state honest).
+        if ($selectedTokenStandard !== '' && !in_array($selectedTokenStandard, $availableStandards, true)) {
+            $selectedTokenStandard = '';
+        }
+
+        $listing = CollectionRepository::listForAdminVerification(
             $page,
             50,
-            $selectedChain !== '' ? $selectedChain : null
+            $selectedChain !== '' ? $selectedChain : null,
+            $selectedTokenStandard !== '' ? $selectedTokenStandard : null
         );
-        $availableChains = ChainRepository::getActive();
+
+        // Pill chains: intersection of PILL_CHAIN_SLUGS (filterable) and
+        // the active chains registry, in the configured order. A
+        // missing/disabled chain silently drops its pill.
+        /** @var list<string> $pillSlugs */
+        $pillSlugs = (array) apply_filters(
+            'bcc_verify_collections_pill_chains',
+            self::PILL_CHAIN_SLUGS
+        );
+        $availableChainsBySlug = [];
+        foreach ($availableChains as $chain) {
+            $availableChainsBySlug[(string) $chain->slug] = $chain;
+        }
+        $pillChains = [];
+        foreach ($pillSlugs as $slug) {
+            $slug = (string) $slug;
+            if (isset($availableChainsBySlug[$slug])) {
+                $pillChains[] = $availableChainsBySlug[$slug];
+            }
+        }
         ?>
         <div class="wrap">
             <h1>Verify Collections</h1>
@@ -75,21 +126,82 @@ final class VerifyCollectionsPage
                 </div>
             <?php endforeach; ?>
 
-            <form method="get" action="" style="margin:0 0 12px 0;">
-                <input type="hidden" name="page" value="<?php echo esc_attr(self::PAGE_SLUG); ?>">
-                <label for="bcc-vc-chain-filter" style="margin-right:6px;">
-                    <strong>Chain:</strong>
-                </label>
-                <select name="chain" id="bcc-vc-chain-filter" onchange="this.form.submit()">
-                    <option value="">All chains</option>
-                    <?php foreach ($availableChains as $chainOption): ?>
-                        <option value="<?php echo esc_attr((string) $chainOption->slug); ?>"
-                            <?php selected($selectedChain, (string) $chainOption->slug); ?>>
-                            <?php echo esc_html((string) $chainOption->name); ?>
-                            (<?php echo esc_html((string) $chainOption->chain_type); ?>)
-                        </option>
+            <?php if ($pillChains !== []): ?>
+                <div style="margin:0 0 10px 0;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                    <strong style="margin-right:4px;">Quick filter:</strong>
+                    <?php
+                    // "All" pill — clears the chain filter while preserving
+                    // other filter state (token_standard).
+                    $allUrl = add_query_arg(
+                        ['page' => self::PAGE_SLUG, 'chain' => false, 'paged' => false],
+                        admin_url('admin.php')
+                    );
+                    if ($selectedTokenStandard !== '') {
+                        $allUrl = add_query_arg('token_standard', $selectedTokenStandard, $allUrl);
+                    }
+                    $allClass = $selectedChain === '' ? 'button button-primary' : 'button';
+                    ?>
+                    <a href="<?php echo esc_url($allUrl); ?>" class="<?php echo esc_attr($allClass); ?>">All</a>
+                    <?php foreach ($pillChains as $pillChain):
+                        $pillSlug   = (string) $pillChain->slug;
+                        $isActive   = $selectedChain === $pillSlug;
+                        // Clicking the active pill clears the filter; clicking
+                        // an inactive pill switches to it. Preserve token_standard.
+                        $pillUrl = add_query_arg(
+                            [
+                                'page'  => self::PAGE_SLUG,
+                                'chain' => $isActive ? false : $pillSlug,
+                                'paged' => false,
+                            ],
+                            admin_url('admin.php')
+                        );
+                        if ($selectedTokenStandard !== '') {
+                            $pillUrl = add_query_arg('token_standard', $selectedTokenStandard, $pillUrl);
+                        }
+                        $pillClass = $isActive ? 'button button-primary' : 'button';
+                        ?>
+                        <a href="<?php echo esc_url($pillUrl); ?>"
+                           class="<?php echo esc_attr($pillClass); ?>"
+                           aria-pressed="<?php echo $isActive ? 'true' : 'false'; ?>">
+                            <?php echo esc_html((string) $pillChain->name); ?>
+                        </a>
                     <?php endforeach; ?>
-                </select>
+                </div>
+            <?php endif; ?>
+
+            <form method="get" action="" style="margin:0 0 12px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                <input type="hidden" name="page" value="<?php echo esc_attr(self::PAGE_SLUG); ?>">
+                <span>
+                    <label for="bcc-vc-chain-filter" style="margin-right:6px;">
+                        <strong>Chain:</strong>
+                    </label>
+                    <select name="chain" id="bcc-vc-chain-filter" onchange="this.form.submit()">
+                        <option value="">All chains</option>
+                        <?php foreach ($availableChains as $chainOption): ?>
+                            <option value="<?php echo esc_attr((string) $chainOption->slug); ?>"
+                                <?php selected($selectedChain, (string) $chainOption->slug); ?>>
+                                <?php echo esc_html((string) $chainOption->name); ?>
+                                (<?php echo esc_html((string) $chainOption->chain_type); ?>)
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </span>
+                <?php if ($availableStandards !== []): ?>
+                    <span>
+                        <label for="bcc-vc-token-filter" style="margin-right:6px;">
+                            <strong>Token standard:</strong>
+                        </label>
+                        <select name="token_standard" id="bcc-vc-token-filter" onchange="this.form.submit()">
+                            <option value="">All standards</option>
+                            <?php foreach ($availableStandards as $standard): ?>
+                                <option value="<?php echo esc_attr($standard); ?>"
+                                    <?php selected($selectedTokenStandard, $standard); ?>>
+                                    <?php echo esc_html($standard); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </span>
+                <?php endif; ?>
                 <noscript>
                     <button type="submit" class="button">Filter</button>
                 </noscript>
@@ -100,6 +212,7 @@ final class VerifyCollectionsPage
                 <input type="hidden" name="bcc_vc_action" value="save">
                 <input type="hidden" name="paged" value="<?php echo (int) $page; ?>">
                 <input type="hidden" name="chain" value="<?php echo esc_attr($selectedChain); ?>">
+                <input type="hidden" name="token_standard" value="<?php echo esc_attr($selectedTokenStandard); ?>">
 
                 <p class="submit" style="margin:0 0 12px 0;">
                     <button type="submit" class="button button-primary">Save Verification Changes</button>
@@ -115,12 +228,15 @@ final class VerifyCollectionsPage
                             <th>Chain</th>
                             <th>Contract</th>
                             <th style="width:120px;">Holders</th>
+                            <th style="width:140px;" title="Members of the auto-provisioned PeepSo group (only meaningful once verified).">
+                                Members in group
+                            </th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php if ($listing['items'] === []): ?>
                             <tr>
-                                <td colspan="6"><em>No collections synced yet. Connect a wallet to populate this list.</em></td>
+                                <td colspan="7"><em>No collections synced yet. Connect a wallet to populate this list.</em></td>
                             </tr>
                         <?php else: foreach ($listing['items'] as $row): ?>
                             <?php
@@ -172,6 +288,33 @@ final class VerifyCollectionsPage
                                     <?php endif; ?>
                                 </td>
                                 <td><?php echo number_format_i18n((int) ($row->unique_holders ?? 0)); ?></td>
+                                <td>
+                                    <?php
+                                    // Reuse-join: collection (chain_id, contract) →
+                                    // PeepSo group post id → member count.
+                                    // Cell semantics:
+                                    //   unverified         → "—"           (no group exists)
+                                    //   verified, no group → "pending"     (cron hasn't provisioned yet)
+                                    //   verified + group   → number        (current member count)
+                                    // N+1 caveat: 50 collections × 2 queries per row.
+                                    // Acceptable on this admin-only page; revisit if
+                                    // perf bites or perPage grows materially.
+                                    if ((int) $row->is_verified !== 1) {
+                                        echo '<span style="color:#999;">&mdash;</span>';
+                                    } else {
+                                        $groupId = GatedGroupRepository::findGroupForCollection(
+                                            (int) $row->chain_id,
+                                            (string) $row->contract_address
+                                        );
+                                        if ($groupId === null) {
+                                            echo '<span style="color:#999;font-size:11px;">pending</span>';
+                                        } else {
+                                            $count = PeepSoGroupRepository::countGroupMembers($groupId);
+                                            echo number_format_i18n($count);
+                                        }
+                                    }
+                                    ?>
+                                </td>
                             </tr>
                         <?php endforeach; endif; ?>
                     </tbody>
