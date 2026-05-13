@@ -19,6 +19,17 @@ if (!defined('ABSPATH')) {
  * relies on this shape for envelope-vs-error discrimination. Without
  * the envelope, the client throws bcc_invalid_envelope on every read.
  *
+ * Legacy shape (recognized, not produced):
+ *   bcc-trust/v1 also accepts the older { success: true, data: ... }
+ *   envelope emitted directly via WP_REST_Response by several
+ *   trust-era handlers (TrustRestController, XController,
+ *   GitHubController, AdminStatsController, UserStatusController).
+ *   The frontend's bcc-trust-client.ts isTrustEnvelope() understands
+ *   that shape; this wrapper recognizes it in isAlreadyEnveloped()
+ *   so the response is not nest-wrapped into
+ *   { data: { success: true, data: ... }, _meta: ... } — which would
+ *   silently fail every trust client call.
+ *
  * This class hooks rest_post_dispatch to wrap responses uniformly.
  * Endpoints that already return an enveloped shape are detected and
  * passed through unchanged (idempotent).
@@ -101,16 +112,48 @@ final class Envelope
             return false;
         }
 
-        // Success envelope marker
+        // Canonical success envelope marker: { data, _meta }.
         if (array_key_exists('data', $data) && array_key_exists('_meta', $data)) {
             return true;
         }
 
-        // Error envelope marker
+        // Canonical error envelope marker: { error: { code, message, status, ... } }.
         if (
             isset($data['error'])
             && is_array($data['error'])
             && isset($data['error']['code'], $data['error']['message'], $data['error']['status'])
+        ) {
+            return true;
+        }
+
+        // Legacy bcc-trust/v1 success envelope: { success: true, data: ... }.
+        //
+        // Predates the canonical { data, _meta } shape. Several handlers
+        // (TrustRestController, XController, GitHubController,
+        // AdminStatsController, UserStatusController) historically emit
+        // this directly via WP_REST_Response. Recognize so wrap() does
+        // not nest-wrap into { data: { success: true, data: ... }, _meta }
+        // — which is the live regression this patch fixes (see commit log
+        // for 2026-05-13 Phase α + the operational audit's V-07/V-29
+        // entry). The frontend's bcc-trust-client.ts isTrustEnvelope()
+        // expects this exact shape at the top level.
+        //
+        // Strictly bounded match: requires the literal boolean `true` on
+        // `success`, a sibling `data` key, AND the absence of `_meta`.
+        // This avoids accidental recognition of any future endpoint that
+        // happens to include a `success` field inside its own payload —
+        // the canonical envelope always carries `_meta`, so its presence
+        // is the disambiguator.
+        //
+        // Do NOT loosen this rule. New endpoints should emit the
+        // canonical { data, _meta } shape via ApiResponse::ok(); the
+        // legacy shape is recognized for backwards compatibility only
+        // and is not a contract option for new code.
+        if (
+            array_key_exists('success', $data)
+            && $data['success'] === true
+            && array_key_exists('data', $data)
+            && !array_key_exists('_meta', $data)
         ) {
             return true;
         }
