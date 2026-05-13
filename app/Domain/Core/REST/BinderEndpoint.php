@@ -59,11 +59,13 @@ final class BinderEndpoint
     private const DEFAULT_PAGE_SIZE = 20;
     private const MAX_PAGE_SIZE     = 50;
 
-    /** Per-user pull throttle (generous — users may pull bursts in onboarding). */
-    private const PULL_RATE_LIMIT = 30;
-    /** Per-user unpull throttle. */
-    private const UNPULL_RATE_LIMIT = 30;
-    private const RATE_LIMIT_WINDOW = 60;
+    // Pull / unpull rate limits migrated 2026-05-13 from hardcoded
+    // class constants (Throttle::allow primitive) to the bcc-trust
+    // RateLimiter buckets `pull` and `unpull`. The new path inherits
+    // trust-tier multipliers + per-IP+per-user dual-bucket sliding
+    // window, so legitimate batch curation by Trusted/Elite operators
+    // isn't punished and subnet-coordinated farming can't multiply
+    // via sock-puppets. Limits live in includes/config/limits.php.
 
     public static function register(): void
     {
@@ -208,7 +210,7 @@ final class BinderEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        if (!\BCC\Core\Security\Throttle::allow('pull_card', self::PULL_RATE_LIMIT, self::RATE_LIMIT_WINDOW)) {
+        if (!\BCC\Trust\Core\Security\RateLimiter::allow('pull')) {
             return ApiResponse::error('bcc_rate_limited', 'Too many pulls. Please wait.', 429);
         }
 
@@ -243,7 +245,7 @@ final class BinderEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        if (!\BCC\Core\Security\Throttle::allow('unpull_card', self::UNPULL_RATE_LIMIT, self::RATE_LIMIT_WINDOW)) {
+        if (!\BCC\Trust\Core\Security\RateLimiter::allow('unpull')) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
         }
 

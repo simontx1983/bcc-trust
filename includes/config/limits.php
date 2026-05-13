@@ -42,6 +42,32 @@ define('BCC_TRUST_RATE_WINDOW_API', 60);
 define('BCC_TRUST_RATE_LIMIT_STATUS_POST', 5);
 define('BCC_TRUST_RATE_WINDOW_STATUS_POST', 120);
 
+// Card-pull / unpull throttle (BinderEndpoint pull / unpull).
+//
+// Scale-hardening pass (2026-05-13): the binder was previously gated
+// by bcc-core's Throttle::allow primitive with hardcoded class constants
+// at BinderEndpoint. Promoted to bcc-trust RateLimiter so it inherits
+// (a) trust-tier multipliers — Elite at 1.5×, Trusted at 1.3× — so
+// legitimate batch curation by high-rep operators isn't punished, and
+// (b) per-IP+per-user dual-bucket sliding window so subnet-coordinated
+// pull-farming can't multiply via sock-puppets on one /24.
+//
+// 30/60s baseline is intentionally generous — a curator browsing 30
+// cards per minute is one every two seconds, which is comfortable
+// human cadence. A Trusted reviewer doing batch follow-up gets ~39/60s;
+// an Elite gets ~45/60s. Anonymous callers can't pull (auth check
+// fires first in the endpoint).
+//
+// Anti-watch-farming rationale: the floor on bulk-pull is set by
+// these constants. At 30/60s = max 43,200 pulls/24h for a baseline
+// user — well above any legitimate use, well below a scripted attack
+// generating mass first_watcher events on the recipient side.
+define('BCC_TRUST_RATE_LIMIT_PULL', 30);
+define('BCC_TRUST_RATE_WINDOW_PULL', 60);
+
+define('BCC_TRUST_RATE_LIMIT_UNPULL', 30);
+define('BCC_TRUST_RATE_WINDOW_UNPULL', 60);
+
 // ======================================================
 // NOTIFICATIONS (§I1)
 // ======================================================

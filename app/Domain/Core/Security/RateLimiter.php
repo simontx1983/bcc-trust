@@ -55,6 +55,12 @@ class RateLimiter {
                 'message' => ['limit' => BCC_TRUST_RATE_LIMIT_MESSAGE, 'window' => BCC_TRUST_RATE_WINDOW_MESSAGE],
                 'login'   => ['limit' => BCC_TRUST_RATE_LIMIT_LOGIN,   'window' => BCC_TRUST_RATE_WINDOW_LOGIN],
                 'api'     => ['limit' => BCC_TRUST_RATE_LIMIT_API,     'window' => BCC_TRUST_RATE_WINDOW_API],
+                // Binder pulls/unpulls — anti-watch-farming. Tier
+                // multipliers in getAdjustedLimit() automatically grant
+                // Trusted/Elite operators higher caps for legitimate
+                // batch curation.
+                'pull'    => ['limit' => BCC_TRUST_RATE_LIMIT_PULL,    'window' => BCC_TRUST_RATE_WINDOW_PULL],
+                'unpull'  => ['limit' => BCC_TRUST_RATE_LIMIT_UNPULL,  'window' => BCC_TRUST_RATE_WINDOW_UNPULL],
             ];
         }
         return self::$limits;
