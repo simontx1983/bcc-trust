@@ -36,6 +36,7 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Repositories\CommentRepository;
+use BCC\Trust\Core\Services\AuthorBadgeResolver;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
@@ -96,7 +97,8 @@ final class CommentService
 
     public function __construct(
         private readonly CommentRepository $commentRepo,
-        private readonly MentionOverlayService $mentionOverlay
+        private readonly MentionOverlayService $mentionOverlay,
+        private readonly AuthorBadgeResolver $authorBadgeResolver
     ) {
     }
 
@@ -146,11 +148,30 @@ final class CommentService
             $limit
         );
 
+        // Batch-resolve author badge fields (card_tier, tier_label,
+        // rank_label, reputation_tier) for every author on the page in
+        // ONE query — avoids N+1 inside shapeCommentRow when a page
+        // has up to PER_PAGE_MAX=50 comments. The map is empty when
+        // there are no rows; shapeCommentRow falls through with absent
+        // fields per its contract.
+        $authorIds = [];
+        foreach ($rows as $row) {
+            $aid = (int) $row->author_id;
+            if ($aid > 0) {
+                $authorIds[$aid] = true;
+            }
+        }
+        $badgeMap = $authorIds === []
+            ? []
+            : $this->authorBadgeResolver->resolveForUsers(array_keys($authorIds));
+
         $items     = [];
         $lastTime  = null;
         $lastActId = null;
         foreach ($rows as $row) {
-            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId);
+            $aid   = (int) $row->author_id;
+            $badge = $badgeMap[$aid] ?? null;
+            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge);
             $lastTime  = (string) $row->posted_at;
             $lastActId = (int) $row->act_id;
         }
@@ -277,7 +298,11 @@ final class CommentService
             return ['error' => 'bcc_unavailable', 'message' => 'Comment was saved but could not be confirmed. Refresh to see it.'];
         }
 
-        $shaped = $this->shapeCommentRow($newRow, $authorId, $feedId);
+        // Resolve the new author's badge fields directly — single-row
+        // path, so the resolver's singleton helper is the right shape
+        // (vs. an array detour that batchers don't need).
+        $badge  = $this->authorBadgeResolver->resolveForUser($authorId);
+        $shaped = $this->shapeCommentRow($newRow, $authorId, $feedId, $badge);
 
         // §A3 event — single emission per state change. Subscribers
         // (NotificationDispatcher, future analytics) attach independently.
@@ -392,30 +417,61 @@ final class CommentService
      * view-model. Per §A2 (no business logic on frontend), every
      * field on the response is server-resolved.
      *
+     * `$badge` carries the pre-resolved rank-chip fields per author
+     * (reputation_tier, card_tier, tier_label, rank_label). Sprint 1
+     * cohesion: comment rows now light the same AuthorBadge chip the
+     * feed surfaces show. The fields are emitted on `author` when
+     * `$badge` is non-null; missing-badge rows (resolver lookup
+     * miss — should not happen on a normal page since we pre-fetch
+     * the whole page in one query) gracefully degrade to the
+     * pre-Sprint-1 shape, and the frontend's AuthorBadge suppresses
+     * the chip line when rank_label is absent.
+     *
      * @phpstan-param CommentRow $row Repository row matching the CommentRow shape.
      * @param string $parentFeedId  The parent post's `feed_<act_id>` string;
      *                              echoed back per §3.5 so the frontend can
      *                              re-resolve the parent without an extra
      *                              round-trip.
+     * @param array{
+     *   reputation_tier: string,
+     *   card_tier: string|null,
+     *   tier_label: string|null,
+     *   rank_label: string,
+     * }|null $badge  Pre-resolved badge fields (see AuthorBadgeResolver).
      * @return array<string, mixed>
      */
-    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId): array
+    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null): array
     {
         $authorId = (int) $row->author_id;
         $authorHandle = (string) $row->author_login;
         $displayName  = (string) $row->author_display_name;
         $body         = (string) $row->body;
 
+        $author = [
+            'id'           => $authorId,
+            'handle'       => $authorHandle,
+            'display_name' => $displayName !== '' ? $displayName : $authorHandle,
+            'avatar_url'   => self::resolveAvatarUrl($authorId),
+        ];
+        if ($badge !== null) {
+            // Server-resolved per §A2; the frontend never derives
+            // card_tier from reputation_tier client-side.
+            $author['reputation_tier'] = $badge['reputation_tier'];
+            $author['card_tier']       = $badge['card_tier'];
+            $author['tier_label']      = $badge['tier_label'];
+            // rank_label is `''` (empty string) when RankCatalog
+            // doesn't resolve a label — the FE AuthorBadge treats
+            // empty as "no chip"; keep as nullable-string equivalent
+            // on the wire by emitting empty string (matches the
+            // existing rank_label contract on UserViewService::getSummary).
+            $author['rank_label']      = $badge['rank_label'];
+        }
+
         return [
             'id'          => 'comment_' . (int) $row->act_id,
             'comment_id'  => 'comment_' . (int) $row->act_id,
             'feed_id'     => $parentFeedId,
-            'author'      => [
-                'id'           => $authorId,
-                'handle'       => $authorHandle,
-                'display_name' => $displayName !== '' ? $displayName : $authorHandle,
-                'avatar_url'   => self::resolveAvatarUrl($authorId),
-            ],
+            'author'      => $author,
             'body'        => $body,
             // §3.3.12 — overlay extracted from raw body. Always present
             // (`[]` when no tokens) for shape stability.

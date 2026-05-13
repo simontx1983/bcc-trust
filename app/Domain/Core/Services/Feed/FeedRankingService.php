@@ -45,6 +45,7 @@ use BCC\Trust\Core\Repositories\PullBatchRepository;
 use BCC\Trust\Core\Repositories\PullMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\AuthorBadgeResolver;
 use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
@@ -76,7 +77,8 @@ final class FeedRankingService
         private readonly PhotoRepository $photoRepo,
         private readonly PhotoAltRepository $photoAltRepo,
         private readonly GifRepository $gifRepo,
-        private readonly MentionOverlayService $mentionOverlay
+        private readonly MentionOverlayService $mentionOverlay,
+        private readonly AuthorBadgeResolver $authorBadgeResolver
     ) {
     }
 
@@ -110,6 +112,8 @@ final class FeedRankingService
         // skips viewer_reaction (always null for anon).
         $payload['items'] = $this->hydrateReactions($payload['items'], 0);
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
+        $payload['items'] = $this->hydrateAuthorRanks($payload['items']);
+        $payload['items'] = $this->hydrateSocialProofReactors($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], 0);
         $payload['items'] = $this->hydrateGroupContexts($payload['items']);
         $payload['items'] = $this->hydrateCommentCounts($payload['items'], 0);
@@ -160,6 +164,8 @@ final class FeedRankingService
         $payload['items'] = $this->hydrateBodies($payload['items']);
         $payload['items'] = $this->hydrateReactions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
+        $payload['items'] = $this->hydrateAuthorRanks($payload['items']);
+        $payload['items'] = $this->hydrateSocialProofReactors($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateGroupContexts($payload['items']);
         $payload['items'] = $this->hydrateCommentCounts($payload['items'], $viewerId);
@@ -210,6 +216,8 @@ final class FeedRankingService
         $payload['items'] = $this->hydrateBodies($payload['items']);
         $payload['items'] = $this->hydrateReactions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
+        $payload['items'] = $this->hydrateAuthorRanks($payload['items']);
+        $payload['items'] = $this->hydrateSocialProofReactors($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateGroupContexts($payload['items']);
         $payload['items'] = $this->hydrateCommentCounts($payload['items'], $viewerId);
@@ -263,6 +271,8 @@ final class FeedRankingService
         $payload['items'] = $this->hydrateBodies($payload['items']);
         $payload['items'] = $this->hydrateReactions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
+        $payload['items'] = $this->hydrateAuthorRanks($payload['items']);
+        $payload['items'] = $this->hydrateSocialProofReactors($payload['items']);
         $payload['items'] = self::hydrateViewerPermissions($payload['items'], $viewerId);
         $payload['items'] = $this->hydrateGroupContexts($payload['items']);
         $payload['items'] = $this->hydrateCommentCounts($payload['items'], $viewerId);
@@ -924,6 +934,247 @@ final class FeedRankingService
             $hydrated[] = $item;
         }
         return $hydrated;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Author rank-chip hydration (Sprint 1 Identity Grammar cohesion)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Overlay rank-chip fields on every author block: reputation_tier,
+     * card_tier, tier_label, rank_label. Server-resolved per §A2 so the
+     * frontend's AuthorBadge never derives card_tier from
+     * reputation_tier client-side.
+     *
+     * This bcc-trust layer is where the chip fields appear — bcc-core's
+     * ActivityFeedService::hydrateAuthors emits card_tier:null /
+     * rank_label:null sentinels (it can't see the trust read model)
+     * and this hydrator overwrites them with real values. Same
+     * pattern as `hydrateAuthorBadges` (operator chip) — bcc-trust
+     * is the only place that knows about trust state.
+     *
+     * Bounded: one batched query inside AuthorBadgeResolver
+     * (ReputationRepository::getTiersForUsers) regardless of items
+     * count; feed page cap is 50, comment drawer cap is 50.
+     *
+     * NOTE: ActivityFeedService emits `author.id` (the user id). The
+     * sibling `hydrateAuthorBadges` reads `author.user_id` which is a
+     * key-name inconsistency — flagged separately as deferred work.
+     * This hydrator reads from `id` to match what's actually on the
+     * wire today.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private function hydrateAuthorRanks(array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        // Collect distinct positive author ids from the payload's
+        // emitted `author.id` field.
+        $authorIds = [];
+        foreach ($items as $item) {
+            $author = is_array($item['author'] ?? null) ? $item['author'] : [];
+            $uid    = is_int($author['id'] ?? null) ? $author['id'] : 0;
+            if ($uid > 0) {
+                $authorIds[$uid] = true;
+            }
+        }
+        if ($authorIds === []) {
+            return $items;
+        }
+
+        $badgeMap = $this->authorBadgeResolver->resolveForUsers(array_keys($authorIds));
+
+        $hydrated = [];
+        foreach ($items as $item) {
+            $author = is_array($item['author'] ?? null) ? $item['author'] : [];
+            $uid    = is_int($author['id'] ?? null) ? $author['id'] : 0;
+            if ($uid > 0 && isset($badgeMap[$uid])) {
+                $badge = $badgeMap[$uid];
+                $author['reputation_tier'] = $badge['reputation_tier'];
+                $author['card_tier']       = $badge['card_tier'];
+                $author['tier_label']      = $badge['tier_label'];
+                $author['rank_label']      = $badge['rank_label'];
+                $item['author'] = $author;
+            }
+            $hydrated[] = $item;
+        }
+        return $hydrated;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Social-proof reactor hydration (Sprint 1 — stacked-avatar rail)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Attach up to 3 most-recent unique reactors to each item's
+     * `social_proof` block as `recent_reactors[]`. Drives the stacked
+     * <Avatar size="xs" /> faces on ReactionRail (replaces the
+     * text-only "X and 3 others reacted" headline as primary signal).
+     *
+     * One batched query (PeepSoReactionRepository::
+     * recentReactorIdsByActIds) using ROW_NUMBER() OVER PARTITION
+     * to bound the row count at `count(actIds) × 3` — capped at
+     * 50 × 3 = 150 rows per feed page. Per §4 (bounded queries) the
+     * LIMIT is implicit in the partitioning function.
+     *
+     * Hydrates identity (handle/display_name/avatar_url) via
+     * get_users batched call + get_user_meta for the bcc_handle.
+     *
+     * Defensive posture: an act with no reactions stays without a
+     * `recent_reactors` field — absence signals "no reactors yet" to
+     * the frontend, which gracefully falls back to the headline (or
+     * to nothing when headline is also absent). Items that already
+     * carry a `social_proof.headline` get `recent_reactors` merged in.
+     * Items with no social_proof at all get `social_proof: {
+     * headline: null, recent_reactors: [...] }` constructed.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private function hydrateSocialProofReactors(array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        // Extract act_ids the same way hydrateReactions does — from
+        // the normalized 'feed_<actId>' id field.
+        $actIds  = [];
+        $actByItem = [];
+        foreach ($items as $idx => $item) {
+            $rawId = is_string($item['id'] ?? null) ? $item['id'] : '';
+            if ($rawId === '' || strncmp($rawId, 'feed_', 5) !== 0) {
+                continue;
+            }
+            $actId = (int) substr($rawId, 5);
+            if ($actId <= 0) {
+                continue;
+            }
+            $actIds[]            = $actId;
+            $actByItem[$idx]     = $actId;
+        }
+        if ($actIds === []) {
+            return $items;
+        }
+
+        $reactorsByAct = $this->reactionRepo->recentReactorIdsByActIds($actIds, 3);
+        if ($reactorsByAct === []) {
+            return $items;
+        }
+
+        // Collect all distinct reactor user_ids across the page so we
+        // can batch the identity lookup. Cap is 50 acts × 3 = 150
+        // reactors max — well under any get_users practical limit.
+        $userIdSet = [];
+        foreach ($reactorsByAct as $uids) {
+            foreach ($uids as $uid) {
+                if ($uid > 0) {
+                    $userIdSet[$uid] = true;
+                }
+            }
+        }
+        if ($userIdSet === []) {
+            return $items;
+        }
+        $reactorUserIds = array_keys($userIdSet);
+
+        $identityByUser = self::hydrateReactorIdentities($reactorUserIds);
+
+        $hydrated = [];
+        foreach ($items as $idx => $item) {
+            $actId = $actByItem[$idx] ?? 0;
+            $uids  = $actId > 0 ? ($reactorsByAct[$actId] ?? []) : [];
+            if ($uids === []) {
+                $hydrated[] = $item;
+                continue;
+            }
+
+            $reactors = [];
+            foreach ($uids as $uid) {
+                $row = $identityByUser[$uid] ?? null;
+                if ($row === null) {
+                    continue;
+                }
+                $reactors[] = $row;
+            }
+            if ($reactors === []) {
+                $hydrated[] = $item;
+                continue;
+            }
+
+            $existing = is_array($item['social_proof'] ?? null) ? $item['social_proof'] : null;
+            if ($existing === null) {
+                $item['social_proof'] = [
+                    'headline'        => null,
+                    'recent_reactors' => $reactors,
+                ];
+            } else {
+                $existing['recent_reactors'] = $reactors;
+                $item['social_proof'] = $existing;
+            }
+
+            $hydrated[] = $item;
+        }
+        return $hydrated;
+    }
+
+    /**
+     * Batch-hydrate reactor identity (handle/display_name/avatar_url)
+     * from a list of user_ids. Single get_users() roundtrip + one
+     * meta-cache prime; per-user get_user_meta reads hit memory after
+     * the prime fires.
+     *
+     * Each returned row matches the §2.2 SocialProof reactor shape
+     * the frontend's FeedSocialProofReactor type encodes.
+     *
+     * @param list<int> $userIds
+     * @return array<int, array{handle: string, display_name: string, avatar_url: string}>
+     */
+    private static function hydrateReactorIdentities(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $users = get_users([
+            'include' => $userIds,
+            'fields'  => ['ID', 'display_name', 'user_login'],
+            'number'  => count($userIds),
+        ]);
+
+        // Prime the user_meta cache for bcc_handle reads — one query
+        // instead of one per user.
+        update_meta_cache('user', array_map(static fn ($u) => (int) $u->ID, $users));
+
+        $out = [];
+        foreach ($users as $u) {
+            $id = (int) $u->ID;
+            if ($id <= 0) {
+                continue;
+            }
+            $handleMeta = get_user_meta($id, 'bcc_handle', true);
+            $handle = is_string($handleMeta) && $handleMeta !== ''
+                ? $handleMeta
+                : (string) $u->user_login;
+
+            $displayName = is_string($u->display_name) && $u->display_name !== ''
+                ? $u->display_name
+                : (string) $u->user_login;
+
+            $avatarUrl = get_avatar_url($id);
+            $avatarUrl = is_string($avatarUrl) ? $avatarUrl : '';
+
+            $out[$id] = [
+                'handle'       => $handle,
+                'display_name' => $displayName,
+                'avatar_url'   => $avatarUrl,
+            ];
+        }
+        return $out;
     }
 
     // ──────────────────────────────────────────────────────────────────

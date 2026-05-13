@@ -472,7 +472,16 @@ final class Plugin
     {
         return $this->commentService ??= new Services\CommentService(
             $this->commentRepository(),
-            $this->mentionOverlayService()
+            $this->mentionOverlayService(),
+            $this->authorBadgeResolver()
+        );
+    }
+
+    private ?Services\AuthorBadgeResolver $authorBadgeResolver = null;
+    public function authorBadgeResolver(): Services\AuthorBadgeResolver
+    {
+        return $this->authorBadgeResolver ??= new Services\AuthorBadgeResolver(
+            $this->reputationRepository()
         );
     }
 
@@ -547,7 +556,8 @@ final class Plugin
             $this->photoRepository(),
             $this->photoAltRepository(),
             $this->gifRepository(),
-            $this->mentionOverlayService()
+            $this->mentionOverlayService(),
+            $this->authorBadgeResolver()
         );
     }
 
@@ -577,8 +587,15 @@ final class Plugin
         return $this->binderService ??= new Services\BinderService(
             $this->binderRepository(),
             $this->pullMetaRepository(),
-            $this->reputationRepository()
+            $this->reputationRepository(),
+            $this->pageFollowRepository()
         );
+    }
+
+    private ?Repositories\PageFollowRepository $pageFollowRepository = null;
+    public function pageFollowRepository(): Repositories\PageFollowRepository
+    {
+        return $this->pageFollowRepository ??= new Repositories\PageFollowRepository();
     }
 
     private ?Services\PostsService $postsService = null;

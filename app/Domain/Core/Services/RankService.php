@@ -39,9 +39,31 @@ final class RankService
      * Reputation tiers that promote a user to Journeyman in the
      * auto-derived rank. Caution and risky stay at Apprentice.
      *
+     * Public so batched view-model assemblers (e.g. AuthorBadgeResolver
+     * for feed/comment author chips) can share one source of truth
+     * for the tier→rank mapping without re-instantiating RankService
+     * + going back to the DB for tier they've already fetched in bulk.
+     *
      * @var list<string>
      */
-    private const PROMOTING_TIERS = ['neutral', 'trusted', 'elite'];
+    public const PROMOTING_TIERS = ['neutral', 'trusted', 'elite'];
+
+    /**
+     * Pure tier → auto-derived rank slug. Public + static so callers
+     * with a pre-fetched tier (batched author hydration on feed pages)
+     * can map without round-tripping through autoDerivedRank() which
+     * re-queries the reputation table per user.
+     *
+     * Mirrors `autoDerivedRank()` for unknown tiers (caution/risky/'')
+     * by falling back to Apprentice — the catalog's default.
+     */
+    public static function deriveRankFromTier(string $tier): string
+    {
+        if (in_array($tier, self::PROMOTING_TIERS, true)) {
+            return RankCatalog::RANK_JOURNEYMAN;
+        }
+        return RankCatalog::RANK_APPRENTICE;
+    }
 
     private UserRankRepository $rankRepository;
     private ReputationRepository $reputationRepository;
@@ -64,12 +86,7 @@ final class RankService
         if ($userId <= 0) {
             return RankCatalog::RANK_APPRENTICE;
         }
-
-        $tier = $this->reputationRepository->getTier($userId);
-        if (in_array($tier, self::PROMOTING_TIERS, true)) {
-            return RankCatalog::RANK_JOURNEYMAN;
-        }
-        return RankCatalog::RANK_APPRENTICE;
+        return self::deriveRankFromTier($this->reputationRepository->getTier($userId));
     }
 
     /**

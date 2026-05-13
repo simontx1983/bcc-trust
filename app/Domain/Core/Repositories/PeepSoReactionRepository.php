@@ -327,6 +327,97 @@ final class PeepSoReactionRepository
      * or null when they haven't reacted. Single-row lookup keyed on
      * the unique (reaction_act_id, reaction_user_id) pair.
      */
+    /**
+     * Most-recent unique reactors per activity, for the social-proof
+     * stacked-avatar rail (Sprint 1 Identity Grammar — drives the
+     * 2-3 <Avatar size="xs" /> faces on each FeedItem's reaction
+     * rail).
+     *
+     * Uses MySQL 8 window functions to bound row count at
+     * `count(actIds) × $perActLimit` — feed page cap is 50, default
+     * `$perActLimit` is 3, so worst case is 150 rows per call.
+     *
+     * "Most recent" is by latest `reaction_timestamp` per
+     * (reaction_act_id, reaction_user_id). A user who reacts then
+     * switches reaction keeps one slot at their LATEST timestamp;
+     * the GROUP BY collapses the multi-reaction history into one
+     * distinct-reactor row per act.
+     *
+     * Returns nested arrays: outer keyed by act_id, inner is a list
+     * of user_ids in newest-first order. Activities with zero
+     * reactions are absent from the outer map.
+     *
+     * Bounded: explicit IN(...) over caller-provided act_ids
+     * (caller caps at 50), window function caps per-act at
+     * $perActLimit. Compliant with §4 bounded-queries rule.
+     *
+     * @param list<int> $actIds
+     * @param int       $perActLimit 1-10 sane range; defaults to 3.
+     * @return array<int, list<int>> act_id → newest-first reactor user_ids
+     */
+    public function recentReactorIdsByActIds(array $actIds, int $perActLimit = 3): array
+    {
+        if ($actIds === []) {
+            return [];
+        }
+        $perActLimit = max(1, min(10, $perActLimit));
+
+        // Dedup + bound + clean. Same defense-in-depth as
+        // countsByActIds — guards against unbounded input from a
+        // future caller that bypasses the page cap.
+        $ids = [];
+        foreach ($actIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $idList = implode(',', array_keys($ids));
+
+        global $wpdb;
+        $table = self::table();
+
+        // Window function caps the per-partition row count cleanly.
+        // The inner GROUP BY collapses (act, user) pairs to a single
+        // row keyed on MAX(timestamp) — so a reactor who switched
+        // their reaction still counts once, at their latest moment.
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT reaction_act_id, reaction_user_id, last_at
+               FROM (
+                 SELECT reaction_act_id,
+                        reaction_user_id,
+                        MAX(reaction_timestamp) AS last_at,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY reaction_act_id
+                          ORDER BY MAX(reaction_timestamp) DESC, reaction_user_id ASC
+                        ) AS rn
+                   FROM {$table}
+                  WHERE reaction_act_id IN ({$idList})
+                    AND reaction_user_id > 0
+                  GROUP BY reaction_act_id, reaction_user_id
+               ) ranked
+              WHERE rn <= %d",
+            $perActLimit
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $actId = (int) $row->reaction_act_id;
+            $uid   = (int) $row->reaction_user_id;
+            if ($actId <= 0 || $uid <= 0) {
+                continue;
+            }
+            if (!isset($out[$actId])) {
+                $out[$actId] = [];
+            }
+            $out[$actId][] = $uid;
+        }
+        return $out;
+    }
+
     public function viewerReactionForActId(int $actId, int $viewerId): ?int
     {
         if ($actId <= 0 || $viewerId <= 0) {

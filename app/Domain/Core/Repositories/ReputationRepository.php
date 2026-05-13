@@ -483,6 +483,60 @@ class ReputationRepository {
     }
 
     /**
+     * Batched form of `getTier()` — resolve reputation tiers for many
+     * users in a single SELECT. Used by feed/comment view-model
+     * assemblers (FeedRankingService::hydrateAuthorRanks,
+     * CommentService::shapeCommentRow) to avoid N+1 across a page of
+     * authors.
+     *
+     * Returns only users with a real bcc_trust_reputation row.
+     * Callers that need a sentinel for unseen users default to
+     * `neutral` (mirrors `getTier()`'s missing-row fallback).
+     *
+     * Bounded by caller (feed page cap = 50; comment page cap = 50).
+     * Empty input short-circuits.
+     *
+     * @param list<int> $userIds
+     * @return array<int, string> user_id → reputation_tier
+     */
+    public function getTiersForUsers(array $userIds): array {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $clean[$intId] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        global $wpdb;
+        /** @var list<object{user_id: int|numeric-string, reputation_tier: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT user_id, reputation_tier
+               FROM {$this->table}
+              WHERE user_id IN ({$placeholders})",
+            ...$idList
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $uid = (int) $row->user_id;
+            if ($uid > 0) {
+                $out[$uid] = (string) $row->reputation_tier;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * User IDs whose reputation tier is `caution` or `risky` — the §O4.1
      * "shadow-limited" set. Used by the feed ranker to exclude these
      * users' posts from feed inputs in a single query.
