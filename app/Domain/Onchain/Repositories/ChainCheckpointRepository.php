@@ -29,8 +29,11 @@ if (!defined('ABSPATH')) {
  *     cu_used_today: string,
  *     cu_budget_reset_at: string,
  *     last_run_at: string|null,
- *     last_error: string|null
+ *     last_error: string|null,
+ *     block_progression_history: string|null
  * }
+ *
+ * @phpstan-type ProgressionEntry array{block: int, head: int, at: string}
  */
 final class ChainCheckpointRepository
 {
@@ -39,7 +42,15 @@ final class ChainCheckpointRepository
     public const STATE_BREAKER_OPEN = 'breaker_open';
     public const STATE_DISABLED     = 'disabled';
 
-    private const COLUMNS = 'chain_id, last_processed_block, head_block, state, cu_used_today, cu_budget_reset_at, last_run_at, last_error';
+    /**
+     * Hard cap on stored progression entries. Bounded write amplification:
+     * the column is rewritten on every `recordSuccess` call, so keeping
+     * the array tiny matters. Five entries is enough to detect monotonic
+     * lag drift (4 deltas) while staying under ~300 bytes encoded.
+     */
+    public const MAX_PROGRESSION_ENTRIES = 5;
+
+    private const COLUMNS = 'chain_id, last_processed_block, head_block, state, cu_used_today, cu_budget_reset_at, last_run_at, last_error, block_progression_history';
 
     public static function table(): string
     {
@@ -115,6 +126,17 @@ final class ChainCheckpointRepository
 
     /**
      * Advance the checkpoint after a successful tick.
+     *
+     * Also appends a {block, head, at} entry to `block_progression_history`,
+     * capped at MAX_PROGRESSION_ENTRIES. The history powers progression
+     * detection in the dashboard: stagnant-but-healthy (worker alive but
+     * checkpoint not advancing), monotonic lag drift (chain throughput
+     * exceeds BLOCKS_PER_TICK), and backward progression (checkpoint
+     * regression — a correctness anomaly).
+     *
+     * Read-modify-write of the JSON column happens inside the same UPDATE
+     * statement (one round trip). Bounded by MAX_PROGRESSION_ENTRIES = 5
+     * → ~50-byte entry × 5 ≈ ~300 bytes max payload.
      */
     public static function recordSuccess(int $chainId, int $lastProcessedBlock, int $headBlock): void
     {
@@ -126,19 +148,83 @@ final class ChainCheckpointRepository
         $table = self::table();
         $now   = current_time('mysql', true);
 
+        // Read current history (one tiny SELECT — bounded by primary key).
+        $currentJson = $wpdb->get_var($wpdb->prepare(
+            "SELECT block_progression_history FROM {$table} WHERE chain_id = %d LIMIT 1",
+            $chainId
+        ));
+        $history    = self::decodeProgressionHistory(is_string($currentJson) ? $currentJson : null);
+        $newHistory = self::appendProgressionEntry($history, $lastProcessedBlock, $headBlock);
+        $encoded    = (string) wp_json_encode($newHistory);
+
         $wpdb->update(
             $table,
             [
-                'last_processed_block' => $lastProcessedBlock,
-                'head_block'           => $headBlock,
-                'state'                => self::STATE_HEALTHY,
-                'last_run_at'          => $now,
-                'last_error'           => null,
+                'last_processed_block'      => $lastProcessedBlock,
+                'head_block'                => $headBlock,
+                'state'                     => self::STATE_HEALTHY,
+                'last_run_at'               => $now,
+                'last_error'                => null,
+                'block_progression_history' => $encoded,
             ],
             ['chain_id' => $chainId],
-            ['%d', '%d', '%s', '%s', '%s'],
+            ['%d', '%d', '%s', '%s', '%s', '%s'],
             ['%d']
         );
+    }
+
+    /**
+     * Decode the `block_progression_history` column into a typed list.
+     * Returns `[]` on null, malformed JSON, or any shape violation —
+     * fail-quiet because the column is bounded-best-effort, not contract.
+     *
+     * @return list<ProgressionEntry>
+     */
+    public static function decodeProgressionHistory(?string $json): array
+    {
+        if ($json === null || $json === '') {
+            return [];
+        }
+        $decoded = json_decode($json, true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+
+        $result = [];
+        foreach ($decoded as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $block = isset($entry['block']) && is_numeric($entry['block']) ? (int) $entry['block'] : null;
+            $head  = isset($entry['head']) && is_numeric($entry['head']) ? (int) $entry['head'] : null;
+            $at    = isset($entry['at']) && is_string($entry['at']) ? $entry['at'] : null;
+            if ($block === null || $head === null || $at === null) {
+                continue;
+            }
+            $result[] = ['block' => $block, 'head' => $head, 'at' => $at];
+        }
+        return $result;
+    }
+
+    /**
+     * Append a new entry and trim to MAX_PROGRESSION_ENTRIES (oldest first).
+     *
+     * @param  list<ProgressionEntry> $history
+     * @return list<ProgressionEntry>
+     */
+    private static function appendProgressionEntry(array $history, int $block, int $head): array
+    {
+        $history[] = [
+            'block' => $block,
+            'head'  => $head,
+            'at'    => gmdate('c'),
+        ];
+
+        $overflow = count($history) - self::MAX_PROGRESSION_ENTRIES;
+        if ($overflow > 0) {
+            $history = array_slice($history, $overflow);
+        }
+        return array_values($history);
     }
 
     /**

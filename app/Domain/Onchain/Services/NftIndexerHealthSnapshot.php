@@ -42,6 +42,17 @@ final class NftIndexerHealthSnapshot
      *  walking that chain until the next UTC midnight rollover. */
     public const CU_BUDGET_PRESSURE_RATIO = 0.8;
 
+    /**
+     * Minimum history entries before progression-detection rules fire.
+     *
+     * `fake_healthy` (stagnant block + advancing head) and "regression"
+     * need at least 3 entries to distinguish a real stall from
+     * insufficient sample. Lag-drift needs 5 (the full window) to assert
+     * monotonic increase across 4 deltas. With <3 entries we report
+     * `insufficient_data` and stay GREEN.
+     */
+    public const PROGRESSION_MIN_SAMPLES = 3;
+
     /** Call-count pressure threshold (X1 visibility phase).
      *
      *  `EnrichmentScheduler` maintains a per-chain rolling 10-minute call
@@ -79,13 +90,17 @@ final class NftIndexerHealthSnapshot
      * means.
      *
      * Rules:
-     *   RED    — cron not scheduled, cron overdue, 0 active chains, OR
+     *   RED    — cron not scheduled, cron overdue, 0 active chains,
      *            every active chain in degraded/breaker_open (operationally
-     *            offline regardless of nominal enable-state).
+     *            offline regardless of nominal enable-state), OR ANY chain
+     *            shows backward progression (last_processed_block went
+     *            DOWN — checkpoint regression, a correctness anomaly).
      *   YELLOW — at least one healthy active chain but something needs
      *            attention: some chains degraded, stalled tick, CU
-     *            pressure, scheduler call-count pressure, or overgrown
-     *            Helius dedupe table.
+     *            pressure, scheduler call-count pressure, overgrown
+     *            Helius dedupe table, "fake healthy" progression
+     *            (block stagnant while head advances), or monotonic
+     *            lag drift (worker can't keep up with chain throughput).
      *   GREEN  — at least one active chain, no outstanding issues.
      *
      * `issues` is an ordered list of human-readable lines safe to render
@@ -103,6 +118,10 @@ final class NftIndexerHealthSnapshot
      *     cu_pressure_chains: list<string>,
      *     call_count_pressure_chains: list<string>,
      *     call_count_by_chain: array<int, array{slug: string, count: int, cap: int}>,
+     *     fake_healthy_chains: list<string>,
+     *     lag_drift_chains: list<string>,
+     *     regression_chains: list<string>,
+     *     progression_by_chain: array<int, array{slug: string, deltas: list<int>, last_block: int, sample_count: int}>,
      *     dedupe_overgrown: bool,
      *     issues: list<string>
      * }
@@ -135,6 +154,10 @@ final class NftIndexerHealthSnapshot
         $cuPressureChains        = [];
         $callCountPressureChains = [];
         $callCountByChain        = [];
+        $fakeHealthyChains       = [];
+        $lagDriftChains          = [];
+        $regressionChains        = [];
+        $progressionByChain      = [];
         $callCountCap            = EnrichmentScheduler::MAX_API_CALLS_PER_CHAIN;
         $now                     = time();
 
@@ -204,6 +227,61 @@ final class NftIndexerHealthSnapshot
                     $slug,
                     $callCount,
                     $callCountCap
+                );
+            }
+
+            // Progression detection (X3). First-class operational state,
+            // not UI decoration. The history column is the truth source;
+            // the per-chain sparkline column is just one presentation of
+            // it. Detection rules:
+            //
+            //   regression       — ANY backward block delta. Correctness
+            //                      anomaly (checkpoint should never go
+            //                      down beyond N=CONFIRMATIONS reorg
+            //                      depth). Surfaced as RED regardless of
+            //                      chain state.
+            //   fake_healthy     — state=healthy, block stagnant across
+            //                      last MIN_SAMPLES entries, head_block
+            //                      advanced. The dangerous silent-failure
+            //                      class: worker is ticking but checkpoint
+            //                      isn't moving while the chain produces
+            //                      blocks. YELLOW.
+            //   lag_drift        — state=healthy, monotonic increase in
+            //                      (head - block) across the full 5-entry
+            //                      window. Independent of absolute lag —
+            //                      the trend is the signal, not the size.
+            //                      YELLOW.
+            //
+            // O(5) per chain. No DB scan — all derivation runs over the
+            // bounded JSON column already loaded by `getAll()`.
+            $history = ChainCheckpointRepository::decodeProgressionHistory(
+                $cp->block_progression_history ?? null
+            );
+            $progressionSignal = self::deriveProgressionSignal($history, $state);
+            $progressionByChain[$chainId] = [
+                'slug'         => $slug,
+                'deltas'       => $progressionSignal['deltas'],
+                'last_block'   => $progressionSignal['last_block'],
+                'sample_count' => count($history),
+            ];
+            if ($progressionSignal['regression']) {
+                $regressionChains[] = sprintf(
+                    '%s (last_processed_block went DOWN — see history)',
+                    $slug
+                );
+            }
+            if ($progressionSignal['fake_healthy']) {
+                $fakeHealthyChains[] = $slug;
+            }
+            if ($progressionSignal['lag_drifting']) {
+                $fromLag = (int) $progressionSignal['lag_first'];
+                $toLag   = (int) $progressionSignal['lag_last'];
+                $lagDriftChains[] = sprintf(
+                    '%s (lag drifted %d→%d across %d ticks)',
+                    $slug,
+                    $fromLag,
+                    $toLag,
+                    count($history)
                 );
             }
         }
@@ -276,6 +354,28 @@ final class NftIndexerHealthSnapshot
                 implode(', ', $callCountPressureChains)
             );
         }
+        // Progression signals (X3). Listed before less-severe issues so
+        // the regression case (RED) sorts ahead.
+        if ($regressionChains !== []) {
+            $issues[] = sprintf(
+                'BACKWARD progression detected: %s. This should never occur outside the N=%d-block reorg window and signals a checkpoint regression bug, corrupted progression history, or manual overwrite. Inspect `block_progression_history` and `last_processed_block` immediately.',
+                implode(', ', $regressionChains),
+                NftEthIndexerWorker::CONFIRMATIONS
+            );
+        }
+        if ($fakeHealthyChains !== []) {
+            $issues[] = sprintf(
+                'Worker alive but NOT progressing on %s: chain state reports healthy and `last_run_at` is fresh, but `last_processed_block` has not advanced across the last %d ticks while `head_block` has. This is the dangerous silent-failure class — heartbeat is lying. Inspect worker logs for swallowed exceptions in the post-fetch loop.',
+                implode(', ', $fakeHealthyChains),
+                self::PROGRESSION_MIN_SAMPLES
+            );
+        }
+        if ($lagDriftChains !== []) {
+            $issues[] = sprintf(
+                'Lag drifting upward on %s: the worker is ticking but `BLOCKS_PER_TICK` is below the chain natural block-production rate. Lag will continue to grow until either traffic eases or BLOCKS_PER_TICK is raised. Independent of absolute lag size — the trend is the signal.',
+                implode(', ', $lagDriftChains)
+            );
+        }
         if ($dedupeOvergrown) {
             $issues[] = sprintf(
                 'Helius dedupe table overgrown: %d rows (threshold %d). The sweep cron may have stalled.',
@@ -285,16 +385,21 @@ final class NftIndexerHealthSnapshot
         }
 
         // Derive RGB. Red dominates yellow dominates green.
+        // Regression is RED — checkpoint going backwards is a correctness
+        // anomaly that should never happen outside the reorg window.
         $isRed = !$cronScheduled
             || $cronOverdue
             || $totalEvmChains === 0
             || $activeCount === 0
-            || $allActiveDegraded;
+            || $allActiveDegraded
+            || $regressionChains !== [];
         $isYellow = !$isRed && (
             $stalledChains !== []
             || $degradedChains !== []
             || $cuPressureChains !== []
             || $callCountPressureChains !== []
+            || $fakeHealthyChains !== []
+            || $lagDriftChains !== []
             || $dedupeOvergrown
         );
         $status = $isRed ? self::STATUS_RED : ($isYellow ? self::STATUS_YELLOW : self::STATUS_GREEN);
@@ -311,8 +416,103 @@ final class NftIndexerHealthSnapshot
             'cu_pressure_chains'         => $cuPressureChains,
             'call_count_pressure_chains' => $callCountPressureChains,
             'call_count_by_chain'        => $callCountByChain,
+            'fake_healthy_chains'        => $fakeHealthyChains,
+            'lag_drift_chains'           => $lagDriftChains,
+            'regression_chains'          => $regressionChains,
+            'progression_by_chain'       => $progressionByChain,
             'dedupe_overgrown'           => $dedupeOvergrown,
             'issues'                     => $issues,
+        ];
+    }
+
+    /**
+     * Derive per-chain progression signals from the bounded history.
+     *
+     * Returns a packed struct so the caller can both raise top-card
+     * signals AND render the per-chain sparkline from one pass — no
+     * second loop over the same history.
+     *
+     * Detection rules (all O(n) over the bounded n <= 5 history):
+     *   regression   — ANY backward delta in block (correctness anomaly)
+     *   fake_healthy — state=healthy AND block stagnant across last
+     *                  PROGRESSION_MIN_SAMPLES entries AND head_block
+     *                  advanced across the same window
+     *   lag_drifting — state=healthy AND lag (head-block) monotonically
+     *                  increasing across the FULL window (needs 5 entries)
+     *
+     * @param  list<array{block: int, head: int, at: string}> $history
+     * @return array{
+     *     deltas: list<int>,
+     *     last_block: int,
+     *     regression: bool,
+     *     fake_healthy: bool,
+     *     lag_drifting: bool,
+     *     lag_first: int,
+     *     lag_last: int
+     * }
+     */
+    private static function deriveProgressionSignal(array $history, string $state): array
+    {
+        $count      = count($history);
+        $lastBlock  = $count > 0 ? $history[$count - 1]['block'] : 0;
+        $deltas     = [];
+
+        // Per-step block deltas + per-step lag values, computed once.
+        $lags = [];
+        for ($i = 0; $i < $count; $i++) {
+            $entry  = $history[$i];
+            $lags[] = $entry['head'] - $entry['block'];
+            if ($i > 0) {
+                $deltas[] = $entry['block'] - $history[$i - 1]['block'];
+            }
+        }
+
+        $regression  = false;
+        foreach ($deltas as $delta) {
+            if ($delta < 0) {
+                $regression = true;
+                break;
+            }
+        }
+
+        $fakeHealthy = false;
+        $lagDrifting = false;
+
+        if ($state === ChainCheckpointRepository::STATE_HEALTHY && $count >= self::PROGRESSION_MIN_SAMPLES) {
+            // Fake-healthy: last MIN_SAMPLES entries all share the same
+            // `block` (stagnant) AND head_block over the same window
+            // advanced (chain produced new blocks the worker did not
+            // process).
+            $tail            = array_slice($history, -self::PROGRESSION_MIN_SAMPLES);
+            $tailBlocks      = array_column($tail, 'block');
+            $tailHeads       = array_column($tail, 'head');
+            $blocksStagnant  = count(array_unique($tailBlocks)) === 1;
+            $headsAdvanced   = end($tailHeads) > $tailHeads[0];
+            $fakeHealthy     = $blocksStagnant && $headsAdvanced;
+        }
+
+        if ($state === ChainCheckpointRepository::STATE_HEALTHY && $count === ChainCheckpointRepository::MAX_PROGRESSION_ENTRIES) {
+            // Lag-drift: strict monotonic increase across the full
+            // 4-delta sequence (5 history entries). Independent of
+            // absolute lag size — the trend is the signal.
+            $monotonic = true;
+            for ($i = 1; $i < count($lags); $i++) {
+                if ($lags[$i] <= $lags[$i - 1]) {
+                    $monotonic = false;
+                    break;
+                }
+            }
+            $lagDrifting = $monotonic;
+        }
+
+        return [
+            'deltas'       => $deltas,
+            'last_block'   => $lastBlock,
+            'regression'   => $regression,
+            'fake_healthy' => $fakeHealthy,
+            'lag_drifting' => $lagDrifting,
+            'lag_first'    => $lags === [] ? 0 : $lags[0],
+            'lag_last'     => $lags === [] ? 0 : $lags[count($lags) - 1],
         ];
     }
 

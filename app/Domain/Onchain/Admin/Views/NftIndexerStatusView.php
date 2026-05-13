@@ -84,7 +84,8 @@ final class NftIndexerStatusView
                     <th>Head</th>
                     <th>Lag (blocks)</th>
                     <th>CU used today</th>
-                    <th title="EnrichmentScheduler per-chain 10-min rolling counter. Consulted by ApiRetry today (X1 visibility) — Phase X2 will scope it back to the scheduler.">Calls (10m)</th>
+                    <th title="EnrichmentScheduler per-chain 10-min rolling counter. Now scoped to scheduler activity only after Phase X2 decoupling.">Calls (10m)</th>
+                    <th title="Per-tick block-progression sparkline (last 5 ticks). ↑ = advanced, — = stagnant, ↓ = regressed.">Progression</th>
                     <th>Last run</th>
                     <th>Last error</th>
                     <th>Action</th>
@@ -92,7 +93,7 @@ final class NftIndexerStatusView
             </thead>
             <tbody>
                 <?php if ($chains === []): ?>
-                    <tr><td colspan="10"><em>No active EVM chains.</em></td></tr>
+                    <tr><td colspan="11"><em>No active EVM chains.</em></td></tr>
                 <?php else: ?>
                     <?php foreach ($chains as $chain):
                         $cid     = (int) $chain->id;
@@ -114,6 +115,18 @@ final class NftIndexerStatusView
                         $callsHot   = $callsCap > 0
                             && ($callsCount / $callsCap) >= NftIndexerHealthSnapshot::CALL_COUNT_PRESSURE_RATIO
                             && $state !== ChainCheckpointRepository::STATE_DISABLED;
+
+                        // Progression sparkline (X3). Read from the same
+                        // summary payload — `progression_by_chain` is the
+                        // shared source of truth for the per-chain table
+                        // AND the top-card signals.
+                        $progRow      = $summary['progression_by_chain'][$cid] ?? null;
+                        $progDeltas   = $progRow !== null ? $progRow['deltas'] : [];
+                        $progSamples  = $progRow !== null ? (int) $progRow['sample_count'] : 0;
+                        $progHasRegression = false;
+                        foreach ($progDeltas as $d) {
+                            if ($d < 0) { $progHasRegression = true; break; }
+                        }
 
                         $runNonce   = wp_create_nonce('bcc_nft_indexer_run_' . $cid);
                         $pauseNonce = wp_create_nonce('bcc_nft_indexer_state_' . $cid);
@@ -138,6 +151,29 @@ final class NftIndexerStatusView
                         <td><?php echo $cuUsed; ?> / <?php echo $dailyBudget; ?></td>
                         <td<?php echo $callsHot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
                             <?php echo $callsCount; ?> / <?php echo $callsCap; ?>
+                        </td>
+                        <td<?php echo $progHasRegression ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
+                            <?php
+                            // Sparkline: ↑ advance, — stagnant, ↓ regression.
+                            // 4 arrows for 5-entry history (4 deltas). Insufficient
+                            // sample shows "—" placeholders until enough ticks
+                            // accumulate. Pure presentation of the same `deltas`
+                            // the snapshot reads; no recomputation here.
+                            if ($progSamples === 0) {
+                                echo '<span style="color:#999;font-size:11px;">no data</span>';
+                            } else {
+                                $glyphs = [];
+                                foreach ($progDeltas as $d) {
+                                    if ($d > 0)      { $glyphs[] = '<span style="color:#46b450;">&uarr;</span>'; }
+                                    elseif ($d < 0)  { $glyphs[] = '<span style="color:#b32d2e;font-weight:bold;">&darr;</span>'; }
+                                    else             { $glyphs[] = '<span style="color:#999;">&mdash;</span>'; }
+                                }
+                                echo '<span style="font-family:monospace;">' . implode(' ', $glyphs) . '</span>';
+                                if ($progSamples < ChainCheckpointRepository::MAX_PROGRESSION_ENTRIES) {
+                                    echo '<span style="color:#999;font-size:10px;margin-left:6px;">(' . (int) $progSamples . '/' . (int) ChainCheckpointRepository::MAX_PROGRESSION_ENTRIES . ')</span>';
+                                }
+                            }
+                            ?>
                         </td>
                         <td><?php echo esc_html($lastRun); ?></td>
                         <td><?php echo esc_html($lastErr); ?></td>
@@ -185,6 +221,10 @@ final class NftIndexerStatusView
      *     cu_pressure_chains: list<string>,
      *     call_count_pressure_chains: list<string>,
      *     call_count_by_chain: array<int, array{slug: string, count: int, cap: int}>,
+     *     fake_healthy_chains: list<string>,
+     *     lag_drift_chains: list<string>,
+     *     regression_chains: list<string>,
+     *     progression_by_chain: array<int, array{slug: string, deltas: list<int>, last_block: int, sample_count: int}>,
      *     dedupe_overgrown: bool,
      *     issues: list<string>
      * } $summary
@@ -242,6 +282,18 @@ final class NftIndexerStatusView
 
                 <?php if ($summary['call_count_pressure_chains'] !== []): ?>
                     <span title="ApiRetry per-chain budget pressure (V2 retries may be pre-blocking V1 fetches on the same chain)"><strong>Call pressure:</strong> <?php echo (int) count($summary['call_count_pressure_chains']); ?></span>
+                <?php endif; ?>
+
+                <?php if ($summary['regression_chains'] !== []): ?>
+                    <span style="color:#b32d2e;font-weight:bold;" title="Backward progression — last_processed_block went DOWN. Correctness anomaly."><strong>↓ Regression:</strong> <?php echo (int) count($summary['regression_chains']); ?></span>
+                <?php endif; ?>
+
+                <?php if ($summary['fake_healthy_chains'] !== []): ?>
+                    <span title="Worker is ticking but the checkpoint is not advancing while head_block moves — heartbeat is lying."><strong>Stalled progress:</strong> <?php echo (int) count($summary['fake_healthy_chains']); ?></span>
+                <?php endif; ?>
+
+                <?php if ($summary['lag_drift_chains'] !== []): ?>
+                    <span title="Lag is drifting monotonically upward — BLOCKS_PER_TICK is below chain block-production rate."><strong>Lag drift:</strong> <?php echo (int) count($summary['lag_drift_chains']); ?></span>
                 <?php endif; ?>
 
                 <?php if ($summary['dedupe_overgrown']): ?>

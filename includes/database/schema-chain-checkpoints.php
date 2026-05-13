@@ -16,6 +16,15 @@
  *     decrements per call; circuit-breaks at BCC_ETH_DAILY_RPC_BUDGET
  *     (default 50 000 CU/day).
  *   - last_run_at / last_error — operator-facing diagnostics
+ *   - block_progression_history — bounded JSON array (max 5 entries,
+ *     oldest first) of `{block, head, at}` snapshots written on every
+ *     successful tick. First-class operational state, NOT a UI nicety:
+ *     enables detection of "worker alive but no progression," monotonic
+ *     lag drift, and backward progression (checkpoint regression — a
+ *     correctness anomaly that should never occur outside the
+ *     N=CONFIRMATIONS reorg window). Bounded write amplification: one
+ *     ~50-byte append per successful tick, capped at 5 entries by the
+ *     repository before write.
  *
  * lag_blocks is a virtual GENERATED column so the operator dashboard
  * doesn't have to compute (head - last_processed) on every read.
@@ -59,6 +68,7 @@ function bcc_onchain_create_chain_checkpoints_table(): void {
         cu_budget_reset_at DATE NOT NULL DEFAULT '1970-01-01',
         last_run_at DATETIME DEFAULT NULL,
         last_error VARCHAR(255) DEFAULT NULL,
+        block_progression_history VARCHAR(500) DEFAULT NULL,
         PRIMARY KEY (chain_id)
     ) {$charset_collate};";
 
