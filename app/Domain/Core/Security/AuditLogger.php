@@ -91,8 +91,20 @@ class AuditLogger {
             ['%d', '%s', '%s', '%d', '%s', '%s']
         );
 
-        if ( $result === false && defined('WP_DEBUG') && WP_DEBUG ) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] ' . 'BCC Trust: Audit log write failed - ', ['detail' => self::getRepo()->getLastError()]);
+        if ( $result === false ) {
+            // §VIII.30: audit-log write failures MUST NOT propagate (the
+            // mutation has already committed). But silently dropping rows
+            // hides accountability gaps from operators. Record a
+            // DegradationMetric so /system/health surfaces the failure
+            // before forensic queries on bcc_trust_activity discover the
+            // missing rows after an incident. Distinct source name from
+            // the read-path swallows so dashboards can segment by which
+            // half of the audit subsystem is unhealthy.
+            \BCC\Core\Observability\DegradationMetrics::record('audit_log_swallow', 'log_write_failed');
+
+            if ( defined('WP_DEBUG') && WP_DEBUG ) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] ' . 'BCC Trust: Audit log write failed - ', ['detail' => self::getRepo()->getLastError()]);
+            }
         }
 
         $alertActions = ['fraud', 'suspicious', 'flag', 'block', 'suspend'];
