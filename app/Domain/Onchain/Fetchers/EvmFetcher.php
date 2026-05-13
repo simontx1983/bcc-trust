@@ -11,6 +11,7 @@ use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Services\NftSpamFilter;
+use BCC\Trust\Onchain\Services\V1FetchFailureTracker;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 
@@ -1010,6 +1011,12 @@ class EvmFetcher implements FetcherInterface
         $fullUrl  = add_query_arg($filtered, $url);
         $chainId  = (int) $this->chain->id;
 
+        // X4 attempt counter — every alchemyNftGet invocation is an
+        // "attempt" regardless of outcome. Per-page granularity is the
+        // right scope for failure-rate diagnostics (a fetch_collections
+        // call may produce 1–5 attempts).
+        V1FetchFailureTracker::recordAttempt($chainId);
+
         $response = ApiRetry::get($fullUrl, [
             'timeout'   => self::HTTP_TIMEOUT,
             'sslverify' => true,
@@ -1019,10 +1026,12 @@ class EvmFetcher implements FetcherInterface
         ]);
 
         if (is_wp_error($response)) {
+            $errStr = 'transport: ' . $response->get_error_message();
             \BCC\Core\Log\Logger::error('[EvmFetcher.alchemyNftGet] transport failed', [
                 'chain_id' => $chainId,
                 'error'    => $response->get_error_message(),
             ]);
+            V1FetchFailureTracker::recordFailure($chainId, $errStr);
             return null;
         }
 
@@ -1041,6 +1050,10 @@ class EvmFetcher implements FetcherInterface
                 'http_status'  => (int) wp_remote_retrieve_response_code($response),
                 'body_excerpt' => $bodyExcerpt,
             ]);
+            V1FetchFailureTracker::recordFailure(
+                $chainId,
+                'non-JSON HTTP ' . (int) wp_remote_retrieve_response_code($response) . ': ' . $bodyExcerpt
+            );
             return null;
         }
 
@@ -1052,6 +1065,10 @@ class EvmFetcher implements FetcherInterface
                 'chain_id' => $chainId,
                 'error'    => is_string($errMsg) ? $errMsg : '(unencodable)',
             ]);
+            V1FetchFailureTracker::recordFailure(
+                $chainId,
+                'API error: ' . (is_string($errMsg) ? $errMsg : '(unencodable)')
+            );
             return null;
         }
 

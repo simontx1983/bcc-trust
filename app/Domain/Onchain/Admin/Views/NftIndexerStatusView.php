@@ -187,6 +187,9 @@ final class NftIndexerStatusView
             </tbody>
         </table>
 
+        <h3 style="margin-top:32px">V1 Discovery (Alchemy NFT API — rolling 1h)</h3>
+        <?php self::renderV1DiscoveryPanel($summary['v1_fetch_stats_by_chain']); ?>
+
         <h3 style="margin-top:32px">Helius Webhook (Solana, V2 Phase 1b)</h3>
         <?php self::renderHeliusPanel($summary['helius_freshness']); ?>
 
@@ -227,6 +230,8 @@ final class NftIndexerStatusView
      *     progression_by_chain: array<int, array{slug: string, deltas: list<int>, last_block: int, sample_count: int}>,
      *     dedupe_overgrown: bool,
      *     helius_freshness: array{state: 'green'|'yellow'|'red'|'never_delivered'|'not_provisioned', last_delivery_at: int|null, age_seconds: int|null},
+     *     v1_fetch_failure_chains: list<string>,
+     *     v1_fetch_stats_by_chain: array<int, array{slug: string, attempts: int, failures: int, last_error: string|null, last_error_at: int|null}>,
      *     issues: list<string>
      * } $summary
      */
@@ -314,6 +319,10 @@ final class NftIndexerStatusView
                 <?php if ($summary['dedupe_overgrown']): ?>
                     <span><strong>Helius dedupe:</strong> overgrown</span>
                 <?php endif; ?>
+
+                <?php if ($summary['v1_fetch_failure_chains'] !== []): ?>
+                    <span style="color:#9b6c00;" title="V1 ownership discovery (Alchemy NFT API) failing on one or more chains. See V1 Discovery panel below."><strong>V1 failures:</strong> <?php echo (int) count($summary['v1_fetch_failure_chains']); ?></span>
+                <?php endif; ?>
             </div>
 
             <?php if ($summary['issues'] !== []): ?>
@@ -328,6 +337,85 @@ final class NftIndexerStatusView
                 </p>
             <?php endif; ?>
         </div>
+        <?php
+    }
+
+    /**
+     * V1 NFT-discovery operator surface (X4).
+     *
+     * Renders per-chain rolling 1h `fetch_collections` attempts / failures
+     * / failure rate + the most recent error message per chain. Reads
+     * from the same summary payload the top-card signals use (single
+     * source of truth — no recomputation).
+     *
+     * Operator question this answers: "is V1 ownership discovery
+     * actually working right now, and if not, which chain and what's
+     * the upstream error?"
+     *
+     * @param array<int, array{slug: string, attempts: int, failures: int, last_error: string|null, last_error_at: int|null}> $statsByChain
+     */
+    private static function renderV1DiscoveryPanel(array $statsByChain): void
+    {
+        if ($statsByChain === []) {
+            echo '<p><em>No V1 attempts recorded yet — counters start once `fetch_collections` runs against an EVM chain (gallery refresh, wallet seed, or 4h TTL cron).</em></p>';
+            return;
+        }
+        $yellowRatio = NftIndexerHealthSnapshot::V1_FETCH_FAILURE_YELLOW_RATIO;
+        $minSamples  = NftIndexerHealthSnapshot::V1_FETCH_FAILURE_MIN_SAMPLES;
+        ?>
+        <p>
+            Per-chain attempts and transport failures for the V1 ownership
+            discovery path (<code>EvmFetcher::fetch_collections</code> via
+            Alchemy NFT API <code>getContractsForOwner</code>). Counters are
+            rolling 1h via wp-cache. YELLOW fires at &ge;<?php echo (int) ($yellowRatio * 100); ?>%
+            failure rate with min <?php echo (int) $minSamples; ?> samples.
+        </p>
+        <table class="widefat striped" style="max-width:1100px">
+            <thead>
+                <tr>
+                    <th>Chain</th>
+                    <th>Attempts (1h)</th>
+                    <th>Failures (1h)</th>
+                    <th>Failure rate</th>
+                    <th>Last error</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($statsByChain as $row):
+                    $attempts = (int) $row['attempts'];
+                    $failures = (int) $row['failures'];
+                    $rate     = $attempts > 0 ? ($failures / $attempts) : 0.0;
+                    $hot      = $attempts >= $minSamples && $rate >= $yellowRatio;
+                    $lastErr  = $row['last_error'];
+                    $lastAt   = $row['last_error_at'];
+                ?>
+                <tr<?php echo $hot ? ' style="background:#fff8e5;"' : ''; ?>>
+                    <td><strong><?php echo esc_html($row['slug']); ?></strong></td>
+                    <td><?php echo $attempts; ?></td>
+                    <td<?php echo $hot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>><?php echo $failures; ?></td>
+                    <td<?php echo $hot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
+                        <?php
+                        if ($attempts === 0) {
+                            echo '<small style="color:#999;">no samples</small>';
+                        } elseif ($attempts < $minSamples) {
+                            printf('<small style="color:#999;">%d%% (insufficient samples)</small>', (int) round($rate * 100));
+                        } else {
+                            printf('%d%%', (int) round($rate * 100));
+                        }
+                        ?>
+                    </td>
+                    <td>
+                        <?php if ($lastErr === null || $lastAt === null): ?>
+                            <small style="color:#999;">—</small>
+                        <?php else: ?>
+                            <small><?php echo esc_html($lastErr); ?></small>
+                            <br><small style="color:#999;">at <?php echo esc_html(gmdate('c', $lastAt)); ?></small>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
         <?php
     }
 

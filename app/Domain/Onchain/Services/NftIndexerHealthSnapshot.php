@@ -8,6 +8,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\HeliusSeenSignaturesRepository;
 use BCC\Trust\Onchain\Services\EnrichmentScheduler;
 use BCC\Trust\Onchain\Services\HeliusSubscriptionManager;
+use BCC\Trust\Onchain\Services\V1FetchFailureTracker;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 
 if (!defined('ABSPATH')) {
@@ -67,6 +68,21 @@ final class NftIndexerHealthSnapshot
      */
     public const HELIUS_FRESHNESS_YELLOW_SECONDS = 3600;   // 60 min
     public const HELIUS_FRESHNESS_RED_SECONDS    = 14400;  // 4 h
+
+    /**
+     * V1 NFT-discovery failure-rate thresholds (X4).
+     *
+     * Operator question: "is V1 ownership discovery actually working?"
+     * Distinct from the V2 indexer (transfer-walker) and Helius
+     * (Solana ingestion). This signal is for the gallery_refresh /
+     * wallet-seed / TTL-cron path on EVM chains.
+     *
+     * Failure rate fires only above a minimum sample size so a single
+     * isolated transport blip doesn't fire YELLOW; below the floor,
+     * we don't have enough data to draw a conclusion.
+     */
+    public const V1_FETCH_FAILURE_YELLOW_RATIO  = 0.20;  // ≥20% failure rate
+    public const V1_FETCH_FAILURE_MIN_SAMPLES   = 5;     // need ≥5 attempts before the rate is meaningful
 
     /**
      * Minimum history entries before progression-detection rules fire.
@@ -150,6 +166,8 @@ final class NftIndexerHealthSnapshot
      *     progression_by_chain: array<int, array{slug: string, deltas: list<int>, last_block: int, sample_count: int}>,
      *     dedupe_overgrown: bool,
      *     helius_freshness: array{state: 'green'|'yellow'|'red'|'never_delivered'|'not_provisioned', last_delivery_at: int|null, age_seconds: int|null},
+     *     v1_fetch_failure_chains: list<string>,
+     *     v1_fetch_stats_by_chain: array<int, array{slug: string, attempts: int, failures: int, last_error: string|null, last_error_at: int|null}>,
      *     issues: list<string>
      * }
      */
@@ -185,6 +203,9 @@ final class NftIndexerHealthSnapshot
         $lagDriftChains          = [];
         $regressionChains        = [];
         $progressionByChain      = [];
+        $v1FetchFailureChains    = [];
+        $v1FetchStatsByChain     = [];
+        $v1LastErrors            = V1FetchFailureTracker::getLastErrors();
         $callCountCap            = EnrichmentScheduler::MAX_API_CALLS_PER_CHAIN;
         $now                     = time();
 
@@ -208,6 +229,33 @@ final class NftIndexerHealthSnapshot
                 'count' => $callCount,
                 'cap'   => $callCountCap,
             ];
+
+            // X4: capture V1 fetch stats for EVERY chain — V1 calls
+            // (gallery_refresh, wallet-seed, TTL cron) can target a
+            // disabled-state chain because V1 doesn't gate on
+            // checkpoint state. The YELLOW signal below only fires
+            // once we have enough samples to draw a conclusion.
+            $v1Stats = V1FetchFailureTracker::getStats($chainId);
+            $v1Last  = $v1LastErrors[$chainId] ?? null;
+            $v1FetchStatsByChain[$chainId] = [
+                'slug'          => $slug,
+                'attempts'      => $v1Stats['attempts'],
+                'failures'      => $v1Stats['failures'],
+                'last_error'    => $v1Last['error'] ?? null,
+                'last_error_at' => $v1Last['at']    ?? null,
+            ];
+            if ($v1Stats['attempts'] >= self::V1_FETCH_FAILURE_MIN_SAMPLES) {
+                $rate = $v1Stats['failures'] / $v1Stats['attempts'];
+                if ($rate >= self::V1_FETCH_FAILURE_YELLOW_RATIO) {
+                    $v1FetchFailureChains[] = sprintf(
+                        '%s (%d/%d = %d%%)',
+                        $slug,
+                        (int) $v1Stats['failures'],
+                        (int) $v1Stats['attempts'],
+                        (int) round($rate * 100)
+                    );
+                }
+            }
 
             if ($state === ChainCheckpointRepository::STATE_DISABLED) {
                 continue;
@@ -432,6 +480,19 @@ final class NftIndexerHealthSnapshot
         } elseif ($heliusFreshness['state'] === 'never_delivered') {
             $issues[] = 'Helius webhook is provisioned but no deliveries have been received yet. Verify (1) the Helius app dashboard shows our callback URL as the configured endpoint, (2) `BCC_HELIUS_WEBHOOK_SECRET` in wp-config.php matches the Helius app secret, and (3) at least one tracked Solana wallet exists.';
         }
+        if ($v1FetchFailureChains !== []) {
+            // Actionable: name the chains and rates, and the next
+            // diagnostic step. The V1 Discovery panel below carries
+            // the full last_error string per chain — that's where the
+            // operator goes for context. Sample-size floor prevents a
+            // single transport blip from firing this signal.
+            $issues[] = sprintf(
+                'V1 NFT ownership discovery failing on %s (>=%d%% failure rate over the last hour, min %d samples). Likely causes: Alchemy upstream errors on the affected chain, the chain rpc_url config drift, or rate-limit responses. See the "V1 Discovery" panel below for the most recent error message per chain.',
+                implode(', ', $v1FetchFailureChains),
+                (int) (self::V1_FETCH_FAILURE_YELLOW_RATIO * 100),
+                self::V1_FETCH_FAILURE_MIN_SAMPLES
+            );
+        }
 
         // Derive RGB. Red dominates yellow dominates green.
         // Regression is RED — checkpoint going backwards is a correctness
@@ -454,6 +515,7 @@ final class NftIndexerHealthSnapshot
             || $dedupeOvergrown
             || $heliusFreshness['state'] === 'yellow'
             || $heliusFreshness['state'] === 'never_delivered'
+            || $v1FetchFailureChains !== []
         );
         $status = $isRed ? self::STATUS_RED : ($isYellow ? self::STATUS_YELLOW : self::STATUS_GREEN);
 
@@ -475,6 +537,8 @@ final class NftIndexerHealthSnapshot
             'progression_by_chain'       => $progressionByChain,
             'dedupe_overgrown'           => $dedupeOvergrown,
             'helius_freshness'           => $heliusFreshness,
+            'v1_fetch_failure_chains'    => $v1FetchFailureChains,
+            'v1_fetch_stats_by_chain'    => $v1FetchStatsByChain,
             'issues'                     => $issues,
         ];
     }
