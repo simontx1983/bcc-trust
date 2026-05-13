@@ -5,6 +5,7 @@ namespace BCC\Trust\Onchain\Controllers;
 use BCC\Core\Wallet\WalletIdentityService;
 use BCC\Core\Wallet\WalletVerificationRequest;
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -388,6 +389,16 @@ class WalletController
                 'chain' => (string) ($existing->chain_slug ?? ''),
                 'via'   => 'rest',
             ], 'wallet', $userId);
+
+            // Side-channel security notification — narrows the auth
+            // surface but still worth telling the user so an attacker
+            // who removes their wallet (e.g. to block account recovery)
+            // can't do it silently. Best-effort; never throws.
+            AccountSecurityMailer::walletUnlinked(
+                $userId,
+                (string) ($existing->chain_slug ?? ''),
+                (string) ($existing->wallet_address ?? '')
+            );
         }
 
         // Idempotent: removed=false on a foreign or already-deleted id

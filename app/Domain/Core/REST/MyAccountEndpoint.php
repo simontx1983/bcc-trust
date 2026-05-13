@@ -39,6 +39,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -141,6 +142,14 @@ final class MyAccountEndpoint
             );
         }
 
+        // Capture the OLD email BEFORE wp_update_user overwrites it — the
+        // security mailer needs to send a canary "your email was changed
+        // away from this address" notice to the old inbox. Without this
+        // capture there'd be no way to reach the legit user if an attacker
+        // hijacked the session and rotated the email.
+        $existingUser = get_userdata($userId);
+        $oldEmail     = $existingUser instanceof \WP_User ? (string) $existingUser->user_email : '';
+
         $result = wp_update_user([
             'ID'         => $userId,
             'user_email' => $email,
@@ -157,6 +166,13 @@ final class MyAccountEndpoint
         // record the new email in meta to avoid duplicating PII in two
         // tables; the wp_users row is the source of truth.
         AuditLogger::log('account_email_changed', $userId, [], 'user', $userId);
+
+        // Side-channel notification: tell BOTH addresses out-of-band so a
+        // compromised-session attacker can't silently rotate the email
+        // and lock the legitimate user out. Best-effort; never throws.
+        if ($oldEmail !== '' && $oldEmail !== $email) {
+            AccountSecurityMailer::emailChanged($userId, $oldEmail, $email);
+        }
 
         $resp = ApiResponse::ok(['email' => $email]);
         $resp->header('Cache-Control', 'no-store');
@@ -218,6 +234,10 @@ final class MyAccountEndpoint
         // Credential rotation — log without the password value (obviously).
         AuditLogger::log('account_password_changed', $userId, [], 'user', $userId);
 
+        // Side-channel notification: tell the user via email out-of-band
+        // so a session-hijack-then-rotate attack is detectable.
+        AccountSecurityMailer::passwordChanged($userId);
+
         $resp = ApiResponse::ok(['ok' => true]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
@@ -274,6 +294,13 @@ final class MyAccountEndpoint
             require_once ABSPATH . 'wp-admin/includes/user.php';
         }
 
+        // Capture the email + display name BEFORE wp_delete_user so the
+        // side-channel security email can still be sent — after deletion
+        // the wp_users row is gone and get_userdata() returns false.
+        $deletingUser = get_userdata($userId);
+        $deletingEmail = $deletingUser instanceof \WP_User ? (string) $deletingUser->user_email : '';
+        $deletingName  = $deletingUser instanceof \WP_User ? (string) $deletingUser->display_name : '';
+
         $deleted = wp_delete_user($userId);
         if ($deleted !== true) {
             return ApiResponse::error(
@@ -289,6 +316,13 @@ final class MyAccountEndpoint
         // the integer id directly to its own audit_log table, which persists
         // independently of the now-deleted user record.
         AuditLogger::log('account_deleted', $userId, [], 'user', $userId);
+
+        // Side-channel notification using the email captured before deletion.
+        // The user record is gone but the audit_log row + this email are the
+        // two reconstructable signals. Best-effort; never throws.
+        if ($deletingEmail !== '') {
+            AccountSecurityMailer::accountDeleted($deletingEmail, $deletingName);
+        }
 
         // Kill the session before responding so the auth cookie no longer
         // resolves to a valid user.

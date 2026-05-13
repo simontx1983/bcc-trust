@@ -48,6 +48,7 @@ use BCC\Core\Wallet\WalletIdentityService;
 use BCC\Core\Wallet\WalletVerificationRequest;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\ApiResponse;
@@ -478,6 +479,16 @@ final class AuthEndpoint
             'chain'   => (string) $chain->slug,
             'via'     => 'rest',
         ], 'wallet', $userId);
+
+        // Side-channel security notification: linking a wallet broadens
+        // the auth surface (the wallet can now be used to sign in). Tell
+        // the user out-of-band so a session-hijack-then-link attack is
+        // detectable. Best-effort; never throws.
+        AccountSecurityMailer::walletLinked(
+            $userId,
+            (string) $chain->slug,
+            $walletAddress
+        );
 
         $response = ApiResponse::ok([
             'wallet_link_id' => $result['wallet_link_id'],
