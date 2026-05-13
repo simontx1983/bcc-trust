@@ -309,6 +309,16 @@ final class NftIndexerHealthSnapshot
         $v1LastErrors            = V1FetchFailureTracker::getLastErrors();
         $callCountCap            = EnrichmentScheduler::MAX_API_CALLS_PER_CHAIN;
         $chainsRaw               = [];
+
+        // F2 causal compression: collect per-chain symptoms during the
+        // loop. The existing per-symptom arrays above feed the top-card
+        // BADGES (operator-glanceable counts) — those stay as-is and
+        // remain the source of truth for the badges + drill-down detail
+        // in the per-chain table. This map drives the ISSUES list,
+        // which gets grouped by symptom-set signature so one root cause
+        // produces one issue line instead of one per downstream signal.
+        // Shape: slug => list<{type: string, detail: string|null}>.
+        $chainSymptoms           = [];
         $now                     = time();
 
         foreach (ChainCheckpointRepository::getAll() as $cp) {
@@ -378,6 +388,10 @@ final class NftIndexerHealthSnapshot
                         (int) $v1Stats['attempts'],
                         (int) round($rate * 100)
                     );
+                    $chainSymptoms[$slug][] = [
+                        'type'   => 'v1_failing',
+                        'detail' => sprintf('%d/%d = %d%%', (int) $v1Stats['failures'], (int) $v1Stats['attempts'], (int) round($rate * 100)),
+                    ];
                 }
             }
 
@@ -391,6 +405,10 @@ final class NftIndexerHealthSnapshot
                 || $state === ChainCheckpointRepository::STATE_DEGRADED
             ) {
                 $degradedChains[] = $slug . ' (' . $state . ')';
+                $chainSymptoms[$slug][] = [
+                    'type'   => 'degraded',
+                    'detail' => $state,
+                ];
                 continue;
             }
 
@@ -399,6 +417,10 @@ final class NftIndexerHealthSnapshot
             $lastRunAt = $cp->last_run_at !== null ? strtotime((string) $cp->last_run_at) : false;
             if ($lastRunAt !== false && ($now - $lastRunAt) > self::CHAIN_STALL_THRESHOLD_SECONDS) {
                 $stalledChains[] = $slug;
+                $chainSymptoms[$slug][] = [
+                    'type'   => 'stalled',
+                    'detail' => 'no run in ' . self::CHAIN_STALL_THRESHOLD_SECONDS . 's+',
+                ];
             }
 
             if ($dailyBudget > 0) {
@@ -410,6 +432,10 @@ final class NftIndexerHealthSnapshot
                         (int) $cp->cu_used_today,
                         $dailyBudget
                     );
+                    $chainSymptoms[$slug][] = [
+                        'type'   => 'cu_pressure',
+                        'detail' => sprintf('%d/%d CU', (int) $cp->cu_used_today, $dailyBudget),
+                    ];
                 }
             }
 
@@ -427,6 +453,10 @@ final class NftIndexerHealthSnapshot
                     $callCount,
                     $callCountCap
                 );
+                $chainSymptoms[$slug][] = [
+                    'type'   => 'call_count_pressure',
+                    'detail' => sprintf('%d/%d', $callCount, $callCountCap),
+                ];
             }
 
             // Progression detection (X3). First-class operational state,
@@ -468,9 +498,11 @@ final class NftIndexerHealthSnapshot
                     '%s (last_processed_block went DOWN — see history)',
                     $slug
                 );
+                $chainSymptoms[$slug][] = ['type' => 'regression', 'detail' => null];
             }
             if ($progressionSignal['fake_healthy']) {
                 $fakeHealthyChains[] = $slug;
+                $chainSymptoms[$slug][] = ['type' => 'fake_healthy', 'detail' => null];
             }
             if ($progressionSignal['lag_drifting']) {
                 $fromLag = (int) $progressionSignal['lag_first'];
@@ -482,6 +514,10 @@ final class NftIndexerHealthSnapshot
                     $toLag,
                     count($history)
                 );
+                $chainSymptoms[$slug][] = [
+                    'type'   => 'lag_drifting',
+                    'detail' => sprintf('lag %d→%d', $fromLag, $toLag),
+                ];
             }
         }
 
@@ -522,61 +558,17 @@ final class NftIndexerHealthSnapshot
         // exhaustion (distinct from per-chain CU budget). See
         // `project_v1_v2_nft_path_separation.md` follow-up.
         $allActiveDegraded = $activeCount > 0 && count($degradedChains) === $activeCount;
+
+        // ── Cross-chain (systemic) issues first ─────────────────────
+        // These describe whole-subsystem states, not per-chain symptoms,
+        // so they stay as single-purpose lines. Per-chain emission
+        // below is suppressed when allActiveDegraded fires — the
+        // consolidated cross-chain line already names every chain.
         if ($allActiveDegraded) {
             $issues[] = sprintf(
                 'All %d active EVM chains are degraded or breaker_open: %s. The subsystem is operationally offline regardless of chain enable-state. Per-chain CU budget is unaffected; check the shared `last_error` in the per-chain table — a uniform error across every chain points at project-wide provider quota exhaustion (Alchemy app-level cap), credentials, or network outage.',
                 $activeCount,
                 implode(', ', $degradedChains)
-            );
-        } elseif ($degradedChains !== []) {
-            $issues[] = 'Chains in degraded state: ' . implode(', ', $degradedChains) . '. Check `last_error` in the per-chain table below.';
-        }
-        if ($stalledChains !== []) {
-            $issues[] = sprintf(
-                'Active chains with no tick in %ds: %s. Worker may be silently failing — check the error log.',
-                self::CHAIN_STALL_THRESHOLD_SECONDS,
-                implode(', ', $stalledChains)
-            );
-        }
-        if ($cuPressureChains !== []) {
-            $issues[] = sprintf(
-                'CU budget pressure (>=%d%% of daily): %s. Walking will pause when budget hits 100%% until next UTC midnight.',
-                (int) (self::CU_BUDGET_PRESSURE_RATIO * 100),
-                implode(', ', $cuPressureChains)
-            );
-        }
-        if ($callCountPressureChains !== []) {
-            // Actionable framing — point at the likely cause (V2 retries on
-            // a degraded chain) and the diagnostic step (the per-chain
-            // table's last_error column). The footgun itself is documented
-            // separately on the class constant; here we focus on what the
-            // operator does right now.
-            $issues[] = sprintf(
-                'Call-count pressure (>=%d%% of EnrichmentScheduler per-chain cap): %s. Likely cause: V2 retries on a degraded chain; V1 fetches on the same chain will be pre-blocked at ApiRetry until the 10-min counter rolls over. Check `last_error` in the per-chain table below.',
-                (int) (self::CALL_COUNT_PRESSURE_RATIO * 100),
-                implode(', ', $callCountPressureChains)
-            );
-        }
-        // Progression signals (X3). Listed before less-severe issues so
-        // the regression case (RED) sorts ahead.
-        if ($regressionChains !== []) {
-            $issues[] = sprintf(
-                'BACKWARD progression detected: %s. This should never occur outside the N=%d-block reorg window and signals a checkpoint regression bug, corrupted progression history, or manual overwrite. Inspect `block_progression_history` and `last_processed_block` immediately.',
-                implode(', ', $regressionChains),
-                NftEthIndexerWorker::CONFIRMATIONS
-            );
-        }
-        if ($fakeHealthyChains !== []) {
-            $issues[] = sprintf(
-                'Worker alive but NOT progressing on %s: chain state reports healthy and `last_run_at` is fresh, but `last_processed_block` has not advanced across the last %d ticks while `head_block` has. This is the dangerous silent-failure class — heartbeat is lying. Inspect worker logs for swallowed exceptions in the post-fetch loop.',
-                implode(', ', $fakeHealthyChains),
-                self::PROGRESSION_MIN_SAMPLES
-            );
-        }
-        if ($lagDriftChains !== []) {
-            $issues[] = sprintf(
-                'Lag drifting upward on %s: the worker is ticking but `BLOCKS_PER_TICK` is below the chain natural block-production rate. Lag will continue to grow until either traffic eases or BLOCKS_PER_TICK is raised. Independent of absolute lag size — the trend is the signal.',
-                implode(', ', $lagDriftChains)
             );
         }
         if ($dedupeOvergrown) {
@@ -587,8 +579,7 @@ final class NftIndexerHealthSnapshot
             );
         }
         // Helius freshness issue lines (X5). Actionable wording: name
-        // the likely causes and the exact next operator step. Each cause
-        // class points at a different remediation surface.
+        // the likely causes and the exact next operator step.
         if ($heliusFreshness['state'] === 'red') {
             $issues[] = sprintf(
                 'Solana ingestion silent for %s (last Helius delivery: %s). At RED severity (>4h). Likely causes: provider outage at Helius, webhook delivery suspended (check Helius dashboard for the app status), or local handler is rejecting deliveries silently before the freshness mark fires (signature mismatch — check `bcc_helius_signature_sigfail_total`). NFT holdings on Solana have stopped updating.',
@@ -604,18 +595,29 @@ final class NftIndexerHealthSnapshot
         } elseif ($heliusFreshness['state'] === 'never_delivered') {
             $issues[] = 'Helius webhook is provisioned but no deliveries have been received yet. Verify (1) the Helius app dashboard shows our callback URL as the configured endpoint, (2) `BCC_HELIUS_WEBHOOK_SECRET` in wp-config.php matches the Helius app secret, and (3) at least one tracked Solana wallet exists.';
         }
-        if ($v1FetchFailureChains !== []) {
-            // Actionable: name the chains and rates, and the next
-            // diagnostic step. The V1 Discovery panel below carries
-            // the full last_error string per chain — that's where the
-            // operator goes for context. Sample-size floor prevents a
-            // single transport blip from firing this signal.
-            $issues[] = sprintf(
-                'V1 NFT ownership discovery failing on %s (>=%d%% failure rate over the last hour, min %d samples). Likely causes: Alchemy upstream errors on the affected chain, the chain rpc_url config drift, or rate-limit responses. See the "V1 Discovery" panel below for the most recent error message per chain.',
-                implode(', ', $v1FetchFailureChains),
-                (int) (self::V1_FETCH_FAILURE_YELLOW_RATIO * 100),
-                self::V1_FETCH_FAILURE_MIN_SAMPLES
-            );
+
+        // ── F2 causal compression: per-chain symptom grouping ──────
+        //
+        // Pre-F2 the issues list emitted one line per signal: a chain
+        // with degraded + stalled + lag_drift produced THREE near-
+        // duplicate lines, all naming the same chain. That conditioned
+        // operator cognition toward "lots is wrong" when actually
+        // ONE underlying issue had downstream symptoms.
+        //
+        // Post-F2 we collect symptoms per chain during the loop above,
+        // then group chains with IDENTICAL symptom signatures and emit
+        // ONE issue per group. Drill-down detail stays available via
+        // the per-chain table + the existing per-symptom arrays (which
+        // still feed the top-card badges and external automation).
+        //
+        // Severity-ordered primary symptom selection: when a chain has
+        // multiple symptoms, the most severe one drives the wording of
+        // the issue line; secondary symptoms are listed as derivative.
+        // Skipped when allActiveDegraded fires (already consolidated).
+        if (!$allActiveDegraded && $chainSymptoms !== []) {
+            foreach (self::groupChainsBySymptomSignature($chainSymptoms) as $group) {
+                $issues[] = self::formatChainSymptomGroupIssue($group);
+            }
         }
 
         // Derive RGB. Red dominates yellow dominates green.
@@ -718,6 +720,176 @@ final class NftIndexerHealthSnapshot
             'last_delivery_at' => $rawTs,
             'age_seconds'      => $age,
         ];
+    }
+
+    /**
+     * F2 — symptom-severity ranking. Higher = more severe; the primary
+     * symptom drives the issue-line wording, secondaries are listed as
+     * derivative. Values picked so simple integer comparison works.
+     *
+     * @return array<string, int>
+     */
+    private static function symptomSeverity(): array
+    {
+        return [
+            'regression'         => 100,  // RED — correctness anomaly
+            'degraded'           => 90,   // chain offline (state-driven)
+            'stalled'            => 80,   // worker hasn't ticked
+            'fake_healthy'       => 70,   // ticking but not advancing
+            'lag_drifting'       => 60,   // ticking but falling behind
+            'cu_pressure'        => 50,   // resource constraint
+            'call_count_pressure' => 40,
+            'v1_failing'         => 30,   // distinct subsystem (V1 ownership discovery)
+        ];
+    }
+
+    /**
+     * Group chains by IDENTICAL symptom-type signature so chains sharing
+     * the same underlying failure pattern produce ONE issue line instead
+     * of one per symptom per chain.
+     *
+     * Returns groups in descending order of the group's primary-symptom
+     * severity. Within a group, chains are listed in insertion order
+     * (which mirrors `ChainCheckpointRepository::getAll()` ordering →
+     * chain_id ASC).
+     *
+     * @param array<string, list<array{type: string, detail: string|null}>> $chainSymptoms
+     * @return list<array{signature: string, primary_type: string, types: list<string>, chains: array<string, list<array{type: string, detail: string|null}>>}>
+     */
+    private static function groupChainsBySymptomSignature(array $chainSymptoms): array
+    {
+        $severity = self::symptomSeverity();
+        $groups   = [];
+
+        foreach ($chainSymptoms as $slug => $symptoms) {
+            $types = [];
+            foreach ($symptoms as $sym) {
+                $types[] = (string) $sym['type'];
+            }
+            $types = array_values(array_unique($types));
+            sort($types);
+            $sig = implode('+', $types);
+
+            // Primary = highest severity among this chain's symptoms.
+            usort(
+                $types,
+                static fn($a, $b) => ($severity[$b] ?? 0) <=> ($severity[$a] ?? 0)
+            );
+            $primary = $types[0] ?? '';
+
+            if (!isset($groups[$sig])) {
+                $groups[$sig] = [
+                    'signature'    => $sig,
+                    'primary_type' => $primary,
+                    'types'        => $types,
+                    'chains'       => [],
+                ];
+            }
+            $groups[$sig]['chains'][$slug] = $symptoms;
+        }
+
+        // Sort groups by primary severity descending so the most severe
+        // group's issue line appears first in the issues list.
+        uasort(
+            $groups,
+            static function (array $a, array $b) use ($severity): int {
+                return ($severity[$b['primary_type']] ?? 0) <=> ($severity[$a['primary_type']] ?? 0);
+            }
+        );
+
+        return array_values($groups);
+    }
+
+    /**
+     * Compose the one-issue-per-group line. Names the affected chains,
+     * leads with the primary symptom, lists secondary symptoms as
+     * derivative, ends with an actionable diagnostic step keyed off the
+     * primary symptom.
+     *
+     * @param array{signature: string, primary_type: string, types: list<string>, chains: array<string, list<array{type: string, detail: string|null}>>} $group
+     */
+    private static function formatChainSymptomGroupIssue(array $group): string
+    {
+        $chainSlugs   = array_keys($group['chains']);
+        $primaryType  = $group['primary_type'];
+        $secondary    = array_values(array_diff($group['types'], [$primaryType]));
+
+        // Per-chain primary-symptom detail (so the operator sees the
+        // numbers when applicable — e.g. "ethereum (43k/50k CU)").
+        $chainStrings = [];
+        foreach ($group['chains'] as $slug => $symptoms) {
+            $detail = null;
+            foreach ($symptoms as $sym) {
+                if ($sym['type'] === $primaryType && $sym['detail'] !== null) {
+                    $detail = $sym['detail'];
+                    break;
+                }
+            }
+            $chainStrings[] = $detail !== null ? sprintf('%s (%s)', $slug, $detail) : $slug;
+        }
+
+        // Lead-in: "chain(s) + primary symptom"
+        $primaryLabel = self::primarySymptomLabel($primaryType);
+        $verb         = count($chainSlugs) === 1 ? 'is' : 'are';
+        $lead         = sprintf(
+            '%s %s %s',
+            implode(', ', $chainStrings),
+            $verb,
+            $primaryLabel
+        );
+
+        // Secondary symptoms (derivative). Skip when there are none —
+        // a single-symptom chain reads cleanly without a "Secondary:"
+        // tail.
+        $secondaryFragment = '';
+        if ($secondary !== []) {
+            $labels = array_map([self::class, 'primarySymptomLabel'], $secondary);
+            $secondaryFragment = sprintf(' Secondary symptoms: %s.', implode(', ', $labels));
+        }
+
+        // Trailing action keyed off the primary symptom.
+        $action = self::primarySymptomAction($primaryType);
+
+        return $lead . '.' . $secondaryFragment . ' ' . $action;
+    }
+
+    private static function primarySymptomLabel(string $type): string
+    {
+        switch ($type) {
+            case 'regression':          return 'showing BACKWARD progression (checkpoint regression)';
+            case 'degraded':            return 'in degraded/breaker_open state';
+            case 'stalled':             return 'stalled (no tick in 5+ min)';
+            case 'fake_healthy':        return 'alive but not progressing (heartbeat lying)';
+            case 'lag_drifting':        return 'lag drifting upward';
+            case 'cu_pressure':         return 'under CU budget pressure';
+            case 'call_count_pressure': return 'under scheduler call-count pressure';
+            case 'v1_failing':          return 'failing V1 ownership discovery';
+            default:                    return 'in an unrecognised state (' . $type . ')';
+        }
+    }
+
+    private static function primarySymptomAction(string $type): string
+    {
+        switch ($type) {
+            case 'regression':
+                return 'Correctness anomaly — should never occur outside the N=' . NftEthIndexerWorker::CONFIRMATIONS . '-block reorg window. Inspect `block_progression_history` and `last_processed_block` immediately.';
+            case 'degraded':
+                return 'Check `last_error` in the per-chain table below.';
+            case 'stalled':
+                return 'Worker may be silently failing. Check the error log for swallowed exceptions in the post-fetch loop.';
+            case 'fake_healthy':
+                return 'The dangerous silent-failure class. Inspect worker logs for swallowed exceptions in the post-fetch loop.';
+            case 'lag_drifting':
+                return 'Worker is ticking but BLOCKS_PER_TICK is below the chain natural block-production rate. Lag will continue to grow until either traffic eases or BLOCKS_PER_TICK is raised.';
+            case 'cu_pressure':
+                return 'Walking will pause when budget hits 100% until next UTC midnight.';
+            case 'call_count_pressure':
+                return 'EnrichmentScheduler per-chain counter is near cap (post-X2 this only fires when the scheduler itself is busy on this chain).';
+            case 'v1_failing':
+                return 'See the V1 Discovery panel below for the most recent error message per chain.';
+            default:
+                return '';
+        }
     }
 
     /**
