@@ -73,7 +73,7 @@ class PatternRepository {
      */
     public function getMostCommonTypes(int $limit = 10): array {
         global $wpdb;
-        
+
         return $wpdb->get_results($wpdb->prepare(
             "SELECT pattern_type, COUNT(*) as count, AVG(confidence) as avg_confidence
              FROM {$this->table}
@@ -82,6 +82,95 @@ class PatternRepository {
              LIMIT %d",
             $limit
         ));
+    }
+
+    /**
+     * Per-type pattern counts within a rolling time window.
+     *
+     * Drives the §O5 operator-journal Ecosystem tab — surfaces which
+     * pattern classes are firing this week without requiring the
+     * operator to query the patterns table directly. Composes cleanly
+     * on the existing pattern_type allowlist (vote_ring,
+     * endorsement_ring, slow_endorsement_ring, suspicious_behavior, ...)
+     * — caller supplies the type list it cares about.
+     *
+     * Bounded: type-list whitelist + windowed `detected_at`. Empty
+     * `$types` short-circuits to an empty map.
+     *
+     * @param list<string> $types Allowlist (typically vote/endorse ring families).
+     * @param int          $days  Rolling window in days. Caller-bounded.
+     * @return array<string, int> pattern_type => count
+     */
+    public function getCountsByTypesSince(array $types, int $days = 7): array {
+        $cleanTypes = [];
+        foreach ($types as $t) {
+            if (is_string($t) && $t !== '') {
+                $cleanTypes[] = $t;
+            }
+        }
+        if ($cleanTypes === []) {
+            return [];
+        }
+
+        $days = max(1, $days);
+
+        global $wpdb;
+        $typePlaceholders = implode(',', array_fill(0, count($cleanTypes), '%s'));
+
+        $params = $cleanTypes;
+        $params[] = $days;
+
+        /** @var list<array{pattern_type: string, count: string|int}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT pattern_type, COUNT(*) AS count
+             FROM {$this->table}
+             WHERE pattern_type IN ({$typePlaceholders})
+               AND detected_at > DATE_SUB(NOW(), INTERVAL %d DAY)
+             GROUP BY pattern_type",
+            ...$params
+        ), ARRAY_A);
+
+        // Default every requested type to 0 so the caller can render a
+        // stable order without presence-guarding each row.
+        $out = [];
+        foreach ($cleanTypes as $t) {
+            $out[$t] = 0;
+        }
+        foreach (($rows ?: []) as $row) {
+            $type = (string) ($row['pattern_type'] ?? '');
+            if ($type !== '' && isset($out[$type])) {
+                $out[$type] = (int) ($row['count'] ?? 0);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Latest pattern row for a given type — used by the operator
+     * journal to surface "most recent slow-ring detection" with its
+     * member-list metadata for one-glance review.
+     *
+     * Returns null when no rows match. Bounded by indexed lookup on
+     * pattern_type + ORDER BY detected_at DESC LIMIT 1.
+     *
+     * @return object|null
+     */
+    public function getLatestByType(string $type): ?object {
+        if ($type === '') {
+            return null;
+        }
+
+        global $wpdb;
+        /** @var object|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT " . self::COLUMNS . "
+             FROM {$this->table}
+             WHERE pattern_type = %s
+             ORDER BY detected_at DESC
+             LIMIT 1",
+            $type
+        ));
+        return $row ?: null;
     }
     
     /**

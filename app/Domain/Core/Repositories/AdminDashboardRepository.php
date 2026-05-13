@@ -1754,4 +1754,399 @@ class AdminDashboardRepository
             $limit
         )) ?: [];
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // §O5 Operator-Journal Ecosystem Rollup (shipped 2026-05-13).
+    //
+    // Single read-side composition that backs the wp-admin Ecosystem
+    // tab. Operators read this weekly; the surface is trajectory-shaped,
+    // not snapshot-shaped — sustained patterns matter, individual spikes
+    // do not. NEVER public-facing; NEVER user-visible. Per the audit's
+    // hard constraints: no popularity rankings, no leaderboards, no
+    // engagement metrics, no DAU. Operator-only stewardship surface.
+    //
+    // Composes on existing producers (PatternRepository, DisputeRepository,
+    // bcc_pull_meta + peepso_user_followers, wp_posts) — no parallel
+    // observability store. Per §11 EXTEND-only doctrine.
+    // ────────────────────────────────────────────────────────────────────
+
+    /**
+     * Consolidated 7-day (or configurable window) operator-journal
+     * snapshot for the wp-admin Ecosystem tab. Cached for 5 minutes
+     * (same TTL as the rest of the admin surface).
+     *
+     * Returns an associative array with stable section keys; sections
+     * not yet wired in V1 (chain_activity, attention_gravity,
+     * external_slot) return `null` so the tab renders an honest
+     * "deferred — needs X" placeholder rather than fabricating data.
+     *
+     * Returned shape (keys stable; values vary per section):
+     *   window_days: int
+     *   generated_at: string (UTC mysql)
+     *   slow_rings: array{total: int, by_type: array<string,int>, latest_slow_ring: ?array}
+     *   panel_duty: array{window_status_counts, opened_in_window, resolved_in_window,
+     *                     timeout_rate_pct, lopsided_count, split_count, all_time_status_counts}
+     *   tier_movement: array{current_distribution: array<string,int>, wow_delta: null}
+     *   watch_graph: array{new_pulls_in_window: int, top_gainers: list<array>}
+     *   feed_dominance: array{total_posts: int, distinct_authors: int,
+     *                         top_10_share_pct: float, by_kind: array<string,int>}
+     *   chain_activity: null   (V1-deferred)
+     *   attention_gravity: null (V1-deferred)
+     *   external_slot: null    (V1-deferred)
+     *
+     * @param int $days Rolling window, clamped [1, 90].
+     * @return array<string, mixed>
+     */
+    public function getEcosystemRollup(int $days = 7): array
+    {
+        $days = max(1, min($days, 90));
+
+        $cacheKey = "ecosystem_rollup_{$days}d";
+        $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        $rollup = [
+            'window_days'   => $days,
+            'generated_at'  => gmdate('Y-m-d H:i:s'),
+            'slow_rings'    => $this->ecosystemSlowRings($days),
+            'panel_duty'    => $this->ecosystemPanelDuty($days),
+            'tier_movement' => $this->ecosystemTierMovement(),
+            'watch_graph'   => $this->ecosystemWatchGraph($days),
+            'feed_dominance' => $this->ecosystemFeedDominance($days),
+
+            // V1-deferred sections — designed in the audit, not wired this pass.
+            // Each `null` is rendered as an honest "deferred" placeholder in the
+            // tab template. Activating them when the producer lands is a one-line
+            // change here (swap null for the sub-helper call).
+            'chain_activity'    => null,  // Needs page→chain bridge (entity_category → chain_id).
+            'attention_gravity' => null,  // Needs prior-period snapshot store for WoW deltas.
+            'external_slot'     => null,  // Needs HighlightStrip fetch-rate instrumentation.
+        ];
+
+        wp_cache_set($cacheKey, $rollup, self::CACHE_GROUP, self::CACHE_TTL);
+        return $rollup;
+    }
+
+    /**
+     * Slow-ring (+ vote-ring + endorsement-ring) detection counts in
+     * the window. Composes on PatternRepository — the soft-flag pattern
+     * store TrustGraph writes to. Surfaces the bake-window gap the
+     * audit identified: Phase 3 slow-ring detection ships output to a
+     * log file operators don't habitually read; this lifts the signal
+     * onto a tab they will.
+     *
+     * @return array<string, mixed>
+     */
+    private function ecosystemSlowRings(int $days): array
+    {
+        $patternRepo = \BCC\Trust\Core\Plugin::instance()->patternRepository();
+
+        $types  = ['vote_ring', 'endorsement_ring', 'slow_endorsement_ring'];
+        $counts = $patternRepo->getCountsByTypesSince($types, $days);
+
+        $latestSlow = $patternRepo->getLatestByType('slow_endorsement_ring');
+        $latest     = null;
+        if ($latestSlow !== null) {
+            $rawData = $latestSlow->pattern_data ?? null;
+            $data    = is_string($rawData) ? json_decode($rawData, true) : null;
+            $latest  = [
+                'detected_at' => is_string($latestSlow->detected_at ?? null)
+                    ? (string) $latestSlow->detected_at
+                    : null,
+                'confidence'  => isset($latestSlow->confidence)
+                    ? round((float) $latestSlow->confidence, 2)
+                    : null,
+                'size'        => is_array($data) && isset($data['size'])
+                    ? (int) $data['size']
+                    : null,
+                'strength'    => is_array($data) && isset($data['strength'])
+                    ? round((float) $data['strength'], 2)
+                    : null,
+            ];
+        }
+
+        return [
+            'total'            => (int) array_sum($counts),
+            'by_type'          => $counts,
+            'latest_slow_ring' => $latest,
+        ];
+    }
+
+    /**
+     * Panel-duty health rollup. Composes on DisputeRepository (status
+     * counts in window + lopsided/split detection) and the existing
+     * dispute table directly for windowed reads not covered by the
+     * existing static helpers.
+     *
+     * Audit-identified gaps surfaced here (the Phase 2 affinity
+     * overlay's effects):
+     *   - timeout_rate_pct — `timeout_no_quorum / resolved`
+     *   - lopsided/split distribution — accept/reject spread
+     *
+     * Repeat-pairings + affinity-distribution detection deferred to
+     * a follow-up pass; both require richer panel-row queries.
+     *
+     * @return array<string, mixed>
+     */
+    private function ecosystemPanelDuty(int $days): array
+    {
+        global $wpdb;
+
+        $disputeTable = \BCC\Trust\Disputes\Repositories\DisputeRepository::disputes_table();
+
+        // Windowed status counts — direct query because the existing
+        // static helper is all-time scope.
+        /** @var list<array{status: string, cnt: string|int}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT status, COUNT(*) AS cnt
+             FROM {$disputeTable}
+             WHERE created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
+             GROUP BY status
+             LIMIT 10",
+            $days
+        ), ARRAY_A);
+
+        $statusCounts = [
+            'reviewing'         => 0,
+            'accepted'          => 0,
+            'rejected'          => 0,
+            'timeout_no_quorum' => 0,
+        ];
+        $totalInWindow = 0;
+        foreach (($rows ?: []) as $row) {
+            $status = (string) ($row['status'] ?? '');
+            $cnt    = (int) ($row['cnt'] ?? 0);
+            if ($status !== '') {
+                $statusCounts[$status] = $cnt;
+                $totalInWindow += $cnt;
+            }
+        }
+        $resolvedInWindow = $statusCounts['accepted']
+            + $statusCounts['rejected']
+            + $statusCounts['timeout_no_quorum'];
+
+        $timeoutRatePct = null;
+        if ($resolvedInWindow > 0) {
+            $timeoutRatePct = round(
+                ($statusCounts['timeout_no_quorum'] / $resolvedInWindow) * 100,
+                1
+            );
+        }
+
+        // Lopsided (5-0 or 4-1) vs split (3-2) panel decisions among
+        // resolved disputes in the window. Reads accept/reject spreads
+        // from the dispute row's denormalised tallies.
+        /** @var list<array{accepts: int|string, rejects: int|string}>|null $resolvedRows */
+        $resolvedRows = $wpdb->get_results($wpdb->prepare(
+            "SELECT panel_accepts AS accepts, panel_rejects AS rejects
+             FROM {$disputeTable}
+             WHERE created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
+               AND status IN ('accepted', 'rejected')
+             LIMIT 1000",
+            $days
+        ), ARRAY_A);
+
+        $lopsided = 0;
+        $split    = 0;
+        foreach (($resolvedRows ?: []) as $row) {
+            $a = (int) $row['accepts'];
+            $r = (int) $row['rejects'];
+            $delta = abs($a - $r);
+            // 5-0 or 4-1 = lopsided (delta >= 3); 3-2 or 2-3 = split (delta <= 1).
+            // Mid-spreads (delta = 2) classified as "split-leaning" elsewhere if
+            // we ever surface a third bucket; for now treat as split for the
+            // operator-readable summary.
+            if ($delta >= 3) {
+                $lopsided++;
+            } else {
+                $split++;
+            }
+        }
+
+        return [
+            'window_status_counts'  => $statusCounts,
+            'opened_in_window'      => $totalInWindow,
+            'resolved_in_window'    => $resolvedInWindow,
+            'timeout_rate_pct'      => $timeoutRatePct,
+            'lopsided_count'        => $lopsided,
+            'split_count'           => $split,
+            'all_time_status_counts' => \BCC\Trust\Disputes\Repositories\DisputeRepository::getDisputeStatusCounts(),
+        ];
+    }
+
+    /**
+     * Tier-distribution snapshot (current state only — no WoW comparison
+     * in V1 because no historical snapshot store exists yet). Composes
+     * on the existing getOverviewData primitive so the tier histogram
+     * stays consistent with the Overview tab.
+     *
+     * @return array<string, mixed>
+     */
+    private function ecosystemTierMovement(): array
+    {
+        $overview = $this->getOverviewData();
+        return [
+            'current_distribution' => $overview['tier_distribution'] ?? [],
+            'wow_delta'            => null, // V1-deferred — see audit P4 design notes.
+        ];
+    }
+
+    /**
+     * Watch-graph activity in the window: total new pulls + top-N
+     * recipients (gainers). OPERATOR-ONLY — never user-visible.
+     *
+     * Composes on `bcc_pull_meta.pulled_at` (indexed) JOIN
+     * peepso_user_followers for recipient resolution. The
+     * peepso_user_followers table has no date column; bcc_pull_meta is
+     * the canonical "deliberate Keep-Tabs action" event log because the
+     * pull is what BinderService records with a timestamp.
+     *
+     * Top-N is capped at 5 and intentionally NOT ranked publicly.
+     * Operators get a list; the platform never surfaces "who has the
+     * most watchers" anywhere user-facing. Per Phase 4 audit
+     * constraints: detect celebrity gravity early, never amplify it.
+     *
+     * @return array<string, mixed>
+     */
+    private function ecosystemWatchGraph(int $days): array
+    {
+        global $wpdb;
+
+        $pullMetaTable = TableRegistry::pullMeta();
+        $followersTable = $wpdb->prefix . 'peepso_user_followers';
+
+        // Total deliberate-pull events in window.
+        $totalPulls = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$pullMetaTable}
+             WHERE pulled_at > DATE_SUB(NOW(), INTERVAL %d DAY)",
+            $days
+        ));
+
+        // Top-5 recipients (operator-only; never user-surfaced).
+        /** @var list<array{recipient_id: string|int, gained: string|int}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT pf.uf_passive_user_id AS recipient_id,
+                    COUNT(*) AS gained
+             FROM {$pullMetaTable} pm
+             INNER JOIN {$followersTable} pf ON pm.follow_id = pf.uf_id
+             WHERE pm.pulled_at > DATE_SUB(NOW(), INTERVAL %d DAY)
+               AND pf.uf_follow = 1
+             GROUP BY pf.uf_passive_user_id
+             ORDER BY gained DESC
+             LIMIT 5",
+            $days
+        ), ARRAY_A);
+
+        $topGainers = [];
+        foreach (($rows ?: []) as $row) {
+            $userId = (int) $row['recipient_id'];
+            if ($userId <= 0) {
+                continue;
+            }
+            $handleMeta = get_user_meta($userId, 'bcc_handle', true);
+            $handle     = is_string($handleMeta) && $handleMeta !== '' ? $handleMeta : null;
+            $topGainers[] = [
+                'user_id' => $userId,
+                'handle'  => $handle,
+                'gained'  => (int) $row['gained'],
+            ];
+        }
+
+        return [
+            'new_pulls_in_window' => $totalPulls,
+            'top_gainers'         => $topGainers,
+        ];
+    }
+
+    /**
+     * Feed dominance rollup — operator-only. Computes the top-10
+     * author share of post creation in the window across BCC-relevant
+     * post types. NEVER ranks individual authors publicly; the share
+     * percentage is the load-bearing signal, not the names.
+     *
+     * If top-10 authors produce >40% of posts in the window, that's
+     * the early signal of a power-poster graph emerging — operators
+     * see it BEFORE users feel it. Threshold tuning lives in the tab
+     * template (color/copy choice), not in this method.
+     *
+     * @return array<string, mixed>
+     */
+    private function ecosystemFeedDominance(int $days): array
+    {
+        global $wpdb;
+
+        // BCC-relevant post types: status posts, photos, gifs, plus
+        // long-form blog posts (default WP `post`). Reviews are tagged
+        // as `post` with a review marker; treated as the same bucket
+        // here. Comments excluded — they're conversation, not posts.
+        $postTypes = ['peepso-activity-status', 'peepso-photo', 'peepso-gif', 'post'];
+        $typePlaceholders = implode(',', array_fill(0, count($postTypes), '%s'));
+
+        $params = $postTypes;
+        $params[] = $days;
+
+        // Per-author counts in window.
+        /** @var list<array{post_author: string|int, c: string|int}>|null $authorRows */
+        $authorRows = $wpdb->get_results($wpdb->prepare(
+            "SELECT post_author, COUNT(*) AS c
+             FROM {$wpdb->posts}
+             WHERE post_type IN ({$typePlaceholders})
+               AND post_status = 'publish'
+               AND post_date_gmt > DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY)
+             GROUP BY post_author
+             ORDER BY c DESC
+             LIMIT 1000",
+            ...$params
+        ), ARRAY_A);
+
+        $totalPosts = 0;
+        $allAuthorCounts = [];
+        foreach (($authorRows ?: []) as $row) {
+            $count = (int) $row['c'];
+            $allAuthorCounts[] = $count;
+            $totalPosts += $count;
+        }
+
+        $top10Sum = (int) array_sum(array_slice($allAuthorCounts, 0, 10));
+        $top10SharePct = $totalPosts > 0
+            ? round(($top10Sum / $totalPosts) * 100, 1)
+            : 0.0;
+
+        // Post-type distribution — same window, grouped by type.
+        $kindParams = $postTypes;
+        $kindParams[] = $days;
+        /** @var list<array{post_type: string, c: string|int}>|null $kindRows */
+        $kindRows = $wpdb->get_results($wpdb->prepare(
+            "SELECT post_type, COUNT(*) AS c
+             FROM {$wpdb->posts}
+             WHERE post_type IN ({$typePlaceholders})
+               AND post_status = 'publish'
+               AND post_date_gmt > DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY)
+             GROUP BY post_type
+             LIMIT 10",
+            ...$kindParams
+        ), ARRAY_A);
+
+        $byKind = [
+            'peepso-activity-status' => 0,
+            'peepso-photo'           => 0,
+            'peepso-gif'             => 0,
+            'post'                   => 0,
+        ];
+        foreach (($kindRows ?: []) as $row) {
+            $kind = (string) $row['post_type'];
+            if (isset($byKind[$kind])) {
+                $byKind[$kind] = (int) $row['c'];
+            }
+        }
+
+        return [
+            'total_posts'          => $totalPosts,
+            'distinct_authors'     => count($allAuthorCounts),
+            'top_10_share_pct'     => $top10SharePct,
+            'by_kind'              => $byKind,
+        ];
+    }
 }

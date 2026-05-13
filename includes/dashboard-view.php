@@ -15,6 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 // ── Load tab files ────────────────────────────────────────────
 $tabs_dir = BCC_TRUST_PATH . 'includes/admin/tabs/';
 require_once $tabs_dir . 'tab-overview.php';
+require_once $tabs_dir . 'tab-ecosystem.php';
 require_once $tabs_dir . 'tab-pages.php';
 require_once $tabs_dir . 'tab-users.php';
 require_once $tabs_dir . 'tab-activity.php';
@@ -31,6 +32,7 @@ $current_tab = isset( $_GET['tab'] ) ? sanitize_key( $_GET['tab'] ) : 'overview'
 // ── Tab definitions ───────────────────────────────────────────
 $tabs = [
     'overview'  => 'Overview',
+    'ecosystem' => 'Ecosystem',
     'pages'     => 'Top Pages',
     'all-pages' => 'All Pages',
     'users'     => 'User Trust',
@@ -63,6 +65,7 @@ $attention_tabs = [ 'repair' => '#f0f8ff', 'verified' => '#e6f3e6' ];
 <div class="tab-content" style="padding-top:10px;">
     <?php
     switch ( $current_tab ) {
+        case 'ecosystem': bcc_trust_render_ecosystem_tab(); break;
         case 'pages':     bcc_trust_render_pages_tab();     break;
         case 'all-pages': bcc_trust_render_all_pages_tab(); break;
         case 'users':     bcc_trust_render_users_tab();     break;
