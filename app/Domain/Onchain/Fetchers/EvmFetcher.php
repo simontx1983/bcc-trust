@@ -7,31 +7,69 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
+use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
+use BCC\Trust\Onchain\Services\NftSpamFilter;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 
 /**
  * EVM Chain Fetcher
  *
- * Fetches NFT collection data from EVM chains via Etherscan-compatible APIs.
- * Uses the ERC-721/1155 token transfer endpoint to discover collections
- * created by an address, then enriches with supply and holder data.
+ * V1 NFT discovery path. `fetch_collections()` queries Alchemy's NFT API v3
+ * (`getContractsForOwner`) to enumerate the contracts a wallet currently
+ * holds NFTs from — ERC-721 and ERC-1155 in the same response. Result feeds
+ * `wp_bcc_onchain_collections` (the read-time TTL'd table behind the Verify
+ * Collections admin page, user gallery refresh, and claim-flow candidate
+ * lists).
  *
- * Requires BCC_ETHERSCAN_API_KEY defined in wp-config.php.
+ * Ownership semantics: current holdings as Alchemy's index shows them. The
+ * V2 confirmation-gated indexer (`NftEthIndexerWorker`) lives on a separate,
+ * trust-grade path against `wp_bcc_nft_holdings` and uses
+ * `alchemy_getAssetTransfers` — that path is unchanged. See
+ * `project_v1_v2_nft_path_separation.md` in memory.
+ *
+ * Spam filtering is defense-in-depth, free-tier-compatible:
+ *   1. `NftSpamContractRepository` rule table (operator overrides; RULE_ALLOW
+ *      wins over upstream signals, RULE_DENY drops unconditionally).
+ *   2. Alchemy `isSpam` field on the response (preserved even when the paid
+ *      `excludeFilters[]=SPAM` query param has no effect on free tier).
+ *   3. `NftSpamFilter::isSpam` heuristic match on collection name.
+ *
+ * CU accounting: each `getContractsForOwner` page = 320 CU against the same
+ * `wp_bcc_chain_checkpoints.cu_used_today` gauge the V2 indexer uses. Hard
+ * pagination cap of `ALCHEMY_NFT_MAX_PAGES` keeps a single fetch bounded so
+ * a whale wallet can't drain the daily budget in one call.
+ *
+ * Etherscan dependency on this method is fully removed. `BCC_ETHERSCAN_API_KEY`
+ * is still required by `SignalFetcher` (wallet-age / tx-count signals); that
+ * code path is unrelated and out of scope.
  *
  * @phpstan-import-type ChainRow from ChainRepository
  *
- * @phpstan-type EtherscanNftTransfer object{
- *     from?: string,
- *     to?: string,
- *     contractAddress?: string,
- *     tokenName?: string
+ * @phpstan-type AlchemyContractRow array{
+ *     address?: string,
+ *     name?: string|null,
+ *     symbol?: string|null,
+ *     totalSupply?: string|null,
+ *     tokenType?: string|null,
+ *     isSpam?: bool|null,
+ *     spamClassifications?: list<string>|null,
+ *     openSeaMetadata?: array{
+ *         floorPrice?: float|null,
+ *         imageUrl?: string|null,
+ *         collectionName?: string|null
+ *     }|null
  * }
  */
 class EvmFetcher implements FetcherInterface
 {
-    private const HTTP_TIMEOUT = 12;
-    private const ALCHEMY_MAX_COUNT = 1000; // alchemy_getAssetTransfers per-page cap (spike 1)
+    private const HTTP_TIMEOUT          = 12;
+    private const ALCHEMY_MAX_COUNT     = 1000; // alchemy_getAssetTransfers per-page cap (spike 1)
+    private const ALCHEMY_NFT_PAGE_SIZE = 100;  // getContractsForOwner pageSize (max per Alchemy docs)
+    private const ALCHEMY_NFT_MAX_PAGES = 5;    // Hard cap. 5 × 100 = 500 contracts/wallet/fetch — covers whales without unbounded CU spend.
+    private const ALCHEMY_NFT_CU_PER_CALL = 320;
 
     /** @var ChainRow */
     private object $chain;
@@ -539,106 +577,230 @@ class EvmFetcher implements FetcherInterface
     }
 
     /**
-     * Discover NFT collections created by an address.
+     * Discover NFT collections currently held by an address (ERC-721 + ERC-1155).
      *
-     * Strategy: query Etherscan "tokennfttx" for outbound ERC-721/1155
-     * transfers where from=0x0 (mints) and contractAddress was deployed
-     * by this address. Groups results by contract.
+     * Strategy: page through Alchemy's
+     * `GET /nft/v3/{apiKey}/getContractsForOwner` (matched grain to
+     * `wp_bcc_onchain_collections` — one row per contract, not per token),
+     * normalise into the upsert shape, and apply the three-tier spam chain
+     * (rule table → Alchemy `isSpam` → local heuristic).
+     *
+     * Bounded by `ALCHEMY_NFT_MAX_PAGES`. Each page costs
+     * `ALCHEMY_NFT_CU_PER_CALL` CU against the same daily budget the V2
+     * indexer tracks — V1/V2 share physical quota by design (see
+     * `project_v1_v2_nft_path_separation.md`).
+     *
+     * Returns `[]` rather than falling back to any other provider when
+     * Alchemy is unreachable or the chain's `rpc_url` is not an Alchemy
+     * endpoint. Fail-loud-and-empty is the locked policy — a fallback
+     * with different ownership semantics would create silent drift.
+     *
+     * Creator/deployer role verification (claim flow) is handled
+     * authoritatively downstream by `BlockchainQueryService::getEthRole()`
+     * via on-chain `owner()` RPC and does NOT depend on this fetcher.
      *
      * @param string $walletAddress  Wallet address to query.
-     * @param int    $chainId        Chain ID override (ignored — uses $this->chain->id).
+     * @param int    $chainId        Chain ID override (defaults to $this->chain->id).
      * @return array<int, array<string, mixed>> Array of normalized collection rows.
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
         $chainId = $chainId ?: (int) $this->chain->id;
 
-        $api_key = defined('BCC_ETHERSCAN_API_KEY') ? BCC_ETHERSCAN_API_KEY : '';
-        if (!$api_key) {
+        $rpcUrl  = (string) ($this->chain->rpc_url ?? '');
+        $nftBase = $this->alchemyNftBaseFromRpcUrl($rpcUrl);
+        if ($nftBase === null) {
+            // Fail-loud-and-empty: chains on non-Alchemy RPCs (e.g.
+            // public-RPC Avalanche / BSC) have no V1 NFT discovery
+            // until their rpc_url is migrated to Alchemy. Logged once
+            // per call so operator can grep for the gap.
+            \BCC\Core\Log\Logger::warning('[EvmFetcher.fetch_collections] chain has non-Alchemy rpc_url; V1 NFT discovery unavailable', [
+                'chain_id' => $chainId,
+                'chain'    => (string) ($this->chain->slug ?? ''),
+            ]);
             return [];
         }
 
-        $explorer = rtrim($this->chain->explorer_url ?? '', '/');
-        $api_base = $this->resolveApiBase($explorer);
+        // Ensure a checkpoint row exists so the shared CU gauge accounts
+        // for V1 spend on this chain even if the V2 worker has never
+        // ticked here. State stays whatever it is (`disabled` by default,
+        // or whatever the operator set) — V1 doesn't gate on chain
+        // state, only on CU budget.
+        ChainCheckpointRepository::ensureExists($chainId);
 
-        // Fetch ERC-721 token transfer events for this address
-        $transfers = $this->etherscanGet($api_base, [
-            'module'     => 'account',
-            'action'     => 'tokennfttx',
-            'address'    => $walletAddress,
-            'startblock' => 0,
-            'endblock'   => 99999999,
-            'page'       => 1,
-            'offset'     => 500,
-            'sort'       => 'asc',
-            'apikey'     => $api_key,
-        ]);
+        $dailyBudget = defined('BCC_ETH_DAILY_RPC_BUDGET')
+            ? (int) constant('BCC_ETH_DAILY_RPC_BUDGET')
+            : NftEthIndexerWorker::DEFAULT_DAILY_BUDGET;
 
-        if (!is_array($transfers) || empty($transfers)) {
-            return [];
-        }
+        $native = (string) ($this->chain->native_token ?? 'ETH');
 
-        // Group by contract address — keep contracts where this address
-        // received mints (from = 0x0). NOTE: this identifies mint recipients,
-        // not necessarily contract deployers. Actual creator/deployer role
-        // verification is performed by BlockchainQueryService::getEthRole()
-        // via on-chain owner() RPC call during the claim flow.
+        /** @var array<string, array<string, mixed>> $contracts keyed by lowercase contract address (final dedupe pass) */
         $contracts = [];
-        $zero      = '0x0000000000000000000000000000000000000000';
+        $pageKey   = null;
 
-        foreach ($transfers as $tx) {
-            $contractAddress = $tx->contractAddress ?? '';
-            $contract        = strtolower($contractAddress);
-            if (!$contract) {
-                continue;
+        for ($pageNum = 0; $pageNum < self::ALCHEMY_NFT_MAX_PAGES; $pageNum++) {
+            // CU budget gate. Shared physical quota with V2. If the
+            // remaining budget can't cover one more page, stop — the
+            // partial result we have so far is honest data (rather
+            // than silently dropping rows to a half-paginated state
+            // the operator can't see in the gauge).
+            $remaining = ChainCheckpointRepository::cuRemainingForToday($chainId, $dailyBudget);
+            if ($remaining < self::ALCHEMY_NFT_CU_PER_CALL) {
+                \BCC\Core\Log\Logger::warning('[EvmFetcher.fetch_collections] daily CU budget exhausted; returning partial result', [
+                    'chain_id'      => $chainId,
+                    'pages_fetched' => $pageNum,
+                    'remaining_cu'  => $remaining,
+                ]);
+                break;
             }
 
-            if (!isset($contracts[$contract])) {
-                $contracts[$contract] = [
-                    'contract_address' => $contractAddress,
-                    'collection_name'  => $tx->tokenName ?? null,
-                    'token_standard'   => 'ERC-721',
-                    'mint_count'       => 0,
-                ];
+            $page = $this->alchemyNftGet(
+                $nftBase . '/getContractsForOwner',
+                [
+                    'owner'        => $walletAddress,
+                    'withMetadata' => 'true',
+                    'pageSize'     => (string) self::ALCHEMY_NFT_PAGE_SIZE,
+                    'excludeSpam'  => 'true', // paid-tier hint; free tier still returns isSpam per row (defense-in-depth below)
+                    'pageKey'      => $pageKey,
+                ]
+            );
+            ChainCheckpointRepository::addCuUsage($chainId, self::ALCHEMY_NFT_CU_PER_CALL);
+
+            if ($page === null) {
+                // Transport / parse failure already logged with body
+                // preserved by alchemyNftGet. Fail loud-and-empty for
+                // the page; return what we have if anything.
+                break;
             }
 
-            // Count mints (from zero address) only when this wallet is the recipient
-            if (strtolower($tx->from ?? '') === $zero
-                && strtolower($tx->to ?? '') === strtolower($walletAddress)
-            ) {
-                $contracts[$contract]['mint_count']++;
+            $rows = isset($page['contracts']) && is_array($page['contracts']) ? $page['contracts'] : [];
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                /** @var AlchemyContractRow $row */
+                $normalized = $this->normalizeAlchemyContract($row, $chainId, $native);
+                if ($normalized === null) {
+                    continue;
+                }
+                $key = strtolower((string) $normalized['contract_address']);
+                if ($key === '' || isset($contracts[$key])) {
+                    continue;
+                }
+                $contracts[$key] = $normalized;
+            }
+
+            $pageKey = isset($page['pageKey']) && is_string($page['pageKey']) && $page['pageKey'] !== ''
+                ? $page['pageKey']
+                : null;
+            if ($pageKey === null) {
+                break;
             }
         }
 
-        // Only keep collections where this address was involved in minting
-        $created = array_filter($contracts, fn($c) => $c['mint_count'] > 0);
-
-        if (empty($created)) {
+        if ($contracts === []) {
             return [];
         }
 
-        // Normalize into the schema format
-        $native = $this->chain->native_token ?? 'ETH';
+        return array_values($contracts);
+    }
 
-        $collections = [];
-        foreach ($created as $meta) {
-            $collections[] = [
-                'contract_address'   => $meta['contract_address'],
-                'collection_name'    => $meta['collection_name'],
-                'chain_id'           => $chainId,
-                'token_standard'     => $meta['token_standard'],
-                'total_supply'       => $meta['mint_count'],
-                'floor_price'        => null,
-                'floor_currency'     => $native,
-                'total_volume'       => null,
-                'unique_holders'     => null,
-                'listed_percentage'  => null,
-                'royalty_percentage' => null,
-                'metadata_storage'   => null,
-            ];
+    /**
+     * Three-tier spam-aware normalisation. Returns null to drop the
+     * contract entirely. The order is:
+     *
+     *   1. NftSpamContractRepository rule table — RULE_ALLOW overrides
+     *      everything (operator whitelist), RULE_DENY drops unconditionally.
+     *   2. Alchemy `isSpam` boolean — drops if true and no RULE_ALLOW.
+     *   3. NftSpamFilter::isSpam — heuristic regex match on collection
+     *      name; already consults the rule table internally so RULE_ALLOW
+     *      remains a hard escape hatch.
+     *
+     * Tokens without a recognisable ERC-721 / ERC-1155 type are dropped
+     * (Alchemy occasionally returns `UNKNOWN` or `NO_SUPPORTED_NFT_STANDARD`
+     * for proxies and oddball contracts).
+     *
+     * @param AlchemyContractRow $row
+     * @return array<string, mixed>|null
+     */
+    private function normalizeAlchemyContract(array $row, int $chainId, string $native): ?array
+    {
+        $contractAddr = isset($row['address']) && is_string($row['address']) ? $row['address'] : '';
+        if ($contractAddr === '') {
+            return null;
         }
 
-        return $collections;
+        $tokenStandard = $this->mapAlchemyTokenType($row['tokenType'] ?? null);
+        if ($tokenStandard === null) {
+            return null;
+        }
+
+        $alchemyName   = isset($row['name']) && is_string($row['name']) ? $row['name'] : null;
+        $openSea       = isset($row['openSeaMetadata']) && is_array($row['openSeaMetadata']) ? $row['openSeaMetadata'] : [];
+        $openSeaName   = isset($openSea['collectionName']) && is_string($openSea['collectionName']) ? $openSea['collectionName'] : null;
+        $collectionName = $alchemyName !== null && $alchemyName !== '' ? $alchemyName : $openSeaName;
+
+        // Spam tier 1: rule table.
+        $rule = NftSpamContractRepository::getRule($chainId, $contractAddr);
+        if ($rule === NftSpamContractRepository::RULE_DENY) {
+            return null;
+        }
+
+        if ($rule !== NftSpamContractRepository::RULE_ALLOW) {
+            // Spam tier 2: Alchemy upstream signal.
+            $alchemyIsSpam = isset($row['isSpam']) && $row['isSpam'] === true;
+            if ($alchemyIsSpam) {
+                return null;
+            }
+
+            // Spam tier 3: local heuristic (re-consults rule table cheaply).
+            if (NftSpamFilter::isSpam($chainId, $contractAddr, $collectionName)) {
+                return null;
+            }
+        }
+
+        $floorPrice = isset($openSea['floorPrice']) && is_numeric($openSea['floorPrice'])
+            ? (float) $openSea['floorPrice']
+            : null;
+        $imageUrl   = isset($openSea['imageUrl']) && is_string($openSea['imageUrl']) && $openSea['imageUrl'] !== ''
+            ? $openSea['imageUrl']
+            : null;
+
+        $totalSupply = isset($row['totalSupply']) && is_string($row['totalSupply']) && $row['totalSupply'] !== ''
+            ? $row['totalSupply']
+            : null;
+
+        return [
+            'contract_address'   => $contractAddr,
+            'collection_name'    => $collectionName,
+            'chain_id'           => $chainId,
+            'token_standard'     => $tokenStandard,
+            'total_supply'       => $totalSupply,
+            'floor_price'        => $floorPrice,
+            'floor_currency'     => $native,
+            'total_volume'       => null,
+            'unique_holders'     => null, // requires getOwnersForContract (480 CU/contract) — out of scope for this fetch
+            'listed_percentage'  => null,
+            'royalty_percentage' => null,
+            'metadata_storage'   => null,
+            'image_url'          => $imageUrl,
+        ];
+    }
+
+    /**
+     * Map Alchemy's `tokenType` enum to the dashed form already in
+     * `wp_bcc_onchain_collections`. Returns null for unrecognised types
+     * so the caller drops the row.
+     */
+    private function mapAlchemyTokenType(?string $tokenType): ?string
+    {
+        if ($tokenType === 'ERC721') {
+            return 'ERC-721';
+        }
+        if ($tokenType === 'ERC1155') {
+            return 'ERC-1155';
+        }
+        return null;
     }
 
     // ── Bulk Collection Indexing ───────────────────────────────────────────
@@ -802,77 +964,97 @@ class EvmFetcher implements FetcherInterface
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /**
-     * Derive the Etherscan-compatible API base URL from an explorer URL.
-     * e.g. https://etherscan.io → https://api.etherscan.io/api
-     *      https://polygonscan.com → https://api.polygonscan.com/api
+     * Derive the Alchemy NFT API v3 base URL from the chain's JSON-RPC URL.
+     *
+     * Maps `https://{network}.g.alchemy.com/v2/{key}` to
+     *      `https://{network}.g.alchemy.com/nft/v3/{key}`.
+     *
+     * Returns `null` for any URL that isn't a recognisable Alchemy v2
+     * endpoint — public RPCs (Avalanche on api.avax.network, BSC on
+     * bsc-dataseed.binance.org) flow this branch and the caller
+     * fail-loud-and-empties for the chain. Strict regex prevents
+     * api-key leakage to non-Alchemy hosts.
      */
-    private function resolveApiBase(string $explorerUrl): string
+    private function alchemyNftBaseFromRpcUrl(string $rpcUrl): ?string
     {
-        if (!$explorerUrl) {
-            return 'https://api.etherscan.io/api';
+        if ($rpcUrl === '') {
+            return null;
         }
-
-        $parsed = parse_url($explorerUrl);
-        $host   = strtolower($parsed['host'] ?? '');
-
-        // SSRF-hardening: only derive api-bases for allow-listed explorer hosts.
-        // A DB row with a malicious `explorer_url` would otherwise exfiltrate
-        // the Etherscan API key via query string to an attacker-controlled host.
-        static $allowlist = [
-            'etherscan.io'    => 'https://api.etherscan.io/api',
-            'polygonscan.com' => 'https://api.polygonscan.com/api',
-            'arbiscan.io'     => 'https://api.arbiscan.io/api',
-            'basescan.org'    => 'https://api.basescan.org/api',
-            'bscscan.com'     => 'https://api.bscscan.com/api',
-            'optimistic.etherscan.io' => 'https://api-optimistic.etherscan.io/api',
-            'snowtrace.io'    => 'https://api.snowtrace.io/api',
-        ];
-
-        // Strict suffix match against allowlist (prevents `etherscan.io.attacker.com`).
-        foreach ($allowlist as $allowedHost => $apiBase) {
-            if ($host === $allowedHost || str_ends_with($host, '.' . $allowedHost)) {
-                return $apiBase;
-            }
+        if (!preg_match('~^(https://[a-z0-9.-]+\.g\.alchemy\.com)/v2/([A-Za-z0-9_-]+)/?$~', $rpcUrl, $m)) {
+            return null;
         }
-
-        // Unknown host — fall back to Etherscan default rather than constructing
-        // an api.<user-controlled>.<tld>/api URL.
-        return 'https://api.etherscan.io/api';
+        return $m[1] . '/nft/v3/' . $m[2];
     }
 
     /**
-     * @param array<string, mixed> $params
-     * @return list<EtherscanNftTransfer>|null
+     * GET an Alchemy NFT API v3 endpoint. Returns the decoded JSON body
+     * (associative array) or `null` on transport / parse / shape failure.
+     *
+     * Preserves upstream error bodies in the log — mirrors the
+     * `fetchHeadBlock` observability pattern so a misconfigured chain
+     * surfaces the actual cause ("MATIC_MAINNET is not enabled for this
+     * app") instead of a generic "collection fetch failed."
+     *
+     * @param array<string, scalar|null> $queryParams
+     * @return array<string, mixed>|null
      */
-    private function etherscanGet(string $apiBase, array $params): ?array
+    private function alchemyNftGet(string $url, array $queryParams): ?array
     {
-        $url      = add_query_arg($params, $apiBase);
+        $filtered = [];
+        foreach ($queryParams as $k => $v) {
+            if ($v === null || $v === '') {
+                continue;
+            }
+            $filtered[$k] = (string) $v;
+        }
+        $fullUrl  = add_query_arg($filtered, $url);
         $chainId  = (int) $this->chain->id;
 
-        $response = ApiRetry::get($url, [
+        $response = ApiRetry::get($fullUrl, [
             'timeout'   => self::HTTP_TIMEOUT,
             'sslverify' => true,
         ], [
-            'label'    => 'Etherscan ' . ($params['action'] ?? 'query'),
+            'label'    => 'Alchemy NFT getContractsForOwner',
             'chain_id' => $chainId,
         ]);
 
         if (is_wp_error($response)) {
-            \BCC\Core\Log\Logger::error('[EVM Fetcher] Collection fetch failed: ' . preg_replace('/apikey=[^&]+/', 'apikey=***', $response->get_error_message()));
+            \BCC\Core\Log\Logger::error('[EvmFetcher.alchemyNftGet] transport failed', [
+                'chain_id' => $chainId,
+                'error'    => $response->get_error_message(),
+            ]);
             return null;
         }
 
-        $json = json_decode(wp_remote_retrieve_body($response));
-
-        if (json_last_error() !== JSON_ERROR_NONE) {
+        $rawBody = wp_remote_retrieve_body($response);
+        $decoded = json_decode($rawBody, true);
+        if (!is_array($decoded)) {
+            // Most commonly: Alchemy returning a plain-text body like
+            // "MATIC_MAINNET is not enabled for this app." Preserve it
+            // verbatim (truncated) so the log row tells the operator
+            // exactly what to fix.
+            $bodyExcerpt = function_exists('mb_substr')
+                ? mb_substr((string) preg_replace('/\s+/', ' ', trim($rawBody)), 0, 200)
+                : substr((string) preg_replace('/\s+/', ' ', trim($rawBody)), 0, 200);
+            \BCC\Core\Log\Logger::error('[EvmFetcher.alchemyNftGet] non-JSON response', [
+                'chain_id'     => $chainId,
+                'http_status'  => (int) wp_remote_retrieve_response_code($response),
+                'body_excerpt' => $bodyExcerpt,
+            ]);
             return null;
         }
 
-        if (is_object($json) && isset($json->status) && $json->status === '1' && isset($json->result) && is_array($json->result)) {
-            /** @var list<EtherscanNftTransfer> */
-            return $json->result;
+        // JSON-RPC-style error object on the v3 NFT API uses { error: ... }
+        // shape; surface it cleanly.
+        if (isset($decoded['error'])) {
+            $errMsg = is_string($decoded['error']) ? $decoded['error'] : json_encode($decoded['error']);
+            \BCC\Core\Log\Logger::error('[EvmFetcher.alchemyNftGet] API error', [
+                'chain_id' => $chainId,
+                'error'    => is_string($errMsg) ? $errMsg : '(unencodable)',
+            ]);
+            return null;
         }
 
-        return null;
+        return $decoded;
     }
 }
