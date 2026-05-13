@@ -114,22 +114,122 @@ final class NftIndexerHealthSnapshot
     public const CALL_COUNT_PRESSURE_RATIO = 0.8;
 
     /**
+     * Contribute to the `bcc_system_health` filter.
+     *
+     * F6 unification: one canonical `buildSummary()` derivation produces
+     * BOTH legacy and forward-looking shapes from a single in-memory
+     * pass. Pre-F6 the dashboard and the system-health surface ran
+     * separate derivations of overlapping signals — drift was inevitable
+     * once new signals (X1/X3/X5/X4) shipped to one but not the other.
+     *
+     * Three keys appear under bcc_system_health:
+     *
+     *   nft_indexer          — legacy shape. Byte-for-byte stable for
+     *                          existing external consumers (bcc-core
+     *                          /system/ping, any future automation).
+     *                          Projection only — no new fields.
+     *   nft_indexer_summary  — NEW (F6). The full derived-signals view
+     *                          the admin dashboard consumes. Status +
+     *                          issues + per-chain rich data. Automation
+     *                          consumers should prefer this surface.
+     *   helius_dedupe        — unchanged.
+     *
      * @param array<string, mixed> $existing
      * @return array<string, mixed>
      */
     public static function contribute(array $existing): array
     {
-        $existing['nft_indexer'] = self::buildSnapshot();
-        $existing['helius_dedupe'] = self::buildHeliusDedupe();
+        $summary = self::buildSummary();
+        $existing['nft_indexer']         = self::projectLegacyNftIndexer($summary);
+        $existing['nft_indexer_summary'] = self::projectFullSummaryForSystemHealth($summary);
+        $existing['helius_dedupe']       = self::buildHeliusDedupe();
         return $existing;
     }
 
     /**
+     * Project the rich `buildSummary` payload to the legacy
+     * `bcc_system_health['nft_indexer']` shape that existed pre-F6.
+     * MUST stay byte-for-byte stable — external consumers depend on
+     * this exact field set.
+     *
+     * @param array<string, mixed> $summary
+     * @return array{cron_overdue: bool, cron_overdue_seconds: int, chains: list<array{chain_id: int, state: string, last_processed_block: int, head_block: int, lag_blocks: int, cu_used_today: int, cu_budget_daily: int, last_run_at: string|null, last_error: string|null}>}
+     */
+    private static function projectLegacyNftIndexer(array $summary): array
+    {
+        /** @var list<array{chain_id: int, state: string, last_processed_block: int, head_block: int, lag_blocks: int, cu_used_today: int, cu_budget_daily: int, last_run_at: string|null, last_error: string|null}> $chains */
+        $chains = isset($summary['chains_raw']) && is_array($summary['chains_raw'])
+            ? $summary['chains_raw']
+            : [];
+
+        return [
+            'cron_overdue'         => (bool) $summary['cron_overdue'],
+            'cron_overdue_seconds' => (int) $summary['cron_overdue_seconds'],
+            'chains'               => $chains,
+        ];
+    }
+
+    /**
+     * Project the full summary for machine consumers
+     * (`bcc_system_health['nft_indexer_summary']`).
+     *
+     * Merges per-chain raw data with the derived signals into one row
+     * per chain — automation consumers see the same truth the admin
+     * dashboard sees, in a single addressable shape, without having to
+     * cross-reference multiple sub-objects.
+     *
+     * @param array<string, mixed> $summary
+     * @return array<string, mixed>
+     */
+    private static function projectFullSummaryForSystemHealth(array $summary): array
+    {
+        // Build a chain_id-keyed view: raw + derived signals merged
+        // per chain. Iterate `chains_raw` (the legacy shape's source)
+        // and enrich each entry with the X1/X3/X4 sub-payloads.
+        $byChain = [];
+        $rawList = isset($summary['chains_raw']) && is_array($summary['chains_raw']) ? $summary['chains_raw'] : [];
+        $callCountByChain    = isset($summary['call_count_by_chain']) && is_array($summary['call_count_by_chain']) ? $summary['call_count_by_chain'] : [];
+        $progressionByChain  = isset($summary['progression_by_chain']) && is_array($summary['progression_by_chain']) ? $summary['progression_by_chain'] : [];
+        $v1ByChain           = isset($summary['v1_fetch_stats_by_chain']) && is_array($summary['v1_fetch_stats_by_chain']) ? $summary['v1_fetch_stats_by_chain'] : [];
+
+        foreach ($rawList as $row) {
+            if (!is_array($row) || !isset($row['chain_id'])) {
+                continue;
+            }
+            $cid = (int) $row['chain_id'];
+            $callRow = $callCountByChain[$cid] ?? null;
+            $progRow = $progressionByChain[$cid] ?? null;
+            $v1Row   = $v1ByChain[$cid] ?? null;
+
+            $byChain[$cid] = array_merge($row, [
+                'slug'                     => is_array($callRow) ? (string) ($callRow['slug'] ?? '') : '',
+                'call_count'               => is_array($callRow) ? (int) ($callRow['count'] ?? 0) : 0,
+                'call_count_cap'           => is_array($callRow) ? (int) ($callRow['cap'] ?? 0) : 0,
+                'progression_deltas'       => is_array($progRow) && isset($progRow['deltas']) && is_array($progRow['deltas']) ? array_values($progRow['deltas']) : [],
+                'progression_sample_count' => is_array($progRow) ? (int) ($progRow['sample_count'] ?? 0) : 0,
+                'v1_attempts'              => is_array($v1Row) ? (int) ($v1Row['attempts'] ?? 0) : 0,
+                'v1_failures'              => is_array($v1Row) ? (int) ($v1Row['failures'] ?? 0) : 0,
+                'v1_last_error'            => is_array($v1Row) ? ($v1Row['last_error'] ?? null) : null,
+                'v1_last_error_at'         => is_array($v1Row) ? ($v1Row['last_error_at'] ?? null) : null,
+            ]);
+        }
+
+        return [
+            'status'           => $summary['status'],
+            'issues'           => $summary['issues'],
+            'helius_freshness' => $summary['helius_freshness'],
+            'chains'           => $byChain,
+        ];
+    }
+
+    /**
      * Operator-facing health summary. Derives a single RGB status +
-     * actionable issues list from the same per-chain checkpoint data
-     * `buildSnapshot()` exposes to the system-health endpoint, so the
-     * admin view and any future health probe agree on what "healthy"
-     * means.
+     * actionable issues list + per-chain raw data in one pass. F6 made
+     * this the CANONICAL derivation: `contribute()` projects both the
+     * legacy `bcc_system_health['nft_indexer']` shape and the new
+     * `bcc_system_health['nft_indexer_summary']` shape from this
+     * payload — so the admin view, the system-health endpoint, and any
+     * future automation consumer all agree on what "healthy" means.
      *
      * Rules:
      *   RED    — cron not scheduled, cron overdue, 0 active chains,
@@ -168,6 +268,7 @@ final class NftIndexerHealthSnapshot
      *     helius_freshness: array{state: 'green'|'yellow'|'red'|'never_delivered'|'not_provisioned', last_delivery_at: int|null, age_seconds: int|null},
      *     v1_fetch_failure_chains: list<string>,
      *     v1_fetch_stats_by_chain: array<int, array{slug: string, attempts: int, failures: int, last_error: string|null, last_error_at: int|null}>,
+     *     chains_raw: list<array{chain_id: int, state: string, last_processed_block: int, head_block: int, lag_blocks: int, cu_used_today: int, cu_budget_daily: int, last_run_at: string|null, last_error: string|null}>,
      *     issues: list<string>
      * }
      */
@@ -207,13 +308,36 @@ final class NftIndexerHealthSnapshot
         $v1FetchStatsByChain     = [];
         $v1LastErrors            = V1FetchFailureTracker::getLastErrors();
         $callCountCap            = EnrichmentScheduler::MAX_API_CALLS_PER_CHAIN;
+        $chainsRaw               = [];
         $now                     = time();
 
         foreach (ChainCheckpointRepository::getAll() as $cp) {
             $chainId = (int) $cp->chain_id;
+            $last    = (int) $cp->last_processed_block;
+            $head    = (int) $cp->head_block;
+
+            // F6 unification: capture the legacy per-chain shape for
+            // EVERY checkpoint row (including non-EVM and unknown chains)
+            // BEFORE any skip logic. This is the shape `bcc_system_health`
+            // consumers have always seen and must keep seeing — backwards-
+            // compatible projection of the rich summary.
+            $chainsRaw[] = [
+                'chain_id'             => $chainId,
+                'state'                => (string) $cp->state,
+                'last_processed_block' => $last,
+                'head_block'           => $head,
+                'lag_blocks'           => max(0, $head - $last),
+                'cu_used_today'        => (int) $cp->cu_used_today,
+                'cu_budget_daily'      => $dailyBudget,
+                'last_run_at'          => $cp->last_run_at !== null ? (string) $cp->last_run_at : null,
+                'last_error'           => $cp->last_error !== null ? (string) $cp->last_error : null,
+            ];
+
             if (!isset($slugByChainId[$chainId])) {
                 // Checkpoint exists for a chain that's no longer active or
-                // not evm-typed. Skip — not part of this view's scope.
+                // not evm-typed. Skip the derived signals — they're scoped
+                // to EVM. Raw data already captured above for the legacy
+                // system-health surface.
                 continue;
             }
             $slug  = $slugByChainId[$chainId];
@@ -539,6 +663,7 @@ final class NftIndexerHealthSnapshot
             'helius_freshness'           => $heliusFreshness,
             'v1_fetch_failure_chains'    => $v1FetchFailureChains,
             'v1_fetch_stats_by_chain'    => $v1FetchStatsByChain,
+            'chains_raw'                 => $chainsRaw,
             'issues'                     => $issues,
         ];
     }
@@ -718,57 +843,11 @@ final class NftIndexerHealthSnapshot
         ];
     }
 
-    /**
-     * @return array{
-     *     cron_overdue: bool,
-     *     cron_overdue_seconds: int,
-     *     chains: list<array{
-     *         chain_id: int,
-     *         state: string,
-     *         last_processed_block: int,
-     *         head_block: int,
-     *         lag_blocks: int,
-     *         cu_used_today: int,
-     *         cu_budget_daily: int,
-     *         last_run_at: string|null,
-     *         last_error: string|null
-     *     }>
-     * }
-     */
-    private static function buildSnapshot(): array
-    {
-        $hook    = NftEthIndexerWorker::CRON_HOOK;
-        $next    = wp_next_scheduled($hook);
-        $overSec = $next ? max(0, time() - (int) $next) : 0;
-        $overdue = $next && $overSec > NftEthIndexerWorker::CRON_OVERDUE_THRESHOLD_SECONDS;
-
-        $dailyBudget = defined('BCC_ETH_DAILY_RPC_BUDGET')
-            ? (int) constant('BCC_ETH_DAILY_RPC_BUDGET')
-            : NftEthIndexerWorker::DEFAULT_DAILY_BUDGET;
-
-        $chains = [];
-        foreach (ChainCheckpointRepository::getAll() as $cp) {
-            $last = (int) $cp->last_processed_block;
-            $head = (int) $cp->head_block;
-            $chains[] = [
-                'chain_id'             => (int) $cp->chain_id,
-                'state'                => (string) $cp->state,
-                'last_processed_block' => $last,
-                'head_block'           => $head,
-                'lag_blocks'           => max(0, $head - $last),
-                'cu_used_today'        => (int) $cp->cu_used_today,
-                'cu_budget_daily'      => $dailyBudget,
-                'last_run_at'          => $cp->last_run_at !== null ? (string) $cp->last_run_at : null,
-                'last_error'           => $cp->last_error !== null ? (string) $cp->last_error : null,
-            ];
-        }
-
-        return [
-            'cron_overdue'         => $overdue,
-            'cron_overdue_seconds' => $overSec,
-            'chains'               => $chains,
-        ];
-    }
+    // (F6 — `buildSnapshot()` removed; its functionality is now produced
+    // by `projectLegacyNftIndexer()` from the canonical buildSummary
+    // payload. Pre-F6 this method was the second derivation pass that
+    // F6 was designed to eliminate. Do NOT re-add it — single source of
+    // truth is load-bearing.)
 
     /**
      * @return array{
