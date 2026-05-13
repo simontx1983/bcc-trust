@@ -200,6 +200,18 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_photo_alts';
     }
 
+    // V2 Trust Attestation Layer: §J wire contract.
+    // Stores Layer-1 attestations (Vouch + Stand Behind). Disputes
+    // live separately (stake + panel mechanics don't fit this shape).
+    // Generalized successor to bcc_trust_endorsements per the §J.11
+    // "endorse collapses into vouch" migration.
+
+    public static function trustAttestations(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_attestations';
+    }
+
     // NOTE: bcc_user_locals removed — Locals membership ledger is PeepSo's
     // peepso_group_members; primary-Local pointer is wp_usermeta.bcc_primary_local_group_id.
     // NOTE: bcc_page_claims removed — page claims merged into bcc_onchain_claims
@@ -244,6 +256,8 @@ final class TableRegistry
             'push_subscriptions' => self::pushSubscriptions(),
             // V1.5 a11y photo alt sidecar
             'photo_alts'         => self::photoAlts(),
+            // V2 Trust Attestation Layer (§J)
+            'trust_attestations' => self::trustAttestations(),
         ];
     }
 }

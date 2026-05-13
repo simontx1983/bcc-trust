@@ -111,7 +111,8 @@ final class MemberProfileComposer
     public function __construct(
         private readonly UserViewService $userViewService,
         private readonly CardViewService $cardViewService,
-        private readonly ShiftLogService $shiftLogService
+        private readonly ShiftLogService $shiftLogService,
+        private readonly AttestationService $attestationService
     ) {
     }
 
@@ -144,6 +145,18 @@ final class MemberProfileComposer
 
         // ── Add user_id alias — frontend reads it; contract uses id.
         $base['user_id'] = isset($base['id']) ? (int) $base['id'] : $userId;
+
+        // ── §J.6 viewer_attestation — does the viewer currently have a
+        //   vouch / stand_behind cast against THIS operator? Drives the
+        //   FE AttestationActionCluster's cast-state copy ("VOUCHED" /
+        //   "STANDING BEHIND") and Stand Behind slot availability.
+        //   Profile-scoped attestations target_kind=user_profile per
+        //   §J.1. Anon viewers get null (service returns null for
+        //   viewerId<=0); the FE treats undefined and null identically
+        //   per the §4.20 contract.
+        $base['viewer_attestation'] = $viewerId > 0
+            ? $this->attestationService->getViewerAttestation($viewerId, 'user_profile', $userId)
+            : null;
 
         // ── Hero card — call CardViewService for the canonical member card.
         $card = $handle !== ''

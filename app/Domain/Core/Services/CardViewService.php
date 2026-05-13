@@ -71,7 +71,8 @@ final class CardViewService
         private readonly VoteRepository $voteRepo,
         private readonly FeatureAccessService $featureAccess,
         private readonly VoteService $voteService,
-        private readonly EndorsementService $endorsementService
+        private readonly EndorsementService $endorsementService,
+        private readonly AttestationService $attestationService
     ) {
     }
 
@@ -135,6 +136,13 @@ final class CardViewService
         $viewerHasReviewed = $viewerId > 0 && $this->voteService->hasUserVotedPage($pageId, $viewerId);
         $viewerHasEndorsed = $viewerId > 0 && $this->endorsementService->hasEndorsedPage($pageId, $viewerId, 'general');
         $endorseEligibility = $this->endorsementService->getEndorseEligibility($viewerId, $pageId);
+        // §J.6 viewer_attestation — present only for authed viewers.
+        // Maps the card kind to the locked target_kind set per §J.1.
+        // Always null for anon (the service returns null on viewerId<=0).
+        $cardTargetKind = self::cardKindToTargetKind($kind);
+        $viewerAttestation = ($viewerId > 0 && $cardTargetKind !== null)
+            ? $this->attestationService->getViewerAttestation($viewerId, $cardTargetKind, $pageId)
+            : null;
 
         return [
             'id'                  => $pageId,
@@ -166,6 +174,16 @@ final class CardViewService
             // Null when can_endorse is true; non-null + human-readable
             // when blocked. Surfaces as the disabled-button tooltip.
             'endorse_unlock_hint' => $endorseEligibility['unlock_hint'],
+            // §J.6 viewer_attestation — present for authed viewers only;
+            // anon viewers get the field omitted entirely (null here so
+            // the array shape is uniform; the FE treats undefined and
+            // null identically per the §4.20 contract). The FE's
+            // AttestationActionCluster reads the inner vouch /
+            // stand_behind slots to render cast state ("VOUCHED" /
+            // "STANDING BEHIND") on the action buttons. Coexists with
+            // the legacy viewer_has_endorsed boolean during the §J.11
+            // endorse→vouch migration window.
+            'viewer_attestation'  => $viewerAttestation,
             // §N8: claim flow needs entity_type + entity_id + chain_slug
             // to drive the four-step modal. Server resolves these from
             // the page id (per §A2/§L5 — frontend never derives). Null
@@ -215,6 +233,12 @@ final class CardViewService
         $trustScore  = (int) round($this->reputationRepo->getScore($userId));
         $card        = ReputationTierMap::resolve($tier);
         $resolvedHandle = self::resolveMemberHandle($user);
+        // §J.6 viewer_attestation on member cards. Member card
+        // target_kind is `user_profile` per §J.1. Anon viewers get
+        // null (service returns null when viewerId<=0).
+        $viewerAttestation = $viewerId > 0
+            ? $this->attestationService->getViewerAttestation($viewerId, 'user_profile', $userId)
+            : null;
 
         return [
             'id'                  => $userId,
@@ -237,6 +261,10 @@ final class CardViewService
             // target page cards only.
             'viewer_has_endorsed' => false,
             'endorse_unlock_hint' => null,
+            // §J.6 viewer_attestation — present on member cards now
+            // that attestations land on user_profile target_kind per
+            // §J.1. Anon viewers get null per the §4.20 contract.
+            'viewer_attestation'  => $viewerAttestation,
             // §K3 — chains is page-only. Always null on member cards
             // for shape uniformity.
             'chains'              => null,
@@ -391,6 +419,22 @@ final class CardViewService
     private static function isInGoodStanding(string $tier): bool
     {
         return in_array($tier, ['neutral', 'trusted', 'elite'], true);
+    }
+
+    /**
+     * Map a card_kind slug to the Trust Attestation Layer target_kind
+     * per §J.1. Returns null for kinds that don't carry attestations
+     * (member cards use `getMemberCard` separately with hard-coded
+     * `user_profile`).
+     */
+    private static function cardKindToTargetKind(string $cardKind): ?string
+    {
+        return match ($cardKind) {
+            'validator' => 'validator_card',
+            'project'   => 'project_card',
+            'creator'   => 'creator_card',
+            default     => null,
+        };
     }
 
     /**
