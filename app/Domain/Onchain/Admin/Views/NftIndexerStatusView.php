@@ -188,7 +188,7 @@ final class NftIndexerStatusView
         </table>
 
         <h3 style="margin-top:32px">Helius Webhook (Solana, V2 Phase 1b)</h3>
-        <?php self::renderHeliusPanel(); ?>
+        <?php self::renderHeliusPanel($summary['helius_freshness']); ?>
 
         <h3 style="margin-top:32px">Recent spam-flagged rows</h3>
         <p>Persisted with <code>metadata_status = 2</code> for review. Never visible to user-facing surfaces.</p>
@@ -226,6 +226,7 @@ final class NftIndexerStatusView
      *     regression_chains: list<string>,
      *     progression_by_chain: array<int, array{slug: string, deltas: list<int>, last_block: int, sample_count: int}>,
      *     dedupe_overgrown: bool,
+     *     helius_freshness: array{state: 'green'|'yellow'|'red'|'never_delivered'|'not_provisioned', last_delivery_at: int|null, age_seconds: int|null},
      *     issues: list<string>
      * } $summary
      */
@@ -296,6 +297,20 @@ final class NftIndexerStatusView
                     <span title="Lag is drifting monotonically upward — BLOCKS_PER_TICK is below chain block-production rate."><strong>Lag drift:</strong> <?php echo (int) count($summary['lag_drift_chains']); ?></span>
                 <?php endif; ?>
 
+                <?php
+                $hfState = $summary['helius_freshness']['state'];
+                $hfAge   = $summary['helius_freshness']['age_seconds'];
+                if ($hfState === 'red' || $hfState === 'yellow'):
+                    $hfColor = $hfState === 'red' ? '#b32d2e' : '#9b6c00';
+                    $hfLabel = $hfAge !== null
+                        ? NftIndexerHealthSnapshot::formatDuration((int) $hfAge)
+                        : '?';
+                ?>
+                    <span style="color:<?php echo esc_attr($hfColor); ?>;font-weight:bold;" title="Solana ingestion has not received a Helius delivery for this long."><strong>Solana silent:</strong> <?php echo esc_html($hfLabel); ?></span>
+                <?php elseif ($hfState === 'never_delivered'): ?>
+                    <span style="color:#9b6c00;" title="Helius webhook is provisioned but no deliveries yet — verify configuration."><strong>Solana ingestion:</strong> never delivered</span>
+                <?php endif; ?>
+
                 <?php if ($summary['dedupe_overgrown']): ?>
                     <span><strong>Helius dedupe:</strong> overgrown</span>
                 <?php endif; ?>
@@ -320,8 +335,10 @@ final class NftIndexerStatusView
      * Helius webhook operator surface — provisioning + status + resync.
      * Phase 1b deliverable. Lives inside the NFT Indexer sub-tab so
      * operators don't have to chase a separate page for related state.
+     *
+     * @param array{state: 'green'|'yellow'|'red'|'never_delivered'|'not_provisioned', last_delivery_at: int|null, age_seconds: int|null} $freshness
      */
-    private static function renderHeliusPanel(): void
+    private static function renderHeliusPanel(array $freshness): void
     {
         $apiKeyDefined = defined('BCC_HELIUS_API_KEY') && (string) constant('BCC_HELIUS_API_KEY') !== '';
         $secretDefined = defined('BCC_HELIUS_WEBHOOK_SECRET') && (string) constant('BCC_HELIUS_WEBHOOK_SECRET') !== '';
@@ -363,6 +380,30 @@ final class NftIndexerStatusView
                         deliveries new: <strong><?php echo $newCount; ?></strong> ·
                         replays blocked: <strong><?php echo $seenCount; ?></strong> ·
                         signature failures: <strong><?php echo $sigfailCount; ?></strong>
+                    </td></tr>
+                <tr><th title="The single 'is Solana ingestion alive?' signal — updated on every authenticated webhook delivery (including empty-payload pings).">Last delivery (X5 freshness)</th>
+                    <td>
+                        <?php
+                        $fState = $freshness['state'];
+                        $fAge   = $freshness['age_seconds'];
+                        $fAt    = $freshness['last_delivery_at'];
+                        if ($fState === 'not_provisioned') {
+                            echo '<em>webhook not provisioned</em>';
+                        } elseif ($fState === 'never_delivered') {
+                            echo '<strong style="color:#9b6c00;">never — webhook provisioned but no deliveries yet</strong>';
+                        } else {
+                            $color = $fState === 'red' ? '#b32d2e' : ($fState === 'yellow' ? '#9b6c00' : '#46b450');
+                            $atIso = $fAt !== null ? gmdate('c', (int) $fAt) : '?';
+                            $ageStr = $fAge !== null ? NftIndexerHealthSnapshot::formatDuration((int) $fAge) : '?';
+                            echo '<strong style="color:' . esc_attr($color) . ';">' . esc_html($ageStr) . ' ago</strong> ';
+                            echo '<small>(' . esc_html($atIso) . ')</small>';
+                            if ($fState === 'yellow') {
+                                echo ' <small style="color:#9b6c00;">— could be a quiet window OR a stalled webhook; see top-card issue line</small>';
+                            } elseif ($fState === 'red') {
+                                echo ' <small style="color:#b32d2e;">— Solana ingestion is offline; see top-card issue line</small>';
+                            }
+                        }
+                        ?>
                     </td></tr>
             </tbody>
         </table>

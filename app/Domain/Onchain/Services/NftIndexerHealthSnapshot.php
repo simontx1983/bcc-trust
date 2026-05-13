@@ -2,10 +2,12 @@
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Trust\Onchain\REST\HeliusWebhookEndpoint;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\HeliusSeenSignaturesRepository;
 use BCC\Trust\Onchain\Services\EnrichmentScheduler;
+use BCC\Trust\Onchain\Services\HeliusSubscriptionManager;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 
 if (!defined('ABSPATH')) {
@@ -41,6 +43,30 @@ final class NftIndexerHealthSnapshot
      *  is yellow because once the budget hits 100% the indexer stops
      *  walking that chain until the next UTC midnight rollover. */
     public const CU_BUDGET_PRESSURE_RATIO = 0.8;
+
+    /**
+     * Helius webhook freshness thresholds (X5).
+     *
+     * Solana ingestion is externally event-driven via Helius webhook
+     * deliveries — there is no local "tick" to monitor. The freshness
+     * timestamp written by `HeliusWebhookEndpoint::handle` on every
+     * authenticated delivery (including empty-payload pings) is the
+     * single source of truth for "is Solana ingestion alive?"
+     *
+     *   YELLOW — no delivery in 60+ minutes. Could be a quiet window
+     *            OR webhook stalled — operator should check.
+     *   RED    — no delivery in 4+ hours. Provider outage, webhook
+     *            delivery suspended, or local handler is failing
+     *            silently.
+     *
+     * Sized for "expected-traffic period." Naturally quiet windows
+     * during low-Solana-NFT-activity hours may still cross the YELLOW
+     * threshold; that's accepted in exchange for catching real
+     * silence early. Adjusting these to be wider would mean an
+     * outage could hide for hours.
+     */
+    public const HELIUS_FRESHNESS_YELLOW_SECONDS = 3600;   // 60 min
+    public const HELIUS_FRESHNESS_RED_SECONDS    = 14400;  // 4 h
 
     /**
      * Minimum history entries before progression-detection rules fire.
@@ -123,6 +149,7 @@ final class NftIndexerHealthSnapshot
      *     regression_chains: list<string>,
      *     progression_by_chain: array<int, array{slug: string, deltas: list<int>, last_block: int, sample_count: int}>,
      *     dedupe_overgrown: bool,
+     *     helius_freshness: array{state: 'green'|'yellow'|'red'|'never_delivered'|'not_provisioned', last_delivery_at: int|null, age_seconds: int|null},
      *     issues: list<string>
      * }
      */
@@ -289,6 +316,10 @@ final class NftIndexerHealthSnapshot
         $dedupeRows      = HeliusSeenSignaturesRepository::rowCount();
         $dedupeOvergrown = $dedupeRows > HeliusSeenSignaturesRepository::ALARM_THRESHOLD;
 
+        // Helius webhook freshness (X5). Solana ingestion alive-or-dead.
+        // See helper for the state machine.
+        $heliusFreshness = self::deriveHeliusFreshness();
+
         // Compose the issues list in severity order so the first line is
         // always the most actionable.
         $issues = [];
@@ -383,16 +414,36 @@ final class NftIndexerHealthSnapshot
                 HeliusSeenSignaturesRepository::ALARM_THRESHOLD
             );
         }
+        // Helius freshness issue lines (X5). Actionable wording: name
+        // the likely causes and the exact next operator step. Each cause
+        // class points at a different remediation surface.
+        if ($heliusFreshness['state'] === 'red') {
+            $issues[] = sprintf(
+                'Solana ingestion silent for %s (last Helius delivery: %s). At RED severity (>4h). Likely causes: provider outage at Helius, webhook delivery suspended (check Helius dashboard for the app status), or local handler is rejecting deliveries silently before the freshness mark fires (signature mismatch — check `bcc_helius_signature_sigfail_total`). NFT holdings on Solana have stopped updating.',
+                self::formatDuration((int) $heliusFreshness['age_seconds']),
+                self::formatTimestamp((int) $heliusFreshness['last_delivery_at'])
+            );
+        } elseif ($heliusFreshness['state'] === 'yellow') {
+            $issues[] = sprintf(
+                'Solana ingestion has not received a Helius delivery in %s (last: %s). At YELLOW severity (>1h). Could be a naturally quiet window during low-Solana-NFT-activity hours, or an early warning that the webhook has stalled. Check the Helius panel below for delivery counters and the Helius dashboard for app status.',
+                self::formatDuration((int) $heliusFreshness['age_seconds']),
+                self::formatTimestamp((int) $heliusFreshness['last_delivery_at'])
+            );
+        } elseif ($heliusFreshness['state'] === 'never_delivered') {
+            $issues[] = 'Helius webhook is provisioned but no deliveries have been received yet. Verify (1) the Helius app dashboard shows our callback URL as the configured endpoint, (2) `BCC_HELIUS_WEBHOOK_SECRET` in wp-config.php matches the Helius app secret, and (3) at least one tracked Solana wallet exists.';
+        }
 
         // Derive RGB. Red dominates yellow dominates green.
         // Regression is RED — checkpoint going backwards is a correctness
         // anomaly that should never happen outside the reorg window.
+        // Helius RED (>4h silence) is RED — Solana ingestion is offline.
         $isRed = !$cronScheduled
             || $cronOverdue
             || $totalEvmChains === 0
             || $activeCount === 0
             || $allActiveDegraded
-            || $regressionChains !== [];
+            || $regressionChains !== []
+            || $heliusFreshness['state'] === 'red';
         $isYellow = !$isRed && (
             $stalledChains !== []
             || $degradedChains !== []
@@ -401,6 +452,8 @@ final class NftIndexerHealthSnapshot
             || $fakeHealthyChains !== []
             || $lagDriftChains !== []
             || $dedupeOvergrown
+            || $heliusFreshness['state'] === 'yellow'
+            || $heliusFreshness['state'] === 'never_delivered'
         );
         $status = $isRed ? self::STATUS_RED : ($isYellow ? self::STATUS_YELLOW : self::STATUS_GREEN);
 
@@ -421,8 +474,93 @@ final class NftIndexerHealthSnapshot
             'regression_chains'          => $regressionChains,
             'progression_by_chain'       => $progressionByChain,
             'dedupe_overgrown'           => $dedupeOvergrown,
+            'helius_freshness'           => $heliusFreshness,
             'issues'                     => $issues,
         ];
+    }
+
+    /**
+     * Derive the Helius freshness state (X5).
+     *
+     * State machine:
+     *   not_provisioned  — webhook id absent. Freshness is not applicable.
+     *   never_delivered  — provisioned but no delivery timestamp recorded.
+     *                      Could be fresh provisioning OR misconfiguration.
+     *                      YELLOW.
+     *   green / yellow / red — derived from age against the two thresholds.
+     *
+     * @return array{state: 'green'|'yellow'|'red'|'never_delivered'|'not_provisioned', last_delivery_at: int|null, age_seconds: int|null}
+     */
+    private static function deriveHeliusFreshness(): array
+    {
+        $webhookId = (string) get_option(HeliusSubscriptionManager::OPTION_WEBHOOK_ID, '');
+        if ($webhookId === '') {
+            return [
+                'state'            => 'not_provisioned',
+                'last_delivery_at' => null,
+                'age_seconds'      => null,
+            ];
+        }
+
+        $rawTs = (int) get_option(HeliusWebhookEndpoint::OPTION_LAST_DELIVERY_AT, 0);
+        if ($rawTs <= 0) {
+            return [
+                'state'            => 'never_delivered',
+                'last_delivery_at' => null,
+                'age_seconds'      => null,
+            ];
+        }
+
+        // Clock-skew tolerance: a system clock briefly ahead of the
+        // recorded timestamp would produce a negative age. Clamp at 0
+        // and treat as fresh.
+        $age = max(0, time() - $rawTs);
+
+        if ($age > self::HELIUS_FRESHNESS_RED_SECONDS) {
+            $state = 'red';
+        } elseif ($age > self::HELIUS_FRESHNESS_YELLOW_SECONDS) {
+            $state = 'yellow';
+        } else {
+            $state = 'green';
+        }
+
+        return [
+            'state'            => $state,
+            'last_delivery_at' => $rawTs,
+            'age_seconds'      => $age,
+        ];
+    }
+
+    /**
+     * Human-friendly duration ("2h 14m", "47m", "12s"). Compact enough
+     * to fit inline in issue lines without bloating the 200-byte
+     * truncation budget downstream callers may impose.
+     *
+     * Public so admin views can render the same string the issue lines
+     * use without recomputing the format.
+     */
+    public static function formatDuration(int $seconds): string
+    {
+        if ($seconds < 60) {
+            return $seconds . 's';
+        }
+        if ($seconds < 3600) {
+            return ((int) floor($seconds / 60)) . 'm';
+        }
+        $h = (int) floor($seconds / 3600);
+        $m = (int) floor(($seconds - $h * 3600) / 60);
+        return $h . 'h ' . $m . 'm';
+    }
+
+    /**
+     * ISO-8601 UTC timestamp for log/issue-line use.
+     */
+    private static function formatTimestamp(int $unixSeconds): string
+    {
+        if ($unixSeconds <= 0) {
+            return 'never';
+        }
+        return gmdate('c', $unixSeconds);
     }
 
     /**

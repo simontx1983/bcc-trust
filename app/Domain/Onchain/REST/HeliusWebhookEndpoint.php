@@ -56,6 +56,15 @@ final class HeliusWebhookEndpoint
     private const SIGFAIL_WINDOW_SECONDS   = 60;
     private const COUNTER_OPTION_PREFIX    = 'bcc_helius_signature_';
 
+    /**
+     * Unix timestamp of the most recent authenticated Helius delivery.
+     * Single source of truth for "is Solana ingestion alive?" — read
+     * by `NftIndexerHealthSnapshot::buildSummary` to derive the X5
+     * freshness signal (YELLOW >60min, RED >4h). `autoload=false`
+     * keeps it off the autoloaded options blob.
+     */
+    public const OPTION_LAST_DELIVERY_AT = 'bcc_helius_last_delivery_at';
+
     public static function register(): void
     {
         register_rest_route(
@@ -91,6 +100,15 @@ final class HeliusWebhookEndpoint
             self::logSignatureFailure();
             return self::ok();
         }
+
+        // X5 freshness mark: any authenticated delivery — including
+        // empty-payload pings during quiet periods — proves Helius is
+        // reaching us. Updated BEFORE body parsing because the
+        // "ingestion alive" signal is about successful provider
+        // delivery, not about the payload's downstream usefulness.
+        // `autoload=false` keeps this off the autoloaded-options blob;
+        // it's read only by the admin dashboard.
+        update_option(self::OPTION_LAST_DELIVERY_AT, time(), false);
 
         // Step 2: parse body. Helius posts a list of enriched transactions
         // (or a single object — we accept both via array_is_list).
