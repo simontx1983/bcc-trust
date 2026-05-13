@@ -50,11 +50,31 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
+use BCC\Trust\Core\Repositories\ReputationRepository;
 
 final class AttestationService
 {
+    /**
+     * Reputation tiers that satisfy the "good standing" gate. Sourced
+     * from UserViewService::GOOD_STANDING_TIERS per the §G2 single-
+     * source-of-truth rule — duplicated here as a class constant only
+     * for clarity. Vouch / Stand Behind / Report all gate on this set.
+     *
+     * @var list<string>
+     */
+    private const NEUTRAL_PLUS_TIERS = ['neutral', 'trusted', 'elite'];
+
+    /**
+     * Reputation tiers that satisfy the Dispute gate per §J.1
+     * "must be ≥ trusted standing to file disputes."
+     *
+     * @var list<string>
+     */
+    private const TRUSTED_PLUS_TIERS = ['trusted', 'elite'];
+
     public function __construct(
-        private readonly AttestationRepository $repo
+        private readonly AttestationRepository $repo,
+        private readonly ReputationRepository $reputationRepo
     ) {
     }
 
@@ -102,6 +122,172 @@ final class AttestationService
             'vouch'        => self::shapeViewerSlot($rows['vouch']),
             'stand_behind' => self::shapeViewerSlot($rows['stand_behind']),
         ];
+    }
+
+    /**
+     * Compute the four §J.6 action-permission entries the viewer
+     * sees on this target. Each entry is the locked
+     * `{allowed, unlock_hint}` shape compatible with both
+     * MemberPermission and CardPermissionEntry surfaces.
+     *
+     * §N7 visibility semantics:
+     *   - `allowed=true`                          → button renders enabled
+     *   - `allowed=false, unlock_hint=<text>`     → button renders disabled
+     *                                               with inline aspirational
+     *                                               copy (path forward visible)
+     *   - `allowed=false, unlock_hint=null`       → button HIDDEN (FE checks
+     *                                               for this and omits the
+     *                                               slot per §N7 structural-
+     *                                               impossible rule)
+     *
+     * unlock_hint tone (per the Phase 1 plan + risk-assessment
+     * emotional calibration):
+     *   - Aspirational, not exclusionary
+     *   - Anti-shame: no language like "you lack" or "you can't"
+     *   - Anti-elitism: no tier comparisons ("Elite operators can…")
+     *   - Single sentence, ends with a period
+     *
+     * Self-target prevention: the viewer cannot attest against their
+     * own profile or against an entity they own (post_author).
+     * Returns hidden — there's no aspirational path; it's structurally
+     * impossible.
+     *
+     * Tier gates: anon → "Sign in to <verb>." Below threshold →
+     * "Reach <Tier> standing to <verb>." Threshold reached → allowed.
+     *
+     * Stand Behind in Phase 1 Slice B uses the same gate as Vouch.
+     * Bandwidth slot enforcement lands in Slice C alongside mutation
+     * endpoints; until then, eligible operators see plain "STAND
+     * BEHIND" rather than the "STAND BEHIND · N OF M" allocation
+     * indicator.
+     *
+     * Phase 1 Slice B intentionally omits can_dispute on profile
+     * surfaces — profile-scoped disputes are Phase 1.5 per §J.1.
+     * On card surfaces, can_dispute is the existing §D5 gate (not
+     * computed here; this method only emits can_vouch + can_stand_
+     * behind + can_report on card surfaces; the card composer keeps
+     * its existing can_dispute resolution).
+     *
+     * @return array{
+     *   can_vouch: array{allowed: bool, unlock_hint: string|null},
+     *   can_stand_behind: array{allowed: bool, unlock_hint: string|null},
+     *   can_report: array{allowed: bool, unlock_hint: string|null}
+     * }
+     */
+    public function getViewerActionPermissions(
+        int $viewerUserId,
+        int $targetOwnerUserId
+    ): array {
+        // Anon viewer: visible-but-disabled with sign-in copy across
+        // all actions. Aspirational visibility per §N7 — never hide,
+        // always invite.
+        if ($viewerUserId <= 0) {
+            return [
+                'can_vouch' => [
+                    'allowed'     => false,
+                    'unlock_hint' => 'Sign in to vouch for operators.',
+                ],
+                'can_stand_behind' => [
+                    'allowed'     => false,
+                    'unlock_hint' => 'Sign in to stand behind operators.',
+                ],
+                'can_report' => [
+                    'allowed'     => false,
+                    'unlock_hint' => 'Sign in to report.',
+                ],
+            ];
+        }
+
+        // Self-target: structurally impossible. Hide per §N7
+        // (allowed=false, unlock_hint=null → FE omits the slot).
+        // The viewer cannot attest about themselves; there is no
+        // aspirational path forward.
+        if ($targetOwnerUserId > 0 && $viewerUserId === $targetOwnerUserId) {
+            $hidden = ['allowed' => false, 'unlock_hint' => null];
+            return [
+                'can_vouch'        => $hidden,
+                'can_stand_behind' => $hidden,
+                'can_report'       => $hidden,
+            ];
+        }
+
+        // Tier gate. Below Neutral standing → aspirational hint that
+        // names the threshold without explaining the math (per §J.4.1
+        // synthesis invisibility + §J.7 heuristic #2 "no synthesis
+        // mechanics in copy").
+        $viewerTier = $this->reputationRepo->getTier($viewerUserId);
+        $isNeutralPlus = in_array($viewerTier, self::NEUTRAL_PLUS_TIERS, true);
+
+        if (!$isNeutralPlus) {
+            return [
+                'can_vouch' => [
+                    'allowed'     => false,
+                    'unlock_hint' => 'Reach Neutral standing to vouch.',
+                ],
+                'can_stand_behind' => [
+                    'allowed'     => false,
+                    'unlock_hint' => 'Reach Neutral standing to stand behind operators.',
+                ],
+                'can_report' => [
+                    'allowed'     => false,
+                    'unlock_hint' => 'Reach Neutral standing to report.',
+                ],
+            ];
+        }
+
+        // All gates pass for Phase 1 Slice B. Stand Behind slot
+        // enforcement lands in Slice C; for now, eligible operators
+        // see plain STAND BEHIND (the FE's allocation indicator
+        // "STAND BEHIND · N OF M" stays plain "STAND BEHIND" when
+        // the slot fields aren't yet supplied).
+        $allowed = ['allowed' => true, 'unlock_hint' => null];
+        return [
+            'can_vouch'        => $allowed,
+            'can_stand_behind' => $allowed,
+            'can_report'       => $allowed,
+        ];
+    }
+
+    /**
+     * Profile-scoped Dispute permission per §J.1 Phase 1.5. Returns
+     * the hidden shape for Phase 1 — profile-scoped disputes ship in
+     * Phase 1.5 per the constitution + Phase 1 plan. Composers can
+     * still call this; the FE will hide the action via §N7 (allowed=
+     * false, unlock_hint=null → no button rendered).
+     *
+     * When Phase 1.5 ships, this method's body changes to apply the
+     * Trusted+ tier gate. The signature stays stable so composers
+     * don't need to re-wire.
+     *
+     * @return array{allowed: bool, unlock_hint: string|null}
+     */
+    public function getViewerCanDisputeProfile(
+        int $viewerUserId,
+        int $targetUserId
+    ): array {
+        // Phase 1: hide. Phase 1.5 enables this with the Trusted-plus
+        // gate and the existing dispute panel mechanic extended to
+        // user_profile target_kind.
+        return ['allowed' => false, 'unlock_hint' => null];
+    }
+
+    /**
+     * Tier-comparison utility: is the viewer at Trusted+ standing
+     * (the §J.1 Dispute gate)? Page-card disputes already gate on
+     * this via the existing CardPermissions.can_dispute pathway;
+     * this method exists for future profile-scoped use (Phase 1.5).
+     *
+     * @phpstan-impure The tier is read from the reputation repo;
+     *                 functionally pure across one request, but
+     *                 changes between requests as scores recompute.
+     */
+    public function viewerIsTrustedPlus(int $viewerUserId): bool
+    {
+        if ($viewerUserId <= 0) {
+            return false;
+        }
+        $tier = $this->reputationRepo->getTier($viewerUserId);
+        return in_array($tier, self::TRUSTED_PLUS_TIERS, true);
     }
 
     /**

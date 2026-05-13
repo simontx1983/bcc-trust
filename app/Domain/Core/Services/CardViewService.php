@@ -205,7 +205,14 @@ final class CardViewService
                 self::resolvePageAvatarUrl($pageId)
             ),
             'stats'               => self::buildPageStats($trustScore, $rm),
-            'permissions'         => $this->resolvePagePermissions($viewerId, $isClaimedByViewer, $endorseEligibility),
+            'permissions'         => $this->resolvePagePermissions(
+                $viewerId,
+                $isClaimedByViewer,
+                $endorseEligibility,
+                (int) $post->post_author,
+                $cardTargetKind,
+                $pageId
+            ),
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
             'social_proof'        => null,
@@ -652,23 +659,74 @@ final class CardViewService
      * @param array{allowed: bool, unlock_hint: string|null, reason_code: string|null} $endorseEligibility
      * @return array<string, Permission>
      */
-    private function resolvePagePermissions(int $viewerId, bool $viewerIsClaimer, array $endorseEligibility): array
-    {
+    /**
+     * @param array<string, mixed> $endorseEligibility
+     * @return array<string, mixed>
+     */
+    private function resolvePagePermissions(
+        int $viewerId,
+        bool $viewerIsClaimer,
+        array $endorseEligibility,
+        int $pageOwnerUserId,
+        ?string $targetKind,
+        int $targetId
+    ): array {
+        // §J.6 attestation permissions: the service handles both anon
+        // (returns "Sign in to <verb>." aspirational copy across all
+        // three actions, visible path per §N7) and authed branches
+        // (tier-gated + self-target-prevented).
+        $attestationPerms = $this->attestationService->getViewerActionPermissions(
+            $viewerId,
+            $pageOwnerUserId
+        );
+        $attestationFields = [
+            'can_vouch'        => self::attestationPermToCardPerm($attestationPerms['can_vouch']),
+            'can_stand_behind' => self::attestationPermToCardPerm($attestationPerms['can_stand_behind']),
+            'can_report'       => self::attestationPermToCardPerm($attestationPerms['can_report']),
+        ];
+
         if ($viewerId <= 0) {
-            return self::lockedPagePermissions();
+            // Legacy permissions stay in their existing locked shape;
+            // attestation fields use the service's anon copy.
+            return array_merge(self::lockedPagePermissions(), $attestationFields);
         }
 
+        return array_merge(
+            [
+                'can_pull'           => self::allow(),
+                'can_review'         => self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
+                'can_dispute'        => self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
+                // §V1.5 — endorse eligibility is precomputed by
+                // EndorsementService::getEndorseEligibility (mirrors the
+                // gates inside endorsePage but read-only). Pass-through the
+                // shape it already produces.
+                'can_endorse'        => $endorseEligibility,
+                'can_post_as_entity' => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+                'can_edit_bio'       => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+            ],
+            // §J.6 Trust Attestation Layer permissions. Tier-gated +
+            // self-target-prevented. The shapes are
+            // {allowed, unlock_hint, reason_code} per CardPermissionEntry;
+            // reason_code is null at V1 (the FE only needs allowed +
+            // unlock_hint for the AttestationActionCluster's render).
+            $attestationFields
+        );
+    }
+
+    /**
+     * Adapt an AttestationService permission entry into the
+     * CardPermissionEntry shape (adds reason_code: null since the
+     * §J.6 attestation flow doesn't carry reason codes at V1).
+     *
+     * @param array{allowed: bool, unlock_hint: string|null} $entry
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    private static function attestationPermToCardPerm(array $entry): array
+    {
         return [
-            'can_pull'           => self::allow(),
-            'can_review'         => self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
-            'can_dispute'        => self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
-            // §V1.5 — endorse eligibility is precomputed by
-            // EndorsementService::getEndorseEligibility (mirrors the
-            // gates inside endorsePage but read-only). Pass-through the
-            // shape it already produces.
-            'can_endorse'        => $endorseEligibility,
-            'can_post_as_entity' => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
-            'can_edit_bio'       => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+            'allowed'     => $entry['allowed'],
+            'unlock_hint' => $entry['unlock_hint'],
+            'reason_code' => null,
         ];
     }
 
@@ -677,26 +735,42 @@ final class CardViewService
      */
     private function resolveMemberPermissions(int $targetUserId, int $viewerId): array
     {
+        // §J.6 attestation permissions on member cards (target_kind=
+        // user_profile per §J.1). Service handles anon ("Sign in to…")
+        // + self-target (hidden) + tier-gating uniformly.
+        $attestationPerms = $this->attestationService->getViewerActionPermissions(
+            $viewerId,
+            $targetUserId
+        );
+        $attestationFields = [
+            'can_vouch'        => self::attestationPermToCardPerm($attestationPerms['can_vouch']),
+            'can_stand_behind' => self::attestationPermToCardPerm($attestationPerms['can_stand_behind']),
+            'can_report'       => self::attestationPermToCardPerm($attestationPerms['can_report']),
+        ];
+
         if ($viewerId <= 0) {
-            return self::lockedMemberPermissions();
+            return array_merge(self::lockedMemberPermissions(), $attestationFields);
         }
         $isSelf = $viewerId === $targetUserId;
 
-        return [
-            // "Pull" on a member card = follow that user. Self-follow is meaningless.
-            'can_pull'           => $isSelf ? self::deny(null, 'self_action_blocked') : self::allow(),
-            'can_review'         => $isSelf
-                ? self::deny(null, 'self_action_blocked')
-                : self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
-            'can_dispute'        => $isSelf
-                ? self::deny(null, 'self_action_blocked')
-                : self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
-            // Endorsements target page-cards (validator/project/creator)
-            // only. Members are followed/reviewed via different surfaces.
-            'can_endorse'        => self::deny(null, 'not_applicable'),
-            'can_post_as_entity' => self::deny(null, 'not_applicable'),
-            'can_edit_bio'       => $isSelf ? self::allow() : self::deny(null, 'not_owner'),
-        ];
+        return array_merge(
+            [
+                // "Pull" on a member card = follow that user. Self-follow is meaningless.
+                'can_pull'           => $isSelf ? self::deny(null, 'self_action_blocked') : self::allow(),
+                'can_review'         => $isSelf
+                    ? self::deny(null, 'self_action_blocked')
+                    : self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
+                'can_dispute'        => $isSelf
+                    ? self::deny(null, 'self_action_blocked')
+                    : self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
+                // Endorsements target page-cards (validator/project/creator)
+                // only. Members are followed/reviewed via different surfaces.
+                'can_endorse'        => self::deny(null, 'not_applicable'),
+                'can_post_as_entity' => self::deny(null, 'not_applicable'),
+                'can_edit_bio'       => $isSelf ? self::allow() : self::deny(null, 'not_owner'),
+            ],
+            $attestationFields
+        );
     }
 
     /**

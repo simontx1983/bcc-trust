@@ -158,6 +158,27 @@ final class MemberProfileComposer
             ? $this->attestationService->getViewerAttestation($viewerId, 'user_profile', $userId)
             : null;
 
+        // ── §J.6 attestation permissions — extend the base
+        //   permissions block (which UserViewService::resolvePermissions
+        //   produced with can_follow / can_message / can_block /
+        //   can_edit_profile) with the four §J.1 attestation actions.
+        //   Service handles anon ("Sign in to vouch for operators."),
+        //   self-target (hidden via allowed=false + unlock_hint=null
+        //   per §N7), and tier-gating ("Reach Neutral standing to
+        //   vouch.") uniformly. can_dispute is intentionally omitted
+        //   on profile surfaces in Phase 1 — profile-scoped disputes
+        //   ship in Phase 1.5 per §J.1; per §N7 absent permission =
+        //   FE hides the action.
+        $attestationPerms = $this->attestationService->getViewerActionPermissions(
+            $viewerId,
+            $userId
+        );
+        if (isset($base['permissions']) && is_array($base['permissions'])) {
+            $base['permissions']['can_vouch']        = $attestationPerms['can_vouch'];
+            $base['permissions']['can_stand_behind'] = $attestationPerms['can_stand_behind'];
+            $base['permissions']['can_report']       = $attestationPerms['can_report'];
+        }
+
         // ── Hero card — call CardViewService for the canonical member card.
         $card = $handle !== ''
             ? $this->cardViewService->getCard('member', $handle, $viewerId)

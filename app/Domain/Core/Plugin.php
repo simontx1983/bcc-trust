@@ -249,7 +249,8 @@ final class Plugin
     public function attestationService(): AttestationService
     {
         return $this->attestationService ??= new AttestationService(
-            $this->attestationRepository()
+            $this->attestationRepository(),
+            $this->reputationRepository()
         );
     }
 
