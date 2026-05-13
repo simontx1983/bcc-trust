@@ -75,7 +75,7 @@ final class NftIndexerStatusView
             (one <code>getAssetTransfers</code> call = 120 CU).
         </p>
 
-        <table class="widefat striped" style="max-width:1100px">
+        <table class="widefat striped" style="max-width:1200px">
             <thead>
                 <tr>
                     <th>Chain</th>
@@ -84,6 +84,7 @@ final class NftIndexerStatusView
                     <th>Head</th>
                     <th>Lag (blocks)</th>
                     <th>CU used today</th>
+                    <th title="EnrichmentScheduler per-chain 10-min rolling counter. Consulted by ApiRetry today (X1 visibility) — Phase X2 will scope it back to the scheduler.">Calls (10m)</th>
                     <th>Last run</th>
                     <th>Last error</th>
                     <th>Action</th>
@@ -91,7 +92,7 @@ final class NftIndexerStatusView
             </thead>
             <tbody>
                 <?php if ($chains === []): ?>
-                    <tr><td colspan="9"><em>No active EVM chains.</em></td></tr>
+                    <tr><td colspan="10"><em>No active EVM chains.</em></td></tr>
                 <?php else: ?>
                     <?php foreach ($chains as $chain):
                         $cid     = (int) $chain->id;
@@ -103,6 +104,16 @@ final class NftIndexerStatusView
                         $cuUsed  = $cp ? (int) $cp->cu_used_today : 0;
                         $lastRun = $cp && $cp->last_run_at ? (string) $cp->last_run_at : '—';
                         $lastErr = $cp && $cp->last_error ? (string) $cp->last_error : '—';
+
+                        // Call-count gauge (X1). Read from the shared summary
+                        // payload so the per-row figure agrees with the
+                        // top-card pressure signal.
+                        $callsRow   = $summary['call_count_by_chain'][$cid] ?? null;
+                        $callsCount = $callsRow !== null ? (int) $callsRow['count'] : 0;
+                        $callsCap   = $callsRow !== null ? (int) $callsRow['cap']   : 0;
+                        $callsHot   = $callsCap > 0
+                            && ($callsCount / $callsCap) >= NftIndexerHealthSnapshot::CALL_COUNT_PRESSURE_RATIO
+                            && $state !== ChainCheckpointRepository::STATE_DISABLED;
 
                         $runNonce   = wp_create_nonce('bcc_nft_indexer_run_' . $cid);
                         $pauseNonce = wp_create_nonce('bcc_nft_indexer_state_' . $cid);
@@ -125,6 +136,9 @@ final class NftIndexerStatusView
                         <td><?php echo $head; ?></td>
                         <td><?php echo $lag; ?></td>
                         <td><?php echo $cuUsed; ?> / <?php echo $dailyBudget; ?></td>
+                        <td<?php echo $callsHot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
+                            <?php echo $callsCount; ?> / <?php echo $callsCap; ?>
+                        </td>
                         <td><?php echo esc_html($lastRun); ?></td>
                         <td><?php echo esc_html($lastErr); ?></td>
                         <td>
@@ -169,6 +183,8 @@ final class NftIndexerStatusView
      *     stalled_chains: list<string>,
      *     degraded_chains: list<string>,
      *     cu_pressure_chains: list<string>,
+     *     call_count_pressure_chains: list<string>,
+     *     call_count_by_chain: array<int, array{slug: string, count: int, cap: int}>,
      *     dedupe_overgrown: bool,
      *     issues: list<string>
      * } $summary
@@ -222,6 +238,10 @@ final class NftIndexerStatusView
 
                 <?php if ($summary['cu_pressure_chains'] !== []): ?>
                     <span><strong>CU pressure:</strong> <?php echo (int) count($summary['cu_pressure_chains']); ?></span>
+                <?php endif; ?>
+
+                <?php if ($summary['call_count_pressure_chains'] !== []): ?>
+                    <span title="ApiRetry per-chain budget pressure (V2 retries may be pre-blocking V1 fetches on the same chain)"><strong>Call pressure:</strong> <?php echo (int) count($summary['call_count_pressure_chains']); ?></span>
                 <?php endif; ?>
 
                 <?php if ($summary['dedupe_overgrown']): ?>

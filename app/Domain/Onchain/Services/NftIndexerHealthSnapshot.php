@@ -5,6 +5,7 @@ namespace BCC\Trust\Onchain\Services;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\HeliusSeenSignaturesRepository;
+use BCC\Trust\Onchain\Services\EnrichmentScheduler;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 
 if (!defined('ABSPATH')) {
@@ -40,6 +41,24 @@ final class NftIndexerHealthSnapshot
      *  is yellow because once the budget hits 100% the indexer stops
      *  walking that chain until the next UTC midnight rollover. */
     public const CU_BUDGET_PRESSURE_RATIO = 0.8;
+
+    /** Call-count pressure threshold (X1 visibility phase).
+     *
+     *  `EnrichmentScheduler` maintains a per-chain rolling 10-minute call
+     *  counter (cap = `MAX_API_CALLS_PER_CHAIN`). Today this gauge is
+     *  consulted by `ApiRetry::request` as a pre-call gate for EVERY
+     *  Alchemy caller, not just the scheduler — a side effect of the
+     *  pre-check having migrated into transport layer. That means a V2
+     *  worker thrashing retries on a degraded chain can silently
+     *  pre-block V1 fetches on the same chain.
+     *
+     *  Surfaced here as a YELLOW signal so the operator can see the
+     *  pressure before it produces user-visible silent-failure symptoms.
+     *  Phase X2 will move the gauge back inside the scheduler loop where
+     *  it belongs; this surface becomes a defense-in-depth signal at
+     *  that point.
+     */
+    public const CALL_COUNT_PRESSURE_RATIO = 0.8;
 
     /**
      * @param array<string, mixed> $existing
@@ -80,6 +99,8 @@ final class NftIndexerHealthSnapshot
      *     stalled_chains: list<string>,
      *     degraded_chains: list<string>,
      *     cu_pressure_chains: list<string>,
+     *     call_count_pressure_chains: list<string>,
+     *     call_count_by_chain: array<int, array{slug: string, count: int, cap: int}>,
      *     dedupe_overgrown: bool,
      *     issues: list<string>
      * }
@@ -106,11 +127,14 @@ final class NftIndexerHealthSnapshot
             $totalEvmChains++;
         }
 
-        $activeCount       = 0;
-        $stalledChains     = [];
-        $degradedChains    = [];
-        $cuPressureChains  = [];
-        $now               = time();
+        $activeCount             = 0;
+        $stalledChains           = [];
+        $degradedChains          = [];
+        $cuPressureChains        = [];
+        $callCountPressureChains = [];
+        $callCountByChain        = [];
+        $callCountCap            = EnrichmentScheduler::MAX_API_CALLS_PER_CHAIN;
+        $now                     = time();
 
         foreach (ChainCheckpointRepository::getAll() as $cp) {
             $chainId = (int) $cp->chain_id;
@@ -121,6 +145,17 @@ final class NftIndexerHealthSnapshot
             }
             $slug  = $slugByChainId[$chainId];
             $state = (string) $cp->state;
+
+            // Capture call-count for EVERY chain (active or disabled) so the
+            // per-chain table can render the gauge for operator inspection.
+            // The YELLOW signal below only fires for non-disabled chains
+            // because that's where pressure produces user-facing symptoms.
+            $callCount = EnrichmentScheduler::getChainApiCount($chainId);
+            $callCountByChain[$chainId] = [
+                'slug'  => $slug,
+                'count' => $callCount,
+                'cap'   => $callCountCap,
+            ];
 
             if ($state === ChainCheckpointRepository::STATE_DISABLED) {
                 continue;
@@ -152,6 +187,22 @@ final class NftIndexerHealthSnapshot
                         $dailyBudget
                     );
                 }
+            }
+
+            // Call-count pressure (X1 visibility phase). See class const
+            // docblock for the V1↔V2 coupling background. We raise on
+            // non-disabled chains only because those are the ones where
+            // pressure produces operator-actionable symptoms (silent
+            // pre-block of V1 fetches by ApiRetry). `$callCountCap` is
+            // a positive class constant; no zero-guard needed.
+            $callRatio = $callCount / $callCountCap;
+            if ($callRatio >= self::CALL_COUNT_PRESSURE_RATIO) {
+                $callCountPressureChains[] = sprintf(
+                    '%s (%d/%d)',
+                    $slug,
+                    $callCount,
+                    $callCountCap
+                );
             }
         }
 
@@ -197,6 +248,18 @@ final class NftIndexerHealthSnapshot
                 implode(', ', $cuPressureChains)
             );
         }
+        if ($callCountPressureChains !== []) {
+            // Actionable framing — point at the likely cause (V2 retries on
+            // a degraded chain) and the diagnostic step (the per-chain
+            // table's last_error column). The footgun itself is documented
+            // separately on the class constant; here we focus on what the
+            // operator does right now.
+            $issues[] = sprintf(
+                'Call-count pressure (>=%d%% of EnrichmentScheduler per-chain cap): %s. Likely cause: V2 retries on a degraded chain; V1 fetches on the same chain will be pre-blocked at ApiRetry until the 10-min counter rolls over. Check `last_error` in the per-chain table below.',
+                (int) (self::CALL_COUNT_PRESSURE_RATIO * 100),
+                implode(', ', $callCountPressureChains)
+            );
+        }
         if ($dedupeOvergrown) {
             $issues[] = sprintf(
                 'Helius dedupe table overgrown: %d rows (threshold %d). The sweep cron may have stalled.',
@@ -214,22 +277,25 @@ final class NftIndexerHealthSnapshot
             $stalledChains !== []
             || $degradedChains !== []
             || $cuPressureChains !== []
+            || $callCountPressureChains !== []
             || $dedupeOvergrown
         );
         $status = $isRed ? self::STATUS_RED : ($isYellow ? self::STATUS_YELLOW : self::STATUS_GREEN);
 
         return [
-            'status'                 => $status,
-            'cron_scheduled'         => $cronScheduled,
-            'cron_overdue'           => $cronOverdue,
-            'cron_overdue_seconds'   => $overSec,
-            'active_chains_count'    => $activeCount,
-            'total_evm_chains_count' => $totalEvmChains,
-            'stalled_chains'         => $stalledChains,
-            'degraded_chains'        => $degradedChains,
-            'cu_pressure_chains'     => $cuPressureChains,
-            'dedupe_overgrown'       => $dedupeOvergrown,
-            'issues'                 => $issues,
+            'status'                     => $status,
+            'cron_scheduled'             => $cronScheduled,
+            'cron_overdue'               => $cronOverdue,
+            'cron_overdue_seconds'       => $overSec,
+            'active_chains_count'        => $activeCount,
+            'total_evm_chains_count'     => $totalEvmChains,
+            'stalled_chains'             => $stalledChains,
+            'degraded_chains'            => $degradedChains,
+            'cu_pressure_chains'         => $cuPressureChains,
+            'call_count_pressure_chains' => $callCountPressureChains,
+            'call_count_by_chain'        => $callCountByChain,
+            'dedupe_overgrown'           => $dedupeOvergrown,
+            'issues'                     => $issues,
         ];
     }
 
