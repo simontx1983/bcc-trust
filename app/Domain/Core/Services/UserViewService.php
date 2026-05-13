@@ -503,7 +503,14 @@ final class UserViewService
         return ['key' => $derived, 'label' => $label];
     }
 
-    private static function isInGoodStanding(string $tier): bool
+    /**
+     * Pure tier → good-standing boolean. Public so AuthEndpoint can
+     * reuse it when minting the login response (the chrome stamp slot
+     * on the frontend reads from the session, which carries this bool
+     * from the JWT). Single source of truth for the tier-to-standing
+     * mapping — do NOT duplicate the in_array list elsewhere.
+     */
+    public static function isInGoodStanding(string $tier): bool
     {
         // §E1: tier ≥ neutral. Tier-fail and moderation flags are now
         // surfaced through separate channels — `is_in_good_standing`

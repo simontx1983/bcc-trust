@@ -49,6 +49,7 @@ use BCC\Core\Wallet\WalletVerificationRequest;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\HandleService;
+use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\JwtToken;
 use BCC\Trust\Core\Support\WalletAddressValidator;
@@ -605,15 +606,48 @@ final class AuthEndpoint
         do_action('bcc_user_signup', $userIdInt, $handle);
 
         $response = ApiResponse::ok([
-            'user_id'    => $userIdInt,
-            'handle'     => $handle,
-            'token'      => $token,
-            'expires_in' => self::JWT_TTL_SECONDS,
-            'token_type' => 'Bearer',
+            'user_id'          => $userIdInt,
+            'handle'           => $handle,
+            'token'            => $token,
+            'expires_in'       => self::JWT_TTL_SECONDS,
+            'token_type'       => 'Bearer',
+            // §I1 chrome signal — bounded-staleness boolean carried
+            // through the NextAuth JWT until next login. Fresh signups
+            // default to 'neutral' tier → true.
+            'in_good_standing' => self::resolveInGoodStanding($userIdInt),
         ], 201);
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+
+    /**
+     * Resolve the in_good_standing boolean for the auth response. Reads
+     * the user's reputation tier (single repo call) and routes through
+     * the canonical UserViewService::isInGoodStanding tier-mapping so
+     * the source of truth stays in one place.
+     *
+     * Wrapped to fail-open: any error returns true (the more permissive
+     * default). The auth response should never block on a downstream
+     * tier-lookup failure — worst-case the chrome stamp shows on a user
+     * who's technically not in good standing, which is recoverable on
+     * next login.
+     */
+    private static function resolveInGoodStanding(int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+        try {
+            $tier = Plugin::instance()->reputationRepository()->getTier($userId);
+            return UserViewService::isInGoodStanding($tier);
+        } catch (\Throwable $e) {
+            Logger::warning('[AuthEndpoint] in_good_standing lookup failed; fail-open', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return true;
+        }
     }
 
     /**
@@ -696,11 +730,12 @@ final class AuthEndpoint
         do_action('bcc_user_login', $userId);
 
         $response = ApiResponse::ok([
-            'user_id'    => $userId,
-            'handle'     => $handle,
-            'token'      => $token,
-            'expires_in' => self::JWT_TTL_SECONDS,
-            'token_type' => 'Bearer',
+            'user_id'          => $userId,
+            'handle'           => $handle,
+            'token'            => $token,
+            'expires_in'       => self::JWT_TTL_SECONDS,
+            'token_type'       => 'Bearer',
+            'in_good_standing' => self::resolveInGoodStanding($userId),
         ]);
         $response->header('Cache-Control', 'no-store');
 
@@ -862,11 +897,12 @@ final class AuthEndpoint
         do_action('bcc_user_login', $userId);
 
         $response = ApiResponse::ok([
-            'user_id'    => $userId,
-            'handle'     => $handle,
-            'token'      => $token,
-            'expires_in' => self::JWT_TTL_SECONDS,
-            'token_type' => 'Bearer',
+            'user_id'          => $userId,
+            'handle'           => $handle,
+            'token'            => $token,
+            'expires_in'       => self::JWT_TTL_SECONDS,
+            'token_type'       => 'Bearer',
+            'in_good_standing' => self::resolveInGoodStanding($userId),
         ]);
         $response->header('Cache-Control', 'no-store');
 
@@ -1076,11 +1112,12 @@ final class AuthEndpoint
         do_action('bcc_user_signup', $userIdInt, $handle);
 
         $response = ApiResponse::ok([
-            'user_id'    => $userIdInt,
-            'handle'     => $handle,
-            'token'      => $token,
-            'expires_in' => self::JWT_TTL_SECONDS,
-            'token_type' => 'Bearer',
+            'user_id'          => $userIdInt,
+            'handle'           => $handle,
+            'token'            => $token,
+            'expires_in'       => self::JWT_TTL_SECONDS,
+            'token_type'       => 'Bearer',
+            'in_good_standing' => self::resolveInGoodStanding($userIdInt),
         ], 201);
         $response->header('Cache-Control', 'no-store');
 
