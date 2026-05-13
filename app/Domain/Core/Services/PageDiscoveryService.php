@@ -56,16 +56,17 @@ class PageDiscoveryService {
      * @return array<string, mixed>
      */
     public function query(array $args): array {
-        $types          = array_filter(array_map('sanitize_key', $args['types'] ?? []));
-        $sort           = sanitize_key($args['sort'] ?? 'trust');
-        $verified_only  = (bool) ($args['verified_only'] ?? false);
-        $tier           = sanitize_key($args['tier'] ?? '');
-        $min_confidence = max(0.0, min(1.0, (float) ($args['min_confidence'] ?? 0)));
-        $new_only       = (bool) ($args['new_only'] ?? false);
-        $max_votes      = max(0, (int) ($args['max_votes'] ?? 0));
-        $limit          = max(1, min(50, (int) ($args['limit'] ?? 12)));
-        $page           = max(1, (int) ($args['page'] ?? 1));
-        $search         = sanitize_text_field($args['search'] ?? '');
+        $types              = array_filter(array_map('sanitize_key', $args['types'] ?? []));
+        $sort               = sanitize_key($args['sort'] ?? 'trust');
+        $verified_only      = (bool) ($args['verified_only'] ?? false);
+        $tier               = sanitize_key($args['tier'] ?? '');
+        $min_confidence     = max(0.0, min(1.0, (float) ($args['min_confidence'] ?? 0)));
+        $new_only           = (bool) ($args['new_only'] ?? false);
+        $max_votes          = max(0, (int) ($args['max_votes'] ?? 0));
+        $limit              = max(1, min(50, (int) ($args['limit'] ?? 12)));
+        $page               = max(1, (int) ($args['page'] ?? 1));
+        $search             = sanitize_text_field($args['search'] ?? '');
+        $good_standing_only = (bool) ($args['good_standing_only'] ?? false);
 
         // Validate tier against allowlist.
         if ($tier !== '' && !in_array($tier, self::ALLOWED_TIERS, true)) {
@@ -73,7 +74,7 @@ class PageDiscoveryService {
         }
 
         // Build cache key from all parameters.
-        $cache_key = $this->buildCacheKey($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search);
+        $cache_key = $this->buildCacheKey($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only);
         $cached    = wp_cache_get($cache_key, self::CACHE_GROUP);
 
         if (false !== $cached) {
@@ -81,8 +82,8 @@ class PageDiscoveryService {
         }
 
         $result = $this->canUseReadModel()
-            ? $this->executeReadModelQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search)
-            : $this->executeQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search);
+            ? $this->executeReadModelQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only)
+            : $this->executeQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only);
 
         /** @var int $ttl Filterable cache TTL. */
         $ttl = (int) apply_filters('bcc_discovery_cache_ttl', self::DEFAULT_TTL);
@@ -133,11 +134,12 @@ class PageDiscoveryService {
         int $max_votes,
         int $limit,
         int $page,
-        string $search
+        string $search,
+        bool $good_standing_only = false
     ): array {
         $result = \BCC\Trust\Core\Repositories\PageDiscoveryRepository::queryFromReadModel(
             $types, $sort, $verified_only, $tier, $min_confidence,
-            $new_only, $max_votes, $limit, $page, $search
+            $new_only, $max_votes, $limit, $page, $search, $good_standing_only
         );
 
         $rows = $result['rows'];
@@ -243,11 +245,12 @@ class PageDiscoveryService {
         int $max_votes,
         int $limit,
         int $page,
-        string $search
+        string $search,
+        bool $good_standing_only = false
     ): array {
         $result = \BCC\Trust\Core\Repositories\PageDiscoveryRepository::queryFromPostsTable(
             $types, $sort, $verified_only, $tier, $min_confidence,
-            $new_only, $max_votes, $limit, $page, $search
+            $new_only, $max_votes, $limit, $page, $search, $good_standing_only
         );
 
         $rows = $result['rows'];
@@ -429,7 +432,8 @@ class PageDiscoveryService {
         int $max_votes,
         int $limit,
         int $page,
-        string $search
+        string $search,
+        bool $good_standing_only = false
     ): string {
         sort($types);
         $type_str    = $types ? implode('-', $types) : 'all';
@@ -439,7 +443,8 @@ class PageDiscoveryService {
         $new_str     = $new_only ? '1' : '0';
         $mv_str      = $max_votes > 0 ? (string) $max_votes : '0';
         $search_hash = $search !== '' ? md5($search) : '0';
+        $gs_str      = $good_standing_only ? '1' : '0';
 
-        return "bcc_discovery_{$type_str}_{$sort}_{$verified}_{$tier_str}_{$conf_str}_{$new_str}_{$mv_str}_{$limit}_{$page}_{$search_hash}";
+        return "bcc_discovery_{$type_str}_{$sort}_{$verified}_{$tier_str}_{$conf_str}_{$new_str}_{$mv_str}_{$limit}_{$page}_{$search_hash}_gs{$gs_str}";
     }
 }

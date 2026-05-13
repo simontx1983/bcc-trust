@@ -26,6 +26,12 @@
  *   - sort   (trust|newest|endorsements|  — passed through verbatim;
  *             followers)                    PageDiscoveryService validates
  *   - q      (search string)              — passed through verbatim
+ *   - good_standing_only (0|1)            — when true, restricts results to
+ *                                            §E1 good-standing tiers (neutral,
+ *                                            trusted, elite). Composes with
+ *                                            `tier` via AND so the filter
+ *                                            chip and per-row stamp can never
+ *                                            disagree.
  *   - page   (1-based)                    — capped at 20 (matches
  *                                            DiscoveryEndpoint's
  *                                            offset-FS guard)
@@ -127,6 +133,14 @@ final class CardsListEndpoint
                         'type'              => 'integer',
                         'sanitize_callback' => 'absint',
                     ],
+                    'good_standing_only' => [
+                        'required' => false,
+                        // Accept '1', 'true', 0, etc. — boolish coerce
+                        // happens at the handler boundary below, not
+                        // in REST args (which would reject 'true' as
+                        // a non-integer).
+                        'type'     => 'string',
+                    ],
                 ],
             ]
         );
@@ -199,15 +213,24 @@ final class CardsListEndpoint
         }
         $sort = $sortParam !== '' ? $sortParam : 'trust';
 
+        // ── good_standing_only (boolish: '1'|'true'|'on'|true → true) ───
+        $goodStandingRaw  = (string) $request->get_param('good_standing_only');
+        $goodStandingOnly = in_array(
+            strtolower($goodStandingRaw),
+            ['1', 'true', 'on', 'yes'],
+            true
+        );
+
         // ── Run discovery ───────────────────────────────────────────────
         $discoveryService = new PageDiscoveryService();
         $discoveryResult = $discoveryService->query([
-            'types'  => $types,
-            'sort'   => $sort,
-            'tier'   => $reputationTier,
-            'limit'  => $perPage,
-            'page'   => $page,
-            'search' => $query,
+            'types'              => $types,
+            'sort'               => $sort,
+            'tier'               => $reputationTier,
+            'limit'              => $perPage,
+            'page'               => $page,
+            'search'             => $query,
+            'good_standing_only' => $goodStandingOnly,
         ]);
 
         $rows = isset($discoveryResult['results']) && is_array($discoveryResult['results'])

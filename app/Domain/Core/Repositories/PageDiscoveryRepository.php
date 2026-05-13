@@ -3,6 +3,7 @@
 namespace BCC\Trust\Core\Repositories;
 
 use BCC\Trust\Core\Database\TableRegistry;
+use BCC\Trust\Core\Services\UserViewService;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -56,7 +57,8 @@ final class PageDiscoveryRepository
         int $max_votes,
         int $limit,
         int $page,
-        string $search
+        string $search,
+        bool $good_standing_only = false
     ): array {
         global $wpdb;
 
@@ -76,6 +78,14 @@ final class PageDiscoveryRepository
         if ($tier !== '') {
             $where[]  = 'rm.reputation_tier = %s';
             $params[] = $tier;
+        }
+        if ($good_standing_only) {
+            // §G2 — sources the tier list from UserViewService so the
+            // chip on /directory, the per-row `is_in_good_standing`
+            // stamp, and this WHERE clause can never drift.
+            $ph       = implode(',', array_fill(0, count(UserViewService::GOOD_STANDING_TIERS), '%s'));
+            $where[]  = "rm.reputation_tier IN ({$ph})";
+            $params   = array_merge($params, UserViewService::GOOD_STANDING_TIERS);
         }
         if ($min_confidence > 0) {
             $where[]  = 'rm.confidence_score >= %f';
@@ -198,7 +208,8 @@ final class PageDiscoveryRepository
         int $max_votes,
         int $limit,
         int $page,
-        string $search
+        string $search,
+        bool $good_standing_only = false
     ): array {
         global $wpdb;
 
@@ -230,6 +241,12 @@ final class PageDiscoveryRepository
         if ($tier !== '') {
             $where[]  = 'ps.reputation_tier = %s';
             $params[] = $tier;
+        }
+        if ($good_standing_only) {
+            // §G2 — same canonical tier list as the read-model path.
+            $ph       = implode(',', array_fill(0, count(UserViewService::GOOD_STANDING_TIERS), '%s'));
+            $where[]  = "ps.reputation_tier IN ({$ph})";
+            $params   = array_merge($params, UserViewService::GOOD_STANDING_TIERS);
         }
         if ($min_confidence > 0) {
             $where[]  = 'ps.confidence_score >= %f';

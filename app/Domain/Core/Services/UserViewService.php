@@ -504,6 +504,17 @@ final class UserViewService
     }
 
     /**
+     * Reputation tiers considered "in good standing" per §E1.
+     * Single source of truth — `isInGoodStanding()` reads from this
+     * list, and the directory's `good_standing_only` filter
+     * (PageDiscoveryRepository) `IN`-clauses the same list so the
+     * frontend chip and the per-row stamp can never diverge.
+     *
+     * @var list<string>
+     */
+    public const GOOD_STANDING_TIERS = ['neutral', 'trusted', 'elite'];
+
+    /**
      * Pure tier → good-standing boolean. Public so AuthEndpoint can
      * reuse it when minting the login response (the chrome stamp slot
      * on the frontend reads from the session, which carries this bool
@@ -516,7 +527,7 @@ final class UserViewService
         // surfaced through separate channels — `is_in_good_standing`
         // tracks tier alone; `flags` (resolveFlags) carries explicit
         // moderation slugs from Permissions + wp_usermeta.
-        return in_array($tier, ['neutral', 'trusted', 'elite'], true);
+        return in_array($tier, self::GOOD_STANDING_TIERS, true);
     }
 
     /**
