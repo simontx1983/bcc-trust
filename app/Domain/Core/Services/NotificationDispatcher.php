@@ -62,9 +62,21 @@
  *   - Coalesced via 5-min per-(recipient, group) transient on bell
  *     and the existing PushDispatcher debounce on push.
  *
+ * Comment-received dispatch (V2 retention slice, locked 2026-05-13):
+ *   - onCommentReceived sends a `COMMENT_RECEIVED` bell + push to the
+ *     PARENT POST's author when someone comments on their post.
+ *   - Wired via a SECOND `bcc_comment_created` subscriber in Plugin.php
+ *     at priority 31 (after the mention subscriber at 30). If the
+ *     commenter @-tags the post author, BOTH dispatchers fire for the
+ *     same recipient — semantically distinct events (mention =
+ *     "called out"; comment-received = "your post has activity"),
+ *     each independently toggleable in prefs.
+ *   - Single-recipient (the post author); no fan-out cost concern,
+ *     dispatch is sync.
+ *   - Coalesced via 5-min per-(recipient, post) transient on bell so
+ *     a hot post doesn't spam the author; push self-debounces.
+ *
  * Deferred (per §P parking lot): follow-posts (cross-graph, expensive).
- * Comments are notified via the mention dispatcher only — a future
- * "someone replied to your post" subscriber would extend this catalogue.
  *
  * @package BCC\Trust\Core\Services
  * @since V1 (2026-04, §I1)
@@ -693,6 +705,108 @@ final class NotificationDispatcher
                 'recipient_id' => $recipientId,
                 'group_id'     => $groupId,
                 'error'        => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // bcc_comment_created (sync) — comment-on-your-post dispatch
+    // ──────────────────────────────────────────────────────────────────
+
+    /** 5-min per-(recipient, post) bell-coalescing window — matches LOCAL_POST. */
+    private const COMMENT_RECEIVED_BELL_WINDOW_SECS = 300;
+
+    /**
+     * Notify the parent-post author when someone comments on their post.
+     * Self-skip when the commenter IS the post author.
+     *
+     * Recipient resolution lives in this method (not the Plugin.php
+     * subscriber) so the subscriber stays a thin trigger and the lookup
+     * logic lives in one place alongside the bell-write logic.
+     *
+     * Bell coalescing: a 5-min per-(recipient, post) transient gates
+     * the bell write so a hot post (50 comments in 10 min) doesn't
+     * produce 50 bell rows for the post author. Push always enqueues
+     * — PushDispatcher's own 5-min (recipient, eventType) debounce
+     * coalesces rapid bursts into "N new comments on your post."
+     *
+     * If the commenter @-tagged the post author, the mention dispatcher
+     * ALSO fires for the same recipient. Both events are sent — they're
+     * semantically distinct (mention = "called out"; comment-received
+     * = "your post has activity") and independently toggleable. See
+     * the @see note on dispatchMentionsFor.
+     */
+    public function onCommentReceived(int $commenterId, int $parentActId, int $newCommentPostId): void
+    {
+        unset($newCommentPostId);
+        if ($commenterId <= 0 || $parentActId <= 0) {
+            return;
+        }
+        try {
+            // Resolve parent post → its author. Mirrors resolveActAuthor
+            // shape; inlined here because we need both the post_id AND
+            // the author for the dispatch payload.
+            $parentAct = PeepSoActivityRepository::getById($parentActId);
+            if ($parentAct === null) {
+                return;
+            }
+            $parentPostId = isset($parentAct->act_external_id) ? (int) $parentAct->act_external_id : 0;
+            if ($parentPostId <= 0) {
+                return;
+            }
+            $parentPost = get_post($parentPostId);
+            if (!$parentPost instanceof \WP_Post) {
+                return;
+            }
+            $postAuthorId = (int) $parentPost->post_author;
+            if ($postAuthorId <= 0 || $postAuthorId === $commenterId) {
+                // Self-skip: the post author is commenting on their own
+                // post; they obviously know they did it.
+                return;
+            }
+
+            $actorHandle = self::resolveHandle($commenterId);
+
+            $transientKey = sprintf(
+                'bcc_comment_received_notified_%d_%d',
+                $postAuthorId,
+                $parentPostId
+            );
+
+            $coalesced = get_transient($transientKey) !== false;
+            if (!$coalesced) {
+                // Set the gate BEFORE the dispatch so a second concurrent
+                // comment for the same (recipient, post) sees the lock
+                // even if the bell write is still in flight.
+                set_transient($transientKey, 1, self::COMMENT_RECEIVED_BELL_WINDOW_SECS);
+
+                $message = sprintf('@%s commented on your post.', $actorHandle);
+
+                $this->dispatch(
+                    $commenterId,
+                    $postAuthorId,
+                    $message,
+                    NotificationType::COMMENT_RECEIVED,
+                    $parentPostId,   // external_id → the parent post
+                    $parentActId
+                );
+            }
+
+            // Push always enqueues — its own 5-min debounce coalesces
+            // rapid bursts into "N new comments on your post." Bell
+            // coalescing is independent of push aggregation; both
+            // align on the same 5-min window so a user sees at most
+            // one bell + one push per post per window.
+            $this->pushDispatcher->enqueue($postAuthorId, 'comment_received', [
+                'actor_handle' => $actorHandle,
+                'post_id'      => $parentPostId,
+                'act_id'       => $parentActId,
+            ]);
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] comment-received dispatch failed', [
+                'commenter_id'  => $commenterId,
+                'parent_act_id' => $parentActId,
+                'error'         => $e->getMessage(),
             ]);
         }
     }

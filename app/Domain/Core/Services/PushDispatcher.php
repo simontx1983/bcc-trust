@@ -276,6 +276,7 @@ final class PushDispatcher
             'panelist_selected'  => PushPayload::forPanelistSelected($count, $first),
             'mention'            => PushPayload::forMention($count, $first),
             'local_post'         => PushPayload::forLocalPost($count, $first),
+            'comment_received'   => PushPayload::forCommentReceived($count, $first),
             default              => [
                 'title' => 'Blue Collar Crypto',
                 'body'  => 'You have new activity.',

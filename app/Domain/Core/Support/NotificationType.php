@@ -37,6 +37,12 @@
  *                     (recipient, group) per 5-min window via
  *                     transient; push coalesced via existing
  *                     PushDispatcher debounce.
+ *   - COMMENT_RECEIVED — someone commented on your post (post-author
+ *                     is the recipient). Original-write only — comment
+ *                     edits do not re-dispatch (no edit hook exists).
+ *                     Bell coalesced to one row per (recipient, post)
+ *                     per 5-min window via transient; push coalesced
+ *                     via existing PushDispatcher debounce.
  *
  * Deferred (per §P): follow-posts. Each will extend this catalogue
  * when its dispatcher subscriber lands.
@@ -53,14 +59,15 @@ if (!defined('ABSPATH')) {
 
 final class NotificationType
 {
-    public const REACTION    = 'bcc_reaction';
-    public const REVIEW      = 'bcc_review';
-    public const CARD_PULLED = 'bcc_card_pulled';
-    public const RANK_UP     = 'bcc_rank_up';
-    public const ENDORSE     = 'bcc_endorse';
-    public const WELCOME     = 'bcc_welcome';
-    public const MENTION     = 'bcc_mention';
-    public const LOCAL_POST  = 'bcc_local_post';
+    public const REACTION         = 'bcc_reaction';
+    public const REVIEW           = 'bcc_review';
+    public const CARD_PULLED      = 'bcc_card_pulled';
+    public const RANK_UP          = 'bcc_rank_up';
+    public const ENDORSE          = 'bcc_endorse';
+    public const WELCOME          = 'bcc_welcome';
+    public const MENTION          = 'bcc_mention';
+    public const LOCAL_POST       = 'bcc_local_post';
+    public const COMMENT_RECEIVED = 'bcc_comment_received';
 
     /**
      * Whitelist of valid type slugs. Used by the read-side validation
@@ -78,6 +85,7 @@ final class NotificationType
         self::WELCOME,
         self::MENTION,
         self::LOCAL_POST,
+        self::COMMENT_RECEIVED,
     ];
 
     public static function isValid(string $type): bool

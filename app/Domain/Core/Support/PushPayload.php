@@ -216,6 +216,45 @@ final class PushPayload
     }
 
     /**
+     * @param array<string, mixed> $first First queued payload — provides
+     *   commenter handle + post act_id for the body + url. Aggregated
+     *   bodies (count > 1) drop the actor + render
+     *   "N new comments on your post." Across a 5-min debounce window
+     *   the queue can mix commenters; the singular actor only reads
+     *   correctly when count === 1.
+     * @return array{title: string, body: string, url: string, tag?: string}
+     */
+    public static function forCommentReceived(int $count, array $first): array
+    {
+        $actor   = self::stringFrom($first, 'actor_handle');
+        $actId   = self::intFrom($first, 'act_id');
+        $postId  = self::intFrom($first, 'post_id');
+
+        $title = 'Blue Collar Crypto';
+        $body  = $count > 1
+            ? sprintf('%d new comments on your post.', $count)
+            : ($actor !== ''
+                ? sprintf('@%s commented on your post.', $actor)
+                : 'New comment on your post.');
+
+        $payload = [
+            'title' => $title,
+            'body'  => $body,
+            // Mirror REACTION + MENTION deep-link convention: jump to
+            // the floor focused on the parent post. The FE has no
+            // comment-anchor consumer in V1 — the user scrolls to find
+            // the new comment in the thread.
+            'url'   => $actId > 0 ? sprintf('/?focus=%d', $actId) : '/',
+        ];
+        if ($postId > 0) {
+            // Per-post tag so two posts with concurrent comments don't
+            // collapse into one OS-shell notification.
+            $payload['tag'] = 'bcc-comment-' . $postId;
+        }
+        return $payload;
+    }
+
+    /**
      * @param array<string, mixed> $first
      * @return array{title: string, body: string, url: string, tag?: string}
      */

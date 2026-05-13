@@ -1723,6 +1723,23 @@ final class Plugin
             );
         }, 30, 4);
 
+        // §I1 V2 — comment-on-your-post dispatch. Second bcc_comment_created
+        // subscriber at priority 31 so it runs AFTER the mention
+        // dispatcher (priority 30). If the commenter @-tagged the post
+        // author, BOTH events fire for the same recipient — they're
+        // semantically distinct (mention = "called out"; comment-received
+        // = "your post has activity"), each independently toggleable
+        // in prefs. Recipient resolution + self-skip lives inside
+        // onCommentReceived; the subscriber stays a thin trigger.
+        add_action('bcc_comment_created', function (int $authorId, int $parentActId, int $newActId, int $newCommentPostId): void {
+            unset($newActId);
+            $this->notificationDispatcher()->onCommentReceived(
+                $authorId,
+                $parentActId,
+                $newCommentPostId
+            );
+        }, 31, 4);
+
         // §I1 V2 — primary-Local post fan-out. Second bcc_post_created
         // subscriber at priority 31 so it runs AFTER the mention
         // dispatcher (priority 30). Pre-gates the post on

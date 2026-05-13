@@ -26,6 +26,10 @@
  *                       (the Local's group_id). Falls back to
  *                       `/locals` if the group is no longer a Local
  *                       (deleted, renamed off-prefix).
+ *   - COMMENT_RECEIVED → `/?focus=<act_id>` (jump to the floor focused
+ *                       on the parent post that received the comment;
+ *                       mirrors REACTION + MENTION shape — the FE has
+ *                       no comment-anchor consumer in V1).
  *
  * Rows whose type is unrecognized (e.g. a future migration or a
  * corrupt row) are filtered out rather than surfaced as "Unknown" —
@@ -218,6 +222,10 @@ final class NotificationViewService
             // section). Falls back to /locals (the directory) if the
             // group is no longer resolvable.
             NotificationType::LOCAL_POST  => self::resolveLocalLink($externalId),
+            // COMMENT_RECEIVED: bell row's act_id is the parent post's
+            // activity row; mirrors REACTION + MENTION shape. The FE
+            // has no comment-anchor consumer in V1.
+            NotificationType::COMMENT_RECEIVED => $actId > 0 ? '/?focus=' . $actId : '/',
             default                       => '/',
         };
     }
