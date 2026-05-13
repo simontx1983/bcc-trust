@@ -840,19 +840,20 @@ final class AttestationService
      * (Elite=7, plus future graduated cap → 10); reads at most that
      * many rows via AttestationRepository::listActiveStandBehindByAttestor.
      *
-     * Lean shape — the FE resolves target display info (handle / name)
-     * via existing entity surfaces (`/users/:handle` or
-     * `/cards/:id`) rather than threading display data through the
-     * error envelope. Phillip's note: the picker should feel
-     * reflective + deliberate, not inventory-management UI; the lean
-     * shape forces the FE to render with quiet attention rather than
-     * dense roster styling.
+     * Each row carries a server-rendered `target_label` + `target_link`
+     * (per §A2) so the FE picker renders without a follow-up display
+     * fetch. The label + link are intentionally minimal — the picker's
+     * emotional frame is "Which of these commitments still reflects my
+     * assessment?" not a tactical overview, so the FE doesn't need
+     * dense metadata to support the decision.
      *
      * @return list<array{
      *   id: int,
      *   kind: string,
      *   target_kind: string,
      *   target_id: int,
+     *   target_label: string,
+     *   target_link: string,
      *   created_at: string,
      *   context_note: string|null
      * }>
@@ -877,16 +878,81 @@ final class AttestationService
             if ($id <= 0 || $targetId <= 0 || $kind !== 'stand_behind') {
                 continue;
             }
+            $display = self::resolveTargetDisplay($targetKind, $targetId);
             $out[] = [
                 'id'           => $id,
                 'kind'         => $kind,
                 'target_kind'  => $targetKind,
                 'target_id'    => $targetId,
+                'target_label' => $display['label'],
+                'target_link'  => $display['link'],
                 'created_at'   => $createdAt !== '' ? self::formatIso($createdAt) : '',
                 'context_note' => $contextNote,
             ];
         }
         return $out;
+    }
+
+    /**
+     * Server-rendered (per §A2) display label + relative link for a
+     * (target_kind, target_id) pair. Used by the §J.2 slot_holders[]
+     * picker payload so the FE renders the picker without a follow-up
+     * display fetch.
+     *
+     * Conventions:
+     *   - user_profile → label = "@{handle}"; link = "/u/{handle}"
+     *   - validator_card → label = post_title; link = "/v/{slug}"
+     *   - project_card   → label = post_title; link = "/p/{slug}"
+     *   - creator_card   → label = post_title; link = "/c/{slug}"
+     *
+     * Missing target (deleted user / unpublished post) returns empty
+     * strings — the FE renders the row with the kind label only,
+     * never crashes.
+     *
+     * @return array{label: string, link: string}
+     */
+    private static function resolveTargetDisplay(string $targetKind, int $targetId): array
+    {
+        $empty = ['label' => '', 'link' => ''];
+        if ($targetId <= 0) {
+            return $empty;
+        }
+
+        if ($targetKind === 'user_profile') {
+            $user = get_userdata($targetId);
+            if (!($user instanceof \WP_User)) {
+                return $empty;
+            }
+            $handleMeta = (string) get_user_meta($targetId, 'bcc_handle', true);
+            $handle     = $handleMeta !== '' ? $handleMeta : (string) $user->user_login;
+            if ($handle === '') {
+                return $empty;
+            }
+            return [
+                'label' => '@' . $handle,
+                'link'  => '/u/' . $handle,
+            ];
+        }
+
+        $post = get_post($targetId);
+        if (!($post instanceof \WP_Post) || $post->post_status !== 'publish') {
+            return $empty;
+        }
+        $slug  = (string) $post->post_name;
+        $title = (string) $post->post_title;
+        $prefix = match ($targetKind) {
+            'validator_card' => '/v/',
+            'project_card'   => '/p/',
+            'creator_card'   => '/c/',
+            default          => null,
+        };
+        if ($prefix === null || $slug === '') {
+            return ['label' => $title, 'link' => ''];
+        }
+        return [
+            'label' => $title !== '' ? $title : ('#' . $targetId),
+            'link'  => $prefix . $slug,
+        ];
     }
 
     // ──────────────────────────────────────────────────────────────────
