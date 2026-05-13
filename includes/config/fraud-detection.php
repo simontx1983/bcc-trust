@@ -70,6 +70,21 @@ define('BCC_TRUST_RING_MIN_SIZE', 3);
 define('BCC_TRUST_RING_MIN_MUTUAL', 3);
 define('BCC_TRUST_RING_STRENGTH_THRESHOLD', 5.0);
 
+// Slow-ring endorsement detection window (in days). Catches paced
+// reciprocal-endorse rings that evade the burst gates
+// (3-in-300s in EndorsementService::assertNoCoordinationBurst,
+//  6-in-1h     in EndorsementService::assertNoHourlyCoordination,
+//  3-pages-24h in EndorsementService::assertNoCrossPageCluster)
+// by spreading endorsements over multiple days — patience-evasion.
+//
+// Detector runs on a weekly cron (bcc_trust_weekly_slow_ring_scan
+// in CronService::scheduleAll); lower-cadence + wider-window is the
+// entire point of this detector. 14d default catches the realistic
+// slow-ring shape (1 endorsement per pair per week × ≥2 weeks) while
+// keeping the rolling-window JOIN bounded by status=1 + the time
+// filter on bcc_trust_endorsements.created_at.
+define('BCC_TRUST_SLOW_RING_WINDOW_DAYS', 14);
+
 // ======================================================
 // DEVICE FINGERPRINTING / AUTOMATION
 // ======================================================

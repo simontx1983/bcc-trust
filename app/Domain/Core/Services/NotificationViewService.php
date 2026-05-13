@@ -226,6 +226,15 @@ final class NotificationViewService
             // activity row; mirrors REACTION + MENTION shape. The FE
             // has no comment-anchor consumer in V1.
             NotificationType::COMMENT_RECEIVED => $actId > 0 ? '/?focus=' . $actId : '/',
+            // V2 Trust Attestation Layer — all four events link to the
+            // attestor's profile (the source of the change). Revoke
+            // uses the same shape since the (former) attestor is the
+            // person whose action prompted the bell. Falls back to /
+            // if the actor handle is empty (handle blanked, deleted).
+            NotificationType::ATTESTATION_VOUCH_RECEIVED       => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
+            NotificationType::ATTESTATION_STAND_BEHIND_RECEIVED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
+            NotificationType::ATTESTATION_REVOKED              => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
+            NotificationType::ATTESTATION_REAFFIRMED           => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             default                       => '/',
         };
     }

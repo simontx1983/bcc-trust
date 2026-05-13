@@ -812,6 +812,208 @@ final class NotificationDispatcher
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // bcc_attestation_created — V2 Trust Attestation Layer
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Notify the target operator when someone vouches for or stands
+     * behind them. Two distinct event types (ATTESTATION_VOUCH_RECEIVED
+     * / ATTESTATION_STAND_BEHIND_RECEIVED) so the recipient can toggle
+     * each in prefs independently.
+     *
+     * Structural self-skip: the service rejects self-attest before
+     * dispatching; the guard here is defense-in-depth in case a future
+     * code path slips one through.
+     *
+     * Bell shape: external_id is the attestation_id (so a future
+     * "view this attestation" deep-link is structurally possible);
+     * act_id is 0 (attestations are not anchored to activity rows).
+     *
+     * @param int    $attestorId    Author of the attestation
+     * @param int    $attestationId The new attestation row id
+     * @param string $targetKind    user_profile | *_card
+     * @param int    $targetId      target row id (for push payload)
+     * @param string $kind          vouch | stand_behind
+     * @param int    $targetOwnerId Recipient (user_profile target → target user; *_card → post_author)
+     */
+    public function onAttestationCreated(
+        int $attestorId,
+        int $attestationId,
+        string $targetKind,
+        int $targetId,
+        string $kind,
+        int $targetOwnerId
+    ): void {
+        if ($attestorId <= 0 || $attestationId <= 0 || $targetOwnerId <= 0) {
+            return;
+        }
+        if ($attestorId === $targetOwnerId) {
+            return; // self-attest — structurally rejected upstream, DiD.
+        }
+        if ($kind !== 'vouch' && $kind !== 'stand_behind') {
+            return; // unknown kind — drop silently.
+        }
+        try {
+            $actorHandle = self::resolveHandle($attestorId);
+            $message     = $kind === 'vouch'
+                ? sprintf('@%s vouched for you.', $actorHandle)
+                : sprintf('@%s is standing behind you.', $actorHandle);
+            $type        = $kind === 'vouch'
+                ? NotificationType::ATTESTATION_VOUCH_RECEIVED
+                : NotificationType::ATTESTATION_STAND_BEHIND_RECEIVED;
+            $pushEvent   = $kind === 'vouch'
+                ? 'attestation_vouch_received'
+                : 'attestation_stand_behind_received';
+
+            $this->dispatch(
+                $attestorId,
+                $targetOwnerId,
+                $message,
+                $type,
+                $attestationId, // external_id → attestation row id
+                0               // no associated activity row
+            );
+
+            // Parallel push enqueue — debounced to one push per
+            // (recipient, eventType) per 5 min, count-aggregated.
+            $this->pushDispatcher->enqueue($targetOwnerId, $pushEvent, [
+                'actor_handle'    => $actorHandle,
+                'attestation_id'  => $attestationId,
+                'target_kind'     => $targetKind,
+                'target_id'       => $targetId,
+                'kind'            => $kind,
+            ]);
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] attestation-created dispatch failed', [
+                'attestor_id'    => $attestorId,
+                'attestation_id' => $attestationId,
+                'target_kind'    => $targetKind,
+                'target_id'      => $targetId,
+                'kind'           => $kind,
+                'error'          => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // bcc_attestation_revoked — neutral state-change notice (§J.3.2)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Notify the (former) target when an attestation is revoked. Wording
+     * is intentionally neutral per the §J.3.2 asymmetric-display rule
+     * — no stigma copy, no "you lost" framing. Revocation reads as a
+     * state-change notice, not a punishment.
+     *
+     * Per the contract §J.3 "Reputation Score impact on attestor: none"
+     * — revocation is healthy signal of changing assessment.
+     */
+    public function onAttestationRevoked(
+        int $attestorId,
+        int $attestationId,
+        string $targetKind,
+        int $targetId,
+        string $kind,
+        int $targetOwnerId
+    ): void {
+        if ($attestorId <= 0 || $attestationId <= 0 || $targetOwnerId <= 0) {
+            return;
+        }
+        if ($attestorId === $targetOwnerId) {
+            return;
+        }
+        try {
+            $actorHandle = self::resolveHandle($attestorId);
+            $message     = $kind === 'stand_behind'
+                ? sprintf('@%s is no longer standing behind you.', $actorHandle)
+                : sprintf('@%s revoked their vouch.', $actorHandle);
+
+            $this->dispatch(
+                $attestorId,
+                $targetOwnerId,
+                $message,
+                NotificationType::ATTESTATION_REVOKED,
+                $attestationId,
+                0
+            );
+
+            $this->pushDispatcher->enqueue($targetOwnerId, 'attestation_revoked', [
+                'actor_handle'    => $actorHandle,
+                'attestation_id'  => $attestationId,
+                'target_kind'     => $targetKind,
+                'target_id'       => $targetId,
+                'kind'            => $kind,
+            ]);
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] attestation-revoked dispatch failed', [
+                'attestor_id'    => $attestorId,
+                'attestation_id' => $attestationId,
+                'target_kind'    => $targetKind,
+                'target_id'      => $targetId,
+                'kind'           => $kind,
+                'error'          => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // bcc_attestation_reaffirmed — soft renewal positive nudge
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Notify the target operator on attestation reaffirmation. Soft
+     * renewal positive signal — the recipient sees that the attestor
+     * still endorses them. Light copy, push debounce coalesces bursts.
+     */
+    public function onAttestationReaffirmed(
+        int $attestorId,
+        int $attestationId,
+        string $targetKind,
+        int $targetId,
+        string $kind,
+        int $targetOwnerId
+    ): void {
+        if ($attestorId <= 0 || $attestationId <= 0 || $targetOwnerId <= 0) {
+            return;
+        }
+        if ($attestorId === $targetOwnerId) {
+            return;
+        }
+        try {
+            $actorHandle = self::resolveHandle($attestorId);
+            $message     = $kind === 'stand_behind'
+                ? sprintf('@%s reaffirmed standing behind you.', $actorHandle)
+                : sprintf('@%s reaffirmed their vouch.', $actorHandle);
+
+            $this->dispatch(
+                $attestorId,
+                $targetOwnerId,
+                $message,
+                NotificationType::ATTESTATION_REAFFIRMED,
+                $attestationId,
+                0
+            );
+
+            $this->pushDispatcher->enqueue($targetOwnerId, 'attestation_reaffirmed', [
+                'actor_handle'    => $actorHandle,
+                'attestation_id'  => $attestationId,
+                'target_kind'     => $targetKind,
+                'target_id'       => $targetId,
+                'kind'            => $kind,
+            ]);
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] attestation-reaffirmed dispatch failed', [
+                'attestor_id'    => $attestorId,
+                'attestation_id' => $attestationId,
+                'target_kind'    => $targetKind,
+                'target_id'      => $targetId,
+                'kind'           => $kind,
+                'error'          => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Shared write path
     // ──────────────────────────────────────────────────────────────────
 

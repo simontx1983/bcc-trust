@@ -903,4 +903,82 @@ class EndorsementRepository {
             $pageId
         ) ) ?: [];
     }
+
+    /**
+     * Get mutual endorse pairs within a rolling time window.
+     *
+     * Slow-ring endorsement detection primitive (scale-hardening pass,
+     * 2026-05-13). Mirrors the exact shape of
+     * {@see VoteRepository::getMutualVotePairs} but joins the
+     * endorsements table on both sides of the reciprocity and filters
+     * each side by `created_at > NOW() - INTERVAL N DAY`.
+     *
+     * What it finds: pairs (A, B) where A endorsed a page owned by B
+     * AND B endorsed a page owned by A AND both endorsements landed
+     * inside the rolling window. The COUNT(*) tracks how many such
+     * reciprocations exist per pair; the SUM(weight) tracks the total
+     * endorsement weight flowing between them.
+     *
+     * Why slow-ring is its own primitive: the existing burst gates
+     * (3-in-300s, 6-in-1h, 3-pages-in-24h in EndorsementService) all
+     * fire on RECENT activity. A 5-person ring at 1 endorsement/day
+     * for 7 days produces 35 mutual endorsements without tripping any
+     * temporal gate. Status=1 + the rolling-window filter is the
+     * `detectVoteRings` analogue tuned for that patience-evasion shape.
+     *
+     * Bounded: `LIMIT %d OFFSET %d` (caller default 500/0); the
+     * GROUP BY collapses per-(user_a, user_b) pair; the time-window
+     * + status=1 filters keep the JOIN bounded.
+     *
+     * Indexes used: `bcc_trust_endorsements (status, created_at)`
+     * composite + status idx; `bcc_page_read_model (page_id)` PK on
+     * the join key.
+     *
+     * @param int $windowDays Rolling window. Default 14 — see
+     *                        BCC_TRUST_SLOW_RING_WINDOW_DAYS rationale.
+     * @param int $minSize    Minimum reciprocations per pair to surface.
+     *                        Default 1 — any reciprocity in the window
+     *                        is signal; the ring-component-size threshold
+     *                        gates further in TrustGraph.
+     * @param int $pageLimit  Max pairs per call.
+     * @param int $offset     Cursor for paginated cron walks.
+     * @return object[]
+     * @phpstan-return list<object{user_a: int|numeric-string, user_b: int|numeric-string, mutual_count: int|numeric-string, total_weight: float|numeric-string}>
+     */
+    public function getMutualEndorsePairsInWindow(
+        int $windowDays = 14,
+        int $minSize = 1,
+        int $pageLimit = 500,
+        int $offset = 0
+    ): array {
+        global $wpdb;
+
+        $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
+
+        return $wpdb->get_results( $wpdb->prepare(
+            "SELECT
+                e1.endorser_user_id AS user_a,
+                e2.endorser_user_id AS user_b,
+                COUNT(*) AS mutual_count,
+                SUM(e1.weight + e2.weight) AS total_weight
+             FROM {$this->table} e1
+             JOIN {$scoresTable} s1 ON e1.page_id = s1.page_id
+             JOIN {$this->table} e2 ON e2.endorser_user_id = s1.page_owner_id
+             JOIN {$scoresTable} s2 ON e2.page_id = s2.page_id
+             WHERE e1.status = 1
+               AND e2.status = 1
+               AND s2.page_owner_id = e1.endorser_user_id
+               AND e1.endorser_user_id != e2.endorser_user_id
+               AND e1.created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
+               AND e2.created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
+             GROUP BY e1.endorser_user_id, e2.endorser_user_id
+             HAVING mutual_count >= %d
+             LIMIT %d OFFSET %d",
+            $windowDays,
+            $windowDays,
+            $minSize,
+            $pageLimit,
+            $offset
+        ) ) ?: [];
+    }
 }

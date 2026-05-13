@@ -321,6 +321,52 @@ class CronService
         }
     }
 
+    /**
+     * Weekly slow-ring endorsement scan — scale-hardening Phase 3.
+     *
+     * Detects paced reciprocal-endorse rings that evade the existing
+     * burst gates (3-in-300s, 6-in-1h, 3-pages-24h in EndorsementService)
+     * by spreading endorsements over multiple days. Patience-evasion.
+     *
+     * Why a separate weekly cron (not merged into dailyGraphUpdate):
+     *   1. Different cadence — slow rings by definition don't need daily
+     *      detection; weekly is honest about the signal class.
+     *   2. Different lock domain — daily graph update holds its lock for
+     *      up to 2h; this scan should never block the daily graph work.
+     *   3. Cheap enough to be free — TrustGraph caches the result for
+     *      one hour anyway; a second daily caller would be a cache hit.
+     *
+     * Soft-flag posture: detectSlowEndorsementRings stores patterns +
+     * writes audit logs but does NOT auto-increment fraud_score. Ops
+     * escalates rings to action manually after reviewing the pattern.
+     */
+    public function weeklySlowRingScan(): void
+    {
+        if (!$this->acquireLock('bcc_cron_slow_ring_lock', HOUR_IN_SECONDS)) {
+            return;
+        }
+
+        try {
+            $graph = Plugin::instance()->trustGraph();
+
+            $windowDays = defined('BCC_TRUST_SLOW_RING_WINDOW_DAYS')
+                ? (int) BCC_TRUST_SLOW_RING_WINDOW_DAYS
+                : 14;
+
+            $rings = $graph->detectSlowEndorsementRings($windowDays);
+
+            \BCC\Core\Log\Logger::info(
+                '[bcc-trust] weekly slow-ring scan complete',
+                [
+                    'rings_found' => count($rings),
+                    'window_days' => $windowDays,
+                ]
+            );
+        } finally {
+            $this->releaseLock('bcc_cron_slow_ring_lock');
+        }
+    }
+
     // ── Daily vote vesting ──────────────────────────────────────────────
 
     /**
@@ -592,6 +638,7 @@ class CronService
             'bcc_trust_process_recalculations' => 'bcc_five_minutes', // recalc queue processor
             'bcc_trust_daily_maintenance'      => 'daily',            // read model sync safety net
             'bcc_trust_weekly_digest'          => 'bcc_weekly',       // §I1 email digest
+            'bcc_trust_weekly_slow_ring_scan'  => 'bcc_weekly',       // scale-hardening: slow endorsement-ring detection
         ];
 
         // Clear retired hooks so they don't fire orphaned actions.

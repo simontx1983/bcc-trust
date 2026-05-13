@@ -257,7 +257,8 @@ final class Plugin
     {
         return $this->attestationService ??= new AttestationService(
             $this->attestationRepository(),
-            $this->reputationRepository()
+            $this->reputationRepository(),
+            $this->userInfoRepository()
         );
     }
 
@@ -1131,6 +1132,18 @@ final class Plugin
         // PeepSoGroupWriter lands eligible holders directly as `member`.
         \BCC\Trust\Onchain\REST\HolderGroupsEndpoint::register();
 
+        // V2 Trust Attestation Layer — Slice C mutation endpoints:
+        //   POST   /me/attestations              — cast new (vouch / stand_behind)
+        //   DELETE /me/attestations/{id}         — revoke (soft-delete)
+        //   POST   /me/attestations/{id}/reaffirm — refresh decay baseline
+        // Locked §4.20 §J wire contract. Idempotent on
+        // (attestor, target_kind, target_id, kind); Stand Behind
+        // bandwidth slot enforcement per §J.1 (Elite 7 / Trusted 5 /
+        // Neutral 3 / Caution+Risky 0). Audit + notification + cache
+        // invalidation gated on real state transitions per §I1
+        // destructive-mutation-hardening invariants.
+        \BCC\Trust\Core\REST\MeAttestationsEndpoint::register();
+
         // V2 Phase 6 (§H1): NFT-piece detail surface.
         //   GET /nft-pieces/{chain}/{contract}/{tokenId} — §3.7 NftPiece
         // Anonymous OR Bearer; response shape is identical for both
@@ -1810,6 +1823,83 @@ final class Plugin
         add_action('bcc_trust_endorsement_added', function (int $endorserId, int $pageId, string $context): void {
             $this->notificationDispatcher()->onEndorseAdded($endorserId, $pageId, $context);
         }, 30, 3);
+
+        // §I1 V2 Trust Attestation Layer — bell + push dispatch for
+        // attestation lifecycle events. Fired by AttestationService::cast
+        // / ::revoke / ::reaffirm post-commit; each subscriber wraps in
+        // try/catch (dispatcher itself also wraps) so a notification
+        // failure never affects the originating mutation.
+        //
+        // Self-attest is structurally rejected upstream (§N7); the
+        // dispatcher methods include defense-in-depth self-skip.
+        add_action(
+            'bcc_attestation_created',
+            function (
+                int $attestorId,
+                int $attestationId,
+                string $targetKind,
+                int $targetId,
+                string $kind,
+                int $targetOwnerId
+            ): void {
+                $this->notificationDispatcher()->onAttestationCreated(
+                    $attestorId,
+                    $attestationId,
+                    $targetKind,
+                    $targetId,
+                    $kind,
+                    $targetOwnerId
+                );
+            },
+            30,
+            6
+        );
+
+        add_action(
+            'bcc_attestation_revoked',
+            function (
+                int $attestorId,
+                int $attestationId,
+                string $targetKind,
+                int $targetId,
+                string $kind,
+                int $targetOwnerId
+            ): void {
+                $this->notificationDispatcher()->onAttestationRevoked(
+                    $attestorId,
+                    $attestationId,
+                    $targetKind,
+                    $targetId,
+                    $kind,
+                    $targetOwnerId
+                );
+            },
+            30,
+            6
+        );
+
+        add_action(
+            'bcc_attestation_reaffirmed',
+            function (
+                int $attestorId,
+                int $attestationId,
+                string $targetKind,
+                int $targetId,
+                string $kind,
+                int $targetOwnerId
+            ): void {
+                $this->notificationDispatcher()->onAttestationReaffirmed(
+                    $attestorId,
+                    $attestationId,
+                    $targetKind,
+                    $targetId,
+                    $kind,
+                    $targetOwnerId
+                );
+            },
+            30,
+            6
+        );
 
         // V2 Phase 2 retention slice — first-touch welcome on signup.
         // Hooks WordPress core's user_register so it fires for ANY new

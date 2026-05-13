@@ -270,14 +270,18 @@ final class PushDispatcher
     private static function buildBody(string $eventType, int $count, array $first): array
     {
         return match ($eventType) {
-            'review'             => PushPayload::forReview($count, $first),
-            'endorse'            => PushPayload::forEndorse($count, $first),
-            'dispute_outcome'    => PushPayload::forDisputeOutcome($count, $first),
-            'panelist_selected'  => PushPayload::forPanelistSelected($count, $first),
-            'mention'            => PushPayload::forMention($count, $first),
-            'local_post'         => PushPayload::forLocalPost($count, $first),
-            'comment_received'   => PushPayload::forCommentReceived($count, $first),
-            default              => [
+            'review'                              => PushPayload::forReview($count, $first),
+            'endorse'                             => PushPayload::forEndorse($count, $first),
+            'dispute_outcome'                     => PushPayload::forDisputeOutcome($count, $first),
+            'panelist_selected'                   => PushPayload::forPanelistSelected($count, $first),
+            'mention'                             => PushPayload::forMention($count, $first),
+            'local_post'                          => PushPayload::forLocalPost($count, $first),
+            'comment_received'                    => PushPayload::forCommentReceived($count, $first),
+            'attestation_vouch_received'          => PushPayload::forAttestationVouchReceived($count, $first),
+            'attestation_stand_behind_received'   => PushPayload::forAttestationStandBehindReceived($count, $first),
+            'attestation_revoked'                 => PushPayload::forAttestationRevoked($count, $first),
+            'attestation_reaffirmed'              => PushPayload::forAttestationReaffirmed($count, $first),
+            default                               => [
                 'title' => 'Blue Collar Crypto',
                 'body'  => 'You have new activity.',
                 'url'   => '/',

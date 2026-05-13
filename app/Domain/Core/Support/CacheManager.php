@@ -102,4 +102,79 @@ class CacheManager {
             );
         }
     }
+
+    /**
+     * Invalidate caches after an attestation mutation (cast / revoke /
+     * reaffirm) per §4.20 §J side-effects. Two surface kinds need a
+     * fresh read post-mutation:
+     *
+     *   - The TARGET's view-model:
+     *       - `validator_card` / `project_card` / `creator_card`
+     *         targets are peepso-page CPT rows — reuse
+     *         invalidatePageCaches so any score/endorsement/page-data
+     *         composer reading the card sees fresh state.
+     *       - `user_profile` targets compose viewer_attestation per
+     *         request via AttestationService at this point (V1 Slice C
+     *         has no server-side cross-request composer cache for the
+     *         member profile beyond user_info), so no DB-level
+     *         invalidation is needed today. Slice E adds a dedicated
+     *         AttestationReadService generation counter when the
+     *         synthesis layer begins materializing.
+     *
+     *   - The ATTESTOR's user_info (their attestation count/slot use
+     *     changed, which affects their own surfaces). The TARGET owner's
+     *     user_info is also invalidated on card targets via
+     *     invalidatePageCaches; we invalidate explicitly for
+     *     user_profile targets and as belt-and-suspenders for cards.
+     *
+     * No-op on idempotent re-attempts (status='existing', re-DELETE on
+     * already-revoked) — the caller gates the call on a real state
+     * transition per the §I1 destructive-mutation-hardening invariant.
+     *
+     * @param int|null $attestorUserId    Required for attestor user_info clear.
+     * @param int|null $targetOwnerUserId Required for user_profile target invalidation.
+     * @param string   $context           Log label ('attestation_cast' / '_revoke' / '_reaffirm').
+     */
+    public static function invalidateAttestationTargetCaches(
+        string $targetKind,
+        int $targetId,
+        ?int $attestorUserId = null,
+        ?int $targetOwnerUserId = null,
+        string $context = 'attestation'
+    ): void {
+        // Card-kind targets are peepso-page posts. invalidatePageCaches
+        // already handles score / endorsement / page-data / user_info
+        // (for the attestor) coherently.
+        if (in_array($targetKind, ['validator_card', 'project_card', 'creator_card'], true)) {
+            self::invalidatePageCaches(
+                $targetId,
+                $attestorUserId,
+                $context
+            );
+        }
+
+        // user_profile-target user_info clear (the target user's profile
+        // surfaces aggregate counts that this mutation may change once
+        // Slice E lights up). Card-target user_info clear is already
+        // handled inside invalidatePageCaches for the attestor; we add
+        // the target-owner clear explicitly here for completeness.
+        if ($targetOwnerUserId !== null && $targetOwnerUserId > 0) {
+            self::delete(
+                "user_info_{$targetOwnerUserId}",
+                'bcc_trust',
+                $context . ':user_info_target'
+            );
+        }
+
+        // Attestor user_info clear (in case invalidatePageCaches wasn't
+        // called — i.e. user_profile targets). Idempotent — duplicate
+        // delete on the same key is harmless.
+        if ($attestorUserId !== null && $attestorUserId > 0) {
+            self::delete(
+                "user_info_{$attestorUserId}",
+                'bcc_trust',
+                $context . ':user_info_attestor'
+            );
+        }
+    }
 }

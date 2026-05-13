@@ -52,6 +52,10 @@ final class NotificationPrefs
         NotificationType::MENTION,
         NotificationType::LOCAL_POST,
         NotificationType::COMMENT_RECEIVED,
+        NotificationType::ATTESTATION_VOUCH_RECEIVED,
+        NotificationType::ATTESTATION_STAND_BEHIND_RECEIVED,
+        NotificationType::ATTESTATION_REVOKED,
+        NotificationType::ATTESTATION_REAFFIRMED,
     ];
 
     /**
@@ -71,6 +75,10 @@ final class NotificationPrefs
         'mention',
         'local_post',
         'comment_received',
+        'attestation_vouch_received',
+        'attestation_stand_behind_received',
+        'attestation_revoked',
+        'attestation_reaffirmed',
     ];
 
     /** wp_usermeta key prefix. Renaming requires a migration. */
@@ -86,24 +94,32 @@ final class NotificationPrefs
      *     anti-noise carries the load via debounce + aggregation)
      */
     private const DEFAULTS = [
-        'email_digest'                     => false,
-        'bell_bcc_reaction'                => true,
-        'bell_bcc_review'                  => true,
-        'bell_bcc_card_pulled'             => true,
-        'bell_bcc_rank_up'                 => true,
-        'bell_bcc_endorse'                 => true,
-        'bell_bcc_welcome'                 => true,
-        'bell_bcc_mention'                 => true,
-        'bell_bcc_local_post'              => true,
-        'bell_bcc_comment_received'        => true,
-        'push_master'                      => false,
-        'push_event_review'                => true,
-        'push_event_endorse'               => true,
-        'push_event_dispute_outcome'       => true,
-        'push_event_panelist_selected'     => true,
-        'push_event_mention'               => true,
-        'push_event_local_post'            => true,
-        'push_event_comment_received'      => true,
+        'email_digest'                                       => false,
+        'bell_bcc_reaction'                                  => true,
+        'bell_bcc_review'                                    => true,
+        'bell_bcc_card_pulled'                               => true,
+        'bell_bcc_rank_up'                                   => true,
+        'bell_bcc_endorse'                                   => true,
+        'bell_bcc_welcome'                                   => true,
+        'bell_bcc_mention'                                   => true,
+        'bell_bcc_local_post'                                => true,
+        'bell_bcc_comment_received'                          => true,
+        'bell_bcc_attestation_vouch_received'                => true,
+        'bell_bcc_attestation_stand_behind_received'         => true,
+        'bell_bcc_attestation_revoked'                       => true,
+        'bell_bcc_attestation_reaffirmed'                    => true,
+        'push_master'                                        => false,
+        'push_event_review'                                  => true,
+        'push_event_endorse'                                 => true,
+        'push_event_dispute_outcome'                         => true,
+        'push_event_panelist_selected'                       => true,
+        'push_event_mention'                                 => true,
+        'push_event_local_post'                              => true,
+        'push_event_comment_received'                        => true,
+        'push_event_attestation_vouch_received'              => true,
+        'push_event_attestation_stand_behind_received'       => true,
+        'push_event_attestation_revoked'                     => true,
+        'push_event_attestation_reaffirmed'                  => true,
     ];
 
     /**

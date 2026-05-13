@@ -255,6 +255,130 @@ final class PushPayload
     }
 
     /**
+     * V2 Trust Attestation Layer events. Four discrete builders so
+     * each event reads with its own copy. Aggregated bodies (count > 1)
+     * drop the actor + render "N new vouches" / "N new operators
+     * standing behind you" / "N reaffirmed" / "N revoked" — debounce
+     * windows are per-(recipient, event), so each builder only mixes
+     * within one event type.
+     *
+     * URL convention per §I1: every attestation event deep-links to
+     * /u/{actor_handle} — that's the source of the change (the
+     * attestor's profile). Revoke uses the same URL — the operator
+     * who just lost an attestation lands on the (former) attestor's
+     * profile to see context. Falls back to / if the actor handle
+     * is unavailable (rare — recipient's bell row preserves the actor
+     * even after handle rename).
+     *
+     * Tag convention: per-attestor + per-event so multiple operators
+     * vouching for you don't collapse into one OS-shell notification,
+     * but a single operator's rapid vouch-revoke-vouch within a
+     * debounce window does.
+     *
+     * @param array<string, mixed> $first
+     * @return array{title: string, body: string, url: string, tag?: string}
+     */
+    public static function forAttestationVouchReceived(int $count, array $first): array
+    {
+        $actor = self::stringFrom($first, 'actor_handle');
+
+        $title = 'Blue Collar Crypto';
+        $body  = $count > 1
+            ? sprintf('%d new vouches.', $count)
+            : ($actor !== ''
+                ? sprintf('@%s vouched for you.', $actor)
+                : 'New vouch received.');
+
+        return [
+            'title' => $title,
+            'body'  => $body,
+            'url'   => $actor !== '' ? '/u/' . $actor : '/',
+            'tag'   => $actor !== ''
+                ? 'bcc-attestation-vouch-' . $actor
+                : 'bcc-attestation-vouch',
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $first
+     * @return array{title: string, body: string, url: string, tag?: string}
+     */
+    public static function forAttestationStandBehindReceived(int $count, array $first): array
+    {
+        $actor = self::stringFrom($first, 'actor_handle');
+
+        $title = 'Blue Collar Crypto';
+        $body  = $count > 1
+            ? sprintf('%d operators are standing behind you.', $count)
+            : ($actor !== ''
+                ? sprintf('@%s is standing behind you.', $actor)
+                : 'Someone is standing behind you.');
+
+        return [
+            'title' => $title,
+            'body'  => $body,
+            'url'   => $actor !== '' ? '/u/' . $actor : '/',
+            'tag'   => $actor !== ''
+                ? 'bcc-attestation-sb-' . $actor
+                : 'bcc-attestation-sb',
+        ];
+    }
+
+    /**
+     * Neutral wording per §J.3.2 asymmetric-display rule — no stigma
+     * copy. "@x revoked an attestation." reads as a state-change
+     * notice, not a punishment.
+     *
+     * @param array<string, mixed> $first
+     * @return array{title: string, body: string, url: string, tag?: string}
+     */
+    public static function forAttestationRevoked(int $count, array $first): array
+    {
+        $actor = self::stringFrom($first, 'actor_handle');
+
+        $title = 'Blue Collar Crypto';
+        $body  = $count > 1
+            ? sprintf('%d attestations were revoked.', $count)
+            : ($actor !== ''
+                ? sprintf('@%s revoked an attestation.', $actor)
+                : 'An attestation was revoked.');
+
+        return [
+            'title' => $title,
+            'body'  => $body,
+            'url'   => $actor !== '' ? '/u/' . $actor : '/',
+            'tag'   => $actor !== ''
+                ? 'bcc-attestation-revoke-' . $actor
+                : 'bcc-attestation-revoke',
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $first
+     * @return array{title: string, body: string, url: string, tag?: string}
+     */
+    public static function forAttestationReaffirmed(int $count, array $first): array
+    {
+        $actor = self::stringFrom($first, 'actor_handle');
+
+        $title = 'Blue Collar Crypto';
+        $body  = $count > 1
+            ? sprintf('%d attestations were reaffirmed.', $count)
+            : ($actor !== ''
+                ? sprintf('@%s reaffirmed their attestation.', $actor)
+                : 'An attestation was reaffirmed.');
+
+        return [
+            'title' => $title,
+            'body'  => $body,
+            'url'   => $actor !== '' ? '/u/' . $actor : '/',
+            'tag'   => $actor !== ''
+                ? 'bcc-attestation-reaffirm-' . $actor
+                : 'bcc-attestation-reaffirm',
+        ];
+    }
+
+    /**
      * @param array<string, mixed> $first
      * @return array{title: string, body: string, url: string, tag?: string}
      */

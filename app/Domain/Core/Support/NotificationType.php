@@ -59,15 +59,30 @@ if (!defined('ABSPATH')) {
 
 final class NotificationType
 {
-    public const REACTION         = 'bcc_reaction';
-    public const REVIEW           = 'bcc_review';
-    public const CARD_PULLED      = 'bcc_card_pulled';
-    public const RANK_UP          = 'bcc_rank_up';
-    public const ENDORSE          = 'bcc_endorse';
-    public const WELCOME          = 'bcc_welcome';
-    public const MENTION          = 'bcc_mention';
-    public const LOCAL_POST       = 'bcc_local_post';
-    public const COMMENT_RECEIVED = 'bcc_comment_received';
+    public const REACTION                         = 'bcc_reaction';
+    public const REVIEW                           = 'bcc_review';
+    public const CARD_PULLED                      = 'bcc_card_pulled';
+    public const RANK_UP                          = 'bcc_rank_up';
+    public const ENDORSE                          = 'bcc_endorse';
+    public const WELCOME                          = 'bcc_welcome';
+    public const MENTION                          = 'bcc_mention';
+    public const LOCAL_POST                       = 'bcc_local_post';
+    public const COMMENT_RECEIVED                 = 'bcc_comment_received';
+
+    /**
+     * V2 Trust Attestation Layer event taxonomy (§I1, locked 2026-05-13).
+     * Four discrete event types so the recipient can independently
+     * toggle each in prefs and the FE can render distinct copy per
+     * event. Self-attest is structurally skipped at dispatch time.
+     *
+     * Asymmetric posture: positive events (vouch/stand_behind received,
+     * reaffirmed) read aspirationally; revoke reads neutrally — no
+     * stigma copy per the §J.3.2 asymmetric-display rule.
+     */
+    public const ATTESTATION_VOUCH_RECEIVED         = 'bcc_attestation_vouch_received';
+    public const ATTESTATION_STAND_BEHIND_RECEIVED  = 'bcc_attestation_stand_behind_received';
+    public const ATTESTATION_REVOKED                = 'bcc_attestation_revoked';
+    public const ATTESTATION_REAFFIRMED             = 'bcc_attestation_reaffirmed';
 
     /**
      * Whitelist of valid type slugs. Used by the read-side validation
@@ -86,6 +101,10 @@ final class NotificationType
         self::MENTION,
         self::LOCAL_POST,
         self::COMMENT_RECEIVED,
+        self::ATTESTATION_VOUCH_RECEIVED,
+        self::ATTESTATION_STAND_BEHIND_RECEIVED,
+        self::ATTESTATION_REVOKED,
+        self::ATTESTATION_REAFFIRMED,
     ];
 
     public static function isValid(string $type): bool

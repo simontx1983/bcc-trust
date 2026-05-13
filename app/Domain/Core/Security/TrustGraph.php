@@ -20,10 +20,11 @@ namespace BCC\Trust\Core\Security;
 
 if (!defined('ABSPATH')) exit;
 
-use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\EdgeRepository;
-use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\PatternRepository;
+use BCC\Trust\Core\Repositories\UserInfoRepository;
+use BCC\Trust\Core\Repositories\VoteRepository;
 
 class TrustGraph {
 
@@ -31,6 +32,7 @@ class TrustGraph {
     private EdgeRepository $edgeRepo;
     private VoteRepository $voteRepo;
     private PatternRepository $patternRepo;
+    private EndorsementRepository $endorsementRepo;
 
     const CACHE_GROUP = 'bcc_trust_graph';
     const CACHE_TTL   = BCC_TRUST_CACHE_GRAPH;
@@ -58,8 +60,9 @@ class TrustGraph {
         $this->userInfoRepo  = $userInfoRepo;
         $this->edgeRepo      = $edgeRepo;
         $plugin = \BCC\Trust\Core\Plugin::instance();
-        $this->voteRepo      = $plugin->voteRepository();
-        $this->patternRepo   = $plugin->patternRepository();
+        $this->voteRepo        = $plugin->voteRepository();
+        $this->patternRepo     = $plugin->patternRepository();
+        $this->endorsementRepo = $plugin->endorsementRepository();
 
         $this->voteWeightMultiplier   = BCC_TRUST_GRAPH_VOTE_MULTIPLIER;
         $this->endorseWeightMultiplier = BCC_TRUST_GRAPH_ENDORSE_MULTIPLIER;
@@ -746,6 +749,202 @@ class TrustGraph {
         wp_cache_set('vote_rings', $components, self::CACHE_GROUP, self::CACHE_TTL);
 
         return $components;
+    }
+
+    /**
+     * Detect slow-ring endorsements within a rolling time window.
+     *
+     * Patience-evasion patch (scale-hardening pass, 2026-05-13). The
+     * existing endorsement burst gates fire on RECENT activity
+     * (3-in-300s, 6-in-1h, 3-pages-in-24h). A 5-person ring at one
+     * endorsement per pair per week produces dozens of mutual
+     * endorsements without tripping any of them. detectEndorsementRings
+     * (DFS-based) walks the FULL historical graph and catches A→B→C→A
+     * cycles but is unbounded by time and misses the pair-level
+     * reciprocity signature that defines the slow-ring shape.
+     *
+     * This detector closes that gap. Mirrors detectVoteRings exactly:
+     * fetch mutual-pair primitive → build undirected graph → BFS
+     * connected components → calculate ring strength → soft-flag
+     * + dedupe via transient.
+     *
+     * Soft-flag discipline (per scale-hardening doctrine — favor
+     * soft-flagging over auto-punishment initially):
+     *   - Pattern stored for ML / ops review.
+     *   - Audit log written so the ring is visible to operators.
+     *   - NO automatic fraud_score increment (unlike detectVoteRings
+     *     which adds 15 per member, or detectEndorsementRings DFS
+     *     which adds 20). Operator escalates manually if real.
+     *
+     * Threshold tuning:
+     *   - Mutual-count threshold per pair = 1 (decoupled from
+     *     $minSize — slow rings are by definition low-velocity; any
+     *     reciprocity in the window is signal).
+     *   - Component-size threshold = $minSize default
+     *     BCC_TRUST_RING_MIN_SIZE (3).
+     *   - Ring strength = half the standard BCC_TRUST_RING_STRENGTH_THRESHOLD
+     *     to compensate for the inherently weaker signal of paced rings.
+     *     Filterable via `bcc_trust_slow_ring_strength_threshold`.
+     *
+     * Cron cadence: weekly (bcc_trust_weekly_slow_ring_scan in
+     * CronService::scheduleAll). Lower frequency + wider window is
+     * the entire point of this detector.
+     *
+     * @param int|null $windowDays Rolling window. Default
+     *                             BCC_TRUST_SLOW_RING_WINDOW_DAYS (14).
+     * @param int|null $minSize    Min component size. Default
+     *                             BCC_TRUST_RING_MIN_SIZE (3).
+     * @return array<int, array<string, mixed>>
+     */
+    public function detectSlowEndorsementRings(?int $windowDays = null, ?int $minSize = null): array {
+        $windowDays = $windowDays ?? (int) BCC_TRUST_SLOW_RING_WINDOW_DAYS;
+        $minSize    = $minSize ?? $this->ringMinSize;
+
+        $cacheKey = 'slow_endorsement_rings_w' . $windowDays;
+        $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
+        if ($cached !== false) {
+            return $cached;
+        }
+
+        // Same paginated-cursor + advisory-lock pattern as detectVoteRings
+        // so concurrent callers (cron + admin-dashboard cold-cache fallback)
+        // cannot both read the same offset, scan the same slice twice, and
+        // lose coverage of the following slice.
+        $pageLimit  = 500;
+        $lockKey    = 'bcc_slow_endorse_ring_cursor';
+        $lockHeld   = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0);
+        $offsetKey  = 'slow_endorsement_ring_offset_w' . $windowDays;
+
+        try {
+            $offset  = (int) (wp_cache_get($offsetKey, self::CACHE_GROUP) ?: 0);
+            // mutual_count threshold = 1: any reciprocity in the window
+            // surfaces; component-size gates further. (Vote rings use
+            // $minSize for both pair- and component-thresholds; for
+            // slow endorsement rings we decouple them.)
+            $mutuals = $this->endorsementRepo->getMutualEndorsePairsInWindow(
+                $windowDays,
+                1,
+                $pageLimit,
+                $offset
+            );
+
+            if ($lockHeld) {
+                $nextOffset = (count($mutuals) === $pageLimit) ? $offset + $pageLimit : 0;
+                wp_cache_set($offsetKey, $nextOffset, self::CACHE_GROUP, self::CACHE_TTL);
+            }
+        } finally {
+            if ($lockHeld) {
+                \BCC\Core\DB\AdvisoryLock::release($lockKey);
+            }
+        }
+
+        $graph   = [];
+        $weights = [];
+
+        foreach ($mutuals as $mv) {
+            $a = (int) $mv->user_a;
+            $b = (int) $mv->user_b;
+
+            $graph[$a] = $graph[$a] ?? [];
+            $graph[$b] = $graph[$b] ?? [];
+
+            $graph[$a][] = $b;
+            $graph[$b][] = $a;
+
+            $weights["{$a}_{$b}"] = (float) ($mv->total_weight ?? 0);
+            $weights["{$b}_{$a}"] = (float) ($mv->total_weight ?? 0);
+        }
+
+        // Half the burst-ring threshold: slow rings are by construction
+        // lower-velocity, so the strength score is lower. Filterable for
+        // ops tuning when production data informs the calibration.
+        $strengthThreshold = (float) apply_filters(
+            'bcc_trust_slow_ring_strength_threshold',
+            $this->ringStrengthThreshold * 0.5
+        );
+
+        $visited    = [];
+        $components = [];
+
+        foreach (array_keys($graph) as $user) {
+            if (isset($visited[$user])) {
+                continue;
+            }
+
+            $component = $this->bfsComponent($user, $graph, $visited);
+
+            if (count($component) >= $minSize) {
+                $strength = $this->calculateRingStrength($component, $weights);
+
+                if ($strength > $strengthThreshold) {
+                    $components[] = [
+                        'users'       => $component,
+                        'size'        => count($component),
+                        'strength'    => $strength,
+                        'window_days' => $windowDays,
+                        'type'        => 'slow_endorsement_ring',
+                        'detected_at' => current_time('mysql'),
+                    ];
+
+                    // SOFT FLAG: store the pattern + log, do NOT
+                    // increment fraud_score. 30-day transient prevents
+                    // re-storing the same ring on every weekly tick.
+                    $ringKey = $this->ringTransientKey('slow_endorse', $component);
+                    if (false === get_transient($ringKey)) {
+                        $this->storeSlowEndorsementRingPattern($component, $strength, $windowDays);
+
+                        \BCC\Core\Log\Logger::info(
+                            '[bcc-trust] slow_endorsement_ring detected (soft-flag)',
+                            [
+                                'size'        => count($component),
+                                'strength'    => round($strength, 2),
+                                'window_days' => $windowDays,
+                                'users'       => $component,
+                            ]
+                        );
+
+                        set_transient($ringKey, 1, 30 * DAY_IN_SECONDS);
+                    }
+                }
+            }
+        }
+
+        wp_cache_set($cacheKey, $components, self::CACHE_GROUP, self::CACHE_TTL);
+
+        return $components;
+    }
+
+    /**
+     * Store slow-ring pattern for ML analysis + operator review surface.
+     * Distinct pattern_type from 'vote_ring' / 'endorsement_ring' so
+     * admin reports don't collide and the slow-ring case is its own
+     * observable signal class.
+     *
+     * @param int[] $ring
+     */
+    private function storeSlowEndorsementRingPattern(array $ring, float $strength, int $windowDays): void {
+        $patternData = [
+            'users'       => $ring,
+            'strength'    => $strength,
+            'size'        => count($ring),
+            'window_days' => $windowDays,
+            'threshold'   => $this->ringStrengthThreshold * 0.5,
+        ];
+
+        try {
+            $this->patternRepo->storePattern(
+                0, // system-level pattern, no specific user
+                'slow_endorsement_ring',
+                $patternData,
+                min(1.0, $strength / 10),
+                date('Y-m-d H:i:s', strtotime('+30 days'))
+            );
+        } catch (\Exception $e) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] [BCC TrustGraph] storeSlowEndorsementRingPattern insert failed: ',
+                ['detail' => $e->getMessage()]
+            );
+        }
     }
 
     /**

@@ -329,6 +329,11 @@ add_action('bcc_trust_process_recalculations', function () {
 add_action('bcc_trust_weekly_digest', function () {
     \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest();
 });
+// Scale-hardening Phase 3 (2026-05-13): weekly slow-ring endorsement
+// scan. Catches paced reciprocity patterns the burst gates miss.
+add_action('bcc_trust_weekly_slow_ring_scan', function () {
+    \BCC\Trust\Core\Plugin::instance()->cronService()->weeklySlowRingScan();
+});
 
 // V2: NFT-gated holder groups — daily provisioning sweep. Reads
 // wp_bcc_onchain_collections.is_verified=1 and creates a closed PeepSo
@@ -1164,6 +1169,10 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust push',
         \BCC\Trust\Core\CLI\PushCommand::class
     );
+    \WP_CLI::add_command(
+        'bcc-trust validators',
+        \BCC\Trust\Onchain\CLI\BackfillValidatorPagesCommand::class
+    );
 }
 
 /*
@@ -1324,6 +1333,7 @@ function bcc_trust_deactivate() {
         'bcc_trust_initial_read_model_sync',
         'bcc_trust_daily_maintenance',
         'bcc_trust_deferred_rm_sync',
+        'bcc_trust_weekly_slow_ring_scan', // scale-hardening Phase 3
         // Onchain cron events.
         'bcc_onchain_daily_refresh',
         'bcc_onchain_retry_bonus',
