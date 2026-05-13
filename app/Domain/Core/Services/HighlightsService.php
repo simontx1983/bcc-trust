@@ -41,6 +41,10 @@
 
 namespace BCC\Trust\Core\Services;
 
+use BCC\Core\Repositories\PeepSoFollowerRepository;
+use BCC\Core\Repositories\PeepSoPageRepository;
+use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\ScoreEventRepository;
 use BCC\Trust\Core\Support\RankCatalog;
 
 if (!defined('ABSPATH')) {
@@ -67,10 +71,15 @@ final class HighlightsService
      * RankService is consulted only to fetch the current auto-derived
      * rank label so the welcome highlight for cold users can reference
      * it by name without re-deriving on the frontend.
+     *
+     * ScoreEventRepository powers the EXTERNAL slot — recent events
+     * across the watched-entity set since a 24h window. Bare-construct
+     * fall-through still keeps the slot at null (V1.0 stub semantics).
      */
     public function __construct(
         private readonly ?LivingService $livingService = null,
-        private readonly ?RankService $rankService = null
+        private readonly ?RankService $rankService = null,
+        private readonly ?ScoreEventRepository $scoreEventRepository = null
     ) {
     }
 
@@ -388,11 +397,52 @@ final class HighlightsService
     /**
      * Slot 3 — high-signal external event (followed entity).
      *
-     * V1.0 STUB: returns null in production. Implementation roadmap:
-     *   - peepso_activities for followed creators with module=nft (drops)
-     *   - peepso_activities for followed projects with module=project_drop
-     *   - trending Legendary entities entering the viewer's interest
-     *     graph (binder + onchain signals)
+     * V1.5 implementation (2026-05-13): real EXTERNAL slot for the
+     * passive-curator / lurker archetype. Composes three reads:
+     *
+     *   1. `PeepSoFollowerRepository::getFollowing(viewerId, 200)` —
+     *      the user_ids the viewer is keeping tabs on (canonical follow
+     *      graph; same source the binder reads). Capped at 200 — that's
+     *      the same cap the binder uses for paginated reads.
+     *
+     *   2. `PeepSoPageRepository::getPageIdsOwnedByUsers(followed, 500)` —
+     *      the bridge from follow-graph (user-keyed) to score-events
+     *      (page-keyed). Returns every `member_owner` page owned by
+     *      anyone the viewer follows.
+     *
+     *   3. `ScoreEventRepository::findForPagesSince($pages, $since, 24)` —
+     *      recent civic-significant events on those pages (vote_cast,
+     *      endorsement_added, dispute_resolved). 24h window — keeps
+     *      the slot meaningfully sparse without over-rotating into
+     *      stale-feeling stories.
+     *
+     * Self-exclusion: pages where the VIEWER is the owner are stripped
+     * before the events query. Those movements go to POSITIVE slot
+     * ("your work got endorsed", "your dispute resolved"), not here.
+     *
+     * Priority ladder (highest first) — civic + accountability bias:
+     *   1. Tier change (any direction)   — rarest, most consequential.
+     *      Detected via `tier_before != tier_after`. Direction (up/down)
+     *      is read from the `delta` sign so we don't have to encode the
+     *      tier-ordering map here.
+     *   2. Dispute resolved              — closure event, on the record.
+     *   3. Endorsement received          — someone vested rep in this work.
+     *   4. High-impact vote_cast         — |delta| ≥ 0.05 ; sub-threshold
+     *      votes are spam-prone, filtered out.
+     *
+     * Within a tier, the most recent event wins (events come pre-sorted
+     * DESC from the repo).
+     *
+     * Dedup/cooldown: highlight id is keyed
+     * `h-external-{category}-{page_id}-{viewer_id}` so dismissing one
+     * page's signal doesn't suppress other pages, and dismissing one
+     * category on one page doesn't suppress another category on the
+     * same page. The 24h slot TTL means a re-surfaced signal needs a
+     * fresh event row to appear.
+     *
+     * Returns null when (a) the viewer follows nobody, (b) followed
+     * users own no pages, (c) no civic-significant event landed in the
+     * 24h window, or (d) the repo dep is missing (legacy bare-construct).
      *
      * @return array<string, mixed>|null
      */
@@ -407,7 +457,245 @@ final class HighlightsService
                 'Demo entry — replace once followed-entity activity scorer ships.'
             );
         }
-        return null;
+
+        if ($this->scoreEventRepository === null) {
+            return null;
+        }
+
+        // (1) Who the viewer watches. 200 cap matches binder pagination.
+        $followedUsers = PeepSoFollowerRepository::getFollowing($viewerId, 200);
+        if ($followedUsers === []) {
+            return null;
+        }
+
+        // (2) Their owned pages. 500 cap defensively bounds even the
+        // pathological case (200 follows × ~2 pages each = ~400; we
+        // round up to 500 to leave headroom for power users).
+        $pageIds = PeepSoPageRepository::getPageIdsOwnedByUsers($followedUsers, 500);
+        if ($pageIds === []) {
+            return null;
+        }
+
+        // Self-exclusion: viewer's own pages don't belong here.
+        $viewerOwnedRaw = PeepSoPageRepository::getPageIdsOwnedByUsers([$viewerId], 50);
+        if ($viewerOwnedRaw !== []) {
+            $excludeSet = [];
+            foreach ($viewerOwnedRaw as $pid) {
+                $excludeSet[$pid] = true;
+            }
+            $filtered = [];
+            foreach ($pageIds as $pid) {
+                if (!isset($excludeSet[$pid])) {
+                    $filtered[] = $pid;
+                }
+            }
+            $pageIds = $filtered;
+            if ($pageIds === []) {
+                return null;
+            }
+        }
+
+        // (3) Civic-significant events in the 24h window. Whitelist
+        // event_types — drop 'recalculation' (system), 'moderation'
+        // (admin-private), 'vote_removed' / 'endorsement_removed'
+        // (revisions, not new signal).
+        $since = gmdate('Y-m-d H:i:s', time() - 86_400);
+        $events = $this->scoreEventRepository->findForPagesSince(
+            $pageIds,
+            $since,
+            24,
+            ['vote_cast', 'endorsement_added', 'dispute_resolved']
+        );
+        if ($events === []) {
+            return null;
+        }
+
+        // Priority ladder — pick the strongest candidate of each class
+        // in a single pass over the (already DESC-sorted) event list.
+        $tierChange      = null;
+        $disputeResolved = null;
+        $endorsement     = null;
+        $highImpactVote  = null;
+
+        foreach ($events as $event) {
+            $tierBeforeRaw = $event->tier_before ?? null;
+            $tierAfterRaw  = $event->tier_after ?? null;
+            $tierBefore    = is_string($tierBeforeRaw) ? $tierBeforeRaw : '';
+            $tierAfter     = is_string($tierAfterRaw) ? $tierAfterRaw : '';
+            $eventType     = is_string($event->event_type ?? null) ? (string) $event->event_type : '';
+            $deltaRaw      = $event->delta ?? null;
+            $delta         = is_numeric($deltaRaw) ? (float) $deltaRaw : null;
+
+            $isTierFlip = $tierBefore !== '' && $tierAfter !== '' && $tierBefore !== $tierAfter;
+
+            if ($tierChange === null && $isTierFlip) {
+                $tierChange = $event;
+                continue;
+            }
+            if ($disputeResolved === null && $eventType === 'dispute_resolved') {
+                $disputeResolved = $event;
+                continue;
+            }
+            if ($endorsement === null && $eventType === 'endorsement_added') {
+                $endorsement = $event;
+                continue;
+            }
+            if ($highImpactVote === null
+                && $eventType === 'vote_cast'
+                && $delta !== null
+                && abs($delta) >= 0.05
+            ) {
+                $highImpactVote = $event;
+                continue;
+            }
+        }
+
+        $top = $tierChange ?? $disputeResolved ?? $endorsement ?? $highImpactVote;
+        if ($top === null) {
+            return null;
+        }
+
+        return self::buildExternalHighlight($viewerId, $top);
+    }
+
+    /**
+     * Build a contract-compliant EXTERNAL-slot highlight payload. The
+     * id is keyed `h-external-{category}-{page_id}-{viewer}` so:
+     *
+     *   - dismissing one category on one page doesn't suppress other
+     *     categories on the same page (e.g. dismissing "ranked up"
+     *     doesn't hide a later "got endorsed" event)
+     *   - dismissing one page's event doesn't suppress identical events
+     *     on other pages the viewer also watches
+     *
+     * The CTA links to the page-owner's `/u/{handle}` profile — that's
+     * where the user can go to see the broader context of the event.
+     * Falls back to `/` when the handle is missing (defensive — same
+     * graceful-degrade pattern as positiveHighlight).
+     *
+     * Returns null if the event row is too malformed to produce a
+     * meaningful headline (missing page_id, etc.) — the resolver caller
+     * treats that the same as "no candidate" and the slot stays empty.
+     *
+     * @return array<string, mixed>|null
+     */
+    private static function buildExternalHighlight(int $viewerId, object $event): ?array
+    {
+        $pageId = is_numeric($event->page_id ?? null) ? (int) $event->page_id : 0;
+        if ($pageId <= 0) {
+            return null;
+        }
+
+        $pageTitleRaw = $event->page_title ?? null;
+        $pageTitle    = is_string($pageTitleRaw) && trim($pageTitleRaw) !== ''
+            ? trim($pageTitleRaw)
+            : 'A page you watch';
+
+        $tierBeforeRaw = $event->tier_before ?? null;
+        $tierAfterRaw  = $event->tier_after ?? null;
+        $tierBefore    = is_string($tierBeforeRaw) ? $tierBeforeRaw : '';
+        $tierAfter     = is_string($tierAfterRaw) ? $tierAfterRaw : '';
+        $eventType     = is_string($event->event_type ?? null) ? (string) $event->event_type : '';
+        $deltaRaw      = $event->delta ?? null;
+        $delta         = is_numeric($deltaRaw) ? (float) $deltaRaw : null;
+
+        $tierChanged = $tierBefore !== '' && $tierAfter !== '' && $tierBefore !== $tierAfter;
+
+        $category = null;
+        $title    = '';
+        $body     = '';
+
+        if ($tierChanged) {
+            // Direction read from delta sign — robust across tier
+            // ladders without encoding their order here. Zero/null
+            // delta on a tier flip is technically impossible (the
+            // score must have moved to cross the threshold) but
+            // defended against here anyway.
+            if ($delta !== null && $delta > 0) {
+                $category = 'watched_rank_up';
+                $title    = sprintf('%s ranked up.', $pageTitle);
+                $body     = 'Something they did paid off. The record reflects it.';
+            } elseif ($delta !== null && $delta < 0) {
+                $category = 'watched_rank_down';
+                $title    = sprintf("%s's rank fell.", $pageTitle);
+                $body     = 'Trust shifts both ways. Worth a look.';
+            } else {
+                $category = 'watched_rank_change';
+                $title    = sprintf("%s's rank changed.", $pageTitle);
+                $body     = 'The record updated. Worth a look.';
+            }
+        } elseif ($eventType === 'dispute_resolved') {
+            $category = 'watched_dispute_resolved';
+            $title    = sprintf('A dispute on %s was resolved.', $pageTitle);
+            $body     = 'Panel duty closed. The outcome is on the record.';
+        } elseif ($eventType === 'endorsement_added') {
+            $category = 'watched_endorsement';
+            $title    = sprintf('%s received an endorsement.', $pageTitle);
+            $body     = 'Someone vested their reputation on this work.';
+        } elseif ($eventType === 'vote_cast' && $delta !== null && abs($delta) >= 0.05) {
+            if ($delta > 0) {
+                $category = 'watched_score_up';
+                $title    = sprintf("%s's standing moved up.", $pageTitle);
+                $body     = 'Recent activity changed the score on the record.';
+            } else {
+                $category = 'watched_score_down';
+                $title    = sprintf("%s's standing moved down.", $pageTitle);
+                $body     = 'Recent activity changed the score on the record.';
+            }
+        }
+
+        if ($category === null) {
+            return null;
+        }
+
+        $id = sprintf('h-%s-%s-%d-%d', self::SLOT_EXTERNAL, $category, $pageId, $viewerId);
+
+        $ownerHandle = self::resolvePageOwnerHandle($pageId);
+        $href        = $ownerHandle !== '' ? '/u/' . $ownerHandle : '/';
+
+        return [
+            'id'       => $id,
+            'slot'     => self::SLOT_EXTERNAL,
+            'category' => $category,
+            'title'    => $title,
+            'body'     => $body,
+            'cta'      => [
+                'label' => 'See',
+                'href'  => $href,
+            ],
+            'actions'  => [
+                'dismiss' => [
+                    'method'        => 'POST',
+                    'href'          => '/wp-json/bcc/v1/me/highlights/' . $id . '/dismiss',
+                    'idempotent'    => true,
+                    'requires_auth' => true,
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * Resolve a page's owner handle for EXTERNAL-slot CTA construction.
+     * Reuses ScoreRepository::getPageOwnerId (the canonical lookup;
+     * same one FirstActionListener uses for endorsement-recipient
+     * resolution) so the EXTERNAL slot doesn't introduce a parallel
+     * page-owner path.
+     *
+     * Empty return is the documented fallback — the caller routes the
+     * CTA to `/` instead of `/u/`, mirroring positiveHighlight's
+     * handle-missing behaviour.
+     */
+    private static function resolvePageOwnerHandle(int $pageId): string
+    {
+        if ($pageId <= 0) {
+            return '';
+        }
+        $ownerId = (int) Plugin::instance()->scoreRepository()->getPageOwnerId($pageId);
+        if ($ownerId <= 0) {
+            return '';
+        }
+        $handle = get_user_meta($ownerId, 'bcc_handle', true);
+        return is_string($handle) ? $handle : '';
     }
 
     // ──────────────────────────────────────────────────────────────────

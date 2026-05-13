@@ -15,6 +15,7 @@ use BCC\Trust\Core\Repositories\EdgeRepository;
 use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\FraudAnalysisRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Repositories\ScoreEventRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VerificationRepository;
@@ -72,6 +73,12 @@ final class Plugin
     public function scoreRepository(): ScoreRepository
     {
         return $this->scoreRepository ??= new ScoreRepository();
+    }
+
+    private ?ScoreEventRepository $scoreEventRepository = null;
+    public function scoreEventRepository(): ScoreEventRepository
+    {
+        return $this->scoreEventRepository ??= new ScoreEventRepository();
     }
 
     private ?ReputationRepository $reputationRepository = null;
@@ -726,15 +733,22 @@ final class Plugin
     private ?Services\HighlightsService $highlightsService = null;
     public function highlightsService(): Services\HighlightsService
     {
-        // §O2 retention wiring (2026-05-13): inject LivingService +
-        // RankService so the POSITIVE slot resolver can surface real
-        // viewer signals (today's reviews, solids received, top-%
-        // comparison, streak, cold-user welcome) without duplicating
-        // queries. The deps are nullable on the service for legacy
-        // bare-construct paths but always populated in production.
+        // §O2 retention wiring (2026-05-13):
+        //   - LivingService + RankService drive the POSITIVE slot
+        //     (today's reviews, solids, percentile, streak, cold-user
+        //     welcome) without duplicating queries.
+        //   - ScoreEventRepository drives the EXTERNAL slot — recent
+        //     civic-significant events on watched-entity pages
+        //     (rank changes, dispute resolutions, endorsements,
+        //     high-impact votes). Reads via PeepSoFollowerRepository +
+        //     PeepSoPageRepository (both static utilities, no DI needed).
+        // All three deps are nullable on the service so legacy bare-
+        // construct paths still work; the resolver falls through to
+        // a V1.0 null stub when any are missing.
         return $this->highlightsService ??= new Services\HighlightsService(
             $this->livingService(),
-            $this->rankService()
+            $this->rankService(),
+            $this->scoreEventRepository()
         );
     }
 
