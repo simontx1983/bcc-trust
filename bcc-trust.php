@@ -391,6 +391,46 @@ add_action(
     [\BCC\Trust\Onchain\Services\NftEnrichmentService::class, 'runAllChains']
 );
 
+// V2 Phase 1 hardening: self-heal cron registration.
+//
+// ┌─ DO NOT REMOVE AS "REDUNDANT WITH ACTIVATION" ─────────────────┐
+// │ This block looks duplicative of the schedule calls inside      │
+// │ `bcc_trust_activate()`. It is not. The duplication is the      │
+// │ fix.                                                           │
+// │                                                                │
+// │ History: the V2 Phase 1 NFT cron hooks (eth indexer, helius    │
+// │ dedupe, enrichment) were originally scheduled ONLY in the      │
+// │ activation hook. Phase 1a + 1c each added a new cron hook      │
+// │ without triggering a reactivation. Result: on every site that  │
+// │ updated the plugin via composer/git/SFTP (not via the WP       │
+// │ admin's deactivate-then-activate flow), the new hooks never    │
+// │ got scheduled. The empty `wp_bcc_chain_checkpoints` table was  │
+// │ the only outward signal. The worker silently never ticked.     │
+// │                                                                │
+// │ Self-heal closes that gap: any drift is corrected on the next  │
+// │ request after deployment. Removing this block re-opens the     │
+// │ exact same silent-failure mode.                                │
+// │                                                                │
+// │ Cost: three `wp_next_scheduled()` calls per request — each a   │
+// │ lookup against the autoloaded `cron` option, no DB query. The  │
+// │ rare cold path (when something is actually missing) hits       │
+// │ `wp_schedule_event` once per missing hook.                     │
+// └────────────────────────────────────────────────────────────────┘
+//
+// This path NEVER unschedules. Cleanup is owned by the plugin's
+// deactivation hook (`bcc_trust_deactivate`).
+add_action('plugins_loaded', static function (): void {
+    \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::register();
+    \BCC\Trust\Onchain\Services\NftEnrichmentService::register();
+
+    // Helius dedupe sweep has no host service class (its handler is the
+    // inline closure above) so its schedule is inlined here. Same shape
+    // as the two register() calls — guarded, additive, no clearing.
+    if (!wp_next_scheduled('bcc_helius_dedupe_sweep')) {
+        wp_schedule_event(time() + 60, 'bcc_five_minutes', 'bcc_helius_dedupe_sweep');
+    }
+}, 5);
+
 add_action('bcc_gated_group_reconcile_sweep', function () {
     $userIds = get_users([
         'meta_key'   => \BCC\Trust\Onchain\Services\NftGroupGateService::USER_META_AUTO_JOIN,
@@ -1202,6 +1242,32 @@ function bcc_trust_activate() {
         // sweep tries to auto-join opted-in users.
         wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
     }
+
+    // V2 Phase 1 NFT cron schedules (activation fast path).
+    //
+    // ┌─ DO NOT REMOVE AS "REDUNDANT" ────────────────────────────────┐
+    // │ These three schedule calls duplicate the `plugins_loaded`     │
+    // │ self-heal at the top of this file. Both are intentional.      │
+    // │                                                               │
+    // │ Activation here = fast path on first activate (saves the      │
+    // │ ~1-request lag until plugins_loaded fires).                   │
+    // │                                                               │
+    // │ plugins_loaded self-heal = drift insurance. The V2 Phase 1a / │
+    // │ 1c cron hooks were originally activation-only. Any plugin     │
+    // │ update that ADDED a new cron hook without triggering a        │
+    // │ reactivation left the hook permanently absent from            │
+    // │ `wp_options.cron` — empty `wp_bcc_chain_checkpoints` was the  │
+    // │ only outward sign. Self-heal closes that gap.                 │
+    // │                                                               │
+    // │ Removing this activation block would not break things on the  │
+    // │ first install (self-heal catches up on the next request) but  │
+    // │ would re-introduce a small startup window where the worker    │
+    // │ isn't scheduled yet. Removing the self-heal would re-open the │
+    // │ silent-drift outage. Keep both.                               │
+    // │                                                               │
+    // │ See: NftEthIndexerWorker::register() and                      │
+    // │      NftEnrichmentService::register().                        │
+    // └───────────────────────────────────────────────────────────────┘
 
     // V2 Phase 1a: NFT ETH indexer worker — confirmation-gated polling.
     // Every minute via 'bcc_one_minute' interval registered in CronService.

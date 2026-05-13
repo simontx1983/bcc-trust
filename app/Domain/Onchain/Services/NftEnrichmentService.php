@@ -43,8 +43,33 @@ if (!defined('ABSPATH')) {
  */
 final class NftEnrichmentService
 {
-    public const CRON_HOOK  = 'bcc_nft_enrichment_tick';
-    public const BATCH_SIZE = 50;
+    public const CRON_HOOK     = 'bcc_nft_enrichment_tick';
+    public const CRON_INTERVAL = 'bcc_five_minutes';
+    public const BATCH_SIZE    = 50;
+
+    /**
+     * Self-heal the every-5-minute cron registration.
+     *
+     * Originally scheduled only at plugin activation. Phase 1c added
+     * this hook after V2 Phase 1a; any site that never reactivated
+     * the plugin after the Phase 1c rollout silently lost enrichment —
+     * indexed rows accumulated without `name` / `image_url` / etc.,
+     * which would render as thumbnail-less gallery tiles once the
+     * persistent read path was wired.
+     *
+     * Hooked from `plugins_loaded` so any drift self-heals on the next
+     * request. `wp_next_scheduled()` reads the autoloaded `cron` option
+     * in memory; the per-request cost is one array lookup.
+     *
+     * This method NEVER unschedules — clearing the hook is owned by
+     * the plugin's deactivation cleanup.
+     */
+    public static function register(): void
+    {
+        if (!wp_next_scheduled(self::CRON_HOOK)) {
+            wp_schedule_event(time() + 90, self::CRON_INTERVAL, self::CRON_HOOK);
+        }
+    }
 
     /**
      * Run a tick across every active chain. Catches per-chain

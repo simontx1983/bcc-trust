@@ -44,6 +44,7 @@ if (!defined('ABSPATH')) {
 final class NftEthIndexerWorker
 {
     public const CRON_HOOK                       = 'bcc_nft_eth_indexer_tick';
+    public const CRON_INTERVAL                   = 'bcc_one_minute';
     public const CONFIRMATIONS                   = 12;
     public const BLOCKS_PER_TICK                 = 2000;
     public const CU_PER_CALL                     = 120;
@@ -51,6 +52,30 @@ final class NftEthIndexerWorker
     public const DEFAULT_DAILY_BUDGET            = 50000;
     public const CRON_OVERDUE_THRESHOLD_SECONDS  = 300;
     private const ADVISORY_LOCK_PREFIX = 'bcc_nft_indexer_chain_';
+
+    /**
+     * Self-heal the every-minute cron registration.
+     *
+     * Originally the schedule call lived only in the plugin's activation
+     * hook. That left a silent drift window: any plugin update that
+     * ADDED a cron hook (Phase 1a did exactly this) without triggering
+     * a reactivation left the hook permanently absent from
+     * `wp_options.cron` — the worker never fired and the empty
+     * `wp_bcc_chain_checkpoints` table was the only outward sign.
+     *
+     * Hooked from `plugins_loaded` so any drift self-heals on the next
+     * request. `wp_next_scheduled()` reads the autoloaded `cron` option
+     * in memory; the per-request cost is one array lookup.
+     *
+     * This method NEVER unschedules — clearing the hook is owned by
+     * the plugin's deactivation cleanup.
+     */
+    public static function register(): void
+    {
+        if (!wp_next_scheduled(self::CRON_HOOK)) {
+            wp_schedule_event(time() + 30, self::CRON_INTERVAL, self::CRON_HOOK);
+        }
+    }
 
     /**
      * Run a tick for every active EVM chain.
@@ -175,13 +200,14 @@ final class NftEthIndexerWorker
         }
 
         // Step 5: discover head + safe_head.
-        $headBlock = self::fetchHeadBlock($fetcher);
+        $headResult = self::fetchHeadBlock($fetcher);
+        $headBlock  = $headResult['block'];
         if ($headBlock <= 0) {
             OnchainCircuitBreaker::recordFailure($chainId);
             ChainCheckpointRepository::recordFailure(
                 $chainId,
                 ChainCheckpointRepository::STATE_DEGRADED,
-                'eth_blockNumber returned 0'
+                $headResult['error'] ?? 'eth_blockNumber returned 0'
             );
             return;
         }
@@ -261,16 +287,34 @@ final class NftEthIndexerWorker
     }
 
     /**
-     * Lightweight `eth_blockNumber` poll. Returns the int block height
-     * or 0 on any error. CU cost is 16, so we don't bother decrementing
-     * the budget for this (one call per tick is negligible).
+     * Lightweight `eth_blockNumber` poll. CU cost is 16, so we don't
+     * bother decrementing the budget for this (one call per tick is
+     * negligible).
+     *
+     * Returns a typed result so the caller can surface the actual
+     * upstream cause in the per-chain `last_error` column. Historically
+     * this returned `int` with 0 on any failure, which collapsed every
+     * cause — RPC unreachable, JSON-RPC error, Alchemy "network not
+     * enabled for this app", malformed response — into the same
+     * useless "returned 0" string. The dashboard couldn't distinguish
+     * "CONFIGURATION FIX REQUIRED" from "TRANSIENT NETWORK BLIP," and
+     * the only way to find out was a curl probe.
+     *
+     * The repo truncates `last_error` to 255 chars on write; this
+     * method only normalises whitespace + strips control chars so the
+     * stored value renders cleanly in the admin table and log lines.
+     *
+     * @return array{block: int, error: ?string}
      */
-    private static function fetchHeadBlock(EvmFetcher $fetcher): int
+    private static function fetchHeadBlock(EvmFetcher $fetcher): array
     {
         $chain  = $fetcher->get_chain();
         $rpcUrl = (string) ($chain->rpc_url ?? '');
-        if (!$rpcUrl || str_ends_with($rpcUrl, '/v2/')) {
-            return 0;
+        if ($rpcUrl === '') {
+            return ['block' => 0, 'error' => 'eth_blockNumber: rpc_url not configured for this chain'];
+        }
+        if (str_ends_with($rpcUrl, '/v2/')) {
+            return ['block' => 0, 'error' => 'eth_blockNumber: rpc_url missing Alchemy API key suffix (ends with /v2/)'];
         }
 
         $body = wp_json_encode([
@@ -291,18 +335,65 @@ final class NftEthIndexerWorker
         ]);
 
         if (is_wp_error($response)) {
-            return 0;
+            return [
+                'block' => 0,
+                'error' => 'eth_blockNumber transport: ' . self::cleanErrorBody($response->get_error_message()),
+            ];
         }
 
-        $json = json_decode(wp_remote_retrieve_body($response), true);
-        if (!is_array($json) || !isset($json['result']) || !is_string($json['result'])) {
-            return 0;
+        $rawBody = wp_remote_retrieve_body($response);
+        $json    = json_decode($rawBody, true);
+
+        // Non-JSON body — most commonly Alchemy returning a plain-text
+        // error like "MATIC_MAINNET is not enabled for this app." when
+        // the chain isn't provisioned on the app. Surface verbatim
+        // (truncated by the repo) so the next operator doesn't repeat
+        // today's curl-probe diagnostic dance.
+        if (!is_array($json)) {
+            return [
+                'block' => 0,
+                'error' => 'eth_blockNumber non-JSON response: ' . self::cleanErrorBody($rawBody),
+            ];
+        }
+
+        // JSON-RPC error object — the well-formed failure path.
+        if (isset($json['error']) && is_array($json['error'])) {
+            $msg = isset($json['error']['message']) && is_string($json['error']['message'])
+                ? $json['error']['message']
+                : '(no error.message)';
+            return [
+                'block' => 0,
+                'error' => 'eth_blockNumber RPC error: ' . self::cleanErrorBody($msg),
+            ];
+        }
+
+        if (!isset($json['result']) || !is_string($json['result'])) {
+            return [
+                'block' => 0,
+                'error' => 'eth_blockNumber missing result field: ' . self::cleanErrorBody($rawBody),
+            ];
         }
 
         $hex = ltrim($json['result'], '0x');
         if ($hex === '') {
-            return 0;
+            return ['block' => 0, 'error' => 'eth_blockNumber result was empty string'];
         }
-        return (int) hexdec($hex);
+        return ['block' => (int) hexdec($hex), 'error' => null];
+    }
+
+    /**
+     * Single-line, control-char-free cleanup of an upstream error
+     * body for embedding in `last_error`. Caps at 200 chars to leave
+     * headroom for the caller's prefix label inside the repository's
+     * 255-char column truncation.
+     */
+    private static function cleanErrorBody(string $raw): string
+    {
+        $cleaned = preg_replace('/[\x00-\x1F\x7F]+/', ' ', $raw);
+        if (!is_string($cleaned)) {
+            $cleaned = $raw;
+        }
+        $cleaned = trim((string) preg_replace('/\s+/', ' ', $cleaned));
+        return function_exists('mb_substr') ? mb_substr($cleaned, 0, 200) : substr($cleaned, 0, 200);
     }
 }

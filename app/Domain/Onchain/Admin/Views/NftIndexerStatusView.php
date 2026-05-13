@@ -8,6 +8,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\HeliusSeenSignaturesRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Services\HeliusSubscriptionManager;
+use BCC\Trust\Onchain\Services\NftIndexerHealthSnapshot;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 
 if (!defined('ABSPATH')) {
@@ -60,8 +61,11 @@ final class NftIndexerStatusView
         $dailyBudget = defined('BCC_ETH_DAILY_RPC_BUDGET')
             ? (int) constant('BCC_ETH_DAILY_RPC_BUDGET')
             : NftEthIndexerWorker::DEFAULT_DAILY_BUDGET;
+
+        $summary = NftIndexerHealthSnapshot::buildSummary();
         ?>
         <h2>NFT Indexer (Confirmation-Gated)</h2>
+        <?php self::renderHealthSummary($summary); ?>
         <p>
             Walks <code>alchemy_getAssetTransfers</code> at
             <strong>N=<?php echo NftEthIndexerWorker::CONFIRMATIONS; ?> confirmations</strong>
@@ -145,6 +149,98 @@ final class NftIndexerStatusView
             <code>BCC\Trust\Onchain\Workers\NftEthIndexerWorker</code> ·
             Tick: <code>bcc_nft_eth_indexer_tick</code> (every minute)
         </small></p>
+        <?php
+    }
+
+    /**
+     * Operator health summary card. Renders an RGB status badge,
+     * top-level metrics (active chains / cron health / dedupe size),
+     * and an ordered actionable-issues list. Reads from a single
+     * source of truth — `NftIndexerHealthSnapshot::buildSummary()` —
+     * so this view and any future system-health probe never disagree.
+     *
+     * @param array{
+     *     status: 'green'|'yellow'|'red',
+     *     cron_scheduled: bool,
+     *     cron_overdue: bool,
+     *     cron_overdue_seconds: int,
+     *     active_chains_count: int,
+     *     total_evm_chains_count: int,
+     *     stalled_chains: list<string>,
+     *     degraded_chains: list<string>,
+     *     cu_pressure_chains: list<string>,
+     *     dedupe_overgrown: bool,
+     *     issues: list<string>
+     * } $summary
+     */
+    private static function renderHealthSummary(array $summary): void
+    {
+        $statusColors = [
+            NftIndexerHealthSnapshot::STATUS_GREEN  => ['bg' => '#e7f5ec', 'border' => '#46b450', 'label' => 'HEALTHY'],
+            NftIndexerHealthSnapshot::STATUS_YELLOW => ['bg' => '#fff8e5', 'border' => '#f0b849', 'label' => 'ATTENTION'],
+            NftIndexerHealthSnapshot::STATUS_RED    => ['bg' => '#fbeaea', 'border' => '#dc3232', 'label' => 'ACTION REQUIRED'],
+        ];
+        $palette = $statusColors[$summary['status']] ?? $statusColors[NftIndexerHealthSnapshot::STATUS_RED];
+
+        $cronLabel = $summary['cron_scheduled']
+            ? ($summary['cron_overdue']
+                ? sprintf('overdue %ds', $summary['cron_overdue_seconds'])
+                : 'scheduled')
+            : 'NOT SCHEDULED';
+
+        ?>
+        <div style="
+            background:<?php echo esc_attr($palette['bg']); ?>;
+            border-left:4px solid <?php echo esc_attr($palette['border']); ?>;
+            padding:12px 16px;
+            margin:12px 0 16px;
+            max-width:1100px;
+        ">
+            <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+                <strong style="
+                    background:<?php echo esc_attr($palette['border']); ?>;
+                    color:#fff;
+                    padding:4px 10px;
+                    border-radius:2px;
+                    font-size:11px;
+                    letter-spacing:0.08em;
+                "><?php echo esc_html($palette['label']); ?></strong>
+
+                <span><strong>Active chains:</strong>
+                    <?php echo (int) $summary['active_chains_count']; ?> / <?php echo (int) $summary['total_evm_chains_count']; ?>
+                </span>
+
+                <span><strong>Cron:</strong> <?php echo esc_html($cronLabel); ?></span>
+
+                <?php if ($summary['degraded_chains'] !== []): ?>
+                    <span><strong>Degraded:</strong> <?php echo (int) count($summary['degraded_chains']); ?></span>
+                <?php endif; ?>
+
+                <?php if ($summary['stalled_chains'] !== []): ?>
+                    <span><strong>Stalled:</strong> <?php echo (int) count($summary['stalled_chains']); ?></span>
+                <?php endif; ?>
+
+                <?php if ($summary['cu_pressure_chains'] !== []): ?>
+                    <span><strong>CU pressure:</strong> <?php echo (int) count($summary['cu_pressure_chains']); ?></span>
+                <?php endif; ?>
+
+                <?php if ($summary['dedupe_overgrown']): ?>
+                    <span><strong>Helius dedupe:</strong> overgrown</span>
+                <?php endif; ?>
+            </div>
+
+            <?php if ($summary['issues'] !== []): ?>
+                <ul style="margin:10px 0 0 1.2em;padding:0;">
+                    <?php foreach ($summary['issues'] as $issue): ?>
+                        <li style="margin:4px 0;"><?php echo esc_html($issue); ?></li>
+                    <?php endforeach; ?>
+                </ul>
+            <?php else: ?>
+                <p style="margin:8px 0 0 0;color:#646970;font-size:12px;">
+                    No outstanding issues. Block-walking and holdings writes are flowing for active chains.
+                </p>
+            <?php endif; ?>
+        </div>
         <?php
     }
 
