@@ -963,14 +963,8 @@ final class Plugin
         // Page flag endpoint (signal only — no score impact)
         \BCC\Trust\Core\REST\FlagEndpoint::register();
 
-        // Endorsement leaderboard endpoint (read model)
-        \BCC\Trust\Core\REST\EndorsementLeaderboardEndpoint::register();
-
         // User endorsements endpoint (my endorsements)
         \BCC\Trust\Core\REST\UserEndorsementsEndpoint::register();
-
-        // Validator leaderboard endpoint (replaces admin-ajax load-more)
-        \BCC\Trust\Core\REST\ValidatorLeaderboardEndpoint::register();
 
         // Entity claim endpoint (replaces admin-ajax bcc_claim_entity)
         \BCC\Trust\Core\REST\EntityClaimEndpoint::register();

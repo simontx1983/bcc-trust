@@ -62,12 +62,6 @@ use BCC\Trust\Core\Repositories\EdgeRepository;
  *   created_at: string,
  *   page_title: string|null
  * }
- * @phpstan-type TopEndorsedRow object{
- *   page_id: int|numeric-string,
- *   page_title: string|null,
- *   endorsement_count: int|numeric-string,
- *   total_weight: float|numeric-string
- * }
  * @phpstan-type TopEndorserRow object{
  *   endorser_user_id: int|numeric-string,
  *   count: int|numeric-string,
@@ -459,42 +453,6 @@ class EndorsementRepository {
                  AND status = 1",
                 $endorserUserId
             )
-        );
-    }
-
-    /**
-     * Get top endorsed pages
-     *
-     * @return object[]
-     * @phpstan-return list<TopEndorsedRow>
-     */
-    public function getTopEndorsed(string $context = null, int $limit = 10): array {
-        global $wpdb;
-
-        $where = "e.status = 1";
-        $params = [];
-
-        if ($context) {
-            $where .= " AND e.context = %s";
-            $params[] = $context;
-        }
-
-        $sql = "SELECT 
-                    e.page_id, 
-                    p.post_title as page_title,
-                    COUNT(*) as endorsement_count, 
-                    SUM(e.weight) as total_weight
-                FROM {$this->table} e
-                LEFT JOIN {$wpdb->posts} p ON e.page_id = p.ID
-                WHERE {$where}
-                GROUP BY e.page_id
-                ORDER BY total_weight DESC, endorsement_count DESC
-                LIMIT %d";
-        
-        $params[] = $limit;
-
-        return $wpdb->get_results(
-            $wpdb->prepare($sql, $params)
         );
     }
 
