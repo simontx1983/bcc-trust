@@ -3,7 +3,7 @@
  * User Endorsements REST Endpoint
  *
  * Returns endorsements given by the current user with page details and stats.
- * Powers the "My Endorsements" Gutenberg block.
+ * Consumed by the headless Next.js frontend (bcc-frontend).
  *
  * Routes:
  *   GET /bcc/v1/endorsements/mine        — list current user's endorsements

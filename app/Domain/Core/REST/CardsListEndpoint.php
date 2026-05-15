@@ -7,16 +7,10 @@
  * surface — same shape per item, just batched with filter + sort
  * controls on the outside.
  *
- * Why a NEW endpoint instead of extending `/discover`:
- *   - `/discover` is consumed by the legacy bcc-page-slider Gutenberg
- *     block (server-side render). Its response shape carries inline
- *     HTML hints + raw row fields the block expects. Changing it would
- *     break that surface.
- *   - The headless frontend speaks Card view-models per §A2 / §L5.
- *     Mapping a legacy shape on the client violates the no-business-
- *     logic-in-frontend rule.
- *   - One service (`PageDiscoveryService`) does the SQL; this endpoint
- *     wraps it for view-model output. Single source of trust per §A4.
+ * Speaks Card view-models per §A2 / §L5 — the frontend renders
+ * server-pre-formatted strings verbatim and never reshapes them.
+ * `PageDiscoveryService` does the SQL; this endpoint wraps it for
+ * view-model output. Single source of trust per §A4.
  *
  * V1 filter set (per §G2 launch checklist):
  *   - kind   (validator|project|creator)  — translates to legacy
@@ -240,8 +234,7 @@ final class CardsListEndpoint
 
         // ── Hydrate to Card view-models ─────────────────────────────────
         // PageDiscoveryService::buildCard{,FromReadModel} emits row keys
-        // `page_id` + `page_type` (the legacy Gutenberg-block shape that
-        // /discover also consumes). Earlier this loop read `ID` — the
+        // `page_id` + `page_type`. Earlier this loop read `ID` — the
         // WP_Post-style key — so $postId silently defaulted to 0 and
         // every row got skipped, leaving items[] empty even when
         // pagination reported many pages of results.

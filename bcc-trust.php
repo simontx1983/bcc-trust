@@ -707,8 +707,7 @@ add_action('rest_api_init', function () {
 | Mirrors the original bcc-onchain-signals.php plugins_loaded hook: runs
 | at priority 20 so bcc-core and Trust Core services (priority 5) have
 | already registered. Wires chain-refresh + wallet controller init,
-| cron handlers, domain events, REST routes, admin triggers/settings,
-| Gutenberg block registration, and the onchain-signals shortcode.
+| cron handlers, domain events, REST routes, and admin triggers/settings.
 */
 
 add_action('plugins_loaded', function (): void {
@@ -913,9 +912,9 @@ add_action('plugins_loaded', function (): void {
 |--------------------------------------------------------------------------
 | DISPUTES DOMAIN BOOT
 |--------------------------------------------------------------------------
-| Scheduler, admin, REST, blocks, shortcodes, and the PeepSo profile
-| report-button injection live here. Mirrors the original
-| bcc-disputes.php hook layout, namespace-rewritten for BCC\Trust\Disputes.
+| Scheduler, admin, REST, and the PeepSo profile report-button injection
+| live here. Mirrors the original bcc-disputes.php hook layout,
+| namespace-rewritten for BCC\Trust\Disputes.
 */
 
 add_action('plugins_loaded', function () {
