@@ -915,10 +915,9 @@ final class Plugin
         //                 OAuth callbacks, health checks. Consumers:
         //                 trust-header.js, trust-frontend.js, admin.js.
         //
-        // bcc/v1        = Shared cross-plugin read API consumed by blocks,
-        //                 the Disputes domain, bcc-search, and external integrations.
-        //                 Routes: /page/{id}, /discover, /endorsements/*,
-        //                 /validators/top, /flag, /claim.
+        // bcc/v1        = Shared cross-plugin read API consumed by the
+        //                 Disputes domain, bcc-search, and external integrations.
+        //                 Routes: /page/{id}, /endorsements/*, /flag, /claim.
         //
         // Do NOT mix: new read endpoints → bcc/v1.
         //             New mutations     → bcc-trust/v1.

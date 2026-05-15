@@ -26,11 +26,11 @@
  *                                            `tier` via AND so the filter
  *                                            chip and per-row stamp can never
  *                                            disagree.
- *   - page   (1-based)                    — capped at 20 (matches
- *                                            DiscoveryEndpoint's
- *                                            offset-FS guard)
- *   - per_page (1..50)                    — same hard ceiling as
- *                                            DiscoveryEndpoint::limit
+ *   - page   (1-based)                    — capped at 20 (filesort
+ *                                            invariant on offset-
+ *                                            paginated queries)
+ *   - per_page (1..50)                    — 50-row hard ceiling
+ *                                            (same invariant)
  *
  * Deferred to V1.5 (per scope discipline §P):
  *   - chain filter             — bcc_page_read_model has no chain column
@@ -60,7 +60,7 @@ final class CardsListEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
-    /** Hard ceilings — must match DiscoveryEndpoint's invariants. */
+    /** Hard ceilings — filesort/memory invariants on offset-paginated queries. */
     private const PER_PAGE_MAX = 50;
     private const PAGE_MAX     = 20;
 
