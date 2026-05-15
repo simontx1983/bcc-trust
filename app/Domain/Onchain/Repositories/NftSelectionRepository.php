@@ -46,6 +46,10 @@ if (!defined('ABSPATH')) {
  */
 final class NftSelectionRepository
 {
+    /** Cache group for §5 generation counters. */
+    private const CACHE_GROUP = 'bcc_nft_selections';
+    private const GENERATION_KEY_PREFIX = 'gen_user_selections_';
+
     public static function table(): string
     {
         return DB::table('user_nft_selections');
@@ -131,6 +135,8 @@ final class NftSelectionRepository
             return false;
         }
 
+        self::bumpUserGeneration((int) $data['user_id']);
+
         // insert_id returns auto-increment for new INSERTs and the
         // LAST_INSERT_ID(id) value for ON DUPLICATE KEY UPDATE matches.
         return $wpdb->insert_id ?: false;
@@ -148,7 +154,11 @@ final class NftSelectionRepository
             ['%d', '%d']
         );
 
-        return $result !== false && $result > 0;
+        $ok = $result !== false && $result > 0;
+        if ($ok) {
+            self::bumpUserGeneration($userId);
+        }
+        return $ok;
     }
 
     /**
@@ -171,7 +181,11 @@ final class NftSelectionRepository
             ['%d', '%d', '%s', '%s']
         );
 
-        return $result !== false && $result > 0;
+        $ok = $result !== false && $result > 0;
+        if ($ok) {
+            self::bumpUserGeneration($userId);
+        }
+        return $ok;
     }
 
     /**
@@ -227,6 +241,10 @@ final class NftSelectionRepository
                 $updated++;
             }
         }
+
+        if ($updated > 0) {
+            self::bumpUserGeneration($userId);
+        }
         return $updated;
     }
 
@@ -255,5 +273,44 @@ final class NftSelectionRepository
             $keys[strtolower($r->chain_id . '|' . $r->contract_address . '|' . $r->token_id)] = true;
         }
         return $keys;
+    }
+
+    // ── Cache invalidation (§5 generation counter) ────────────────────
+
+    /**
+     * Bump the per-user selections generation counter. Called from
+     * save / delete / reorder so any future read-side cache (currently
+     * none, but the read-side hook lands when picker GETs start
+     * keying on it) sees mutations on the next request.
+     *
+     * Mirrors NftHoldingsRepository::bumpWalletGeneration — the
+     * defensive `wp_cache_add` seeds the value because some object
+     * cache backends don't auto-seed on `wp_cache_incr`.
+     */
+    public static function bumpUserGeneration(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+        $key = self::GENERATION_KEY_PREFIX . $userId;
+        if (wp_cache_get($key, self::CACHE_GROUP) === false) {
+            wp_cache_add($key, 1, self::CACHE_GROUP);
+            return;
+        }
+        wp_cache_incr($key, 1, self::CACHE_GROUP);
+    }
+
+    /**
+     * Read the current per-user selections generation. Returns 0 when
+     * the counter hasn't been seeded yet (no writes since cache reset).
+     */
+    public static function getUserGeneration(int $userId): int
+    {
+        if ($userId <= 0) {
+            return 0;
+        }
+        $key = self::GENERATION_KEY_PREFIX . $userId;
+        $value = wp_cache_get($key, self::CACHE_GROUP);
+        return is_numeric($value) ? (int) $value : 0;
     }
 }
