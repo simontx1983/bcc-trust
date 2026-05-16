@@ -209,14 +209,14 @@ final class NotificationDispatcher
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Notify the followee when someone pulls their card. The
-     * followee is always a user id (binder is a projection of
-     * PeepSo follows — see §C2). Self-pulls are not possible from
-     * the binder UI; we still guard.
+     * Notify the followee when someone watches their card. The
+     * followee is always a user id (watchlist is a projection of
+     * PeepSo follows — see §C2). Self-watches are not possible from
+     * the watchlist UI; we still guard.
      *
-     * Note: pulls run through C3's batch aggregator on the feed
+     * Note: watches run through §C3's batch aggregator on the feed
      * side (one feed item per 10-min window). The notification side
-     * is intentionally per-event for now — a pull-batch-collapse
+     * is intentionally per-event for now — a watch-batch-collapse
      * pattern would be V2 work after we see the volume.
      *
      * @param string $targetKind 'validator'|'project'|'creator'|'member'
@@ -1009,6 +1009,88 @@ final class NotificationDispatcher
                 'target_id'      => $targetId,
                 'kind'           => $kind,
                 'error'          => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // bcc_divergence_state_warning — system-generated 24h heads-up
+    // when an entity transitions INTO polarizing or disputed (§J.7)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Notify the target operator when their entity transitioned into a
+     * polarizing or disputed divergence state. PR-8b — fired by the
+     * daily `PolarizationTransitionNotifier` worker, NOT by direct
+     * mutation hooks (the state is derived, not user-cast).
+     *
+     * Recipient is the target owner — for entity cards that's the
+     * page_author; for user_profile that's the user themselves. Caller
+     * supplies the recipient already resolved.
+     *
+     * From-user is 0 (system event — no actor). PeepSoNotificationWriter
+     * accepts 0 for system notifications. Deep-link target is
+     * /me/reliability (the §J.5 self-mirror with the explainer body).
+     *
+     * Wording is calibrated per §2.7 — descriptive, never prescriptive.
+     * "Your entity has transitioned into X" — no "you should attest
+     * more" or "consider responding" nudge.
+     *
+     * @param int    $targetOwnerId Recipient user_id.
+     * @param string $newState      DivergenceStateClassifier::STATE_*
+     *                              (only polarizing/disputed in scope
+     *                              — caller filters; other slugs are
+     *                              silently dropped here).
+     * @param string $targetKind    user_profile | *_card per §J.8.
+     * @param int    $targetId      The entity row id.
+     */
+    public function onDivergenceStateTransitioned(
+        int $targetOwnerId,
+        string $newState,
+        string $targetKind,
+        int $targetId
+    ): void {
+        if ($targetOwnerId <= 0 || $targetId <= 0) {
+            return;
+        }
+        // Only fire on the two states that warrant a heads-up. Any
+        // other slug (well_regarded, untested, poorly_regarded) is a
+        // non-event for notification purposes.
+        if ($newState !== 'polarizing' && $newState !== 'disputed') {
+            return;
+        }
+
+        try {
+            $message = $newState === 'disputed'
+                ? 'Your entity is now under active dispute. The panel mechanic will resolve it.'
+                : 'Your entity reads as polarizing — reliable operators currently disagree on you.';
+
+            $this->dispatch(
+                0, // System event — no human actor.
+                $targetOwnerId,
+                $message,
+                NotificationType::DIVERGENCE_STATE_WARNING,
+                $targetId, // external_id → the target entity row
+                0          // no associated activity row
+            );
+
+            // Parallel push enqueue. PushDispatcher's per-(recipient,
+            // eventType) 5-minute debounce piles up — combined with
+            // the notifier's 24h coalescing at the storage layer
+            // (last_notified_at), the recipient sees at most one
+            // push per state-transition.
+            $this->pushDispatcher->enqueue($targetOwnerId, 'divergence_state_warning', [
+                'new_state'    => $newState,
+                'target_kind'  => $targetKind,
+                'target_id'    => $targetId,
+            ]);
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] divergence-state-warning dispatch failed', [
+                'target_owner_id' => $targetOwnerId,
+                'new_state'       => $newState,
+                'target_kind'     => $targetKind,
+                'target_id'       => $targetId,
+                'error'           => $e->getMessage(),
             ]);
         }
     }

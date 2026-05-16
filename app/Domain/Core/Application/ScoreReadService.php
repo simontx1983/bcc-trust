@@ -134,7 +134,8 @@ final class ScoreReadService implements ScoreReadServiceInterface
 
     /**
      * Read enriched data from the read model, computing the same composite
-     * ranking score used by GET /bcc/v1/discover for consistent ordering.
+     * ranking score `PageDiscoveryService` uses so /cards/list (and the
+     * bcc-search relevance ranking) sort consistently with the read model.
      *
      * @param int[] $pageIds
      * @return array<int, array{total_score: float, reputation_tier: string, ranking_score: float, endorsement_count: int, is_verified: bool, follower_count: int}>

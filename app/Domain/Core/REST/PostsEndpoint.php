@@ -37,6 +37,8 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\ValueObjects\BlogCategory;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -125,6 +127,64 @@ final class PostsEndpoint
                         'type'              => 'integer',
                         'sanitize_callback' => 'absint',
                     ],
+                    // ── §D6 crypto-blog composer (PR-A) fields ───────
+                    //
+                    // All optional at the REST layer; the service
+                    // validates per-kind (the create() handler only
+                    // forwards them when kind === 'blog'). Frontend
+                    // enforces title as required; backend accepts a
+                    // titleless blog for backward compat with the
+                    // legacy 3-arg create-path.
+                    'title' => [
+                        'required' => false,
+                        'type'     => 'string',
+                        // No sanitize_callback — PostsService::createBlog
+                        // runs sanitize_text_field inside, and adding
+                        // it here would double-strip newlines that the
+                        // length check needs to see.
+                    ],
+                    'category' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => static function ($value): string {
+                            return is_string($value) ? sanitize_key($value) : '';
+                        },
+                    ],
+                    'tags' => [
+                        'required' => false,
+                        'type'     => 'array',
+                        // Items are sanitized in PostsService::normalizeBlogTags;
+                        // here we just unwrap the array shape. WP_REST_Request
+                        // returns arrays as-is when content-type is JSON.
+                    ],
+                    // Chain tags are SLUGS over the wire (stable across
+                    // chain-row id renumbering). The handler resolves
+                    // each to its current id via ChainRepository::getBySlug
+                    // before forwarding to the service.
+                    'chain_tags' => [
+                        'required' => false,
+                        'type'     => 'array',
+                    ],
+                    'disclosure' => [
+                        'required' => false,
+                        'type'     => 'object',
+                    ],
+                    'cover_image_id' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
+                    ],
+                    // 'draft' or 'publish'. Defaults to 'publish' at the
+                    // service layer so a JSON body omitting the field
+                    // continues to land as a published post (no behavior
+                    // change for existing callers).
+                    'status' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => static function ($value): string {
+                            return is_string($value) ? sanitize_key($value) : '';
+                        },
+                    ],
                 ],
             ]
         );
@@ -158,6 +218,95 @@ final class PostsEndpoint
                         'required'          => false,
                         'type'              => 'integer',
                         'sanitize_callback' => 'absint',
+                    ],
+                ],
+            ]
+        );
+
+        // §D6 PR-B — owner edit for blog posts (partial update).
+        //
+        // Methods: WP_REST_Server::EDITABLE = PATCH | PUT. Both verbs
+        // share the same handler — the underlying semantics are
+        // partial-update either way (the service merges; missing
+        // fields stay unchanged).
+        //
+        // Auth gate is current_user_can('read') — any signed-in viewer
+        // can hit the route; the service enforces post_author ===
+        // viewer_id and returns bcc_forbidden otherwise. Permitting
+        // 'read' rather than '__return_true' keeps anonymous traffic
+        // from even reaching the handler — anonymous bots can't be
+        // authors, so there's no value in serving them a 401 envelope
+        // here vs. a 403 'rest_forbidden' from WP's auth layer.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/posts/(?P<id>\d+)',
+            [
+                'methods'             => WP_REST_Server::EDITABLE,
+                'callback'            => [$instance, 'updateBlog'],
+                'permission_callback' => static function (): bool {
+                    return current_user_can('read');
+                },
+                'args' => [
+                    'id' => [
+                        'required'          => true,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
+                    ],
+                    // All body fields are OPTIONAL — partial update.
+                    // The service's null-means-unchanged contract
+                    // requires the handler to distinguish "field was
+                    // omitted" from "field was sent as null." We do
+                    // that via $request->has_param() inside the
+                    // handler — declaring `default => null` here
+                    // would collapse those two states.
+                    'title' => [
+                        'required' => false,
+                        'type'     => 'string',
+                    ],
+                    'excerpt' => [
+                        'required' => false,
+                        'type'     => 'string',
+                    ],
+                    'content' => [
+                        'required' => false,
+                        'type'     => 'string',
+                    ],
+                    'category' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => static function ($value): string {
+                            return is_string($value) ? sanitize_key($value) : '';
+                        },
+                    ],
+                    'tags' => [
+                        'required' => false,
+                        'type'     => 'array',
+                    ],
+                    'chain_tags' => [
+                        'required' => false,
+                        'type'     => 'array',
+                    ],
+                    'disclosure' => [
+                        'required' => false,
+                        // type: object|null — `null` is a meaningful
+                        // value (clear). We don't declare a JSON
+                        // schema type because REST args validation
+                        // would refuse a null body for an `object`
+                        // type. The handler narrows manually.
+                    ],
+                    'cover_image_id' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        // Use absint — 0 is a meaningful value (un-pin
+                        // cover), so we want non-negative integers.
+                        'sanitize_callback' => 'absint',
+                    ],
+                    'status' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => static function ($value): string {
+                            return is_string($value) ? sanitize_key($value) : '';
+                        },
                     ],
                 ],
             ]
@@ -248,7 +397,119 @@ final class PostsEndpoint
                 );
             }
             $excerpt = (string) ($request->get_param('excerpt') ?? '');
-            $result  = $service->createBlog($viewerId, $excerpt, $content);
+
+            // ── PR-A: crypto-blog composer fields ───────────────────
+            //
+            // Each field is optional; we forward `null` / `[]` defaults
+            // for fields the caller omitted so the service's
+            // signature defaults take over. Validation (length, FK,
+            // shape) lives in the service — this handler's job is
+            // only narrowing/parsing/resolving.
+
+            $title = $request->get_param('title');
+            $title = is_string($title) ? $title : null;
+
+            $categoryRaw = $request->get_param('category');
+            $categoryRaw = is_string($categoryRaw) ? $categoryRaw : null;
+            $category    = null;
+            if ($categoryRaw !== null && $categoryRaw !== '') {
+                $category = BlogCategory::tryFromString($categoryRaw);
+                if ($category === null) {
+                    return ApiResponse::error(
+                        'bcc_invalid_request',
+                        'Unknown blog category.',
+                        400,
+                        ['category' => $categoryRaw]
+                    );
+                }
+            }
+
+            $tagsRaw = $request->get_param('tags');
+            /** @var list<string> $tags */
+            $tags = [];
+            if (is_array($tagsRaw)) {
+                foreach ($tagsRaw as $t) {
+                    if (is_string($t)) {
+                        $tags[] = $t;
+                    }
+                }
+            }
+
+            // Chain tags arrive as slugs (e.g. ["bitcoin","ethereum"]).
+            // Resolve to chain ids here — unknown slugs return a clear
+            // bcc_invalid_request envelope rather than silently dropping
+            // the tag.
+            $chainTagsRaw = $request->get_param('chain_tags');
+            /** @var list<int> $chainIds */
+            $chainIds = [];
+            if (is_array($chainTagsRaw)) {
+                foreach ($chainTagsRaw as $slug) {
+                    if (!is_string($slug) || $slug === '') {
+                        continue;
+                    }
+                    $chain = ChainRepository::getBySlug($slug);
+                    if ($chain === null) {
+                        return ApiResponse::error(
+                            'bcc_invalid_request',
+                            'Unknown chain tag.',
+                            400,
+                            ['chain_slug' => $slug]
+                        );
+                    }
+                    $chainIds[] = (int) $chain->id;
+                }
+            }
+
+            $disclosureRaw = $request->get_param('disclosure');
+            /** @var array{tickers?: list<string>, note?: string}|null $disclosure */
+            $disclosure = null;
+            if (is_array($disclosureRaw)) {
+                // Narrow to the expected shape; the service does the
+                // full validation, but we pre-check the keys so PHPStan
+                // sees the right type flowing into createBlog.
+                $tickersRaw = $disclosureRaw['tickers'] ?? [];
+                $noteRaw    = $disclosureRaw['note']    ?? '';
+                /** @var list<string> $tickers */
+                $tickers = [];
+                if (is_array($tickersRaw)) {
+                    foreach ($tickersRaw as $t) {
+                        if (is_string($t)) {
+                            $tickers[] = $t;
+                        }
+                    }
+                }
+                $disclosure = [
+                    'tickers' => $tickers,
+                    'note'    => is_string($noteRaw) ? $noteRaw : '',
+                ];
+            }
+
+            $coverImageIdRaw = $request->get_param('cover_image_id');
+            $coverImageId = null;
+            if (is_int($coverImageIdRaw) && $coverImageIdRaw > 0) {
+                $coverImageId = $coverImageIdRaw;
+            } elseif (is_string($coverImageIdRaw) && $coverImageIdRaw !== '') {
+                $tmp = (int) $coverImageIdRaw;
+                if ($tmp > 0) {
+                    $coverImageId = $tmp;
+                }
+            }
+
+            $statusRaw = $request->get_param('status');
+            $status    = is_string($statusRaw) && $statusRaw !== '' ? $statusRaw : 'publish';
+
+            $result = $service->createBlog(
+                $viewerId,
+                $excerpt,
+                $content,
+                $title,
+                $category,
+                $tags,
+                $chainIds,
+                $disclosure,
+                $coverImageId,
+                $status
+            );
         } else {
             // Disputes / post-as-entity are explicit V1.5/V2 work —
             // reject unknown kinds with a clear contract.
@@ -351,6 +612,206 @@ final class PostsEndpoint
         $groupId = (int) ($request->get_param('group_id') ?? 0);
 
         $result = Plugin::instance()->postsService()->createGifPost($viewerId, $url, $caption, $groupId);
+        if (isset($result['error'])) {
+            return self::forwardServiceError($result);
+        }
+
+        $response = ApiResponse::ok($result);
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
+    /**
+     * §D6 PR-B — partial-update handler for /bcc/v1/posts/{id}.
+     *
+     * Mirrors the create-path `kind=blog` branch but every body field
+     * is optional. The service's "null = unchanged" contract requires
+     * us to distinguish "field omitted" from "field sent as null":
+     *
+     *   - `has_param('foo') === false` → forward null (unchanged)
+     *   - `has_param('foo') === true`  → forward the parsed value
+     *                                    (which may itself be null for
+     *                                    fields whose contract treats
+     *                                    null as a clear, like
+     *                                    `disclosure`)
+     *
+     * The single exception to the null-means-unchanged convention is
+     * `disclosure`, which the service treats as `null → clear` and
+     * `struct → replace` (no "unchanged" state). When the caller
+     * doesn't include `disclosure` in the body, we forward the
+     * service's internal `__noop__` sentinel so the existing meta
+     * survives the request unchanged. The sentinel never escapes the
+     * service boundary.
+     */
+    public function updateBlog(WP_REST_Request $request): WP_REST_Response
+    {
+        $viewerId = get_current_user_id();
+        if ($viewerId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        $postId = (int) $request->get_param('id');
+        if ($postId <= 0) {
+            return ApiResponse::error('bcc_not_found', 'Blog post not found.', 404);
+        }
+
+        // ── Partial-update plumbing ──────────────────────────────────
+        //
+        // For each field: if the caller didn't include it, forward
+        // null (unchanged). If they did, parse + narrow.
+
+        $title = null;
+        if ($request->has_param('title')) {
+            $raw   = $request->get_param('title');
+            $title = is_string($raw) ? $raw : '';
+        }
+
+        $excerpt = null;
+        if ($request->has_param('excerpt')) {
+            $raw     = $request->get_param('excerpt');
+            $excerpt = is_string($raw) ? $raw : '';
+        }
+
+        $content = null;
+        if ($request->has_param('content')) {
+            $raw     = $request->get_param('content');
+            $content = is_string($raw) ? $raw : '';
+        }
+
+        $category = null;
+        if ($request->has_param('category')) {
+            $raw = $request->get_param('category');
+            if (is_string($raw) && $raw !== '') {
+                $parsed = BlogCategory::tryFromString($raw);
+                if ($parsed === null) {
+                    return ApiResponse::error(
+                        'bcc_invalid_request',
+                        'Unknown blog category.',
+                        400,
+                        ['category' => $raw]
+                    );
+                }
+                $category = $parsed;
+            }
+            // Empty string for category is treated as "no category
+            // change" — there's no semantic for "clear the category"
+            // in V1.5 since category is required at create. If a
+            // future contract needs clearing, add a dedicated
+            // `clear_category=true` flag rather than overloading
+            // the empty string.
+        }
+
+        $tags = null;
+        if ($request->has_param('tags')) {
+            $raw = $request->get_param('tags');
+            /** @var list<string> $tagsList */
+            $tagsList = [];
+            if (is_array($raw)) {
+                foreach ($raw as $t) {
+                    if (is_string($t)) {
+                        $tagsList[] = $t;
+                    }
+                }
+            }
+            $tags = $tagsList; // []=clear, non-empty=replace
+        }
+
+        $chainIds = null;
+        if ($request->has_param('chain_tags')) {
+            $raw = $request->get_param('chain_tags');
+            /** @var list<int> $chainIdsList */
+            $chainIdsList = [];
+            if (is_array($raw)) {
+                foreach ($raw as $slug) {
+                    if (!is_string($slug) || $slug === '') {
+                        continue;
+                    }
+                    $chain = ChainRepository::getBySlug($slug);
+                    if ($chain === null) {
+                        return ApiResponse::error(
+                            'bcc_invalid_request',
+                            'Unknown chain tag.',
+                            400,
+                            ['chain_slug' => $slug]
+                        );
+                    }
+                    $chainIdsList[] = (int) $chain->id;
+                }
+            }
+            $chainIds = $chainIdsList; // []=clear, non-empty=replace
+        }
+
+        // Disclosure — the exception to null-means-unchanged. When
+        // omitted entirely, forward the service's internal no-op
+        // sentinel so existing meta survives. When supplied as null,
+        // forward null (= clear). When supplied as an object, narrow
+        // to the expected shape.
+        $disclosure = ['__noop__' => true];
+        if ($request->has_param('disclosure')) {
+            $raw = $request->get_param('disclosure');
+            if ($raw === null) {
+                $disclosure = null; // clear
+            } elseif (is_array($raw)) {
+                $tickersRaw = $raw['tickers'] ?? [];
+                $noteRaw    = $raw['note']    ?? '';
+                /** @var list<string> $tickers */
+                $tickers = [];
+                if (is_array($tickersRaw)) {
+                    foreach ($tickersRaw as $t) {
+                        if (is_string($t)) {
+                            $tickers[] = $t;
+                        }
+                    }
+                }
+                $disclosure = [
+                    'tickers' => $tickers,
+                    'note'    => is_string($noteRaw) ? $noteRaw : '',
+                ];
+            } else {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    'Disclosure must be an object or null.',
+                    400
+                );
+            }
+        }
+
+        $coverImageId = null;
+        if ($request->has_param('cover_image_id')) {
+            $raw = $request->get_param('cover_image_id');
+            if (is_int($raw)) {
+                $coverImageId = $raw;
+            } elseif (is_string($raw) && $raw !== '') {
+                $coverImageId = (int) $raw;
+            } else {
+                // null / empty string / unexpected type — fall back to
+                // 0 (un-pin) only if the field was explicitly present.
+                $coverImageId = 0;
+            }
+        }
+
+        $status = null;
+        if ($request->has_param('status')) {
+            $raw = $request->get_param('status');
+            if (is_string($raw) && $raw !== '') {
+                $status = $raw; // service validates value set
+            }
+        }
+
+        $result = Plugin::instance()->postsService()->updateBlog(
+            $postId,
+            $viewerId,
+            $title,
+            $excerpt,
+            $content,
+            $category,
+            $tags,
+            $chainIds,
+            $disclosure,
+            $coverImageId,
+            $status
+        );
+
         if (isset($result['error'])) {
             return self::forwardServiceError($result);
         }

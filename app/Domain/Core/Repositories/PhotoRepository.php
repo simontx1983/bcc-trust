@@ -124,6 +124,41 @@ final class PhotoRepository
     }
 
     /**
+     * Batch-load all photos in a single album, newest first. Bounded
+     * by `$limit` (defaults to 200 — comfortable headroom for a single
+     * album view without unbounded scans). Owner filter is a
+     * defense-in-depth check so a stale album_id from a different user
+     * can't leak rows.
+     *
+     * Returns photos in `pho_id DESC` order — PeepSo's stored timeline
+     * (no `pho_created` on this table, the ID is the only stable
+     * ordering signal).
+     *
+     * @return list<object>
+     * @phpstan-return list<PhotoRow>
+     */
+    public function findByAlbumId(int $albumId, int $ownerId, int $limit = 200): array
+    {
+        if ($albumId <= 0 || $ownerId <= 0) {
+            return [];
+        }
+
+        $limit = max(1, min(500, $limit));
+
+        global $wpdb;
+        $sql = 'SELECT ' . self::COLUMNS . '
+                  FROM ' . self::table() . '
+                 WHERE pho_album_id = %d
+                   AND pho_owner_id = %d
+                 ORDER BY pho_id DESC
+                 LIMIT %d';
+
+        /** @phpstan-var list<PhotoRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare($sql, $albumId, $ownerId, $limit));
+        return is_array($rows) ? $rows : [];
+    }
+
+    /**
      * Resolve the owner user id for a photo by its `pho_id`. Returns
      * null when the photo doesn't exist (deleted, never uploaded, or
      * unknown id). Used by the §3.3.9 alt-text write endpoint to

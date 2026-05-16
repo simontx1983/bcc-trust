@@ -67,6 +67,7 @@ class PageDiscoveryService {
         $page               = max(1, (int) ($args['page'] ?? 1));
         $search             = sanitize_text_field($args['search'] ?? '');
         $good_standing_only = (bool) ($args['good_standing_only'] ?? false);
+        $chain_slug         = sanitize_key($args['chain_slug'] ?? '');
 
         // Validate tier against allowlist.
         if ($tier !== '' && !in_array($tier, self::ALLOWED_TIERS, true)) {
@@ -74,7 +75,7 @@ class PageDiscoveryService {
         }
 
         // Build cache key from all parameters.
-        $cache_key = $this->buildCacheKey($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only);
+        $cache_key = $this->buildCacheKey($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug);
         $cached    = wp_cache_get($cache_key, self::CACHE_GROUP);
 
         if (false !== $cached) {
@@ -82,7 +83,7 @@ class PageDiscoveryService {
         }
 
         $result = $this->canUseReadModel()
-            ? $this->executeReadModelQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only)
+            ? $this->executeReadModelQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug)
             : $this->executeQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only);
 
         /** @var int $ttl Filterable cache TTL. */
@@ -135,11 +136,12 @@ class PageDiscoveryService {
         int $limit,
         int $page,
         string $search,
-        bool $good_standing_only = false
+        bool $good_standing_only = false,
+        string $chain_slug = ''
     ): array {
         $result = \BCC\Trust\Core\Repositories\PageDiscoveryRepository::queryFromReadModel(
             $types, $sort, $verified_only, $tier, $min_confidence,
-            $new_only, $max_votes, $limit, $page, $search, $good_standing_only
+            $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug
         );
 
         $rows = $result['rows'];
@@ -433,7 +435,8 @@ class PageDiscoveryService {
         int $limit,
         int $page,
         string $search,
-        bool $good_standing_only = false
+        bool $good_standing_only = false,
+        string $chain_slug = ''
     ): string {
         sort($types);
         $type_str    = $types ? implode('-', $types) : 'all';
@@ -444,7 +447,8 @@ class PageDiscoveryService {
         $mv_str      = $max_votes > 0 ? (string) $max_votes : '0';
         $search_hash = $search !== '' ? md5($search) : '0';
         $gs_str      = $good_standing_only ? '1' : '0';
+        $chain_str   = $chain_slug !== '' ? $chain_slug : '0';
 
-        return "bcc_discovery_{$type_str}_{$sort}_{$verified}_{$tier_str}_{$conf_str}_{$new_str}_{$mv_str}_{$limit}_{$page}_{$search_hash}_gs{$gs_str}";
+        return "bcc_discovery_{$type_str}_{$sort}_{$verified}_{$tier_str}_{$conf_str}_{$new_str}_{$mv_str}_{$limit}_{$page}_{$search_hash}_gs{$gs_str}_ch{$chain_str}";
     }
 }

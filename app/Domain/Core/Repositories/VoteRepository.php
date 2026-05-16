@@ -962,6 +962,85 @@ class VoteRepository {
     }
 
     /**
+     * Page-side counterpart to {@see findByVoterPaginated()} — paginated
+     * list of active reviews whose subject is the given page. Used by
+     * `/entities/{kind}/{id}/reviews` to power the Reviews tab on
+     * entity profiles.
+     *
+     * No JOIN here — the service hydrates each voter via the shared
+     * `MemberSummaryPrefetcher` + `UserViewService::getSummary` so the
+     * caller can render a full MemberSummary card per row instead of
+     * a flat `voter_login` string.
+     *
+     * @return list<object{
+     *   id: int|numeric-string,
+     *   voter_user_id: int|numeric-string,
+     *   vote_type: int|numeric-string,
+     *   explanation: string|null,
+     *   reason: string|null,
+     *   created_at: string
+     * }>
+     */
+    public function findByPageIdPaginated(int $pageId, int $limit, int $offset): array
+    {
+        if ($pageId <= 0) {
+            return [];
+        }
+        $limit  = max(1, min(100, $limit));
+        $offset = max(0, $offset);
+
+        global $wpdb;
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT id,
+                        voter_user_id,
+                        vote_type,
+                        explanation,
+                        reason,
+                        created_at
+                 FROM {$this->table}
+                 WHERE page_id = %d
+                   AND status  = 1
+                 ORDER BY created_at DESC
+                 LIMIT %d OFFSET %d",
+                $pageId,
+                $limit,
+                $offset
+            )
+        );
+
+        /** @var list<object{
+         *   id: int|numeric-string,
+         *   voter_user_id: int|numeric-string,
+         *   vote_type: int|numeric-string,
+         *   explanation: string|null,
+         *   reason: string|null,
+         *   created_at: string
+         * }> $rows
+         */
+        return $rows ?: [];
+    }
+
+    /**
+     * Count total active votes whose subject is the given page. Pair
+     * to {@see findByPageIdPaginated()} for `pagination.total`.
+     */
+    public function countByPageId(int $pageId): int
+    {
+        if ($pageId <= 0) {
+            return 0;
+        }
+        global $wpdb;
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table}
+             WHERE page_id = %d
+               AND status  = 1",
+            $pageId
+        ));
+    }
+
+    /**
      * Count total active votes by voter.
      */
     public function countByVoter( int $voterId ): int {
@@ -2154,5 +2233,40 @@ class VoteRepository {
         ) );
 
         return $result ?: null;
+    }
+
+    /**
+     * Count active votes cast by a user within the last N days.
+     *
+     * Drives §D5 interest-coupled panel duty (scale-hardening Phase 2,
+     * 2026-05-13). The "recent civic activity" affinity signal: a
+     * panelist who has voted in the last 30 days is materially more
+     * informed about current floor dynamics than one who has gone
+     * quiet. The dispute panel benefits from at least some such
+     * panelists.
+     *
+     * Indexed: bcc_trust_votes (voter_user_id, created_at) composite
+     * covers WHERE + range filter cheaply. The status=1 filter excludes
+     * removed/disputed votes from the count so revocations don't
+     * artificially deflate the recent-activity signal.
+     *
+     * Bounded by the time window — never a full table scan.
+     *
+     * @param int $voterId   The user to count for.
+     * @param int $daysBack  Window size in days. Caller-bounded.
+     */
+    public function countRecentByActor( int $voterId, int $daysBack ): int {
+        global $wpdb;
+
+        $daysBack = max(1, $daysBack);
+
+        return (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table}
+              WHERE voter_user_id = %d
+                AND status = 1
+                AND created_at > DATE_SUB(NOW(), INTERVAL %d DAY)",
+            $voterId,
+            $daysBack
+        ) );
     }
 }

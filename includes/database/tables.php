@@ -27,6 +27,7 @@ require_once __DIR__ . '/schema-score-events.php';
 
 // V1 frontend support tables (per docs/api-contract-v1.md §6.5)
 require_once __DIR__ . '/schema-pull-meta.php';
+require_once __DIR__ . '/schema-page-follows.php';
 require_once __DIR__ . '/schema-user-ranks.php';
 require_once __DIR__ . '/schema-pull-batches.php';
 require_once __DIR__ . '/schema-reputation-events.php';
@@ -40,6 +41,9 @@ require_once __DIR__ . '/schema-push-subscriptions.php';
 require_once __DIR__ . '/schema-photo-alts.php';
 // V2 Trust Attestation Layer: §J wire contract — generalizes Endorse → Vouch
 require_once __DIR__ . '/schema-trust-attestations.php';
+// V2 Trust Attestation Layer PR-8b: divergence-state sidecar — prior-state
+// memory for the PolarizationTransitionNotifier cron worker.
+require_once __DIR__ . '/schema-target-divergence-state.php';
 // NOTE: bcc_user_locals removed — Locals membership lives in PeepSo's
 // peepso_group_members (single graph rule); primary-Local pointer in
 // wp_usermeta.bcc_primary_local_group_id.
@@ -124,6 +128,10 @@ function bcc_trust_create_tables() {
         bcc_trust_create_pull_meta_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Pull meta table created', []);
     }
+    if (function_exists('bcc_trust_create_page_follows_table')) {
+        bcc_trust_create_page_follows_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Page follows table created', []);
+    }
     if (function_exists('bcc_trust_create_user_ranks_table')) {
         bcc_trust_create_user_ranks_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: User ranks table created', []);
@@ -159,6 +167,10 @@ function bcc_trust_create_tables() {
     if (function_exists('bcc_trust_create_trust_attestations_table')) {
         bcc_trust_create_trust_attestations_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Trust attestations table created + legacy endorsement migration applied', []);
+    }
+    if (function_exists('bcc_trust_create_target_divergence_state_table')) {
+        bcc_trust_create_target_divergence_state_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Target divergence-state sidecar table created', []);
     }
 
     // §D5 reaction seeding — idempotent insert of the three custom

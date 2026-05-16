@@ -1,12 +1,15 @@
 <?php
 /**
- * Pull Meta Table Schema
+ * Watch Meta Table Schema (legacy physical name: bcc_pull_meta)
  *
- * Sidecar metadata for PeepSo follows that represent BCC card pulls.
- * Per §C2 of the V1 plan: the binder is a UI projection of PeepSo
- * follows + this thin metadata table. There is NO separate follow
- * graph — pulling a card is creating a peepso_follower row, and this
- * table only stores the BCC-specific extras PeepSo follows don't carry.
+ * Sidecar metadata for PeepSo follows that represent BCC card watches.
+ * Per §C2 of the V1 plan: the watchlist (formerly "Binder," renamed
+ * 2026-05-13 — see docs/api-contract-v1.md §4.5.1) is a UI projection
+ * of PeepSo follows + this thin metadata table. There is NO separate
+ * follow graph — watching a card is creating a peepso_follower row,
+ * and this table only stores the BCC-specific extras PeepSo follows
+ * don't carry. The table and column names retain their original
+ * `pull`-prefixed forms; a physical rename is deferred to release N+2.
  *
  * Rows are 1:1 with peepso_follower rows. PK is follow_id (not an
  * autoincrement) so that an unfollow cascading on follow_id removes

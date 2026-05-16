@@ -7,10 +7,10 @@
  * chain-alignment personalization (see FeedColdStartService doctype
  * for why that's load-bearing).
  *
- * Route is intentionally NOT under /discover/* — that path is owned by
- * the legacy bcc-page-slider DiscoveryEndpoint and would collide. The
- * `cold-start` slug also matches what the surface IS (a cold-start
- * bridge) rather than what it APPEARS to be (a discovery panel).
+ * Route is intentionally NOT under /discover/* — the `cold-start` slug
+ * matches what the surface IS (a cold-start bridge) rather than what
+ * it APPEARS to be (a discovery panel). (Historical note: /bcc/v1/discover
+ * was the legacy bcc-page-slider endpoint, retired 2026-05-15.)
  *
  * Cache posture: `Cache-Control: private, no-store`. The underlying
  * primitives (FeedRankingService::getHotFeed, UserSyncRepository

@@ -3,13 +3,14 @@
  * Users Endpoint — handles /bcc/v1/users/:handle/* routes.
  *
  * Phase 1 routes registered:
- *   - GET /users/:handle/shift-log — 52-week activity grid (§4.4)
- *   - GET /users/:handle/blog      — §D6 long-form posts, paginated
- *   - GET /users/:handle/reviews   — §V1.5 reviews-on-file, paginated
- *   - GET /users/:handle/disputes  — §V1.5 disputes-signed, paginated
- *   - GET /users/:handle/activity  — per-user wall (PeepSo "stream"), cursor
- *   - GET /members                 — paginated member directory (offset)
- *   - GET /users/mention-search    — §3.3.12 composer @-mention picker
+ *   - GET /users/:handle/shift-log      — 52-week activity grid (§4.4)
+ *   - GET /users/:handle/blog           — §D6 long-form posts, paginated
+ *   - GET /users/:handle/reviews        — §V1.5 reviews-on-file, paginated
+ *   - GET /users/:handle/disputes       — §V1.5 disputes-signed, paginated
+ *   - GET /users/:handle/activity       — per-user wall (PeepSo "stream"), cursor
+ *   - GET /users/:handle/endorsements   — pages this user has endorsed (§J6 given)
+ *   - GET /members                      — paginated member directory (offset)
+ *   - GET /users/mention-search         — §3.3.12 composer @-mention picker
  *
  * Future Phase 1 routes (will register here when they land):
  *   - GET /users/:handle — full User view-model (§4.4)
@@ -24,22 +25,16 @@
 
 namespace BCC\Trust\Core\REST;
 
-use BCC\Core\Repositories\PeepSoFollowerRepository;
-use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Repositories\PeepSoPageRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Plugin;
-use BCC\Trust\Core\Repositories\EndorsementRepository;
-use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\GitHubRepository;
-use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\UserRankRepository;
-use BCC\Trust\Core\Repositories\UserSyncRepository;
-use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
-use BCC\Trust\Core\Support\ReactionTypeRegistry;
+use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
+use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -260,6 +255,35 @@ final class UsersEndpoint
             ]
         );
 
+        // GET /users/:handle/endorsements — pages this user has endorsed
+        // (§J.6 given-direction; the inverse of the attestation roster
+        // which shows received). Anonymous-readable per §J trust-graph
+        // doctrine: attestation data is public-by-design.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/users/(?P<handle>' . self::HANDLE_PATTERN . ')/endorsements',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [new self(), 'endorsements'],
+                'permission_callback' => '__return_true',
+                'args'                => [
+                    'handle' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'limit' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        'default'           => 20,
+                        'minimum'           => 1,
+                        'maximum'           => 50,
+                        'sanitize_callback' => 'absint',
+                    ],
+                ],
+            ]
+        );
+
         // GET /members — paginated directory of human members.
         // Sibling to /directory (entity cards: validator/project/creator).
         // Slim summary shape per UserViewService::getSummary; click-through
@@ -360,7 +384,7 @@ final class UsersEndpoint
     {
         $handle = (string) $request->get_param('handle');
 
-        $userId = self::resolveHandle($handle);
+        $userId = UserSlugResolver::resolve($handle);
         if ($userId === 0) {
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
@@ -396,7 +420,7 @@ final class UsersEndpoint
     {
         $handle = (string) $request->get_param('handle');
 
-        $userId = self::resolveHandle($handle);
+        $userId = UserSlugResolver::resolve($handle);
         if ($userId === 0) {
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
@@ -426,7 +450,7 @@ final class UsersEndpoint
     {
         $handle = (string) $request->get_param('handle');
 
-        $userId = self::resolveHandle($handle);
+        $userId = UserSlugResolver::resolve($handle);
         if ($userId === 0) {
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
@@ -453,6 +477,43 @@ final class UsersEndpoint
         // absorb tab toggles without stalling on fresh activity.
         $response->header('Cache-Control', 'private, max-age=15');
         $response->header('Vary', 'Authorization, Cookie');
+
+        return $response;
+    }
+
+    public function endorsements(WP_REST_Request $request): WP_REST_Response
+    {
+        // Per-handle bucket so a hot profile can't starve the rest of the
+        // namespace; matches /endorsements/mine throttle posture.
+        if (!Throttle::allow('users_endorsements', 30, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
+        $handle = (string) $request->get_param('handle');
+
+        $userId = UserSlugResolver::resolve($handle);
+        if ($userId === 0) {
+            return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
+        }
+
+        $limit = (int) $request->get_param('limit');
+        if ($limit < 1) {
+            $limit = 20;
+        }
+
+        $service      = Plugin::instance()->endorsementService();
+        $endorsements = $service->getUserEndorsements($userId, $limit);
+        $items        = $service->hydrateEndorsementItems($endorsements);
+
+        $response = ApiResponse::ok([
+            'items' => $items,
+            'total' => count($items),
+        ]);
+        // Public read with per-page snapshot — short shared cache absorbs
+        // tab-strip toggles. Vary on Authorization so an auth flip
+        // (sign-in / sign-out) doesn't serve a cached anon response.
+        $response->header('Cache-Control', 'public, max-age=15');
+        $response->header('Vary', 'Authorization');
 
         return $response;
     }
@@ -595,34 +656,15 @@ final class UsersEndpoint
         $userIds = array_map('intval', $rawIds);
 
         // Prefetch the per-user signals that would otherwise N+1 across
-        // the page (24 rows × 3-4 single-user queries each). Each repo
-        // call below is one batched SQL keyed on `IN (userIds)`, so the
-        // total query budget for these signals is bounded regardless of
-        // `per_page`. Trust score is request-memoized on UserViewService
-        // itself (`$trustScoreCache`); we don't need a separate prefetch
-        // for it — the per-row `resolveAugmentedTrustScore` lookup is a
+        // the page (24 rows × 11 single-user queries each). Each batched
+        // call inside `MemberSummaryPrefetcher::primeFor` is one SQL
+        // keyed on `IN (userIds)`, so the total query budget for these
+        // signals is bounded regardless of `per_page`. Trust score is
+        // request-memoized on UserViewService itself
+        // (`$trustScoreCache`); we don't need a separate prefetch for
+        // it — the per-row `resolveAugmentedTrustScore` lookup is a
         // PK-on-`bcc_reputation_scores` read, cheap.
-        // Solid reaction id can be null when the reaction set isn't
-        // seeded yet (fresh install / dev). Skip the batch query in
-        // that case — getSummary defaults solids_received to 0.
-        $solidId = ReactionTypeRegistry::solidId();
-        $solidsReceivedCounts = $solidId === null
-            ? []
-            : (new PeepSoReactionRepository())->countReceivedByUsers($userIds, $solidId);
-
-        $prefetched = [
-            'follower_counts'              => PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
-            'primary_locals'               => PeepSoGroupRepository::getPrimaryLocalForUsers($userIds),
-            'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
-            'owned_pages_by_type'          => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
-            'endorsements_received_counts' => (new EndorsementRepository())->getReceivedCountsForUsers($userIds),
-            'solids_received_counts'       => $solidsReceivedCounts,
-            'reviews_written_counts'       => (new VoteRepository())->countByVoters($userIds),
-            'disputes_signed_counts'       => (new FlagsRepository())->countByFlaggers($userIds),
-            'wallets_verified_counts'      => WalletRepository::getVerifiedCountsForUsers($userIds),
-            'x_connections'                => (new XRepository())->getConnectionsForUsers($userIds),
-            'github_connections'           => (new GitHubRepository())->getConnectionsForUsers($userIds),
-        ];
+        $prefetched = MemberSummaryPrefetcher::primeFor($userIds);
 
         $userView = Plugin::instance()->userViewService();
         $items    = [];
@@ -833,7 +875,7 @@ final class UsersEndpoint
     {
         $handle = (string) $request->get_param('handle');
 
-        $userId = self::resolveHandle($handle);
+        $userId = UserSlugResolver::resolve($handle);
         if ($userId === 0) {
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
@@ -868,7 +910,7 @@ final class UsersEndpoint
             $weeks = self::DEFAULT_WEEKS;
         }
 
-        $userId = self::resolveHandle($handle);
+        $userId = UserSlugResolver::resolve($handle);
         if ($userId === 0) {
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
@@ -882,47 +924,4 @@ final class UsersEndpoint
         return $response;
     }
 
-    /**
-     * Resolve a handle to a wp_users.ID.
-     *
-     * Primary lookup is `wp_usermeta.bcc_handle` (the §B6 canonical
-     * handle). Falls back to `wp_users.user_login` for legacy accounts
-     * created before §B6's handle picker landed — without this fallback
-     * those accounts get a 404 on their own profile page even though
-     * they exist + are logged in. WordPress enforces unique
-     * `user_login` so the fallback is collision-safe.
-     *
-     * Returns 0 when nothing matches either lookup.
-     */
-    private static function resolveHandle(string $handle): int
-    {
-        $handle = strtolower(trim($handle));
-        if ($handle === '') {
-            return 0;
-        }
-
-        // get_users uses $wpdb under the hood but is the WP-canonical
-        // user-lookup API — repo-only-DB rule is about raw $wpdb in
-        // our code. Bounded to a single match by 'number' => 1.
-        $userIds = get_users([
-            'meta_key'   => 'bcc_handle',
-            'meta_value' => $handle,
-            'number'     => 1,
-            'fields'     => 'ID',
-        ]);
-
-        if (!empty($userIds)) {
-            return (int) $userIds[0];
-        }
-
-        // ── Fallback: try wp_users.user_login. ──────────────────────────
-        // get_user_by('login', ...) is case-insensitive on most WP
-        // collations; that matches the §B6 lowercase-only handle rule.
-        $userByLogin = get_user_by('login', $handle);
-        if ($userByLogin instanceof \WP_User) {
-            return (int) $userByLogin->ID;
-        }
-
-        return 0;
-    }
 }

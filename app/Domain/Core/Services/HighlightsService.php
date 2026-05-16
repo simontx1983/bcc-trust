@@ -7,7 +7,7 @@
  *
  *   slot 1 — negative event affecting the viewer (slashing, uptime
  *            drop on a followed validator, dispute against an entity
- *            in binder)
+ *            in watchlist)
  *   slot 2 — positive milestone for the viewer (rank promotion, card
  *            tier bump, milestone reactions on own content)
  *   slot 3 — high-signal external event (followed creator drop,
@@ -182,7 +182,7 @@ final class HighlightsService
      * Slot 1 — negative event affecting the viewer.
      *
      * V1.0 STUB: returns null in production. Implementation roadmap:
-     *   - JOIN bcc_onchain_signals deltas with viewer's binder to find
+     *   - JOIN bcc_onchain_signals deltas with viewer's watchlist to find
      *     uptime drops on followed validators (≥ 1% over 24h)
      *   - bcc_trust_flags filed against entities the viewer pulled
      *   - slashing events on followed validators
@@ -402,8 +402,8 @@ final class HighlightsService
      *
      *   1. `PeepSoFollowerRepository::getFollowing(viewerId, 200)` —
      *      the user_ids the viewer is keeping tabs on (canonical follow
-     *      graph; same source the binder reads). Capped at 200 — that's
-     *      the same cap the binder uses for paginated reads.
+     *      graph; same source the watchlist reads). Capped at 200 — that's
+     *      the same cap the watchlist uses for paginated reads.
      *
      *   2. `PeepSoPageRepository::getPageIdsOwnedByUsers(followed, 500)` —
      *      the bridge from follow-graph (user-keyed) to score-events
@@ -462,7 +462,7 @@ final class HighlightsService
             return null;
         }
 
-        // (1) Who the viewer watches. 200 cap matches binder pagination.
+        // (1) Who the viewer watches. 200 cap matches watchlist pagination.
         $followedUsers = PeepSoFollowerRepository::getFollowing($viewerId, 200);
         if ($followedUsers === []) {
             return null;

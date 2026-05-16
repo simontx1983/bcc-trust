@@ -730,6 +730,69 @@ class EndorsementService {
     }
 
     /**
+     * Hydrate raw endorsement rows into the §J.6 contract-stable item
+     * shape (page_title + page_url + page-owner avatar, current tier
+     * snapshot from the read model, weight + context + reason +
+     * timestamp).
+     *
+     * Shared between:
+     *   - UserEndorsementsEndpoint::handleList  (`GET /endorsements/mine`)
+     *   - UsersEndpoint::endorsements           (`GET /users/:handle/endorsements`)
+     *
+     * Single source of trust per §A4 — both surfaces emit identical
+     * row shapes. The owner-side and public-side reads diverge on
+     * permission + cache headers, not on row shape.
+     *
+     * §A view-model boundary: this is presentation-layer assembly
+     * (avatar URL via WP, esc_url / sanitize_key for the wire). The
+     * underlying score / tier / weight values are computed elsewhere
+     * (read model). This method only joins them per row.
+     *
+     * @param list<array<string, mixed>> $endorsements Raw rows from
+     *     EndorsementService::getUserEndorsements.
+     * @return list<array<string, mixed>>
+     */
+    public function hydrateEndorsementItems(array $endorsements): array
+    {
+        $page_ids = array_map(static fn(array $e): int => (int) ($e['page_id'] ?? 0), $endorsements);
+        $rm_rows  = [];
+        if (!empty($page_ids)) {
+            $rm_rows = \BCC\Trust\Core\Plugin::instance()->pageReadModelRepository()->getByPageIds($page_ids);
+        }
+
+        $items = [];
+        foreach ($endorsements as $e) {
+            $pid = (int) ($e['page_id'] ?? 0);
+            $rm  = $rm_rows[$pid] ?? null;
+
+            $avatar = '';
+            if ($rm && $rm->owner_id) {
+                $avatar = get_avatar_url((int) $rm->owner_id, ['size' => 64]);
+            }
+
+            $pageTitle = isset($e['page_title']) && is_string($e['page_title']) ? $e['page_title'] : null;
+            $context   = isset($e['context'])    && is_string($e['context'])    ? $e['context']    : null;
+            $reason    = isset($e['reason'])     && is_string($e['reason'])     ? $e['reason']     : null;
+            $createdAt = isset($e['created_at']) && is_string($e['created_at']) ? $e['created_at'] : null;
+
+            $items[] = [
+                'id'           => (int) ($e['id'] ?? 0),
+                'page_id'      => $pid,
+                'page_title'   => $pageTitle ?? __('(Untitled)', 'bcc-trust'),
+                'page_url'     => get_permalink($pid) ? esc_url(get_permalink($pid)) : '',
+                'avatar_url'   => $avatar ? esc_url($avatar) : '',
+                'trust_score'  => $rm ? (int) round((float) $rm->trust_score) : null,
+                'tier'         => $rm ? sanitize_key($rm->reputation_tier ?? 'neutral') : 'unavailable',
+                'weight'       => round((float) ($e['weight'] ?? 0), 2),
+                'context'      => $context ?? 'general',
+                'reason'       => $reason,
+                'created_at'   => $createdAt,
+            ];
+        }
+        return $items;
+    }
+
+    /**
      * Update endorser's stats in user_info table
      */
     private function updateEndorserStats(int $userId): void {

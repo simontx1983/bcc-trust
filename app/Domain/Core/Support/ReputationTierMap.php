@@ -11,7 +11,7 @@
  *   risky   → null   (entity hidden from card UI per §C1)
  *
  * Before this class existed, the same mapping was duplicated verbatim
- * across UserViewService, CardViewService, BinderService,
+ * across UserViewService, CardViewService, WatchingService,
  * TierUpgradeListener, and CardsSearchEndpoint. A drift between any two
  * would silently mis-tier a card on one surface relative to another —
  * a P1 contract break. All five now resolve through here.

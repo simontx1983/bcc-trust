@@ -1,13 +1,13 @@
 <?php
 /**
- * Binder Service — composes the GET /bcc/v1/me/binder response.
+ * Watching Service — composes the GET /bcc/v1/me/watching response.
  *
- * Per §C2: the binder is a UI-layer projection of PeepSo follows.
- * This service is the read-side composer; mutation services
- * (pull/unpull/batch) ship in Phase 2/3 alongside their endpoints.
+ * Per §C2: the watchlist is a UI-layer projection of PeepSo follows.
+ * This service is the read-side composer plus the watch/unwatch
+ * mutations.
  *
  * Scope (this file):
- *   - Read paginated binder items for a viewer
+ *   - Read paginated watch items for a viewer
  *   - card_kind resolves to validator/project/creator when the followed
  *     user has a peepso-page (Phase 2 lookup); falls back to 'member'
  *     for member-only follows. {is_resolved=true, card_kind='member'}
@@ -20,19 +20,25 @@
  *   - pulled_at         → null when no bcc_pull_meta row exists yet
  *
  * Previously stubbed, now wired (kept for changelog clarity):
- *   - card_kind         → resolved via BinderRepository::findPageInfoByUserIds
+ *   - card_kind         → resolved via WatchingRepository::findPageInfoByUserIds
  *
- * Pagination: offset envelope per §1.5 (binder is a directory, not
+ * Pagination: offset envelope per §1.5 (watchlist is a directory, not
  * a time-ordered feed).
  *
+ * Vocabulary note (release N): this service is canonical "Watching";
+ * the legacy "Binder" route family in WatchingEndpoint delegates to
+ * the same handlers per the additive-deprecation runway (api-contract
+ * §1.1.1).
+ *
  * @package BCC\Trust\Core\Services
- * @since V1 (2026-04, Binder Phase 1)
+ * @since V1 (2026-04, Watching Phase 1; renamed from BinderService 2026-05-13)
  */
 
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\PeepSo\PeepSoFollowWriter;
-use BCC\Trust\Core\Repositories\BinderRepository;
+use BCC\Trust\Core\Repositories\WatchingRepository;
+use BCC\Trust\Core\Repositories\PageFollowRepository;
 use BCC\Trust\Core\Repositories\PullMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
@@ -44,9 +50,9 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * @phpstan-import-type BinderItemRow from BinderRepository
+ * @phpstan-import-type WatchingItemRow from WatchingRepository
  */
-final class BinderService
+final class WatchingService
 {
     /**
      * Hard cap on page_size — defended at three layers (route arg
@@ -59,21 +65,22 @@ final class BinderService
     public const VALID_TARGET_KINDS = ['validator', 'project', 'creator', 'member'];
 
     // Frontend URL prefix moved to CardUrlMap (single source of truth
-    // shared with CardViewService — see §C2 binder-Phase-1 corrections).
+    // shared with CardViewService — see §C2 watching-Phase-1 corrections).
     //
     // §C1 reputation tier ↔ card_tier ↔ display label mapping is in
     // ReputationTierMap (Support/) — shared with CardViewService,
     // UserViewService, TierUpgradeListener, CardsSearchEndpoint.
 
     public function __construct(
-        private readonly BinderRepository $binderRepo,
+        private readonly WatchingRepository $watchingRepo,
         private readonly PullMetaRepository $pullMetaRepo,
-        private readonly ReputationRepository $reputationRepo
+        private readonly ReputationRepository $reputationRepo,
+        private readonly PageFollowRepository $pageFollowRepo
     ) {
     }
 
     /**
-     * Build the binder view-model for a viewer.
+     * Build the watchlist view-model for a viewer.
      *
      * @return array{
      *   items: list<array{
@@ -93,46 +100,85 @@ final class BinderService
      *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
      * }
      */
-    public function getBinder(int $userId, int $page, int $pageSize): array
+    public function getWatching(int $userId, int $page, int $pageSize): array
     {
         $page     = max(1, $page);
         $pageSize = max(1, min(self::MAX_PAGE_SIZE, $pageSize));
         $offset   = ($page - 1) * $pageSize;
 
         // ────────────────────────────────────────────────────────────
-        //  Query budget (LOCKED — do not exceed 3 queries per binder
-        //  request without an explicit contract amendment):
+        //  Two-source watchlist (V1.6+):
+        //    1. PeepSo user→user follows (the historical source — claimed
+        //       pages + member follows go here)
+        //    2. bcc_page_follows         (pre-claim placeholder pages,
+        //       drained on claim — see PeepSoIntegration::onPageClaimed)
         //
-        //    1. countItemsForUser     (pagination total)
-        //    2. findItemsForUser      (cross-table cursor read)
-        //    3. findPageInfoByUserIds (Phase 2 reverse lookup)
+        //  Page-follows accrue slowly (one per unclaimed validator a
+        //  viewer cares about) and migrate out as operators claim. V1
+        //  always fetches the full set (cap 100) and prepends them on
+        //  page 1 only — pagination still anchors on the PeepSo side
+        //  for the bulk of follows. When page_follows exceed page 1's
+        //  budget, the overflow visibly drops; this is a known V1
+        //  limitation that becomes a non-issue post-claim drainage.
         //
-        //  Adding a 4th would re-introduce N+1 via the back door.
-        //  If a follow-up needs more data, fold it into one of the
-        //  existing queries or pre-cache; do not append a new query.
+        //  Query budget remains capped: countItemsForUser +
+        //  findItemsForUser + findPageInfoByUserIds (PeepSo side) +
+        //  findByUserId + bulk get_post (page-follow side) = 5 queries.
+        //  Acceptable for the directory UX which fires once per session.
         // ────────────────────────────────────────────────────────────
-        $total      = $this->binderRepo->countItemsForUser($userId);
-        $totalPages = $total > 0 ? (int) ceil($total / $pageSize) : 0;
 
-        $rows = $this->binderRepo->findItemsForUser($userId, $offset, $pageSize);
+        // ── Page-follows (placeholder pages, pre-claim) ──────────────
+        $pageFollowItems = [];
+        $pageFollowCount = 0;
+        if ($page === 1) {
+            $pageFollowRows = $this->pageFollowRepo->findByUserId($userId, 100, 0);
+            $pageFollowCount = count($pageFollowRows);
 
-        // Phase 2: bulk-resolve page-info for all followed users in
-        // this page. Users without a peepso-page stay as 'member';
-        // users with one flip to validator / project / creator and
-        // gain is_resolved=true. One query for the whole feed page;
-        // no N+1.
+            if ($pageFollowCount > 0) {
+                $pageIds = array_map(fn($r) => (int) $r->page_id, $pageFollowRows);
+                _prime_post_caches($pageIds, false, false);
+                foreach ($pageFollowRows as $pfRow) {
+                    $post = get_post((int) $pfRow->page_id);
+                    if ($post instanceof \WP_Post && $post->post_type === 'peepso-page') {
+                        $pageFollowItems[] = self::buildItemFromPageFollow($pfRow, $post);
+                    }
+                }
+            }
+        } else {
+            // page > 1 — still need the count for accurate totals.
+            $pageFollowCount = $this->pageFollowRepo->countByUserId($userId);
+        }
+
+        // ── PeepSo follows (legacy source) ───────────────────────────
+        $peepsoTotal = $this->watchingRepo->countItemsForUser($userId);
+
+        // Leave room on page 1 for the page-follow items above. Page 2+
+        // uses the full pageSize budget for PeepSo follows.
+        $peepsoBudget = $page === 1
+            ? max(0, $pageSize - count($pageFollowItems))
+            : $pageSize;
+
+        $rows = $peepsoBudget > 0
+            ? $this->watchingRepo->findItemsForUser($userId, $offset, $peepsoBudget)
+            : [];
+
         $followeeUserIds = [];
         foreach ($rows as $row) {
             $followeeUserIds[] = (int) $row->card_user_id;
         }
         $followeeUserIds = array_values(array_unique($followeeUserIds));
-        $pageInfo = $this->binderRepo->findPageInfoByUserIds($followeeUserIds);
+        $pageInfo = $this->watchingRepo->findPageInfoByUserIds($followeeUserIds);
 
-        $items = [];
+        $peepsoItems = [];
         foreach ($rows as $row) {
             $userPage = $pageInfo[(int) $row->card_user_id] ?? null;
-            $items[] = self::buildItem($row, $userPage);
+            $peepsoItems[] = self::buildItem($row, $userPage);
         }
+
+        $items = array_merge($pageFollowItems, $peepsoItems);
+
+        $total      = $peepsoTotal + $pageFollowCount;
+        $totalPages = $total > 0 ? (int) ceil($total / $pageSize) : 0;
 
         return [
             'items' => $items,
@@ -146,7 +192,7 @@ final class BinderService
     }
 
     /**
-     * @param BinderItemRow $row
+     * @param WatchingItemRow $row
      * @param object{user_id: int|numeric-string, page_id: int|numeric-string, page_slug: string, page_type: string}|null $pageInfo
      *        Phase-2 page resolution. Null when the followed user has
      *        no peepso-page (item stays 'member'); non-null with a
@@ -227,7 +273,7 @@ final class BinderService
         // ────────────────────────────────────────────────────────────
         $isLegacy = $pulledAt === null;
 
-        // Identifier rule (locked per binder Phase-1 correction):
+        // Identifier rule (locked per watching Phase-1 correction):
         // member uses bcc_handle, page kinds use post_name (slug).
         // Phase 2 fills $slug from page resolution; resolveCardIdentifier
         // flips the identifier automatically — no field/shape change.
@@ -237,7 +283,7 @@ final class BinderService
         $cardApiUrl = CardUrlMap::cardApiUrl($cardKind, $identifier);
 
         // ────────────────────────────────────────────────────────────
-        //  Renderable invariant (LOCKED): every binder item MUST carry
+        //  Renderable invariant (LOCKED): every watch item MUST carry
         //  enough to render a card link + fetch the card view-model:
         //    - card_kind     (always set, even at the 'member' default)
         //    - card_id + card_handle (both populated below)
@@ -267,6 +313,13 @@ final class BinderService
 
         return [
             'follow_id'          => (int) $row->follow_id,
+            // follow_source discriminates rows that came from the
+            // PeepSo user→user graph ('peepso') vs. our page-scoped
+            // pre-claim follow store ('page'). The frontend echoes
+            // it back on DELETE /me/watching/{id} (or the legacy
+            // /me/binder/{id}) so the server routes
+            // the unpull to the right table without an ID collision.
+            'follow_source'      => 'peepso',
             'card_kind'          => $cardKind,
             'is_resolved'        => $isResolved,
             'card_id'            => (int) $row->card_user_id,
@@ -296,11 +349,183 @@ final class BinderService
     }
 
     /**
+     * Build a watch item from a `bcc_page_follows` row + the target
+     * peepso-page post. Mirrors `buildItem` exactly except for the
+     * `follow_source` discriminator (page, not peepso) and the data
+     * sources for handle / slug / page_id. The frontend never has to
+     * know which source produced the item — fields are uniform.
+     *
+     * @param object{
+     *     id: numeric-string,
+     *     user_id: numeric-string,
+     *     page_id: numeric-string,
+     *     card_kind: string,
+     *     tier_at_pull: string|null,
+     *     created_at: string
+     * } $row
+     * @return array{
+     *   follow_id: int,
+     *   card_kind: string,
+     *   is_resolved: bool,
+     *   card_id: int,
+     *   card_handle: string,
+     *   card_slug: string|null,
+     *   page_id: int|null,
+     *   card_tier_at_pull: string|null,
+     *   tier_label_at_pull: string|null,
+     *   batch_id: string|null,
+     *   pulled_at: string|null,
+     *   is_legacy: bool,
+     *   links: array{card: string},
+     *   actions: array{view: array{method: string, href: string, idempotent: bool, requires_auth: bool}}
+     * }
+     */
+    private static function buildItemFromPageFollow(object $row, \WP_Post $page): array
+    {
+        $cardKind = (string) $row->card_kind;
+        $slug     = $page->post_name !== '' ? $page->post_name : null;
+        $pageId   = (int) $page->ID;
+
+        $identifier = self::resolveCardIdentifier($cardKind, $slug ?? '', $slug);
+        $cardLink   = CardUrlMap::frontendUrl($cardKind, $identifier);
+        $cardApiUrl = CardUrlMap::cardApiUrl($cardKind, $identifier);
+
+        $tierAtPull = $row->tier_at_pull;
+        $tierLabel  = ReputationTierMap::toCardTierLabel($tierAtPull);
+
+        $createdAt = self::toIso8601($row->created_at);
+
+        return [
+            // The id here is the bcc_page_follows row id — disambiguated
+            // from peepso follow IDs by the follow_source field below.
+            // Server uses both (id + source) to route DELETE.
+            'follow_id'          => (int) $row->id,
+            'follow_source'      => 'page',
+            'card_kind'          => $cardKind,
+            'is_resolved'        => true,
+            // For page-follows, card_id is the page's wp_post ID so the
+            // frontend's "{kind}-{id}" lookup against the cards-list
+            // response (where Card.id is the wp_post ID) matches the
+            // same key. Members never go through this code path.
+            'card_id'            => $pageId,
+            'card_handle'        => $slug ?? (string) $pageId,
+            'card_slug'          => $slug,
+            'page_id'            => $pageId,
+            'card_tier_at_pull'  => $tierAtPull,
+            'tier_label_at_pull' => $tierLabel,
+            'batch_id'           => null,
+            'pulled_at'          => $createdAt !== '' ? $createdAt : null,
+            // Page-follows are always a real pull moment — never legacy
+            // (legacy means "PeepSo follow with no BCC pull record").
+            'is_legacy'          => false,
+            'links' => [
+                'card' => $cardLink,
+            ],
+            'actions' => [
+                'view' => [
+                    'method'        => 'GET',
+                    'href'          => $cardApiUrl,
+                    'idempotent'    => true,
+                    'requires_auth' => false,
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * Record a follow on a system-minted placeholder page (post_author=0)
+     * via the BCC page-follows table. Idempotent — calling watch twice
+     * on the same placeholder returns status='already_pulled' the second
+     * time and does NOT re-fire `bcc_card_pulled` / `bcc_card_watched`.
+     *
+     * Validates the target shape (peepso-page, publish, author=0)
+     * before writing — anything else still surfaces as
+     * `bcc_not_found` so we don't silently start following
+     * member/post/comment rows via the wrong path.
+     *
+     * @return array{
+     *   status: 'pulled'|'already_pulled',
+     *   item: array<string, mixed>
+     * }|array{error: string, message: string}
+     */
+    private function watchPlaceholderPage(int $viewerId, string $targetKind, int $targetId): array
+    {
+        // Page-kind only — member cards have a user, not a page.
+        if (!in_array($targetKind, ['validator', 'project', 'creator'], true)) {
+            return ['error' => 'bcc_not_found', 'message' => 'Target not found.'];
+        }
+
+        $post = get_post($targetId);
+        if (!$post instanceof \WP_Post
+            || $post->post_type !== 'peepso-page'
+            || $post->post_status !== 'publish'
+            || (int) $post->post_author !== 0
+        ) {
+            // Not a placeholder page — return the same not-found shape
+            // the PeepSo path would return so callers can't probe.
+            return ['error' => 'bcc_not_found', 'message' => 'Target not found.'];
+        }
+
+        // tier_at_pull for placeholders: read from the page's read-model
+        // row when present; null otherwise. Matches the existing
+        // resolveCardTierForUser pattern but page-scoped.
+        $tierAtPull = self::resolveCardTierForPage($targetId);
+
+        $result = $this->pageFollowRepo->insertOrFind($viewerId, $targetId, $targetKind, $tierAtPull);
+        if ($result['id'] === 0) {
+            return ['error' => 'bcc_internal_error', 'message' => 'Failed to record follow.'];
+        }
+
+        if ($result['inserted']) {
+            // Dual-emit during release N (additive-deprecation runway):
+            //   - bcc_card_pulled  (legacy event, kept for back-compat;
+            //     dropped in release N+1)
+            //   - bcc_card_watched (new canonical event)
+            // Subscribers MUST attach to exactly ONE of the two to avoid
+            // double-processing. The Plugin.php registrations still bind
+            // to bcc_card_pulled during release N.
+            do_action('bcc_card_pulled',  $viewerId, $result['id'], $targetKind, $targetId);
+            do_action('bcc_card_watched', $viewerId, $result['id'], $targetKind, $targetId);
+        }
+
+        $row = $this->pageFollowRepo->findById($result['id']);
+        if ($row === null) {
+            return ['error' => 'bcc_internal_error', 'message' => 'Watch recorded but item not retrievable.'];
+        }
+
+        return [
+            'status' => $result['inserted'] ? 'pulled' : 'already_pulled',
+            'item'   => self::buildItemFromPageFollow($row, $post),
+        ];
+    }
+
+    /**
+     * Map a placeholder page's current read-model tier to a card_tier
+     * for tier_at_pull. Returns null when the read-model row hasn't
+     * projected yet — same null semantics buildItem already handles.
+     */
+    private static function resolveCardTierForPage(int $pageId): ?string
+    {
+        global $wpdb;
+        $rmTable = \BCC\Trust\Core\Database\TableRegistry::pageReadModel();
+
+        $tier = $wpdb->get_var($wpdb->prepare(
+            "SELECT reputation_tier FROM {$rmTable} WHERE page_id = %d LIMIT 1",
+            $pageId
+        ));
+
+        if ($tier === null || $tier === '') {
+            return null;
+        }
+        return ReputationTierMap::toCardTier((string) $tier);
+    }
+
+    /**
      * Pick the canonical identifier for a card_kind. The kind dictates
      * whether the second URL segment is a bcc_handle (member) or a
      * post_name slug (page-backed kinds).
      *
-     * Locked structure (binder Phase-1 correction). Phase 2 supplies
+     * Locked structure (watching Phase-1 correction). Phase 2 supplies
      * a non-null $slug from page resolution; Phase 1 always passes
      * null. The match shape stays stable across phases — only the
      * value flips.
@@ -324,30 +549,36 @@ final class BinderService
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Phase 2 mutations (pull / unpull) — single-graph rule via
-    // PeepSoFollowWriter. NO batching here (Phase 3 owns the §C3
-    // 10-minute rolling-window aggregator).
+    // Mutations (watch / unwatch) — single-graph rule via
+    // PeepSoFollowWriter. NO batching here (the §C3 10-minute
+    // rolling-window aggregator owns that, see WatchBatchAggregator).
+    //
+    // Vocabulary note (release N): public methods named watch/unwatch
+    // for canonical clarity. Legacy callers can continue to invoke
+    // pull/unpull via the deprecated WatchingEndpoint route family,
+    // which delegates to these methods.
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Pull a card into the viewer's binder.
+     * Watch a card (add it to the viewer's watchlist).
      *
-     * Per §C2: pulling = creating a peepso_user_followers row +
+     * Per §C2: watching = creating a peepso_user_followers row +
      * writing a bcc_pull_meta sidecar. The follow itself is the
      * source of truth; bcc_pull_meta carries the BCC-specific extras
      * (tier_at_pull, batch_id, visibility).
      *
      * Idempotent: if the viewer is already following the resolved
      * target, returns the existing item with status='already_pulled'
-     * and does NOT re-fire the bcc_card_pulled event or rewrite
-     * tier_at_pull (preserves historical record of the original pull).
+     * and does NOT re-fire the bcc_card_pulled / bcc_card_watched
+     * events or rewrite tier_at_pull (preserves historical record of
+     * the original watch).
      *
      * @return array{
      *   status: 'pulled'|'already_pulled',
      *   item: array<string, mixed>
      * }|array{error: string, message: string}
      */
-    public function pull(int $viewerId, string $targetKind, int $targetId): array
+    public function watch(int $viewerId, string $targetKind, int $targetId): array
     {
         if (!in_array($targetKind, self::VALID_TARGET_KINDS, true)) {
             return ['error' => 'bcc_invalid_request', 'message' => 'Invalid target_kind.'];
@@ -358,11 +589,16 @@ final class BinderService
 
         $followeeId = self::resolveFollowee($targetKind, $targetId);
         if ($followeeId === 0) {
-            return ['error' => 'bcc_not_found', 'message' => 'Target not found.'];
+            // Pre-claim fallback: system-minted placeholder pages have
+            // post_author=0, so the PeepSo user→user follow path can't
+            // resolve a followee. Record the follow in our own page-
+            // scoped table instead; on claim, PeepSoIntegration::on
+            // PageClaimed migrates these into real PeepSo follows.
+            return $this->watchPlaceholderPage($viewerId, $targetKind, $targetId);
         }
 
         if ($followeeId === $viewerId) {
-            return ['error' => 'bcc_invalid_request', 'message' => 'You cannot pull yourself.'];
+            return ['error' => 'bcc_invalid_request', 'message' => 'You cannot watch yourself.'];
         }
 
         $followId = PeepSoFollowWriter::follow($viewerId, $followeeId);
@@ -374,28 +610,35 @@ final class BinderService
         $alreadyPulled = $existingMeta !== null;
 
         if (!$alreadyPulled) {
-            // First-time pull: write the sidecar with the followee's
+            // First-time watch: write the sidecar with the followee's
             // current card_tier preserved. tier_at_pull is the
             // *card_tier* (legendary/rare/...) per the schema docblock,
             // not the reputation_tier — map at write time.
             $cardTier = self::resolveCardTierForUser($followeeId);
-            $this->pullMetaRepo->insert($followId, $cardTier, null /* batch_id — Phase 3 */);
-            do_action('bcc_card_pulled', $viewerId, $followId, $targetKind, $targetId);
+            $this->pullMetaRepo->insert($followId, $cardTier, null /* batch_id — owned by WatchBatchAggregator */);
+            // Dual-emit during release N (additive-deprecation runway):
+            //   - bcc_card_pulled  (legacy, dropped in release N+1)
+            //   - bcc_card_watched (new canonical)
+            // Subscribers MUST attach to exactly ONE of the two to
+            // avoid double-processing. Plugin.php registrations still
+            // bind to bcc_card_pulled during release N.
+            do_action('bcc_card_pulled',  $viewerId, $followId, $targetKind, $targetId);
+            do_action('bcc_card_watched', $viewerId, $followId, $targetKind, $targetId);
         }
 
-        $row = $this->binderRepo->findItemByFollowId($viewerId, $followId);
+        $row = $this->watchingRepo->findItemByFollowId($viewerId, $followId);
         if ($row === null) {
             // Should not happen: we just inserted the follow + meta.
             // If it does, the writer failed and surfacing the row
             // wouldn't help anyway — return an honest error.
-            return ['error' => 'bcc_internal_error', 'message' => 'Pull recorded but item not retrievable.'];
+            return ['error' => 'bcc_internal_error', 'message' => 'Watch recorded but item not retrievable.'];
         }
 
-        // Phase 2: resolve the followee's page info so the returned
-        // binder item carries the right card_kind / is_resolved /
+        // Resolve the followee's page info so the returned watch
+        // item carries the right card_kind / is_resolved /
         // identifier per the locked contract — same shape as items
-        // from GET /me/binder.
-        $pageInfo = $this->binderRepo->findPageInfoByUserIds([(int) $row->card_user_id]);
+        // from GET /me/watching.
+        $pageInfo = $this->watchingRepo->findPageInfoByUserIds([(int) $row->card_user_id]);
         $userPage = $pageInfo[(int) $row->card_user_id] ?? null;
 
         return [
@@ -405,29 +648,45 @@ final class BinderService
     }
 
     /**
-     * Unpull (remove a card from the viewer's binder).
+     * Unwatch (remove a card from the viewer's watchlist).
      *
      * Sets uf_follow=0 on the existing PeepSo row (preserves uf_id
      * for audit) and DELETEs the bcc_pull_meta sidecar (per §C2 cascade).
      *
      * Returns success only when the viewer actually owned the follow
-     * — cross-user unpull attempts get 'bcc_not_found' to avoid
+     * — cross-user unwatch attempts get 'bcc_not_found' to avoid
      * leaking ownership info.
      *
      * @return array{status: 'unpulled', follow_id: int}|array{error: string, message: string}
      */
-    public function unpull(int $viewerId, int $followId): array
+    public function unwatch(int $viewerId, int $followId, string $source = 'peepso'): array
     {
         if ($viewerId <= 0 || $followId <= 0) {
             return ['error' => 'bcc_invalid_request', 'message' => 'follow_id is required.'];
         }
 
-        // Read the followee under the ownership predicate before
-        // mutating — needed for the bcc_card_unpulled event payload
-        // and as the existence check.
-        $followeeId = $this->binderRepo->getFolloweeForOwner($viewerId, $followId);
+        // Source = 'page' → look up + delete in the page-follow table.
+        // The IDs in bcc_page_follows are auto-increment and overlap with
+        // PeepSo follow IDs, so the discriminator is load-bearing — we
+        // can't deduce the table from the id alone.
+        if ($source === 'page') {
+            $row = $this->pageFollowRepo->findById($followId);
+            if ($row === null || (int) $row->user_id !== $viewerId) {
+                return ['error' => 'bcc_not_found', 'message' => 'Follow not found in your watchlist.'];
+            }
+            $deleted = $this->pageFollowRepo->deleteById($followId);
+            if ($deleted === false || $deleted === 0) {
+                return ['error' => 'bcc_internal_error', 'message' => 'Failed to remove follow.'];
+            }
+
+            do_action('bcc_card_unpulled', $viewerId, $followId, 0);
+            return ['status' => 'unpulled', 'follow_id' => $followId];
+        }
+
+        // Default path — PeepSo user→user unfollow.
+        $followeeId = $this->watchingRepo->getFolloweeForOwner($viewerId, $followId);
         if ($followeeId === 0) {
-            return ['error' => 'bcc_not_found', 'message' => 'Follow not found in your binder.'];
+            return ['error' => 'bcc_not_found', 'message' => 'Follow not found in your watchlist.'];
         }
 
         $unfollowed = PeepSoFollowWriter::unfollow($viewerId, $followeeId);

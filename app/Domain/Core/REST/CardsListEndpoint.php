@@ -26,11 +26,13 @@
  *                                            `tier` via AND so the filter
  *                                            chip and per-row stamp can never
  *                                            disagree.
- *   - page   (1-based)                    — capped at 20 (filesort
- *                                            invariant on offset-
- *                                            paginated queries)
- *   - per_page (1..50)                    — 50-row hard ceiling
- *                                            (same invariant)
+ *   - page   (1-based)                    — capped at 20 (offset-FS
+ *                                            guard inherited from the
+ *                                            now-retired DiscoveryEndpoint
+ *                                            it superseded; same filesort-
+ *                                            prevention budget on deep
+ *                                            pagination)
+ *   - per_page (1..50)                    — hard ceiling
  *
  * Deferred to V1.5 (per scope discipline §P):
  *   - chain filter             — bcc_page_read_model has no chain column
@@ -48,6 +50,7 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\PageDiscoveryService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\PageTypeMap;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -60,7 +63,7 @@ final class CardsListEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
-    /** Hard ceilings — filesort/memory invariants on offset-paginated queries. */
+    /** Hard ceilings — must match DiscoveryEndpoint's invariants. */
     private const PER_PAGE_MAX = 50;
     private const PAGE_MAX     = 20;
 
@@ -134,6 +137,11 @@ final class CardsListEndpoint
                         // in REST args (which would reject 'true' as
                         // a non-integer).
                         'type'     => 'string',
+                    ],
+                    'chain' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_key',
                     ],
                 ],
             ]
@@ -215,6 +223,21 @@ final class CardsListEndpoint
             true
         );
 
+        // ── chain filter (validator-scoped today; service handles the
+        //    JOIN through the `_bcc_onchain_validator_id` post_meta the
+        //    minter writes). Rejected at the boundary for unknown slugs
+        //    so we never silently return empty results from a typo.
+        $chainSlug = (string) $request->get_param('chain');
+        if ($chainSlug !== '') {
+            if (ChainRepository::getBySlug($chainSlug) === null) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    'chain must be a known chain slug.',
+                    400
+                );
+            }
+        }
+
         // ── Run discovery ───────────────────────────────────────────────
         $discoveryService = new PageDiscoveryService();
         $discoveryResult = $discoveryService->query([
@@ -225,6 +248,7 @@ final class CardsListEndpoint
             'page'               => $page,
             'search'             => $query,
             'good_standing_only' => $goodStandingOnly,
+            'chain_slug'         => $chainSlug,
         ]);
 
         $rows = isset($discoveryResult['results']) && is_array($discoveryResult['results'])

@@ -231,7 +231,7 @@ final class FirstActionListener
     /**
      * Resolve the user id that should receive the first_watcher
      * celebration given a `bcc_card_pulled` hook payload. Encapsulates
-     * the two binder-pull target shapes so the hook handler stays
+     * the two watch target shapes so the hook handler stays
      * single-line at the call site.
      *
      *   - targetKind === 'user' → the target IS a user id (direct follow)

@@ -3,7 +3,7 @@
  * CardUrlMap — single source of truth for card kind → URL mapping.
  *
  * ────────────────────────────────────────────────────────────────────
- *  CENTRALIZATION RULE (LOCKED — see binder Phase-2 corrections):
+ *  CENTRALIZATION RULE (LOCKED — see watching Phase-2 corrections):
  *
  *    Every consumer that builds a card URL — frontend route OR API
  *    endpoint — MUST go through this class. Do not redefine the
@@ -12,7 +12,7 @@
  *
  *    Current consumers:
  *      - CardViewService (links.self / links.review on card view-models)
- *      - BinderService   (links.card + actions.view on binder items)
+ *      - WatchingService (links.card + actions.view on watch items)
  *
  *    Next.js frontend routes MUST agree with the prefixes here.
  *    Divergence creates silent broken links across kinds — the bug

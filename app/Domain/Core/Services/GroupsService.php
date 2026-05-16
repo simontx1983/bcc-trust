@@ -44,9 +44,11 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 
@@ -62,6 +64,11 @@ final class GroupsService
      * consistent across surfaces.
      */
     private const DESCRIPTION_LIMIT = 200;
+
+    public function __construct(
+        private readonly ReputationRepository $reputationRepo
+    ) {
+    }
 
     /**
      * Server-pinned copy for the NFT-gate unlock hint surfaced on
@@ -102,6 +109,8 @@ final class GroupsService
      *   },
      *   feed_visible: bool,
      *   members_visible: bool,
+     *   chain_tag: string|null,
+     *   trust_min: int|null,
      *   links: array{self: string}
      * }|null
      */
@@ -125,6 +134,14 @@ final class GroupsService
         }
 
         $isMember = $this->viewerIsActiveMember($viewerId, $groupId);
+        // Owners get a dedicated `can_leave` branch because
+        // PeepSoGroupWriter::leave returns false (group would be
+        // orphaned). Surfacing the gate on the permissions block lets
+        // the FE render a disabled button with a server-pinned hint
+        // instead of a live button that always 403s.
+        $isOwner  = $isMember
+            ? $this->viewerIsGroupOwner($viewerId, $groupId)
+            : false;
 
         // ── §S defense-in-depth gate #1: secret group, non-member → 404 ──
         if ($ctx->privacy === PeepSoPrivacy::Secret && !$isMember) {
@@ -153,15 +170,31 @@ final class GroupsService
                 $this->resolveNftEnrichment($ctx, $viewerId, $isMember);
         }
 
+        // BCC trust-gate read. Meta value is the canonical threshold
+        // (25/50/75) the create flow locked at the moment of creation.
+        // Plain-group only — NFT/Local groups use other gate paths.
+        $trustGateMin = 0;
+        if ($ctx->type !== GroupType::Nft && $ctx->type !== GroupType::Local) {
+            $trustGateMin = (int) get_post_meta($groupId, '_bcc_trust_gate_min', true);
+        }
+
         $permissions = $this->buildPermissions(
             $ctx,
             $viewerId,
             $isMember,
-            $isNftHolder
+            $isNftHolder,
+            $isOwner,
+            $trustGateMin
         );
 
         $feedVisible    = $permissions['can_read_feed']['allowed'];
         $membersVisible = $this->resolveMembersVisible($ctx, $isMember);
+
+        // Chain-tag resolution: reads from either `_bcc_gate_chain_id`
+        // (NFT) or `_bcc_chain_tag` (plain). Locals + legacy untagged
+        // groups return null — the FE renders no chip in that case.
+        $chainMap = ChainRepository::resolveSlugsForGroups([$groupId]);
+        $chainTag = $chainMap[$groupId] ?? null;
 
         return [
             'id'                => $groupId,
@@ -179,6 +212,13 @@ final class GroupsService
             'permissions'       => $permissions,
             'feed_visible'      => $feedVisible,
             'members_visible'   => $membersVisible,
+            // Same key vocabulary as the create-response on POST /me/groups
+            // (MyGroupsEndpoint::postCreate) — `trust_min` is the canonical
+            // signal that the group is reputation-gated (privacy === "open"
+            // under the hood for trust groups). `chain_tag` is the chain
+            // slug; null means untagged.
+            'chain_tag'         => $chainTag,
+            'trust_min'         => $trustGateMin > 0 ? $trustGateMin : null,
             'links'             => ['self' => '/groups/' . (string) $row->post_name],
         ];
     }
@@ -287,6 +327,26 @@ final class GroupsService
             return false;
         }
         return in_array($status, CommentService::READ_ALLOWED_STATUSES, true);
+    }
+
+    /**
+     * Is the viewer the group's owner? `member_owner` is PeepSo's
+     * canonical role enum value (one per group). Used to gate
+     * `permissions.can_leave` on the detail-page response so the FE
+     * renders the button server-disabled instead of a live action
+     * that always 403s via PeepSoGroupWriter::leave's owner guard.
+     *
+     * Cheap: one indexed lookup against peepso_group_members. Same
+     * source of truth PeepSoGroupWriter::leave uses for its own guard,
+     * so the gate UI + write reject can never drift.
+     */
+    private function viewerIsGroupOwner(int $viewerId, int $groupId): bool
+    {
+        if ($viewerId <= 0 || $groupId <= 0) {
+            return false;
+        }
+        $status = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
+        return $status === 'member_owner';
     }
 
     /**
@@ -427,10 +487,12 @@ final class GroupsService
         GroupContext $ctx,
         int $viewerId,
         bool $isMember,
-        bool $isNftHolder
+        bool $isNftHolder,
+        bool $isOwner = false,
+        int $trustGateMin = 0
     ): array {
-        $canJoin     = $this->resolveCanJoin($ctx, $viewerId, $isMember, $isNftHolder);
-        $canLeave    = $this->resolveCanLeave($viewerId, $isMember);
+        $canJoin     = $this->resolveCanJoin($ctx, $viewerId, $isMember, $isNftHolder, $trustGateMin);
+        $canLeave    = $this->resolveCanLeave($viewerId, $isMember, $isOwner);
         $canReadFeed = $this->resolveCanReadFeed($ctx, $viewerId, $isMember);
 
         return [
@@ -447,7 +509,8 @@ final class GroupsService
         GroupContext $ctx,
         int $viewerId,
         bool $isMember,
-        bool $isNftHolder
+        bool $isNftHolder,
+        int $trustGateMin = 0
     ): array {
         if ($viewerId <= 0) {
             return [
@@ -480,6 +543,30 @@ final class GroupsService
             ];
         }
 
+        // BCC trust gate — ranked above the PeepSo privacy checks
+        // because trust-gated groups use PeepSo's `open` privacy at
+        // the storage layer (the gate is purely a BCC-layer concept).
+        // Same threshold semantics as MyGroupsEndpoint::postJoin so
+        // the FE hint and the server reject can't drift.
+        if ($trustGateMin > 0) {
+            $viewerScore = (int) round($this->reputationRepo->getScore($viewerId));
+            if ($viewerScore < $trustGateMin) {
+                return [
+                    'allowed'     => false,
+                    'unlock_hint' => sprintf(
+                        'Earn a reputation score of %d to join. You\'re at %d.',
+                        $trustGateMin,
+                        $viewerScore
+                    ),
+                    'reason_code' => 'trust_threshold',
+                ];
+            }
+            // Score passes — fall through to the open-privacy allow path
+            // below. PeepSo privacy for trust groups is `open` per the
+            // create-flow mapping, so the Secret/Closed checks here are
+            // no-ops for the trust path.
+        }
+
         if ($ctx->privacy === PeepSoPrivacy::Secret) {
             // Secret-non-member never reaches this branch (gated to 404
             // upstream). Belt-and-braces in case the call shape changes.
@@ -508,7 +595,7 @@ final class GroupsService
     /**
      * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
      */
-    private function resolveCanLeave(int $viewerId, bool $isMember): array
+    private function resolveCanLeave(int $viewerId, bool $isMember, bool $isOwner = false): array
     {
         if ($viewerId <= 0) {
             return [
@@ -522,6 +609,19 @@ final class GroupsService
                 'allowed'     => false,
                 'unlock_hint' => null,
                 'reason_code' => 'not_member',
+            ];
+        }
+        // Owners cannot leave their own group via the regular path —
+        // PeepSoGroupWriter::leave guards on member_owner status to
+        // prevent orphaning. Mirror that guard at the permissions
+        // boundary so the FE renders a disabled button + the same
+        // copy MyGroupsEndpoint::postLeave returns on a server-rejected
+        // POST. Single source of truth for the unlock_hint.
+        if ($isOwner) {
+            return [
+                'allowed'     => false,
+                'unlock_hint' => 'Owners cannot leave their own community. Hand off ownership or delete the group first.',
+                'reason_code' => 'owner_cannot_leave',
             ];
         }
         return [

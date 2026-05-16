@@ -85,6 +85,16 @@ final class NotificationType
     public const ATTESTATION_REAFFIRMED             = 'bcc_attestation_reaffirmed';
 
     /**
+     * PR-8b — divergence-state warning. Fired by the daily
+     * PolarizationTransitionNotifier when a target transitions INTO
+     * `polarizing` or `disputed` (per §J.7 / §J.8). 24h coalescing per
+     * (recipient, target_kind, target_id, new_state) so the same
+     * transition doesn't spam the bell across cron ticks. Deep-links
+     * to /me/reliability where the §J.5 explainer body sits.
+     */
+    public const DIVERGENCE_STATE_WARNING           = 'bcc_divergence_state_warning';
+
+    /**
      * Whitelist of valid type slugs. Used by the read-side validation
      * (NotificationViewService) to reject corrupt rows rather than
      * surface garbage to the frontend.
@@ -105,6 +115,7 @@ final class NotificationType
         self::ATTESTATION_STAND_BEHIND_RECEIVED,
         self::ATTESTATION_REVOKED,
         self::ATTESTATION_REAFFIRMED,
+        self::DIVERGENCE_STATE_WARNING,
     ];
 
     public static function isValid(string $type): bool

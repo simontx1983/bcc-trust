@@ -146,6 +146,12 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_pull_meta';
     }
 
+    public static function pageFollows(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_page_follows';
+    }
+
     public static function userRanks(): string
     {
         global $wpdb;
@@ -212,6 +218,17 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_attestations';
     }
 
+    /**
+     * PR-8b sidecar — prior-state memory + cooldown bookkeeping for the
+     * §J.8 divergence-state notifier. Keyed on (target_kind, target_id);
+     * not a cache (the classifier remains the source of truth).
+     */
+    public static function targetDivergenceState(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_target_divergence_state';
+    }
+
     // NOTE: bcc_user_locals removed — Locals membership ledger is PeepSo's
     // peepso_group_members; primary-Local pointer is wp_usermeta.bcc_primary_local_group_id.
     // NOTE: bcc_page_claims removed — page claims merged into bcc_onchain_claims
@@ -258,6 +275,8 @@ final class TableRegistry
             'photo_alts'         => self::photoAlts(),
             // V2 Trust Attestation Layer (§J)
             'trust_attestations' => self::trustAttestations(),
+            // V2 Trust Attestation Layer PR-8b — divergence-state sidecar
+            'target_divergence_state' => self::targetDivergenceState(),
         ];
     }
 }

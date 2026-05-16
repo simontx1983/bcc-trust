@@ -20,7 +20,6 @@ use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VerificationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
-use BCC\Trust\Core\REST\DiscoveryEndpoint;
 use BCC\Trust\Core\REST\Envelope;
 use BCC\Trust\Core\REST\PageEndpoint;
 use BCC\Trust\Core\Security\BehavioralAnalyzer;
@@ -252,13 +251,103 @@ final class Plugin
         return $this->attestationRepository ??= new AttestationRepository();
     }
 
+    private ?\BCC\Trust\Core\Services\WalletAgeWeighter $walletAgeWeighter = null;
+    public function walletAgeWeighter(): \BCC\Trust\Core\Services\WalletAgeWeighter
+    {
+        return $this->walletAgeWeighter ??= new \BCC\Trust\Core\Services\WalletAgeWeighter();
+    }
+
+    private ?\BCC\Trust\Core\Services\ReciprocityPenaltyResolver $reciprocityResolver = null;
+    public function reciprocityResolver(): \BCC\Trust\Core\Services\ReciprocityPenaltyResolver
+    {
+        return $this->reciprocityResolver ??= new \BCC\Trust\Core\Services\ReciprocityPenaltyResolver(
+            $this->attestationRepository()
+        );
+    }
+
+    private ?\BCC\Trust\Core\Services\DormancyDetector $dormancyDetector = null;
+    public function dormancyDetector(): \BCC\Trust\Core\Services\DormancyDetector
+    {
+        return $this->dormancyDetector ??= new \BCC\Trust\Core\Services\DormancyDetector(
+            $this->attestationRepository()
+        );
+    }
+
+    private ?\BCC\Trust\Core\Services\ReliabilityStandingComputer $reliabilityStandingComputer = null;
+    public function reliabilityStandingComputer(): \BCC\Trust\Core\Services\ReliabilityStandingComputer
+    {
+        return $this->reliabilityStandingComputer ??= new \BCC\Trust\Core\Services\ReliabilityStandingComputer(
+            $this->attestationRepository()
+        );
+    }
+
+    private ?\BCC\Trust\Core\Services\CohortOverlapDampener $cohortOverlapDampener = null;
+    public function cohortOverlapDampener(): \BCC\Trust\Core\Services\CohortOverlapDampener
+    {
+        return $this->cohortOverlapDampener ??= new \BCC\Trust\Core\Services\CohortOverlapDampener(
+            $this->attestationRepository()
+        );
+    }
+
+    private ?\BCC\Trust\Core\Services\NewEntityReputationVelocityCap $newEntityVelocityCap = null;
+    public function newEntityVelocityCap(): \BCC\Trust\Core\Services\NewEntityReputationVelocityCap
+    {
+        return $this->newEntityVelocityCap ??= new \BCC\Trust\Core\Services\NewEntityReputationVelocityCap();
+    }
+
+    private ?\BCC\Trust\Core\Services\DivergenceStateClassifier $divergenceClassifier = null;
+    public function divergenceClassifier(): \BCC\Trust\Core\Services\DivergenceStateClassifier
+    {
+        return $this->divergenceClassifier ??= new \BCC\Trust\Core\Services\DivergenceStateClassifier(
+            $this->attestationRepository()
+        );
+    }
+
+    private ?\BCC\Trust\Core\Services\ContestedStateExplainer $contestedStateExplainer = null;
+    public function contestedStateExplainer(): \BCC\Trust\Core\Services\ContestedStateExplainer
+    {
+        return $this->contestedStateExplainer ??= new \BCC\Trust\Core\Services\ContestedStateExplainer();
+    }
+
+    private ?\BCC\Trust\Core\Repositories\TargetDivergenceStateRepository $targetDivergenceStateRepository = null;
+    public function targetDivergenceStateRepository(): \BCC\Trust\Core\Repositories\TargetDivergenceStateRepository
+    {
+        return $this->targetDivergenceStateRepository ??= new \BCC\Trust\Core\Repositories\TargetDivergenceStateRepository();
+    }
+
+    private ?\BCC\Trust\Core\Services\PolarizationTransitionNotifier $polarizationTransitionNotifier = null;
+    public function polarizationTransitionNotifier(): \BCC\Trust\Core\Services\PolarizationTransitionNotifier
+    {
+        return $this->polarizationTransitionNotifier ??= new \BCC\Trust\Core\Services\PolarizationTransitionNotifier(
+            $this->attestationRepository(),
+            $this->targetDivergenceStateRepository(),
+            $this->divergenceClassifier(),
+            $this->notificationDispatcher()
+        );
+    }
+
+    private ?\BCC\Trust\Core\Services\MetaDisputeFilerEligibility $metaDisputeFilerEligibility = null;
+    public function metaDisputeFilerEligibility(): \BCC\Trust\Core\Services\MetaDisputeFilerEligibility
+    {
+        return $this->metaDisputeFilerEligibility ??= new \BCC\Trust\Core\Services\MetaDisputeFilerEligibility(
+            $this->attestationRepository()
+        );
+    }
+
     private ?AttestationService $attestationService = null;
     public function attestationService(): AttestationService
     {
         return $this->attestationService ??= new AttestationService(
             $this->attestationRepository(),
             $this->reputationRepository(),
-            $this->userInfoRepository()
+            $this->userInfoRepository(),
+            $this->walletAgeWeighter(),
+            $this->reciprocityResolver(),
+            $this->dormancyDetector(),
+            $this->reliabilityStandingComputer(),
+            $this->cohortOverlapDampener(),
+            $this->divergenceClassifier(),
+            $this->contestedStateExplainer()
         );
     }
 
@@ -422,7 +511,9 @@ final class Plugin
     private ?Services\GroupsService $groupsService = null;
     public function groupsService(): Services\GroupsService
     {
-        return $this->groupsService ??= new Services\GroupsService();
+        return $this->groupsService ??= new Services\GroupsService(
+            $this->reputationRepository()
+        );
     }
 
     private ?Services\GroupMembersService $groupMembersService = null;
@@ -522,7 +613,8 @@ final class Plugin
             $this->livingService(),
             $this->reputationEventRepository(),
             $this->peepSoReactionRepository(),
-            $this->disputeParticipationRepository()
+            $this->disputeParticipationRepository(),
+            $this->attestationService()
         );
     }
 
@@ -547,7 +639,7 @@ final class Plugin
             $this->reputationRepository(),
             $this->pullBatchRepository(),
             $this->pullMetaRepository(),
-            $this->binderRepository(),
+            $this->watchingRepository(),
             $this->peepSoReactionRepository(),
             $this->voteRepository(),
             $this->hiddenActivityRepository(),
@@ -557,7 +649,8 @@ final class Plugin
             $this->photoAltRepository(),
             $this->gifRepository(),
             $this->mentionOverlayService(),
-            $this->authorBadgeResolver()
+            $this->authorBadgeResolver(),
+            $this->blogService()
         );
     }
 
@@ -571,21 +664,23 @@ final class Plugin
             $this->featureAccessService(),
             $this->voteService(),
             $this->endorsementService(),
-            $this->attestationService()
+            $this->attestationService(),
+            $this->newEntityVelocityCap(),
+            $this->divergenceClassifier()
         );
     }
 
-    private ?Repositories\BinderRepository $binderRepository = null;
-    public function binderRepository(): Repositories\BinderRepository
+    private ?Repositories\WatchingRepository $watchingRepository = null;
+    public function watchingRepository(): Repositories\WatchingRepository
     {
-        return $this->binderRepository ??= new Repositories\BinderRepository();
+        return $this->watchingRepository ??= new Repositories\WatchingRepository();
     }
 
-    private ?Services\BinderService $binderService = null;
-    public function binderService(): Services\BinderService
+    private ?Services\WatchingService $watchingService = null;
+    public function watchingService(): Services\WatchingService
     {
-        return $this->binderService ??= new Services\BinderService(
-            $this->binderRepository(),
+        return $this->watchingService ??= new Services\WatchingService(
+            $this->watchingRepository(),
             $this->pullMetaRepository(),
             $this->reputationRepository(),
             $this->pageFollowRepository()
@@ -604,8 +699,23 @@ final class Plugin
         return $this->postsService ??= new Services\PostsService(
             $this->voteService(),
             $this->voteRepository(),
-            $this->featureAccessService()
+            $this->featureAccessService(),
+            $this->blogChainTagRepository()
         );
+    }
+
+    /** §D6 PR-A — post ↔ chain join. Tagged on blog create; read on body hydration. */
+    private ?Repositories\BlogChainTagRepository $blogChainTagRepository = null;
+    public function blogChainTagRepository(): Repositories\BlogChainTagRepository
+    {
+        return $this->blogChainTagRepository ??= new Repositories\BlogChainTagRepository();
+    }
+
+    /** §D6 PR-B — cover-image upload writer for /bcc/v1/blog/cover-image. */
+    private ?Services\BlogCoverImageWriter $blogCoverImageWriter = null;
+    public function blogCoverImageWriter(): Services\BlogCoverImageWriter
+    {
+        return $this->blogCoverImageWriter ??= new Services\BlogCoverImageWriter();
     }
 
     /**
@@ -636,7 +746,8 @@ final class Plugin
     public function blogService(): Services\BlogService
     {
         return $this->blogService ??= new Services\BlogService(
-            $this->hiddenActivityRepository()
+            $this->hiddenActivityRepository(),
+            $this->blogChainTagRepository()
         );
     }
 
@@ -707,22 +818,22 @@ final class Plugin
         );
     }
 
-    private ?Services\BinderSummaryService $binderSummaryService = null;
-    public function binderSummaryService(): Services\BinderSummaryService
+    private ?Services\WatchingSummaryService $watchingSummaryService = null;
+    public function watchingSummaryService(): Services\WatchingSummaryService
     {
-        return $this->binderSummaryService ??= new Services\BinderSummaryService(
-            $this->binderRepository(),
+        return $this->watchingSummaryService ??= new Services\WatchingSummaryService(
+            $this->watchingRepository(),
             $this->voteRepository(),
             $this->flagsRepository(),
             $this->peepSoReactionRepository()
         );
     }
 
-    private ?Services\PullBatchAggregator $pullBatchAggregator = null;
-    public function pullBatchAggregator(): Services\PullBatchAggregator
+    private ?Services\WatchBatchAggregator $watchBatchAggregator = null;
+    public function watchBatchAggregator(): Services\WatchBatchAggregator
     {
-        return $this->pullBatchAggregator ??= new Services\PullBatchAggregator(
-            $this->binderRepository(),
+        return $this->watchBatchAggregator ??= new Services\WatchBatchAggregator(
+            $this->watchingRepository(),
             $this->pullMetaRepository()
         );
     }
@@ -744,6 +855,15 @@ final class Plugin
     {
         return $this->activityStreamWriter ??= new Services\Feed\ActivityStreamWriter(
             $this->pullBatchRepository(),
+            $this->peepSoActivityWriter()
+        );
+    }
+
+    /** §D6 PR-A — bridges WP's transition_post_status into BCC events for blog posts. */
+    private ?Services\Feed\BlogStatusTransitionHandler $blogStatusTransitionHandler = null;
+    public function blogStatusTransitionHandler(): Services\Feed\BlogStatusTransitionHandler
+    {
+        return $this->blogStatusTransitionHandler ??= new Services\Feed\BlogStatusTransitionHandler(
             $this->peepSoActivityWriter()
         );
     }
@@ -915,9 +1035,10 @@ final class Plugin
         //                 OAuth callbacks, health checks. Consumers:
         //                 trust-header.js, trust-frontend.js, admin.js.
         //
-        // bcc/v1        = Shared cross-plugin read API consumed by the
-        //                 Disputes domain, bcc-search, and external integrations.
-        //                 Routes: /page/{id}, /endorsements/*, /flag, /claim.
+        // bcc/v1        = Shared cross-plugin read API consumed by blocks,
+        //                 the Disputes domain, bcc-search, and external integrations.
+        //                 Routes: /page/{id}, /discover, /endorsements/*,
+        //                 /validators/top, /flag, /claim.
         //
         // Do NOT mix: new read endpoints → bcc/v1.
         //             New mutations     → bcc-trust/v1.
@@ -952,9 +1073,6 @@ final class Plugin
         // Wallet verification is handled by the Onchain domain (AJAX).
         // The Core domain listens to bcc_wallet_verified / bcc_wallet_disconnected
         // hooks in CronService::registerCacheInvalidation() for scoring updates.
-
-        // Discovery feed
-        DiscoveryEndpoint::register();
 
         // Page data endpoint
         PageEndpoint::register();
@@ -1024,10 +1142,11 @@ final class Plugin
         // orchestration over the existing onchain ClaimService.
         \BCC\Trust\Core\REST\PagesEndpoint::register();
 
-        // V1 contract: binder (§C2 — projection of PeepSo follows +
-        // bcc_pull_meta sidecar). Phase 1: read-only GET /me/binder.
-        // Phase 2/3 add pull/unpull/batching.
-        \BCC\Trust\Core\REST\BinderEndpoint::register();
+        // V1 contract: watchlist (§C2 — projection of PeepSo follows +
+        // bcc_pull_meta sidecar). Registers BOTH the canonical
+        // /me/watching/* family AND the deprecated /me/binder/* alias
+        // family (release N additive-deprecation per api-contract §1.1.1).
+        \BCC\Trust\Core\REST\WatchingEndpoint::register();
 
         // V1 contract: highlights strip (§O2 / §O2.1) — three slots,
         // strict priority order, max one item per slot, dismissal.
@@ -1058,7 +1177,21 @@ final class Plugin
         // (single-graph rule); fires bcc_post_created on the §A3 bus.
         // v1.5: also handles POST /posts/photo (multipart) and
         // POST /posts/gif (Giphy URL) for the social-grammar slices.
+        // §D6 PR-B (2026-05): also handles PATCH /posts/{id} (owner
+        // edit), which wraps WP-native wp_save_post_revision +
+        // wp_update_post + the existing BlogStatusTransitionHandler.
         \BCC\Trust\Core\REST\PostsEndpoint::register();
+
+        // §D6 PR-B — crypto-blog composer support endpoints:
+        //   POST /blog/cover-image  — multipart cover upload (writes
+        //                             a WP attachment; the create /
+        //                             update paths pin it via
+        //                             set_post_thumbnail).
+        //   GET  /blog/chain-options — picker source for the chain-tag
+        //                              widget. Anonymous-readable, 1h
+        //                              cache. Reads ChainRepository::getActive.
+        \BCC\Trust\Core\REST\BlogCoverImageEndpoint::register();
+        \BCC\Trust\Core\REST\BlogChainOptionsEndpoint::register();
 
         // v1.5 a11y: PATCH /photos/:pho_id/alt — author-only write
         // for the §3.3.9 alt-text deferred-debt slot. Stores into the
@@ -1187,6 +1320,28 @@ final class Plugin
         // surface in the response per §J.4.1 synthesis invisibility.
         \BCC\Trust\Core\REST\EntityAttestationsEndpoint::register();
 
+        // Phase 2 entity tab parity (2026-05-14) — Reviews / Disputes /
+        // Watchers tabs on /v, /p, /c profiles. Same /entities/{kind}/{id}
+        // namespace as EntityAttestationsEndpoint so the by-target shape
+        // stays consistent. Each service paginates a single bcc_trust_*
+        // table read + hydrates authors/flaggers/watchers via the shared
+        // MemberSummaryPrefetcher.
+        \BCC\Trust\Core\REST\CardReviewsEndpoint::register();
+        \BCC\Trust\Core\REST\CardDisputesEndpoint::register();
+        \BCC\Trust\Core\REST\CardWatchersEndpoint::register();
+
+        // V2 Trust Attestation Layer — PR-2 self-mirror surface:
+        //   GET /me/reliability  (§4.20 §J.5)
+        // The asymmetric-display companion to the public roster — the
+        // operator's own reliability numeric, trends, and slot
+        // allocation. Self-only per §J.10 q14; the numeric never flows
+        // to a third-party endpoint in V1. V1 baseline: live counts
+        // (slots_used, since_attestation_count, slots_total) + zero'd
+        // synthesis math (operator_reliability=0.0, trends.direction=
+        // steady, outcomes={0,0,0,0}). Slice E populates the synthesis
+        // via the bcc_attestor_reliability_cache read-model.
+        \BCC\Trust\Core\REST\MeReliabilityEndpoint::register();
+
         // V2 Phase 6 (§H1): NFT-piece detail surface.
         //   GET /nft-pieces/{chain}/{contract}/{tokenId} — §3.7 NftPiece
         // Anonymous OR Bearer; response shape is identical for both
@@ -1198,6 +1353,21 @@ final class Plugin
         // V2: Profile Groups tab — cross-kind list with viewer-aware
         // permissions and server-built action URLs (per `type`).
         \BCC\Trust\Core\REST\UserGroupsEndpoint::register();
+
+        // §3.1 Photos tab → Albums sub-tab. Read-only over PeepSo
+        // peepso_photos_album with viewer-aware privacy filter
+        // mirroring PeepSoPhotosAlbumModel::get_user_photos_album.
+        \BCC\Trust\Core\REST\UserAlbumsEndpoint::register();
+
+        // §3.1 Photos drill-down — per-album photo list. Same privacy
+        // gate re-checked here so stale IDs from the list endpoint
+        // can't bypass a later friend-state flip.
+        \BCC\Trust\Core\REST\UserAlbumPhotosEndpoint::register();
+
+        // §3.1 Watching tab — followers ("Being Watched") + following
+        // ("Keeping Tabs") sub-tabs. Respects watching_hidden privacy;
+        // hydrates each row via UserViewService::getSummary.
+        \BCC\Trust\Core\REST\UserFollowsEndpoint::register();
 
         // V2: Plain (non-gated, non-Local) group join/leave for the
         // residual case. Holder groups → /me/holder-groups; Locals →
@@ -1411,18 +1581,25 @@ final class Plugin
             10, 5
         );
 
-        // ── §C3 pull-batch aggregator ───────────────────────────────────
+        // ── §C3 watch-batch aggregator ──────────────────────────────────
         //
-        // 1-minute recurring sweep that finds users whose binder
-        // batches have been quiet for ≥10 minutes and closes them.
-        // The handler is idempotent (UPDATE ... WHERE batch_id IS NULL
-        // guards races) so missed ticks under cron pressure are safe.
+        // 1-minute recurring sweep that finds users whose watch batches
+        // have been quiet for ≥10 minutes and closes them. The handler
+        // is idempotent (UPDATE ... WHERE batch_id IS NULL guards races)
+        // so missed ticks under cron pressure are safe.
         //
-        // Custom cron interval registered via the cron_schedules
-        // filter; the schedule itself is created on first init below.
+        // Hook name renamed 2026-05-13 from `bcc_pull_batch_sweep` to
+        // `bcc_watch_batch_sweep`. Self-heal block below unschedules the
+        // legacy hook on every plugins_loaded to drain stale events from
+        // sites that upgraded without reactivating (cron-drift mitigation
+        // mirrors V2 NFT Phase 1a/1c pattern).
+        //
+        // Custom cron interval registered via the cron_schedules filter;
+        // the interval slug (`bcc_minute`) is unchanged — only the hook
+        // name moved.
         add_filter('cron_schedules', static function (array $schedules): array {
-            if (!isset($schedules[Services\PullBatchAggregator::SWEEP_INTERVAL])) {
-                $schedules[Services\PullBatchAggregator::SWEEP_INTERVAL] = [
+            if (!isset($schedules[Services\WatchBatchAggregator::SWEEP_INTERVAL])) {
+                $schedules[Services\WatchBatchAggregator::SWEEP_INTERVAL] = [
                     'interval' => 60,
                     'display'  => 'BCC: Every Minute',
                 ];
@@ -1430,19 +1607,24 @@ final class Plugin
             return $schedules;
         });
 
-        if (!wp_next_scheduled(Services\PullBatchAggregator::SWEEP_HOOK)) {
+        // Self-heal: unschedule the legacy hook on every load (idempotent
+        // no-op once drained). Removed in release N+1 alongside the
+        // /me/binder/* routes and bcc_card_pulled event.
+        wp_clear_scheduled_hook('bcc_pull_batch_sweep');
+
+        if (!wp_next_scheduled(Services\WatchBatchAggregator::SWEEP_HOOK)) {
             wp_schedule_event(
                 time(),
-                Services\PullBatchAggregator::SWEEP_INTERVAL,
-                Services\PullBatchAggregator::SWEEP_HOOK
+                Services\WatchBatchAggregator::SWEEP_INTERVAL,
+                Services\WatchBatchAggregator::SWEEP_HOOK
             );
         }
 
-        add_action(Services\PullBatchAggregator::SWEEP_HOOK, function (): void {
+        add_action(Services\WatchBatchAggregator::SWEEP_HOOK, function (): void {
             try {
-                $this->pullBatchAggregator()->sweep();
+                $this->watchBatchAggregator()->sweep();
             } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] pull_batch_sweep failed', [
+                \BCC\Core\Log\Logger::error('[bcc-trust] watch_batch_sweep failed', [
                     'error' => $e->getMessage(),
                 ]);
             }
@@ -1456,9 +1638,10 @@ final class Plugin
         // — no other code path should INSERT into peepso_activities for
         // BCC-owned modules (pull_batch, page_claim).
         //
-        // bcc_card_pulled / bcc_card_unpulled are intentionally NOT
-        // subscribed: pulls are silent until the §C3 batch closes, and
-        // unpulls don't retroactively edit emitted batch items.
+        // bcc_card_watched / bcc_card_unpulled (and the legacy
+        // bcc_card_pulled) are intentionally NOT subscribed: watches
+        // are silent until the §C3 batch closes, and unwatches don't
+        // retroactively edit emitted batch items.
 
         add_action('bcc_pull_batch_emitted', function (int $userId, string $batchId, int $cardCount, array $topCards, int $moreCount): void {
             try {
@@ -1517,6 +1700,29 @@ final class Plugin
             }
         }, 10, 2);
 
+        // §D6 PR-A — WP transition_post_status bridge for blog posts.
+        //
+        // Fires on every WP post status transition; the handler scopes
+        // itself to peepso-activity-status + _bcc_activity_module='blog'
+        // before doing anything. Wiring here (not in createBlog) ensures
+        // the handler also fires for status changes initiated from
+        // wp-admin (rare today, but the Edit Post screen exists).
+        //
+        // Priority 10 — same tier as the blog event subscriber. WP
+        // passes three positional args: ($new_status, $old_status, $post).
+        add_action('transition_post_status', function (string $newStatus, string $oldStatus, mixed $post): void {
+            try {
+                $this->blogStatusTransitionHandler()->handle($newStatus, $oldStatus, $post);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] blog_status_transition failed', [
+                    'new_status' => $newStatus,
+                    'old_status' => $oldStatus,
+                    'post_id'    => $post instanceof \WP_Post ? $post->ID : 0,
+                    'error'      => $e->getMessage(),
+                ]);
+            }
+        }, 10, 3);
+
         // ── §E2 / §O1.2 rank progression listener ──────────────────────
         //
         // Detects auto-derived rank changes off the back of activity
@@ -1565,11 +1771,16 @@ final class Plugin
             }
         }, 20, 1);
 
-        add_action('bcc_card_pulled', function (int $viewerId): void {
+        // Subscribed to the canonical `bcc_card_watched` event (release N+).
+        // WatchingService emits BOTH bcc_card_pulled (legacy, for external
+        // consumers) AND bcc_card_watched (new); internal subscribers
+        // attach to the new one only, so we don't double-process when
+        // both fire on the same watch.
+        add_action('bcc_card_watched', function (int $viewerId): void {
             try {
                 $this->rankProgressionListener()->onActivityEvent($viewerId);
             } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression pull failed', [
+                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression watch failed', [
                     'user_id' => $viewerId,
                     'error'   => $e->getMessage(),
                 ]);
@@ -1640,11 +1851,11 @@ final class Plugin
         // carries 4 args; we capture all so the resolver can branch on
         // targetKind. Self-pulls and corrupted events no-op inside the
         // listener.
-        add_action('bcc_card_pulled', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
+        add_action('bcc_card_watched', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
             try {
                 $this->firstActionListener()->onCardPulled($viewerId, $followId, $targetKind, $targetId);
             } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] first_action card_pulled failed', [
+                \BCC\Core\Log\Logger::error('[bcc-trust] first_action card_watched failed', [
                     'viewer_id'   => $viewerId,
                     'target_kind' => $targetKind,
                     'target_id'   => $targetId,
@@ -1715,11 +1926,11 @@ final class Plugin
             }
         }, 25, 1);
 
-        add_action('bcc_card_pulled', function (int $viewerId): void {
+        add_action('bcc_card_watched', function (int $viewerId): void {
             try {
                 $this->tierUpgradeListener()->onActivityEvent($viewerId);
             } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] tier_upgrade pull failed', [
+                \BCC\Core\Log\Logger::error('[bcc-trust] tier_upgrade watch failed', [
                     'user_id' => $viewerId,
                     'error'   => $e->getMessage(),
                 ]);
@@ -1781,11 +1992,11 @@ final class Plugin
             }
         }, 26, 1);
 
-        add_action('bcc_card_pulled', function (int $viewerId): void {
+        add_action('bcc_card_watched', function (int $viewerId): void {
             try {
                 $this->levelProgressionListener()->onActivityEvent($viewerId);
             } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression pull failed', [
+                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression watch failed', [
                     'user_id' => $viewerId,
                     'error'   => $e->getMessage(),
                 ]);
@@ -1853,7 +2064,7 @@ final class Plugin
             $this->notificationDispatcher()->onReviewPublished($authorId, $pageId, $voteId, $explanation);
         }, 30, 4);
 
-        add_action('bcc_card_pulled', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
+        add_action('bcc_card_watched', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
             $this->notificationDispatcher()->onCardPulled($viewerId, $followId, $targetKind, $targetId);
         }, 30, 4);
 

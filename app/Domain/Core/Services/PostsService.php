@@ -28,9 +28,12 @@ use BCC\Core\PeepSo\PeepSoPhotoWriter;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
+use BCC\Trust\Core\ValueObjects\BlogCategory;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use Exception;
 
 if (!defined('ABSPATH')) {
@@ -87,6 +90,39 @@ final class PostsService
      */
     public const BLOG_FULL_TEXT_MAX_LENGTH = 60000;
 
+    // ── §D6 crypto-blog composer (PR-A) caps ────────────────────────────
+    //
+    // All five caps are public consts so the REST endpoint, tests, and
+    // future PATCH handler (PR-B) can reference the same numbers. The
+    // values are also documented in docs/api-contract-v1.md §3.3.8.
+
+    /** Headline length cap. Frontend enforces 'required'; service treats
+     *  title as optional in PR-A so the legacy 3-arg create-path keeps
+     *  working without churn. */
+    public const BLOG_TITLE_MAX_LENGTH = 120;
+
+    /** Max free-form (non-chain) tags per post. */
+    public const BLOG_TAGS_MAX = 5;
+
+    /** Max length per free-form tag. Tags are normalized to lowercase
+     *  alnum + dash so the cap is roughly "two short words." */
+    public const BLOG_TAG_LEN_MAX = 24;
+
+    /** Max chain tags per post. Mirrors BlogChainTagRepository's
+     *  MAX_TAGS_PER_POST — kept in two places intentionally; bumping
+     *  one without the other is a contract drift the tests catch. */
+    public const BLOG_CHAIN_TAGS_MAX = 3;
+
+    /** Max tickers per disclosure block (e.g. ["BTC","ETH","SOL",…]). */
+    public const BLOG_DISCLOSURE_TICKERS_MAX = 20;
+
+    /** Max length of a single ticker (covers DEX pair symbols like
+     *  WBTC.b — 12 chars handles the long tail). */
+    public const BLOG_DISCLOSURE_TICKER_LEN_MAX = 12;
+
+    /** Max length of the disclosure free-text note. */
+    public const BLOG_DISCLOSURE_NOTE_MAX = 500;
+
     /**
      * §D2 — review grade buckets. Map to the existing trust system's
      * vote_type values (-1 / 0 / +1) so castPageVote consumes them
@@ -104,8 +140,24 @@ final class PostsService
     public function __construct(
         private readonly VoteService $voteService,
         private readonly VoteRepository $voteRepository,
-        private readonly FeatureAccessService $featureAccess
+        private readonly FeatureAccessService $featureAccess,
+        // §D6 PR-A — chain-tag join writer. Optional in the signature
+        // (defaults to null + a fresh instance) so test paths and
+        // third-party callers wiring this service by hand don't break.
+        // Plugin always passes the singleton; the null fallback is
+        // never taken in production.
+        private readonly ?BlogChainTagRepository $blogChainTagRepository = null
     ) {
+    }
+
+    /**
+     * Lazily resolve the chain-tag repo. Production calls always come
+     * through Plugin's accessor, which supplies the singleton — this
+     * path is the legacy 3-arg test-harness fallback only.
+     */
+    private function chainTagRepo(): BlogChainTagRepository
+    {
+        return $this->blogChainTagRepository ?? new BlogChainTagRepository();
     }
 
     /**
@@ -419,17 +471,53 @@ final class PostsService
      *   - blog-as-entity composer (claimed validators/creators posting)
      *   - markdown / image embed rendering
      *
+     * PR-A widens the signature to accept the crypto-blog composer's
+     * sidecar fields. All new params are optional — legacy 3-arg
+     * callers continue to work unchanged, just landing as a
+     * categoryless/tagless blog row.
+     *
+     * Validation order (each gate returns immediately on failure):
+     *   1. auth        — authorId > 0
+     *   2. excerpt     — required, length window
+     *   3. fullText    — required, length cap
+     *   4. title       — optional; if present, sanitize + length cap
+     *   5. category    — optional; pre-narrowed to enum or null by caller
+     *   6. tags        — optional; normalized lowercase, alnum-dash, capped
+     *   7. chainIds    — optional; each FK-validated against chain registry, capped
+     *   8. disclosure  — optional; ticker shape + note cap
+     *   9. coverImageId— optional; existence + author-ownership check
+     *  10. status      — must be 'draft' or 'publish'
+     *  11. throttle    — status burst seatbelt
+     *  12. PeepSo write
+     *  13. side-car meta + chain-tag join
+     *  14. §A3 event for publish (drafts do NOT fire — ActivityStreamWriter
+     *      would insert an activity row that surfaces the draft on the
+     *      floor before publish)
+     *
+     * @param list<string> $tags           Free-form tags (will be normalized).
+     * @param list<int>    $chainIds       Chain registry IDs.
+     * @param array{tickers?: list<string>, note?: string}|null $disclosure
+     *                                     Disclosure block — tickers + note.
+     *
      * @return array{
      *   ok: true,
      *   post_id: int,
      *   excerpt_length: int,
-     *   full_text_length: int
-     * }|array{error: string, message: string}
+     *   full_text_length: int,
+     *   status: string
+     * }|array{error: string, message: string, data?: array<string, mixed>}
      */
     public function createBlog(
         int $authorId,
         string $excerpt,
-        string $fullText
+        string $fullText,
+        ?string $title = null,
+        ?BlogCategory $category = null,
+        array $tags = [],
+        array $chainIds = [],
+        ?array $disclosure = null,
+        ?int $coverImageId = null,
+        string $status = 'publish'
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -481,8 +569,119 @@ final class PostsService
             ];
         }
 
-        // Reuse the status burst seatbelt — blogs are heavier writes
-        // but share the same "don't let a script flood the wall" intent.
+        // ── Title: optional in PR-A (frontend enforces required) ─────
+        //
+        // sanitize_text_field strips tags + newlines. We accept null
+        // (legacy 3-arg callers) but also '' (empty REST string) —
+        // both collapse to "no title" so the WP post gets post_title=''.
+        $titleSanitized = '';
+        if (is_string($title) && trim($title) !== '') {
+            $titleSanitized = sanitize_text_field($title);
+            if (mb_strlen($titleSanitized) > self::BLOG_TITLE_MAX_LENGTH) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => sprintf(
+                        'Blog title caps at %d characters.',
+                        self::BLOG_TITLE_MAX_LENGTH
+                    ),
+                ];
+            }
+        }
+
+        // ── Tags: lowercase alnum-dash, deduped, capped ──────────────
+        $tagsClean = self::normalizeBlogTags($tags);
+        if ($tagsClean === null) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => 'Tags may only contain lowercase letters, digits, and dashes.',
+            ];
+        }
+        if (count($tagsClean) > self::BLOG_TAGS_MAX) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => sprintf(
+                    'Blogs cap at %d tags.',
+                    self::BLOG_TAGS_MAX
+                ),
+                'data'    => ['max' => self::BLOG_TAGS_MAX],
+            ];
+        }
+
+        // ── Chain tags: FK-validate, dedupe, cap ─────────────────────
+        $chainIdsClean = self::normalizeChainIds($chainIds);
+        if (count($chainIdsClean) > self::BLOG_CHAIN_TAGS_MAX) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => sprintf(
+                    'Blogs cap at %d chain tags.',
+                    self::BLOG_CHAIN_TAGS_MAX
+                ),
+                'data'    => ['max' => self::BLOG_CHAIN_TAGS_MAX],
+            ];
+        }
+        foreach ($chainIdsClean as $cid) {
+            // ChainRepository::getById hits the active-chain cache
+            // first then falls back to a direct query. Inactive chains
+            // are rejected here — a deactivated chain shouldn't be
+            // pickable in the composer at all, but a stale frontend
+            // cache could send one and we want a clean error envelope.
+            if (ChainRepository::getById($cid) === null) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => 'Unknown chain tag.',
+                    'data'    => ['chain_id' => $cid],
+                ];
+            }
+        }
+
+        // ── Disclosure block: shape + caps ───────────────────────────
+        $disclosureClean = null;
+        if ($disclosure !== null) {
+            $disclosureClean = self::normalizeDisclosure($disclosure);
+            if (!is_array($disclosureClean)) {
+                // String error code from the normalizer — surface as
+                // bcc_invalid_request with the offending field hinted.
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => (string) $disclosureClean,
+                ];
+            }
+        }
+
+        // ── Cover image: must be the author's own attachment ─────────
+        //
+        // Author-ownership check is the security gate: without it, a
+        // user could pin another user's photo as their blog cover
+        // (information-disclosure for restricted attachments, plus
+        // attribution confusion). We resolve via get_post + check
+        // post_type === 'attachment' AND post_author === authorId.
+        if ($coverImageId !== null && $coverImageId > 0) {
+            $attachment = get_post($coverImageId);
+            if (!$attachment instanceof \WP_Post
+                || $attachment->post_type !== 'attachment'
+                || (int) $attachment->post_author !== $authorId
+            ) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => 'Cover image not found or not owned by you.',
+                ];
+            }
+        }
+
+        // ── Status validation ────────────────────────────────────────
+        if ($status !== 'draft' && $status !== 'publish') {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => 'Status must be "draft" or "publish".',
+            ];
+        }
+
+        // ── Throttle (shared with status posts) ──────────────────────
+        //
+        // Same seatbelt as the legacy path. Drafts are throttled too —
+        // a script could mass-create drafts to fill the user's tab
+        // even without publishing, and the cost of a draft is the
+        // same as a publish on the wp_posts insert.
         $burstKey = "blog_post:{$authorId}:burst";
         if (!Throttle::allow(
             $burstKey,
@@ -500,10 +699,13 @@ final class PostsService
             ];
         }
 
+        // ── Persistence ──────────────────────────────────────────────
         $postId = PeepSoStatusWriter::createSelfBlogPost(
             $authorId,
             $excerpt,
-            $fullText
+            $fullText,
+            $titleSanitized !== '' ? $titleSanitized : null,
+            $status
         );
         if ($postId <= 0) {
             return [
@@ -512,19 +714,607 @@ final class PostsService
             ];
         }
 
-        // §A3 event — ActivityStreamWriter subscribes (async via WP-cron
-        // queue) and inserts the peepso_activities row. The originating
-        // request returns the post_id immediately; the activity row may
-        // land a tick later. Frontend invalidates the feed query and
-        // refetches once the response resolves.
-        do_action('bcc_blog_post_created', $authorId, $postId);
+        // ── Side-car meta + chain-tag join ───────────────────────────
+        //
+        // Each meta key is OPTIONAL on the post — the hydrator returns
+        // null/[] when absent. Storing absent fields would be wasteful
+        // and would make backfill of pre-PR-A blog posts visible as
+        // "real null" vs "field never set" inconsistency.
+        if ($category !== null) {
+            update_post_meta($postId, '_bcc_blog_category', $category->value);
+        }
+        if ($tagsClean !== []) {
+            $tagsJson = wp_json_encode(array_values($tagsClean));
+            if (is_string($tagsJson)) {
+                update_post_meta($postId, '_bcc_blog_tags', $tagsJson);
+            }
+        }
+        if ($disclosureClean !== null) {
+            $discJson = wp_json_encode($disclosureClean);
+            if (is_string($discJson)) {
+                update_post_meta($postId, '_bcc_blog_disclosure', $discJson);
+            }
+        }
+        if ($coverImageId !== null && $coverImageId > 0) {
+            // Native WP — surfaces as the featured image on the wp_post
+            // AND drives get_the_post_thumbnail_url() in the hydrator.
+            set_post_thumbnail($postId, $coverImageId);
+        }
+
+        // Persist chain tags (empty list is a valid "no chains" state).
+        $this->chainTagRepo()->replace($postId, $chainIdsClean);
+
+        // ── §A3 event — publish only ────────────────────────────────
+        //
+        // Drafts must NOT dispatch bcc_blog_post_created — that event
+        // is the trigger ActivityStreamWriter::handleBlogPostCreated
+        // listens for to insert the peepso_activities row, which is
+        // what surfaces the post in the floor feed + per-user blog
+        // tab. A draft surfacing in either place is the failure mode
+        // we're guarding against. The draft→publish transition is
+        // handled by BlogStatusTransitionHandler.
+        if ($status === 'publish') {
+            do_action('bcc_blog_post_created', $authorId, $postId);
+        }
 
         return [
-            'ok'              => true,
-            'post_id'         => $postId,
-            'excerpt_length'  => $excerptLen,
+            'ok'               => true,
+            'post_id'          => $postId,
+            'excerpt_length'   => $excerptLen,
             'full_text_length' => $fullTextLen,
+            'status'           => $status,
         ];
+    }
+
+    /**
+     * Partial-update an existing blog post (§D6 PR-B owner edit).
+     *
+     * Wraps WordPress's `wp_save_post_revision()` + `wp_update_post()`
+     * so the existing draft↔publish status transition handler picks
+     * up status flips for free (via `transition_post_status`).
+     *
+     * Partial-update semantics:
+     *   - `null` on any nullable param means "leave unchanged."
+     *   - Empty array on `$tags` or `$chainIds` means "clear" (caller
+     *     supplied an empty list deliberately — semantically distinct
+     *     from null).
+     *   - `$disclosure` is the exception to the "null = unchanged"
+     *     rule: `null` means CLEAR (delete the sidecar meta) and a
+     *     struct means REPLACE. The REST handler enforces this
+     *     contract at its boundary — if the caller did not include
+     *     `disclosure` in the request body, the handler MUST forward
+     *     the internal "no-op" sentinel below rather than null.
+     *     Without that boundary discipline a partial-update request
+     *     that omits `disclosure` would silently wipe the existing
+     *     disclosure block.
+     *   - `$coverImageId === 0` means "un-pin the cover." A positive
+     *     int means "replace" (must be author-owned). `null` means
+     *     "leave unchanged."
+     *   - `$status` is `'draft'|'publish'|null`. `null` = unchanged.
+     *
+     * Validation reuses the same private normalizers + FK-validators
+     * as {@see createBlog}, so the error messages stay identical
+     * across create + update.
+     *
+     * Ordering:
+     *   1. Load + identify the post (existence, type, module tag).
+     *   2. Ownership check — viewer must equal post_author.
+     *   3. Per-field validation (every supplied field passes the
+     *      create-path validator before any DB write).
+     *   4. wp_save_post_revision — fires BEFORE any mutation so the
+     *      revision captures pre-change state. Idempotent on retry
+     *      (WP's revision API absorbs duplicate calls within its
+     *      configured threshold; we don't try to dedupe here).
+     *   5. wp_update_post — title / excerpt / content / status. The
+     *      transition_post_status hook fires automatically; the
+     *      BlogStatusTransitionHandler is already wired and handles
+     *      the draft→publish / publish→draft side effects.
+     *   6. Sidecar meta — _bcc_blog_category, _bcc_blog_tags,
+     *      _bcc_blog_disclosure. delete_post_meta when caller asks
+     *      to clear (empty array / null disclosure).
+     *   7. Cover image pin — set_post_thumbnail or delete_post_thumbnail.
+     *   8. Chain-tag join — replace() (writes empty set when caller
+     *      passed an empty array; cache invalidation runs inside).
+     *
+     * Failure during the post-revision phase leaves the revision as
+     * a no-op artifact. Acceptable: WP's retention pruning eventually
+     * collects it. The alternative (transactional rollback over
+     * wp_posts + postmeta + sidecar tables + WP cache invalidation)
+     * isn't worth the complexity for a content edit.
+     *
+     * @param list<string>|null                              $tags
+     *        `null` = unchanged; `[]` = clear; non-empty = replace.
+     * @param list<int>|null                                 $chainIds
+     *        `null` = unchanged; `[]` = clear; non-empty = replace.
+     * @param array{tickers?: list<string>, note?: string}|array{__noop__: true}|null $disclosure
+     *        `null` = clear; struct = replace; `{__noop__:true}` =
+     *        internal sentinel from the REST layer meaning "unchanged."
+     *
+     * @return array{
+     *   ok: true,
+     *   post_id: int,
+     *   status: string
+     * }|array{error: string, message: string, data?: array<string, mixed>}
+     */
+    public function updateBlog(
+        int $postId,
+        int $authorId,
+        ?string $title,
+        ?string $excerpt,
+        ?string $content,
+        ?BlogCategory $category,
+        ?array $tags,
+        ?array $chainIds,
+        ?array $disclosure,
+        ?int $coverImageId,
+        ?string $status
+    ): array {
+        if ($authorId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+        if ($postId <= 0) {
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
+        }
+
+        // ── Load + identify ──────────────────────────────────────────
+        $post = get_post($postId);
+        if (!$post instanceof \WP_Post) {
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
+        }
+
+        // Defense-in-depth: confirm the post is actually a blog (not a
+        // status / review / pull-batch). The shape check matches what
+        // BlogStatusTransitionHandler::handle uses, so the two paths
+        // agree on what counts as a blog.
+        if ($post->post_type !== 'peepso-activity-status') {
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
+        }
+        $module = get_post_meta($postId, '_bcc_activity_module', true);
+        if (!is_string($module) || $module !== 'blog') {
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
+        }
+
+        // ── Ownership ────────────────────────────────────────────────
+        if ((int) $post->post_author !== $authorId) {
+            return ['error' => 'bcc_forbidden', 'message' => 'You can only edit your own blog posts.'];
+        }
+
+        // ── Per-field validation (mirrors createBlog) ───────────────
+        $excerptClean = null;
+        if ($excerpt !== null) {
+            $excerptClean = trim($excerpt);
+            if ($excerptClean === '') {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => 'Blog excerpt is required.',
+                ];
+            }
+            $excerptLen = mb_strlen($excerptClean);
+            if ($excerptLen < self::BLOG_EXCERPT_MIN_LENGTH) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => sprintf(
+                        'Blog excerpt must be at least %d characters.',
+                        self::BLOG_EXCERPT_MIN_LENGTH
+                    ),
+                ];
+            }
+            if ($excerptLen > self::BLOG_EXCERPT_MAX_LENGTH) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => sprintf(
+                        'Blog excerpt caps at %d characters.',
+                        self::BLOG_EXCERPT_MAX_LENGTH
+                    ),
+                ];
+            }
+        }
+
+        $contentClean = null;
+        if ($content !== null) {
+            $contentClean = trim($content);
+            if ($contentClean === '') {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => 'Blog body is required.',
+                ];
+            }
+            $contentLen = mb_strlen($contentClean);
+            if ($contentLen > self::BLOG_FULL_TEXT_MAX_LENGTH) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => sprintf(
+                        'Blog body caps at %d characters.',
+                        self::BLOG_FULL_TEXT_MAX_LENGTH
+                    ),
+                ];
+            }
+        }
+
+        // Title — three-state: null (unchanged), '' (clear), non-empty
+        // (replace). sanitize_text_field strips tags + newlines.
+        $titleAction    = 'unchanged'; // 'unchanged' | 'clear' | 'set'
+        $titleSanitized = '';
+        if ($title !== null) {
+            $trimmed = trim($title);
+            if ($trimmed === '') {
+                $titleAction = 'clear';
+            } else {
+                $titleSanitized = sanitize_text_field($title);
+                if (mb_strlen($titleSanitized) > self::BLOG_TITLE_MAX_LENGTH) {
+                    return [
+                        'error'   => 'bcc_invalid_request',
+                        'message' => sprintf(
+                            'Blog title caps at %d characters.',
+                            self::BLOG_TITLE_MAX_LENGTH
+                        ),
+                    ];
+                }
+                $titleAction = 'set';
+            }
+        }
+
+        // Tags — null=unchanged, []=clear, non-empty=replace.
+        $tagsClean = null;
+        if ($tags !== null) {
+            $normalized = self::normalizeBlogTags($tags);
+            if ($normalized === null) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => 'Tags may only contain lowercase letters, digits, and dashes.',
+                ];
+            }
+            if (count($normalized) > self::BLOG_TAGS_MAX) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => sprintf('Blogs cap at %d tags.', self::BLOG_TAGS_MAX),
+                    'data'    => ['max' => self::BLOG_TAGS_MAX],
+                ];
+            }
+            $tagsClean = $normalized;
+        }
+
+        // Chain ids — null=unchanged, []=clear, non-empty=replace +
+        // each FK-validated against the chain registry.
+        $chainIdsClean = null;
+        if ($chainIds !== null) {
+            $normalized = self::normalizeChainIds($chainIds);
+            if (count($normalized) > self::BLOG_CHAIN_TAGS_MAX) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => sprintf('Blogs cap at %d chain tags.', self::BLOG_CHAIN_TAGS_MAX),
+                    'data'    => ['max' => self::BLOG_CHAIN_TAGS_MAX],
+                ];
+            }
+            foreach ($normalized as $cid) {
+                if (ChainRepository::getById($cid) === null) {
+                    return [
+                        'error'   => 'bcc_invalid_request',
+                        'message' => 'Unknown chain tag.',
+                        'data'    => ['chain_id' => $cid],
+                    ];
+                }
+            }
+            $chainIdsClean = $normalized;
+        }
+
+        // Disclosure — three-state field tunneled through `?array`:
+        //   - null            → clear
+        //   - normal array    → replace
+        //   - {__noop__: true} → leave unchanged (internal sentinel)
+        //
+        // PHP's nullable type can only express two states (null vs.
+        // value), so the REST handler encodes "leave unchanged" as a
+        // tiny internal-only sentinel array. The alternative — adding
+        // a separate `bool $disclosureChanged` flag — would be sludge
+        // for callers; the alternative-alternative — splitting
+        // updateBlog into a dozen single-field setters — wrecks the
+        // partial-update API. The sentinel is only readable from the
+        // REST handler, never the wire (clients omit the field).
+        $disclosureAction = 'unchanged'; // 'unchanged' | 'clear' | 'replace'
+        $disclosureClean  = null;
+        if (is_array($disclosure) && isset($disclosure['__noop__']) && $disclosure['__noop__'] === true) {
+            // "Leave unchanged" — REST handler signaled an omitted
+            // field. Skip both clear + replace branches.
+            $disclosureAction = 'unchanged';
+        } elseif ($disclosure === null) {
+            $disclosureAction = 'clear';
+        } else {
+            $normalized = self::normalizeDisclosure($disclosure);
+            if (!is_array($normalized)) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => (string) $normalized,
+                ];
+            }
+            $disclosureClean  = $normalized;
+            $disclosureAction = 'replace';
+        }
+
+        // Cover image — null=unchanged, 0=un-pin, positive=replace.
+        $coverAction = 'unchanged'; // 'unchanged' | 'clear' | 'set'
+        if ($coverImageId !== null) {
+            if ($coverImageId === 0) {
+                $coverAction = 'clear';
+            } elseif ($coverImageId > 0) {
+                $attachment = get_post($coverImageId);
+                if (!$attachment instanceof \WP_Post
+                    || $attachment->post_type !== 'attachment'
+                    || (int) $attachment->post_author !== $authorId
+                ) {
+                    return [
+                        'error'   => 'bcc_invalid_request',
+                        'message' => 'Cover image not found or not owned by you.',
+                    ];
+                }
+                $coverAction = 'set';
+            } else {
+                // Negative id is a contract violation.
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => 'Cover image id must be non-negative.',
+                ];
+            }
+        }
+
+        // Status — null=unchanged, must be 'draft' or 'publish' otherwise.
+        $statusClean = null;
+        if ($status !== null) {
+            if ($status !== 'draft' && $status !== 'publish') {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => 'Status must be "draft" or "publish".',
+                ];
+            }
+            $statusClean = $status;
+        }
+
+        // ── Revision FIRST (captures pre-change state) ───────────────
+        //
+        // wp_save_post_revision absorbs duplicate calls within WP's
+        // built-in revision threshold (default: skips if no content
+        // change since the last revision). Retries on the same post
+        // do NOT double-create revisions — WP handles idempotency.
+        if (function_exists('wp_save_post_revision')) {
+            wp_save_post_revision($postId);
+        }
+
+        // ── wp_update_post (title / excerpt / content / status) ─────
+        //
+        // Build the update array only with fields the caller asked to
+        // change. wp_update_post merges with the existing post — fields
+        // we don't include stay as-is. The transition_post_status hook
+        // fires AUTOMATICALLY when post_status differs from the
+        // stored value; BlogStatusTransitionHandler handles the
+        // draft→publish (fires bcc_blog_post_created) and
+        // publish→draft (removes peepso_activities row) side effects.
+        $postUpdate = ['ID' => $postId];
+        if ($excerptClean !== null) {
+            $postUpdate['post_excerpt'] = wp_kses_post($excerptClean);
+        }
+        if ($contentClean !== null) {
+            $postUpdate['post_content'] = wp_kses_post($contentClean);
+        }
+        if ($titleAction === 'clear') {
+            $postUpdate['post_title'] = '';
+        } elseif ($titleAction === 'set') {
+            $postUpdate['post_title'] = $titleSanitized;
+        }
+        if ($statusClean !== null) {
+            $postUpdate['post_status'] = $statusClean;
+        }
+
+        // Only call wp_update_post if there's something on the post
+        // itself to change — sidecar / chain-tag changes don't need
+        // to bump the wp_post row. (Skipping the call also avoids a
+        // no-op revision insert when only sidecar meta changes.)
+        if (count($postUpdate) > 1) {
+            $result = wp_update_post($postUpdate, true);
+            if (is_wp_error($result) || (int) $result <= 0) {
+                $errMsg = is_wp_error($result) ? $result->get_error_message() : 'wp_update_post returned non-positive id';
+                Logger::warning('[PostsService] updateBlog wp_update_post failed', [
+                    'user_id' => $authorId,
+                    'post_id' => $postId,
+                    'error'   => $errMsg,
+                ]);
+                return [
+                    'error'   => 'bcc_unavailable',
+                    'message' => 'Could not save your changes. Try again.',
+                ];
+            }
+        }
+
+        // ── Sidecar meta writes ──────────────────────────────────────
+        if ($category !== null) {
+            update_post_meta($postId, '_bcc_blog_category', $category->value);
+        }
+        if ($tagsClean !== null) {
+            if ($tagsClean === []) {
+                delete_post_meta($postId, '_bcc_blog_tags');
+            } else {
+                $tagsJson = wp_json_encode(array_values($tagsClean));
+                if (is_string($tagsJson)) {
+                    update_post_meta($postId, '_bcc_blog_tags', $tagsJson);
+                }
+            }
+        }
+        if ($disclosureAction === 'clear') {
+            delete_post_meta($postId, '_bcc_blog_disclosure');
+        } elseif ($disclosureAction === 'replace' && $disclosureClean !== null) {
+            $discJson = wp_json_encode($disclosureClean);
+            if (is_string($discJson)) {
+                update_post_meta($postId, '_bcc_blog_disclosure', $discJson);
+            }
+        }
+
+        // ── Cover image pin / un-pin ─────────────────────────────────
+        if ($coverAction === 'set' && $coverImageId !== null && $coverImageId > 0) {
+            set_post_thumbnail($postId, $coverImageId);
+        } elseif ($coverAction === 'clear') {
+            delete_post_thumbnail($postId);
+        }
+
+        // ── Chain-tag join replace (cache invalidation inside) ──────
+        if ($chainIdsClean !== null) {
+            $this->chainTagRepo()->replace($postId, $chainIdsClean);
+        }
+
+        // Resolve the post-update status. If status wasn't changed,
+        // report whatever post_status the row currently carries.
+        $finalStatus = $statusClean ?? (string) $post->post_status;
+
+        return [
+            'ok'      => true,
+            'post_id' => $postId,
+            'status'  => $finalStatus,
+        ];
+    }
+
+    /**
+     * Normalize an inbound tags array to lowercase alnum-dash form.
+     *
+     * Returns the normalized list on success, OR `null` when any tag
+     * contains characters outside [a-z0-9-]. Caller surfaces `null`
+     * as a `bcc_invalid_request`.
+     *
+     * Length cap per tag is enforced here; total-count cap is
+     * enforced by the caller (after this method returns) so the cap
+     * applies to the deduped set rather than the raw input.
+     *
+     * @param array<int|string, mixed> $tags
+     * @return list<string>|null
+     */
+    private static function normalizeBlogTags(array $tags): ?array
+    {
+        /** @var list<string> $out */
+        $out = [];
+        foreach ($tags as $raw) {
+            if (!is_string($raw)) {
+                // Non-string entries are silently skipped — a
+                // misbehaving frontend should not be able to crash
+                // the validator. The shape mismatch is logged by
+                // PHP's strict type checks upstream.
+                continue;
+            }
+            $tag = strtolower(trim($raw));
+            if ($tag === '') {
+                continue;
+            }
+            // Reject tags with non-alnum-dash chars. Composer's UI
+            // normalizes on input, but server-side gate stops a raw
+            // API caller from sneaking in #-hashtags / spaces / unicode.
+            if (preg_match('/^[a-z0-9-]+$/', $tag) !== 1) {
+                return null;
+            }
+            if (mb_strlen($tag) > self::BLOG_TAG_LEN_MAX) {
+                return null;
+            }
+            if (!in_array($tag, $out, true)) {
+                $out[] = $tag;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Normalize an inbound chain-ids array — dedupe + cast.
+     *
+     * Validation against the chain registry happens at the call site
+     * (one FK lookup per id); this just shapes the list.
+     *
+     * @param array<int|string, mixed> $chainIds
+     * @return list<int>
+     */
+    private static function normalizeChainIds(array $chainIds): array
+    {
+        /** @var list<int> $out */
+        $out = [];
+        foreach ($chainIds as $raw) {
+            $cid = (int) $raw;
+            if ($cid > 0 && !in_array($cid, $out, true)) {
+                $out[] = $cid;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Validate + normalize a disclosure block.
+     *
+     * Shape: `{tickers: string[], note: string}` — both optional but
+     * one of the two must be present (empty disclosure is meaningless;
+     * caller passes `null` instead).
+     *
+     * Returns the normalized block on success OR a human-readable
+     * error string the caller surfaces in the envelope.
+     *
+     * @param array<string, mixed> $disclosure
+     * @return array{tickers: list<string>, note: string}|string
+     */
+    private static function normalizeDisclosure(array $disclosure): array|string
+    {
+        $tickersRaw = $disclosure['tickers'] ?? [];
+        $noteRaw    = $disclosure['note']    ?? '';
+
+        if (!is_array($tickersRaw)) {
+            return 'Disclosure tickers must be an array.';
+        }
+        if (!is_string($noteRaw)) {
+            return 'Disclosure note must be a string.';
+        }
+
+        /** @var list<string> $tickers */
+        $tickers = [];
+        foreach ($tickersRaw as $raw) {
+            if (!is_string($raw)) {
+                continue;
+            }
+            $t = strtoupper(trim($raw));
+            if ($t === '') {
+                continue;
+            }
+            // Alnum only — DEX pair separators (slash, dot) would
+            // double the validation surface for marginal benefit.
+            // Tickers carrying suffixes ("WBTC.b") get the suffix
+            // stripped at the composer; here we enforce the canonical
+            // shape.
+            if (preg_match('/^[A-Z0-9]+$/', $t) !== 1) {
+                return 'Tickers may only contain letters and digits.';
+            }
+            if (mb_strlen($t) > self::BLOG_DISCLOSURE_TICKER_LEN_MAX) {
+                return sprintf(
+                    'Tickers cap at %d characters.',
+                    self::BLOG_DISCLOSURE_TICKER_LEN_MAX
+                );
+            }
+            if (!in_array($t, $tickers, true)) {
+                $tickers[] = $t;
+            }
+        }
+        if (count($tickers) > self::BLOG_DISCLOSURE_TICKERS_MAX) {
+            return sprintf(
+                'Disclosure caps at %d tickers.',
+                self::BLOG_DISCLOSURE_TICKERS_MAX
+            );
+        }
+
+        $note = trim($noteRaw);
+        if (mb_strlen($note) > self::BLOG_DISCLOSURE_NOTE_MAX) {
+            return sprintf(
+                'Disclosure note caps at %d characters.',
+                self::BLOG_DISCLOSURE_NOTE_MAX
+            );
+        }
+
+        // Empty disclosure (no tickers AND no note) is meaningless —
+        // caller should have passed null instead. Surface as a clear
+        // contract error rather than silently writing an empty
+        // post_meta blob.
+        if ($tickers === [] && $note === '') {
+            return 'Disclosure block must include at least one ticker or a note.';
+        }
+
+        return ['tickers' => $tickers, 'note' => $note];
     }
 
     /**

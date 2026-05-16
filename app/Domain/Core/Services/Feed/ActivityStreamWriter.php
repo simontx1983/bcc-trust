@@ -124,12 +124,12 @@ final class ActivityStreamWriter
      * Idempotency: the batch_id has a UNIQUE KEY, so step 1 is a no-op
      * on duplicate event delivery (record() returns the existing id).
      * Step 2 then writes a second activity row pointing at the same
-     * batch — undesirable but bounded; PullBatchAggregator's own
+     * batch — undesirable but bounded; WatchBatchAggregator's own
      * `WHERE batch_id IS NULL` guard makes the duplicate event
      * delivery itself rare.
      *
      * `$topCards` is the canonical list<{follow_id, card_handle}> shape
-     * emitted by PullBatchAggregator, but the parameter type stays
+     * emitted by WatchBatchAggregator, but the parameter type stays
      * loose `array` because WordPress's add_action plumbing doesn't
      * carry generic types — strict typing the lambda is impossible
      * without an inline @var override (forbidden by §L6).
@@ -341,10 +341,36 @@ final class ActivityStreamWriter
      * Module is 'blog' (mapped to post_kind 'blog_excerpt' by
      * FeedItemNormalizer); external_id is the wp_posts.ID so renderers
      * can join wp_posts for the body fields.
+     *
+     * Idempotency (PR-A): the event may fire more than once across
+     * the lifetime of a blog post — initial publish via PostsService,
+     * draft→publish transition via BlogStatusTransitionHandler, and
+     * defensive re-dispatch on rare retry paths. We refuse to insert
+     * a second peepso_activities row for the same wp_post by checking
+     * the existing (act_module_id='blog', act_external_id=$postId)
+     * pair first. The check is bounded LIMIT 1 against an existing
+     * index. Draft posts are also rejected so a published-while-draft
+     * event flap can't surface a draft on the floor.
      */
     public function handleBlogPostCreated(int $authorId, int $postId): void
     {
         if ($authorId <= 0 || $postId <= 0) {
+            return;
+        }
+
+        // PR-A guard: drafts must not surface as feed activity. The
+        // event firing on a draft is a contract violation (PostsService
+        // only emits on publish + BlogStatusTransitionHandler only emits
+        // on draft→publish), but a defensive check here keeps the
+        // assertion local — easier to grep than tracing the event
+        // graph if the guarantee ever drifts.
+        $post = get_post($postId);
+        if (!$post instanceof \WP_Post || $post->post_status !== 'publish') {
+            Logger::warning('[ActivityStreamWriter] blog_post_created skipped — not published', [
+                'user_id'    => $authorId,
+                'post_id'    => $postId,
+                'post_status'=> $post instanceof \WP_Post ? $post->post_status : '(missing)',
+            ]);
             return;
         }
 
@@ -355,6 +381,28 @@ final class ActivityStreamWriter
         // same lookup path as other BCC modules.
         update_post_meta($postId, '_bcc_activity_module',     'blog');
         update_post_meta($postId, '_bcc_activity_sidecar_id', $postId);
+
+        // ── Idempotency check ───────────────────────────────────────
+        //
+        // peepso_activities has no UNIQUE constraint on (module,
+        // external_id) — adding one would require coordinating a
+        // schema change with PeepSo, who owns the table. Instead we
+        // check-then-insert via the Repository (§1 — no raw $wpdb
+        // in Services). Race: two concurrent dispatches could both
+        // miss the existing row and both insert. In practice the
+        // event subscribers run on action-scheduler, which serializes
+        // per-hook, so the race window is empty. If we ever observe
+        // duplicates in logs we tighten this to a DB-level lock or a
+        // sidecar dedup table.
+        $existingActId = $this->activityWriter->findActIdForExternal('blog', $postId);
+        if ($existingActId > 0) {
+            Logger::info('[ActivityStreamWriter] blog activity already exists — skipping insert', [
+                'user_id'    => $authorId,
+                'post_id'    => $postId,
+                'existing_act_id' => $existingActId,
+            ]);
+            return;
+        }
 
         $actId = $this->activityWriter->insert(
             $authorId,   // actor
@@ -377,4 +425,5 @@ final class ActivityStreamWriter
             'act_id'  => $actId,
         ]);
     }
+
 }

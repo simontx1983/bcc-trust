@@ -5,7 +5,9 @@ namespace BCC\Trust\Disputes\Controllers;
 use BCC\Core\Contracts\TrustReadServiceInterface;
 use BCC\Core\Log\Logger as CoreLogger;
 use BCC\Core\Permissions\Permissions;
+use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\ServiceLocator;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Disputes\DTO\DisputeCoreDTO;
@@ -702,8 +704,55 @@ class DisputeController
     }
 
     /**
-     * Pick up to BCC_DISPUTES_PANEL_SIZE Gold/Platinum users,
-     * excluding the reporter and the voter.
+     * Pick up to BCC_DISPUTES_PANEL_SIZE Trusted/Elite panelists, with:
+     *   1. Tier + fraud + suspension eligibility filter (TrustReadService).
+     *   2. Soft-IP-diversity over the eligible pool (TrustReadService).
+     *   3. Per-panelist load cap (DisputeRepository).
+     *   4. §D5 interest-coupled affinity overlay (scale-hardening 2026-05-13).
+     *   5. Explicit outsider quota to preserve "the floor selected qualified
+     *      peers" feeling vs "the algorithm picked my tribe."
+     *
+     * Affinity scoring inputs (Phase 2 MVP — extends as new signals queryable):
+     *   - WATCHES THE PAGE OWNER (+2): the panelist follows the disputed
+     *     page's owner (=reporter_id; the page owner is the dispute
+     *     reporter per the upstream Permissions::owns_page check). A
+     *     panelist who watches the page has substantive interest in
+     *     the entity's standing and is materially better informed
+     *     about its recent activity. Read: PeepSoFollowerRepository.
+     *   - RECENT CIVIC ACTIVITY (+2): the panelist has voted in the
+     *     last 30 days. Voters paying current attention to the floor
+     *     adjudicate better than panelists who have gone quiet.
+     *     Read: VoteRepository::countRecentByActor.
+     *
+     * Affinity inputs deferred (filterable extension points, not yet
+     * queryable as cheap reads — schema work needed):
+     *   - Chain affinity (+3): requires page→chain resolver.
+     *   - Prior panel-vote accuracy (+2): requires
+     *     DisputeParticipationRepository aggregator method.
+     *   - Category familiarity (+1): requires panelist's own pages by
+     *     category — partially derivable but adds 1 query per candidate.
+     *
+     * Anti-clique enforcement:
+     *   `bcc_disputes_outsider_quota_pct` filter (default 0.40 = 40%)
+     *   reserves N slots for panelists with affinity ≤ 1. For a 5-person
+     *   panel: 2 outsider slots, 3 high-affinity slots. Within each
+     *   tier, the candidate order is shuffled so two high-affinity
+     *   panelists with the same score have equal probability of
+     *   selection — no deterministic "always pick the closest watcher."
+     *
+     * Why "watches the page owner" instead of "watches the voter":
+     *   The voter is the actor being disputed. A panelist who watches
+     *   the voter is biased TOWARD the voter's defense. The page owner
+     *   is the recipient of the disputed action — a panelist who
+     *   watches them is biased toward neither party but has substantive
+     *   context. The outsider quota then ensures even high-context
+     *   panels include peers without that context — preserving the
+     *   "floor of qualified peers" feeling.
+     *
+     * Backward-compatibility: signature unchanged (reporter_id, voter_id).
+     * Existing callers don't have to change. The page_owner_id used for
+     * watches-the-owner affinity IS reporter_id by upstream invariant
+     * (Permissions::owns_page check at the create-dispute call site).
      *
      * @return int[]
      */
@@ -739,17 +788,127 @@ class DisputeController
 
         $loadMap = DisputeRepository::batchCountActivePanelAssignments($candidates);
 
-        $filtered = [];
+        // Load-filter — collect ALL candidates with load < cap (no truncate
+        // here; affinity ranking does the final truncate).
+        $availableCandidates = [];
         foreach ($candidates as $uid) {
-            if (count($filtered) >= $needed) {
-                break;
-            }
             if (($loadMap[$uid] ?? 0) < $maxActivePanels) {
-                $filtered[] = $uid;
+                $availableCandidates[] = (int) $uid;
             }
         }
 
-        return $filtered;
+        if (count($availableCandidates) <= $needed) {
+            // Insufficient candidates after load filter — return the small
+            // pool as-is. The caller's insufficient_panelists check
+            // (line 183) will surface a clear error to the reporter.
+            return $availableCandidates;
+        }
+
+        return $this->rankPanelistsByAffinity($availableCandidates, $reporter_id, $voter_id);
+    }
+
+    /**
+     * Score candidates by §D5 affinity inputs and apply the outsider
+     * quota. See selectPanelists() docblock for design rationale.
+     *
+     * @param int[] $candidates   Load-filtered pool (Trusted/Elite, low
+     *                            fraud, under load cap).
+     * @param int   $pageOwnerId  The page owner (== reporter_id by
+     *                            upstream Permissions::owns_page invariant).
+     * @param int   $voterId      The disputed actor (excluded from
+     *                            candidates upstream; passed here for
+     *                            audit-log context only).
+     * @return int[]              Exactly BCC_DISPUTES_PANEL_SIZE user_ids
+     *                            (or fewer if the pool was small).
+     */
+    private function rankPanelistsByAffinity(array $candidates, int $pageOwnerId, int $voterId): array
+    {
+        $needed = BCC_DISPUTES_PANEL_SIZE;
+
+        if (count($candidates) <= $needed) {
+            return $candidates;
+        }
+
+        $voteRepo    = Plugin::instance()->voteRepository();
+        $recentDays  = (int) apply_filters('bcc_disputes_recent_activity_days', 30);
+        $watcherBoost = 2;
+        $recentBoost  = 2;
+
+        // Score every candidate. Affinity is bounded by the input boosts;
+        // expansion points (chain match, prior accuracy, category) noted
+        // in the parent docblock would add their own bounded boosts.
+        $scored = [];
+        foreach ($candidates as $uid) {
+            $score = 0;
+
+            if (PeepSoFollowerRepository::isFollowing($uid, $pageOwnerId)) {
+                $score += $watcherBoost;
+            }
+
+            if ($voteRepo->countRecentByActor($uid, $recentDays) > 0) {
+                $score += $recentBoost;
+            }
+
+            $scored[$uid] = $score;
+        }
+
+        // Partition into high-affinity (>= 2) and outsider (<= 1).
+        // Threshold is "any single affinity boost is enough to be
+        // considered substantively interested." Outsiders are the
+        // anti-clique counterweight.
+        $high = [];
+        $low  = [];
+        foreach ($scored as $uid => $score) {
+            if ($score >= 2) {
+                $high[] = $uid;
+            } else {
+                $low[] = $uid;
+            }
+        }
+
+        // Within each tier, shuffle so candidates with the same score
+        // have equal probability of selection. Avoids a deterministic
+        // "always pick the longest-watcher" bias.
+        shuffle($high);
+        shuffle($low);
+
+        // Outsider quota: at least N panelists with affinity <= 1.
+        // 40% default = 2 of 5; filterable for ops tuning. Capped at
+        // $needed - 1 so we always retain at least one high-affinity
+        // slot (otherwise affinity scoring would be pointless).
+        $outsiderPct   = (float) apply_filters('bcc_disputes_outsider_quota_pct', 0.40);
+        $outsiderQuota = max(1, (int) ceil($needed * $outsiderPct));
+        $outsiderQuota = min($outsiderQuota, $needed - 1);
+        $highQuota     = $needed - $outsiderQuota;
+
+        $selected = array_merge(
+            array_slice($high, 0, $highQuota),
+            array_slice($low, 0, $outsiderQuota)
+        );
+
+        // Backfill: if either pile was undersupplied (rare), draw from
+        // the combined remainder. Preserves the panel size when the
+        // pool is unbalanced but no quota can be honored.
+        if (count($selected) < $needed) {
+            $remainder = array_merge(
+                array_slice($high, $highQuota),
+                array_slice($low, $outsiderQuota)
+            );
+            foreach ($remainder as $uid) {
+                if (count($selected) >= $needed) {
+                    break;
+                }
+                $selected[] = $uid;
+            }
+        }
+
+        // Final shuffle so the panel order in storage isn't itself a
+        // signal (high-affinity-first ordering could leak the affinity
+        // signal to anyone reading the raw panel row). shuffle()
+        // reindexes the array, so the return value is already a list.
+        shuffle($selected);
+
+        return $selected;
     }
 
     /**

@@ -29,6 +29,7 @@ namespace BCC\Trust\Core\REST;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
@@ -74,7 +75,7 @@ final class UserGroupsEndpoint
     public function getList(WP_REST_Request $request): WP_REST_Response
     {
         $slug      = (string) $request->get_param('slug');
-        $targetId  = $this->resolveSlugToUserId($slug);
+        $targetId  = UserSlugResolver::resolve($slug);
         if ($targetId === 0) {
             return ApiResponse::error('bcc_not_found', 'User not found.', 404);
         }
@@ -100,6 +101,21 @@ final class UserGroupsEndpoint
         // Pre-compute holder-group eligibility for the viewer in one batched call.
         $holderEligibility = $this->computeViewerHolderEligibility($viewerId, $visibleContexts);
 
+        // Bulk-resolve chain + trust enrichment so the profile-tab rows
+        // carry the same chips the /communities discovery surface emits.
+        // One JOIN'd SELECT for chain slugs + one warmed meta cache for
+        // trust thresholds — keeps the surface consistent without N+1.
+        $visibleIds       = array_keys($visibleContexts);
+        $chainSlugByGroup = ChainRepository::resolveSlugsForGroups($visibleIds);
+        update_meta_cache('post', $visibleIds);
+        $trustMinByGroup = [];
+        foreach ($visibleIds as $gid) {
+            $v = (int) get_post_meta($gid, '_bcc_trust_gate_min', true);
+            if ($v > 0) {
+                $trustMinByGroup[$gid] = $v;
+            }
+        }
+
         $items = [];
         foreach ($visibleContexts as $groupId => $ctx) {
             $display = $displays[$groupId] ?? null;
@@ -107,7 +123,9 @@ final class UserGroupsEndpoint
                 $ctx,
                 $display,
                 $isSelf,
-                $holderEligibility[$groupId] ?? null
+                $holderEligibility[$groupId] ?? null,
+                $chainSlugByGroup[$groupId] ?? null,
+                $trustMinByGroup[$groupId] ?? null
             );
         }
 
@@ -122,33 +140,6 @@ final class UserGroupsEndpoint
         $response = ApiResponse::ok(['items' => $items]);
         $response->header('Cache-Control', 'private, max-age=30');
         return $response;
-    }
-
-    /**
-     * Mirrors UsersEndpoint::resolveHandle — bcc_handle meta first,
-     * user_login fallback for legacy accounts.
-     */
-    private function resolveSlugToUserId(string $slug): int
-    {
-        if ($slug === '') {
-            return 0;
-        }
-
-        $userIds = get_users([
-            'meta_key'   => 'bcc_handle',
-            'meta_value' => $slug,
-            'number'     => 1,
-            'fields'     => 'ID',
-        ]);
-        if (!empty($userIds)) {
-            return (int) $userIds[0];
-        }
-
-        $user = get_user_by('login', $slug);
-        if ($user instanceof \WP_User) {
-            return (int) $user->ID;
-        }
-        return 0;
     }
 
     /**
@@ -280,7 +271,9 @@ final class UserGroupsEndpoint
         GroupContext $ctx,
         ?object $display,
         bool $isSelf,
-        ?array $holderEligibility
+        ?array $holderEligibility,
+        ?string $chainTag,
+        ?int $trustMin
     ): array {
         $route = $this->routeKeyForType($ctx->type);
 
@@ -293,6 +286,11 @@ final class UserGroupsEndpoint
             'member_count' => $display !== null ? (int) $display->member_count : 0,
             'privacy'      => $ctx->privacy->value,
             'verification' => $ctx->verification?->toApiResponse(),
+            // Same key vocabulary as discovery + detail surfaces. Profile
+            // Groups tab carries them too so the same group renders with
+            // the same chips wherever it appears.
+            'chain_tag'    => $chainTag,
+            'trust_min'    => $trustMin,
             'actions'      => [
                 'join'  => ['url' => self::REST_BASE . '/' . $route . '/' . $ctx->groupId . '/join'],
                 'leave' => ['url' => self::REST_BASE . '/' . $route . '/' . $ctx->groupId . '/leave'],

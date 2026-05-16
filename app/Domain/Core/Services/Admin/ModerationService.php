@@ -59,7 +59,7 @@ final class ModerationService
         try {
             $this->suspensionRepository->create($userId, get_current_user_id(), $reason, $notes, $fraudScore);
         } catch (\Exception $e) {
-            Logger::error('[bcc-trust-engine] suspend_insert_failed', [
+            Logger::error('[bcc-trust] suspend_insert_failed', [
                 'user_id'  => $userId,
                 'db_error' => $e->getMessage(),
             ]);
@@ -70,7 +70,7 @@ final class ModerationService
         try {
             $this->userInfoRepository->suspendUser($userId, $reason);
         } catch (\Exception $e) {
-            Logger::error('[bcc-trust-engine] suspend_flag_update_failed', [
+            Logger::error('[bcc-trust] suspend_flag_update_failed', [
                 'user_id'  => $userId,
                 'db_error' => $e->getMessage(),
             ]);
@@ -101,7 +101,7 @@ final class ModerationService
                 $this->userInfoRepository->unsuspendUser($userId);
             });
         } catch (\Throwable $e) {
-            Logger::error('[bcc-trust-engine] unsuspend_failed', [
+            Logger::error('[bcc-trust] unsuspend_failed', [
                 'user_id'  => $userId,
                 'db_error' => $e->getMessage(),
             ]);
@@ -132,7 +132,7 @@ final class ModerationService
         $r1 = $this->voteRepository->softDeleteAllByVoter($userId);
 
         if ($r1 === false) {
-            Logger::error('[bcc-trust-engine] clear_votes_failed', [
+            Logger::error('[bcc-trust] clear_votes_failed', [
                 'user_id' => $userId,
             ]);
             echo '<div class="notice notice-error"><p>Failed to clear votes: database error.</p></div>';

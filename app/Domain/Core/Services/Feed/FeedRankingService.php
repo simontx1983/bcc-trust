@@ -34,7 +34,7 @@ use BCC\Core\Feed\ActivityFeedService;
 use BCC\Core\Feed\ReactionGrammarMap;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
-use BCC\Trust\Core\Repositories\BinderRepository;
+use BCC\Trust\Core\Repositories\WatchingRepository;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\GifRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
@@ -46,6 +46,7 @@ use BCC\Trust\Core\Repositories\PullMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
+use BCC\Trust\Core\Services\BlogService;
 use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
@@ -68,7 +69,7 @@ final class FeedRankingService
         private readonly ReputationRepository $reputationRepo,
         private readonly PullBatchRepository $pullBatchRepo,
         private readonly PullMetaRepository $pullMetaRepo,
-        private readonly BinderRepository $binderRepo,
+        private readonly WatchingRepository $watchingRepo,
         private readonly PeepSoReactionRepository $reactionRepo,
         private readonly VoteRepository $voteRepo,
         private readonly HiddenActivityRepository $hiddenRepo,
@@ -78,7 +79,8 @@ final class FeedRankingService
         private readonly PhotoAltRepository $photoAltRepo,
         private readonly GifRepository $gifRepo,
         private readonly MentionOverlayService $mentionOverlay,
-        private readonly AuthorBadgeResolver $authorBadgeResolver
+        private readonly AuthorBadgeResolver $authorBadgeResolver,
+        private readonly BlogService $blogService
     ) {
     }
 
@@ -462,6 +464,11 @@ final class FeedRankingService
         // gifUrlByExtId map already in hand; we don't need a second
         // bucket pass, just track the ext_ids that need a body shape.
         $gifExtIds = [];
+        // §D6 blog excerpts — like photos, the wp_post IS the body
+        // source-of-truth (post_title/post_excerpt/post_content plus
+        // sidecar post_meta). No separate sidecar table. Collect
+        // external_ids and delegate to BlogService.
+        $blogExtIds = [];
         foreach ($items as $item) {
             $kind  = is_string($item['post_kind'] ?? null) ? $item['post_kind'] : '';
             $extId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
@@ -474,6 +481,10 @@ final class FeedRankingService
             }
             if ($kind === 'gif') {
                 $gifExtIds[$extId] = true;
+                continue;
+            }
+            if ($kind === 'blog_excerpt') {
+                $blogExtIds[$extId] = true;
                 continue;
             }
             $sid = (int) get_post_meta($extId, '_bcc_activity_sidecar_id', true);
@@ -494,6 +505,7 @@ final class FeedRankingService
         $reviewBodies    = $this->loadReviewBodies(array_values(array_unique($reviewExtToSid)));
         $photoBodies     = $this->loadPhotoBodies(array_keys($photoExtIds));
         $gifBodies       = $this->loadGifBodies(array_keys($gifExtIds), $gifUrlByExtId);
+        $blogBodies      = $this->loadBlogBodies(array_keys($blogExtIds));
 
         $hydrated = [];
         foreach ($items as $item) {
@@ -510,6 +522,8 @@ final class FeedRankingService
                 $item['body'] = $photoBodies[$extId];
             } elseif ($kind === 'gif' && isset($gifBodies[$extId])) {
                 $item['body'] = $gifBodies[$extId];
+            } elseif ($kind === 'blog_excerpt' && isset($blogBodies[$extId])) {
+                $item['body'] = $blogBodies[$extId];
             }
             $hydrated[] = $item;
         }
@@ -595,6 +609,38 @@ final class FeedRankingService
         // photo + gif both use `caption`, which is `string|null`.
         $caption = $body['caption'] ?? null;
         return is_string($caption) ? $caption : '';
+    }
+
+    /**
+     * §D6 blog body hydration for the Floor context.
+     *
+     * The wp_post is the source-of-truth (post_title, post_excerpt,
+     * post_content) plus the post-meta + chain-tag sidecars
+     * (`_bcc_blog_category`, `_bcc_blog_tags`, `_bcc_blog_disclosure`,
+     * `_thumbnail_id`, and the `bcc_blog_chain_tags` join).
+     *
+     * `BlogService::hydrateForPostId` carries the full body shape;
+     * here we pass `$includeFullText = false` so the Floor payload
+     * stays small (Floor renders excerpt + chips + title only; the
+     * full body lives on the blog tab). Per-row reads — V1.5 should
+     * batch through BlogChainTagRepository::findByPostIds + a single
+     * ChainRepository fetch when blog excerpts go multi-author on
+     * the Floor.
+     *
+     * @param list<int> $postIds
+     * @return array<int, array<string, mixed>>
+     */
+    private function loadBlogBodies(array $postIds): array
+    {
+        if ($postIds === []) {
+            return [];
+        }
+        /** @var array<int, array<string, mixed>> $out */
+        $out = [];
+        foreach ($postIds as $postId) {
+            $out[$postId] = $this->blogService->hydrateForPostId($postId, false);
+        }
+        return $out;
     }
 
     /**
@@ -853,7 +899,7 @@ final class FeedRankingService
             }
             $topFollowIdsPerBatch[$batchId] = $topIds;
         }
-        $handleMap = $this->binderRepo->findHandlesForFollowIds(array_keys($allFollowIds));
+        $handleMap = $this->watchingRepo->findHandlesForFollowIds(array_keys($allFollowIds));
 
         // Compose bodies indexed by bcc_pull_batches.id (matches
         // act_external_id at the call site).

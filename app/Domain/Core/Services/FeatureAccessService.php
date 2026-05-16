@@ -27,7 +27,7 @@ if (!defined('ABSPATH')) {
  *
  * Threshold semantics (§O5):
  *   Level 1 (New)     — default for all signups
- *   Level 2 (Active)  — requires 5+ pulls AND 3+ Floor visits
+ *   Level 2 (Active)  — requires 5+ pulls
  *   Level 3 (Veteran) — requires Level-2 thresholds AND 3+ reviews AND 30+ days active
  *
  * Promotion is cumulative: Level 3 implies Level 2's thresholds also met.
@@ -35,11 +35,27 @@ if (!defined('ABSPATH')) {
  * Thresholds are admin-tunable via `wp_options('bcc_level_thresholds')`
  * with safe defaults below — call sites NEVER inline thresholds.
  *
- * Sources for the four counters:
- *   - pulls            ← peepso_user_followers (binder is the UI projection per §C2)
- *   - floor_visits     ← wp_usermeta.bcc_floor_visits (incremented server-side on Floor page load)
+ * Sources for the counters:
+ *   - pulls            ← peepso_user_followers (watchlist is the UI projection per §C2)
  *   - reviews_written  ← bcc_trust_votes (count via VoteRepository::countByVoter)
  *   - days_active      ← time since wp_users.user_registered
+ *
+ * Note (2026-05-14): `floor_visits` was removed from the LEVEL_ACTIVE
+ * gate. Visiting the Floor is passive consumption — it isn't a signal
+ * we want to use as a permission gate. Pulls (a real choice the user
+ * made) is the only LEVEL_ACTIVE requirement now.
+ *
+ * Per-user override (§O5 admin escape hatch):
+ *   Setting `bcc_feature_override_{feature_key}` = "1" on a user_meta row
+ *   bypasses the level/tier/wallet gate for that ONE feature. Used to
+ *   hand-grant access (e.g. trusted operator who hasn't earned the
+ *   organic gate yet, or staff for testing). Set via wp-cli:
+ *
+ *     wp user meta add <user_id> bcc_feature_override_write_review 1
+ *
+ *   The override surface is per-feature + per-user so a single granted
+ *   permission can't accidentally widen to "ignore all gates" — every
+ *   feature requires its own explicit meta row.
  */
 final class FeatureAccessService
 {
@@ -55,16 +71,15 @@ final class FeatureAccessService
      * Callers should never read this constant directly — go through
      * getLevelThresholds() so admin overrides apply.
      *
-     * @var array<int, array{label: string, pulls?: int, floor_visits?: int, reviews_written?: int, days_active?: int}>
+     * @var array<int, array{label: string, pulls?: int, reviews_written?: int, days_active?: int}>
      */
     private const DEFAULT_THRESHOLDS = [
         self::LEVEL_NEW => [
             'label' => 'New',
         ],
         self::LEVEL_ACTIVE => [
-            'label'        => 'Active',
-            'pulls'        => 5,
-            'floor_visits' => 3,
+            'label' => 'Active',
+            'pulls' => 5,
         ],
         self::LEVEL_VETERAN => [
             'label'           => 'Veteran',
@@ -141,6 +156,13 @@ final class FeatureAccessService
 
         $features = [];
         foreach (array_keys(self::FEATURE_REQUIREMENTS) as $feature) {
+            // Per-user override short-circuits the gate. Documented at
+            // the class level; intentionally per-feature so a single
+            // grant can't widen accidentally.
+            if (self::hasFeatureOverride($userId, $feature)) {
+                $features[$feature] = ['allowed' => true, 'unlock_hint' => null];
+                continue;
+            }
             $features[$feature] = $this->resolveFeature($feature, $level, $stats);
         }
 
@@ -172,9 +194,36 @@ final class FeatureAccessService
             return ['allowed' => false, 'unlock_hint' => null];
         }
 
+        // Per-user override — see class-level doc. Checked before the
+        // (more expensive) stats + level computation. The override only
+        // bypasses the level/tier/wallet gate; unknown features still
+        // fail closed above so an override on a nonexistent feature
+        // never grants anything.
+        if (self::hasFeatureOverride($userId, $featureKey)) {
+            return ['allowed' => true, 'unlock_hint' => null];
+        }
+
         $stats = $this->getUserStats($userId);
         $level = $this->resolveLevel($stats);
         return $this->resolveFeature($featureKey, $level, $stats);
+    }
+
+    /**
+     * Read the per-user override meta for one feature. "1" / true / 1
+     * are all treated as bypass; anything else (including missing) is
+     * the no-op default. Filter `bcc_feature_override_value` lets
+     * callers transform the raw meta value before truthiness — useful
+     * if a future admin UI stores e.g. JSON instead of a flat bool.
+     */
+    private static function hasFeatureOverride(int $userId, string $featureKey): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+        $raw = get_user_meta($userId, 'bcc_feature_override_' . $featureKey, true);
+        /** @var mixed $filtered */
+        $filtered = apply_filters('bcc_feature_override_value', $raw, $userId, $featureKey);
+        return filter_var($filtered, FILTER_VALIDATE_BOOLEAN);
     }
 
     /**
@@ -193,7 +242,7 @@ final class FeatureAccessService
      * Admin-tunable thresholds. Reads wp_options('bcc_level_thresholds')
      * and merges over the defaults so partial overrides are safe.
      *
-     * @return array<int, array{label: string, pulls?: int, floor_visits?: int, reviews_written?: int, days_active?: int}>
+     * @return array<int, array{label: string, pulls?: int, reviews_written?: int, days_active?: int}>
      */
     public function getLevelThresholds(): array
     {
@@ -220,9 +269,6 @@ final class FeatureAccessService
             if (isset($override['pulls']) && is_int($override['pulls'])) {
                 $entry['pulls'] = $override['pulls'];
             }
-            if (isset($override['floor_visits']) && is_int($override['floor_visits'])) {
-                $entry['floor_visits'] = $override['floor_visits'];
-            }
             if (isset($override['reviews_written']) && is_int($override['reviews_written'])) {
                 $entry['reviews_written'] = $override['reviews_written'];
             }
@@ -235,13 +281,12 @@ final class FeatureAccessService
     }
 
     /**
-     * @return array{pulls: int, floor_visits: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string}
+     * @return array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string}
      */
     private function getUserStats(int $userId): array
     {
         return [
             'pulls'           => $this->countPulls($userId),
-            'floor_visits'    => $this->countFloorVisits($userId),
             'reviews_written' => $this->countReviewsWritten($userId),
             'days_active'     => $this->countDaysActive($userId),
             'has_wallet'      => $this->hasVerifiedWallet($userId),
@@ -253,7 +298,7 @@ final class FeatureAccessService
      * Cumulative level resolver. Level 3 requires Level-2 thresholds also
      * met (a user with 100 reviews but 0 pulls is NOT Level 3).
      *
-     * @param array{pulls: int, floor_visits: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
+     * @param array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
      */
     private function resolveLevel(array $stats): int
     {
@@ -261,8 +306,7 @@ final class FeatureAccessService
         $activeReq  = $thresholds[self::LEVEL_ACTIVE]  ?? [];
         $veteranReq = $thresholds[self::LEVEL_VETERAN] ?? [];
 
-        $atActive = $stats['pulls']        >= (int) ($activeReq['pulls']        ?? 0)
-                 && $stats['floor_visits'] >= (int) ($activeReq['floor_visits'] ?? 0);
+        $atActive = $stats['pulls'] >= (int) ($activeReq['pulls'] ?? 0);
 
         $atVeteran = $atActive
                   && $stats['reviews_written'] >= (int) ($veteranReq['reviews_written'] ?? 0)
@@ -283,7 +327,7 @@ final class FeatureAccessService
      * needed) pass. The unlock_hint describes whichever sub-gate is
      * closer to resolution.
      *
-     * @param array{pulls: int, floor_visits: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
+     * @param array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
      * @return array{allowed: bool, unlock_hint: ?string}
      */
     private function resolveFeature(string $featureKey, int $currentLevel, array $stats): array
@@ -318,7 +362,7 @@ final class FeatureAccessService
      * Pick the hint that describes the most-actionable next step.
      * Priority: level (typically the closer gate) → tier → wallet.
      *
-     * @param array{pulls: int, floor_visits: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
+     * @param array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
      */
     private function composeUnlockHint(
         int $minLevel,
@@ -333,9 +377,8 @@ final class FeatureAccessService
 
             if ($minLevel === self::LEVEL_ACTIVE) {
                 return sprintf(
-                    'Pull %d cards and visit the Floor on %d days to unlock this.',
-                    (int) ($target['pulls']        ?? 0),
-                    (int) ($target['floor_visits'] ?? 0)
+                    'Pull %d cards to unlock this.',
+                    (int) ($target['pulls'] ?? 0)
                 );
             }
 
@@ -363,10 +406,10 @@ final class FeatureAccessService
 
     /**
      * Render the metrics that gate the NEXT level (not cumulative). For a
-     * Level-1 viewer, shows the pulls/floor_visits requirements; for a
+     * Level-1 viewer, shows the pulls requirement; for a
      * Level-2 viewer, shows the reviews/days_active requirements.
      *
-     * @param array{pulls: int, floor_visits: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
+     * @param array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
      * @return list<array{metric: string, label: string, current: int, required: int}>
      */
     private function renderNextLevelThresholds(int $currentLevel, array $stats): array
@@ -381,12 +424,6 @@ final class FeatureAccessService
                     'label'    => 'Pulls',
                     'current'  => (int) $stats['pulls'],
                     'required' => (int) ($req['pulls'] ?? 0),
-                ],
-                [
-                    'metric'   => 'floor_visits',
-                    'label'    => 'Floor visits',
-                    'current'  => (int) $stats['floor_visits'],
-                    'required' => (int) ($req['floor_visits'] ?? 0),
                 ],
             ];
         }
@@ -414,7 +451,7 @@ final class FeatureAccessService
 
     private function countPulls(int $userId): int
     {
-        // Pulls = follows on PeepSo's graph (§C2: binder is the UI projection).
+        // Pulls = follows on PeepSo's graph (§C2: watchlist is the UI projection).
         // Defensive class_exists in case bcc-core isn't loaded; if absent the
         // gate naturally fails closed because pulls=0 < 5.
         if (class_exists('\\BCC\\Core\\Repositories\\PeepSoFollowerRepository')) {
@@ -422,14 +459,6 @@ final class FeatureAccessService
             return (int) ($counts['following'] ?? 0);
         }
         return 0;
-    }
-
-    private function countFloorVisits(int $userId): int
-    {
-        // bcc_floor_visits is incremented server-side on Floor page load.
-        // Auto-creates on first read returning 0; no schema migration needed.
-        $value = get_user_meta($userId, 'bcc_floor_visits', true);
-        return is_numeric($value) ? (int) $value : 0;
     }
 
     private function countReviewsWritten(int $userId): int

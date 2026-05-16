@@ -19,11 +19,11 @@
  *   - /feed     — private, no shared cache (per-viewer scope filtering + auth)
  *
  * ─────────────────────────────────────────────────────────────────
- *  Pagination convention (LOCKED — see also BinderEndpoint for the
+ *  Pagination convention (LOCKED — see also WatchingEndpoint for the
  *  inverse rule):
  *
- *    Feed   = cursor pagination (next_cursor / has_more)
- *    Binder = offset pagination (page / page_size / total / total_pages)
+ *    Feed     = cursor pagination (next_cursor / has_more)
+ *    Watching = offset pagination (page / page_size / total / total_pages)
  *
  *  Feed responses MUST emit cursor pagination. Do not "optimize" to
  *  offset later — keyset cursors are required for stable feed paging

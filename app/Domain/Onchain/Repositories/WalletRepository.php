@@ -278,6 +278,44 @@ final class WalletRepository
         return $out;
     }
 
+    /**
+     * Earliest verified-wallet timestamp across all of the user's wallets.
+     *
+     * Returns the MySQL datetime string (UTC) of the user's oldest verified
+     * wallet, or `null` when the user has no verified wallet at all. Drives
+     * the wallet-age Sybil-mitigation multiplier in `WalletAgeWeighter`:
+     * older = more weight, fresh = clamped.
+     *
+     * Uses `verified_at` rather than `created_at` so a wallet that was
+     * linked but never completed the signature flow doesn't count toward
+     * the operator's age (a Sybil would otherwise farm `created_at` by mass-
+     * linking unverified rows). Plan §4 Week 4 references `linked_at` —
+     * doc drift; the actual column is `verified_at`.
+     *
+     * Bounded query: MIN() aggregate against the user_id index.
+     */
+    public static function oldestVerifiedAt(int $userId): ?string
+    {
+        if ($userId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var string|null $raw */
+        $raw = $wpdb->get_var($wpdb->prepare(
+            "SELECT MIN(verified_at) FROM {$table}
+             WHERE user_id = %d AND verified_at IS NOT NULL",
+            $userId
+        ));
+
+        if (!is_string($raw) || $raw === '' || $raw === '0000-00-00 00:00:00') {
+            return null;
+        }
+        return $raw;
+    }
+
     /** @return list<WalletWithChain> */
     public static function getForProject(int $postId, ?string $walletType = null): array
     {

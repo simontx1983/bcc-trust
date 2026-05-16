@@ -39,6 +39,7 @@ if (!defined('ABSPATH')) {
  *     decimals: string,
  *     bech32_prefix: string|null,
  *     icon_url: string|null,
+ *     color: string|null,
  *     marketplace_template: string|null,
  *     is_testnet: string,
  *     is_active: string,
@@ -47,9 +48,10 @@ if (!defined('ABSPATH')) {
  */
 final class ChainRepository
 {
-    /** @var string Explicit column list — must match schema-chains.php. */
+    /** @var string Explicit column list — must match schema-chains.php
+     *  + schema-blog-chain-tags.php's ALTER (color). */
     private const COLUMNS = 'id, slug, name, chain_type, chain_id_hex, rpc_url, rest_url,
-                 explorer_url, native_token, decimals, bech32_prefix, icon_url,
+                 explorer_url, native_token, decimals, bech32_prefix, icon_url, color,
                  marketplace_template, is_testnet, is_active, created_at';
 
     /** @var string Object-cache / transient group. */
@@ -134,6 +136,65 @@ final class ChainRepository
     {
         $chain = self::getBySlug($slug);
         return $chain ? (int) $chain->id : null;
+    }
+
+    /**
+     * Map group_id → chain slug for the given peepso-group post IDs.
+     *
+     * Resolves from either of the two canonical chain-tag meta keys:
+     *   - `_bcc_gate_chain_id` — NFT holder groups; written by the
+     *     gate-config admin flow at claim time.
+     *   - `_bcc_chain_tag`     — user-created plain groups; written at
+     *     create-time by `PeepSoGroupWriter::createPlainGroup` and
+     *     immutable thereafter (`add_post_meta unique=true`).
+     *
+     * The two keys are mutually exclusive in practice (one is NFT-side,
+     * one is plain-side). If both somehow exist on the same post, the
+     * first row returned wins — order is implementation-defined but the
+     * outcome is deterministic per (post, request).
+     *
+     * Single bulk SELECT joining `wp_postmeta` → `bcc_onchain_chains` by
+     * id. Bounded by `IN ($groupIds)`. Groups carrying neither key
+     * (Locals, legacy pre-tag groups) are absent from the returned map
+     * — callers treat absence as "no chain tag."
+     *
+     * Mirrors the CAST-on-meta-value direction used in
+     * GroupsDiscoveryEndpoint::filterContextsByChain — `CAST(meta_value AS UNSIGNED)`
+     * avoids the utf8mb4_unicode_ci vs utf8mb4_unicode_520_ci illegal-
+     * mix-of-collations error that the inverse direction (`CAST(id AS CHAR)`)
+     * triggers on this DB.
+     *
+     * @param list<int> $groupIds
+     * @return array<int, string>
+     */
+    public static function resolveSlugsForGroups(array $groupIds): array
+    {
+        if ($groupIds === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $ph    = implode(',', array_fill(0, count($groupIds), '%d'));
+
+        /** @var list<object{post_id: numeric-string, slug: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT pm.post_id AS post_id, c.slug AS slug
+               FROM {$wpdb->postmeta} pm
+               JOIN {$table} c ON c.id = CAST(pm.meta_value AS UNSIGNED)
+              WHERE pm.meta_key IN ('_bcc_gate_chain_id', '_bcc_chain_tag')
+                AND pm.post_id IN ({$ph})",
+            ...$groupIds
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $postId = (int) $row->post_id;
+            if (!isset($out[$postId])) {
+                $out[$postId] = (string) $row->slug;
+            }
+        }
+        return $out;
     }
 
     // ──────────────────────────────────────────────────────────

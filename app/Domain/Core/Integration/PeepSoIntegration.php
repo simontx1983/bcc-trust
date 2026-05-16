@@ -42,6 +42,14 @@ class PeepSoIntegration
         add_action('save_post_peepso-page', [$this, 'onPageSaved'], 10, 3);
         add_filter('peepso_page_create_response', [$this, 'onPageCreateResponse']);
 
+        // System-minted placeholder pages (ValidatorPageMinter) start with
+        // post_author=0 because nobody owned them at mint time. On a verified
+        // claim, transfer authorship to the claimer so WP-native /wp-admin
+        // listings, peepso byline rendering, and post_count queries
+        // attribute the page correctly. Idempotent: only fires when the page
+        // is currently author-0; already-owned pages are left alone.
+        add_action('bcc_page_claimed', [$this, 'onPageClaimed'], 20, 2);
+
         // Email verification is delegated to PeepSo. When a user completes
         // activation via their shortcode flow, PeepSo fires this action with
         // a PeepSoUser instance; we mirror the verified state into
@@ -121,6 +129,133 @@ class PeepSoIntegration
         if ($ownerId) {
             $this->userInfoRepo->decrementPageCount($ownerId, $pageId);
         }
+    }
+
+    /**
+     * Transfer authorship from `post_author=0` to the claimer on a
+     * verified claim. Only fires for system-minted placeholder pages
+     * (ValidatorPageMinter and any future on-chain entity placeholders);
+     * pages with a real author are left alone so a re-claim attempt
+     * can never overwrite the existing owner.
+     *
+     * The trust-engine source of truth for "who claimed this" remains
+     * the bcc_onchain_claims table — this handler is purely so WP-native
+     * surfaces (/wp-admin, post_author queries, PeepSo byline rendering)
+     * agree with what the claim flow already established.
+     *
+     * Hooked at priority 20 so BonusService::applyClaimBonus (10) has
+     * already run and read scoreRepo state under the pre-claim author.
+     */
+    public function onPageClaimed(int $userId, int $pageId): void
+    {
+        if ($userId <= 0 || $pageId <= 0) {
+            return;
+        }
+
+        $currentAuthor = (int) get_post_field('post_author', $pageId);
+        if ($currentAuthor !== 0) {
+            return;
+        }
+
+        $update = wp_update_post([
+            'ID'          => $pageId,
+            'post_author' => $userId,
+        ], true);
+
+        if (is_wp_error($update)) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] onPageClaimed: wp_update_post failed', [
+                'page_id' => $pageId,
+                'user_id' => $userId,
+                'error'   => $update->get_error_message(),
+            ]);
+            return;
+        }
+
+        $this->userInfoRepo->incrementPageCount($userId, $pageId);
+
+        // V1.6 follower migration — drain bcc_page_follows for this
+        // page into real PeepSo user→user follows on the new operator.
+        // Every viewer who pulled the placeholder pre-claim becomes a
+        // PeepSo follower of the claimer immediately, with their
+        // tier_at_pull preserved in bcc_pull_meta so the watchlist UI
+        // surfaces the historically-correct tier ribbon.
+        //
+        // Best-effort: an individual follow that fails is logged but
+        // does not block the rest of the migration. The placeholder
+        // page-follow rows are deleted in bulk at the end so a partial
+        // migration leaves no stragglers.
+        $this->migratePageFollowersToPeepSo($pageId, $userId);
+    }
+
+    /**
+     * Promote every `bcc_page_follows` row for the given page into a
+     * real PeepSo follow (viewer → claimer) + the matching
+     * `bcc_pull_meta` sidecar. Idempotent: if the viewer happens to
+     * already follow the claimer in PeepSo (rare), the existing
+     * follow_id is reused and we just write the missing meta row.
+     */
+    private function migratePageFollowersToPeepSo(int $pageId, int $newAuthorId): void
+    {
+        $pageFollowRepo = Plugin::instance()->pageFollowRepository();
+        $pullMetaRepo   = Plugin::instance()->pullMetaRepository();
+
+        $rows = $pageFollowRepo->findByPageId($pageId);
+        if (empty($rows)) {
+            return;
+        }
+
+        $migrated  = 0;
+        $skipped   = 0;
+        $errored   = 0;
+
+        foreach ($rows as $row) {
+            $viewerId = (int) $row->user_id;
+
+            // Self-follow guard (the claimer's own pull would now be a
+            // self-follow). PeepSoFollowWriter::follow rejects this too,
+            // but we filter here so it doesn't count as an error.
+            if ($viewerId === $newAuthorId) {
+                $skipped++;
+                continue;
+            }
+
+            try {
+                $followId = \BCC\Core\PeepSo\PeepSoFollowWriter::follow($viewerId, $newAuthorId);
+                if ($followId === 0) {
+                    $errored++;
+                    continue;
+                }
+
+                $existingMeta = $pullMetaRepo->find($followId);
+                if ($existingMeta === null) {
+                    $pullMetaRepo->insert(
+                        $followId,
+                        $row->tier_at_pull,
+                        null /* batch_id — Phase 3 */
+                    );
+                }
+                $migrated++;
+            } catch (\Throwable $e) {
+                $errored++;
+                \BCC\Core\Log\Logger::error('[bcc-trust] migratePageFollowersToPeepSo: per-row failure', [
+                    'page_id'   => $pageId,
+                    'viewer_id' => $viewerId,
+                    'author_id' => $newAuthorId,
+                    'error'     => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $deleted = $pageFollowRepo->deleteByPageId($pageId);
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Page-follow migration complete', [
+            'page_id'  => $pageId,
+            'author'   => $newAuthorId,
+            'migrated' => $migrated,
+            'skipped'  => $skipped,
+            'errored'  => $errored,
+            'deleted'  => $deleted,
+        ]);
     }
 
     public function onPageSaved(int $postId, \WP_Post $post, bool $update): void

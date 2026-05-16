@@ -25,7 +25,9 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -37,8 +39,17 @@ final class BlogService
     public const MAX_LIMIT     = 50;
 
     public function __construct(
-        private readonly HiddenActivityRepository $hiddenRepo
+        private readonly HiddenActivityRepository $hiddenRepo,
+        // PR-A — chain-tag join read-side. Optional in the signature
+        // so the legacy 1-arg constructor still works for tests; the
+        // Plugin singleton always supplies the real repo.
+        private readonly ?BlogChainTagRepository $chainTagRepo = null
     ) {
+    }
+
+    private function chainTags(): BlogChainTagRepository
+    {
+        return $this->chainTagRepo ?? new BlogChainTagRepository();
     }
 
     /**
@@ -91,7 +102,7 @@ final class BlogService
             $items[] = FeedItemNormalizer::normalize(
                 $row,
                 $author,
-                self::hydrateBlogBody($row),
+                $this->hydrateBlogBody($row),
                 null,  // reactions  — V1 default
                 null,  // socialProof — V1 default
                 null,  // attachedCard — V1 default
@@ -118,23 +129,231 @@ final class BlogService
      * Per-row body hydrator — full_text included (blog-tab context, vs.
      * the Floor context which omits it; see ActivityFeedService::resolveBody).
      *
+     * PR-A extends the body shape with the crypto-blog composer's
+     * sidecar fields:
+     *   - title           — closes the existing §3.3.8 contract gap
+     *                       (the spec listed it; the hydrator omitted it)
+     *   - category        — string|null from `_bcc_blog_category` post_meta
+     *   - tags            — list<string>; [] when meta absent or invalid
+     *   - chain_tags      — list of resolved chain rows (id/slug/name/color/icon)
+     *   - disclosure      — {tickers, note}|null from `_bcc_blog_disclosure`
+     *   - cover_image_url — large-size thumbnail URL or null when no thumbnail
+     *
+     * Backward compatibility: pre-PR-A blog posts have no `_bcc_blog_*`
+     * post_meta keys + no chain-tag rows + no thumbnail. The hydrator
+     * returns `null`/`[]` for every new field in that case rather than
+     * throwing — readers must handle absence gracefully.
+     *
      * @param object{act_external_id: int|numeric-string} $row
-     * @return array{excerpt: string, full_text: string, wp_post_id: int}
+     * @return array{
+     *   excerpt: string,
+     *   full_text: string,
+     *   wp_post_id: int,
+     *   title: string,
+     *   category: ?string,
+     *   tags: list<string>,
+     *   chain_tags: list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}>,
+     *   disclosure: ?array{tickers: list<string>, note: string},
+     *   cover_image_url: ?string
+     * }
      */
-    private static function hydrateBlogBody(object $row): array
+    private function hydrateBlogBody(object $row): array
     {
         $postId = (int) $row->act_external_id;
+        return $this->hydrateForPostId($postId, true);
+    }
+
+    /**
+     * Public §D6 body hydrator keyed on the wp_post id directly.
+     *
+     * Used by:
+     *   - {@see hydrateBlogBody} (this class) — wraps for the blog-tab
+     *     read surface (`/users/:handle/blog`). `$includeFullText=true`.
+     *   - {@see FeedRankingService::loadBlogBodies} — for the Floor
+     *     feed surface. `$includeFullText=false` (Floor context omits
+     *     `full_text` per the §3.3.8 contract — the body is rendered
+     *     by the standalone blog tab, not inline on the Floor).
+     *
+     * Stripping `full_text` server-side keeps Floor payloads small
+     * (a 60KB body × 20 items = 1.2MB; 20 items × ~1KB excerpt is
+     * negligible). The frontend's `BlogExcerptBody` only reads
+     * title/excerpt/category/chain_tags/cover_image_url for the Floor
+     * card; full_text never surfaces there.
+     *
+     * @return array{
+     *   excerpt: string,
+     *   full_text: string,
+     *   wp_post_id: int,
+     *   title: string,
+     *   category: ?string,
+     *   tags: list<string>,
+     *   chain_tags: list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}>,
+     *   disclosure: ?array{tickers: list<string>, note: string},
+     *   cover_image_url: ?string
+     * }
+     */
+    public function hydrateForPostId(int $postId, bool $includeFullText): array
+    {
         if ($postId <= 0) {
-            return ['excerpt' => '', 'full_text' => '', 'wp_post_id' => 0];
+            return self::emptyBody(0);
         }
         $post = get_post($postId);
         if (!$post instanceof \WP_Post) {
-            return ['excerpt' => '', 'full_text' => '', 'wp_post_id' => $postId];
+            return self::emptyBody($postId);
         }
+        $body = $this->loadBodyFromPost($post);
+        if (!$includeFullText) {
+            $body['full_text'] = '';
+        }
+        return $body;
+    }
+
+    /**
+     * Internal body builder — pulled out of hydrateBlogBody so both
+     * the activity-row path (`hydrateBlogBody`) and the direct
+     * post-id path (`hydrateForPostId`) share one implementation.
+     *
+     * @return array{
+     *   excerpt: string,
+     *   full_text: string,
+     *   wp_post_id: int,
+     *   title: string,
+     *   category: ?string,
+     *   tags: list<string>,
+     *   chain_tags: list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}>,
+     *   disclosure: ?array{tickers: list<string>, note: string},
+     *   cover_image_url: ?string
+     * }
+     */
+    private function loadBodyFromPost(\WP_Post $post): array
+    {
+        $postId = (int) $post->ID;
+
+        // ── Free-form tags from JSON post_meta ──────────────────────
+        //
+        // Pre-PR-A posts have no meta key → tags = []. A corrupted
+        // JSON blob (manual SQL edit, schema drift) also resolves to
+        // [] — we never throw inside a hydrator.
+        $tagsRaw = get_post_meta($postId, '_bcc_blog_tags', true);
+        $tags    = [];
+        if (is_string($tagsRaw) && $tagsRaw !== '') {
+            $decoded = json_decode($tagsRaw, true);
+            if (is_array($decoded)) {
+                foreach ($decoded as $t) {
+                    if (is_string($t) && $t !== '') {
+                        $tags[] = $t;
+                    }
+                }
+            }
+        }
+
+        // ── Category (string|null) ──────────────────────────────────
+        $catRaw  = get_post_meta($postId, '_bcc_blog_category', true);
+        $category = (is_string($catRaw) && $catRaw !== '') ? $catRaw : null;
+
+        // ── Disclosure block ────────────────────────────────────────
+        $discRaw = get_post_meta($postId, '_bcc_blog_disclosure', true);
+        $disclosure = null;
+        if (is_string($discRaw) && $discRaw !== '') {
+            $decoded = json_decode($discRaw, true);
+            if (is_array($decoded) && isset($decoded['tickers'], $decoded['note'])) {
+                /** @var list<string> $tickersOut */
+                $tickersOut = [];
+                if (is_array($decoded['tickers'])) {
+                    foreach ($decoded['tickers'] as $t) {
+                        if (is_string($t) && $t !== '') {
+                            $tickersOut[] = $t;
+                        }
+                    }
+                }
+                $note = is_string($decoded['note']) ? $decoded['note'] : '';
+                $disclosure = ['tickers' => $tickersOut, 'note' => $note];
+            }
+        }
+
+        // ── Chain tags — resolve via FK to bcc_onchain_chains ────────
+        //
+        // PR-A reads per-post because BlogService is a single-author
+        // tab — the per-row chain-tag fetch is bounded by
+        // BLOG_CHAIN_TAGS_MAX. When the Floor renderer adopts blog
+        // excerpts at multi-author scale it should batch via
+        // BlogChainTagRepository::findByPostIds + a single
+        // ChainRepository fetch (already cache-backed).
+        $chainIds = $this->chainTags()->findByPostId($postId);
+        /** @var list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}> $chainRows */
+        $chainRows = [];
+        foreach ($chainIds as $cid) {
+            $chain = ChainRepository::getById($cid);
+            if ($chain === null) {
+                // Chain was deactivated / deleted after the blog was
+                // tagged — silently drop from the hydrated body rather
+                // than emitting a row with stale identifiers.
+                continue;
+            }
+            // Defensive null-coalesce — pre-migration rows could still
+            // be in the DB cache during the window between code deploy
+            // and the dbDelta re-run picking up the new color column.
+            // The ChainRow phpdoc declares `color: string|null` so this
+            // narrows cleanly.
+            $color   = is_string($chain->color)    ? $chain->color    : null;
+            $iconUrl = is_string($chain->icon_url) ? $chain->icon_url : null;
+            $chainRows[] = [
+                'id'       => (int) $chain->id,
+                'slug'     => (string) $chain->slug,
+                'name'     => (string) $chain->name,
+                'color'    => $color,
+                'icon_url' => $iconUrl,
+            ];
+        }
+
+        // ── Cover image — large-size URL or null ─────────────────────
+        $coverUrl = get_the_post_thumbnail_url($postId, 'large');
+        $coverImageUrl = is_string($coverUrl) ? $coverUrl : null;
+
         return [
-            'excerpt'    => (string) $post->post_excerpt,
-            'full_text'  => (string) $post->post_content,
-            'wp_post_id' => $postId,
+            'excerpt'         => (string) $post->post_excerpt,
+            'full_text'       => (string) $post->post_content,
+            'wp_post_id'      => $postId,
+            'title'           => (string) $post->post_title,
+            'category'        => $category,
+            'tags'            => $tags,
+            'chain_tags'      => $chainRows,
+            'disclosure'      => $disclosure,
+            'cover_image_url' => $coverImageUrl,
+        ];
+    }
+
+    /**
+     * Empty-body shape — keeps the contract surface stable when the
+     * underlying wp_post can't be loaded (deleted, never existed,
+     * or the act_external_id was zero). Every new PR-A field is
+     * present with its null/[] sentinel so the frontend never has
+     * to branch on "field exists vs missing".
+     *
+     * @return array{
+     *   excerpt: string,
+     *   full_text: string,
+     *   wp_post_id: int,
+     *   title: string,
+     *   category: null,
+     *   tags: list<string>,
+     *   chain_tags: list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}>,
+     *   disclosure: null,
+     *   cover_image_url: null
+     * }
+     */
+    private static function emptyBody(int $postId): array
+    {
+        return [
+            'excerpt'         => '',
+            'full_text'       => '',
+            'wp_post_id'      => $postId,
+            'title'           => '',
+            'category'        => null,
+            'tags'            => [],
+            'chain_tags'      => [],
+            'disclosure'      => null,
+            'cover_image_url' => null,
         ];
     }
 

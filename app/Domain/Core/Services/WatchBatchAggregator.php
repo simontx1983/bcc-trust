@@ -1,12 +1,13 @@
 <?php
 /**
- * Pull Batch Aggregator — §C3 implementation.
+ * Watch Batch Aggregator — §C3 implementation.
  *
  * Per §C3:
- *   - Pulls accumulate into a single batch while the user keeps pulling.
- *   - The batch closes after exactly 10 minutes of pull inactivity.
+ *   - Watches accumulate into a single batch while the user keeps
+ *     watching cards.
+ *   - The batch closes after exactly 10 minutes of watch inactivity.
  *   - At close, server emits exactly ONE pull_batch feed item.
- *   - Once emitted, the batch is frozen — subsequent unpulls don't
+ *   - Once emitted, the batch is frozen — subsequent unwatches don't
  *     retroactively edit, recount, or remove the feed post.
  *   - Maximum 3 cards shown in post body + "+N more".
  *
@@ -22,42 +23,61 @@
  *      via `WHERE batch_id IS NULL`).
  *   3. Emit `bcc_pull_batch_emitted` event with batch metadata.
  *
- * Why a recurring sweep (not one-shot scheduling per pull): WP-Cron's
+ * Why a recurring sweep (not one-shot scheduling per watch): WP-Cron's
  * `wp_schedule_single_event` dedups identical hook+args pairs scheduled
  * within a 10-minute window, which collides exactly with our case
- * (same user pulling twice in <10 min). The recurring sweep avoids
+ * (same user watching twice in <10 min). The recurring sweep avoids
  * that hazard at the cost of a small constant-time query each minute.
  *
  * Frozen-history rule: the §C3 contract says emitted batches don't
  * retroactively change. This service writes the batch_id and emits
  * the event — the feed item itself is written by a separate
  * subscriber (the activity-stream writer) per §A3. That subscriber
- * MUST NOT re-write the feed item on subsequent unpull events; the
+ * MUST NOT re-write the feed item on subsequent unwatch events; the
  * §C3 frozen-history rule lives there, not here.
  *
+ * Cron hook rename (release N): SWEEP_HOOK changed from
+ * `bcc_pull_batch_sweep` to `bcc_watch_batch_sweep`. Plugin.php's
+ * plugins_loaded handler unschedules the legacy hook on every load
+ * to drain stale events from sites that upgrade mid-flight (mitigates
+ * the cron-drift incident class).
+ *
  * @package BCC\Trust\Core\Services
- * @since V1 (2026-04, Binder Phase 3)
+ * @since V1 (2026-04; renamed from PullBatchAggregator 2026-05-13)
  */
 
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Log\Logger;
-use BCC\Trust\Core\Repositories\BinderRepository;
+use BCC\Trust\Core\Repositories\WatchingRepository;
 use BCC\Trust\Core\Repositories\PullMetaRepository;
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-final class PullBatchAggregator
+final class WatchBatchAggregator
 {
     /** §C3 inactivity window — 10 minutes (in seconds). */
     public const INACTIVITY_WINDOW_SECONDS = 600;
 
-    /** Recurring cron hook for the periodic sweep. */
-    public const SWEEP_HOOK = 'bcc_pull_batch_sweep';
+    /**
+     * Recurring cron hook for the periodic sweep.
+     *
+     * Renamed 2026-05-13 from `bcc_pull_batch_sweep`. Plugin.php
+     * self-heals via wp_clear_scheduled_hook() on plugins_loaded so
+     * sites that upgrade without reactivating don't orphan the legacy
+     * hook.
+     */
+    public const SWEEP_HOOK = 'bcc_watch_batch_sweep';
 
-    /** Custom WP-Cron interval registered for the sweep. */
+    /**
+     * Custom WP-Cron interval registered for the sweep.
+     *
+     * The interval slug `bcc_minute` is the historical name registered
+     * in `cron_schedules`; keeping the existing slug avoids a second
+     * migration of internal-only names that no public consumer reads.
+     */
     public const SWEEP_INTERVAL = 'bcc_minute';
 
     /** §C3 cap: post body shows up to 3 cards + "+N more". */
@@ -74,7 +94,7 @@ final class PullBatchAggregator
     private const SWEEP_USER_LIMIT_DEFAULT = 100;
 
     public function __construct(
-        private readonly BinderRepository $binderRepo,
+        private readonly WatchingRepository $watchingRepo,
         private readonly PullMetaRepository $pullMetaRepo
     ) {
     }
@@ -91,7 +111,7 @@ final class PullBatchAggregator
         $limit = self::resolveSweepLimit();
         $cutoffMysql = gmdate('Y-m-d H:i:s', time() - self::INACTIVITY_WINDOW_SECONDS);
 
-        $userIds = $this->binderRepo->findUsersWithExpiredOpenBatches($cutoffMysql, $limit);
+        $userIds = $this->watchingRepo->findUsersWithExpiredOpenBatches($cutoffMysql, $limit);
 
         if ($userIds === []) {
             // Quiet path — no log noise when there's nothing to do
@@ -99,7 +119,7 @@ final class PullBatchAggregator
             return;
         }
 
-        Logger::info('[PullBatchAggregator] sweep tick', [
+        Logger::info('[WatchBatchAggregator] sweep tick', [
             'user_count' => count($userIds),
             'cutoff'     => $cutoffMysql,
             'limit'      => $limit,
@@ -124,7 +144,7 @@ final class PullBatchAggregator
             return;
         }
 
-        $openRows = $this->binderRepo->findOpenPullMetaForUser($userId);
+        $openRows = $this->watchingRepo->findOpenPullMetaForUser($userId);
         if ($openRows === []) {
             return;
         }
@@ -172,7 +192,7 @@ final class PullBatchAggregator
             // (with the same deterministic batch_id, since inputs are
             // identical). The other worker fired the event; we exit
             // silently to avoid duplicate emission.
-            Logger::info('[PullBatchAggregator] batch close skipped — already stamped', [
+            Logger::info('[WatchBatchAggregator] batch close skipped — already stamped', [
                 'user_id'  => $userId,
                 'batch_id' => $batchId,
             ]);
@@ -181,7 +201,7 @@ final class PullBatchAggregator
 
         $cardCount    = count($followIds);
         $topFollowIds = array_slice($followIds, 0, self::TOP_CARDS_DISPLAY);
-        $handles      = $this->binderRepo->findHandlesForFollowIds($topFollowIds);
+        $handles      = $this->watchingRepo->findHandlesForFollowIds($topFollowIds);
 
         $topCards = [];
         foreach ($topFollowIds as $followId) {
@@ -192,7 +212,7 @@ final class PullBatchAggregator
         }
         $moreCount = max(0, $cardCount - self::TOP_CARDS_DISPLAY);
 
-        Logger::info('[PullBatchAggregator] batch emitted', [
+        Logger::info('[WatchBatchAggregator] batch emitted', [
             'user_id'    => $userId,
             'batch_id'   => $batchId,
             'card_count' => $cardCount,

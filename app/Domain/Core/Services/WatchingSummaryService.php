@@ -1,9 +1,9 @@
 <?php
 /**
- * Binder Summary Service — §N9 identity-snapshot composer.
+ * Watching Summary Service — §N9 identity-snapshot composer.
  *
- * Builds the GET /me/binder/summary response. Pre-computes everything
- * the BinderHeader UI surfaces so the frontend renders without
+ * Builds the GET /me/watching/summary response. Pre-computes everything
+ * the WatchingHeader UI surfaces so the frontend renders without
  * deriving any business value (per §A2 / §L5):
  *
  *   {
@@ -23,10 +23,10 @@
  *   }
  *
  * Composition pattern: this service ONLY composes the §N9 block.
- * BinderService stays focused on the read/pull/unpull pipeline; this
- * service borrows from the same activity repos as LivingService for
- * the monthly rollup. Keeping both narrow makes each independently
- * testable and avoids growing BinderService into a god-service.
+ * WatchingService stays focused on the read/watch/unwatch pipeline;
+ * this service borrows from the same activity repos as LivingService
+ * for the monthly rollup. Keeping both narrow makes each independently
+ * testable and avoids growing WatchingService into a god-service.
  *
  * Stale-but-stable contract: when ReactionTypeRegistry can't resolve
  * the Solid reaction (fresh install, seeder hasn't run yet), the
@@ -34,12 +34,12 @@
  * as LivingService.today.
  *
  * @package BCC\Trust\Core\Services
- * @since V1 (2026-04, §N9 binder summary)
+ * @since V1 (2026-04, §N9 watchlist summary; renamed from BinderSummaryService 2026-05-13)
  */
 
 namespace BCC\Trust\Core\Services;
 
-use BCC\Trust\Core\Repositories\BinderRepository;
+use BCC\Trust\Core\Repositories\WatchingRepository;
 use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
@@ -49,7 +49,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-final class BinderSummaryService
+final class WatchingSummaryService
 {
     /**
      * The five slots we surface in `tier_distribution`. Order is
@@ -64,7 +64,7 @@ final class BinderSummaryService
     private const MONTHLY_DAYS = 30;
 
     public function __construct(
-        private readonly BinderRepository $binderRepo,
+        private readonly WatchingRepository $watchingRepo,
         private readonly VoteRepository $voteRepo,
         private readonly FlagsRepository $flagsRepo,
         private readonly PeepSoReactionRepository $reactionRepo
@@ -82,8 +82,8 @@ final class BinderSummaryService
      */
     public function compose(int $userId): array
     {
-        $total            = $this->binderRepo->countItemsForUser($userId);
-        $tierCounts       = $this->binderRepo->countByTierForUser($userId);
+        $total            = $this->watchingRepo->countItemsForUser($userId);
+        $tierCounts       = $this->watchingRepo->countByTierForUser($userId);
         $tierDistribution = self::projectDistribution($tierCounts, $total);
 
         return [
@@ -129,7 +129,7 @@ final class BinderSummaryService
      *
      * Solid resolution: when ReactionTypeRegistry::solidId() returns
      * null (reactions not seeded yet), surface 0 rather than fail —
-     * the binder summary is supplementary chrome, not load-bearing.
+     * the watchlist summary is supplementary chrome, not load-bearing.
      *
      * @return array{reviews: int, solids_received: int, disputes_signed: int}
      */

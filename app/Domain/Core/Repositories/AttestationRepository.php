@@ -272,6 +272,275 @@ final class AttestationRepository
     }
 
     /**
+     * Lifetime attestation count for an attestor — every row ever
+     * inserted, including revoked. Drives `since_attestation_count`
+     * on the §J.5 self-mirror surface so the operator sees a real
+     * "how much have I done" anchor even before Slice E's outcome
+     * classifier populates `track_record.outcomes`.
+     *
+     * Counts vouch + stand_behind across all target_kinds. Bounded
+     * with a defensive LIMIT — a single operator's lifetime cast
+     * count is realistically dozens, not thousands.
+     */
+    public function countAllByAttestor(int $attestorUserId): int
+    {
+        if ($attestorUserId <= 0) {
+            return 0;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT COUNT(*) FROM `{$table}`"
+            . ' WHERE attestor_user_id = %d'
+            . ' LIMIT 10000';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $attestorUserId);
+        if (!is_string($prepared)) {
+            return 0;
+        }
+
+        $raw = $wpdb->get_var($prepared);
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
+     * Has-recent-activity probe for the dormancy detector.
+     *
+     * Counts attestation rows where the attestor (a) cast a new row,
+     * (b) reaffirmed an existing row, or (c) revoked an existing row
+     * since the supplied UTC datetime. Any of the three counts as a
+     * "sign of life" for §J.4 `attestor.is_dormant` — we don't want
+     * to mark an operator dormant just because they haven't cast
+     * NEW rows; a revoke is still active judgment.
+     *
+     * Bounded with LIMIT defensively — for the dormancy threshold
+     * (60-day window) the realistic count is single digits per user.
+     *
+     * @param string $sinceMysqlUtc UTC datetime in MySQL format ("YYYY-MM-DD HH:MM:SS").
+     */
+    public function countByActorSince(int $attestorUserId, string $sinceMysqlUtc): int
+    {
+        if ($attestorUserId <= 0 || $sinceMysqlUtc === '') {
+            return 0;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        // Three-way OR: created / reaffirmed / revoked since $since.
+        // `created_at >= ?` is index-covered via idx_attestor_active
+        // (attestor_user_id, kind, revoked_at, created_at DESC). The
+        // other two cases scan non-indexed columns within the
+        // attestor's row subset; at our scale (≤ dozens of rows per
+        // attestor) this is cheap. LIMIT 1000 keeps a misbehaving
+        // dataset from running away.
+        //
+        // String concatenation (vs a multi-line "..." literal) keeps
+        // PHPStan's literal-string inference happy — same idiom as
+        // `countAllByAttestor` and `countActiveStandBehindByAttestor`
+        // above.
+        $sql = "SELECT COUNT(*) FROM `{$table}`"
+            . ' WHERE attestor_user_id = %d'
+            . ' AND (created_at >= %s OR reaffirmed_at >= %s OR revoked_at >= %s)'
+            . ' LIMIT 1000';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $attestorUserId, $sinceMysqlUtc, $sinceMysqlUtc, $sinceMysqlUtc);
+        if (!is_string($prepared)) {
+            return 0;
+        }
+
+        $raw = $wpdb->get_var($prepared);
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
+     * How many distinct targets has this attestor cast ACTIVE
+     * attestations on, for the given target_kind? Drives the
+     * "attestor's cohort size" denominator in
+     * `CohortOverlapDampener` — % overlap with target's cohort.
+     *
+     * Counts vouch + stand_behind, active rows only (revoked
+     * attestations represent withdrawn judgment and shouldn't
+     * inflate the cohort denominator).
+     *
+     * Bounded with LIMIT 5000 — a single operator's lifetime
+     * distinct-target count is realistically dozens to low hundreds.
+     */
+    public function countDistinctTargetsByAttestor(int $attestorUserId, string $targetKind): int
+    {
+        if ($attestorUserId <= 0) {
+            return 0;
+        }
+        if (!in_array($targetKind, self::TARGET_KINDS, true)) {
+            return 0;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT COUNT(DISTINCT target_id) FROM `{$table}`"
+            . ' WHERE attestor_user_id = %d'
+            . ' AND target_kind = %s'
+            . ' AND revoked_at IS NULL'
+            . ' LIMIT 5000';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $attestorUserId, $targetKind);
+        if (!is_string($prepared)) {
+            return 0;
+        }
+
+        $raw = $wpdb->get_var($prepared);
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
+     * Size of the intersection between attestor's cohort and
+     * target's attestor-cohort, scoped to `target_kind='user_profile'`:
+     *
+     *   |{ users U : attestor → U active AND U → target active }|
+     *
+     * In words: "how many of the operators I've vouched/stand-behind
+     * on have also vouched/stand-behind on this target?" Drives the
+     * `CohortOverlapDampener` numerator.
+     *
+     * Self-join across two row sets via the `target_id = attestor_user_id`
+     * bridge. Both sides bounded by `target_kind='user_profile'` and
+     * `revoked_at IS NULL`; LIMIT belt-and-suspenders applies on the
+     * outer COUNT in case a misbehaving dataset goes nuts (realistic
+     * intersection sizes are dozens).
+     */
+    public function countOverlapBetweenAttestorAndTarget(int $attestorUserId, int $targetUserId): int
+    {
+        if ($attestorUserId <= 0 || $targetUserId <= 0 || $attestorUserId === $targetUserId) {
+            return 0;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        // a.target_id is the user the attestor cast on;
+        // b.attestor_user_id is anyone who has cast on the target.
+        // Equal a.target_id = b.attestor_user_id ⇒ that user is in
+        // both sets ⇒ counted once via DISTINCT.
+        $sql = "SELECT COUNT(DISTINCT a.target_id) FROM `{$table}` a"
+            . " INNER JOIN `{$table}` b ON b.attestor_user_id = a.target_id"
+            . " WHERE a.attestor_user_id = %d"
+            . " AND a.target_kind = 'user_profile'"
+            . " AND a.revoked_at IS NULL"
+            . " AND b.target_id = %d"
+            . " AND b.target_kind = 'user_profile'"
+            . " AND b.revoked_at IS NULL"
+            . ' LIMIT 5000';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $attestorUserId, $targetUserId);
+        if (!is_string($prepared)) {
+            return 0;
+        }
+
+        $raw = $wpdb->get_var($prepared);
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
+     * Distinct (target_kind, target_id) pairs that saw ANY attestation
+     * activity (cast / reaffirm / revoke) since the given timestamp.
+     * Drives the `PolarizationTransitionNotifier::sweep()` candidate
+     * set so the daily worker only re-classifies entities that
+     * actually moved, not the entire universe.
+     *
+     * Bounded by LIMIT (50k cap — soft fence against a runaway dataset;
+     * realistic daily activity is dozens to low hundreds of targets).
+     *
+     * @param string $sinceMysqlUtc UTC datetime "YYYY-MM-DD HH:MM:SS".
+     * @return list<array{target_kind: string, target_id: int}>
+     */
+    public function listTargetsWithRecentActivity(string $sinceMysqlUtc): array
+    {
+        if ($sinceMysqlUtc === '') {
+            return [];
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT DISTINCT target_kind, target_id FROM `{$table}`"
+            . ' WHERE created_at >= %s OR reaffirmed_at >= %s OR revoked_at >= %s'
+            . ' LIMIT 50000';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $sinceMysqlUtc, $sinceMysqlUtc, $sinceMysqlUtc);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        /** @var list<object{target_kind: string, target_id: numeric-string}>|null $rows */
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->target_kind, $row->target_id)) {
+                continue;
+            }
+            $out[] = [
+                'target_kind' => (string) $row->target_kind,
+                'target_id'   => (int) $row->target_id,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Count REVOKED attestations against a target (across all kinds).
+     * Drives the `poorly_regarded` heuristic in `DivergenceStateClassifier`:
+     * when the revoked-to-active ratio crosses the threshold, the target
+     * is flagged as poorly regarded.
+     *
+     * Counts vouch + stand_behind where `revoked_at IS NOT NULL`. Bounded
+     * with LIMIT — realistic revocation count per target is dozens.
+     */
+    public function countRevokedByTarget(string $targetKind, int $targetId): int
+    {
+        if (!in_array($targetKind, self::TARGET_KINDS, true)) {
+            return 0;
+        }
+        if ($targetId <= 0) {
+            return 0;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT COUNT(*) FROM `{$table}`"
+            . ' WHERE target_kind = %s'
+            . ' AND target_id = %d'
+            . ' AND revoked_at IS NOT NULL'
+            . ' LIMIT 10000';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $targetKind, $targetId);
+        if (!is_string($prepared)) {
+            return 0;
+        }
+
+        $raw = $wpdb->get_var($prepared);
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
      * Compute the next per-target order number for a new attestation.
      * Used to populate `attestation_order_in_target` so the FE can
      * surface `is_pre_consensus_pick` for the first-mover positions
@@ -534,14 +803,24 @@ final class AttestationRepository
         //   - include-revoked: active rows first, revoked rows after.
         //     Phillip's note: revoked is archival; preserves "no hiding
         //     the past" without interleaving the dead with the living.
-        // V1 sort: only 'recency' produces a distinct ORDER BY.
-        // 'reliability' and 'decayed_weight' both collapse to the
-        // weight-then-recency ordering until Slice E ships real
-        // decay + reliability synthesis. We accept all three from
-        // the contract surface; the FE renders the order it gets.
-        $orderBy = $sort === 'recency'
-            ? 'created_at DESC, id DESC'
-            : 'weight_at_time DESC, created_at DESC';
+        //
+        // Sort mode wiring:
+        //   - `recency`         → created_at DESC, id DESC
+        //   - `decayed_weight`  → DecayResolver SQL CASE (Slice E.1 PR-5)
+        //   - `reliability`     → collapses to `decayed_weight` for now;
+        //                         PR-6 swaps in the reliability standing
+        //                         + numeric Operator Reliability score
+        //                         once the cache table populates.
+        //
+        // The DecayResolver SQL expression is safe to interpolate —
+        // every numeric value is a class constant (never user input).
+        // See VoteRepository::applyTimeDecay for the sibling SQL idiom.
+        if ($sort === 'recency') {
+            $orderBy = 'created_at DESC, id DESC';
+        } else {
+            $decayedExpr = \BCC\Trust\Core\Services\DecayResolver::decayedWeightSqlExpression();
+            $orderBy = $decayedExpr . ' DESC, created_at DESC';
+        }
         if ($includeRevoked) {
             // Active-first secondary: rows with revoked_at IS NULL
             // come before revoked rows. ISNULL(col) returns 1 for

@@ -376,6 +376,106 @@ class DisputeRepository
     }
 
     /**
+     * Check whether any active (reviewing) dispute exists against this
+     * entity page. Page-scoped predicate for §J.8 `negative_signals.under_review`
+     * + the V1 `DivergenceStateClassifier::STATE_DISPUTED` branch.
+     *
+     * Active state per the canonical enum is `'reviewing'` only —
+     * accepted/rejected/dismissed/timeout_no_quorum are all terminal and
+     * do NOT count. Mirrors `hasActiveDisputeForVote` shape but keys on
+     * `page_id` instead of `vote_id` (votes are vote-scoped; the
+     * negative-signal surface is page-scoped — a single page can carry
+     * disputes across multiple votes).
+     */
+    public static function hasActiveDisputeForPage(int $pageId): bool
+    {
+        if ($pageId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        $table = self::disputes_table();
+
+        $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$table} WHERE page_id = %d AND status = 'reviewing' LIMIT 1",
+            $pageId
+        ));
+
+        return (bool) $existing;
+    }
+
+    /**
+     * Distinct `page_id`s with any dispute activity (created OR
+     * status-changed) since the given UTC timestamp. Feeds
+     * `PolarizationTransitionNotifier::sweep()` candidate set so the
+     * daily worker re-classifies entities whose dispute state may
+     * have flipped.
+     *
+     * Bounded by LIMIT (5000 cap; daily dispute volume is realistically
+     * single digits to low double digits). Distinct page_ids only — a
+     * single page can have multiple dispute rows over time; the
+     * classifier handles that via `hasActiveDisputeForPage`.
+     *
+     * @param string $sinceMysqlUtc UTC datetime "YYYY-MM-DD HH:MM:SS".
+     * @return list<int>
+     */
+    public static function listPagesWithRecentDisputeActivity(string $sinceMysqlUtc): array
+    {
+        if ($sinceMysqlUtc === '') {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::disputes_table();
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT DISTINCT page_id FROM {$table}
+              WHERE created_at >= %s OR reviewed_at >= %s
+              LIMIT 5000",
+            $sinceMysqlUtc,
+            $sinceMysqlUtc
+        ));
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->page_id)) {
+                continue;
+            }
+            $pageId = (int) $row->page_id;
+            if ($pageId > 0) {
+                $out[] = $pageId;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Count active (reviewing) disputes against this entity page. Feeds
+     * `negative_signals.unresolved_claims_count` on the §J.6 view-model.
+     * Returns 0 for missing/invalid page IDs. Bounded scan via the
+     * existing (page_id, status) index.
+     */
+    public static function countActiveDisputesForPage(int $pageId): int
+    {
+        if ($pageId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::disputes_table();
+
+        $raw = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE page_id = %d AND status = 'reviewing' LIMIT 5000",
+            $pageId
+        ));
+
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
      * Atomically create a dispute row and its panel assignments.
      *
      * @param array<string, mixed> $disputeData  Dispute column values.

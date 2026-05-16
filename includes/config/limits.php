@@ -42,26 +42,47 @@ define('BCC_TRUST_RATE_WINDOW_API', 60);
 define('BCC_TRUST_RATE_LIMIT_STATUS_POST', 5);
 define('BCC_TRUST_RATE_WINDOW_STATUS_POST', 120);
 
-// Card-pull / unpull throttle (BinderEndpoint pull / unpull).
+// §D6 PR-B — blog cover-image upload throttle (BlogCoverImageEndpoint).
 //
-// Scale-hardening pass (2026-05-13): the binder was previously gated
-// by bcc-core's Throttle::allow primitive with hardcoded class constants
-// at BinderEndpoint. Promoted to bcc-trust RateLimiter so it inherits
-// (a) trust-tier multipliers — Elite at 1.5×, Trusted at 1.3× — so
-// legitimate batch curation by high-rep operators isn't punished, and
-// (b) per-IP+per-user dual-bucket sliding window so subnet-coordinated
-// pull-farming can't multiply via sock-puppets on one /24.
+// Sized for the composer's "pick a cover, change my mind, pick another"
+// flow. Each upload is an attachment write + image-meta generation —
+// cheaper than a photo-post but still a real disk/DB hit, and
+// attachments stick to the user's media library. 5/60s is generous for
+// composer interactivity (one retry every ~12 seconds) and clips
+// scripted abuse hard (60/min would let a script fill the uploads
+// directory).
+//
+// Throttled BEFORE wp_handle_upload to keep the disk write off the
+// hot abuse path. NOT a primary defense — author-ownership on
+// PostsService::createBlog is the security gate.
+define('BCC_TRUST_RATE_LIMIT_BLOG_COVER_UPLOAD', 5);
+define('BCC_TRUST_RATE_WINDOW_BLOG_COVER_UPLOAD', 60);
+
+// Card-watch / unwatch throttle (WatchingEndpoint watch / unwatch).
+//
+// Scale-hardening pass (2026-05-13): the watch-graph was previously
+// gated by bcc-core's Throttle::allow primitive with hardcoded class
+// constants at the endpoint. Promoted to bcc-trust RateLimiter so it
+// inherits (a) trust-tier multipliers — Elite at 1.5×, Trusted at
+// 1.3× — so legitimate batch curation by high-rep operators isn't
+// punished, and (b) per-IP+per-user dual-bucket sliding window so
+// subnet-coordinated watch-farming can't multiply via sock-puppets
+// on one /24.
 //
 // 30/60s baseline is intentionally generous — a curator browsing 30
 // cards per minute is one every two seconds, which is comfortable
 // human cadence. A Trusted reviewer doing batch follow-up gets ~39/60s;
-// an Elite gets ~45/60s. Anonymous callers can't pull (auth check
+// an Elite gets ~45/60s. Anonymous callers can't watch (auth check
 // fires first in the endpoint).
 //
-// Anti-watch-farming rationale: the floor on bulk-pull is set by
-// these constants. At 30/60s = max 43,200 pulls/24h for a baseline
+// Anti-watch-farming rationale: the floor on bulk-watch is set by
+// these constants. At 30/60s = max 43,200 watches/24h for a baseline
 // user — well above any legitimate use, well below a scripted attack
 // generating mass first_watcher events on the recipient side.
+//
+// Bucket names `pull` / `unpull` kept stable through release N for
+// storage compatibility with in-flight rate-limit counters; the
+// vocabulary inside the comments is the canonical one.
 define('BCC_TRUST_RATE_LIMIT_PULL', 30);
 define('BCC_TRUST_RATE_WINDOW_PULL', 60);
 

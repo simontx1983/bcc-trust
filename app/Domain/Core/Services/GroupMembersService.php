@@ -41,20 +41,10 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Services;
 
-use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
-use BCC\Core\Repositories\PeepSoPageRepository;
 use BCC\Trust\Core\Plugin;
-use BCC\Trust\Core\Repositories\EndorsementRepository;
-use BCC\Trust\Core\Repositories\FlagsRepository;
-use BCC\Trust\Core\Repositories\GitHubRepository;
-use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
-use BCC\Trust\Core\Repositories\UserSyncRepository;
-use BCC\Trust\Core\Repositories\VoteRepository;
-use BCC\Trust\Core\Repositories\XRepository;
-use BCC\Trust\Core\Support\ReactionTypeRegistry;
+use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
-use BCC\Trust\Onchain\Repositories\WalletRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -146,7 +136,7 @@ final class GroupMembersService
             }
         }
 
-        $prefetched = $userIds === [] ? null : self::primePrefetched($userIds);
+        $prefetched = $userIds === [] ? null : MemberSummaryPrefetcher::primeFor($userIds);
 
         // ── 5. Hydrate each row. ─────────────────────────────────────
         $userView = Plugin::instance()->userViewService();
@@ -184,40 +174,6 @@ final class GroupMembersService
                 'total'    => $total,
                 'has_more' => $hasMore,
             ],
-        ];
-    }
-
-    /**
-     * Build the prefetched-batch map UserViewService::getSummary uses to
-     * collapse the per-row N+1 across the page (same shape that
-     * UsersEndpoint::members assembles for the /members directory).
-     *
-     * Eight batched SQLs total (one per signal) regardless of `limit`.
-     * Solid reaction id can be null pre-seeder; we skip that batch and
-     * `getSummary` defaults solids_received to 0 in that case.
-     *
-     * @param list<int> $userIds
-     * @return array<string, mixed>
-     */
-    private static function primePrefetched(array $userIds): array
-    {
-        $solidId = ReactionTypeRegistry::solidId();
-        $solidsReceivedCounts = $solidId === null
-            ? []
-            : (new PeepSoReactionRepository())->countReceivedByUsers($userIds, $solidId);
-
-        return [
-            'follower_counts'              => PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
-            'primary_locals'               => PeepSoGroupRepository::getPrimaryLocalForUsers($userIds),
-            'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
-            'owned_pages_by_type'          => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
-            'endorsements_received_counts' => (new EndorsementRepository())->getReceivedCountsForUsers($userIds),
-            'solids_received_counts'       => $solidsReceivedCounts,
-            'reviews_written_counts'       => (new VoteRepository())->countByVoters($userIds),
-            'disputes_signed_counts'       => (new FlagsRepository())->countByFlaggers($userIds),
-            'wallets_verified_counts'      => WalletRepository::getVerifiedCountsForUsers($userIds),
-            'x_connections'                => (new XRepository())->getConnectionsForUsers($userIds),
-            'github_connections'           => (new GitHubRepository())->getConnectionsForUsers($userIds),
         ];
     }
 

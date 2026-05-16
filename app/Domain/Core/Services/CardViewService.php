@@ -60,10 +60,10 @@ if (!defined('ABSPATH')) {
 final class CardViewService
 {
     // KIND_TO_PAGE_TYPE moved to Support\PageTypeMap (single source of
-    // truth shared with BinderService, which uses the reverse direction).
+    // truth shared with WatchingService, which uses the reverse direction).
 
     // Frontend URL prefix moved to CardUrlMap (single source of truth
-    // shared with BinderService — see §C2 binder-Phase-1 corrections).
+    // shared with WatchingService — see §C2 watching-Phase-1 corrections).
 
     public function __construct(
         private readonly PageReadModelRepository $pageReadModelRepo,
@@ -72,7 +72,9 @@ final class CardViewService
         private readonly FeatureAccessService $featureAccess,
         private readonly VoteService $voteService,
         private readonly EndorsementService $endorsementService,
-        private readonly AttestationService $attestationService
+        private readonly AttestationService $attestationService,
+        private readonly NewEntityReputationVelocityCap $newEntityVelocityCap,
+        private readonly DivergenceStateClassifier $divergenceClassifier
     ) {
     }
 
@@ -127,6 +129,12 @@ final class CardViewService
 
         $tier        = $rm !== null ? (string) $rm->reputation_tier : 'neutral';
         $trustScore  = $rm !== null ? (int) round((float) $rm->trust_score) : 50;
+        // PR-7 new-entity velocity cap: clamp entity-card scores to
+        // ≤50 for the first 60 days of the entity's existence so a
+        // burst of day-one attestations can't pump a fresh page into
+        // a high-tier public score before sustained trust is earned.
+        // Entity-only; user-account scores are not capped.
+        $trustScore  = $this->newEntityVelocityCap->cap($pageId, $trustScore);
         $card        = ReputationTierMap::resolve($tier);
 
         $name   = (string) $post->post_title;
@@ -194,6 +202,13 @@ final class CardViewService
             // a dead one-tab strip. Validator-only in V1.5; creator
             // gallery chain filter is V2 (per §H1).
             'chains'              => self::resolveChains($kind, $pageId),
+            // On-chain validator signals — status, uptime, commission,
+            // voting power, stake. Validator-only; null for other kinds
+            // and for validator pages with no resolvable on-chain row
+            // (transient indexer state). Surfaces the chain's own data
+            // on a card so unclaimed placeholders still show what the
+            // operator actually does on-chain.
+            'onchain_signals'     => self::resolveOnchainSignals($kind, $pageId),
             // V1: tier-keyed coloring for entity cards (chain-keyed lands
             // alongside §K3 chain-wiring in V1.5). `background_value` per
             // §2.9 is the card_tier slug; falls back to 'common' on the
@@ -216,8 +231,53 @@ final class CardViewService
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
             'social_proof'        => null,
+            // §J.6 negative_signals — PR-8a wires the under_review +
+            // divergence_state real-time signals. `volatile` is the
+            // nightly worker's job (Slice E.5), shipped here as
+            // baseline `false`. `unresolved_claims_count` is V1 = the
+            // active-dispute count; content-reports add later when
+            // §J.9 reports extend to user_profile / card target kinds.
+            'negative_signals'    => $this->buildNegativeSignals(
+                $cardTargetKind,
+                $pageId
+            ),
             'links'               => self::buildLinks($kind, $handle),
             'actions'             => self::buildPageActions($kind, $pageId),
+        ];
+    }
+
+    /**
+     * §J.6 derived negative-signals block. Pure composition of:
+     *   - DisputeRepository::hasActiveDisputeForPage (real-time)
+     *   - DivergenceStateClassifier::classify       (real-time per PR-8a)
+     *   - DisputeRepository::countActiveDisputesForPage (real-time)
+     *
+     * `volatile` stays the nightly-worker slot per §J.8; ships as
+     * baseline `false` until Slice E.5 lands. Surface shape is
+     * contract-stable — FE renders without branching on whether
+     * the field is "real" vs "baseline."
+     *
+     * @return array{
+     *   under_review: bool,
+     *   divergence_state: string,
+     *   volatile: bool,
+     *   unresolved_claims_count: int
+     * }
+     */
+    private function buildNegativeSignals(?string $targetKind, int $pageId): array
+    {
+        $hasActive   = \BCC\Trust\Disputes\Repositories\DisputeRepository::hasActiveDisputeForPage($pageId);
+        $activeCount = \BCC\Trust\Disputes\Repositories\DisputeRepository::countActiveDisputesForPage($pageId);
+
+        $state = $targetKind !== null
+            ? $this->divergenceClassifier->classify($targetKind, $pageId)
+            : DivergenceStateClassifier::STATE_UNTESTED;
+
+        return [
+            'under_review'             => $hasActive,
+            'divergence_state'         => $state,
+            'volatile'                 => false,
+            'unresolved_claims_count'  => $activeCount,
         ];
     }
 
@@ -275,6 +335,15 @@ final class CardViewService
             // §K3 — chains is page-only. Always null on member cards
             // for shape uniformity.
             'chains'              => null,
+            // §N8 — members are always claimed (a wp_user exists by
+            // being on the platform). WANTED corner stamp targets
+            // unclaimed page entities (validator/project/creator); on
+            // member cards both fields are constant. Missing earlier;
+            // their absence let the frontend `!card.is_claimed` branch
+            // evaluate truthy and render the WANTED stamp on member
+            // cards — fixed now by setting them explicitly.
+            'is_claimed'          => true,
+            'claim_target'        => null,
             'crest'               => self::buildCrest(
                 (string) $user->display_name ?: $user->user_login,
                 'tier',
@@ -382,6 +451,81 @@ final class CardViewService
             'entity_id'   => (int) $row->validator_id,
             'chain_slug'  => (string) $row->chain_slug,
         ];
+    }
+
+    /**
+     * Build the `onchain_signals` view-model block from
+     * bcc_onchain_validators. Surfaces the chain's own data on a card
+     * so unclaimed placeholders still tell the viewer what the operator
+     * actually does on-chain (uptime, commission, voting rank, status).
+     *
+     * Returns null for non-validator kinds and for validator pages with
+     * no resolvable on-chain row (transient indexer state). Floats are
+     * normalized to 0..1 ratios (uptime, commission); bigint stakes are
+     * returned as strings to preserve Cosmos token precision.
+     *
+     * @return array{
+     *     status: string,
+     *     uptime_30d: float|null,
+     *     commission_rate: float|null,
+     *     voting_power_rank: int|null,
+     *     total_stake: string|null,
+     *     self_stake: string|null,
+     *     delegator_count: int|null,
+     *     jailed_count: int|null,
+     *     last_fetched_at: string|null
+     * }|null
+     */
+    private static function resolveOnchainSignals(string $kind, int $pageId): ?array
+    {
+        if ($kind !== 'validator') {
+            return null;
+        }
+        $row = ValidatorRepository::findSignalsByPageId($pageId);
+        if ($row === null) {
+            return null;
+        }
+
+        // DB stores uptime/commission as DECIMAL(5,2) which the driver
+        // returns as a string like "98.73" — divide by 100 here so the
+        // frontend always gets a 0..1 ratio and never has to remember
+        // the unit convention.
+        $uptime = $row->uptime_30d !== null ? (float) $row->uptime_30d / 100.0 : null;
+        $comm   = $row->commission_rate !== null ? (float) $row->commission_rate / 100.0 : null;
+
+        return [
+            'status'            => (string) $row->status,
+            'uptime_30d'        => $uptime,
+            'commission_rate'   => $comm,
+            'voting_power_rank' => $row->voting_power_rank !== null ? (int) $row->voting_power_rank : null,
+            // Stakes are DECIMAL(30,8); preserve precision by passing
+            // through as strings. The frontend formats with a chain-aware
+            // helper rather than parsing as float (which would clip
+            // precision for large Cosmos stake amounts).
+            'total_stake'       => $row->total_stake,
+            'self_stake'        => $row->self_stake,
+            'delegator_count'   => $row->delegator_count !== null ? (int) $row->delegator_count : null,
+            'jailed_count'      => $row->jailed_count !== null ? (int) $row->jailed_count : null,
+            'last_fetched_at'   => self::formatIso8601($row->fetched_at),
+        ];
+    }
+
+    /**
+     * Normalize a MySQL DATETIME (UTC) to ISO-8601 with a trailing Z.
+     * Returns null when the input is empty / unparseable, so the
+     * frontend can collapse "never fetched" into "—" rather than
+     * trying to format an empty string.
+     */
+    private static function formatIso8601(?string $mysqlDateTime): ?string
+    {
+        if ($mysqlDateTime === null || $mysqlDateTime === '' || $mysqlDateTime === '0000-00-00 00:00:00') {
+            return null;
+        }
+        $ts = strtotime($mysqlDateTime . ' UTC');
+        if ($ts === false) {
+            return null;
+        }
+        return gmdate('Y-m-d\TH:i:s\Z', $ts);
     }
 
     /**
@@ -561,8 +705,30 @@ final class CardViewService
      * Gravatar / Buddyboss / PeepSo overrides because they all hook
      * the `get_avatar_url` filter. Empty string when no avatar resolves.
      */
+    /**
+     * Resolve the URL of a member's avatar for the card crest.
+     *
+     * Prefers PeepSo's avatar resolution (`PeepSoUser::get_avatar`)
+     * because PeepSo stores custom avatars at its own filesystem path
+     * (`/wp-content/peepso/users/{id}/avatar-full.jpg`) — WordPress's
+     * native `get_avatar_url()` does not see those files unless PeepSo
+     * is also filtering the WP avatar pipeline (which depends on a
+     * plugin option that isn't guaranteed on). Asking PeepSo directly
+     * gives us the canonical resolved URL — custom upload first,
+     * configured Gravatar fallback second, default avatar third.
+     *
+     * Falls back to WP's `get_avatar_url` when PeepSo isn't loaded so
+     * the crest still resolves on installations without PeepSo.
+     */
     private static function resolveMemberAvatarUrl(int $userId): string
     {
+        if ($userId > 0 && class_exists('\\PeepSoUser')) {
+            $peepso = \PeepSoUser::get_instance($userId);
+            $url    = $peepso->get_avatar('full');
+            if ($url !== '') {
+                return $url;
+            }
+        }
         $url = get_avatar_url($userId);
         return is_string($url) ? $url : '';
     }
@@ -893,7 +1059,7 @@ final class CardViewService
         $actions = [
             'pull' => [
                 'method'        => 'POST',
-                'href'          => '/wp-json/bcc/v1/me/binder/pull',
+                'href'          => '/wp-json/bcc/v1/me/watching/watch',
                 'body'          => [
                     'target_kind' => $kind,
                     'target_id'   => $pageId,
@@ -932,7 +1098,7 @@ final class CardViewService
         return [
             'pull' => [
                 'method'        => 'POST',
-                'href'          => '/wp-json/bcc/v1/me/binder/pull',
+                'href'          => '/wp-json/bcc/v1/me/watching/watch',
                 'body'          => [
                     'target_kind' => 'member',
                     'target_id'   => $userId,

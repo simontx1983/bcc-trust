@@ -41,6 +41,7 @@ use BCC\Core\PeepSo\PeepSoMessageWriter;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoMessageRepository;
 use BCC\Trust\Core\Repositories\UserMiniRepository;
+use BCC\Trust\Core\Support\PeepSoFriendGate;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -348,7 +349,7 @@ final class MessagesService
                 'message' => 'This member has direct messages turned off.',
             ];
         }
-        if (self::chatFriendsOnly($recipientId) && !self::areFriends($viewerId, $recipientId)) {
+        if (self::chatFriendsOnly($recipientId) && !PeepSoFriendGate::areFriends($viewerId, $recipientId)) {
             return [
                 'error'   => 'bcc_forbidden',
                 'message' => 'This member only accepts messages from friends.',
@@ -390,7 +391,7 @@ final class MessagesService
                     'message' => 'This member has direct messages turned off.',
                 ];
             }
-            if (self::chatFriendsOnly($peerId) && !self::areFriends($viewerId, $peerId)) {
+            if (self::chatFriendsOnly($peerId) && !PeepSoFriendGate::areFriends($viewerId, $peerId)) {
                 return [
                     'error'   => 'bcc_forbidden',
                     'message' => 'This member only accepts messages from friends.',
@@ -445,7 +446,7 @@ final class MessagesService
             // than silently allowing writes.
             return false;
         }
-        return (bool) \PeepSoChatModel::check_chat_enabled($userId);
+        return (bool) \PeepSoChatModel::chat_enabled($userId);
     }
 
     private static function chatFriendsOnly(int $userId): bool
@@ -454,18 +455,6 @@ final class MessagesService
             return false;
         }
         return (bool) \PeepSoChatModel::chat_friends_only($userId);
-    }
-
-    private static function areFriends(int $a, int $b): bool
-    {
-        if (!class_exists('PeepSoFriendsModel')) {
-            // No friends plugin — friends_only effectively becomes
-            // "no one can DM"; the chat_friends_only gate above will
-            // already short-circuit. Return false defensively.
-            return false;
-        }
-        $model = new \PeepSoFriendsModel();
-        return (bool) $model->are_friends($a, $b);
     }
 
     private static function userExists(int $userId): bool

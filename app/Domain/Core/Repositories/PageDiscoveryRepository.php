@@ -58,14 +58,38 @@ final class PageDiscoveryRepository
         int $limit,
         int $page,
         string $search,
-        bool $good_standing_only = false
+        bool $good_standing_only = false,
+        string $chain_slug = ''
     ): array {
         global $wpdb;
 
-        $rm_table = TableRegistry::pageReadModel();
+        $rm_table        = TableRegistry::pageReadModel();
+        $validators_table = \BCC\Core\DB\DB::table('onchain_validators');
+        $chains_table     = \BCC\Core\DB\DB::table('chains');
 
         $where  = ["p.post_status = 'publish'", "p.post_type = 'peepso-page'"];
         $params = [];
+
+        // Chain filter joins through `_bcc_onchain_validator_id` post_meta
+        // (written by ValidatorPageMinter and preserved across claim) →
+        // bcc_onchain_validators → bcc_onchain_chains. INNER JOINs because
+        // a chain filter only applies to rows backed by the indexer; any
+        // pre-backfill validator page without the meta key is intentionally
+        // excluded from chain-scoped results.
+        $chain_joins = '';
+        if ($chain_slug !== '') {
+            $chain_joins = "
+                INNER JOIN {$wpdb->postmeta} pm_validator
+                        ON pm_validator.post_id   = p.ID
+                       AND pm_validator.meta_key  = '_bcc_onchain_validator_id'
+                INNER JOIN {$validators_table} v_chain
+                        ON v_chain.id = CAST(pm_validator.meta_value AS UNSIGNED)
+                INNER JOIN {$chains_table} c_chain
+                        ON c_chain.id   = v_chain.chain_id
+                       AND c_chain.slug = %s
+            ";
+            $params[] = $chain_slug;
+        }
 
         if (!empty($types)) {
             $ph       = implode(',', array_fill(0, count($types), '%s'));
@@ -128,6 +152,7 @@ final class PageDiscoveryRepository
         $count_sql = "SELECT COUNT(*)
             FROM {$wpdb->posts} p
             INNER JOIN {$rm_table} rm ON rm.page_id = p.ID
+            {$chain_joins}
             WHERE {$where_clause}";
 
         if (!empty($params)) {
@@ -154,6 +179,7 @@ final class PageDiscoveryRepository
                 {$ranking_select}
             FROM {$wpdb->posts} p
             INNER JOIN {$rm_table} rm ON rm.page_id = p.ID
+            {$chain_joins}
             WHERE {$where_clause}
             ORDER BY {$orderby}
             LIMIT %d OFFSET %d";

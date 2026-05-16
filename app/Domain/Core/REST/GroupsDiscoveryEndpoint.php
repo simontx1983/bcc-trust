@@ -36,6 +36,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\ValueObjects\GroupContext;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use WP_REST_Request;
@@ -67,6 +68,8 @@ final class GroupsDiscoveryEndpoint
                 'permission_callback' => '__return_true',
                 'args' => [
                     'verified'  => ['sanitize_callback' => 'absint'],
+                    'mine'      => ['sanitize_callback' => 'absint'],
+                    'chain'     => ['sanitize_callback' => 'sanitize_key'],
                     'page'      => ['sanitize_callback' => 'absint'],
                     'page_size' => ['sanitize_callback' => 'absint'],
                 ],
@@ -80,13 +83,46 @@ final class GroupsDiscoveryEndpoint
     public function getList(WP_REST_Request $request): WP_REST_Response
     {
         $verifiedOnly = (int) $request->get_param('verified') === 1;
+        $mineOnly     = (int) $request->get_param('mine') === 1;
+        $chainSlug    = (string) $request->get_param('chain');
         $page         = max(1, (int) $request->get_param('page') ?: 1);
         $pageSize     = (int) $request->get_param('page_size') ?: self::DEFAULT_PAGE_SIZE;
         $pageSize     = max(1, min(self::MAX_PAGE_SIZE, $pageSize));
 
-        $candidateIds = PeepSoGroupRepository::listBrowsableGroupIds(self::CANDIDATE_LIMIT);
-        if ($candidateIds === []) {
-            return $this->respond([], $page, $pageSize, 0);
+        $viewerId = get_current_user_id();
+
+        // ── mine=1 path — viewer's own group memberships ────────────────
+        // Anonymous viewers can browse the rest of the directory but
+        // "mine" needs an identity. Return an empty result rather than
+        // 401 so the page can render the empty-state copy with a sign-in
+        // hint instead of erroring out.
+        if ($mineOnly) {
+            if ($viewerId <= 0) {
+                return $this->respond([], $page, $pageSize, 0, true);
+            }
+
+            $memberIds = PeepSoGroupRepository::getUserMemberGroupIds(
+                $viewerId,
+                self::CANDIDATE_LIMIT
+            );
+            if ($memberIds === []) {
+                return $this->respond([], $page, $pageSize, 0, true);
+            }
+            // Intersect with the browsable set so secret-group memberships
+            // (which the rest of the directory hides) stay hidden here too.
+            $browsable    = array_flip(PeepSoGroupRepository::listBrowsableGroupIds(self::CANDIDATE_LIMIT));
+            $candidateIds = array_values(array_filter(
+                $memberIds,
+                static fn(int $id): bool => isset($browsable[$id])
+            ));
+            if ($candidateIds === []) {
+                return $this->respond([], $page, $pageSize, 0, true);
+            }
+        } else {
+            $candidateIds = PeepSoGroupRepository::listBrowsableGroupIds(self::CANDIDATE_LIMIT);
+            if ($candidateIds === []) {
+                return $this->respond([], $page, $pageSize, 0);
+            }
         }
 
         $resolver = Plugin::instance()->groupContextResolver();
@@ -98,7 +134,21 @@ final class GroupsDiscoveryEndpoint
                 static fn(GroupContext $c): bool => $c->isVerified()
             );
             if ($contexts === []) {
-                return $this->respond([], $page, $pageSize, 0);
+                return $this->respond([], $page, $pageSize, 0, $mineOnly);
+            }
+        }
+
+        // Chain filter — restricts to groups whose `_bcc_gate_chain_id`
+        // post_meta resolves to the requested slug. NFT holder groups
+        // carry this meta key directly (the gate config writes it at
+        // claim time); user/system groups and Locals don't, so they
+        // drop out of chain-scoped views. Unknown chain slugs return
+        // an empty result rather than 400 — the chain dropdown is
+        // client-driven and a stale slug shouldn't surface as an error.
+        if ($chainSlug !== '') {
+            $contexts = $this->filterContextsByChain($contexts, $chainSlug);
+            if ($contexts === []) {
+                return $this->respond([], $page, $pageSize, 0, $mineOnly);
             }
         }
 
@@ -115,6 +165,23 @@ final class GroupsDiscoveryEndpoint
         // Onchain repo calls, both batched. Cap-at-500 matches
         // CANDIDATE_LIMIT above.
         $enrichmentByGroup = $this->resolveCollectionEnrichment($orderedIds);
+
+        // Chain + trust enrichment — both surfaces want them on the card
+        // (chain chip alongside the kind label; trust threshold replaces
+        // the OPEN privacy chip when set). Bulk-resolve to avoid N+1:
+        //   - chain slugs come from one indexed SELECT joining wp_postmeta
+        //     → bcc_onchain_chains.
+        //   - trust gate min: warm WP's post-meta cache once for the
+        //     candidate set, then read per-group from L1.
+        $chainSlugByGroup = ChainRepository::resolveSlugsForGroups($orderedIds);
+        update_meta_cache('post', $orderedIds);
+        $trustMinByGroup = [];
+        foreach ($orderedIds as $gid) {
+            $v = (int) get_post_meta($gid, '_bcc_trust_gate_min', true);
+            if ($v > 0) {
+                $trustMinByGroup[$gid] = $v;
+            }
+        }
 
         // Build sortable rows.
         $rows = [];
@@ -138,6 +205,8 @@ final class GroupsDiscoveryEndpoint
                 'image_url'         => $enrichment['image_url'] ?? null,
                 'collection_stats'  => $enrichment['stats'] ?? null,
                 'description'       => $description,
+                'chain_tag'         => $chainSlugByGroup[$groupId] ?? null,
+                'trust_min'         => $trustMinByGroup[$groupId] ?? null,
                 'sort_verified'     => $ctx->isVerified() ? 1 : 0,
                 'sort_heat'         => (int) $heat['posts_last_7d'],
                 'sort_member_cnt'   => $display !== null ? (int) $display->member_count : 0,
@@ -169,17 +238,19 @@ final class GroupsDiscoveryEndpoint
                 $row['activity'],
                 $row['image_url'],
                 $row['collection_stats'],
-                $row['description']
+                $row['description'],
+                $row['chain_tag'],
+                $row['trust_min']
             );
         }
 
-        return $this->respond($items, $page, $pageSize, $total);
+        return $this->respond($items, $page, $pageSize, $total, $mineOnly);
     }
 
     /**
      * @param list<array<string, mixed>> $items
      */
-    private function respond(array $items, int $page, int $pageSize, int $total): WP_REST_Response
+    private function respond(array $items, int $page, int $pageSize, int $total, bool $perViewer = false): WP_REST_Response
     {
         $response = ApiResponse::ok([
             'items'      => $items,
@@ -190,7 +261,14 @@ final class GroupsDiscoveryEndpoint
                 'total_pages' => $pageSize > 0 ? (int) ceil($total / $pageSize) : 0,
             ],
         ]);
-        $response->header('Cache-Control', 'public, max-age=60');
+        // `mine=1` results are viewer-scoped — must NEVER be served from
+        // a shared cache. Other filter combos (verified, no-filter) are
+        // viewer-agnostic and stay on the 60s public cache.
+        if ($perViewer) {
+            $response->header('Cache-Control', 'private, no-store');
+        } else {
+            $response->header('Cache-Control', 'public, max-age=60');
+        }
         return $response;
     }
 
@@ -206,7 +284,9 @@ final class GroupsDiscoveryEndpoint
         array $activity,
         ?string $imageUrl,
         ?array $stats,
-        ?string $description
+        ?string $description,
+        ?string $chainTag,
+        ?int $trustMin
     ): array {
         return [
             'group_id'         => $ctx->groupId,
@@ -220,6 +300,10 @@ final class GroupsDiscoveryEndpoint
             'image_url'        => $imageUrl,
             'collection_stats' => $stats,
             'activity'         => $activity,
+            // Same key vocabulary as CreatePlainGroupResponse + the detail
+            // view-model — single contract shape across all surfaces.
+            'chain_tag'        => $chainTag,
+            'trust_min'        => $trustMin,
         ];
     }
 
@@ -261,6 +345,81 @@ final class GroupsDiscoveryEndpoint
      *         marketplace: array{url: string, label: string}|null
      *     }|null
      * }>
+     */
+    /**
+     * Drop GroupContexts whose chain meta doesn't resolve to the
+     * requested chain slug. Matches EITHER `_bcc_gate_chain_id` (NFT
+     * holder groups — the gate config writes it at admin claim time)
+     * OR `_bcc_chain_tag` (user-created plain groups — written at
+     * create-time on /communities/new and locked from there on).
+     * Single bulk SELECT scoped to the candidate set — no N+1.
+     *
+     * Groups without either meta key (Locals, legacy user/system
+     * groups that pre-date the chain-tag field) drop out of chain-
+     * scoped results. Locals fall out by design — they bind to a
+     * chain via post_title prefix, not post_meta. When that needs
+     * to be chain-filterable, this helper expands to include a
+     * Local-specific path without touching the endpoint wiring.
+     *
+     * @param array<int, GroupContext> $contexts
+     * @return array<int, GroupContext>
+     */
+    private function filterContextsByChain(array $contexts, string $chainSlug): array
+    {
+        if ($contexts === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $chains = \BCC\Trust\Onchain\Repositories\ChainRepository::table();
+
+        $groupIds = array_keys($contexts);
+        $ph       = implode(',', array_fill(0, count($groupIds), '%d'));
+
+        // Subquery: postmeta value is a stringified chain_id, joined to
+        // chains.id. Caller passes a slug, we resolve to id once.
+        $chainId = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$chains} WHERE slug = %s LIMIT 1",
+            $chainSlug
+        ));
+        if ($chainId <= 0) {
+            return [];
+        }
+
+        $params   = $groupIds;
+        $params[] = $chainId;
+
+        /** @var list<object{post_id: numeric-string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT post_id
+               FROM {$wpdb->postmeta}
+              WHERE meta_key IN ('_bcc_gate_chain_id', '_bcc_chain_tag')
+                AND post_id IN ({$ph})
+                AND CAST(meta_value AS UNSIGNED) = %d",
+            ...$params
+        ));
+
+        $allowed = [];
+        foreach ($rows ?: [] as $row) {
+            $allowed[(int) $row->post_id] = true;
+        }
+
+        if ($allowed === []) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($contexts as $gid => $ctx) {
+            if (isset($allowed[$gid])) {
+                $out[$gid] = $ctx;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * @param list<int> $groupIds
+     * @return array<int, array{image_url: string|null, stats: array<string, mixed>}>
      */
     private function resolveCollectionEnrichment(array $groupIds): array
     {

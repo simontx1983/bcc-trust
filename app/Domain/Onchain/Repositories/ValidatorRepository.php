@@ -134,9 +134,20 @@ final class ValidatorRepository
      * on the validator card view-model so the §N8 claim flow knows
      * which entity_id + chain_slug to send back to the claim endpoint.
      *
-     * Validator pages typically map 1:1 to a single validator row;
-     * the LIMIT 1 is defensive in case a page accidentally hosts
-     * multiple validator rows during transitional re-indexing.
+     * Two resolution paths (tried in order):
+     *
+     *   1. wallet_link join — for pages an operator has already linked
+     *      a wallet to (the post-link state). This is the canonical
+     *      claimed/in-flight path.
+     *
+     *   2. _bcc_onchain_validator_id post_meta fallback — for system-minted
+     *      placeholder pages (ValidatorPageMinter) where no wallet has
+     *      been linked yet. Without this fallback the WANTED claim CTA
+     *      can't render on unclaimed validator placeholders because
+     *      CardViewService would receive null and skip claim_target.
+     *
+     * Validator pages typically map 1:1 to a single validator row; the
+     * LIMIT 1 in each path is defensive against transitional re-indexing.
      *
      * @return object{validator_id: numeric-string, chain_slug: string}|null
      */
@@ -162,6 +173,25 @@ final class ValidatorRepository
             $pageId
         ));
 
+        if ($row !== null) {
+            return $row;
+        }
+
+        // Fallback: placeholder pages minted by ValidatorPageMinter have
+        // no wallet_link yet — the page<->validator binding lives in
+        // post_meta until a real claim creates a wallet_link.
+        /** @var object{validator_id: numeric-string, chain_slug: string}|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT v.id AS validator_id, c.slug AS chain_slug
+               FROM {$wpdb->postmeta} pm
+               JOIN {$table} v  ON v.id = CAST(pm.meta_value AS UNSIGNED)
+               JOIN {$chains} c ON c.id = v.chain_id
+              WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                AND pm.post_id  = %d
+              LIMIT 1",
+            $pageId
+        ));
+
         return $row;
     }
 
@@ -172,6 +202,17 @@ final class ValidatorRepository
      * field on validator cards. When an operator runs validators on
      * multiple chains and links each wallet to the same peepso-page,
      * this method returns one row per chain in chain-name order.
+     *
+     * Two resolution paths (mirrors findFirstByPageId):
+     *
+     *   1. wallet_link join — for pages with operator-linked wallets.
+     *      Returns multi-chain rows when an operator has linked wallets
+     *      on several chains to the same peepso-page.
+     *
+     *   2. _bcc_onchain_validator_id post_meta fallback — for placeholder
+     *      pages with no wallet_link yet. Always returns at most one row
+     *      because the minter binds one placeholder page to exactly one
+     *      validator. The multi-chain case can't apply pre-claim.
      *
      * Bounded: result count is the number of distinct chains an operator
      * runs on (single-digit in practice — Cosmos Hub + Osmosis + Injective
@@ -212,6 +253,32 @@ final class ValidatorRepository
               LIMIT 32",
             $pageId
         ));
+
+        if (empty($rows)) {
+            // Fallback: placeholder pages bind to a single validator via
+            // post_meta. At most one row, by construction.
+            /**
+             * @var list<object{
+             *     validator_id: numeric-string,
+             *     chain_slug: string,
+             *     chain_name: string,
+             *     operator_address: string
+             * }> $rows
+             */
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT v.id AS validator_id,
+                        c.slug AS chain_slug,
+                        c.name AS chain_name,
+                        v.operator_address AS operator_address
+                   FROM {$wpdb->postmeta} pm
+                   JOIN {$table} v  ON v.id = CAST(pm.meta_value AS UNSIGNED)
+                   JOIN {$chains} c ON c.id = v.chain_id
+                  WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                    AND pm.post_id  = %d
+                  LIMIT 1",
+                $pageId
+            ));
+        }
 
         $out = [];
         foreach ($rows as $row) {
@@ -914,6 +981,246 @@ final class ValidatorRepository
         return (bool) $wpdb->get_var($wpdb->prepare(
             "SELECT 1 FROM {$table} WHERE wallet_link_id = %d LIMIT 1",
             $walletLinkId
+        ));
+    }
+
+    /**
+     * Enumerate validators that have NO peepso-page backing yet — neither
+     * a user-linked wallet (wallet_link_id IS NULL) nor a system-minted
+     * placeholder page (no post_meta `_bcc_onchain_validator_id` row).
+     *
+     * Used by ValidatorPageMinter to backfill missing placeholder pages
+     * so the 97 Akash (and any other chain-indexed) validators surface in
+     * /directory?kind=validator with a WANTED claim CTA.
+     *
+     * Bounded by LIMIT/OFFSET; caller paginates. The LEFT JOIN on postmeta
+     * uses the `_bcc_onchain_validator_id` key — index lookup is fast
+     * because postmeta has KEY(meta_key, meta_value(N)).
+     *
+     * @return list<object{
+     *     id: int,
+     *     operator_address: string,
+     *     moniker: string|null,
+     *     status: string,
+     *     chain_id: int,
+     *     chain_slug: string,
+     *     chain_name: string
+     * }>
+     */
+    public static function findMissingPlaceholderPage(?int $chainId, int $limit, int $offset): array
+    {
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        $where  = ['v.wallet_link_id IS NULL'];
+        $params = [];
+
+        if ($chainId !== null) {
+            $where[]  = 'v.chain_id = %d';
+            $params[] = $chainId;
+        }
+
+        $params[] = max(1, min($limit, 500));
+        $params[] = max(0, $offset);
+
+        $whereSql = implode(' AND ', $where);
+
+        /**
+         * @var list<object{
+         *     id: numeric-string,
+         *     operator_address: string,
+         *     moniker: string|null,
+         *     status: string,
+         *     chain_id: numeric-string,
+         *     chain_slug: string,
+         *     chain_name: string
+         * }>|null $rows
+         */
+        // The LEFT JOIN compares an int (v.id) against postmeta.meta_value
+        // (LONGTEXT) by numeric cast on the text side. Casting in the
+        // other direction (CAST(v.id AS CHAR)) trips a collation mismatch
+        // because wp_postmeta is utf8mb4_unicode_ci and the CHAR cast
+        // inherits utf8mb4_unicode_520_ci on this MySQL build.
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT v.id, v.operator_address, v.moniker, v.status,
+                    v.chain_id, c.slug AS chain_slug, c.name AS chain_name
+               FROM {$table} v
+               JOIN {$chains} c ON c.id = v.chain_id
+               LEFT JOIN {$wpdb->postmeta} pm
+                      ON pm.meta_key = '_bcc_onchain_validator_id'
+                     AND CAST(pm.meta_value AS UNSIGNED) = v.id
+              WHERE {$whereSql}
+                AND pm.meta_id IS NULL
+              ORDER BY v.chain_id ASC, v.voting_power_rank ASC, v.id ASC
+              LIMIT %d OFFSET %d",
+            ...$params
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $out[] = (object) [
+                'id'               => (int) $row->id,
+                'operator_address' => $row->operator_address,
+                'moniker'          => $row->moniker,
+                'status'           => $row->status,
+                'chain_id'         => (int) $row->chain_id,
+                'chain_slug'       => $row->chain_slug,
+                'chain_name'       => $row->chain_name,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Count validators eligible for placeholder-page minting. Cheap
+     * companion to findMissingPlaceholderPage() for CLI progress output.
+     */
+    public static function countMissingPlaceholderPage(?int $chainId): int
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $where  = ['v.wallet_link_id IS NULL'];
+        $params = [];
+
+        if ($chainId !== null) {
+            $where[]  = 'v.chain_id = %d';
+            $params[] = $chainId;
+        }
+
+        $whereSql = implode(' AND ', $where);
+
+        $sql = "SELECT COUNT(*)
+                  FROM {$table} v
+                  LEFT JOIN {$wpdb->postmeta} pm
+                         ON pm.meta_key = '_bcc_onchain_validator_id'
+                        AND CAST(pm.meta_value AS UNSIGNED) = v.id
+                 WHERE {$whereSql}
+                   AND pm.meta_id IS NULL";
+
+        if (empty($params)) {
+            return (int) $wpdb->get_var($sql);
+        }
+
+        return (int) $wpdb->get_var($wpdb->prepare($sql, ...$params));
+    }
+
+    /**
+     * Resolve the first validator's on-chain signals (status, uptime,
+     * commission, stake, rank, …) backing a peepso-page. Used by
+     * CardViewService to surface the `onchain_signals` view-model field
+     * on validator cards.
+     *
+     * Mirrors findFirstByPageId's two-path resolution: wallet_link join
+     * for claimed/in-flight pages, post_meta fallback for placeholder
+     * pages minted by ValidatorPageMinter.
+     *
+     * @return object{
+     *     status: string,
+     *     uptime_30d: string|null,
+     *     commission_rate: string|null,
+     *     voting_power_rank: string|null,
+     *     total_stake: string|null,
+     *     self_stake: string|null,
+     *     delegator_count: string|null,
+     *     jailed_count: string|null,
+     *     fetched_at: string,
+     *     chain_slug: string,
+     *     chain_name: string
+     * }|null
+     */
+    public static function findSignalsByPageId(int $pageId): ?object
+    {
+        if ($pageId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+        $chains  = ChainRepository::table();
+
+        $selectCols =
+            "v.status, v.uptime_30d, v.commission_rate, v.voting_power_rank,
+             v.total_stake, v.self_stake, v.delegator_count, v.jailed_count,
+             v.fetched_at, c.slug AS chain_slug, c.name AS chain_name";
+
+        /**
+         * @var object{
+         *     status: string,
+         *     uptime_30d: string|null,
+         *     commission_rate: string|null,
+         *     voting_power_rank: string|null,
+         *     total_stake: string|null,
+         *     self_stake: string|null,
+         *     delegator_count: string|null,
+         *     jailed_count: string|null,
+         *     fetched_at: string,
+         *     chain_slug: string,
+         *     chain_name: string
+         * }|null $row
+         */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT {$selectCols}
+               FROM {$table} v
+               JOIN {$wallets} w ON w.id = v.wallet_link_id
+               JOIN {$chains}  c ON c.id = v.chain_id
+              WHERE w.post_id = %d
+              LIMIT 1",
+            $pageId
+        ));
+
+        if ($row !== null) {
+            return $row;
+        }
+
+        // Placeholder-page fallback (no wallet_link yet).
+        /**
+         * @var object{
+         *     status: string,
+         *     uptime_30d: string|null,
+         *     commission_rate: string|null,
+         *     voting_power_rank: string|null,
+         *     total_stake: string|null,
+         *     self_stake: string|null,
+         *     delegator_count: string|null,
+         *     jailed_count: string|null,
+         *     fetched_at: string,
+         *     chain_slug: string,
+         *     chain_name: string
+         * }|null $row
+         */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT {$selectCols}
+               FROM {$wpdb->postmeta} pm
+               JOIN {$table} v  ON v.id = CAST(pm.meta_value AS UNSIGNED)
+               JOIN {$chains} c ON c.id = v.chain_id
+              WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                AND pm.post_id  = %d
+              LIMIT 1",
+            $pageId
+        ));
+
+        return $row;
+    }
+
+    /**
+     * Resolve a peepso-page id from its placeholder-validator post_meta link.
+     * Used by ValidatorPageMinter to dedupe re-runs without scanning postmeta
+     * a second time.
+     */
+    public static function findPlaceholderPageId(int $validatorId): int
+    {
+        global $wpdb;
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT post_id
+               FROM {$wpdb->postmeta}
+              WHERE meta_key = '_bcc_onchain_validator_id'
+                AND meta_value = %s
+              LIMIT 1",
+            (string) $validatorId
         ));
     }
 

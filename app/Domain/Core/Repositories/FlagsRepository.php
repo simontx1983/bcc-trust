@@ -112,6 +112,95 @@ class FlagsRepository
     }
 
     /**
+     * Page-side counterpart to {@see findByFlagger()} — paginated list
+     * of open disputes filed AGAINST the given page (JOIN flags →
+     * votes ON `f.vote_id = v.id` filtering `v.page_id`). Used by
+     * `/entities/{kind}/{id}/disputes` to power the Disputes tab on
+     * entity profiles.
+     *
+     * V1 surfaces only `f.status = 0` (open) — resolved + dismissed
+     * disputes are noise on the entity profile; the operator
+     * profile-level dispute history lives in `/users/:handle/disputes`.
+     *
+     * The service hydrates `flagger_user_id` into a full MemberSummary
+     * via the shared prefetcher — same pattern as Reviews.
+     *
+     * @return list<object{
+     *   id: int|numeric-string,
+     *   vote_id: int|numeric-string,
+     *   flagger_user_id: int|numeric-string,
+     *   reason: string,
+     *   status: int|numeric-string,
+     *   created_at: string
+     * }>
+     */
+    public function findByPageIdPaginated(int $pageId, int $limit, int $offset): array
+    {
+        if ($pageId <= 0) {
+            return [];
+        }
+        $limit  = max(1, min(100, $limit));
+        $offset = max(0, $offset);
+
+        global $wpdb;
+        $flagsTable = TableRegistry::flags();
+        $votesTable = TableRegistry::votes();
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT f.id,
+                    f.vote_id,
+                    f.flagger_user_id,
+                    f.reason,
+                    f.status,
+                    f.created_at
+             FROM {$flagsTable} f
+             INNER JOIN {$votesTable} v ON f.vote_id = v.id
+             WHERE v.page_id  = %d
+               AND f.status   = 0
+             ORDER BY f.created_at DESC
+             LIMIT %d OFFSET %d",
+            $pageId,
+            $limit,
+            $offset
+        ));
+
+        /** @var list<object{
+         *   id: int|numeric-string,
+         *   vote_id: int|numeric-string,
+         *   flagger_user_id: int|numeric-string,
+         *   reason: string,
+         *   status: int|numeric-string,
+         *   created_at: string
+         * }> $rows
+         */
+        return $rows ?: [];
+    }
+
+    /**
+     * Pair to {@see findByPageIdPaginated()} for `pagination.total`.
+     * Same JOIN + status filter; aggregate-only.
+     */
+    public function countByPageId(int $pageId): int
+    {
+        if ($pageId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $flagsTable = TableRegistry::flags();
+        $votesTable = TableRegistry::votes();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*)
+             FROM {$flagsTable} f
+             INNER JOIN {$votesTable} v ON f.vote_id = v.id
+             WHERE v.page_id = %d
+               AND f.status  = 0",
+            $pageId
+        ));
+    }
+
+    /**
      * Lifetime count of flags signed by this user.
      *
      * Per §D2 / §B5, flagging a vote is the V1 dispute-signing

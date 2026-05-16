@@ -36,9 +36,16 @@ final class PrivacySettings
     /**
      * §K2 toggles — embedded in the user view-model. Order is canonical;
      * the settings UI consumes this list verbatim.
+     *
+     * `binder_hidden` is doubled with `watching_hidden` during release N
+     * per the additive-deprecation runway (api-contract §1.1.1). Both
+     * keys carry the same boolean value via the lazy-migration read
+     * path; writes go to `watching_hidden` only. `binder_hidden`
+     * removed in release N+1.
      */
     public const PROFILE_KEYS = [
         'binder_hidden',
+        'watching_hidden',
         'reviews_hidden',
         'disputes_hidden',
         'delegations_hidden',
@@ -58,6 +65,7 @@ final class PrivacySettings
     /** All keys the /me/privacy endpoint accepts and returns. */
     public const ALL_KEYS = [
         'binder_hidden',
+        'watching_hidden',
         'reviews_hidden',
         'disputes_hidden',
         'delegations_hidden',
@@ -71,12 +79,19 @@ final class PrivacySettings
     private const META_PREFIX = 'bcc_privacy_';
 
     /**
-     * Read the seven §K2 flags for the user view-model. Always returns a
+     * Read the §K2 flags for the user view-model. Always returns a
      * complete array — missing meta defaults to false (V1 baseline:
      * everything public per §K2).
      *
+     * `binder_hidden` / `watching_hidden` are mirrored: the watching
+     * flag is resolved via readWatchingHidden() (canonical key with
+     * lazy migration from the legacy `binder_hidden` user_meta key),
+     * and the legacy field on the response carries the same boolean.
+     * Removed in release N+1.
+     *
      * @return array{
      *   binder_hidden: bool,
+     *   watching_hidden: bool,
      *   reviews_hidden: bool,
      *   disputes_hidden: bool,
      *   delegations_hidden: bool,
@@ -87,8 +102,11 @@ final class PrivacySettings
      */
     public static function readProfile(int $userId): array
     {
+        $watchingHidden = self::readWatchingHidden($userId);
         return [
-            'binder_hidden'         => self::flag($userId, 'binder_hidden'),
+            // Doubled — identical value. Legacy field, dropped in N+1.
+            'binder_hidden'         => $watchingHidden,
+            'watching_hidden'       => $watchingHidden,
             'reviews_hidden'        => self::flag($userId, 'reviews_hidden'),
             'disputes_hidden'       => self::flag($userId, 'disputes_hidden'),
             'delegations_hidden'    => self::flag($userId, 'delegations_hidden'),
@@ -99,14 +117,22 @@ final class PrivacySettings
     }
 
     /**
-     * Read all eight flags for the /me/privacy endpoint response.
+     * Read all flags for the /me/privacy endpoint response.
+     *
+     * `binder_hidden` and `watching_hidden` are mirrored — both carry
+     * the same value after the read-side lazy migration.
      *
      * @return array<string, bool>
      */
     public static function readAll(int $userId): array
     {
+        $watchingHidden = self::readWatchingHidden($userId);
         $out = [];
         foreach (self::ALL_KEYS as $key) {
+            if ($key === 'binder_hidden' || $key === 'watching_hidden') {
+                $out[$key] = $watchingHidden;
+                continue;
+            }
             $out[$key] = self::flag($userId, $key);
         }
         return $out;
@@ -116,6 +142,12 @@ final class PrivacySettings
      * Write a partial set of flags. Only keys in ALL_KEYS are written;
      * unknown keys are silently dropped (validation is the endpoint's
      * job — by the time we get here the input is already filtered).
+     *
+     * `binder_hidden` and `watching_hidden` both route to the canonical
+     * `bcc_privacy_watching_hidden` user_meta key (legacy key is left
+     * inert after the lazy migration in readWatchingHidden). This
+     * preserves a single source of truth even when the frontend sends
+     * the legacy field name during release N.
      *
      * @param array<string, bool> $partial
      */
@@ -128,9 +160,15 @@ final class PrivacySettings
             if (!in_array($key, self::ALL_KEYS, true)) {
                 continue;
             }
+            // Legacy `binder_hidden` writes funnel to the canonical
+            // `watching_hidden` user_meta key — keeps the two flags
+            // structurally indistinguishable during release N and
+            // means dropping the legacy field in N+1 needs no data
+            // migration.
+            $storageKey = ($key === 'binder_hidden') ? 'watching_hidden' : $key;
             // Store as "1" / "0" strings (matches WP's boolean meta convention
             // and round-trips through FILTER_VALIDATE_BOOLEAN cleanly).
-            update_user_meta($userId, self::META_PREFIX . $key, $value ? '1' : '0');
+            update_user_meta($userId, self::META_PREFIX . $storageKey, $value ? '1' : '0');
         }
     }
 
@@ -144,6 +182,48 @@ final class PrivacySettings
         }
         $raw = get_user_meta($userId, self::META_PREFIX . $key, true);
         return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    /**
+     * Read the canonical `watching_hidden` flag with lazy migration from
+     * the legacy `binder_hidden` user_meta key.
+     *
+     * Resolution order:
+     *   1. `bcc_privacy_watching_hidden` (canonical, set on first write
+     *      or migration). Empty meta = '' → treated as "not set".
+     *   2. `bcc_privacy_binder_hidden`   (legacy) — when present and
+     *      non-empty, copy to the canonical key and DELETE the legacy
+     *      row so the next read short-circuits at step 1.
+     *
+     * Returns false when neither key is set (V1 baseline: public).
+     *
+     * Idempotent: a second concurrent reader for a user who already
+     * migrated sees the new key at step 1 and skips the migration.
+     */
+    private static function readWatchingHidden(int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+
+        $canonical = get_user_meta($userId, self::META_PREFIX . 'watching_hidden', true);
+        if (is_string($canonical) && $canonical !== '') {
+            return filter_var($canonical, FILTER_VALIDATE_BOOLEAN);
+        }
+
+        // Legacy fallback + lazy migration.
+        $legacy = get_user_meta($userId, self::META_PREFIX . 'binder_hidden', true);
+        if (!is_string($legacy) || $legacy === '') {
+            return false;
+        }
+
+        // Migrate: copy the legacy value to the canonical key, then
+        // delete the legacy row. update_user_meta is a no-op if the
+        // canonical key was set between our get + here (idempotent).
+        update_user_meta($userId, self::META_PREFIX . 'watching_hidden', $legacy);
+        delete_user_meta($userId, self::META_PREFIX . 'binder_hidden');
+
+        return filter_var($legacy, FILTER_VALIDATE_BOOLEAN);
     }
 
     /**

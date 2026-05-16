@@ -300,7 +300,7 @@ final class FeedColdStartService
      *
      * Idiom is intentionally inline (per the brief's "no premature
      * utility extraction" rule). The only other place a deterministic
-     * hash appears in this codebase is PullBatchAggregator's batch_id
+     * hash appears in this codebase is WatchBatchAggregator's batch_id
      * generator, where the inputs and entropy budget are different
      * enough that a shared helper would couple two unrelated concerns.
      *

@@ -2001,7 +2001,7 @@ class AdminDashboardRepository
      * peepso_user_followers for recipient resolution. The
      * peepso_user_followers table has no date column; bcc_pull_meta is
      * the canonical "deliberate Keep-Tabs action" event log because the
-     * pull is what BinderService records with a timestamp.
+     * watch is what WatchingService records with a timestamp.
      *
      * Top-N is capped at 5 and intentionally NOT ranked publicly.
      * Operators get a list; the platform never surfaces "who has the

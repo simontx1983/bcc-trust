@@ -12,6 +12,7 @@ use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Services\CollectionService;
+use BCC\Trust\Onchain\Services\ValidatorPageMinter;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
 /**
@@ -244,6 +245,28 @@ class ChainRefreshService
                 EnrichmentScheduler::markDeadValidators();
             } else {
                 \BCC\Core\Log\Logger::info('[Onchain] Skipped markDeadValidators — partial fetch detected in this run.');
+            }
+
+            // Mint placeholder peepso-page posts for any newly-indexed
+            // validators that don't have one yet, so they surface in
+            // /directory?kind=validator with the WANTED claim CTA.
+            // Capped per invocation and idempotent — re-running is a no-op
+            // once the placeholders exist. Skipped on partial fetch to
+            // avoid minting pages for a chain whose indexer just hiccuped.
+            if (!$hasPartialFetch) {
+                try {
+                    $mintResult = ValidatorPageMinter::mintMissing(null, false);
+                    if ($mintResult['minted'] > 0 || $mintResult['errors'] > 0) {
+                        \BCC\Core\Log\Logger::info(sprintf(
+                            '[Onchain] Validator placeholder pages — scanned=%d, minted=%d, errors=%d',
+                            $mintResult['scanned'],
+                            $mintResult['minted'],
+                            $mintResult['errors']
+                        ));
+                    }
+                } catch (\Throwable $e) {
+                    \BCC\Core\Log\Logger::error('[Onchain] ValidatorPageMinter::mintMissing failed: ' . $e->getMessage());
+                }
             }
         } finally {
             self::releaseLock('index_validators');

@@ -8,11 +8,11 @@
  * have a typed FK back to the batch summary.
  *
  * Writes are idempotent via UNIQUE KEY uk_batch_id (the deterministic
- * batch_id from PullBatchAggregator collides on duplicate event
+ * batch_id from WatchBatchAggregator collides on duplicate event
  * delivery; the writer detects that and reuses the existing row).
  *
  * @package BCC\Trust\Core\Repositories
- * @since V1 (2026-04, Binder Phase 4)
+ * @since V1 (2026-04, watch-batch Phase 4)
  */
 
 namespace BCC\Trust\Core\Repositories;

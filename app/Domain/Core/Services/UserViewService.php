@@ -24,10 +24,12 @@
  *   - progression.trust_score_recent_changes → ReputationEventRepository::getRecentForUser
  *
  * Intentional V1 design (NOT a stub):
- *   - counts.binder_size = followers_count proxy. §C2 single-graph rule:
- *     binder IS the follow set; page-resolution lights every follow as a
- *     renderable card, so a "filter to BCC kinds" would remove valid
- *     binder entries. Field stays equal to following count by design.
+ *   - counts.watching_size = followers_count proxy. §C2 single-graph rule:
+ *     watchlist IS the follow set; page-resolution lights every follow as
+ *     a renderable card, so a "filter to BCC kinds" would remove valid
+ *     watch entries. Field stays equal to following count by design.
+ *     Release N also emits `counts.binder_size` as a deprecated alias
+ *     (identical value) for back-compat — removed in release N+1.
  *
  * @package BCC\Trust\Core\Services
  * @since V1 (2026-04)
@@ -72,6 +74,7 @@ final class UserViewService
     private ReputationEventRepository $reputationEventRepo;
     private PeepSoReactionRepository $reactionRepo;
     private DisputeParticipationRepository $participationRepo;
+    private AttestationService $attestationService;
 
     /**
      * Per-request memoization of resolveAugmentedTrustScore — UserViewService
@@ -92,7 +95,8 @@ final class UserViewService
         LivingService $livingService,
         ReputationEventRepository $reputationEventRepo,
         PeepSoReactionRepository $reactionRepo,
-        DisputeParticipationRepository $participationRepo
+        DisputeParticipationRepository $participationRepo,
+        AttestationService $attestationService
     ) {
         $this->voteRepo            = $voteRepo;
         $this->reputationRepo      = $reputationRepo;
@@ -103,6 +107,7 @@ final class UserViewService
         $this->reputationEventRepo = $reputationEventRepo;
         $this->reactionRepo        = $reactionRepo;
         $this->participationRepo   = $participationRepo;
+        $this->attestationService  = $attestationService;
     }
 
     /**
@@ -161,7 +166,7 @@ final class UserViewService
             'wallets'             => self::resolveWallets($userId, $isSelf),
             'counts'              => $this->resolveCounts($userId, $followCounts, $isSelf, $privacy),
             'privacy'             => $privacy,
-            'permissions'         => self::resolvePermissions($userId, $viewerId, $isSelf),
+            'permissions'         => $this->resolvePermissions($userId, $viewerId, $isSelf),
             // §K1 Phase A — true when the viewer is currently blocking
             // this profile's owner. Drives the "Block"/"Unblock" copy
             // swap on the profile actions strip without a separate
@@ -728,10 +733,29 @@ final class UserViewService
         return $user->user_login; // fallback for users without a bcc_handle yet
     }
 
+    /**
+     * Resolve the absolute URL of a user's avatar.
+     *
+     * Mirrors `CardViewService::resolveMemberAvatarUrl` — prefers
+     * PeepSo's avatar resolution (`PeepSoUser::get_avatar`) because
+     * PeepSo stores custom uploads under its own image dir; WP's
+     * `get_avatar_url()` only sees them when PeepSo is filtering the
+     * native pipeline (a plugin option). Asking PeepSo directly is
+     * reliable across PeepSo configurations.
+     *
+     * Falls back to WP's `get_avatar_url` when PeepSo isn't loaded so
+     * the profile avatar still resolves on installations without it.
+     * §1.7 "Asset / media URLs are absolute" is satisfied either way.
+     */
     private static function resolveAvatar(int $userId): string
     {
-        // get_avatar_url returns absolute URL (per WP) — matches §1.7
-        // "Asset / media URLs are absolute" rule.
+        if ($userId > 0 && class_exists('\\PeepSoUser')) {
+            $peepso = \PeepSoUser::get_instance($userId);
+            $url    = $peepso->get_avatar('full');
+            if ($url !== '') {
+                return $url;
+            }
+        }
         $url = get_avatar_url($userId);
         return is_string($url) ? $url : '';
     }
@@ -899,6 +923,7 @@ final class UserViewService
      * @param array{following: int, followers: int} $followCounts
      * @param array{
      *   binder_hidden: bool,
+     *   watching_hidden: bool,
      *   reviews_hidden: bool,
      *   disputes_hidden: bool,
      *   delegations_hidden: bool,
@@ -910,6 +935,7 @@ final class UserViewService
      *   followers: int,
      *   following: int,
      *   binder_size: int,
+     *   watching_size: int,
      *   reviews_written: int,
      *   disputes_signed: int,
      *   solids_given: int,
@@ -925,18 +951,28 @@ final class UserViewService
         // user has flagged.
         $disputesSigned = $this->flagsRepo->countByFlagger($userId);
 
-        // §C2 single-graph rule: binder IS the follow set; binder_size
-        // equals the following count by design. Do not "filter to BCC
-        // card kinds" — page-resolution makes every follow renderable
-        // as a card, so any filter would remove valid binder entries.
-        $binderSize = $followCounts['following'];
+        // §C2 single-graph rule: watchlist IS the follow set;
+        // watching_size equals the following count by design. Do not
+        // "filter to BCC card kinds" — page-resolution makes every
+        // follow renderable as a card, so any filter would remove
+        // valid watch entries.
+        //
+        // Field doubling during release N (additive-deprecation per
+        // api-contract §1.1.1): emit BOTH `binder_size` (legacy,
+        // dropped in N+1) AND `watching_size` (canonical) with the
+        // same value. Privacy mirroring below collapses both together.
+        $watchingSize = $followCounts['following'];
 
         if (!$isSelf) {
             if ($privacy['follower_count_hidden']) {
                 $followCounts['followers'] = 0;
             }
-            if ($privacy['binder_hidden']) {
-                $binderSize = 0;
+            // EITHER legacy `binder_hidden` OR canonical `watching_hidden`
+            // collapses the count — frontend may toggle either during
+            // release N. PrivacyService::readProfile mirrors values so
+            // both keys carry the same boolean after the lazy migration.
+            if ($privacy['binder_hidden'] || $privacy['watching_hidden']) {
+                $watchingSize = 0;
                 $followCounts['following'] = 0;
             }
             if ($privacy['reviews_hidden']) {
@@ -948,13 +984,21 @@ final class UserViewService
         }
 
         return [
-            'followers'       => $followCounts['followers'],
-            'following'       => $followCounts['following'],
-            'binder_size'     => $binderSize,
-            'reviews_written' => $reviewsWritten,
-            'disputes_signed' => $disputesSigned,
-            'solids_given'    => $this->countSolidsGiven($userId),
-            'solids_received' => $this->countSolidsReceived($userId),
+            'followers'         => $followCounts['followers'],
+            'following'         => $followCounts['following'],
+            // Doubled fields during release N. Identical value;
+            // `binder_size` removed in release N+1.
+            'binder_size'       => $watchingSize,
+            'watching_size'     => $watchingSize,
+            'reviews_written'   => $reviewsWritten,
+            'disputes_signed'   => $disputesSigned,
+            'solids_given'      => $this->countSolidsGiven($userId),
+            'solids_received'   => $this->countSolidsReceived($userId),
+            // §D6 blog tab count — lifetime published blog posts authored
+            // by the user. Sourced from peepso_activities rows where
+            // act_module_id='blog' joined against wp_posts for the
+            // published filter. Mirrors what /u/:handle/blog renders.
+            'blog_posts_written' => \BCC\Core\Repositories\PeepSoActivityRepository::countBlogsByAuthor($userId),
         ];
     }
 
@@ -994,8 +1038,13 @@ final class UserViewService
      * PrivacySettings. Always returns a complete array; missing meta
      * defaults to false (V1 baseline: everything public per §K2).
      *
+     * `binder_hidden` and `watching_hidden` are field-doubled during
+     * release N: both keys carry the same boolean value after the
+     * read-side lazy migration. `binder_hidden` removed in release N+1.
+     *
      * @return array{
      *   binder_hidden: bool,
+     *   watching_hidden: bool,
      *   reviews_hidden: bool,
      *   disputes_hidden: bool,
      *   delegations_hidden: bool,
@@ -1023,9 +1072,17 @@ final class UserViewService
      *   can_block       — true for any other authed viewer
      *   can_edit_profile — true only on own profile
      *
+     * §J.6 attestation extension — the four trust-attestation gates
+     * (can_vouch / can_stand_behind / can_dispute / can_report) are
+     * resolved by reusing the same primitives the entity-card resolver
+     * uses (CardViewService::resolveMemberPermissions): AttestationService
+     * for vouch/stand-behind/report, FeatureAccessService for dispute.
+     * Same gates, same shape — so the frontend's AttestationActionCluster
+     * renders identically on member profiles and entity cards.
+     *
      * @return array<string, array{allowed: bool, unlock_hint: string|null}>
      */
-    private static function resolvePermissions(int $userId, int $viewerId, bool $isSelf): array
+    private function resolvePermissions(int $userId, int $viewerId, bool $isSelf): array
     {
         $isAuthed = $viewerId > 0;
         $isOther  = $isAuthed && !$isSelf;
@@ -1037,11 +1094,42 @@ final class UserViewService
         // "Message" button at all.
         $canMessage = $isOther && self::recipientChatEnabled($userId);
 
+        // §J.6 attestation gates — same resolver as entity cards.
+        // getViewerActionPermissions ships {allowed, unlock_hint} for
+        // vouch / stand_behind / report; we forward them verbatim.
+        $attestationPerms = $this->attestationService->getViewerActionPermissions(
+            $viewerId,
+            $userId
+        );
+
+        // can_dispute — feature-access gate (§J.1 "must be ≥ trusted").
+        // Self-target and anon both deny per CardViewService's parallel
+        // member-card resolver. Anon gets the sign-in hint; self gets
+        // the structural-deny shape (null hint → FE hides per §N7).
+        if ($viewerId <= 0) {
+            $canDispute = [
+                'allowed'     => false,
+                'unlock_hint' => 'Sign in to file a dispute.',
+            ];
+        } elseif ($isSelf) {
+            $canDispute = ['allowed' => false, 'unlock_hint' => null];
+        } else {
+            $featurePerm = $this->featureAccess->canPerform($viewerId, 'sign_dispute');
+            $canDispute = [
+                'allowed'     => (bool) $featurePerm['allowed'],
+                'unlock_hint' => $featurePerm['unlock_hint'] ?? null,
+            ];
+        }
+
         return [
             'can_follow'       => ['allowed' => $isOther,    'unlock_hint' => null],
             'can_message'      => ['allowed' => $canMessage, 'unlock_hint' => null],
             'can_block'        => ['allowed' => $isOther,    'unlock_hint' => null],
             'can_edit_profile' => ['allowed' => $isSelf,     'unlock_hint' => null],
+            'can_vouch'        => $attestationPerms['can_vouch'],
+            'can_stand_behind' => $attestationPerms['can_stand_behind'],
+            'can_dispute'      => $canDispute,
+            'can_report'       => $attestationPerms['can_report'],
         ];
     }
 
@@ -1056,7 +1144,7 @@ final class UserViewService
         if ($userId <= 0 || !class_exists('PeepSoChatModel')) {
             return false;
         }
-        return (bool) \PeepSoChatModel::check_chat_enabled($userId);
+        return (bool) \PeepSoChatModel::chat_enabled($userId);
     }
 
     /**
@@ -1177,7 +1265,10 @@ final class UserViewService
         $base = '/u/' . $handle;
         return [
             'self'     => $base,
+            // Field-doubled during release N (additive-deprecation per
+            // api-contract §1.1.1). `binder` removed in release N+1.
             'binder'   => $base . '/binder',
+            'watching' => $base . '/watching',
             'reviews'  => $base . '/reviews',
             'activity' => $base . '/activity',
             'disputes' => $base . '/disputes',

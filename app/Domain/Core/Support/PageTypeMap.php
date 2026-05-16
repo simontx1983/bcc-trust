@@ -5,7 +5,7 @@
  *
  * Used by:
  *   - CardViewService (forward: kind → page_type, validating cards/:type/:id route)
- *   - BinderService   (reverse: page_type → kind, resolving followed users to validator/project/creator)
+ *   - WatchingService (reverse: page_type → kind, resolving followed users to validator/project/creator)
  *
  * The two directions intentionally don't include 'member' — that's
  * the wp_users-backed kind, not a peepso-page-backed kind. Callers
@@ -46,7 +46,7 @@ final class PageTypeMap
 
     /**
      * _bcc_page_type meta value → card_kind.
-     * Used by BinderService to resolve a followed user's owned
+     * Used by WatchingService to resolve a followed user's owned
      * peepso-page into the right card_kind label. Unknown values
      * (or no page at all) collapse to the 'member' default.
      *

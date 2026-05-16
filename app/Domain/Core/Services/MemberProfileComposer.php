@@ -53,7 +53,11 @@ final class MemberProfileComposer
         ['key' => 'reviews',     'label' => 'Reviews',     'platform' => 'BCC'],
         ['key' => 'solids',      'label' => 'Solids',      'platform' => 'PEEPSO'],
         ['key' => 'disputes',    'label' => 'Disputes',    'platform' => 'BCC'],
-        ['key' => 'binder',      'label' => 'Binder',      'platform' => 'BCC'],
+        // Single source of truth — vocabulary unified on "Watching"
+        // 2026-05-13. Frontend reads `key` only; legacy 'binder' key
+        // is not emitted (release N additive-deprecation only doubles
+        // wire fields the FE reads by name, not by key lookup).
+        ['key' => 'watching',    'label' => 'Watching',    'platform' => 'BCC'],
     ];
 
     /**
@@ -85,7 +89,7 @@ final class MemberProfileComposer
      * }>
      */
     private const BREAKDOWN_DEFINITIONS = [
-        ['key' => 'pulls',     'label' => 'Pulls',     'description' => 'Cards added to the binder.', 'tone' => 'verified'],
+        ['key' => 'pulls',     'label' => 'Pulls',     'description' => 'Cards added to the watchlist.', 'tone' => 'verified'],
         ['key' => 'reviews',   'label' => 'Reviews',   'description' => 'Long-form reviews on pages.', 'tone' => 'ink'],
         ['key' => 'reactions', 'label' => 'Reactions', 'description' => 'Solids, vouches, stand-behinds.', 'tone' => 'safety'],
         ['key' => 'disputes',  'label' => 'Disputes',  'description' => 'Disputes signed.', 'tone' => 'weld'],
@@ -217,7 +221,120 @@ final class MemberProfileComposer
         $base['reviews']  = [];
         $base['disputes'] = [];
 
+        // ── PR-11b — identity verification status. Surfaced on
+        //   /me/progression as the VERIFIED IDENTITY section, also
+        //   consumed by the §3.1 verified panel on /u/[handle]. Same
+        //   shape as the parallel block in UserViewService::getProfile
+        //   so the contract is stable across surfaces. wallets_verified
+        //   counts the already-resolved `wallets` array; github + x
+        //   resolve via per-user repo lookups (cheap; single user).
+        $walletCount = isset($base['wallets']) && is_array($base['wallets'])
+            ? count($base['wallets'])
+            : 0;
+        $base['verifications'] = self::buildVerifications($userId, $walletCount);
+
         return $base;
+    }
+
+    /**
+     * §3.1 verifications block. Reads from the canonical per-provider
+     * repositories that UserViewService already uses. The shape mirrors
+     * UserViewService::getProfile's `verifications` field so the wire
+     * contract is consistent across endpoints.
+     *
+     * `profile_completeness` is the PeepSo profile-fields fill
+     * percentage (0–100). Same primitive QuestValidator uses
+     * (`profile_fields_stats.completeness`), shared so both surfaces
+     * read from the same number. Surfaced on /me/progression as a
+     * 4th row in the VERIFIED IDENTITY section per PR-11b.
+     *
+     * @return array{
+     *   x_verified: bool,
+     *   x_username: string|null,
+     *   github_verified: bool,
+     *   github_username: string|null,
+     *   wallets_verified: int,
+     *   profile_completeness: int
+     * }
+     */
+    private static function buildVerifications(int $userId, int $walletCount): array
+    {
+        $githubVerified = false;
+        $githubUsername = null;
+        if (class_exists(\BCC\Trust\Core\Repositories\GitHubRepository::class)) {
+            $githubConnections = (new \BCC\Trust\Core\Repositories\GitHubRepository())
+                ->getConnectionsForUsers([$userId]);
+            $githubConnection  = $githubConnections[$userId] ?? null;
+            if (is_array($githubConnection)
+                && isset($githubConnection['verified_at'])
+                && is_string($githubConnection['verified_at'])
+            ) {
+                $githubVerified = true;
+                $githubUsername = isset($githubConnection['provider_username'])
+                    && is_string($githubConnection['provider_username'])
+                    ? $githubConnection['provider_username']
+                    : null;
+            }
+        }
+
+        $xVerified = false;
+        $xUsername = null;
+        if (class_exists(\BCC\Trust\Core\Repositories\XRepository::class)) {
+            $xConnections = (new \BCC\Trust\Core\Repositories\XRepository())
+                ->getConnectionsForUsers([$userId]);
+            $xConnection  = $xConnections[$userId] ?? null;
+            if (is_array($xConnection)
+                && isset($xConnection['verified_at'])
+                && is_string($xConnection['verified_at'])
+            ) {
+                $xVerified = true;
+                $xUsername = isset($xConnection['provider_username'])
+                    && is_string($xConnection['provider_username'])
+                    ? $xConnection['provider_username']
+                    : null;
+            }
+        }
+
+        return [
+            'x_verified'           => $xVerified,
+            'x_username'           => $xUsername,
+            'github_verified'      => $githubVerified,
+            'github_username'      => $githubUsername,
+            'wallets_verified'     => $walletCount,
+            'profile_completeness' => self::resolveProfileCompleteness($userId),
+        ];
+    }
+
+    /**
+     * Resolve the PeepSo profile-completeness percentage (0–100).
+     *
+     * Mirrors `QuestValidator::validateCompleteProfile`'s PeepSo path —
+     * uses `PeepSoUser::get_instance($userId)->profile_fields` to
+     * fetch the canonical stats. Falls back to 0 on any failure
+     * (PeepSo absent, plugin disabled, exception during field load).
+     *
+     * Defensive: this is fire-and-forget. A failure here should NOT
+     * propagate out of the profile composer — the rest of the page
+     * still works even when this signal is unavailable.
+     */
+    private static function resolveProfileCompleteness(int $userId): int
+    {
+        if (!class_exists('PeepSoUser') || !class_exists('PeepSoProfileFields')) {
+            return 0;
+        }
+        try {
+            $peepsoUser = \PeepSoUser::get_instance($userId);
+            $fields     = $peepsoUser->profile_fields;
+            $fields->load_fields();
+            $stats = $fields->profile_fields_stats ?? [];
+            if (!is_array($stats)) {
+                return 0;
+            }
+            $completeness = isset($stats['completeness']) ? (int) $stats['completeness'] : 0;
+            return max(0, min(100, $completeness));
+        } catch (\Throwable $e) {
+            return 0;
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -461,13 +578,16 @@ final class MemberProfileComposer
         $counts = isset($base['counts']) && is_array($base['counts']) ? $base['counts'] : [];
         $trustScore = isset($base['trust_score']) ? (int) $base['trust_score'] : 0;
 
+        // Read `watching_size` (canonical) with `binder_size` fallback —
+        // UserViewService doubles both during release N, but keep the
+        // fallback so we don't trip if a consumer trims fields.
         $values = [
             'trust'     => (string) $trustScore,
             'pulled_by' => self::numberOrDash($counts['followers'] ?? null),
             'reviews'   => self::numberOrDash($counts['reviews_written'] ?? null),
             'solids'    => self::numberOrDash($counts['solids_received'] ?? null),
             'disputes'  => self::numberOrDash($counts['disputes_signed'] ?? null),
-            'binder'    => self::numberOrDash($counts['binder_size'] ?? null),
+            'watching'  => self::numberOrDash($counts['watching_size'] ?? $counts['binder_size'] ?? null),
         ];
 
         $stats = [];
@@ -734,8 +854,14 @@ final class MemberProfileComposer
             return isset($privacy[$key]) && $privacy[$key] === true;
         };
 
+        // Vocabulary unified on "Watching" 2026-05-13 — single source of
+        // truth (frontend reads `key`). Privacy reads `watching_hidden`
+        // with `binder_hidden` fallback to honour the release-N field
+        // doubling in PrivacySettings::readProfile.
+        $watchHidden = $hideFor('watching_hidden') || $hideFor('binder_hidden');
+
         return [
-            ['key' => 'binder',   'label' => 'Binder',   'count' => (int) ($counts['binder_size'] ?? 0),      'hidden' => $hideFor('binder_hidden')],
+            ['key' => 'watching', 'label' => 'Watching', 'count' => (int) ($counts['watching_size'] ?? $counts['binder_size'] ?? 0), 'hidden' => $watchHidden],
             ['key' => 'reviews',  'label' => 'Reviews',  'count' => (int) ($counts['reviews_written'] ?? 0),  'hidden' => $hideFor('reviews_hidden')],
             ['key' => 'activity', 'label' => 'Activity', 'count' => 0,                                         'hidden' => false],
             ['key' => 'disputes', 'label' => 'Disputes', 'count' => (int) ($counts['disputes_signed'] ?? 0),  'hidden' => $hideFor('disputes_hidden')],

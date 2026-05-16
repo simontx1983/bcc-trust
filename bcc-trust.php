@@ -55,13 +55,16 @@ if (!defined('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS')) {
  * includes/database/schema-*.php file. Any edit to a schema definition
  * automatically triggers dbDelta on the next request.
  *
- * Hot path. md5_file reads each file's full contents — cheap on warm OS
- * cache, but multiplied by every PHP request (admin, REST, webhook,
- * cron) it becomes meaningful. We cache the version keyed on a cheap
- * filemtime+filesize signature; the content md5 is only re-computed
- * when the signature changes. Edits to a schema file change either
- * mtime or size, so the dev workflow still triggers dbDelta on the
- * next request.
+ * Computed live on every request via md5_file() of each schema file.
+ * Reads ~30 small files (<10KB each) from disk; warm OS-cache cost is
+ * ~1ms total — negligible vs the cost of the alternative (an mtime+size
+ * signature cache stored in `bcc_trust_schema_version_cache`), which
+ * we ran in 2026-05 and which silently mis-fired during deploys where
+ * mtime stayed stable (rsync --times, atomic symlink swap, fast file
+ * replacement). The stale-signature path left `ChainRepository::COLUMNS`
+ * referencing a column the migration hadn't yet added, poisoning the
+ * chains cache with an ERROR_SENTINEL. Live-computation removes that
+ * failure class entirely. Per-deploy md5 thrash is ~1ms; we keep it.
  */
 define('BCC_TRUST_SCHEMA_VERSION', (static function (): string {
     $files = glob(__DIR__ . '/includes/database/schema-*.php') ?: [];
@@ -70,32 +73,21 @@ define('BCC_TRUST_SCHEMA_VERSION', (static function (): string {
     }
     sort($files);
 
-    $signature = '';
-    foreach ($files as $file) {
-        $signature .= basename($file) . ':' . filemtime($file) . ':' . filesize($file) . "\n";
-    }
-
-    $cache = get_option('bcc_trust_schema_version_cache');
-    if (is_array($cache)
-        && isset($cache['signature'], $cache['version'])
-        && $cache['signature'] === $signature
-    ) {
-        return (string) $cache['version'];
-    }
-
     $input = '';
     foreach ($files as $file) {
         $input .= basename($file) . ':' . md5_file($file) . "\n";
     }
-    $version = substr(md5($input), 0, 10);
-
-    update_option('bcc_trust_schema_version_cache', [
-        'signature' => $signature,
-        'version'   => $version,
-    ], false);
-
-    return $version;
+    return substr(md5($input), 0, 10);
 })());
+
+// Best-effort cleanup of the old version-cache option. Harmless to call
+// when the option doesn't exist; eventually-removed once every site has
+// upgraded past the 2026-05 PR-B deploy that retired the cache.
+add_action('plugins_loaded', static function (): void {
+    if (get_option('bcc_trust_schema_version_cache') !== false) {
+        delete_option('bcc_trust_schema_version_cache');
+    }
+}, 4); // priority 4 — strictly before the schema migration at priority 5
 
 /*
 |--------------------------------------------------------------------------
@@ -220,6 +212,8 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-chain-checkpoints.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-spam-contracts.php';
 // V2 Phase 1b — Helius webhook replay protection (LRU)
 require_once BCC_TRUST_PATH . 'includes/database/schema-helius-seen-signatures.php';
+// V1.5 §D6 — crypto-blog composer chain-tag join + bcc_onchain_chains.color
+require_once BCC_TRUST_PATH . 'includes/database/schema-blog-chain-tags.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**
@@ -242,6 +236,11 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_helius_seen_signatures_table();
     // V2 Phase 6 (§H1) NFT-piece detail metadata cache
     bcc_onchain_create_collection_pieces_table();
+    // V1.5 §D6 crypto-blog composer — chains.color column + Bitcoin seed,
+    // then the post↔chain join table. Order matters: the join table
+    // references chain ids that the seed may have just inserted.
+    bcc_blog_extend_chains_table();
+    bcc_blog_create_chain_tags_table();
 
     // Signals table is owned by SignalRepository — included here so its
     // column-type migrations run on version bump, not just on fresh
@@ -434,7 +433,33 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled('bcc_helius_dedupe_sweep')) {
         wp_schedule_event(time() + 60, 'bcc_five_minutes', 'bcc_helius_dedupe_sweep');
     }
+
+    // PR-8b — divergence-state sweep self-heal. Mirrors activation-time
+    // schedule so installs that updated without reactivation pick up
+    // the cron. Hot path: one autoloaded-option lookup per request.
+    if (!wp_next_scheduled('bcc_trust_divergence_state_sweep')) {
+        wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_divergence_state_sweep');
+    }
 }, 5);
+
+// PR-8b — daily divergence-state sweep callback. Runs the worker;
+// any per-target failure is contained inside `sweep()` (per the
+// fire-and-forget posture documented in the service class). The
+// summary is logged for cron-observability use.
+add_action('bcc_trust_divergence_state_sweep', static function (): void {
+    try {
+        $summary = \BCC\Trust\Core\Plugin::instance()
+            ->polarizationTransitionNotifier()
+            ->sweep();
+        \BCC\Core\Log\Logger::info('[bcc-trust] Divergence-state sweep complete', $summary);
+    } catch (\Throwable $e) {
+        // Belt-and-suspenders — sweep() itself swallows errors, but
+        // a constructor/DI failure could escape. Log + drop.
+        \BCC\Core\Log\Logger::warning('[bcc-trust] Divergence-state sweep callback failed', [
+            'error' => $e->getMessage(),
+        ]);
+    }
+});
 
 add_action('bcc_gated_group_reconcile_sweep', function () {
     $userIds = get_users([
@@ -1251,6 +1276,14 @@ function bcc_trust_activate() {
         wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
     }
 
+    // PR-8b — daily divergence-state sweep. Detects targets that
+    // transitioned into polarizing/disputed and fires the §J.7
+    // `divergence_state_warning` heads-up. Self-heal at plugins_loaded
+    // below — DO NOT REMOVE the activation-side schedule as "redundant."
+    if (!wp_next_scheduled('bcc_trust_divergence_state_sweep')) {
+        wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_divergence_state_sweep');
+    }
+
     // V2 Phase 1 NFT cron schedules (activation fast path).
     //
     // ┌─ DO NOT REMOVE AS "REDUNDANT" ────────────────────────────────┐
@@ -1303,6 +1336,22 @@ function bcc_trust_activate() {
         wp_schedule_event(time() + 90, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK);
     }
 
+    // §C3 watch-batch sweep — activation fast path + legacy hook drain.
+    // Mirrors the plugins_loaded self-heal in Plugin::registerAsyncJobs:
+    // unschedule the legacy `bcc_pull_batch_sweep` hook (release N) and
+    // schedule the canonical `bcc_watch_batch_sweep` hook. Defense in
+    // depth — see the V2 NFT cron-drift incident memory.
+    if (class_exists('\\BCC\\Trust\\Core\\Services\\WatchBatchAggregator')) {
+        wp_clear_scheduled_hook('bcc_pull_batch_sweep');
+        if (!wp_next_scheduled(\BCC\Trust\Core\Services\WatchBatchAggregator::SWEEP_HOOK)) {
+            wp_schedule_event(
+                time(),
+                \BCC\Trust\Core\Services\WatchBatchAggregator::SWEEP_INTERVAL,
+                \BCC\Trust\Core\Services\WatchBatchAggregator::SWEEP_HOOK
+            );
+        }
+    }
+
     // Defensive: re-register custom intervals (top-level add_filter above
     // should already have done this; WP dedupes by callable signature).
     add_filter('cron_schedules', [\BCC\Trust\Onchain\Services\ChainRefreshService::class, 'add_cron_intervals']);
@@ -1344,6 +1393,9 @@ function bcc_trust_deactivate() {
         'bcc_helius_dedupe_sweep',
         // V2 Phase 1c: NFT enrichment scheduler.
         \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK,
+        // §C3 watch-batch sweep + legacy hook (release-N drain).
+        'bcc_pull_batch_sweep',
+        'bcc_watch_batch_sweep',
     ];
 
     foreach ($cron_hooks as $hook) {

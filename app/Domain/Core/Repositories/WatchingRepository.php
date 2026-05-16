@@ -1,27 +1,33 @@
 <?php
 /**
- * Binder Repository — read-only projection of PeepSo follows
+ * Watching Repository — read-only projection of PeepSo follows
  * enriched with bcc_pull_meta sidecar metadata.
  *
- * Per §C2: the binder is a UI-layer projection of PeepSo follows,
+ * Per §C2: the watchlist is a UI-layer projection of PeepSo follows,
  * NOT a separate relationship graph. This repository owns the
  * cross-table read that JOINs:
  *   - {prefix}peepso_user_followers (PeepSo, source of truth for follows)
  *   - {prefix}bcc_pull_meta         (BCC sidecar metadata; LEFT JOIN)
+ *                                    NOTE: physical table name kept as
+ *                                    `bcc_pull_meta` per release-N
+ *                                    additive-deprecation runway. The
+ *                                    logical concept is "watch metadata".
+ *                                    Physical rename deferred to release
+ *                                    N+2 (see docs/database-schema.md).
  *   - {prefix}users                 (handle / user_login fallback)
  *   - {prefix}usermeta              (bcc_handle resolution)
  *
  * Why a dedicated repository (not on PullMetaRepository): PullMeta's
- * scope is the bcc_pull_meta table only. The binder read crosses
+ * scope is the bcc_pull_meta table only. The watch read crosses
  * three other tables; putting it elsewhere would either violate
  * PullMeta's documented scope or scatter $wpdb across services
  * (forbidden by §L6 "Repository-only DB access").
  *
- * Read-only. No writes — pull/unpull are Phase 2/3 mutations and
- * route through PullMetaRepository directly when they land.
+ * Read-only. No writes — watch/unwatch are mutations and route through
+ * PullMetaRepository directly.
  *
  * @package BCC\Trust\Core\Repositories
- * @since V1 (2026-04, Binder Phase 1)
+ * @since V1 (2026-04, Watching Phase 1; renamed from BinderRepository 2026-05-13)
  */
 
 namespace BCC\Trust\Core\Repositories;
@@ -33,7 +39,7 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * @phpstan-type BinderItemRow object{
+ * @phpstan-type WatchingItemRow object{
  *     follow_id: int|numeric-string,
  *     card_user_id: int|numeric-string,
  *     user_login: string,
@@ -43,7 +49,7 @@ if (!defined('ABSPATH')) {
  *     pulled_at: string|null
  * }
  */
-final class BinderRepository
+final class WatchingRepository
 {
     /**
      * Active-follow predicate for peepso_user_followers per the
@@ -53,17 +59,17 @@ final class BinderRepository
 
     /**
      * Hard cap defending against pathological page_size requests
-     * even after route-arg validation. Matches BinderService::MAX_PAGE_SIZE
+     * even after route-arg validation. Matches WatchingService::MAX_PAGE_SIZE
      * — the cap is enforced at three layers (route arg, service, repo)
      * so a misconfigured caller never leaks the unbounded query.
      */
     private const MAX_PAGE_SIZE = 50;
 
     /**
-     * The binder for a viewer — paginated, most-recent-pull first
+     * The watchlist for a viewer — paginated, most-recent-watch first
      * (follow ordinal break-tie when pull_meta absent).
      *
-     * @return list<BinderItemRow>
+     * @return list<WatchingItemRow>
      */
     public function findItemsForUser(int $userId, int $offset, int $limit): array
     {
@@ -118,7 +124,7 @@ final class BinderRepository
         //  offset pagination (some items shown twice, others missed).
         // ────────────────────────────────────────────────────────────
 
-        /** @var list<BinderItemRow>|null $rows */
+        /** @var list<WatchingItemRow>|null $rows */
         $rows = $wpdb->get_results($sql);
         return $rows ?: [];
     }
@@ -127,16 +133,16 @@ final class BinderRepository
      * Single-item lookup using the same JOIN as findItemsForUser, scoped
      * to a specific follow_id and ownership-checked against the viewer.
      *
-     * Used by the pull/unpull mutation handlers to return the canonical
-     * binder-item shape immediately after a successful write — same
-     * shape as GET /me/binder, no separate hydration path.
+     * Used by the watch/unwatch mutation handlers to return the canonical
+     * watch-item shape immediately after a successful write — same
+     * shape as GET /me/watching, no separate hydration path.
      *
      * Returns null when:
      *   - the follow_id doesn't exist
      *   - the follow_id belongs to a different user (ownership-fail)
-     *   - the follow has been flipped to uf_follow=0 (no longer in binder)
+     *   - the follow has been flipped to uf_follow=0 (no longer in watchlist)
      *
-     * @phpstan-return BinderItemRow|null
+     * @phpstan-return WatchingItemRow|null
      */
     public function findItemByFollowId(int $userId, int $followId): ?object
     {
@@ -175,15 +181,16 @@ final class BinderRepository
             $userId
         );
 
-        /** @phpstan-var BinderItemRow|null $row */
+        /** @phpstan-var WatchingItemRow|null $row */
         $row = $wpdb->get_row($sql);
         return $row ?: null;
     }
 
     /**
      * Look up the passive_user_id (followee) for a follow row owned
-     * by $userId. Used by the unpull handler to get the followee
-     * before deletion (so the bcc_card_unpulled event can carry it).
+     * by $userId. Used by the unwatch handler to get the followee
+     * before deletion (so the bcc_card_unwatched / bcc_card_unpulled
+     * events can carry it).
      *
      * Returns 0 when the row doesn't exist or isn't owned by $userId.
      */
@@ -281,7 +288,7 @@ final class BinderRepository
 
     /**
      * Bulk reverse-lookup: given a set of user_ids (followed users),
-     * resolve each to its peepso-page (if any) so the binder can
+     * resolve each to its peepso-page (if any) so the watchlist can
      * surface validator / project / creator card_kinds with real
      * post_name slugs in URLs.
      *
@@ -296,7 +303,7 @@ final class BinderRepository
      *      across backups and reorderings.)
      *   2. Within the same priority, lowest post_id wins (earliest-published).
      *
-     * Bounded by LIMIT 200 — at the binder cap of 50 follows × an
+     * Bounded by LIMIT 200 — at the watch cap of 50 follows × an
      * unrealistic 4 pages each, the 200 row budget still holds.
      *
      * @param list<int> $userIds
@@ -414,7 +421,7 @@ final class BinderRepository
     }
 
     /**
-     * Tier-distribution rollup for the §N9 binder identity-snapshot.
+     * Tier-distribution rollup for the §N9 watchlist identity-snapshot.
      *
      * GROUP BY tier_at_pull on the active-follows table left-joined to
      * bcc_pull_meta. Returns counts keyed by tier_at_pull value.

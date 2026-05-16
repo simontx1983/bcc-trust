@@ -6,7 +6,7 @@
  * follows that represent BCC card pulls (per §C2 of the V1 plan).
  *
  * Scope: this repository owns the bcc_pull_meta table only. Queries
- * that JOIN with peepso_follower (e.g., the binder list endpoint)
+ * that JOIN with peepso_follower (e.g., the watchlist list endpoint)
  * belong in a Service that composes this Repository with the PeepSo
  * follow store — never inline here.
  *
@@ -48,7 +48,7 @@ class PullMetaRepository
     /**
      * Find a single pull-meta row by its parent follow_id.
      *
-     * Used by the pull endpoint for the §already_in_binder idempotency
+     * Used by the watch endpoint for the §already_watching idempotency
      * check before deciding whether to insert.
      *
      * @phpstan-return PullMetaRow|null
@@ -107,7 +107,7 @@ class PullMetaRepository
     }
 
     /**
-     * Bulk-fetch pull-meta for a set of follow_ids. Used by the binder
+     * Bulk-fetch pull-meta for a set of follow_ids. Used by the watchlist
      * list endpoint after PeepSo returns the user's follows — we then
      * enrich with our metadata in a single query (no N+1).
      *

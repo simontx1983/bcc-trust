@@ -326,7 +326,6 @@ run_t1() {
     log "${BOLD}Tier 1 — deep verify (public reads, no auth needed)${NC}"
 
     t1_check "/wp-json/bcc/v1/ranks"                "ranks"
-    t1_check "/wp-json/bcc/v1/discover"             "discover (Floor)"
     t1_check "/wp-json/bcc/v1/locals"               "locals"
 
     local sample_page_id="${BCC_SAMPLE_PAGE_ID:-1}"
@@ -344,7 +343,8 @@ run_t2() {
     t2_check "/wp-json/bcc/v1/system/health"          "GET system/health (admin)"
     t2_check "/wp-json/bcc/v1/me/highlights"          "GET me/highlights"
     t2_check "/wp-json/bcc/v1/me/notifications"       "GET me/notifications"
-    t2_check "/wp-json/bcc/v1/me/binder"              "GET me/binder"
+    t2_check "/wp-json/bcc/v1/me/watching"            "GET me/watching"
+    t2_check "/wp-json/bcc/v1/me/binder"              "GET me/binder (deprecated, release-N alias)"
     t2_check "/wp-json/bcc/v1/me/notification-prefs"  "GET me/notification-prefs"
     t2_check "/wp-json/bcc/v1/me/privacy"             "GET me/privacy"
     t2_check "/wp-json/bcc/v1/me/blocks"              "GET me/blocks"

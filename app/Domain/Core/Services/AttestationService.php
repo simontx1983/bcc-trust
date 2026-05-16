@@ -130,7 +130,14 @@ final class AttestationService
     public function __construct(
         private readonly AttestationRepository $repo,
         private readonly ReputationRepository $reputationRepo,
-        private readonly UserInfoRepository $userInfoRepo
+        private readonly UserInfoRepository $userInfoRepo,
+        private readonly WalletAgeWeighter $walletAgeWeighter,
+        private readonly ReciprocityPenaltyResolver $reciprocityResolver,
+        private readonly DormancyDetector $dormancyDetector,
+        private readonly ReliabilityStandingComputer $reliabilityComputer,
+        private readonly CohortOverlapDampener $cohortOverlapDampener,
+        private readonly DivergenceStateClassifier $divergenceClassifier,
+        private readonly ContestedStateExplainer $contestedStateExplainer
     ) {
     }
 
@@ -490,12 +497,36 @@ final class AttestationService
 
                 $orderInTarget = $this->repo->nextOrderInTarget($targetKind, $targetId);
 
+                // Cast-time weight composition (PR-4 + PR-7). All three
+                // multipliers are pure read-side functions over committed
+                // state; computed inside the same transaction-locked
+                // region as the insert so a concurrent reverse-cast can't
+                // slip in between the multiplier checks and the row write.
+                // Captured in weight_at_time per §J.4 ledger semantics —
+                // later wallet aging, reverse revokes, or cohort changes
+                // do NOT retroactively reweight this row.
+                $walletAgeMult   = $this->walletAgeWeighter->weightFor($attestorUserId);
+                $reciprocityMult = $this->reciprocityResolver->weightFor(
+                    $attestorUserId,
+                    $targetKind,
+                    $targetId
+                );
+                $cohortOverlapMult = $this->cohortOverlapDampener->weightFor(
+                    $attestorUserId,
+                    $targetKind,
+                    $targetId
+                );
+                $weightAtTime = self::DEFAULT_WEIGHT
+                    * $walletAgeMult
+                    * $reciprocityMult
+                    * $cohortOverlapMult;
+
                 $id = $this->repo->insert(
                     $attestorUserId,
                     $targetKind,
                     $targetId,
                     $kind,
-                    self::DEFAULT_WEIGHT,
+                    $weightAtTime,
                     $cleanNote,
                     $orderInTarget
                 );
@@ -507,11 +538,19 @@ final class AttestationService
                     $action,
                     $id,
                     [
-                        'attestor_user_id' => $attestorUserId,
-                        'target_kind'      => $targetKind,
-                        'target_id'        => $targetId,
-                        'kind'             => $kind,
-                        'order_in_target'  => $orderInTarget,
+                        'attestor_user_id'    => $attestorUserId,
+                        'target_kind'         => $targetKind,
+                        'target_id'           => $targetId,
+                        'kind'                => $kind,
+                        'order_in_target'      => $orderInTarget,
+                        // Cast-time weight components — observability into
+                        // the multipliers so closed-network testing can
+                        // audit what fed into each row's weight. PR-4 +
+                        // PR-7 (cohort_overlap).
+                        'weight_at_time'       => $weightAtTime,
+                        'wallet_age_mult'      => $walletAgeMult,
+                        'reciprocity_mult'     => $reciprocityMult,
+                        'cohort_overlap_mult'  => $cohortOverlapMult,
                     ],
                     'attestation',
                     $attestorUserId
@@ -1049,7 +1088,11 @@ final class AttestationService
             if ($attestorId <= 0) {
                 continue;
             }
-            $attestor = self::buildAttestorMiniView($attestorId, $this->reputationRepo);
+            $attestor = self::buildAttestorMiniView(
+                $attestorId,
+                $this->reputationRepo,
+                $this->dormancyDetector
+            );
             if ($attestor === null) {
                 // Deleted attestor — drop the row (the underlying
                 // attestation stays in DB; we just don't render it).
@@ -1111,12 +1154,23 @@ final class AttestationService
      * §J.4 attestor mini-view per contract row schema. Returns null
      * when the user no longer exists (caller drops the row).
      *
-     * V1 baselines (Slice E populates real values):
-     *   - reliability_standing = 'newly_active'
-     *   - badges = []
-     *   - is_dormant = false (no user-activity dormancy detector yet;
-     *     the field is present in the contract shape for forward
-     *     compatibility but always emits false until Slice E).
+     * Slice E activations (PR-6):
+     *   - `is_dormant` now reflects the real `DormancyDetector` output
+     *     (60-day window over last_login + attestation activity). The
+     *     FE renders the INACTIVE marker conditionally — purely a
+     *     backend swap-in.
+     *
+     * V1 baselines (still hardcoded — gated by §J.10 q14 "public
+     * surface SELF-ONLY in V1" until V2 expansion opens them):
+     *   - `reliability_standing = 'newly_active'` for every row. The
+     *     positive-only catalogue per §J.3.2 means an operator in a
+     *     low-tier reliability state renders as "newly_active" anyway,
+     *     so the public roster carries no information leak. The real
+     *     standing is computed by `ReliabilityStandingComputer` and
+     *     surfaced on `/me/reliability` (self-only) per PR-6.
+     *   - `badges = []` for every row. Per-attestor badges
+     *     (e.g. Early Read) ship with the §J.3.2.1 outcome
+     *     classifier in Slice E.4+.
      *
      * The numeric `reputation_score` IS surfaced (per the locked
      * §J.4 row shape) — that's the existing public score, distinct
@@ -1135,7 +1189,8 @@ final class AttestationService
      */
     private static function buildAttestorMiniView(
         int $userId,
-        ReputationRepository $reputationRepo
+        ReputationRepository $reputationRepo,
+        DormancyDetector $dormancyDetector
     ): ?array {
         if ($userId <= 0) {
             return null;
@@ -1158,16 +1213,23 @@ final class AttestationService
 
         $score = (int) round($reputationRepo->getScore($userId));
 
+        // Dormancy: real value as of PR-6. Tracks last_login + recent
+        // attestation activity over a 60-day window (plan §12 q9).
+        $isDormant = $dormancyDetector->isDormant($userId);
+
         return [
             'id'                   => $userId,
             'handle'               => $handle,
             'display_name'         => $displayName,
             'avatar_url'           => $avatarUrl,
             'reputation_score'     => $score,
-            // V1 baselines — Slice E populates.
+            // Still hardcoded — §J.10 q14 gates public reliability_standing
+            // + badges to SELF-ONLY in V1. Real values surface on
+            // /me/reliability via ReliabilityStandingComputer. V2 expansion
+            // opens these to third-party rows.
             'reliability_standing' => 'newly_active',
             'badges'               => [],
-            'is_dormant'           => false,
+            'is_dormant'           => $isDormant,
         ];
     }
 
@@ -1194,6 +1256,206 @@ final class AttestationService
     private static function standBehindBaselineFor(string $tier): int
     {
         return self::STAND_BEHIND_BASELINE_SLOTS[$tier] ?? 0;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // §J.5 self-mirror reliability — GET /me/reliability
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Build the §J.5 self-mirror payload for the signed-in operator.
+     *
+     * Three buckets of fields:
+     *
+     *   1. **Live-counted** (real values today):
+     *      - `since_attestation_count` — lifetime cast count
+     *        from `bcc_trust_attestations`.
+     *      - `stand_behind_allocation.slots_total` — tier baseline.
+     *      - `stand_behind_allocation.slots_used` — active stand_behind
+     *        rows for this attestor.
+     *
+     *   2. **V1 baselines** (Slice E populates):
+     *      - `operator_reliability = 0.0`
+     *      - `reliability_standing = 'newly_active'`
+     *      - `track_record.total_attestations = 0` (outcome classifier
+     *        is Slice E)
+     *      - `track_record.outcomes.*  = 0` (same)
+     *      - `trends.reliability_30d_ago = 0.0`
+     *      - `trends.reliability_90d_ago = 0.0`
+     *      - `trends.direction = 'steady'`
+     *      - `stand_behind_allocation.slots_recyclable_count = 0`
+     *        (decay-curve crossing is Slice E)
+     *      - `stand_behind_allocation.next_slot_unlocks_at = null`
+     *        (graduated bonus tracker is Slice E)
+     *
+     *   3. **Self-only**: caller (MeReliabilityEndpoint) enforces
+     *      `viewerId === $userId`. The shape includes the numeric
+     *      `operator_reliability` per §J.3.2 asymmetric-display rule
+     *      — this surface IS the asymmetry, the operator sees their
+     *      own number while it stays out of third-party responses.
+     *
+     * Slice E will refactor this method to read-cache-first via
+     * `bcc_attestor_reliability_cache` and fall through to a live
+     * compute on cache miss. The current implementation is the
+     * fall-through path's V1 baseline.
+     *
+     * @return array{
+     *   operator_reliability: float,
+     *   reliability_standing: string,
+     *   since_attestation_count: int,
+     *   stand_behind_allocation: array{
+     *     slots_total: int,
+     *     slots_used: int,
+     *     slots_recyclable_count: int,
+     *     next_slot_unlocks_at: string|null
+     *   },
+     *   track_record: array{
+     *     total_attestations: int,
+     *     outcomes: array{
+     *       targets_disputed_and_upheld: int,
+     *       targets_disputed_and_dismissed: int,
+     *       targets_received_further_attestations: int,
+     *       targets_clean_and_active: int
+     *     }
+     *   },
+     *   trends: array{
+     *     reliability_30d_ago: float,
+     *     reliability_90d_ago: float,
+     *     direction: string
+     *   },
+     *   divergence_state: string,
+     *   explainer: array{state: string, headline: string, body: string}
+     * }
+     */
+    public function getReliabilityFor(int $userId): array
+    {
+        if ($userId <= 0) {
+            return self::emptyReliabilityPayload();
+        }
+
+        $tier         = $this->reputationRepo->getTier($userId);
+        $slotsTotal   = self::standBehindBaselineFor($tier);
+        $slotsUsed    = $this->repo->countActiveStandBehindByAttestor($userId);
+        $totalCasts   = $this->repo->countAllByAttestor($userId);
+
+        // Reliability standing: PR-6 activates the real computer.
+        // Self-only per §J.10 q14 — the public roster keeps emitting
+        // 'newly_active' regardless of what the computer returns,
+        // gated upstream in buildAttestorMiniView.
+        $standing = $this->reliabilityComputer->compute($userId);
+
+        // §J.5 divergence_state + explainer (PR-8a). Classifier runs
+        // against the operator's own user_profile target — disputes
+        // don't fire on user_profile in V1 (Phase 1.5), so the slot
+        // resolves via the active/revocation heuristic only. Explainer
+        // returns server-pinned headline+body per the §2.7 mitigation.
+        $divergenceState = $this->divergenceClassifier->classify('user_profile', $userId);
+        $explainer       = $this->contestedStateExplainer->explain($divergenceState);
+
+        return [
+            // Numeric stays 0.0 until Slice E.4+ ships the outcome
+            // classifier. The categorical standing above is the V1
+            // signal operators see on /me/reliability.
+            'operator_reliability'   => 0.0,
+            'reliability_standing'   => $standing,
+            'since_attestation_count' => $totalCasts,
+            'stand_behind_allocation' => [
+                'slots_total'             => $slotsTotal,
+                'slots_used'              => $slotsUsed,
+                'slots_recyclable_count'  => 0,
+                'next_slot_unlocks_at'    => null,
+            ],
+            'track_record' => [
+                'total_attestations' => 0,
+                'outcomes' => [
+                    'targets_disputed_and_upheld'           => 0,
+                    'targets_disputed_and_dismissed'        => 0,
+                    'targets_received_further_attestations' => 0,
+                    'targets_clean_and_active'              => 0,
+                ],
+            ],
+            'trends' => [
+                'reliability_30d_ago' => 0.0,
+                'reliability_90d_ago' => 0.0,
+                // Three-state direction per §J.5 contract: softening
+                // / steady / improving. V1 baseline is steady — every
+                // operator sits at 0.0 across the rolling window until
+                // Slice E populates real reliability history.
+                'direction'           => 'steady',
+            ],
+            'divergence_state'        => $divergenceState,
+            'explainer'               => $explainer,
+        ];
+    }
+
+    /**
+     * @return array{
+     *   operator_reliability: float,
+     *   reliability_standing: string,
+     *   since_attestation_count: int,
+     *   stand_behind_allocation: array{
+     *     slots_total: int,
+     *     slots_used: int,
+     *     slots_recyclable_count: int,
+     *     next_slot_unlocks_at: string|null
+     *   },
+     *   track_record: array{
+     *     total_attestations: int,
+     *     outcomes: array{
+     *       targets_disputed_and_upheld: int,
+     *       targets_disputed_and_dismissed: int,
+     *       targets_received_further_attestations: int,
+     *       targets_clean_and_active: int
+     *     }
+     *   },
+     *   trends: array{
+     *     reliability_30d_ago: float,
+     *     reliability_90d_ago: float,
+     *     direction: string
+     *   },
+     *   divergence_state: string,
+     *   explainer: array{state: string, headline: string, body: string}
+     * }
+     */
+    private static function emptyReliabilityPayload(): array
+    {
+        return [
+            'operator_reliability'   => 0.0,
+            'reliability_standing'   => 'newly_active',
+            'since_attestation_count' => 0,
+            'stand_behind_allocation' => [
+                'slots_total'             => 0,
+                'slots_used'              => 0,
+                'slots_recyclable_count'  => 0,
+                'next_slot_unlocks_at'    => null,
+            ],
+            'track_record' => [
+                'total_attestations' => 0,
+                'outcomes' => [
+                    'targets_disputed_and_upheld'           => 0,
+                    'targets_disputed_and_dismissed'        => 0,
+                    'targets_received_further_attestations' => 0,
+                    'targets_clean_and_active'              => 0,
+                ],
+            ],
+            'trends' => [
+                'reliability_30d_ago' => 0.0,
+                'reliability_90d_ago' => 0.0,
+                'direction'           => 'steady',
+            ],
+            // §J.5 PR-8a — anonymous viewers / invalid userIds get the
+            // V1 baseline divergence + explainer too. The empty payload
+            // is contract-stable so the FE renders without conditional
+            // null checks.
+            'divergence_state'        => DivergenceStateClassifier::STATE_UNTESTED,
+            'explainer'               => [
+                'state'    => DivergenceStateClassifier::STATE_UNTESTED,
+                'headline' => 'No reads yet.',
+                'body'     => "The floor hasn't formed a read on you yet — most operators sit "
+                            . "here for a while. The graph doesn't grade silence as either "
+                            . "good or bad; it just waits for evidence.",
+            ],
+        ];
     }
 
     // ──────────────────────────────────────────────────────────────────

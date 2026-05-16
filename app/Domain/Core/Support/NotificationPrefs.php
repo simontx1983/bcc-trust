@@ -56,6 +56,7 @@ final class NotificationPrefs
         NotificationType::ATTESTATION_STAND_BEHIND_RECEIVED,
         NotificationType::ATTESTATION_REVOKED,
         NotificationType::ATTESTATION_REAFFIRMED,
+        NotificationType::DIVERGENCE_STATE_WARNING,
     ];
 
     /**
@@ -79,6 +80,7 @@ final class NotificationPrefs
         'attestation_stand_behind_received',
         'attestation_revoked',
         'attestation_reaffirmed',
+        'divergence_state_warning',
     ];
 
     /** wp_usermeta key prefix. Renaming requires a migration. */
@@ -108,6 +110,7 @@ final class NotificationPrefs
         'bell_bcc_attestation_stand_behind_received'         => true,
         'bell_bcc_attestation_revoked'                       => true,
         'bell_bcc_attestation_reaffirmed'                    => true,
+        'bell_bcc_divergence_state_warning'                  => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,
         'push_event_endorse'                                 => true,
@@ -120,6 +123,7 @@ final class NotificationPrefs
         'push_event_attestation_stand_behind_received'       => true,
         'push_event_attestation_revoked'                     => true,
         'push_event_attestation_reaffirmed'                  => true,
+        'push_event_divergence_state_warning'                => true,
     ];
 
     /**
