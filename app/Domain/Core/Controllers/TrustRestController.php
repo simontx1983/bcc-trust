@@ -126,12 +126,6 @@ class TrustRestController {
             'permission_callback' => [self::class, 'permission_check'],
         ]);
 
-        register_rest_route('bcc-trust/v1', '/pages/top', [
-            'methods'             => 'GET',
-            'callback'            => [self::class, 'get_top_pages'],
-            'permission_callback' => [self::class, 'permission_check'],
-        ]);
-
         register_rest_route('bcc-trust/v1', '/device-fingerprint', [
             'methods'             => 'POST',
             'callback'            => [UserStatusController::class, 'store_fingerprint'],
@@ -488,122 +482,6 @@ class TrustRestController {
         } catch (\Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'Trust engine error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
             return new \WP_Error('trust_engine_error', 'An unexpected error occurred.', ['status' => 500]);
-        }
-    }
-
-    /**
-     * Get top pages by trust score
-     *
-     * @return WP_REST_Response|WP_Error
-     */
-    public static function get_top_pages(WP_REST_Request $request) {
-        if (!RateLimiter::allow('api')) {
-            return self::error('Too many requests. Please try again later.', 429);
-        }
-
-        $limit        = min(50, (int) $request->get_param('limit') ?: 10);
-        $rawOrderBy   = $request->get_param('order_by') ?? '';
-        $tier         = $request->get_param('tier');
-
-        // ── Whitelist order_by at the controller boundary ─────────────────────
-        // ORDER BY columns cannot be parameterised with $wpdb->prepare(), so the
-        // value must be validated here before it reaches any SQL. Matching is
-        // case-insensitive so 'Total_Score' is treated the same as 'total_score'.
-        // Invalid values are logged for security monitoring and silently replaced
-        // with the safe default — callers do not receive an error for a read
-        // endpoint, but the anomaly is recorded.
-        $allowedOrderColumns = [
-            'total_score',
-            'confidence_score',
-            'vote_count',
-            'positive_score',
-            'endorsement_count',
-        ];
-        $orderByNormalised = strtolower(trim((string) $rawOrderBy));
-        if ($orderByNormalised === '' || !in_array($orderByNormalised, $allowedOrderColumns, true)) {
-            if ($orderByNormalised !== '') {
-                // Non-empty but invalid — log for security monitoring.
-                \BCC\Core\Log\Logger::error(sprintf(
-                    '[BCC Trust Security] Invalid order_by value rejected: "%s" | user_id=%d | ip=%s',
-                    substr($rawOrderBy, 0, 64),       // truncate to prevent log flooding
-                    get_current_user_id(),
-                    \BCC\Trust\Core\Security\IpResolver::getClientIp()
-                ));
-            }
-            $orderByNormalised = 'total_score';
-        }
-
-        $plugin = \BCC\Trust\Core\Plugin::instance();
-        $repo   = $plugin->scoreRepository();
-
-        try {
-            if ($tier) {
-                $validTiers = ['elite', 'trusted', 'neutral', 'caution', 'risky'];
-                if (!in_array($tier, $validTiers)) {
-                    return self::error('Invalid tier specified', 400);
-                }
-                $pages = $repo->getByTier($tier, $limit);
-            } else {
-                $pages = $repo->getTopScored($limit, $orderByNormalised);
-            }
-
-            // Pull authoritative score fields from the read model — same
-            // contract as get_user_pages_scores above. The write-table
-            // driven order (getTopScored / getByTier) is preserved as the
-            // discovery surface, but the DISPLAYED values are sourced from
-            // bcc_page_read_model so this endpoint agrees with /discover,
-            // the page header, and search.
-            $readModel = $plugin->pageReadModelRepository();
-            $pageIds   = array_map(
-                static fn($page): int => (int) $page->score->getPageId(),
-                $pages
-            );
-            $rmByPageId = $readModel->getByPageIds($pageIds);
-
-            $formatted = [];
-            foreach ($pages as $page) {
-                /** @var \BCC\Trust\Core\ValueObjects\PageScore $score */
-                $score  = $page->score;
-                $pageId = (int) $score->getPageId();
-                $rm     = $rmByPageId[$pageId] ?? null;
-
-                $entry = [
-                    'page_id'          => $pageId,
-                    'page_title'       => $page->post_title ?? get_the_title($pageId),
-                    'owner_name'       => $page->owner_name ?? '',
-                    'total_score'      => $rm !== null
-                        ? (float) $rm->trust_score
-                        : $score->getTotalScore(),
-                    'reputation_tier'  => $rm !== null
-                        ? (string) $rm->reputation_tier
-                        : $score->getReputationTier(),
-                    'vote_count'       => $rm !== null
-                        ? (int) $rm->vote_count
-                        : $score->getVoteCount(),
-                    'endorsement_count'=> $rm !== null
-                        ? (int) $rm->endorsement_count
-                        : $score->getEndorsementCount(),
-                    'confidence_score' => $rm !== null
-                        ? (float) $rm->confidence_score
-                        : $score->getConfidenceScore(),
-                ];
-                if (current_user_can('manage_options')) {
-                    // Admin-only metadata flag; not part of the read model.
-                    $entry['has_fraud_alerts'] = $score->hasFraudAlerts();
-                }
-                $formatted[] = $entry;
-            }
-
-            return self::success([
-                'pages'       => $formatted,
-                'total'       => count($formatted),
-                'order_by'    => $orderByNormalised,  // reflects what was actually used, not raw input
-                'tier_filter' => $tier
-            ]);
-
-        } catch (Exception $e) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'REST API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return self::error('Failed to retrieve pages.', 500);
         }
     }
 
