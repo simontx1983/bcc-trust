@@ -2,6 +2,7 @@
 
 namespace BCC\Trust\Onchain\Controllers;
 
+use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Repositories\NftSelectionRepository;
 use BCC\Trust\Onchain\Services\NftSelectionService;
 
@@ -88,20 +89,20 @@ final class NftSelectionController
     public static function rest_picker(\WP_REST_Request $req): \WP_REST_Response
     {
         if (!\BCC\Core\Security\Throttle::allow('nft_picker', 10, 60)) {
-            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $userId = get_current_user_id();
         $force  = (bool) $req->get_param('force');
 
-        return rest_ensure_response(NftSelectionService::buildPickerData($userId, $force));
+        return ApiResponse::ok(NftSelectionService::buildPickerData($userId, $force));
     }
 
     public static function rest_list(\WP_REST_Request $req): \WP_REST_Response
     {
         $userId = get_current_user_id();
         $items  = NftSelectionRepository::getForUser($userId);
-        return rest_ensure_response([
+        return ApiResponse::ok([
             'items' => $items,
         ]);
     }
@@ -109,7 +110,7 @@ final class NftSelectionController
     public static function rest_save(\WP_REST_Request $req): \WP_REST_Response
     {
         if (!\BCC\Core\Security\Throttle::allow('nft_select', 60, 60)) {
-            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $userId   = get_current_user_id();
@@ -119,23 +120,28 @@ final class NftSelectionController
 
         // Basic format guard before the service layer runs DB work.
         if ($chainId <= 0 || $contract === '' || $tokenId === '') {
-            return new \WP_REST_Response(['message' => 'Invalid selection.'], 400);
+            return ApiResponse::error('bcc_invalid_request', 'Invalid selection.', 400);
         }
 
         $result = NftSelectionService::saveSelection($userId, $chainId, $contract, $tokenId);
 
         if (!($result['ok'] ?? false)) {
             $error = $result['error'] ?? 'unknown';
-            $status = $error === 'not_owned' ? 403 : 500;
-            return new \WP_REST_Response([
-                'message' => $error === 'not_owned'
-                    ? 'This NFT is not in your connected wallets.'
-                    : 'Could not save selection.',
-                'error'   => $error,
-            ], $status);
+            if ($error === 'not_owned') {
+                return ApiResponse::error(
+                    'bcc_nft_not_owned',
+                    'This NFT is not in your connected wallets.',
+                    403
+                );
+            }
+            return ApiResponse::error(
+                'bcc_internal_error',
+                'Could not save selection.',
+                500
+            );
         }
 
-        return rest_ensure_response([
+        return ApiResponse::ok([
             'ok' => true,
             'id' => $result['id'] ?? null,
         ]);
@@ -144,7 +150,7 @@ final class NftSelectionController
     public static function rest_delete(\WP_REST_Request $req): \WP_REST_Response
     {
         if (!\BCC\Core\Security\Throttle::allow('nft_deselect', 60, 60)) {
-            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $userId   = get_current_user_id();
@@ -153,17 +159,21 @@ final class NftSelectionController
         $tokenId  = (string) $req->get_param('token_id');
 
         $ok = NftSelectionService::removeSelection($userId, $chainId, $contract, $tokenId);
-        return rest_ensure_response(['ok' => $ok]);
+        return ApiResponse::ok(['ok' => $ok]);
     }
 
     public static function rest_refresh(\WP_REST_Request $req): \WP_REST_Response
     {
         // Rate-limit refresh aggressively — each call hits chain APIs.
         if (!\BCC\Core\Security\Throttle::allow('nft_refresh', 3, 60)) {
-            return new \WP_REST_Response(['message' => 'Refreshing too often. Try again in a minute.'], 429);
+            return ApiResponse::error(
+                'bcc_rate_limited',
+                'Refreshing too often. Try again in a minute.',
+                429
+            );
         }
 
-        return rest_ensure_response(NftSelectionService::refreshHoldings(get_current_user_id()));
+        return ApiResponse::ok(NftSelectionService::refreshHoldings(get_current_user_id()));
     }
 
     public static function rest_reorder(\WP_REST_Request $req): \WP_REST_Response
@@ -173,6 +183,6 @@ final class NftSelectionController
         $ids        = array_values(array_map('intval', $orderedIds));
 
         $count = NftSelectionService::reorder($userId, $ids);
-        return rest_ensure_response(['ok' => true, 'updated' => $count]);
+        return ApiResponse::ok(['ok' => true, 'updated' => $count]);
     }
 }
