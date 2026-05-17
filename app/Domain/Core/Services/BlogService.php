@@ -154,7 +154,9 @@ final class BlogService
      *   tags: list<string>,
      *   chain_tags: list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}>,
      *   disclosure: ?array{tickers: list<string>, note: string},
-     *   cover_image_url: ?string
+     *   cover_image_url: ?string,
+     *   cover_image_id: ?int,
+     *   sources: list<string>
      * }
      */
     private function hydrateBlogBody(object $row): array
@@ -189,7 +191,9 @@ final class BlogService
      *   tags: list<string>,
      *   chain_tags: list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}>,
      *   disclosure: ?array{tickers: list<string>, note: string},
-     *   cover_image_url: ?string
+     *   cover_image_url: ?string,
+     *   cover_image_id: ?int,
+     *   sources: list<string>
      * }
      */
     public function hydrateForPostId(int $postId, bool $includeFullText): array
@@ -222,7 +226,9 @@ final class BlogService
      *   tags: list<string>,
      *   chain_tags: list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}>,
      *   disclosure: ?array{tickers: list<string>, note: string},
-     *   cover_image_url: ?string
+     *   cover_image_url: ?string,
+     *   cover_image_id: ?int,
+     *   sources: list<string>
      * }
      */
     private function loadBodyFromPost(\WP_Post $post): array
@@ -306,9 +312,37 @@ final class BlogService
             ];
         }
 
-        // ── Cover image — large-size URL or null ─────────────────────
+        // ── Cover image — large-size URL or null + attachment id ─────
+        //
+        // `cover_image_id` lets the edit-flow composer round-trip an
+        // existing cover without re-uploading: the composer pre-fills
+        // its CoverImageValue from `{attachment_id, url}` and only
+        // sends `cover_image_id` back on PATCH when the writer
+        // actually changed it (omit-to-unchanged contract).
         $coverUrl = get_the_post_thumbnail_url($postId, 'large');
         $coverImageUrl = is_string($coverUrl) ? $coverUrl : null;
+        $coverImageId  = (int) get_post_thumbnail_id($postId);
+        if ($coverImageId <= 0) {
+            $coverImageId = null;
+        }
+
+        // ── Sources — numbered citations, free strings ───────────────
+        //
+        // Stored as JSON-encoded list<string> on `_bcc_blog_sources`.
+        // Empty/missing meta key → []. Same defensive-parse posture
+        // as tags: corrupted JSON yields [], never throws.
+        $sourcesRaw = get_post_meta($postId, '_bcc_blog_sources', true);
+        $sources    = [];
+        if (is_string($sourcesRaw) && $sourcesRaw !== '') {
+            $decoded = json_decode($sourcesRaw, true);
+            if (is_array($decoded)) {
+                foreach ($decoded as $s) {
+                    if (is_string($s) && $s !== '') {
+                        $sources[] = $s;
+                    }
+                }
+            }
+        }
 
         return [
             'excerpt'         => (string) $post->post_excerpt,
@@ -320,6 +354,8 @@ final class BlogService
             'chain_tags'      => $chainRows,
             'disclosure'      => $disclosure,
             'cover_image_url' => $coverImageUrl,
+            'cover_image_id'  => $coverImageId,
+            'sources'         => $sources,
         ];
     }
 
@@ -339,7 +375,9 @@ final class BlogService
      *   tags: list<string>,
      *   chain_tags: list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}>,
      *   disclosure: null,
-     *   cover_image_url: null
+     *   cover_image_url: null,
+     *   cover_image_id: null,
+     *   sources: list<string>
      * }
      */
     private static function emptyBody(int $postId): array
@@ -354,6 +392,8 @@ final class BlogService
             'chain_tags'      => [],
             'disclosure'      => null,
             'cover_image_url' => null,
+            'cover_image_id'  => null,
+            'sources'         => [],
         ];
     }
 

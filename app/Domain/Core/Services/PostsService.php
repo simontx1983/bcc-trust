@@ -123,6 +123,15 @@ final class PostsService
     /** Max length of the disclosure free-text note. */
     public const BLOG_DISCLOSURE_NOTE_MAX = 500;
 
+    /** Max numbered citations per blog post. Each citation is a free
+     *  string (URL or short reference). The composer renders them as a
+     *  numbered list at the post footer. */
+    public const BLOG_SOURCES_MAX = 20;
+
+    /** Max length of a single source string. Wide enough for a long
+     *  URL plus a short trailing label ("https://… — title"). */
+    public const BLOG_SOURCE_LEN_MAX = 280;
+
     /**
      * §D2 — review grade buckets. Map to the existing trust system's
      * vote_type values (-1 / 0 / +1) so castPageVote consumes them
@@ -498,6 +507,8 @@ final class PostsService
      * @param list<int>    $chainIds       Chain registry IDs.
      * @param array{tickers?: list<string>, note?: string}|null $disclosure
      *                                     Disclosure block — tickers + note.
+     * @param list<string> $sources        Free-form citation strings;
+     *                                     trimmed, deduped, capped server-side.
      *
      * @return array{
      *   ok: true,
@@ -517,7 +528,8 @@ final class PostsService
         array $chainIds = [],
         ?array $disclosure = null,
         ?int $coverImageId = null,
-        string $status = 'publish'
+        string $status = 'publish',
+        array $sources = []
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -648,6 +660,15 @@ final class PostsService
             }
         }
 
+        // ── Sources: shape + caps ────────────────────────────────────
+        $sourcesClean = self::normalizeSources($sources);
+        if (!is_array($sourcesClean)) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => (string) $sourcesClean,
+            ];
+        }
+
         // ── Cover image: must be the author's own attachment ─────────
         //
         // Author-ownership check is the security gate: without it, a
@@ -733,6 +754,12 @@ final class PostsService
             $discJson = wp_json_encode($disclosureClean);
             if (is_string($discJson)) {
                 update_post_meta($postId, '_bcc_blog_disclosure', $discJson);
+            }
+        }
+        if ($sourcesClean !== []) {
+            $srcJson = wp_json_encode(array_values($sourcesClean));
+            if (is_string($srcJson)) {
+                update_post_meta($postId, '_bcc_blog_sources', $srcJson);
             }
         }
         if ($coverImageId !== null && $coverImageId > 0) {
@@ -829,6 +856,8 @@ final class PostsService
      * @param array{tickers?: list<string>, note?: string}|array{__noop__: true}|null $disclosure
      *        `null` = clear; struct = replace; `{__noop__:true}` =
      *        internal sentinel from the REST layer meaning "unchanged."
+     * @param list<string>|null                              $sources
+     *        `null` = unchanged; `[]` = clear; non-empty = replace.
      *
      * @return array{
      *   ok: true,
@@ -847,7 +876,8 @@ final class PostsService
         ?array $chainIds,
         ?array $disclosure,
         ?int $coverImageId,
-        ?string $status
+        ?string $status,
+        ?array $sources = null
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -863,10 +893,14 @@ final class PostsService
         }
 
         // Defense-in-depth: confirm the post is actually a blog (not a
-        // status / review / pull-batch). The shape check matches what
-        // BlogStatusTransitionHandler::handle uses, so the two paths
-        // agree on what counts as a blog.
-        if ($post->post_type !== 'peepso-activity-status') {
+        // status / review / pull-batch). post_type is PeepSo's canonical
+        // `peepso-post` (status posts AND blog posts share this CPT —
+        // the discriminator is the `_bcc_activity_module='blog'` meta
+        // marker, NOT the post_type). The original 2026-05-15 contract
+        // used a fabricated `peepso-activity-status` slug that fails WP's
+        // varchar(20) post_type column — see the related fix in
+        // `PeepSoStatusWriter::createSelfBlogPost`.
+        if ($post->post_type !== 'peepso-post') {
             return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
         }
         $module = get_post_meta($postId, '_bcc_activity_module', true);
@@ -1031,6 +1065,23 @@ final class PostsService
             $disclosureAction = 'replace';
         }
 
+        // Sources — null=unchanged, []=clear, non-empty=replace.
+        // Same `?array` tunnel as tags/chainIds; no sentinel needed
+        // because an empty array IS a meaningful state here ("clear").
+        $sourcesAction = 'unchanged'; // 'unchanged' | 'clear' | 'replace'
+        $sourcesClean  = [];
+        if ($sources !== null) {
+            $normalized = self::normalizeSources($sources);
+            if (!is_array($normalized)) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => (string) $normalized,
+                ];
+            }
+            $sourcesClean  = $normalized;
+            $sourcesAction = $sourcesClean === [] ? 'clear' : 'replace';
+        }
+
         // Cover image — null=unchanged, 0=un-pin, positive=replace.
         $coverAction = 'unchanged'; // 'unchanged' | 'clear' | 'set'
         if ($coverImageId !== null) {
@@ -1144,6 +1195,14 @@ final class PostsService
             $discJson = wp_json_encode($disclosureClean);
             if (is_string($discJson)) {
                 update_post_meta($postId, '_bcc_blog_disclosure', $discJson);
+            }
+        }
+        if ($sourcesAction === 'clear') {
+            delete_post_meta($postId, '_bcc_blog_sources');
+        } elseif ($sourcesAction === 'replace') {
+            $srcJson = wp_json_encode(array_values($sourcesClean));
+            if (is_string($srcJson)) {
+                update_post_meta($postId, '_bcc_blog_sources', $srcJson);
             }
         }
 
@@ -1315,6 +1374,65 @@ final class PostsService
         }
 
         return ['tickers' => $tickers, 'note' => $note];
+    }
+
+    /**
+     * Normalize the §D6 sources list into a clean `list<string>`.
+     *
+     * Returns the cleaned array on success or a string error message
+     * on validation failure (caller wraps with bcc_invalid_request).
+     *
+     * Rules:
+     *  - Each entry is a free string (URL or short citation).
+     *  - Trim, then drop empties.
+     *  - Cap each at BLOG_SOURCE_LEN_MAX (280 chars; long URL + trailing
+     *    label).
+     *  - Cap total count at BLOG_SOURCES_MAX (20).
+     *  - Dedupe by exact match (case-sensitive — URLs ARE case-sensitive
+     *    in the path component).
+     *
+     * Empty input list = "no sources" = valid (we just write no
+     * post_meta). Distinct from the disclosure block's "empty struct
+     * is invalid" rule because sources don't carry a clear-the-existing
+     * semantic — the create path defaults to no sources and the update
+     * path treats an explicit empty list as "clear" (handled at the
+     * updateBlog call site).
+     *
+     * @param array<int|string, mixed> $sources
+     * @return list<string>|string
+     */
+    private static function normalizeSources(array $sources): array|string
+    {
+        if ($sources === []) {
+            return [];
+        }
+        /** @var list<string> $clean */
+        $clean = [];
+        foreach ($sources as $raw) {
+            if (!is_string($raw)) {
+                continue;
+            }
+            $s = trim($raw);
+            if ($s === '') {
+                continue;
+            }
+            if (mb_strlen($s) > self::BLOG_SOURCE_LEN_MAX) {
+                return sprintf(
+                    'Each source caps at %d characters.',
+                    self::BLOG_SOURCE_LEN_MAX
+                );
+            }
+            if (!in_array($s, $clean, true)) {
+                $clean[] = $s;
+            }
+        }
+        if (count($clean) > self::BLOG_SOURCES_MAX) {
+            return sprintf(
+                'Sources cap at %d entries.',
+                self::BLOG_SOURCES_MAX
+            );
+        }
+        return $clean;
     }
 
     /**

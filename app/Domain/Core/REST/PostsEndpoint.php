@@ -169,6 +169,13 @@ final class PostsEndpoint
                         'required' => false,
                         'type'     => 'object',
                     ],
+                    // Free-form numbered citations. Each entry is a
+                    // raw string (URL or short reference). Cap, dedupe,
+                    // and length enforced by PostsService::normalizeSources.
+                    'sources' => [
+                        'required' => false,
+                        'type'     => 'array',
+                    ],
                     'cover_image_id' => [
                         'required'          => false,
                         'type'              => 'integer',
@@ -293,6 +300,13 @@ final class PostsEndpoint
                         // schema type because REST args validation
                         // would refuse a null body for an `object`
                         // type. The handler narrows manually.
+                    ],
+                    // Sources — null=unchanged, []=clear, non-empty=
+                    // replace. Same three-state tunnel as tags /
+                    // chain_tags. Caps + length enforced in service.
+                    'sources' => [
+                        'required' => false,
+                        'type'     => 'array',
                     ],
                     'cover_image_id' => [
                         'required'          => false,
@@ -498,6 +512,21 @@ final class PostsEndpoint
             $statusRaw = $request->get_param('status');
             $status    = is_string($statusRaw) && $statusRaw !== '' ? $statusRaw : 'publish';
 
+            // Sources — free-form citation strings. Per-item length /
+            // total count / dedupe are enforced inside
+            // PostsService::normalizeSources; here we only unwrap the
+            // array shape.
+            $sourcesRaw = $request->get_param('sources');
+            /** @var list<string> $sources */
+            $sources = [];
+            if (is_array($sourcesRaw)) {
+                foreach ($sourcesRaw as $s) {
+                    if (is_string($s)) {
+                        $sources[] = $s;
+                    }
+                }
+            }
+
             $result = $service->createBlog(
                 $viewerId,
                 $excerpt,
@@ -508,7 +537,8 @@ final class PostsEndpoint
                 $chainIds,
                 $disclosure,
                 $coverImageId,
-                $status
+                $status,
+                $sources
             );
         } else {
             // Disputes / post-as-entity are explicit V1.5/V2 work —
@@ -798,6 +828,21 @@ final class PostsEndpoint
             }
         }
 
+        $sources = null;
+        if ($request->has_param('sources')) {
+            $raw = $request->get_param('sources');
+            /** @var list<string> $sourcesList */
+            $sourcesList = [];
+            if (is_array($raw)) {
+                foreach ($raw as $s) {
+                    if (is_string($s)) {
+                        $sourcesList[] = $s;
+                    }
+                }
+            }
+            $sources = $sourcesList; // []=clear, non-empty=replace
+        }
+
         $result = Plugin::instance()->postsService()->updateBlog(
             $postId,
             $viewerId,
@@ -809,7 +854,8 @@ final class PostsEndpoint
             $chainIds,
             $disclosure,
             $coverImageId,
-            $status
+            $status,
+            $sources
         );
 
         if (isset($result['error'])) {
