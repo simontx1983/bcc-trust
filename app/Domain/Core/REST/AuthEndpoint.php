@@ -229,6 +229,21 @@ final class AuthEndpoint
             ]
         );
 
+        // POST /auth/logout-everywhere — destructive: invalidate every
+        // outstanding token for the current user (including the one
+        // making this request). Closes the §J / Track-F stolen-session
+        // threat-model loop: the user can respond to a suspected
+        // hijack by nuking all sessions, then sign back in fresh.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/logout-everywhere',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'logoutEverywhere'],
+                'permission_callback' => '__return_true',
+            ]
+        );
+
         // POST /auth/refresh — exchange a (recently-expired-OK) JWT for
         // a fresh one. Survivability seam for mobile clients whose
         // backgrounded app exits the 7-day TTL window. Auth is checked
@@ -1189,6 +1204,55 @@ final class AuthEndpoint
             'expires_in' => self::JWT_TTL_SECONDS,
             'token_type' => 'Bearer',
         ]);
+        $response->header('Cache-Control', 'no-store');
+
+        return $response;
+    }
+
+    /**
+     * POST /auth/logout-everywhere — destructive credential-class
+     * mutation. Bumps the user's token-version counter so every
+     * outstanding JWT (including the request's own bearer) fails the
+     * version check on its next use. Writes a `sessions_revoked_all`
+     * audit row + fires the AccountSecurityMailer confirmation email.
+     *
+     * The current token IS revoked; the response is the last
+     * authenticated reply this session will get. The client MUST call
+     * NextAuth `signOut()` immediately after a 200 so the local
+     * session state matches the server.
+     *
+     * Throttle: 5/60/user (`logout_everywhere` bucket). Low cardinality —
+     * a user has no reason to fire this more than a few times per
+     * minute, and the destructive blast-radius justifies a tight cap.
+     */
+    public function logoutEverywhere(WP_REST_Request $request): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // Throttle BEFORE the destructive mutation — per
+        // project_destructive_mutation_hardening Tier 1 doctrine:
+        // Throttle::allow runs BEFORE credential gates.
+        if (!\BCC\Core\Security\Throttle::allow('logout_everywhere', 5, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
+        // Audit row FIRST so the in-app timeline records the action
+        // even if the mailer fails. AuditLogger never throws.
+        AuditLogger::log('sessions_revoked_all', $userId, [], 'user', $userId);
+
+        // Out-of-band email — Track-F redundancy. Never throws; failure
+        // records a DegradationMetric and is silently swallowed.
+        AccountSecurityMailer::sessionsRevokedAll($userId);
+
+        // Mutation: bump the token-version meta. Every outstanding JWT
+        // for this user fails ERR_REVOKED on next use, including the
+        // bearer that authenticated THIS request.
+        JwtToken::revokeAllForUser($userId);
+
+        $response = ApiResponse::ok(['ok' => true]);
         $response->header('Cache-Control', 'no-store');
 
         return $response;

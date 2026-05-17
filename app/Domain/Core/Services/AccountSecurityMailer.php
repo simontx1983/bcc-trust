@@ -48,9 +48,10 @@
  * `DegradationMetrics::record('account_security_mail', $event)` where
  * $event is one of {email_changed_send_failed,
  * password_changed_send_failed, account_deleted_send_failed,
- * wallet_linked_send_failed, wallet_unlinked_send_failed}. The
- * taxonomy is registered in bcc-core/bcc-core.php so /system/health
- * surfaces sustained failure on a hot security surface.
+ * wallet_linked_send_failed, wallet_unlinked_send_failed,
+ * sessions_revoked_all_send_failed}. The taxonomy is registered in
+ * bcc-core/bcc-core.php so /system/health surfaces sustained failure
+ * on a hot security surface.
  *
  * @package BCC\Trust\Core\Services
  * @since   2026-05-13 (operational-hardening track F)
@@ -289,6 +290,48 @@ final class AccountSecurityMailer
         );
 
         self::send($user->user_email, $subject, $body, 'wallet_unlinked_send_failed', $userId);
+    }
+
+    /**
+     * Sessions revoked everywhere — the user (or an attacker) just
+     * called `/auth/logout-everywhere`. Every outstanding token for
+     * this account has been invalidated; the user will need to sign
+     * back in on every device including this one.
+     *
+     * Track-F redundancy: an attacker who triggers this to lock the
+     * legitimate user out still trips the email channel — the
+     * out-of-band warning reaches the inbox the attacker can't
+     * suppress.
+     */
+    public static function sessionsRevokedAll(int $userId): void
+    {
+        $user = get_userdata($userId);
+        if (!$user instanceof \WP_User || !$user->user_email) {
+            return;
+        }
+
+        $siteName = get_bloginfo('name') ?: 'BCC';
+        $subject  = sprintf('[%s] All other devices signed out', $siteName);
+        $body     = sprintf(
+            "Hello %s,\n\n"
+            . "Your %s account was just signed out of every device.\n\n"
+            . "When: %s\n"
+            . "IP:   %s\n\n"
+            . "If you initiated this — for example, because you suspected a "
+            . "stolen session — no action is needed. You'll be asked to sign "
+            . "back in on every device the next time you use them.\n\n"
+            . "If you did NOT initiate this, your account may have been "
+            . "compromised. Change your password immediately, then sign back "
+            . "in. Reply to this email if you need help.\n\n"
+            . "— The %s Team",
+            $user->display_name,
+            $siteName,
+            gmdate('Y-m-d H:i:s') . ' UTC',
+            self::clientIp(),
+            $siteName
+        );
+
+        self::send($user->user_email, $subject, $body, 'sessions_revoked_all_send_failed', $userId);
     }
 
     // ── internals ─────────────────────────────────────────────────────

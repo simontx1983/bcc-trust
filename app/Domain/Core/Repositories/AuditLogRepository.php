@@ -308,6 +308,148 @@ class AuditLogRepository {
     }
 
     /**
+     * Paginated read of a single user's audit-log rows, optionally
+     * filtered to an action allowlist. Powers `/me/account-activity`
+     * — the in-app half of the §J / Track-F security trail.
+     *
+     * Bounded query: explicit columns (no SELECT *), per-user index
+     * (`idx_user_action_date` covers user_id + action + created_at),
+     * LIMIT enforced (perPage capped by the REST args schema).
+     *
+     * @param int                         $userId          Self-only read; caller MUST pass the current user id.
+     * @param int                         $page            1-based.
+     * @param int                         $perPage         Capped by caller (1..50 per the endpoint).
+     * @param list<string>|null           $actionAllowlist When provided, restricts the result set to these
+     *                                                    action strings (server-side enforcement). NULL = all.
+     * @return object[]
+     * @phpstan-return list<object{
+     *   id: int|numeric-string,
+     *   action: string,
+     *   target_type: string,
+     *   target_id: int|numeric-string,
+     *   ip_address: string|null,
+     *   created_at: string
+     * }>
+     */
+    public function getByUserIdPaginated(
+        int $userId,
+        int $page,
+        int $perPage,
+        ?array $actionAllowlist = null
+    ): array {
+        global $wpdb;
+
+        $page    = max(1, $page);
+        $perPage = max(1, $perPage);
+        $offset  = ($page - 1) * $perPage;
+
+        if ($actionAllowlist !== null && $actionAllowlist !== []) {
+            // Bounded IN-list: per CLAUDE.md §4 every SELECT has a
+            // bounded filter; the caller's allowlist is a small fixed
+            // set (6 user-facing security actions).
+            $placeholders = implode(',', array_fill(0, count($actionAllowlist), '%s'));
+            $sql = "SELECT id, action, target_type, target_id, ip_address, created_at
+                    FROM {$this->table}
+                    WHERE user_id = %d
+                      AND action IN ({$placeholders})
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %d OFFSET %d";
+            $params = array_merge([$userId], array_values($actionAllowlist), [$perPage, $offset]);
+            return $wpdb->get_results($wpdb->prepare($sql, ...$params));
+        }
+
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT id, action, target_type, target_id, ip_address, created_at
+             FROM {$this->table}
+             WHERE user_id = %d
+             ORDER BY created_at DESC, id DESC
+             LIMIT %d OFFSET %d",
+            $userId,
+            $perPage,
+            $offset
+        ));
+    }
+
+    /**
+     * Count audit-log rows for a single user, optionally filtered to
+     * an action allowlist. Companion to getByUserIdPaginated for
+     * `total` + `total_pages` in the REST response.
+     *
+     * @param int                $userId
+     * @param list<string>|null  $actionAllowlist
+     */
+    public function countByUserId(int $userId, ?array $actionAllowlist = null): int {
+        global $wpdb;
+
+        if ($actionAllowlist !== null && $actionAllowlist !== []) {
+            $placeholders = implode(',', array_fill(0, count($actionAllowlist), '%s'));
+            $sql = "SELECT COUNT(*) FROM {$this->table}
+                    WHERE user_id = %d
+                      AND action IN ({$placeholders})";
+            $params = array_merge([$userId], array_values($actionAllowlist));
+            return (int) $wpdb->get_var($wpdb->prepare($sql, ...$params));
+        }
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table} WHERE user_id = %d",
+            $userId
+        ));
+    }
+
+    /**
+     * Mask a VARBINARY ip_address column value for display.
+     *
+     *   IPv4  →  "192.168.1.***"      (last octet hidden)
+     *   IPv6  →  "2001:db8:abcd:1234::***"   (last 64 bits hidden)
+     *   null  →  ""                   (no IP recorded)
+     *
+     * Mirrors the IPv4/IPv6 branching shape of
+     * `\BCC\Trust\Core\Security\RateLimiter::normalizeIpToSubnet` but
+     * substitutes "***" for the zeroed octet/bytes so the output is
+     * legibly a redaction rather than a canonical subnet string.
+     * Kept here (rather than on IpResolver) because IpResolver's
+     * single responsibility is resolution — masking is a presentation
+     * concern paired with this repository's reads.
+     *
+     * Operates on the binary input directly for IPv6 so canonical
+     * `::` zero-compression doesn't break the slice — `inet_ntop`
+     * collapses zero runs, which would mangle a string-based split.
+     * We take the first 8 bytes (4 hextets), format as hex pairs,
+     * then append `::***` for the masked tail.
+     */
+    public static function maskIpBinary(?string $ipBinary): string {
+        if ($ipBinary === null || $ipBinary === '') {
+            return '';
+        }
+        $len = strlen($ipBinary);
+        if ($len === 4) {
+            // IPv4 — 4 bytes; mask the last octet.
+            $bytes = unpack('C4', $ipBinary);
+            if ($bytes === false) {
+                return '';
+            }
+            return sprintf('%d.%d.%d.***', $bytes[1], $bytes[2], $bytes[3]);
+        }
+        if ($len === 16) {
+            // IPv6 — 16 bytes / 8 hextets. Keep the first 4 hextets
+            // (8 bytes = /64 network prefix), mask the rest. Operate
+            // on the binary directly to avoid canonical-form pitfalls
+            // (`::` zero compression in inet_ntop output).
+            $bytes = unpack('n8', $ipBinary);
+            if ($bytes === false) {
+                return '';
+            }
+            return sprintf(
+                '%x:%x:%x:%x::***',
+                $bytes[1], $bytes[2], $bytes[3], $bytes[4]
+            );
+        }
+        // Unknown length — fall through with empty rather than emit a
+        // malformed marker.
+        return '';
+    }
+
+    /**
      * Count activity records older than a given cutoff date.
      *
      * @param string $cutoff MySQL datetime string.

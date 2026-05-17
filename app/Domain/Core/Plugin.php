@@ -1279,6 +1279,16 @@ final class Plugin
         // PeepSo's `site_registration_allowdelete` toggle.
         \BCC\Trust\Core\REST\MyAccountEndpoint::register();
 
+        // Tier D: in-app account-activity timeline — paginated read of
+        // the user's own bcc_trust_activity rows filtered to the 6
+        // user-facing security events (email change, password change,
+        // account deletion, wallet link/unlink, sessions revoked all).
+        //   GET /me/account-activity
+        // Self-only; server-side action allowlist; IP masked at the
+        // boundary. Pairs with AccountSecurityMailer for in-app/email
+        // cross-channel audit trail.
+        \BCC\Trust\Core\REST\MyAccountActivityEndpoint::register();
+
         // V2 Phase 2.5: Preferences sub-tab — profile-wide visibility +
         // post-privacy default + hide-birthday-year toggle:
         //   GET   /me/profile-prefs   — read current values
