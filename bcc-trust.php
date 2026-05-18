@@ -1197,6 +1197,13 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust validators',
         \BCC\Trust\Onchain\CLI\BackfillValidatorPagesCommand::class
     );
+    // 2026-05-16 SMALLINT-coercion recovery — repairs legacy
+    // peepso_activities rows where the pre-fix writer wrote module
+    // names as strings (coerced to 0 by MySQL). One-shot, idempotent.
+    \WP_CLI::add_command(
+        'bcc-trust activity',
+        \BCC\Trust\Core\CLI\BackfillActivityModuleIdsCommand::class
+    );
 }
 
 /*

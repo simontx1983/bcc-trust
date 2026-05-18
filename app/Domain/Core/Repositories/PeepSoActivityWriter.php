@@ -75,6 +75,22 @@ final class PeepSoActivityWriter
     }
 
     /**
+     * Resolve a BCC-owned module name to its numeric `act_module_id`.
+     *
+     * Returns null when the name isn't in the whitelist — callers
+     * should treat that as "skip" (the row probably belongs to PeepSo
+     * or a future module not yet mapped here).
+     *
+     * Used by the 2026-05-16 backfill CLI to translate legacy
+     * meta-stored module names ('blog', 'review', …) back to the
+     * canonical integer that `MODULE_ID_BY_NAME` now stamps.
+     */
+    public static function getNumericId(string $name): ?int
+    {
+        return self::MODULE_ID_BY_NAME[$name] ?? null;
+    }
+
+    /**
      * Insert a BCC-owned activity row.
      *
      * Returns the new act_id on success, or 0 on:
@@ -161,6 +177,96 @@ final class PeepSoActivityWriter
 
         $rows = $wpdb->delete($table, ['act_id' => $actId], ['%d']);
         return is_int($rows) && $rows > 0;
+    }
+
+    /**
+     * Backfill `act_module_id = 0` rows that were string-coerced by
+     * the pre-2026-05-15 writer.
+     *
+     * The legacy writer wrote module names ('blog', 'review', …) as
+     * strings into the SMALLINT column. MySQL silently coerced them
+     * to 0, losing the discriminator. The hot-path read side
+     * ({@see FeedItemNormalizer::MODULE_TO_KIND}) then fell through
+     * to 'status' for every affected row.
+     *
+     * Recovery path: every BCC-owned activity row also carries the
+     * canonical module name on the backing wp_post as the
+     * `_bcc_activity_module` post_meta key
+     * ({@see ActivityStreamWriter::META_MODULE}). We JOIN against
+     * that meta to recover the intended module name, translate it
+     * to the canonical integer via {@see getNumericId}, and UPDATE
+     * the row in place. Bounded by `$maxRows` per invocation;
+     * idempotent (re-running after a successful pass is a no-op
+     * because no `act_module_id=0` rows remain that match the
+     * meta join).
+     *
+     * Returns a `{module_name => rows_updated}` map for the caller
+     * to surface in the CLI output.
+     *
+     * §1: stays inside this Repository (only $wpdb access lives here).
+     * §2: explicit SELECT projection.
+     * §4: SELECT is bounded by `LIMIT $maxRows`; the UPDATE is
+     *     per-row (one row per matched name) and bounded by the
+     *     SELECT's row count.
+     *
+     * @return array<string, int>
+     */
+    public function backfillCoercedModuleIds(int $maxRows = 500): array
+    {
+        if ($maxRows <= 0) {
+            return [];
+        }
+        $maxRows = min($maxRows, 5000);
+
+        global $wpdb;
+        $actTable  = $wpdb->prefix . 'peepso_activities';
+        $metaTable = $wpdb->postmeta;
+
+        // The `IN (...)` list is the canonical BCC-owned module
+        // names. Bounded by the size of MODULE_ID_BY_NAME (5 entries
+        // today) so the placeholder count is constant.
+        $names = array_keys(self::MODULE_ID_BY_NAME);
+        $namePlaceholders = implode(',', array_fill(0, count($names), '%s'));
+
+        /** @var list<object{act_id: numeric-string, meta_value: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT a.act_id, pm.meta_value
+               FROM {$actTable} a
+               INNER JOIN {$metaTable} pm
+                       ON pm.post_id = a.act_external_id
+                      AND pm.meta_key = '_bcc_activity_module'
+              WHERE a.act_module_id = 0
+                AND pm.meta_value IN ({$namePlaceholders})
+              ORDER BY a.act_id ASC
+              LIMIT %d",
+            ...array_merge($names, [$maxRows])
+        ));
+
+        if (!is_array($rows) || $rows === []) {
+            return [];
+        }
+
+        /** @var array<string, int> $counts */
+        $counts = [];
+        foreach ($rows as $row) {
+            $name      = (string) $row->meta_value;
+            $numericId = self::getNumericId($name);
+            if ($numericId === null) {
+                continue;
+            }
+            $result = $wpdb->update(
+                $actTable,
+                ['act_module_id' => $numericId],
+                ['act_id'        => (int) $row->act_id],
+                ['%d'],
+                ['%d']
+            );
+            if ($result === false || $result === 0) {
+                continue;
+            }
+            $counts[$name] = ($counts[$name] ?? 0) + 1;
+        }
+        return $counts;
     }
 
     public function insert(
