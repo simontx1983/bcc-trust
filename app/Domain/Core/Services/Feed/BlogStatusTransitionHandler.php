@@ -27,10 +27,14 @@
  *                       readers observe the edit immediately.
  *
  * Only fires for the specific post shape this handler owns —
- *   post_type === 'peepso-activity-status' AND
+ *   post_type === 'peepso-post' AND
  *   post_meta `_bcc_activity_module === 'blog'`
  * — so status changes on PeepSo statuses, reviews, claims, pull-batches
- * pass through untouched.
+ * pass through untouched. (Blog posts share PeepSo's canonical
+ * `peepso-post` CPT slug with status posts; the meta marker is the
+ * discriminator. The original 2026-05-15 contract used a fabricated
+ * `peepso-activity-status` slug that fails WP's varchar(20) post_type
+ * column — see the related fix in PeepSoStatusWriter.)
  *
  * Idempotency: each branch is safe to re-run. The activity-row insert
  * (downstream of the bcc_blog_post_created event) has its own
@@ -76,11 +80,11 @@ final class BlogStatusTransitionHandler
             return;
         }
 
-        // Scope: only the blog-kinded peepso-activity-status posts.
-        // Everything else passes through untouched — including PeepSo
-        // statuses, reviews, claims, pull batches that share the same
-        // post_type.
-        if ($post->post_type !== 'peepso-activity-status') {
+        // Scope: only the blog-kinded peepso-post posts. Everything
+        // else passes through untouched — PeepSo statuses share this
+        // CPT slug; the `_bcc_activity_module='blog'` meta marker
+        // (set immediately below) is the discriminator.
+        if ($post->post_type !== 'peepso-post') {
             return;
         }
         $module = get_post_meta($post->ID, '_bcc_activity_module', true);
