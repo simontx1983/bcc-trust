@@ -41,6 +41,7 @@ use BCC\Core\PeepSo\PeepSoMessageWriter;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoMessageRepository;
 use BCC\Trust\Core\Repositories\UserMiniRepository;
+use BCC\Trust\Core\Services\BadgesService;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
 
 if (!defined('ABSPATH')) {
@@ -248,6 +249,10 @@ final class MessagesService
         // GET / dontmark in a follow-up.
         PeepSoMessageRepository::markConversationAsViewed($viewerId, $rootMsgId);
 
+        // Bump the viewer's badge gen — the messages_unread count just
+        // dropped (or was already 0; bumping is cheap).
+        BadgesService::bumpForUser($viewerId);
+
         return [
             'conversation' => [
                 'id'           => $rootMsgId,
@@ -360,6 +365,12 @@ final class MessagesService
         if ($result === null) {
             return ['error' => 'bcc_unavailable', 'message' => 'Could not send your message.'];
         }
+
+        // Invalidate badge caches: sender's "open thread hint" needs
+        // to advance immediately, recipient's unread count needs to
+        // tick up on the next /me/badges poll.
+        BadgesService::bumpForUsers([$viewerId, $recipientId]);
+
         return $result;
     }
 
@@ -404,6 +415,11 @@ final class MessagesService
             return ['error' => 'bcc_unavailable', 'message' => 'Could not send your message.'];
         }
 
+        // Invalidate every participant's badge cache. $participants
+        // was already fetched above for the peer-gate re-check, so
+        // we reuse it here (no extra query).
+        BadgesService::bumpForUsers($participants);
+
         return [
             'conversation_id'      => $rootMsgId,
             'message_id'           => $messageId,
@@ -426,6 +442,12 @@ final class MessagesService
             return ['error' => 'bcc_not_found', 'message' => 'Conversation not found.'];
         }
         PeepSoMessageRepository::markConversationAsViewed($viewerId, $rootMsgId);
+
+        // Viewer's unread-message count just dropped; bump badge gen
+        // so the next poll surfaces the change. Only the viewer's
+        // count changes here — peers' counts are unchanged.
+        BadgesService::bumpForUser($viewerId);
+
         return ['ok' => true];
     }
 

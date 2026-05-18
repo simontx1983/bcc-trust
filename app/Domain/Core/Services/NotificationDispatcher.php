@@ -88,6 +88,7 @@ use BCC\Core\Log\Logger;
 use BCC\Core\PeepSo\PeepSoNotificationWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Services\BadgesService;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
 use BCC\Trust\Core\Support\NotificationPrefs;
@@ -1133,6 +1134,18 @@ final class NotificationDispatcher
                 'type'         => $type,
                 'reason'       => $result['reason'] ?? 'unknown',
             ]);
+            return;
+        }
+
+        // Invalidate the recipient's /me/badges cache so the next poll
+        // surfaces the new unread count. Single chokepoint — every
+        // BCC-driven bell row flows through here. PeepSo-internal
+        // bell writes (e.g. from peepso-messages itself) won't hit
+        // this bump; the 15s TTL is the safety net for that case.
+        // Skipped when PeepSo silently suppressed the write
+        // (notification_id === 0 for opt-out / blocked).
+        if (($result['notification_id'] ?? 0) > 0) {
+            BadgesService::bumpForUser($toUserId);
         }
     }
 

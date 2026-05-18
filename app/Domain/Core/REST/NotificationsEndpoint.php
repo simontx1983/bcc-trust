@@ -28,6 +28,7 @@
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Services\BadgesService;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -158,6 +159,12 @@ final class NotificationsEndpoint
         } else {
             $updated = $repo->markAllReadForUser($viewerId);
         }
+
+        // Invalidate the viewer's badge cache so the bell badge
+        // updates on the next poll. Bump even on $updated === 0 (the
+        // row may already have been read by a parallel session and the
+        // viewer's badge still wants to reflect that quickly).
+        BadgesService::bumpForUser($viewerId);
 
         $response = ApiResponse::ok(['ok' => true, 'updated' => $updated]);
         $response->header('Cache-Control', 'no-store');

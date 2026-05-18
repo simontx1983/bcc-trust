@@ -590,6 +590,15 @@ final class Plugin
         );
     }
 
+    private ?Services\BadgesService $badgesService = null;
+    public function badgesService(): Services\BadgesService
+    {
+        return $this->badgesService ??= new Services\BadgesService(
+            $this->notificationRepository(),
+            $this->messagesService()
+        );
+    }
+
     private ?Services\LivingService $livingService = null;
     public function livingService(): Services\LivingService
     {
@@ -1258,6 +1267,14 @@ final class Plugin
         // chat_friends_only + friendship, mutual blocks, rate limit)
         // lives inside MessagesService.
         \BCC\Trust\Core\REST\MessagesEndpoint::register();
+
+        // v2 polling-coalesce: one cached payload replaces the two
+        // unread-count polls + the per-thread "did my conversation
+        // move forward?" 5s poll. See BadgesService for the cache
+        // shape; invalidated from NotificationDispatcher::dispatch,
+        // NotificationsEndpoint::markRead, MessagesService::sendMessage,
+        // and MessagesService::markRead.
+        \BCC\Trust\Core\REST\MeBadgesEndpoint::register();
 
         // V2 Phase 2.5: PeepSo profile-fields mirror — the headless
         // analogue of PeepSo's About sub-tab:
