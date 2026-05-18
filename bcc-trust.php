@@ -864,6 +864,15 @@ add_action('plugins_loaded', function (): void {
     // dedupe — see HeliusWebhookEndpoint for the auth + replay model.
     add_action('rest_api_init', [\BCC\Trust\Onchain\REST\HeliusWebhookEndpoint::class, 'register']);
 
+    // Hostinger-shared cron compat: signed POST relay invoked by
+    // Vercel Cron at the 1-min cadence the WP-Cron registration
+    // assumes. Auth via X-Bcc-Internal header against
+    // BCC_INTERNAL_CRON_SECRET. WP-Cron remains registered as a
+    // fallback — per-chain AdvisoryLock makes duplicate ticks a
+    // no-op. See IndexerTickEndpoint for the auth + idempotency
+    // rationale.
+    add_action('rest_api_init', [\BCC\Trust\Onchain\REST\IndexerTickEndpoint::class, 'register']);
+
     // Manual cron triggers (admin only, CSRF-protected).
     add_action('admin_init', function () {
         if (!current_user_can('manage_options')) {
