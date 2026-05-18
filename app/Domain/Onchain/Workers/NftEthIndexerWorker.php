@@ -51,6 +51,16 @@ final class NftEthIndexerWorker
     public const MAX_PAGES_PER_TICK              = 5; // safety bound on pagination loop
     public const DEFAULT_DAILY_BUDGET            = 50000;
     public const CRON_OVERDUE_THRESHOLD_SECONDS  = 300;
+    /**
+     * Per-tick wall-clock cap. Hostinger Business shared caps PHP
+     * `max_execution_time` at 30s; budgeting our own 20s ceiling
+     * leaves headroom for the response trip back to Vercel Cron and
+     * any per-chain teardown. Catch-ups split across multiple ticks
+     * are already the design (BLOCKS_PER_TICK + pagination cap), so
+     * cutting a long tick short never loses progress — the next
+     * tick resumes from the persisted checkpoint.
+     */
+    public const MAX_RUNTIME_SECONDS             = 20;
     private const ADVISORY_LOCK_PREFIX = 'bcc_nft_indexer_chain_';
 
     /**
@@ -79,6 +89,12 @@ final class NftEthIndexerWorker
 
     /**
      * Run a tick for every active EVM chain.
+     *
+     * Wall-clock budget: MAX_RUNTIME_SECONDS. Once the budget is
+     * spent we stop scheduling further chains — the next tick (1 min
+     * later for both WP-Cron and Vercel-Cron) will resume from where
+     * we left off. Per-chain progress is durable via the checkpoint,
+     * so skipping the rest of the loop never loses work.
      */
     public static function runAllChains(): void
     {
@@ -87,7 +103,15 @@ final class NftEthIndexerWorker
             return;
         }
 
+        $deadline = microtime(true) + (float) self::MAX_RUNTIME_SECONDS;
+
         foreach ($chains as $chain) {
+            if (microtime(true) >= $deadline) {
+                \BCC\Core\Log\Logger::info('[NftEthIndexerWorker] tick budget exhausted — deferring remaining chains', [
+                    'max_runtime_seconds' => self::MAX_RUNTIME_SECONDS,
+                ]);
+                break;
+            }
             $chainType = (string) $chain->chain_type;
             if ($chainType !== 'evm') {
                 continue;
