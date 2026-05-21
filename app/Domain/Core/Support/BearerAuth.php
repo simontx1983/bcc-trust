@@ -129,10 +129,17 @@ final class BearerAuth
      */
     private static function readAuthorizationHeader(): string
     {
-        if (isset($_SERVER['HTTP_AUTHORIZATION']) && is_string($_SERVER['HTTP_AUTHORIZATION'])) {
+        // LiteSpeed/HTTP-2 quirk: $_SERVER['HTTP_AUTHORIZATION'] can be
+        // *set but empty* when the upstream rewrite captures an empty
+        // header on HTTP/2 even though the actual request DID carry
+        // Authorization. Using !empty() here forces fall-through to
+        // REDIRECT_HTTP_AUTHORIZATION / apache_request_headers() which
+        // do carry the real value. Plain isset() short-circuits at the
+        // empty string and BearerAuth ends up rejecting valid tokens.
+        if (!empty($_SERVER['HTTP_AUTHORIZATION']) && is_string($_SERVER['HTTP_AUTHORIZATION'])) {
             return $_SERVER['HTTP_AUTHORIZATION'];
         }
-        if (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION']) && is_string($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+        if (!empty($_SERVER['REDIRECT_HTTP_AUTHORIZATION']) && is_string($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
             return $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
         }
         if (function_exists('apache_request_headers')) {
