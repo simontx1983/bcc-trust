@@ -37,13 +37,34 @@ class EndorsementFraudAnalyzer {
 
     /**
      * Schedule this analyzer to run after the current request completes.
+     *
+     * Delegates to AsyncDispatcher so the call lands on Action Scheduler
+     * when available and falls back to wp_schedule_single_event otherwise
+     * (parity with the rest of the trust async surface).
+     *
+     * Observability: a soft-failed enqueue means fraud analysis never runs
+     * for this endorsement — the user keeps any trust bonus they should
+     * not have. There is NO reconciliation sweep for endorsement fraud
+     * scoring, so a silent loss is unrecoverable without manual replay.
+     * We record `cron_dispatch / endorsement_fraud_analyzer` on the
+     * canonical-subsystem map and emit a structured Logger::error so the
+     * operator journal carries the full context.
      */
     public static function schedule(int $endorserUserId, int $pageId): void {
-        wp_schedule_single_event(
-            time(),
+        $enqueued = \BCC\Core\Cron\AsyncDispatcher::enqueueAsync(
             self::HOOK,
-            [$endorserUserId, $pageId]
+            [$endorserUserId, $pageId],
+            'bcc-trust'
         );
+
+        if (!$enqueued) {
+            \BCC\Core\Observability\DegradationMetrics::record('cron_dispatch', 'endorsement_fraud_analyzer');
+            \BCC\Core\Log\Logger::error('[bcc-trust] endorsement fraud analyzer enqueue failed', [
+                'hook'        => self::HOOK,
+                'endorser_id' => $endorserUserId,
+                'page_id'     => $pageId,
+            ]);
+        }
     }
 
     /**

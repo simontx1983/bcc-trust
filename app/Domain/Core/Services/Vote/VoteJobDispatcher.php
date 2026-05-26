@@ -123,7 +123,18 @@ class VoteJobDispatcher {
         // Short TTL: only needs to span the scheduler's visibility lag.
         set_transient( $fingerprint, 1, 30 );
 
-        wp_schedule_single_event( time(), $hook, $positional );
+        // Soft failure on sick wp_options means none of the post-vote tasks
+        // (fraud analysis, trust graph, recalc, stats) ever run for this
+        // vote. Surface via the cron_dispatch DegradationMetric subsystem
+        // so /system/health and the operator journal both see the loss.
+        $scheduled = wp_schedule_single_event( time(), $hook, $positional );
+        if ( $scheduled === false ) {
+            \BCC\Core\Observability\DegradationMetrics::record( 'cron_dispatch', 'vote_job_dispatcher' );
+            \BCC\Core\Log\Logger::error( '[bcc-trust] vote job dispatcher enqueue failed', [
+                'hook' => $hook,
+                'args' => $positional,
+            ] );
+        }
     }
 
     /**

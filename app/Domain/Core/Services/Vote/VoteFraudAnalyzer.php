@@ -4,9 +4,10 @@
  *
  * Asynchronous fraud analysis stage of the vote pipeline.
  *
- * Triggered by wp_schedule_single_event() after the vote transaction has
- * committed and the HTTP response has been sent. Never called inline during
- * a vote request.
+ * Triggered by VoteJobDispatcher::handlePostVote (via do_action on the
+ * composite `bcc_trust_async_post_vote` cron job) after the vote
+ * transaction has committed and the HTTP response has been sent. Never
+ * called inline during a vote request.
  *
  * Delegates all fraud signal collection and scoring to FraudDetector —
  * the single entry point for fraud analysis across the entire trust engine.
@@ -36,20 +37,17 @@ class VoteFraudAnalyzer {
 
     /**
      * WordPress action hook name.
-     * Registered in bootstrap.php; scheduled by VoteService after commit.
+     *
+     * Registered as an add_action in Plugin::registerAsyncHooks; the live
+     * dispatch path is VoteJobDispatcher::handlePostVote, which fires this
+     * hook synchronously via do_action() inside the composite
+     * `bcc_trust_async_post_vote` cron job.
      */
     public const HOOK = 'bcc_trust_async_fraud_analysis';
 
     public function __construct(
         private readonly VoteRepository $voteRepo,
     ) {}
-
-    /**
-     * Schedule this analyzer to run after the current request completes.
-     */
-    public static function schedule(int $voteId): void {
-        wp_schedule_single_event(time(), self::HOOK, [$voteId]);
-    }
 
     /**
      * Entry point called by WordPress cron via the registered hook.
