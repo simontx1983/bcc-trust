@@ -299,7 +299,7 @@ class TrustRestController {
                 return self::safeExceptionError($e, 'vote()');
             }
             \BCC\Core\Log\Logger::error('[bcc-trust] vote() unexpected error', ['error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -329,7 +329,7 @@ class TrustRestController {
             return self::safeExceptionError($e, 'remove_vote()');
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::error('[bcc-trust] remove_vote() unexpected error', ['error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -349,7 +349,7 @@ class TrustRestController {
             $context     = $request->get_param('context') ?? 'general';
             $allowedContexts = ['general'];
             if (!in_array($context, $allowedContexts, true)) {
-                return self::error('Invalid endorsement context.', 400);
+                return self::errorWithCode('bcc_invalid_request', 'Invalid endorsement context.', 400);
             }
             $reason      = $request->get_param('reason');
             $fingerprint = $request->get_param('fingerprint');
@@ -462,14 +462,14 @@ class TrustRestController {
      */
     public static function get_user_pages_scores(WP_REST_Request $request) {
         if (!RateLimiter::allow('api')) {
-            return self::error('Too many requests. Please try again later.', 429);
+            return self::errorWithCode('bcc_rate_limited', 'Too many requests. Please try again later.', 429);
         }
 
         try {
             $userId = (int) $request['id'];
             $currentUser = get_current_user_id();
             if ($userId !== $currentUser && !current_user_can('manage_options')) {
-                return self::error('You can only view your own page scores.', 403);
+                return self::errorWithCode('bcc_forbidden', 'You can only view your own page scores.', 403);
             }
 
             $plugin = \BCC\Trust\Core\Plugin::instance();
@@ -632,7 +632,7 @@ class TrustRestController {
             return self::safeExceptionError($e, 'report_vote()');
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::error('[bcc-trust] report_vote() unexpected error', ['error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -650,17 +650,13 @@ class TrustRestController {
         ], 200);
     }
 
-    private static function error(string $message, int $status): WP_Error {
-        return new WP_Error('trust_error', $message, ['status' => $status]);
-    }
-
     /**
      * Emit a WP_Error with a stable §1.4.6 / Phase γ error code.
      *
-     * Use this for new code paths where the frontend branches on
-     * `err.code` (see bcc-frontend/src/lib/api/errors.ts). The default
-     * `error()` helper above stamps every response with `trust_error`,
-     * which is §γ-incompatible — only retained for legacy call sites.
+     * All error responses from this controller go through here. The
+     * code becomes `error.code` on the envelope (per
+     * Envelope::wrap()); the frontend branches on it (see
+     * bcc-frontend/src/lib/api/errors.ts — humanizeCode).
      *
      * `$data` flows through the envelope as `error.data` (e.g.
      * `unlock_hint` for soft gates per §1.4.5).
@@ -680,12 +676,17 @@ class TrustRestController {
      * Unknown messages are replaced with a generic error and logged.
      *
      * Status-code mapping:
-     *   - code 429 (RateLimiter::enforce throws with this code) → 429 Too Many Requests.
-     *     The thrown message includes a dynamic "wait N seconds" suffix that can't
-     *     be whitelisted in BCC_SAFE_EXCEPTION_MESSAGES, so we recognise the code.
-     *   - code 503 → 503 Service Unavailable (reserved for fail-closed degradations).
-     *   - message in BCC_SAFE_EXCEPTION_MESSAGES → 400 with the raw message.
-     *   - anything else → 400 with a generic message, full detail logged.
+     *   - code 429 (RateLimiter::enforce throws with this code) → 429
+     *     Too Many Requests / `bcc_rate_limited`. The thrown message
+     *     includes a dynamic "wait N seconds" suffix that can't be
+     *     whitelisted in BCC_SAFE_EXCEPTION_MESSAGES, so we recognise
+     *     the code.
+     *   - message in BCC_SAFE_EXCEPTION_MESSAGES → 400 / `bcc_invalid_request`
+     *     with the raw message (server's English copy still passes through
+     *     `error.message`, but per §γ the frontend ignores it and branches
+     *     on `error.code`).
+     *   - anything else → 400 / `bcc_invalid_request` with a generic
+     *     message, full detail logged.
      */
     private static function safeExceptionError(\Throwable $e, string $context): WP_Error {
         $code = (int) $e->getCode();
@@ -694,20 +695,16 @@ class TrustRestController {
         // turned "Too many requests" into an "unexpected error" which some
         // clients retry aggressively — exactly the wrong response.
         if ($code === 429) {
-            return self::error($e->getMessage(), 429);
-        }
-
-        if ($code === 503) {
-            return self::error('Service temporarily unavailable. Please try again.', 503);
+            return self::errorWithCode('bcc_rate_limited', $e->getMessage(), 429);
         }
 
         if (in_array($e->getMessage(), BCC_SAFE_EXCEPTION_MESSAGES, true)) {
-            return self::error($e->getMessage(), 400);
+            return self::errorWithCode('bcc_invalid_request', $e->getMessage(), 400);
         }
         \BCC\Core\Log\Logger::error("[bcc-trust] {$context} unexpected domain exception", [
             'error' => $e->getMessage(),
             'class' => get_class($e),
         ]);
-        return self::error('This action could not be completed. Please try again.', 400);
+        return self::errorWithCode('bcc_invalid_request', 'This action could not be completed. Please try again.', 400);
     }
 }
