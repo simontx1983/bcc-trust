@@ -182,6 +182,51 @@ class ChainsPage
         <div class="wrap">
             <h1>Chains</h1>
 
+            <?php
+            // "Run cron now" — manual trigger for the all-chains indexers. Reuses
+            // the existing admin_init handler at bcc-trust.php:878-905 which routes
+            // through ChainRefreshService::index_validators / index_collections /
+            // refresh_validators. Those paths call OnchainCircuitBreaker::recordSuccess()
+            // on success, which clears the "Chain data is stale" admin notice that
+            // fires from bcc-trust.php:1505. Synchronous run; first invocation can
+            // be slow while every active chain's fetcher is exercised.
+            //
+            // Note: the per-chain AJAX "Refresh" buttons further down call the
+            // fetchers directly without going through ChainRefreshService, so they
+            // do NOT clear the staleness notice. Use these top-of-page buttons for
+            // that.
+            $runAllUrl    = wp_nonce_url(
+                admin_url('admin.php?page=' . self::PAGE_SLUG . '&bcc_run_index_all=1'),
+                'bcc_onchain_admin_trigger'
+            );
+            $runValUrl    = wp_nonce_url(
+                admin_url('admin.php?page=' . self::PAGE_SLUG . '&bcc_run_index_validators=1'),
+                'bcc_onchain_admin_trigger'
+            );
+            $runCollUrl   = wp_nonce_url(
+                admin_url('admin.php?page=' . self::PAGE_SLUG . '&bcc_run_index_collections=1'),
+                'bcc_onchain_admin_trigger'
+            );
+            $runEnrichUrl = wp_nonce_url(
+                admin_url('admin.php?page=' . self::PAGE_SLUG . '&bcc_run_enrich_validators=1'),
+                'bcc_onchain_admin_trigger'
+            );
+            ?>
+            <div style="margin:8px 0 16px 0;padding:10px 12px;background:#f6f7f7;border:1px solid #c3c4c7;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <strong style="margin-right:4px;">Run cron now:</strong>
+                <a href="<?php echo esc_url($runAllUrl); ?>"
+                   class="button button-primary"
+                   onclick="return confirm('Run validator index + collection index + enrichment for every active chain? This is synchronous — first click may take 30+ seconds.');">
+                    All (validators + collections + enrichment)
+                </a>
+                <a href="<?php echo esc_url($runValUrl); ?>" class="button">Validators only</a>
+                <a href="<?php echo esc_url($runCollUrl); ?>" class="button">Collections only</a>
+                <a href="<?php echo esc_url($runEnrichUrl); ?>" class="button">Enrichment only</a>
+                <span style="color:#646970;font-size:11px;margin-left:auto;">
+                    Clears the &ldquo;Chain data is stale&rdquo; notice via <code>OnchainCircuitBreaker::recordSuccess</code> on the chains that respond.
+                </span>
+            </div>
+
             <nav class="nav-tab-wrapper" style="margin-bottom:16px">
                 <a href="<?php echo esc_url(add_query_arg('subtab', 'validators')); ?>"
                    class="nav-tab <?php echo $activeTab === 'validators' ? 'nav-tab-active' : ''; ?>">
