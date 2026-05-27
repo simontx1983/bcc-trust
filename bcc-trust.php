@@ -1682,4 +1682,10 @@ if (is_admin()) {
     // adjudication delays, permanent orphans). Replaces N separate
     // banners with one summary banner + a dedicated page.
     \BCC\Trust\Core\Admin\NotificationCenter::register();
+
+    // Phase 3 deferred items — Wallet audit + Sessions surfaces.
+    // Both diagnostic-grade (read-only); destructive wallet actions
+    // remain on the per-user Moderation page.
+    \BCC\Trust\Core\Admin\WalletAuditPage::register();
+    \BCC\Trust\Core\Admin\SessionsPage::register();
 }

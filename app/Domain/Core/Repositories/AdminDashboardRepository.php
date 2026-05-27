@@ -1302,6 +1302,119 @@ class AdminDashboardRepository
         )) ?: [];
     }
 
+    /**
+     * Wallet audit counters for BCC System → Wallets.
+     *
+     * @return array{total: int, unique_users: int, oldest_linked_at: ?string, newest_linked_at: ?string}
+     */
+    public function getWalletAuditCounts(): array
+    {
+        global $wpdb;
+        $table = \BCC\Core\DB\DB::table('wallet_links');
+
+        $row = $wpdb->get_row(
+            "SELECT
+                COUNT(*)                    AS total,
+                COUNT(DISTINCT user_id)     AS unique_users,
+                MIN(created_at)             AS oldest_linked_at,
+                MAX(created_at)             AS newest_linked_at
+             FROM {$table}"
+        );
+
+        return [
+            'total'            => (int)    ($row->total ?? 0),
+            'unique_users'     => (int)    ($row->unique_users ?? 0),
+            'oldest_linked_at' => $row && isset($row->oldest_linked_at) ? (string) $row->oldest_linked_at : null,
+            'newest_linked_at' => $row && isset($row->newest_linked_at) ? (string) $row->newest_linked_at : null,
+        ];
+    }
+
+    /**
+     * Wallet counts grouped by chain. Bounded to known active chains.
+     *
+     * @return list<object>
+     */
+    public function getWalletCountsByChain(): array
+    {
+        global $wpdb;
+        $walletsTable = \BCC\Core\DB\DB::table('wallet_links');
+        $chainsTable  = \BCC\Core\DB\DB::table('chains');
+
+        return $wpdb->get_results(
+            "SELECT c.id, c.name, c.slug, c.chain_type, c.is_active,
+                    COUNT(w.id)        AS wallet_count,
+                    COUNT(DISTINCT w.user_id) AS unique_users
+             FROM {$chainsTable} c
+             LEFT JOIN {$walletsTable} w ON w.chain_id = c.id
+             GROUP BY c.id
+             ORDER BY wallet_count DESC, c.name ASC
+             LIMIT 50"
+        ) ?: [];
+    }
+
+    /**
+     * Activity-log entries matching a SQL LIKE prefix. Used by the wallet-
+     * audit and sessions admin surfaces to scope by action family
+     * (e.g. 'wallet_%', 'account_%').
+     *
+     * @return list<object>
+     */
+    public function getRecentActivityByPrefix(string $prefix, int $limit): array
+    {
+        global $wpdb;
+        $table = TableRegistry::activity();
+
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT a.id, a.user_id, a.action, a.target_id, a.target_type,
+                    a.ip_address, a.created_at,
+                    u.display_name AS user_name
+             FROM {$table} a
+             LEFT JOIN {$wpdb->users} u ON a.user_id = u.ID
+             WHERE a.action LIKE %s
+             ORDER BY a.created_at DESC
+             LIMIT %d",
+            $prefix,
+            $limit
+        )) ?: [];
+    }
+
+    /**
+     * Activity-log entries matching a list of exact action names. Used
+     * by the sessions admin surface for the auth-event-family read
+     * where a LIKE prefix would over-include adjacent actions.
+     *
+     * @param list<string> $actions
+     * @return list<object>
+     */
+    public function getRecentActivityByActions(array $actions, int $limit): array
+    {
+        global $wpdb;
+        $table = TableRegistry::activity();
+
+        if ($actions === []) {
+            return [];
+        }
+
+        // Bounded IN list — manually built from sanitized input rather
+        // than %s placeholders since the count is variable.
+        $placeholders = implode(',', array_fill(0, count($actions), '%s'));
+        $params       = $actions;
+        $params[]     = $limit;
+
+        $sql = "SELECT a.id, a.user_id, a.action, a.target_id, a.target_type,
+                       a.ip_address, a.created_at,
+                       u.display_name AS user_name
+                FROM {$table} a
+                LEFT JOIN {$wpdb->users} u ON a.user_id = u.ID
+                WHERE a.action IN ({$placeholders})
+                ORDER BY a.created_at DESC
+                LIMIT %d";
+
+        /** @var list<object>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare($sql, $params));
+        return $rows ?: [];
+    }
+
     // ─────────────────────────────────────────────────────────────
     // Dashboard — Verified Tab (dashboard-verified.php)
     // ─────────────────────────────────────────────────────────────
