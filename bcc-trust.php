@@ -380,6 +380,34 @@ add_filter(
     [\BCC\Trust\Onchain\Services\NftIndexerHealthSnapshot::class, 'contribute']
 );
 
+// Operator OS v1 Phase 2: contribute bcc-trust's secret/API-key
+// inventory to bcc-core's ApiKeysPage. Never raw values; the page
+// renders status + masked previews only. When introducing a new
+// secret elsewhere in bcc-trust, add it here too so an operator
+// can see its status without grepping the codebase.
+add_filter('bcc_api_keys_inventory', function (array $inventory): array {
+    $bccTrustKeys = [
+        // Critical — missing locks out the affected subsystem entirely.
+        'BCC_ENCRYPTION_KEY'        => ['severity' => 'critical',  'description' => 'Trust-engine secret-encryption key. Missing = all non-admin users locked out (NullTrustReadService).'],
+        'BCC_HELIUS_WEBHOOK_SECRET' => ['severity' => 'critical',  'description' => 'Helius webhook authentication header. Missing = Solana ingestion silently dark.'],
+        // Important — missing significantly degrades a subsystem.
+        'BCC_ALCHEMY_API_KEY'       => ['severity' => 'important', 'description' => 'Alchemy EVM RPC + NFT-metadata API key. Missing = ETH NFT indexer + balance lookups degrade to fallback paths.'],
+        'BCC_HELIUS_API_KEY'        => ['severity' => 'important', 'description' => 'Helius Solana enriched-RPC key. Missing = Solana enrichment falls back to public RPC rate limits.'],
+        'BCC_INTERNAL_CRON_SECRET'  => ['severity' => 'important', 'description' => 'Internal shared challenge for the Vercel cron relay → IndexerTickEndpoint. Missing = remote-triggered cron rejected.'],
+        'BCC_GITHUB_CLIENT_SECRET'  => ['severity' => 'important', 'description' => 'GitHub OAuth client secret. Missing = GitHub identity-verification flow broken.'],
+        'BCC_PUSH_VAPID_PUBLIC_KEY' => ['severity' => 'important', 'description' => 'Web Push VAPID public key (browser-exposed). Triplet with VAPID_PRIVATE_KEY + _SUBJECT — all three required for push delivery.'],
+        'BCC_PUSH_VAPID_PRIVATE_KEY'=> ['severity' => 'important', 'description' => 'Web Push VAPID private key. Rotating invalidates ALL existing browser subscriptions — rotate with intent.'],
+        'BCC_PUSH_VAPID_SUBJECT'    => ['severity' => 'important', 'description' => 'Web Push VAPID subject (mailto: or site URL). Not secret, but required for push.'],
+        // Optional — missing causes mild degradation only.
+        'BCC_SUBSCAN_API_KEY'       => ['severity' => 'optional',  'description' => 'Subscan Polkadot API key. Missing = validator-info reads fall back to anonymous rate limits.'],
+        'BCC_ETHERSCAN_API_KEY'     => ['severity' => 'optional',  'description' => 'Etherscan API key for validator score signal enrichment. Missing = mild degradation.'],
+    ];
+    foreach ($bccTrustKeys as $constant => $meta) {
+        $inventory[$constant] = array_merge($meta, ['source' => 'bcc-trust']);
+    }
+    return $inventory;
+});
+
 // Operator OS v1 Phase 2: contribute bcc-trust's canonical cron hooks
 // to bcc-core's CronPage drift detector. The hook list mirrors the
 // recurring-hooks table in docs/cron-registry.md — keep in sync when
