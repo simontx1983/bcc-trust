@@ -87,6 +87,14 @@ class EvmFetcher implements FetcherInterface
         return $this->chain;
     }
 
+    public function last_fetch_error(): ?string
+    {
+        // EVM has no validator-fetch path (fetch_all_validators returns [],
+        // supports_feature('validator') is false). No transport calls,
+        // no error to surface.
+        return null;
+    }
+
     public function supports_feature(string $feature): bool
     {
         // 'holdings_list' deliberately omitted — EVM gallery requires

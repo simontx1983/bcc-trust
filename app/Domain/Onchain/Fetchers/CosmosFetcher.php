@@ -53,6 +53,13 @@ class CosmosFetcher implements FetcherInterface
         return $this->chain;
     }
 
+    public function last_fetch_error(): ?string
+    {
+        // Stub — wire to actual apiGet error tracking when a real
+        // transport-failure UX gap surfaces here.
+        return null;
+    }
+
     public function supports_feature(string $feature): bool
     {
         return in_array(

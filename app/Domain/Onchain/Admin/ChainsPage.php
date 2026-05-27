@@ -81,10 +81,25 @@ class ChainsPage
             }
 
             $validators = $fetcher->fetch_all_validators();
+            $fetchErr   = $fetcher->last_fetch_error();
 
             if (empty($validators)) {
+                // Distinguish transport failure from API-returned-empty.
+                // The two used to render the same "No validators returned"
+                // message, which made dead-endpoint diagnostics painful
+                // (operator spent N round-trips probing alternative URLs
+                // before realising the upstream was unreachable).
+                if ($fetchErr !== null) {
+                    wp_send_json_error([
+                        'message' => sprintf(
+                            'Refresh failed for %s: %s. Check Logger for full context; the upstream endpoint may be down or its URL may have changed (see wp_bcc_chains.rest_url).',
+                            $chain->name,
+                            $fetchErr
+                        ),
+                    ]);
+                }
                 wp_send_json_success([
-                    'message' => "No validators returned for {$chain->name}.",
+                    'message' => "No validators returned for {$chain->name} (API succeeded; empty response).",
                     'stats'   => ['total' => 0, 'new' => 0, 'updated' => 0, 'unchanged' => 0, 'enriched' => 0],
                 ]);
             }

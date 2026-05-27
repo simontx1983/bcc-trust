@@ -29,6 +29,14 @@ class ThorchainFetcher implements FetcherInterface
     private string $base_url;
     private int    $timeout = 20;
 
+    /**
+     * Most-recent transport error from apiGet(), or null when the last
+     * call succeeded. Exposes per-call failure mode to ChainsPage and
+     * the cron refresh handler so they can distinguish "API succeeded
+     * with empty result" from "request never returned anything usable."
+     */
+    private ?string $lastError = null;
+
     /** @param ChainRow $chain */
     public function __construct(object $chain)
     {
@@ -40,6 +48,11 @@ class ThorchainFetcher implements FetcherInterface
     public function get_chain(): object
     {
         return $this->chain;
+    }
+
+    public function last_fetch_error(): ?string
+    {
+        return $this->lastError;
     }
 
     public function supports_feature(string $feature): bool
@@ -233,12 +246,15 @@ class ThorchainFetcher implements FetcherInterface
         ]);
 
         if (is_wp_error($response)) {
-            \BCC\Core\Log\Logger::error('[THORChain Fetcher] error for ' . $path . ': ' . $response->get_error_message());
+            $msg = $response->get_error_message();
+            $this->lastError = "transport error for {$path}: {$msg}";
+            \BCC\Core\Log\Logger::error('[THORChain Fetcher] error for ' . $path . ': ' . $msg);
             return null;
         }
 
         $code = wp_remote_retrieve_response_code($response);
         if ($code !== 200) {
+            $this->lastError = "HTTP {$code} for {$path}";
             \BCC\Core\Log\Logger::error('[THORChain Fetcher] HTTP ' . $code . ' for ' . $path);
             return null;
         }
@@ -246,6 +262,12 @@ class ThorchainFetcher implements FetcherInterface
         $body = wp_remote_retrieve_body($response);
         $data = json_decode($body, true);
 
-        return is_array($data) ? $data : null;
+        if (!is_array($data)) {
+            $this->lastError = "malformed response body for {$path} (not a JSON array)";
+            return null;
+        }
+
+        $this->lastError = null;
+        return $data;
     }
 }

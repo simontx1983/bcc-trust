@@ -237,12 +237,16 @@ function bcc_onchain_create_chains_table(): void {
             'bech32_prefix'  => 'dungeon',
         ],
 
-        // THORChain (custom API — uses ThorchainFetcher, not CosmosFetcher)
+        // THORChain (custom API — uses ThorchainFetcher, not CosmosFetcher).
+        // Endpoint history: thornode.ninerealms.com was the historical default
+        // until ~2025 when NineRealms retired the public thornode subdomain.
+        // Liquify (community-run) is the current canonical replacement; same
+        // /thorchain/nodes shape as the original.
         [
             'slug'           => 'thorchain',
             'name'           => 'THORChain',
             'chain_type'     => 'thorchain',
-            'rest_url'       => 'https://thornode.ninerealms.com',
+            'rest_url'       => 'https://thornode.thorchain.liquify.com',
             'explorer_url'   => 'https://runescan.io',
             'native_token'   => 'RUNE',
             'decimals'       => 8,

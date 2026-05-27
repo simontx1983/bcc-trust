@@ -124,4 +124,25 @@ interface FetcherInterface
      * @return ChainRow Chain row from wp_bcc_chains.
      */
     public function get_chain(): object;
+
+    /**
+     * Return the last transport / API error message produced by this
+     * fetcher instance, or null if no error has occurred since the
+     * fetcher was constructed.
+     *
+     * Distinguishes the two failure modes that look identical from
+     * an admin "Refresh" click:
+     *   - `null`  → request(s) succeeded; an empty list result means the
+     *               API really returned nothing.
+     *   - string  → at least one underlying HTTP request failed (network
+     *               error, 4xx/5xx, malformed body). The empty list result
+     *               means "we never got a usable response," not "API said
+     *               there are no validators."
+     *
+     * Implementations should reset to null on successful calls and set
+     * on any failure. Drivers that don't make external HTTP calls
+     * (e.g. EvmFetcher's validator path is a no-op) return null
+     * unconditionally.
+     */
+    public function last_fetch_error(): ?string;
 }
