@@ -313,10 +313,12 @@ final class EnrichmentScheduler
             return false;
         }
 
-        // Use enrich_validator() when available (skip-if-fresh logic built in).
-        $data = method_exists($fetcher, 'enrich_validator')
-            ? $fetcher->enrich_validator($row->operator_address, $row)
-            : $fetcher->fetch_validator($row->operator_address);
+        // enrich_validator is on FetcherInterface with skip-if-fresh logic
+        // built into each implementation. The supports_feature('validator')
+        // gate at line 311 above already filtered out non-supporting drivers
+        // (their enrich_validator returns []), so the previous
+        // method_exists fallback to fetch_validator was dead code.
+        $data = $fetcher->enrich_validator($row->operator_address, $row);
 
         if (empty($data)) {
             throw new \RuntimeException('Fetcher returned empty data for ' . $row->operator_address);

@@ -76,7 +76,7 @@ class ChainsPage
         try {
             $fetcher = FetcherFactory::make_for_chain($chain);
 
-            if (!method_exists($fetcher, 'fetch_all_validators')) {
+            if (!$fetcher->supports_feature('validator')) {
                 wp_send_json_error(['message' => 'This chain type does not support validator indexing.']);
             }
 
@@ -250,7 +250,7 @@ class ChainsPage
                     $hasDriver = FetcherFactory::has_driver($chain->chain_type);
                     $isActive  = (int) $chain->is_active;
                     $hasValidators = $hasDriver && $isActive
-                        && method_exists(FetcherFactory::make_for_chain($chain), 'fetch_all_validators');
+                        && FetcherFactory::make_for_chain($chain)->supports_feature('validator');
                 ?>
                 <tr>
                     <td><?php echo esc_html((string) $cid); ?></td>

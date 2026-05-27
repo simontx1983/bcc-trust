@@ -168,7 +168,7 @@ class ChainRefreshService
 
                     $fetcher = FetcherFactory::make_for_chain($chain);
 
-                    if (!method_exists($fetcher, 'fetch_all_validators')) {
+                    if (!$fetcher->supports_feature('validator')) {
                         continue;
                     }
 

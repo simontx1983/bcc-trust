@@ -101,6 +101,23 @@ class EvmFetcher implements FetcherInterface
         return []; // EVM chains don't expose validator data via Etherscan API
     }
 
+    /** @return array<int, array<string, mixed>> */
+    public function fetch_all_validators(): array
+    {
+        // EVM chains have no indexable validator enumeration in BCC's model.
+        // The supports_feature('validator') gate above keeps callers from
+        // reaching this; the empty return is a belt-and-suspenders
+        // contract satisfaction so the interface remains uniform.
+        return [];
+    }
+
+    /** @return array<string, mixed> */
+    public function enrich_validator(string $address, ?object $existingRow = null): array
+    {
+        // Same posture as fetch_all_validators — non-supporting driver.
+        return [];
+    }
+
     /** @return array<int, array{validator_address: string, shares?: string|null, amount?: float|null}> */
     public function fetch_delegations(string $delegatorAddress): array
     {

@@ -34,6 +34,37 @@ interface FetcherInterface
     public function fetch_validator(string $address): array;
 
     /**
+     * Fetch the full set of validators on this chain.
+     *
+     * Not all chains support this — check supports_feature('validator')
+     * first. Drivers that can't enumerate validators return []. Powers
+     * the ValidatorRepository bulk upsert path (admin Refresh All
+     * Chains + the per-chain refresh cron).
+     *
+     * @return array<int, array<string, mixed>> Normalized validator rows.
+     */
+    public function fetch_all_validators(): array;
+
+    /**
+     * Enrich a single validator row with up-to-date provider data
+     * (commission %, last-block-signed, uptime, identity, etc.).
+     *
+     * Richer variant of fetch_validator() with skip-if-fresh logic
+     * built into each implementation. Used by EnrichmentScheduler's
+     * cron. Drivers that can't enrich return []; non-supporting drivers
+     * are filtered out upstream by supports_feature('validator').
+     *
+     * Not all chains support this — check supports_feature('validator')
+     * first.
+     *
+     * @param string  $address      The validator's operator address.
+     * @param ?object $existingRow  Current row from wp_bcc_onchain_validators
+     *                              (passed for skip-if-fresh checks).
+     * @return array<string, mixed> Validator data, or [] if not supported / not refreshable.
+     */
+    public function enrich_validator(string $address, ?object $existingRow = null): array;
+
+    /**
      * Fetch the set of validators a given delegator account stakes to.
      *
      * Treats the input as a delegator (account) address, not a validator
