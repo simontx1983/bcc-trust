@@ -85,8 +85,20 @@ Same architecture guardrails as the predecessor plugins:
    app at `bcc-frontend/` is the only user-facing renderer. wp-admin
    pages and admin notices are a documented exception (paths under
    `*/Admin/`, files subscribing to `admin_notices`, methods named
-   `*Notice`) until the admin app moves to Next.js. Enforced by
-   `scripts/arch-guardrails.sh` rules 6–9.
+   `*Notice`). Enforced by `scripts/arch-guardrails.sh` rules 6–9.
+
+   **Admin split (locked 2026-05-27):** the admin is **two surfaces by
+   role**, not one transitional state. wp-admin = *infrastructure
+   cockpit* — system configuration, plugin settings, secrets-related
+   metadata (never raw values), cron and queue tools, emergency
+   operations, low-frequency maintenance, indexer configuration, raw
+   data inspection, developer tools, schema/version management.
+   Next.js `/admin/*` = *operational command center* — moderation,
+   trust review, disputes, onchain monitoring, holder-group operations,
+   analytics, user investigations, live operational workflows. Routing
+   rule: ask whether the new surface is a *configuration / repair
+   operation* (wp-admin) or a *daily workflow* (Next.js). New admin
+   work lands in one of these two surfaces; do not invent a third.
 9. **Load-bearing contract must be verified, not assumed.** Every
    response under `/wp-json/bcc/v1/` and `/wp-json/bcc-trust/v1/`
    conforms to `docs/api-contract-v1.md` §1.4–§1.5. The

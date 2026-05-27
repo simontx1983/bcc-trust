@@ -61,12 +61,19 @@ final class RepairService
     // ── Security ────────────────────────────────────────────────────────
 
     /**
-     * Verify the current user has manage_options and a valid nonce.
+     * Verify the current user has manage_options, the environment opts
+     * into repair operations, and the nonce is valid.
      *
      * @param string $action Nonce action name.
      */
     public function securityCheck(string $action = 'bcc_trust_admin_action'): void
     {
+        // Operator OS v1 Phase 1: every destructive Repair handler bails
+        // out unless wp-config explicitly opts in. See tab-repair.php
+        // for operator-facing instructions.
+        if (!(defined('BCC_REPAIR_ENABLED') && BCC_REPAIR_ENABLED === true)) {
+            wp_die('Repair is disabled in this environment. Set BCC_REPAIR_ENABLED in wp-config.php to enable.');
+        }
         if (!current_user_can('manage_options')) {
             wp_die('Unauthorized access.');
         }

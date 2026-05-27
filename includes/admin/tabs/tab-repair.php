@@ -10,6 +10,26 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 function bcc_trust_render_repair_tab() {
+    // Operator OS v1 Phase 1: Repair is destructive maintenance.
+    // It only runs in environments that explicitly opt in via wp-config:
+    //   define( 'BCC_REPAIR_ENABLED', true );
+    // Prod wp-config should leave the constant undefined. To run a real
+    // repair on prod, edit wp-config out of band, do the work, remove
+    // the constant.
+    if ( ! ( defined( 'BCC_REPAIR_ENABLED' ) && BCC_REPAIR_ENABLED === true ) ) {
+        ?>
+        <div class="notice notice-warning">
+            <p>
+                <strong>Repair is disabled in this environment.</strong>
+                Add <code>define( 'BCC_REPAIR_ENABLED', true );</code> to
+                <code>wp-config.php</code> to enable. Remove the constant
+                when the operation is complete.
+            </p>
+        </div>
+        <?php
+        return;
+    }
+
     $data = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository()->getRepairData();
 
     // ── Flash messages ────────────────────────────────────────────

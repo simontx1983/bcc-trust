@@ -22,18 +22,7 @@ add_action('admin_menu', function () {
         'dashicons-shield',
         26
     );
-
-    add_submenu_page(
-        'bcc-trust-dashboard',
-        'Verified Users',
-        'Verified',
-        'manage_options',
-        'bcc-trust-verified',
-        'bcc_trust_render_verified_page'
-    );
 });
-
-require_once BCC_TRUST_PATH . 'includes/admin/page-verified.php';
 
 /**
  * Main dashboard render function - delegates to dashboard-view.php
