@@ -1271,45 +1271,9 @@ add_action('admin_notices', function (): void {
     }
 });
 
-add_action('admin_notices', function (): void {
-    if (!current_user_can('manage_options')) {
-        return;
-    }
-
-    $cache_key   = 'bcc_disputes_panelist_pool_count';
-    $cache_group = 'bcc_disputes';
-    $pool_count  = wp_cache_get($cache_key, $cache_group);
-
-    if ($pool_count === false) {
-        if (!class_exists('\\BCC\\Core\\ServiceLocator')
-            || !\BCC\Core\ServiceLocator::hasRealService(\BCC\Core\Contracts\TrustReadServiceInterface::class)
-        ) {
-            return;
-        }
-
-        $trust_read  = \BCC\Core\ServiceLocator::resolveTrustReadService();
-        $eligible    = $trust_read->getEligiblePanelistUserIds([], BCC_DISPUTES_PANEL_SIZE * 3);
-        $pool_count  = is_array($eligible) ? count($eligible) : 0;
-        wp_cache_set($cache_key, $pool_count, $cache_group, HOUR_IN_SECONDS);
-    }
-
-    $minimum_healthy = BCC_DISPUTES_PANEL_SIZE * 2;
-    if ((int) $pool_count >= $minimum_healthy) {
-        return;
-    }
-
-    $level = (int) $pool_count < BCC_DISPUTES_PANEL_SIZE ? 'error' : 'warning';
-    printf(
-        '<div class="notice notice-%s"><p><strong>BCC Trust (Disputes):</strong> '
-        . 'The eligible panelist pool is critically low — only <strong>%d</strong> qualified members found. '
-        . 'At least <strong>%d</strong> are needed per dispute (and %d recommended for proper randomization). '
-        . 'Disputes cannot be filed until enough Trusted/Elite tier members with clean records are available.</p></div>',
-        esc_attr($level),
-        (int) $pool_count,
-        BCC_DISPUTES_PANEL_SIZE,
-        $minimum_healthy
-    );
-});
+// Panelist pool health check — moved to NotificationCenter as the
+// `disputes.panelist_pool_low` item. See
+// \BCC\Trust\Core\Admin\NotificationCenter::checkPanelistPool().
 
 /*
 |--------------------------------------------------------------------------
@@ -1605,57 +1569,34 @@ function bcc_trust_admin_notices() {
     }
 }
 
-// Onchain stale data + cron health warning.
+// Onchain stale-chains check — moved to NotificationCenter as the
+// `onchain.stale_chains` item. See
+// \BCC\Trust\Core\Admin\NotificationCenter::checkStaleChains().
+//
+// The DISABLE_WP_CRON warning that previously co-lived in this handler
+// is kept inline below as a direct banner because it's a setup/config
+// failure (external cron not wired up) rather than a recurring health
+// signal — it requires operator config action, not just awareness.
 add_action('admin_notices', function () {
     if (!current_user_can('manage_options')) {
         return;
     }
 
-    $notices = [];
-
-    if (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) {
-        $nextRefresh = wp_next_scheduled('bcc_onchain_daily_refresh');
-        if ($nextRefresh && $nextRefresh < (time() - DAY_IN_SECONDS)) {
-            $notices[] = sprintf(
-                'DISABLE_WP_CRON is enabled but the daily signal refresh has not fired in over 24 hours. '
-                . 'Configure a system cron: <code>*/5 * * * * curl -s %s >/dev/null 2>&1</code>',
-                esc_html(site_url('/wp-cron.php?doing_wp_cron'))
-            );
-        }
+    if (!defined('DISABLE_WP_CRON') || !DISABLE_WP_CRON) {
+        return;
     }
 
-    if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')
-        && class_exists('\\BCC\\Trust\\Onchain\\Support\\OnchainCircuitBreaker')
-    ) {
-        $activeChains = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive();
-        $chainIds     = array_map(fn($c) => (int) $c->id, $activeChains);
-        $chainNames   = [];
-        foreach ($activeChains as $c) {
-            $chainNames[(int) $c->id] = $c->name;
-        }
-
-        $staleChains = \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::getStaleChains($chainIds);
-
-        if (!empty($staleChains)) {
-            $parts = [];
-            foreach ($staleChains as $id => $info) {
-                $name   = $chainNames[$id] ?? "Chain #{$id}";
-                $detail = esc_html($info['age_human']);
-                if ($info['circuit_status'] !== 'CLOSED') {
-                    $detail .= ', circuit: ' . esc_html($info['circuit_status']);
-                }
-                $parts[] = sprintf('%s (%s)', esc_html($name), $detail);
-            }
-            $notices[] = 'Chain data is stale for: ' . implode(', ', $parts)
-                . '. Trust scores may be understated.';
-        }
+    $nextRefresh = wp_next_scheduled('bcc_onchain_daily_refresh');
+    if (!$nextRefresh || $nextRefresh >= (time() - DAY_IN_SECONDS)) {
+        return;
     }
 
-    if (!empty($notices)) {
-        echo '<div class="notice notice-warning"><p><strong>BCC Trust (Onchain):</strong> '
-            . implode('</p><p><strong>BCC Trust (Onchain):</strong> ', $notices)
-            . '</p></div>';
-    }
+    printf(
+        '<div class="notice notice-warning"><p><strong>BCC Trust (Onchain):</strong> '
+        . 'DISABLE_WP_CRON is enabled but the daily signal refresh has not fired in over 24 hours. '
+        . 'Configure a system cron: <code>*/5 * * * * curl -s %s >/dev/null 2>&1</code></p></div>',
+        esc_html(site_url('/wp-cron.php?doing_wp_cron'))
+    );
 });
 
 // Missing onchain API key warnings — without these, signals silently
@@ -1725,4 +1666,10 @@ if (is_admin()) {
             'bcc_trust_render_repair_tab'
         );
     }, 25);
+
+    // Notification Center — single admin surface for operational
+    // health signals (panelist pool, stale chains, dispute
+    // adjudication delays, permanent orphans). Replaces N separate
+    // banners with one summary banner + a dedicated page.
+    \BCC\Trust\Core\Admin\NotificationCenter::register();
 }

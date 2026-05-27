@@ -41,9 +41,12 @@ class DisputeScheduler
         add_action('bcc_disputes_async_resolve', [__CLASS__, 'handleAsyncResolve'], 10, 6);
 
         // Admin health checks.
+        // warnIfCronDisabled stays as a direct banner — DISABLE_WP_CRON
+        // misconfiguration is a setup failure that should be loud.
+        // The other two (warnIfAdjudicationDown + warnIfPermanentOrphans)
+        // were moved to the NotificationCenter via *Notification() helpers
+        // returning ?NotificationItem; see NotificationCenter::contributeBuiltins.
         add_action('admin_notices', [__CLASS__, 'warnIfCronDisabled']);
-        add_action('admin_notices', [__CLASS__, 'warnIfAdjudicationDown']);
-        add_action('admin_notices', [__CLASS__, 'warnIfPermanentOrphans']);
 
         // Self-healing: recreate scheduled events if they were deleted or
         // never registered (e.g. the original activation ran before the
@@ -683,31 +686,35 @@ class DisputeScheduler
     }
 
     /**
-     * Show admin notice when adjudication has been unavailable for >1 hour.
+     * NotificationCenter contributor — returns the adjudication-down item
+     * when the alert transient is set, null when healthy.
+     *
      * Companion to checkAdjudicationHealth() (called from reconciliation cron).
+     * Previously emitted as a direct admin_notices banner; routed through
+     * NotificationCenter as of the two-engineer audit follow-up so that
+     * recurring health signals collect in one surface instead of stacking
+     * on every wp-admin page.
+     *
+     * @return array{id:string,source:string,level:string,message:string}|null
      */
-    public static function warnIfAdjudicationDown(): void
+    public static function adjudicationDownNotification(): ?array
     {
-        if (!current_user_can('manage_options')) {
-            return;
+        $staleCount = (int) get_transient('bcc_disputes_adjudication_alert');
+        if ($staleCount === 0) {
+            return null;
         }
 
-        $staleCount = get_transient('bcc_disputes_adjudication_alert');
-        if (!$staleCount) {
-            return;
-        }
-
-        echo wp_kses_post(
-            '<div class="notice notice-error"><p>'
-            . '<strong>BCC Disputes:</strong> '
-            . sprintf(
+        return [
+            'id'      => 'disputes.adjudication_down',
+            'source'  => 'BCC Disputes',
+            'level'   => 'error',
+            'message' => sprintf(
                 '%d dispute(s) have been waiting over 1 hour for trust adjudication. '
                 . 'The trust engine adjudication service may be unavailable. '
                 . 'Check the <code>bcc-trust</code> plugin status.',
-                (int) $staleCount
-            )
-            . '</p></div>'
-        );
+                $staleCount
+            ),
+        ];
     }
 
     /**
@@ -874,39 +881,42 @@ class DisputeScheduler
     }
 
     /**
-     * Show admin notice when disputes have exhausted all reconciliation
-     * retries and require manual admin intervention.
+     * NotificationCenter contributor — returns the permanent-orphans item
+     * when disputes have exhausted all reconciliation retries, null
+     * when healthy. 30-min transient cache to avoid extra queries on
+     * every admin page load.
+     *
+     * Previously emitted as a direct admin_notices banner; routed through
+     * NotificationCenter as of the two-engineer audit follow-up.
+     *
+     * @return array{id:string,source:string,level:string,message:string,link:string}|null
      */
-    public static function warnIfPermanentOrphans(): void
+    public static function permanentOrphansNotification(): ?array
     {
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-
-        // Cache the count check for 30 minutes to avoid extra queries on every admin page.
         $cacheKey = 'bcc_disputes_permanent_orphan_count';
-        $count = get_transient($cacheKey);
+        $count    = get_transient($cacheKey);
         if ($count === false) {
             $count = DisputeRepository::countPermanentOrphans();
             set_transient($cacheKey, $count, 30 * MINUTE_IN_SECONDS);
         }
 
         if ((int) $count === 0) {
-            return;
+            return null;
         }
 
-        echo wp_kses_post(
-            '<div class="notice notice-error"><p>'
-            . '<strong>BCC Disputes:</strong> '
-            . sprintf(
+        $link = admin_url('admin.php?page=bcc-trust-dashboard&tab=disputes&filter=orphaned');
+
+        return [
+            'id'      => 'disputes.permanent_orphans',
+            'source'  => 'BCC Disputes',
+            'level'   => 'error',
+            'message' => sprintf(
                 '%d dispute(s) have failed adjudication 3+ times and are permanently stuck. '
-                . 'Trust scores for these disputes are NOT applied. '
-                . '<a href="%s">Review and re-adjudicate &rarr;</a>',
-                (int) $count,
-                admin_url('admin.php?page=bcc-trust-dashboard&tab=disputes&filter=orphaned')
-            )
-            . '</p></div>'
-        );
+                . 'Trust scores for these disputes are NOT applied.',
+                (int) $count
+            ),
+            'link'    => $link,
+        ];
     }
 
 }
