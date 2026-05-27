@@ -154,6 +154,13 @@ final class HeliusWebhookEndpoint
             if (!HeliusSeenSignaturesRepository::markSeen($signature)) {
                 $totalReplays++;
                 self::bumpCounter('seen_total');
+                // Surface dedup-skipped events on /system/health alongside
+                // the admin-panel `seen_total` counter. Sustained
+                // activation = legitimate replay (Helius double-sent) or
+                // attacker re-delivering with a stolen auth header. Both
+                // are operationally interesting; the dedup itself is
+                // working (replay was correctly refused).
+                \BCC\Core\Observability\DegradationMetrics::record('helius_dedup', 'replay_skipped');
                 continue;
             }
             self::bumpCounter('new_total');
