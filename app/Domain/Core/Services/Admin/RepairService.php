@@ -462,11 +462,16 @@ final class RepairService
         $fraudRepo      = Plugin::instance()->fraudAnalysisRepository();
 
         $results = [
-            'action'              => 'complete_page_repair',
-            'pages_created'       => 0,
-            'fraud_deleted'       => 0,
-            'pages_recalculated'  => 0,
-            'details'             => [],
+            'action'                => 'complete_page_repair',
+            'score_rows_backfilled' => 0,  // Renamed from pages_created: counts
+                                           // bcc_score_data rows inserted for
+                                           // peepso-page posts that already
+                                           // existed but were missing scores.
+                                           // It does NOT create posts —
+                                           // ValidatorPageMinter owns that.
+            'fraud_deleted'         => 0,
+            'pages_recalculated'    => 0,
+            'details'               => [],
         ];
 
         $maxConfidenceVotes = BCC_TRUST_MAX_CONFIDENCE_VOTES;
@@ -497,8 +502,8 @@ final class RepairService
             }
 
             if ($scoreRepo->insertDefaultScore($page_id, $owner_id)) {
-                $results['pages_created']++;
-                $results['details'][] = "Created score for page #{$page_id} - {$page->post_title}";
+                $results['score_rows_backfilled']++;
+                $results['details'][] = "Inserted score row for existing page #{$page_id} - {$page->post_title}";
             }
         }
 
@@ -568,11 +573,11 @@ final class RepairService
 
         set_transient('bcc_trust_repair_results', $results, 120);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'        => $results['action'] ?? 'complete_page_repair',
-            'pages_created' => (int) ($results['pages_created'] ?? 0),
-            'operator'      => get_current_user_id(),
+            'action'                => $results['action'] ?? 'complete_page_repair',
+            'score_rows_backfilled' => (int) ($results['score_rows_backfilled'] ?? 0),
+            'operator'              => get_current_user_id(),
         ]);
-        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair&fixed=' . (int) ($results['pages_created'] ?? 0)));
+        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair&score_rows_backfilled=' . (int) ($results['score_rows_backfilled'] ?? 0)));
         exit;
     }
 
