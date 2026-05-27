@@ -380,6 +380,66 @@ add_filter(
     [\BCC\Trust\Onchain\Services\NftIndexerHealthSnapshot::class, 'contribute']
 );
 
+// Operator OS v1 Phase 3: contribute the Read Model panel to
+// bcc-core's DeveloperPage. Renders coverage / drift / dirty-queue
+// state from ReadModelHealthRepository — no new domain logic.
+add_filter('bcc_developer_panels', function (array $panels): array {
+    $panels['bcc-trust:read-model'] = [
+        'title' => 'Read Model (bcc-trust)',
+        'sort'  => 10,
+        'render' => function (): void {
+            $repo = new \BCC\Trust\Core\Repositories\ReadModelHealthRepository();
+
+            $published = $repo->countPublishedPages();
+            $rmRows    = $repo->countReadModelRows();
+            $pending   = $repo->countPendingRecalculations();
+            $dirtyRows = $repo->getDirtyQueueSize();
+            $lagSec    = $repo->getDirtyQueueLagSeconds();
+            $drift     = $repo->countDriftedPages(100);
+            $gaps      = $repo->countGapPages(1000);
+            $oldest    = $repo->getOldestUpdate();
+            $newest    = $repo->getNewestUpdate();
+
+            $coverage  = $published > 0 ? round(($rmRows / $published) * 100, 1) : 0.0;
+
+            echo '<table class="widefat striped" style="max-width:760px;"><tbody>';
+            printf('<tr><th style="width:280px;">Published peepso-pages</th><td>%s</td></tr>',                esc_html(number_format($published)));
+            printf('<tr><th>Read-model rows</th><td>%s &nbsp; <span style="color:#888;">(%s%% coverage)</span></td></tr>', esc_html(number_format($rmRows)), esc_html((string) $coverage));
+            printf('<tr><th>Gap pages (scored, RM missing)</th><td>%s</td></tr>',                            esc_html(number_format($gaps)));
+            printf('<tr><th>Drifted pages (RM vs live &gt; 1.0)</th><td>%s</td></tr>',                       esc_html(number_format($drift)));
+            printf('<tr><th>Pending recalculations</th><td>%s</td></tr>',                                    esc_html(number_format($pending)));
+            printf('<tr><th>Dirty queue (rows)</th><td>%s</td></tr>',                                        esc_html(number_format($dirtyRows)));
+            printf('<tr><th>Dirty queue lag (seconds)</th><td>%s</td></tr>',                                 esc_html(number_format($lagSec)));
+            printf('<tr><th>Oldest RM updated_at</th><td><code>%s</code></td></tr>',                          esc_html($oldest ?? '—'));
+            printf('<tr><th>Newest RM updated_at</th><td><code>%s</code></td></tr>',                          esc_html($newest ?? '—'));
+            echo '</tbody></table>';
+
+            if ($drift > 0) {
+                echo '<h3 style="margin-top:16px;">Top drift samples</h3>';
+                $samples = $repo->getDriftSamples(5);
+                if ($samples === []) {
+                    echo '<p>(none returned)</p>';
+                } else {
+                    echo '<table class="widefat striped" style="max-width:760px;">';
+                    echo '<thead><tr><th>Page ID</th><th style="text-align:right;">RM score</th><th style="text-align:right;">Live score</th><th style="text-align:right;">Drift</th><th>RM updated_at</th></tr></thead><tbody>';
+                    foreach ($samples as $row) {
+                        printf(
+                            '<tr><td>%s</td><td style="text-align:right;">%s</td><td style="text-align:right;">%s</td><td style="text-align:right;font-weight:bold;color:#dc3232;">%s</td><td><code>%s</code></td></tr>',
+                            esc_html((string) ($row->page_id   ?? '')),
+                            esc_html((string) ($row->rm_score   ?? '')),
+                            esc_html((string) ($row->live_score ?? '')),
+                            esc_html((string) ($row->drift      ?? '')),
+                            esc_html((string) ($row->rm_updated ?? '—'))
+                        );
+                    }
+                    echo '</tbody></table>';
+                }
+            }
+        },
+    ];
+    return $panels;
+});
+
 // Operator OS v1 Phase 2: contribute bcc-trust's secret/API-key
 // inventory to bcc-core's ApiKeysPage. Never raw values; the page
 // renders status + masked previews only. When introducing a new
