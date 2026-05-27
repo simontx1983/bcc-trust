@@ -180,7 +180,7 @@ final class RepairService
 
         set_transient('bcc_trust_repair_results', $results, 60);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'   => $results['action'] ?? 'unknown',
+            'action'   => $results['action'],
             'operator' => get_current_user_id(),
         ]);
         wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
@@ -272,7 +272,7 @@ final class RepairService
 
         set_transient('bcc_trust_repair_results', $results, 60);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'   => $results['action'] ?? 'unknown',
+            'action'   => $results['action'],
             'operator' => get_current_user_id(),
         ]);
         wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
@@ -317,7 +317,7 @@ final class RepairService
 
         set_transient('bcc_trust_repair_results', $results, 60);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'   => $results['action'] ?? 'unknown',
+            'action'   => $results['action'],
             'operator' => get_current_user_id(),
         ]);
         wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
@@ -406,7 +406,7 @@ final class RepairService
 
         set_transient('bcc_trust_repair_results', $results, 60);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'   => $results['action'] ?? 'unknown',
+            'action'   => $results['action'],
             'operator' => get_current_user_id(),
         ]);
         wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
@@ -436,7 +436,7 @@ final class RepairService
 
         set_transient('bcc_trust_repair_results', $results, 60);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'   => $results['action'] ?? 'unknown',
+            'action'   => $results['action'],
             'operator' => get_current_user_id(),
         ]);
         wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
@@ -573,11 +573,11 @@ final class RepairService
 
         set_transient('bcc_trust_repair_results', $results, 120);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'                => $results['action'] ?? 'complete_page_repair',
-            'score_rows_backfilled' => (int) ($results['score_rows_backfilled'] ?? 0),
+            'action'                => $results['action'],
+            'score_rows_backfilled' => (int) $results['score_rows_backfilled'],
             'operator'              => get_current_user_id(),
         ]);
-        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair&score_rows_backfilled=' . (int) ($results['score_rows_backfilled'] ?? 0)));
+        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair&score_rows_backfilled=' . (int) $results['score_rows_backfilled']));
         exit;
     }
 

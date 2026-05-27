@@ -94,15 +94,13 @@ final class HolderGroupsPage
         $service       = Plugin::instance()->nftGroupGateService();
         $totalJoined   = 0;
         $usersTouched  = 0;
-        $usersConsidered = is_array($userIds) ? count($userIds) : 0;
+        $usersConsidered = count($userIds);
 
-        if (is_array($userIds)) {
-            foreach ($userIds as $uid) {
-                $r = $service->reconcileForUser((int) $uid);
-                if (($r['joined'] ?? 0) > 0) {
-                    $totalJoined += (int) $r['joined'];
-                    $usersTouched++;
-                }
+        foreach ($userIds as $uid) {
+            $r = $service->reconcileForUser((int) $uid);
+            if (($r['joined'] ?? 0) > 0) {
+                $totalJoined += (int) $r['joined'];
+                $usersTouched++;
             }
         }
 
