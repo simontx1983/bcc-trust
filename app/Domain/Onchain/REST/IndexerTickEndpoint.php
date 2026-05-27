@@ -88,7 +88,7 @@ final class IndexerTickEndpoint
         $expected = self::expectedSecret();
         if ($expected === '') {
             \BCC\Core\Log\Logger::error('[IndexerTickEndpoint] BCC_INTERNAL_CRON_SECRET not configured');
-            return self::error(503, 'bcc_misconfigured', 'Internal cron secret not configured.');
+            return self::error(500, 'bcc_internal', 'Internal cron secret not configured.');
         }
 
         // Step 2: header check.
@@ -109,7 +109,7 @@ final class IndexerTickEndpoint
             \BCC\Core\Log\Logger::error('[IndexerTickEndpoint] runAllChains threw', [
                 'error' => $e->getMessage(),
             ]);
-            return self::error(500, 'bcc_indexer_failed', 'Indexer run threw: ' . $e->getMessage());
+            return self::error(500, 'bcc_internal', 'Indexer run threw: ' . $e->getMessage());
         }
 
         $elapsedMs = (int) round((microtime(true) - $startedAt) * 1000);

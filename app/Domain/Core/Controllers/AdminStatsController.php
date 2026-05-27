@@ -52,7 +52,7 @@ class AdminStatsController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'REST API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -82,7 +82,7 @@ class AdminStatsController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'REST API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -112,7 +112,7 @@ class AdminStatsController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'REST API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -141,7 +141,7 @@ class AdminStatsController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'REST API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -164,7 +164,7 @@ class AdminStatsController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'REST API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -197,7 +197,7 @@ class AdminStatsController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'REST API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -219,7 +219,7 @@ class AdminStatsController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'REST API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -252,7 +252,7 @@ class AdminStatsController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'REST API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return self::error('An unexpected error occurred.', 500);
+            return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
 
@@ -283,7 +283,11 @@ class AdminStatsController {
         ], 200);
     }
 
-    private static function error(string $message, int $status): WP_Error {
-        return new WP_Error('trust_error', $message, ['status' => $status]);
+    /**
+     * Emit a WP_Error with a stable §1.4.6 / Phase γ error code.
+     * Mirrors TrustRestController::errorWithCode (commit 3e27fa5).
+     */
+    private static function errorWithCode(string $code, string $message, int $status): WP_Error {
+        return new WP_Error($code, $message, ['status' => $status]);
     }
 }

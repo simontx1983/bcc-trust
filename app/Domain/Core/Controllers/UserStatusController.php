@@ -56,7 +56,7 @@ class UserStatusController {
         // Nonce is validated automatically by WordPress via the X-WP-Nonce header.
 
         if (!RateLimiter::allow('api')) {
-            return self::error('Too many requests. Please try again later.', 429);
+            return self::errorWithCode('bcc_rate_limited', 'Too many requests. Please try again later.', 429);
         }
 
         try {
@@ -144,7 +144,7 @@ class UserStatusController {
             \BCC\Core\Log\Logger::error('[bcc-trust] store_fingerprint failed', ['error' => $e->getMessage()]);
             $safeMessages = ['User not authenticated', 'Invalid fingerprint data', 'Invalid fingerprint format'];
             $message = in_array($e->getMessage(), $safeMessages, true) ? $e->getMessage() : 'An unexpected error occurred.';
-            return self::error($message, 400);
+            return self::errorWithCode('bcc_invalid_request', $message, 400);
         }
     }
 
@@ -155,7 +155,7 @@ class UserStatusController {
      */
     public static function get_user_status(WP_REST_Request $request) {
         if (!RateLimiter::allow('api')) {
-            return new \WP_Error('rate_limited', 'Too many requests.', ['status' => 429]);
+            return self::errorWithCode('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         try {
@@ -181,7 +181,7 @@ class UserStatusController {
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::error('[bcc-trust] get_user_status failed', ['error' => $e->getMessage()]);
             $message = $e->getMessage() === 'User not authenticated' ? $e->getMessage() : 'An unexpected error occurred.';
-            return self::error($message, 400);
+            return self::errorWithCode('bcc_invalid_request', $message, 400);
         }
     }
 
@@ -199,7 +199,11 @@ class UserStatusController {
         ], 200);
     }
 
-    private static function error(string $message, int $status): WP_Error {
-        return new WP_Error('trust_error', $message, ['status' => $status]);
+    /**
+     * Emit a WP_Error with a stable §1.4.6 / Phase γ error code.
+     * Mirrors TrustRestController::errorWithCode (commit 3e27fa5).
+     */
+    private static function errorWithCode(string $code, string $message, int $status): WP_Error {
+        return new WP_Error($code, $message, ['status' => $status]);
     }
 }
