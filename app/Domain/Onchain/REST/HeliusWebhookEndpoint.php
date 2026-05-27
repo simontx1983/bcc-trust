@@ -9,6 +9,7 @@ use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\SolanaFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\HeliusSeenSignaturesRepository;
+use BCC\Trust\Onchain\Services\HeliusDeliveryLog;
 use BCC\Trust\Onchain\Services\NftHoldingsIndexer;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -98,6 +99,11 @@ final class HeliusWebhookEndpoint
 
         if ($expectedAuth === '' || !hash_equals($expectedAuth, $providedAuth)) {
             self::logSignatureFailure();
+            HeliusDeliveryLog::record([
+                'outcome'     => HeliusDeliveryLog::OUTCOME_AUTH_FAILED,
+                'auth_passed' => false,
+                'ip'          => IpResolver::getClientIp(),
+            ]);
             return self::ok();
         }
 
@@ -110,28 +116,58 @@ final class HeliusWebhookEndpoint
         // it's read only by the admin dashboard.
         update_option(self::OPTION_LAST_DELIVERY_AT, time(), false);
 
+        $clientIp = IpResolver::getClientIp();
+
         // Step 2: parse body. Helius posts a list of enriched transactions
         // (or a single object — we accept both via array_is_list).
         $params = $request->get_json_params();
         if (!is_array($params)) {
+            HeliusDeliveryLog::record([
+                'outcome'     => HeliusDeliveryLog::OUTCOME_NO_PAYLOAD,
+                'auth_passed' => true,
+                'ip'          => $clientIp,
+            ]);
             return self::ok();
         }
         $transactions = array_is_list($params) ? $params : [$params];
         if ($transactions === []) {
+            HeliusDeliveryLog::record([
+                'outcome'     => HeliusDeliveryLog::OUTCOME_NO_PAYLOAD,
+                'auth_passed' => true,
+                'ip'          => $clientIp,
+            ]);
             return self::ok();
         }
 
         // Step 3: resolve Solana chain + fetcher once.
         $chain = ChainRepository::getBySlug('solana');
         if ($chain === null) {
+            HeliusDeliveryLog::record([
+                'outcome'     => HeliusDeliveryLog::OUTCOME_NO_CHAIN,
+                'auth_passed' => true,
+                'tx_count'    => count($transactions),
+                'ip'          => $clientIp,
+            ]);
             return self::ok();
         }
         $chainId = (int) $chain->id;
         if (!FetcherFactory::has_driver((string) $chain->chain_type)) {
+            HeliusDeliveryLog::record([
+                'outcome'     => HeliusDeliveryLog::OUTCOME_NO_CHAIN,
+                'auth_passed' => true,
+                'tx_count'    => count($transactions),
+                'ip'          => $clientIp,
+            ]);
             return self::ok();
         }
         $fetcher = FetcherFactory::make_for_chain($chain);
         if (!($fetcher instanceof SolanaFetcher)) {
+            HeliusDeliveryLog::record([
+                'outcome'     => HeliusDeliveryLog::OUTCOME_NO_CHAIN,
+                'auth_passed' => true,
+                'tx_count'    => count($transactions),
+                'ip'          => $clientIp,
+            ]);
             return self::ok();
         }
 
@@ -193,6 +229,15 @@ final class HeliusWebhookEndpoint
                 'replays_blocked' => $totalReplays,
             ]);
         }
+
+        HeliusDeliveryLog::record([
+            'outcome'     => HeliusDeliveryLog::OUTCOME_PROCESSED,
+            'auth_passed' => true,
+            'tx_count'    => count($transactions),
+            'events'      => $totalEvents,
+            'replays'     => $totalReplays,
+            'ip'          => $clientIp,
+        ]);
 
         return self::ok();
     }
