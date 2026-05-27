@@ -179,7 +179,11 @@ final class RepairService
         }
 
         set_transient('bcc_trust_repair_results', $results, 60);
-        wp_safe_redirect(admin_url('admin.php?page=bcc-trust-dashboard&tab=repair'));
+        Logger::info('[bcc-trust] Repair action complete', [
+            'action'   => $results['action'] ?? 'unknown',
+            'operator' => get_current_user_id(),
+        ]);
+        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
         exit;
     }
 
@@ -267,7 +271,11 @@ final class RepairService
         Plugin::instance()->pageReadModelRepository()->syncAll();
 
         set_transient('bcc_trust_repair_results', $results, 60);
-        wp_safe_redirect(admin_url('admin.php?page=bcc-trust-dashboard&tab=repair'));
+        Logger::info('[bcc-trust] Repair action complete', [
+            'action'   => $results['action'] ?? 'unknown',
+            'operator' => get_current_user_id(),
+        ]);
+        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
         exit;
     }
 
@@ -308,7 +316,11 @@ final class RepairService
         $fingerprintRepo->deleteHighAutomationOlderThan($automationHigh, $automationCutoff);
 
         set_transient('bcc_trust_repair_results', $results, 60);
-        wp_safe_redirect(admin_url('admin.php?page=bcc-trust-dashboard&tab=repair'));
+        Logger::info('[bcc-trust] Repair action complete', [
+            'action'   => $results['action'] ?? 'unknown',
+            'operator' => get_current_user_id(),
+        ]);
+        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
         exit;
     }
 
@@ -393,7 +405,11 @@ final class RepairService
         }
 
         set_transient('bcc_trust_repair_results', $results, 60);
-        wp_safe_redirect(admin_url('admin.php?page=bcc-trust-dashboard&tab=repair'));
+        Logger::info('[bcc-trust] Repair action complete', [
+            'action'   => $results['action'] ?? 'unknown',
+            'operator' => get_current_user_id(),
+        ]);
+        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
         exit;
     }
 
@@ -419,7 +435,11 @@ final class RepairService
         $results['suspensions_archived']   = $suspensionRepo->archiveOldClosed(BCC_TRUST_CLEANUP_SUSPENSIONS);
 
         set_transient('bcc_trust_repair_results', $results, 60);
-        wp_safe_redirect(admin_url('admin.php?page=bcc-trust-dashboard&tab=repair'));
+        Logger::info('[bcc-trust] Repair action complete', [
+            'action'   => $results['action'] ?? 'unknown',
+            'operator' => get_current_user_id(),
+        ]);
+        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
         exit;
     }
 
@@ -547,8 +567,12 @@ final class RepairService
         Plugin::instance()->pageReadModelRepository()->syncAll();
 
         set_transient('bcc_trust_repair_results', $results, 120);
-
-        wp_safe_redirect(admin_url('admin.php?page=bcc-trust-dashboard&tab=repair&fixed=' . $results['pages_created']));
+        Logger::info('[bcc-trust] Repair action complete', [
+            'action'        => $results['action'] ?? 'complete_page_repair',
+            'pages_created' => (int) ($results['pages_created'] ?? 0),
+            'operator'      => get_current_user_id(),
+        ]);
+        wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair&fixed=' . (int) ($results['pages_created'] ?? 0)));
         exit;
     }
 
@@ -561,10 +585,16 @@ final class RepairService
     {
         $this->securityCheck();
 
-        $synced = Plugin::instance()->userSyncService()->sync();
+        $synced = (int) Plugin::instance()->userSyncService()->sync();
+
+        Logger::info('[bcc-trust] Repair action complete', [
+            'action'   => 'sync_users',
+            'synced'   => $synced,
+            'operator' => get_current_user_id(),
+        ]);
 
         wp_safe_redirect(
-            admin_url('admin.php?page=bcc-trust-dashboard&tab=repair&sync_done=' . intval($synced))
+            admin_url('admin.php?page=bcc-system-repair&sync_done=' . $synced)
         );
         exit;
     }

@@ -28,8 +28,10 @@ class ChainsPage
 
     public static function register_page(): void
     {
+        // Audit follow-up: relocated under BCC System alongside the
+        // other onchain admin pages. Page slug unchanged.
         add_submenu_page(
-            'bcc-trust-dashboard',
+            'bcc-system-health',
             'Chains',
             'Chains',
             'manage_options',
@@ -56,6 +58,12 @@ class ChainsPage
 
         $chainId = (int) ($_POST['chain_id'] ?? 0);
         $chain   = ChainRepository::getById($chainId);
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Chain validator refresh (manual)', [
+            'action'   => 'chain_refresh_validators',
+            'chain_id' => $chainId,
+            'operator' => get_current_user_id(),
+        ]);
 
         if (!$chain) {
             wp_send_json_error(['message' => 'Chain not found.']);
@@ -130,6 +138,12 @@ class ChainsPage
 
         $chainId = (int) ($_POST['chain_id'] ?? 0);
         $chain   = ChainRepository::getById($chainId);
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Chain collection refresh (manual)', [
+            'action'   => 'chain_refresh_collections',
+            'chain_id' => $chainId,
+            'operator' => get_current_user_id(),
+        ]);
 
         if (!$chain) {
             wp_send_json_error(['message' => 'Chain not found.']);

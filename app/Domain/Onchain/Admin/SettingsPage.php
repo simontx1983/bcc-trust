@@ -34,8 +34,14 @@ class SettingsPage
 
     public static function register_page(): void
     {
+        // Audit follow-up (HIGH item #3): the three onchain admin pages
+        // (On-Chain Signals, Chains, Verify Collections) were relocated
+        // out of the Trust Engine menu and under BCC System so all
+        // onchain config + monitoring lives in one menu alongside
+        // Webhooks + Holder Groups (Phase 2 additions). Page slug
+        // unchanged — existing bookmarks still work.
         add_submenu_page(
-            'bcc-trust-dashboard',
+            'bcc-system-health',
             'On-Chain Signals',
             'On-Chain Signals',
             'manage_options',

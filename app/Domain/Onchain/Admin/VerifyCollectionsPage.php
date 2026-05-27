@@ -49,8 +49,10 @@ final class VerifyCollectionsPage
 
     public static function register_page(): void
     {
+        // Audit follow-up: relocated under BCC System alongside the
+        // other onchain admin pages. Page slug unchanged.
         add_submenu_page(
-            'bcc-trust-dashboard',
+            'bcc-system-health',
             'Verify Collections',
             'Verify Collections',
             'manage_options',
@@ -484,6 +486,14 @@ final class VerifyCollectionsPage
 
         $changed = CollectionRepository::setVerifiedBulk($verify, $unverify);
 
+        \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections save', [
+            'action'    => 'verify_collections_save',
+            'verified'  => count($verify),
+            'unverified' => count($unverify),
+            'changed'   => $changed,
+            'operator'  => get_current_user_id(),
+        ]);
+
         return [[
             'type'    => 'success',
             'message' => sprintf(
@@ -503,6 +513,14 @@ final class VerifyCollectionsPage
         $saveNotices = self::handleSave();
 
         $result = Plugin::instance()->gatedGroupProvisioningService()->provisionAll();
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections provision (manual)', [
+            'action'   => 'gated_group_provision_manual',
+            'created'  => (int) ($result['created'] ?? 0),
+            'skipped'  => (int) ($result['skipped'] ?? 0),
+            'errors'   => count($result['errors'] ?? []),
+            'operator' => get_current_user_id(),
+        ]);
 
         $message = sprintf(
             'Provisioning sweep ran: %d created, %d skipped (already exist or missing metadata).',

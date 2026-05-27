@@ -1707,4 +1707,22 @@ if (is_admin()) {
             require_once $path;
         }
     }
+
+    // Audit follow-up (HIGH item #1): Repair was moved out of the
+    // Dashboard tab nav to its own submenu under bcc-core's BCC
+    // System menu. The render function still lives in tabs/tab-repair.php
+    // (renaming would just churn references); load it eagerly here
+    // so the new admin page can call it even when the Dashboard
+    // isn't visited.
+    require_once BCC_TRUST_PATH . 'includes/admin/tabs/tab-repair.php';
+    add_action('admin_menu', function () {
+        add_submenu_page(
+            'bcc-system-health',
+            'Repair (dangerous)',
+            '🔧 Repair',
+            'manage_options',
+            'bcc-system-repair',
+            'bcc_trust_render_repair_tab'
+        );
+    }, 25);
 }

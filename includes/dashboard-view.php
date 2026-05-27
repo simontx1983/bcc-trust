@@ -23,9 +23,11 @@ require_once $tabs_dir . 'tab-fraud.php';
 require_once $tabs_dir . 'tab-devices.php';
 require_once $tabs_dir . 'tab-rings.php';
 require_once $tabs_dir . 'tab-ml.php';
-require_once $tabs_dir . 'tab-repair.php';
 require_once $tabs_dir . 'tab-push.php';
 require_once BCC_TRUST_PATH . 'includes/admin/dashboard-verified.php';
+// Note: tab-repair.php is no longer required here — Repair was moved
+// out of the Dashboard tab nav to "BCC System → Repair" and is
+// loaded from bcc-trust.php at module boot.
 
 $current_tab = isset( $_GET['tab'] ) ? sanitize_key( $_GET['tab'] ) : 'overview';
 
@@ -42,12 +44,11 @@ $tabs = [
     'devices'   => 'Devices',
     'rings'     => 'Vote Rings',
     'ml'        => 'ML Insights',
-    'repair'    => '🔧 Repair',
     'push'      => 'Push Stats',
 ];
 
 // Highlight tabs that need attention
-$attention_tabs = [ 'repair' => '#f0f8ff', 'verified' => '#e6f3e6' ];
+$attention_tabs = [ 'verified' => '#e6f3e6' ];
 ?>
 
 <nav class="nav-tab-wrapper">
@@ -75,7 +76,6 @@ $attention_tabs = [ 'repair' => '#f0f8ff', 'verified' => '#e6f3e6' ];
         case 'devices':   bcc_trust_render_devices_tab();   break;
         case 'rings':     bcc_trust_render_rings_tab();     break;
         case 'ml':        bcc_trust_render_ml_tab();        break;
-        case 'repair':    bcc_trust_render_repair_tab();    break;
         case 'push':      bcc_trust_render_push_tab();      break;
         default:          bcc_trust_render_overview_tab();  break;
     }
