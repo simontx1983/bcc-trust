@@ -2,30 +2,30 @@
 
 namespace BCC\Trust\Onchain\Controllers;
 
-use BCC\Core\Wallet\WalletIdentityService;
-use BCC\Core\Wallet\WalletVerificationRequest;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
-use BCC\Core\Log\Logger;
-use BCC\Trust\Onchain\Services\CollectionService;
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
 /**
- * Wallet Connect & Verify
+ * Wallet REST surface for the bcc/v1 namespace.
  *
- * Handles the full wallet lifecycle:
- *  1. Generate a nonce/challenge message
- *  2. User signs with wallet (MetaMask / Keplr / Phantom)
- *  3. Server verifies signature → inserts wallet_link row → marks verified
- *  4. CRUD: list, set-primary, disconnect
+ * Exposes the self-service wallet endpoints consumed by the Next.js
+ * settings + claim flows (§4.24 of the API contract):
  *
- * Signature verification delegates to \BCC\Core\Crypto\WalletVerifier.
+ *  - GET    /wallets                       — list current user's wallets
+ *  - DELETE /wallets/{id}                  — unlink (idempotent)
+ *  - GET    /wallets/project/{post_id}     — wallets on a project page
+ *  - GET    /chains                        — enabled-chain catalog
+ *
+ * Wallet linking + signature verification for credential auth lives in
+ * \BCC\Trust\Core\REST\AuthEndpoint (§4.1: /auth/nonce, /auth/wallet-link,
+ * /auth/wallet-nonce, /auth/wallet-login, /auth/wallet-signup).
  *
  * @phpstan-import-type WalletWithChain from WalletRepository
  */
@@ -36,260 +36,7 @@ class WalletController
      */
     public static function init(): void
     {
-        add_action('wp_ajax_bcc_wallet_challenge',    [__CLASS__, 'ajax_challenge']);
-        add_action('wp_ajax_bcc_wallet_verify',       [__CLASS__, 'ajax_verify']);
-        add_action('wp_ajax_bcc_wallet_disconnect',   [__CLASS__, 'ajax_disconnect']);
-        add_action('wp_ajax_bcc_wallet_set_primary',  [__CLASS__, 'ajax_set_primary']);
-        add_action('wp_ajax_bcc_wallet_list',         [__CLASS__, 'ajax_list']);
-        add_action('wp_ajax_bcc_collection_toggle_profile', [__CLASS__, 'ajax_toggle_collection_profile']);
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
-    }
-
-    // ── AJAX: Generate Challenge ─────────────────────────────────────────────
-
-    public static function ajax_challenge(): void
-    {
-        // Phase 1.7 dead-code observability (2026-05-09): no caller found
-        // in any JS / PHP / TS in the codebase; SPA flows go through REST.
-        // Recording before the nonce check so we capture failed-nonce hits
-        // too (attackers / cached pre-deploy pages / external scripts).
-        // 30-day zero-hit window → safe to retire per V-08 Phase D.
-        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_challenge');
-        check_ajax_referer('bcc_wallet_nonce', 'nonce');
-
-        $user_id = get_current_user_id();
-        if (!$user_id) {
-            wp_send_json_error(['message' => 'Not logged in.'], 401);
-        }
-
-        // Rate limit: 10 requests per minute per user (atomic).
-        if (!\BCC\Core\Security\Throttle::allow('wallet_challenge', 10, 60)) {
-            wp_send_json_error(['message' => 'Too many requests. Please wait.'], 429);
-        }
-
-        $chain_slug     = sanitize_text_field($_POST['chain_slug'] ?? '');
-        $wallet_address = sanitize_text_field($_POST['wallet_address'] ?? '');
-
-        if (!$chain_slug || !$wallet_address) {
-            wp_send_json_error(['message' => 'Missing chain or address.'], 400);
-        }
-
-        $chain_id = ChainRepository::resolveId($chain_slug);
-        if (!$chain_id) {
-            wp_send_json_error(['message' => 'Unsupported chain.'], 400);
-        }
-
-        // Validate wallet address format against the chain type before generating a challenge.
-        $chain = ChainRepository::getById($chain_id);
-        if ($chain && !self::validateAddressFormat($wallet_address, $chain->chain_type ?? '')) {
-            wp_send_json_error(['message' => 'Invalid wallet address format.'], 400);
-        }
-
-        $challenge = WalletIdentityService::generateChallenge(
-            $user_id,
-            $chain_slug,
-            $chain_id,
-            $wallet_address
-        );
-
-        wp_send_json_success([
-            'message' => $challenge['message'],
-            'nonce'   => $challenge['nonce'],
-        ]);
-    }
-
-    // ── AJAX: Verify Signature ───────────────────────────────────────────────
-
-    public static function ajax_verify(): void
-    {
-        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
-        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_verify');
-        check_ajax_referer('bcc_wallet_nonce', 'nonce');
-
-        if (!\BCC\Core\Security\Throttle::allow('wallet_verify', 5, 60)) {
-            wp_send_json_error(['message' => 'Too many requests.'], 429);
-        }
-
-        $user_id = get_current_user_id();
-        if (!$user_id) {
-            wp_send_json_error(['message' => 'Not logged in.'], 401);
-        }
-
-        $wallet_address = sanitize_text_field($_POST['wallet_address'] ?? '');
-        $post_id        = (int) ($_POST['post_id'] ?? 0);
-        $wallet_type    = sanitize_text_field($_POST['wallet_type'] ?? 'user');
-        $label          = sanitize_text_field($_POST['label'] ?? '');
-
-        $raw_sig   = wp_unslash($_POST['signature'] ?? '');
-        $signature = wp_strip_all_tags($raw_sig);
-
-        if (!$wallet_address || !$signature) {
-            wp_send_json_error(['message' => 'Missing address or signature.'], 400);
-        }
-
-        // Peek at the stored challenge (non-destructive) to resolve
-        // the chain metadata. The atomic consume happens inside
-        // WalletIdentityService::verifyAndLink() so the challenge
-        // cannot be used twice even if verification then fails.
-        $challenge = WalletIdentityService::peekChallenge($user_id, $wallet_address);
-
-        if (!$challenge) {
-            wp_send_json_error(['message' => 'Challenge not found or expired. Please try again.'], 400);
-        }
-
-        $chain = ChainRepository::getById((int) $challenge['chain_id']);
-        if (!$chain) {
-            wp_send_json_error(['message' => 'Chain not found.'], 400);
-        }
-
-        // Pre-check: reject re-verification attempts with 409.
-        if (WalletRepository::exists($user_id, (int) $chain->id, $wallet_address)) {
-            wp_send_json_error(['message' => 'This wallet is already linked to your account.'], 409);
-        }
-
-        // Pre-check: reject if wallet is already linked to a different user.
-        if (WalletRepository::existsForOtherUser($user_id, (int) $chain->id, $wallet_address)) {
-            wp_send_json_error(['message' => 'This wallet is already linked to another account.'], 409);
-        }
-
-        // Single execution pipeline: consume challenge + verify signature
-        // + link wallet + fire event. challengeMessage is sourced server-
-        // side inside verifyAndLink() — never from caller input.
-        $result = WalletIdentityService::verifyAndLink(
-            WalletVerificationRequest::fromArray([
-                'userId'        => $user_id,
-                'chainSlug'     => $chain->slug,
-                'chainType'     => $chain->chain_type,
-                'chainId'       => (int) $chain->id,
-                'walletAddress' => $wallet_address,
-                'signature'     => $signature,
-                'postId'        => $post_id,
-                'walletType'    => $wallet_type,
-                'label'         => $label,
-            ])
-        );
-
-        if (!$result['success']) {
-            wp_send_json_error(['message' => $result['message']], 403);
-        }
-
-        Logger::audit('wallet_connected', ['user_id' => $user_id, 'chain' => $chain->slug, 'address' => $wallet_address]);
-
-        wp_send_json_success([
-            'wallet_link_id' => $result['wallet_link_id'],
-            'chain'          => $chain->slug,
-            'chain_name'     => $chain->name,
-            'address'        => $wallet_address,
-            'wallet_type'    => $wallet_type,
-            'verified'       => true,
-        ]);
-    }
-
-    // ── AJAX: Disconnect Wallet ──────────────────────────────────────────────
-
-    public static function ajax_disconnect(): void
-    {
-        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
-        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_disconnect');
-        check_ajax_referer('bcc_wallet_nonce', 'nonce');
-
-        if (!\BCC\Core\Security\Throttle::allow('wallet_disconnect', 5, 60)) {
-            wp_send_json_error(['message' => 'Too many requests.'], 429);
-        }
-
-        $user_id        = get_current_user_id();
-        $wallet_link_id = (int) ($_POST['wallet_link_id'] ?? 0);
-
-        if (!$user_id || !$wallet_link_id) {
-            wp_send_json_error(['message' => 'Invalid request.'], 400);
-        }
-
-        // Resolve chain + address BEFORE deleting so we can notify listeners.
-        $wallet = WalletRepository::getById($wallet_link_id);
-        if (!$wallet || (int) $wallet->user_id !== $user_id) {
-            wp_send_json_error(['message' => 'Wallet not found or not yours.'], 404);
-        }
-
-        // Single execution pipeline: delete + fire event.
-        $deleted = WalletIdentityService::unlinkWallet(
-            $user_id,
-            $wallet->chain_slug,
-            $wallet->wallet_address
-        );
-
-        if (!$deleted) {
-            wp_send_json_error(['message' => 'Failed to disconnect wallet.'], 500);
-        }
-
-        Logger::audit('wallet_disconnected', ['user_id' => get_current_user_id(), 'wallet_id' => $wallet_link_id]);
-
-        wp_send_json_success(['deleted' => $wallet_link_id]);
-    }
-
-    // ── AJAX: Set Primary ────────────────────────────────────────────────────
-
-    public static function ajax_set_primary(): void
-    {
-        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
-        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_set_primary');
-        check_ajax_referer('bcc_wallet_nonce', 'nonce');
-
-        if (!\BCC\Core\Security\Throttle::allow('wallet_primary', 10, 60)) {
-            wp_send_json_error(['message' => 'Too many requests.'], 429);
-        }
-
-        $user_id        = get_current_user_id();
-        $wallet_link_id = (int) ($_POST['wallet_link_id'] ?? 0);
-
-        if (!$user_id || !$wallet_link_id) {
-            wp_send_json_error(['message' => 'Invalid request.'], 400);
-        }
-
-        $result = WalletRepository::setPrimary($wallet_link_id, $user_id);
-
-        if (!$result) {
-            wp_send_json_error(['message' => 'Wallet not found or not yours.'], 404);
-        }
-
-        wp_send_json_success(['primary' => $wallet_link_id]);
-    }
-
-    // ── AJAX: List Wallets ───────────────────────────────────────────────────
-
-    public static function ajax_list(): void
-    {
-        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
-        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'wallet_list');
-        check_ajax_referer('bcc_wallet_nonce', 'nonce');
-
-        if (!\BCC\Core\Security\Throttle::allow('wallet_list', 20, 60)) {
-            wp_send_json_error(['message' => 'Too many requests.'], 429);
-        }
-
-        $user_id = get_current_user_id();
-        if (!$user_id) {
-            wp_send_json_error(['message' => 'Not logged in.'], 401);
-        }
-
-        $wallets = WalletRepository::getForUser($user_id);
-
-        wp_send_json_success([
-            'wallets' => array_map(function ($w) {
-                return [
-                    'id'             => (int) $w->id,
-                    'wallet_address' => $w->wallet_address,
-                    'chain_slug'     => $w->chain_slug,
-                    'chain_name'     => $w->chain_name,
-                    'chain_type'     => $w->chain_type,
-                    'explorer_url'   => $w->explorer_url,
-                    'wallet_type'    => $w->wallet_type,
-                    'label'          => $w->label,
-                    'is_primary'     => (bool) $w->is_primary,
-                    'verified'       => !empty($w->verified_at),
-                    'created_at'     => $w->created_at,
-                ];
-            }, $wallets),
-        ]);
     }
 
     // ── REST API Routes ──────────────────────────────────────────────────────
@@ -488,49 +235,4 @@ class WalletController
         return rest_ensure_response($safe);
     }
 
-    // ── Signature Verification ───────────────────────────────────────────────
-    // All crypto verification is handled by \BCC\Core\Crypto\WalletVerifier.
-
-    // ── AJAX: Toggle Collection Profile Visibility ─────────────────────────
-
-    public static function ajax_toggle_collection_profile(): void
-    {
-        // Phase 1.7 dead-code observability (2026-05-09) — see ajax_challenge above.
-        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'collection_toggle_profile');
-        check_ajax_referer('bcc_wallet_nonce', 'nonce');
-
-        if (!\BCC\Core\Security\Throttle::allow('collection_toggle', 10, 60)) {
-            wp_send_json_error(['message' => 'Too many requests.'], 429);
-        }
-
-        $user_id       = get_current_user_id();
-        $collection_id = (int) ($_POST['collection_id'] ?? 0);
-        $show          = filter_var($_POST['show'] ?? true, FILTER_VALIDATE_BOOLEAN);
-
-        if (!$user_id || !$collection_id) {
-            wp_send_json_error(['message' => 'Invalid request.'], 400);
-        }
-
-        $updated = CollectionService::toggleProfileVisibility($collection_id, $user_id, $show);
-
-        if (!$updated) {
-            wp_send_json_error(['message' => 'Collection not found or not yours.'], 404);
-        }
-
-        wp_send_json_success(['collection_id' => $collection_id, 'show_on_profile' => $show]);
-    }
-
-
-    /**
-     * Validate wallet address format against the chain type.
-     *
-     * Delegates to the shared validator so the V1 REST endpoint
-     * (AuthEndpoint) and the legacy AJAX path here use identical
-     * matching rules — extracting one was the contract-correction
-     * trigger; both call sites now route through the same code.
-     */
-    private static function validateAddressFormat(string $address, string $chainType): bool
-    {
-        return \BCC\Trust\Core\Support\WalletAddressValidator::validate($address, $chainType);
-    }
 }
