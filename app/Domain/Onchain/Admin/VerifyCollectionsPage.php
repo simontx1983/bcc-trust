@@ -218,7 +218,11 @@ final class VerifyCollectionsPage
 
                 <p class="submit" style="margin:0 0 12px 0;">
                     <button type="submit" class="button button-primary">Save Verification Changes</button>
-                    <button type="submit" name="bcc_vc_action" value="provision" class="button">Provision Now</button>
+                    <button type="submit"
+                            name="bcc_vc_action"
+                            value="provision"
+                            class="button"
+                            onclick="return confirm('Run the provisioning sweep now? This may create PeepSo groups for any newly-verified collections and may trigger member-join writes. Continue?');">Provision Now</button>
                 </p>
 
                 <table class="widefat striped">

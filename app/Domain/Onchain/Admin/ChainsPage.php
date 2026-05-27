@@ -288,7 +288,9 @@ class ChainsPage
         </table>
 
         <p style="margin-top:16px">
-            <button class="button button-primary" id="bcc-refresh-all">Refresh All Chains</button>
+            <button class="button button-primary"
+                    id="bcc-refresh-all"
+                    onclick="return confirm('Refresh validators for ALL chains? This fans out per-chain API calls (Alchemy / Helius / Subscan / etc.), can take 1-3 minutes, and consumes provider quota. Confirm only if you actually want a full refresh — for one chain, use the per-row Refresh button instead.');">Refresh All Chains</button>
             <span id="bcc-refresh-all-status" style="margin-left:12px;font-size:13px;"></span>
         </p>
         <?php
@@ -362,7 +364,9 @@ class ChainsPage
         </table>
 
         <p style="margin-top:16px">
-            <button class="button button-primary" id="bcc-refresh-all">Refresh All Collections</button>
+            <button class="button button-primary"
+                    id="bcc-refresh-all"
+                    onclick="return confirm('Refresh top NFT collections for ALL chains? This fans out per-chain API calls (Alchemy / Helius / Cosmos LCD / etc.) and consumes provider quota. Confirm only if you actually want a full refresh — for one chain, use the per-row Refresh button instead.');">Refresh All Collections</button>
             <span id="bcc-refresh-all-status" style="margin-left:12px;font-size:13px;"></span>
         </p>
         <?php
