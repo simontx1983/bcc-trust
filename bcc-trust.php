@@ -380,6 +380,46 @@ add_filter(
     [\BCC\Trust\Onchain\Services\NftIndexerHealthSnapshot::class, 'contribute']
 );
 
+// Operator OS v1 Phase 2: contribute bcc-trust's canonical cron hooks
+// to bcc-core's CronPage drift detector. The hook list mirrors the
+// recurring-hooks table in docs/cron-registry.md — keep in sync when
+// adding/retiring a recurring hook. Dynamic hooks (per-chain
+// bcc_chain_refresh_*) and single-event hooks intentionally excluded
+// from drift detection (the former are registered at runtime, the
+// latter are fire-once jobs whose "missing" state means "no recent
+// queue activity," not "drift").
+add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
+    $bccTrustHooks = [
+        // Core domain
+        'bcc_trust_daily_cleanup'         => ['interval' => 'daily',                'description' => 'audit-log retention + daily housekeeping'],
+        'bcc_trust_hourly_recalc'         => ['interval' => 'hourly',               'description' => 'page-score recalculation sweep'],
+        'bcc_trust_daily_ml_update'       => ['interval' => 'daily',                'description' => 'fraud-detection ML refresh'],
+        'bcc_trust_daily_graph_update'    => ['interval' => 'daily',                'description' => 'trust-graph rank + vote/endorsement ring detection'],
+        'bcc_trust_daily_vesting'         => ['interval' => 'daily',                'description' => 'vote-weight vesting promotion'],
+        'bcc_trust_process_recalculations'=> ['interval' => 'bcc_five_minutes',     'description' => 'recalc queue worker'],
+        'bcc_trust_daily_maintenance'     => ['interval' => 'daily',                'description' => 'read-model sync safety net'],
+        'bcc_trust_weekly_digest'         => ['interval' => 'bcc_weekly',           'description' => 'weekly digest mailer'],
+        'bcc_trust_deferred_rm_sync'      => ['interval' => 'bcc_thirty_seconds',   'description' => 'read-model deferred-rebuild for staleness recovery'],
+        'bcc_trust_divergence_state_sweep'=> ['interval' => 'daily',                'description' => 'divergence-state classification + §J.7 notifications'],
+        // Onchain domain
+        'bcc_onchain_daily_refresh'       => ['interval' => 'daily',                'description' => 'onchain holdings refresh sweep'],
+        'bcc_onchain_retry_bonus'         => ['interval' => 'hourly',               'description' => 'onchain bonus-application retry'],
+        'bcc_gated_group_provision'       => ['interval' => 'daily',                'description' => 'holder-group provisioning (PeepSo write surface)'],
+        'bcc_gated_group_reconcile_sweep' => ['interval' => 'twicedaily',           'description' => 'holder-group reconcile sweep'],
+        'bcc_nft_eth_indexer_tick'        => ['interval' => 'bcc_one_minute',       'description' => 'NFT EVM indexer per-chain tick'],
+        'bcc_helius_dedupe_sweep'         => ['interval' => 'bcc_five_minutes',     'description' => 'Helius signature replay LRU eviction'],
+        'bcc_nft_enrichment_tick'         => ['interval' => 'bcc_five_minutes',     'description' => 'NFT metadata backfill (name + image_url)'],
+        'bcc_watch_batch_sweep'           => ['interval' => 'bcc_pull_batch_sweep_minute', 'description' => 'WatchBatchAggregator sweep'],
+        // Disputes domain
+        'bcc_disputes_auto_resolve'       => ['interval' => 'daily',                'description' => 'dispute auto-resolve sweep'],
+        'bcc_disputes_reconcile'          => ['interval' => 'bcc_five_minutes',     'description' => 'dispute reconcile (covers cron + AS enqueue failures)'],
+    ];
+    foreach ($bccTrustHooks as $hook => $meta) {
+        $hooks[$hook] = array_merge($meta, ['source' => 'bcc-trust']);
+    }
+    return $hooks;
+});
+
 // V2 Phase 1b: dedupe-sweep cron handler. Bounded operationally —
 // see HeliusSeenSignaturesRepository for the cap + alarm rules.
 add_action('bcc_helius_dedupe_sweep', static function (): void {
