@@ -65,7 +65,7 @@ class PageEndpoint {
         // Rate limit: 60 requests per minute per user/IP
         if (!RateLimiter::allow('page_read', 60, 60)) {
             return new WP_Error(
-                'rate_limited',
+                'bcc_rate_limited',
                 'Too many requests. Please try again shortly.',
                 ['status' => 429]
             );
@@ -79,7 +79,7 @@ class PageEndpoint {
 
         if ( ! $data ) {
             return new WP_Error(
-                'not_found',
+                'bcc_not_found',
                 'Page not found.',
                 ['status' => 404]
             );

@@ -60,7 +60,7 @@ class FlagEndpoint
     {
         if (!RateLimiter::allow('flag')) {
             return new WP_REST_Response(
-                ['code' => 'rate_limited', 'message' => 'Too many requests. Please wait.'],
+                ['code' => 'bcc_rate_limited', 'message' => 'Too many requests. Please wait.'],
                 429
             );
         }
@@ -73,7 +73,7 @@ class FlagEndpoint
         // Verify page exists
         if (!get_post($pageId)) {
             return new WP_REST_Response(
-                ['code' => 'not_found', 'message' => 'Page not found.'],
+                ['code' => 'bcc_not_found', 'message' => 'Page not found.'],
                 404
             );
         }

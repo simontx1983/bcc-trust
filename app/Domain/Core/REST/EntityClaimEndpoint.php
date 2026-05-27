@@ -55,7 +55,7 @@ final class EntityClaimEndpoint
     {
         if (!\BCC\Core\Security\Throttle::allow('claim_entity', 10, 60)) {
             return new WP_REST_Response(
-                ['code' => 'rate_limited', 'message' => 'Too many requests. Please wait.'],
+                ['code' => 'bcc_rate_limited', 'message' => 'Too many requests. Please wait.'],
                 429
             );
         }

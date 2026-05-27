@@ -117,7 +117,7 @@ class XController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'X API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return new WP_Error('x_error', 'An unexpected error occurred. Please try again.', ['status' => 500]);
+            return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }
 
@@ -224,7 +224,7 @@ class XController {
             // server log above.
             wp_safe_redirect(add_query_arg([
                 'x_verified' => 'error',
-                'x_error'    => 'oauth_failed',
+                'bcc_internal'    => 'oauth_failed',
             ], $errorBase));
             exit;
         }
@@ -257,7 +257,7 @@ class XController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'X API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return new WP_Error('x_error', 'An unexpected error occurred. Please try again.', ['status' => 500]);
+            return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }
 
@@ -270,7 +270,7 @@ class XController {
     public static function verifyShare(): WP_REST_Response|WP_Error {
         try {
             if (!RateLimiter::allow('x_verify_share', 5, 60)) {
-                return new WP_Error('rate_limited', 'Too many attempts. Please wait a minute.', ['status' => 429]);
+                return new WP_Error('bcc_rate_limited', 'Too many attempts. Please wait a minute.', ['status' => 429]);
             }
 
             $userId = get_current_user_id();
@@ -311,7 +311,7 @@ class XController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::error('[bcc-trust] verifyShare() error', ['error' => $e->getMessage()]);
-            return new WP_Error('x_error', 'Verification failed. Please try again.', ['status' => 500]);
+            return new WP_Error('bcc_internal', 'Verification failed. Please try again.', ['status' => 500]);
         }
     }
 
@@ -336,7 +336,7 @@ class XController {
 
         } catch (Exception $e) {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'X API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
-            return new WP_Error('x_error', 'An unexpected error occurred. Please try again.', ['status' => 500]);
+            return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }
 
