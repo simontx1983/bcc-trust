@@ -40,12 +40,14 @@ final class GatedGroupProvisioningService {
 
         if (!class_exists('\\PeepSoGroup')) {
             $errors[] = 'PeepSoGroup class not available; PeepSo Groups inactive?';
+            \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'peepso_absent');
             return ['created' => 0, 'skipped' => 0, 'errors' => $errors];
         }
 
         $ownerId = $this->resolveOwnerId();
         if ($ownerId === 0) {
             $errors[] = 'No administrator user found to own auto-provisioned groups.';
+            \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'no_admin_owner');
             return ['created' => 0, 'skipped' => 0, 'errors' => $errors];
         }
 
@@ -83,6 +85,12 @@ final class GatedGroupProvisioningService {
                     $colId,
                     $contract
                 );
+                // Covers both `new PeepSoGroup` returning a 0-id group
+                // and the catch-block path inside createPeepSoGroup
+                // (PeepSoGroup constructor threw). Either way the
+                // collection stays unprovisioned and the sweep will
+                // retry next tick.
+                \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'group_create_failed');
                 continue;
             }
 
