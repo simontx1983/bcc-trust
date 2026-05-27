@@ -149,7 +149,7 @@ function bcc_trust_render_verified_tab() {
                     <input type="submit" class="button" value="Apply">
                     
                     <?php if ($search): ?>
-                        <a href="<?php echo esc_url(admin_url('admin.php?page=bcc-trust-dashboard&tab=verified')); ?>" class="button">Clear Search</a>
+                        <a href="<?php echo esc_url(admin_url('admin.php?page=bcc-trust-dashboard&tab=users&sub=verified')); ?>" class="button">Clear Search</a>
                     <?php endif; ?>
                 </div>
 

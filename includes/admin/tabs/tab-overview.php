@@ -162,9 +162,9 @@ function bcc_trust_render_overview_tab() {
             $links = [
                 [ 'label' => 'View High-Risk Users',  'url' => admin_url( 'admin.php?page=bcc-trust-moderation&filter=high_fraud' ) ],
                 [ 'label' => 'View Suspended Users',  'url' => admin_url( 'admin.php?page=bcc-trust-moderation&filter=suspended' ) ],
-                [ 'label' => 'Vote Ring Detection',   'url' => admin_url( 'admin.php?page=bcc-trust-dashboard&tab=rings' ) ],
+                [ 'label' => 'Vote Ring Detection',   'url' => admin_url( 'admin.php?page=bcc-trust-dashboard&tab=signals&sub=rings' ) ],
                 [ 'label' => 'Fraud Detection',       'url' => admin_url( 'admin.php?page=bcc-trust-dashboard&tab=fraud' ) ],
-                [ 'label' => 'Device Investigation',  'url' => admin_url( 'admin.php?page=bcc-trust-dashboard&tab=devices' ) ],
+                [ 'label' => 'Device Investigation',  'url' => admin_url( 'admin.php?page=bcc-trust-dashboard&tab=signals&sub=devices' ) ],
                 [ 'label' => 'Moderation',            'url' => admin_url( 'admin.php?page=bcc-trust-moderation' ) ],
             ];
             foreach ( $links as $link ):
