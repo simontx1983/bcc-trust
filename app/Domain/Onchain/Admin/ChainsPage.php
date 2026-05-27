@@ -223,9 +223,9 @@ class ChainsPage
             </nav>
 
             <?php if ($activeTab === 'validators'): ?>
-                <?php self::render_validators_tab($chains, $valCountMap, $nonce); ?>
+                <?php self::render_validators_tab($chains, $valCountMap); ?>
             <?php else: ?>
-                <?php self::render_collections_tab($chains, $collCountMap, $nonce); ?>
+                <?php self::render_collections_tab($chains, $collCountMap); ?>
             <?php endif; ?>
         </div>
 
@@ -237,7 +237,7 @@ class ChainsPage
      * @param list<ChainRow> $chains
      * @param array<int, ValidatorCountByChain> $countMap
      */
-    private static function render_validators_tab(array $chains, array $countMap, string $nonce): void
+    private static function render_validators_tab(array $chains, array $countMap): void
     {
         ?>
         <p>Click <strong>Refresh</strong> to re-index validators for a specific chain.</p>
@@ -315,7 +315,7 @@ class ChainsPage
      * @param list<ChainRow> $chains
      * @param array<int, CollectionCountByChain> $countMap
      */
-    private static function render_collections_tab(array $chains, array $countMap, string $nonce): void
+    private static function render_collections_tab(array $chains, array $countMap): void
     {
         ?>
         <p>Click <strong>Refresh</strong> to fetch top NFT collections for a chain. Only chains with <code>top_collections</code> support are shown.</p>

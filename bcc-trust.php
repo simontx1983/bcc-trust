@@ -958,7 +958,11 @@ add_action('plugins_loaded', function (): void {
         \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::addAddress($walletLinkId, $walletAddress);
     }, 10, 2);
 
-    add_action('bcc_wallet_disconnected', function (int $userId, string $chainSlug, string $walletAddress): void {
+    // $_userId is unused by this handler — the do_action signature is
+    // (userId, chainSlug, walletAddress) and PHP positional binding
+    // requires the slot stay in place. The leading underscore signals
+    // "intentionally unused" to linters.
+    add_action('bcc_wallet_disconnected', function (int $_userId, string $chainSlug, string $walletAddress): void {
         if ($chainSlug !== 'solana') {
             return;
         }
@@ -1619,7 +1623,13 @@ add_action('admin_notices', function () {
 
 add_filter('plugin_action_links_' . plugin_basename(__FILE__), 'bcc_trust_action_links');
 
-function bcc_trust_action_links($links) {
+/**
+ * WordPress plugin_action_links_* filter callback.
+ *
+ * @param array<int, string> $links Existing action links (Activate / Deactivate / Delete).
+ * @return array<int, string>
+ */
+function bcc_trust_action_links(array $links): array {
     $plugin_links = [
         '<a href="' . admin_url('admin.php?page=bcc-trust-dashboard') . '">Dashboard</a>',
         '<a href="' . admin_url('admin.php?page=bcc-trust-moderation') . '">Moderation</a>',

@@ -550,7 +550,7 @@ class EvmFetcher implements FetcherInterface
         try {
             $dt = new \DateTimeImmutable($iso, new \DateTimeZone('UTC'));
             return $dt->format('Y-m-d H:i:s');
-        } catch (\Throwable $e) {
+        } catch (\Throwable) {
             return current_time('mysql', true);
         }
     }

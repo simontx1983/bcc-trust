@@ -167,7 +167,6 @@ class ThorchainFetcher implements FetcherInterface
         $totalBond  = $this->toDisplay($node['total_bond'] ?? '0');
         $status     = $this->mapStatus($node['status'] ?? '');
         $slashPts   = (int) ($node['slash_points'] ?? 0);
-        $version    = $node['version'] ?? '';
         $operatorAddr = $node['node_operator_address'] ?? '';
 
         // Self-bond: find the bond provider matching the node operator.

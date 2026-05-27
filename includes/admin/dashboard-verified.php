@@ -20,7 +20,6 @@ function bcc_trust_render_verified_tab() {
 
     // Get filter/sort parameters
     $search            = isset($_GET['s'])       ? sanitize_text_field($_GET['s'])   : '';
-    $verification_type = isset($_GET['type'])    ? sanitize_key($_GET['type'])        : 'github';
     $orderby           = isset($_GET['orderby']) ? sanitize_key($_GET['orderby'])     : 'verified_at';
     $order             = isset($_GET['order']) && strtoupper($_GET['order']) === 'ASC' ? 'ASC' : 'DESC';
 
