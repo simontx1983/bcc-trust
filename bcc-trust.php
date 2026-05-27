@@ -996,9 +996,11 @@ add_action('plugins_loaded', function (): void {
         \BCC\Trust\Onchain\Admin\ChainsPage::register_page();
         \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_page();
         \BCC\Trust\Onchain\Admin\WebhooksPage::register_page();
+        \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_page();
     }, 20);
     \BCC\Trust\Onchain\Admin\ChainsPage::register_ajax();
     \BCC\Trust\Onchain\Admin\WebhooksPage::register_actions();
+    \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_actions();
 
     add_action('admin_enqueue_scripts', function ($hook) {
         if (strpos($hook, 'bcc-onchain') !== false) {
