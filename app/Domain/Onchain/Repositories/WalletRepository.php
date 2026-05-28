@@ -51,7 +51,8 @@ final class WalletRepository
 
         $userId  = (int) $data['user_id'];
         $postId  = (int) $data['post_id'];
-        $address = strtolower(sanitize_text_field($data['wallet_address']));
+        // Case-preserving: SS58 base58check would be corrupted by strtolower; dedup is handled by the column's utf8mb4_unicode_520_ci collation.
+        $address = sanitize_text_field($data['wallet_address']);
         $chainId = (int) $data['chain_id'];
         $type    = sanitize_text_field($data['wallet_type'] ?? 'user');
         $label   = isset($data['label']) ? sanitize_text_field($data['label']) : '';
@@ -378,7 +379,6 @@ final class WalletRepository
     {
         global $wpdb;
         $table = self::table();
-        $walletAddress = strtolower($walletAddress);
 
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT id FROM {$table} WHERE user_id = %d AND chain_id = %d AND wallet_address = %s LIMIT 1",
@@ -582,7 +582,6 @@ final class WalletRepository
     {
         global $wpdb;
         $table = self::table();
-        $walletAddress = strtolower($walletAddress);
 
         return (bool) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(1) FROM {$table} WHERE user_id = %d AND chain_id = %d AND wallet_address = %s",
@@ -597,7 +596,6 @@ final class WalletRepository
     {
         global $wpdb;
         $table = self::table();
-        $walletAddress = strtolower($walletAddress);
 
         return (bool) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(1) FROM {$table} WHERE user_id != %d AND chain_id = %d AND wallet_address = %s",
@@ -619,7 +617,6 @@ final class WalletRepository
     {
         global $wpdb;
         $table = self::table();
-        $walletAddress = strtolower($walletAddress);
 
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT user_id FROM {$table}
