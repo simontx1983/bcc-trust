@@ -88,6 +88,16 @@ final class CorsHandler
         }
 
         self::emitHeaders($origin);
+
+        // Don't let edge / reverse-proxy caches (LiteSpeed, Cloudflare,
+        // Varnish) store the preflight. They cache by URL including the
+        // query string, so a single stale entry made before BCC_FRONTEND_ORIGIN
+        // was configured (or before this plugin loaded) would lock out every
+        // subsequent OPTIONS to that exact URL with a no-CORS response.
+        // Access-Control-Max-Age above is the BROWSER preflight cache
+        // (different layer); this is the SERVER-side cache prevention.
+        header('Cache-Control: no-store, no-cache, must-revalidate');
+
         status_header(204);
 
         // Defensive: a 204 response should have an empty body. If a
