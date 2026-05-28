@@ -58,6 +58,10 @@ final class WebhooksPage
 
         HeliusDeliveryLog::clear();
 
+        \BCC\Core\Log\Logger::info('[bcc-trust] Helius delivery log cleared (manual)', [
+            'operator' => get_current_user_id(),
+        ]);
+
         wp_safe_redirect(add_query_arg(
             ['page' => self::PAGE_SLUG, 'cleared' => '1'],
             admin_url('admin.php')
