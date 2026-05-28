@@ -502,6 +502,14 @@ final class AuthEndpoint
             return ApiResponse::error('bcc_forbidden', $result['message'], 403);
         }
 
+        // For Polkadot, swap to canonical prefix-0 SS58 (set by the
+        // verifier inside verifyAndLink) so audit log, security email,
+        // and the response all reflect the address that was actually
+        // stored. Other chains pass through.
+        if ((string) $chain->chain_type === 'polkadot' && \BCC\Core\Crypto\PolkadotSignatureVerifier::$lastCanonicalAddress !== null) {
+            $walletAddress = \BCC\Core\Crypto\PolkadotSignatureVerifier::$lastCanonicalAddress;
+        }
+
         Logger::audit('wallet_connected', [
             'user_id' => $userId,
             'chain'   => $chain->slug,
@@ -901,6 +909,14 @@ final class AuthEndpoint
             return ApiResponse::error('bcc_signature_invalid', 'Signature verification failed.', 401);
         }
 
+        // For Polkadot, swap to the canonical prefix-0 SS58 form. The
+        // row was stored under the canonical at signup time, so a user
+        // logging in with their wallet rendering in prefix 42 (Polkadot.js
+        // "Substrate" default) still finds it. Other chains pass through.
+        if ((string) $chain->chain_type === 'polkadot' && \BCC\Core\Crypto\PolkadotSignatureVerifier::$lastCanonicalAddress !== null) {
+            $walletAddress = \BCC\Core\Crypto\PolkadotSignatureVerifier::$lastCanonicalAddress;
+        }
+
         // Resolve the BCC user this wallet is bound to. The
         // (chain, address) pair is constrained to one user by the
         // application layer (every link path checks existsForOtherUser).
@@ -1072,6 +1088,15 @@ final class AuthEndpoint
                 'address' => $walletAddress,
             ]);
             return ApiResponse::error('bcc_signature_invalid', 'Signature verification failed.', 401);
+        }
+
+        // For Polkadot, swap to the canonical prefix-0 SS58 form so the
+        // wallet_links INSERT below dedups by underlying public key.
+        // Same key signed up via prefix-42 (Polkadot.js "Substrate"
+        // default) and prefix-0 (Polkadot mainnet) lands on the same
+        // row. Other chains pass through unchanged.
+        if ((string) $chain->chain_type === 'polkadot' && \BCC\Core\Crypto\PolkadotSignatureVerifier::$lastCanonicalAddress !== null) {
+            $walletAddress = \BCC\Core\Crypto\PolkadotSignatureVerifier::$lastCanonicalAddress;
         }
 
         // Mint the WP user. Random unguessable password — caller
