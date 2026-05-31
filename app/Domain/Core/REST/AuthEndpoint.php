@@ -52,6 +52,7 @@ use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\FrontendRedirect;
 use BCC\Trust\Core\Support\JwtToken;
 use BCC\Trust\Core\Support\WalletAddressValidator;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -92,6 +93,19 @@ final class AuthEndpoint
      * an expired-token + grace window are throttled.
      */
     private const REFRESH_RATE_LIMIT = 30;
+    /**
+     * Anon-IP-keyed (hourly) throttle for /auth/forgot-password. Caps
+     * email-bomb spam against any single account from one source.
+     * 3/hour covers the legitimate retry pattern (typo, mail didn't
+     * arrive, try once more) without giving a harasser a useful weapon.
+     */
+    private const FORGOT_PASSWORD_RATE_LIMIT = 3;
+    /**
+     * Anon-IP-keyed (hourly) throttle for /auth/reset-password. Defense
+     * in depth against key brute force — WP reset keys are ~20 random
+     * chars so this is bug-or-misuse insurance, not an active budget.
+     */
+    private const RESET_PASSWORD_RATE_LIMIT = 10;
 
     /** Minimum password length at signup. WP itself accepts shorter, we don't. */
     private const SIGNUP_MIN_PASSWORD_LENGTH = 8;
@@ -380,6 +394,58 @@ final class AuthEndpoint
                         'required' => false,
                         'type'     => 'object',
                         'default'  => [],
+                    ],
+                ],
+            ]
+        );
+
+        // POST /auth/forgot-password — request a password-reset link.
+        // Always returns ok=true regardless of whether the email matches
+        // a user (anti-enumeration). When a match exists, generates a
+        // WP-native reset key + emails the reset link.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/forgot-password',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'forgotPassword'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'email' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_email',
+                    ],
+                ],
+            ]
+        );
+
+        // POST /auth/reset-password — consume a reset key + set a new
+        // password. Validates the (key, login) pair against WP's native
+        // user_activation_key store; on success, rotates the password
+        // hash and fires the `password_reset` action which invalidates
+        // outstanding sessions.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/reset-password',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'resetPassword'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'key' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'login' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_user',
+                    ],
+                    'password' => [
+                        'required' => true,
+                        'type'     => 'string',
                     ],
                 ],
             ]
@@ -794,6 +860,125 @@ final class AuthEndpoint
             'token_type'       => 'Bearer',
             'in_good_standing' => self::resolveInGoodStanding($userId),
         ]);
+        $response->header('Cache-Control', 'no-store');
+
+        return $response;
+    }
+
+    /**
+     * POST /auth/forgot-password — anti-enumeration password-reset request.
+     *
+     * Always returns ok=true. Only when the email matches a real user do
+     * we generate a reset key (WP-native, written to user_activation_key
+     * with a 24h default expiry) and dispatch the email — but the
+     * response is identical either way so a caller can't enumerate which
+     * addresses are registered.
+     */
+    public function forgotPassword(WP_REST_Request $request): WP_REST_Response
+    {
+        // Throttle first — IP-bucketed, before any DB lookup or mail
+        // dispatch. Caps email-bomb spam against any one inbox from a
+        // single source.
+        if (!\BCC\Core\Security\Throttle::allow('forgot_password', self::FORGOT_PASSWORD_RATE_LIMIT, 3600)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
+        }
+
+        $email = sanitize_email((string) $request->get_param('email'));
+        if ($email === '' || !is_email($email)) {
+            return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
+        }
+
+        $user = get_user_by('email', $email);
+
+        // Always-ok response below. We branch ONLY for the side effects
+        // (key generation + email + audit) — never for the response.
+        if ($user instanceof \WP_User) {
+            $userId = (int) $user->ID;
+
+            // get_password_reset_key writes a hash + timestamp to the
+            // user_activation_key column. WP's own /wp-login.php?action=rp
+            // flow reads from the same column — our path coexists with it.
+            $key = get_password_reset_key($user);
+            if (!is_wp_error($key) && is_string($key) && $key !== '') {
+                $login = (string) $user->user_login;
+                $path  = '/reset-password?key=' . rawurlencode($key) . '&login=' . rawurlencode($login);
+                $resetUrl = FrontendRedirect::defaultReturn($path);
+
+                AccountSecurityMailer::passwordResetRequested($userId, $resetUrl);
+
+                AuditLogger::log('password_reset_requested', $userId, [
+                    'email_hash' => sha1($email),
+                ], 'user', $userId);
+            } else {
+                // Key generation failed (e.g. user is admin and a filter
+                // blocks resets). Still respond ok=true — same anti-
+                // enumeration discipline. Log so ops can see why no mail
+                // went out.
+                Logger::warning('[bcc-trust] get_password_reset_key returned WP_Error / empty', [
+                    'user_id' => $userId,
+                ]);
+            }
+        }
+
+        $response = ApiResponse::ok(['ok' => true]);
+        $response->header('Cache-Control', 'no-store');
+
+        return $response;
+    }
+
+    /**
+     * POST /auth/reset-password — consume a reset key + set a new password.
+     *
+     * Validates (key, login) against WP's user_activation_key store. On
+     * success: rotates the password hash via reset_password() (which
+     * fires the `password_reset` action — other plugins listening to that
+     * hook will invalidate sessions for this user) and emails a security
+     * confirmation. The user is NOT auto-logged-in; they must sign in
+     * fresh with the new password.
+     */
+    public function resetPassword(WP_REST_Request $request): WP_REST_Response
+    {
+        if (!\BCC\Core\Security\Throttle::allow('reset_password_attempt', self::RESET_PASSWORD_RATE_LIMIT, 3600)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many attempts. Try again later.', 429);
+        }
+
+        $key      = (string) $request->get_param('key');
+        $login    = (string) $request->get_param('login');
+        $password = (string) $request->get_param('password');
+
+        if ($key === '' || $login === '' || $password === '') {
+            return ApiResponse::error('bcc_invalid_request', 'key, login, and password are required.', 422);
+        }
+
+        if (strlen($password) < self::SIGNUP_MIN_PASSWORD_LENGTH) {
+            return ApiResponse::error(
+                'bcc_weak_password',
+                sprintf('Password must be at least %d characters.', self::SIGNUP_MIN_PASSWORD_LENGTH),
+                422
+            );
+        }
+
+        $user = check_password_reset_key($key, $login);
+        if (is_wp_error($user) || !($user instanceof \WP_User)) {
+            // Same generic code for "expired" and "wrong key" — never
+            // leak which one. The frontend surfaces "expired or invalid".
+            return ApiResponse::error('bcc_invalid_reset_token', 'This reset link is expired or invalid.', 400);
+        }
+
+        $userId = (int) $user->ID;
+
+        // reset_password() hashes + stores the new password, clears the
+        // user_activation_key (single-use), and fires the `password_reset`
+        // action hook. Returns void.
+        reset_password($user, $password);
+
+        // Side-channel security email — reuses the "password changed"
+        // mail since the user-facing effect is identical.
+        AccountSecurityMailer::passwordChanged($userId);
+
+        AuditLogger::log('password_reset_completed', $userId, [], 'user', $userId);
+
+        $response = ApiResponse::ok(['ok' => true]);
         $response->header('Cache-Control', 'no-store');
 
         return $response;

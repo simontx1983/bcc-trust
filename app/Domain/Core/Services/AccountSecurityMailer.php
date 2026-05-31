@@ -334,6 +334,51 @@ final class AccountSecurityMailer
         self::send($user->user_email, $subject, $body, 'sessions_revoked_all_send_failed', $userId);
     }
 
+    /**
+     * Password-reset link requested — the user (or someone claiming to
+     * be them) hit /auth/forgot-password. The endpoint always responds
+     * "ok" regardless of whether a matching user exists (anti-
+     * enumeration); this mail is only sent when a real user was found.
+     *
+     * The reset URL is itself the secret (one-shot, 24-hour TTL via
+     * WP's user_activation_key). Emitting it in plain text is the
+     * standard WP behavior — the body around it carries the canary
+     * signal so a user who didn't request the reset learns about an
+     * unauthorized attempt against their account.
+     */
+    public static function passwordResetRequested(int $userId, string $resetUrl): void
+    {
+        $user = get_userdata($userId);
+        if (!$user instanceof \WP_User || !$user->user_email) {
+            return;
+        }
+
+        $siteName = get_bloginfo('name') ?: 'BCC';
+        $subject  = sprintf('[%s] Reset your password', $siteName);
+        $body     = sprintf(
+            "Hello %s,\n\n"
+            . "Someone requested a password reset for your %s account.\n\n"
+            . "When: %s\n"
+            . "IP:   %s\n\n"
+            . "If this was you, click the link below to set a new password. "
+            . "The link is single-use and expires in 24 hours:\n\n"
+            . "%s\n\n"
+            . "If you did NOT request this, ignore this email — your password "
+            . "stays the same. Repeated unexpected reset emails could mean "
+            . "someone is targeting your account; reply if you'd like help "
+            . "investigating.\n\n"
+            . "— The %s Team",
+            $user->display_name,
+            $siteName,
+            gmdate('Y-m-d H:i:s') . ' UTC',
+            self::clientIp(),
+            $resetUrl,
+            $siteName
+        );
+
+        self::send($user->user_email, $subject, $body, 'password_reset_requested_send_failed', $userId);
+    }
+
     // ── internals ─────────────────────────────────────────────────────
 
     /**
