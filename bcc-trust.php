@@ -1063,6 +1063,7 @@ add_action('plugins_loaded', function (): void {
         \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_page();
     }, 20);
     \BCC\Trust\Onchain\Admin\ChainsPage::register_ajax();
+    \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_ajax();
     \BCC\Trust\Onchain\Admin\WebhooksPage::register_actions();
     \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_actions();
 

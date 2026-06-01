@@ -67,6 +67,7 @@ if (!defined('ABSPATH')) {
  *     floor_price: string|null,
  *     unique_holders: string|null,
  *     total_volume: string|null,
+ *     is_verified: string,
  *     chain_slug: string,
  *     chain_type: string
  * }
@@ -232,8 +233,8 @@ final class CollectionRepository
                     (wallet_link_id, contract_address, chain_id, collection_name, token_standard,
                      total_supply, floor_price, floor_currency, unique_holders, total_volume,
                      listed_percentage, royalty_percentage, metadata_storage, image_url,
-                     fetched_at, expires_at)
-                 VALUES (NULL, %s, %d, %s, %s, {$sqlSupply}, {$sqlFloor}, %s, {$sqlHolders}, {$sqlVolume}, {$sqlListed}, {$sqlRoyalty}, %s, %s, %s, %s)
+                     source, fetched_at, expires_at)
+                 VALUES (NULL, %s, %d, %s, %s, {$sqlSupply}, {$sqlFloor}, %s, {$sqlHolders}, {$sqlVolume}, {$sqlListed}, {$sqlRoyalty}, %s, %s, 'stargaze', %s, %s)
                  ON DUPLICATE KEY UPDATE
                     collection_name    = VALUES(collection_name),
                     token_standard     = VALUES(token_standard),
@@ -244,6 +245,9 @@ final class CollectionRepository
                     listed_percentage  = VALUES(listed_percentage),
                     royalty_percentage  = VALUES(royalty_percentage),
                     image_url          = VALUES(image_url),
+                    -- Preserve operator curation: a 'manual' row that later
+                    -- shows up in Stargaze top-collections keeps source='manual'.
+                    source             = IF(source = 'manual', 'manual', VALUES(source)),
                     fetched_at         = VALUES(fetched_at),
                     expires_at         = VALUES(expires_at)",
                 $data['contract_address'],
@@ -326,14 +330,15 @@ final class CollectionRepository
         $result = $wpdb->query($wpdb->prepare(
             "INSERT INTO {$table}
                 (wallet_link_id, contract_address, chain_id, collection_name, token_standard,
-                 total_supply, image_url, show_on_profile, is_verified, fetched_at, expires_at)
-             VALUES (NULL, %s, %d, %s, %s, {$sqlSupply}, %s, %d, 0, %s, %s)
+                 total_supply, image_url, show_on_profile, is_verified, source, fetched_at, expires_at)
+             VALUES (NULL, %s, %d, %s, %s, {$sqlSupply}, %s, %d, 0, 'manual', %s, %s)
              ON DUPLICATE KEY UPDATE
                 collection_name = VALUES(collection_name),
                 token_standard  = VALUES(token_standard),
                 total_supply    = VALUES(total_supply),
                 image_url       = VALUES(image_url),
                 show_on_profile = VALUES(show_on_profile),
+                source          = VALUES(source),
                 fetched_at      = VALUES(fetched_at),
                 expires_at      = VALUES(expires_at)",
             $contract,
@@ -368,6 +373,34 @@ final class CollectionRepository
             $chainId,
             $contract
         )) ?: false;
+    }
+
+    /**
+     * Delete a single collection row by id. Powers the admin "Remove"
+     * action on the Verify Collections page — primarily for cleaning up
+     * a mistyped manual add. Bounded by the primary key.
+     *
+     * Returns the number of rows deleted (0 if the id didn't exist, 1 on
+     * success). Group teardown is intentionally NOT handled here — a
+     * verified collection's community is a separate concern; the caller
+     * decides whether to block deletion of provisioned rows.
+     */
+    public static function deleteById(int $id): int
+    {
+        if ($id <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $deleted = (int) $wpdb->delete($table, ['id' => $id], ['%d']);
+
+        if ($deleted > 0) {
+            wp_cache_delete('collection_counts_by_chain', 'bcc_onchain');
+        }
+
+        return $deleted;
     }
 
     /**
@@ -570,7 +603,7 @@ final class CollectionRepository
         return $wpdb->get_row($wpdb->prepare(
             "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id,
                     c.collection_name, c.token_standard, c.total_supply,
-                    c.floor_price, c.unique_holders, c.total_volume,
+                    c.floor_price, c.unique_holders, c.total_volume, c.is_verified,
                     ch.slug AS chain_slug, ch.chain_type
              FROM {$table} c
              INNER JOIN {$chains} ch ON ch.id = c.chain_id
@@ -681,6 +714,7 @@ final class CollectionRepository
      *     unique_holders: string|null,
      *     image_url: string|null,
      *     is_verified: string,
+     *     source: string,
      *     chain_id: string,
      *     chain_slug: string,
      *     chain_type: string
@@ -754,13 +788,14 @@ final class CollectionRepository
          *     unique_holders: string|null,
          *     image_url: string|null,
          *     is_verified: string,
+         *     source: string,
          *     chain_id: string,
          *     chain_slug: string,
          *     chain_type: string
          * }>|null $items */
         $items = $wpdb->get_results($wpdb->prepare(
             "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
-                    c.unique_holders, c.image_url, c.is_verified, c.chain_id,
+                    c.unique_holders, c.image_url, c.is_verified, c.source, c.chain_id,
                     ch.slug AS chain_slug, ch.chain_type
                FROM {$table} c
           LEFT JOIN {$chains} ch ON ch.id = c.chain_id

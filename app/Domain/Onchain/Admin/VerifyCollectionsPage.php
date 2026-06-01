@@ -35,6 +35,15 @@ final class VerifyCollectionsPage
     public const NONCE_NAME = '_bcc_vc_nonce';
 
     /**
+     * Separate nonce for the inline AJAX actions (instant verify toggle,
+     * per-row community create). Kept distinct from the form-POST nonce
+     * so the two flows don't interfere — mirrors ChainsPage's pattern.
+     */
+    public const AJAX_NONCE_KEY    = 'bcc_vc_ajax_nonce';
+    public const AJAX_ACTION_TOGGLE  = 'bcc_vc_toggle_verified';
+    public const AJAX_ACTION_PROVISION = 'bcc_vc_provision_one';
+
+    /**
      * Chain slugs surfaced as quick-filter pills above the dropdown.
      * Pills only render if the slug also appears in the active chains
      * registry — a missing/disabled chain silently drops its pill
@@ -59,6 +68,84 @@ final class VerifyCollectionsPage
             self::PAGE_SLUG,
             [__CLASS__, 'render_page']
         );
+    }
+
+    /**
+     * Register the inline AJAX handlers. Called from the plugin
+     * bootstrap alongside ChainsPage::register_ajax().
+     */
+    public static function register_ajax(): void
+    {
+        add_action('wp_ajax_' . self::AJAX_ACTION_TOGGLE, [__CLASS__, 'ajax_toggle_verified']);
+        add_action('wp_ajax_' . self::AJAX_ACTION_PROVISION, [__CLASS__, 'ajax_provision_one']);
+    }
+
+    /**
+     * AJAX: flip a single collection's is_verified flag. Returns the new
+     * state so the row UI can re-render without a page reload.
+     */
+    public static function ajax_toggle_verified(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => 'Unauthorized.']);
+        }
+        check_ajax_referer(self::AJAX_NONCE_KEY, 'nonce');
+
+        $collectionId = (int) ($_POST['collection_id'] ?? 0);
+        // empty() already treats '0', '', and absent as false — the JS
+        // sends '1' to verify and '0' to unverify.
+        $verify       = !empty($_POST['verify']);
+
+        if ($collectionId <= 0) {
+            wp_send_json_error(['message' => 'Invalid collection id.']);
+        }
+
+        if ($verify) {
+            $changed = CollectionRepository::setVerifiedBulk([$collectionId], []);
+        } else {
+            $changed = CollectionRepository::setVerifiedBulk([], [$collectionId]);
+        }
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections toggle (ajax)', [
+            'action'        => 'verify_collections_toggle_ajax',
+            'collection_id' => $collectionId,
+            'verify'        => $verify,
+            'changed'       => $changed,
+            'operator'      => get_current_user_id(),
+        ]);
+
+        wp_send_json_success([
+            'verified' => $verify,
+            'message'  => $verify ? 'Marked verified.' : 'Marked unverified.',
+        ]);
+    }
+
+    /**
+     * AJAX: provision the holder community for one verified collection.
+     */
+    public static function ajax_provision_one(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => 'Unauthorized.']);
+        }
+        check_ajax_referer(self::AJAX_NONCE_KEY, 'nonce');
+
+        $collectionId = (int) ($_POST['collection_id'] ?? 0);
+        if ($collectionId <= 0) {
+            wp_send_json_error(['message' => 'Invalid collection id.']);
+        }
+
+        $result = Plugin::instance()->gatedGroupProvisioningService()->provisionOne($collectionId);
+
+        if ($result['status'] === 'error' || $result['status'] === 'skipped') {
+            wp_send_json_error(['message' => $result['message']]);
+        }
+
+        wp_send_json_success([
+            'status'   => $result['status'],
+            'group_id' => $result['group_id'],
+            'message'  => $result['message'],
+        ]);
     }
 
     public static function render_page(): void
@@ -348,21 +435,23 @@ final class VerifyCollectionsPage
                 <table class="widefat striped">
                     <thead>
                         <tr>
-                            <th style="width:80px;">Verified</th>
+                            <th style="width:90px;">Verified</th>
                             <th style="width:60px;"></th>
                             <th>Collection</th>
+                            <th style="width:90px;">Source</th>
                             <th>Chain</th>
                             <th>Contract</th>
-                            <th style="width:120px;">Holders</th>
-                            <th style="width:140px;" title="Members of the collection's holder community (only meaningful once verified).">
-                                Community members
+                            <th style="width:100px;">Holders</th>
+                            <th style="width:160px;" title="Members of the collection's holder community (only meaningful once verified).">
+                                Community
                             </th>
+                            <th style="width:80px;">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php if ($listing['items'] === []): ?>
                             <tr>
-                                <td colspan="7"><em>
+                                <td colspan="9"><em>
                                     <?php if ($isVerified): ?>
                                         No verified collections yet. Verify a collection in the Unverified tab to give its holders a community.
                                     <?php else: ?>
@@ -373,14 +462,21 @@ final class VerifyCollectionsPage
                         <?php else: foreach ($listing['items'] as $row): ?>
                             <?php
                             $tokenStandard = (string) ($row->token_standard ?? '');
+                            $rowId         = (int) $row->id;
+                            $rowVerified   = (int) $row->is_verified === 1;
+                            $source        = (string) ($row->source ?? 'discovery');
                             ?>
-                            <tr>
+                            <tr data-collection-id="<?php echo $rowId; ?>">
                                 <td>
-                                    <input type="hidden" name="known[]" value="<?php echo (int) $row->id; ?>">
-                                    <input type="checkbox"
-                                           name="verified[<?php echo (int) $row->id; ?>]"
-                                           value="1"
-                                           <?php checked((int) $row->is_verified, 1); ?>>
+                                    <input type="hidden" name="known[]" value="<?php echo $rowId; ?>">
+                                    <label class="bcc-vc-toggle" style="display:inline-flex;align-items:center;gap:4px;">
+                                        <input type="checkbox"
+                                               class="bcc-vc-verify"
+                                               name="verified[<?php echo $rowId; ?>]"
+                                               value="1"
+                                               <?php checked($rowVerified); ?>>
+                                        <span class="bcc-vc-toggle-status" style="font-size:11px;color:#999;"></span>
+                                    </label>
                                 </td>
                                 <td>
                                     <?php if (!empty($row->image_url)): ?>
@@ -395,6 +491,22 @@ final class VerifyCollectionsPage
                                         <br>
                                         <span style="color:#646970;font-size:11px;"><?php echo esc_html($tokenStandard); ?></span>
                                     <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php
+                                    // Source badge — where the row came from.
+                                    //   manual    → operator added it by hand (safe to remove)
+                                    //   stargaze  → auto-pulled from Stargaze top-collections
+                                    //   discovery → seen by the holdings transfer indexer
+                                    $badge = [
+                                        'manual'    => ['Manual', '#2271b1'],
+                                        'stargaze'  => ['Stargaze', '#646970'],
+                                        'discovery' => ['Discovered', '#646970'],
+                                    ][$source] ?? ['Discovered', '#646970'];
+                                    ?>
+                                    <span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($badge[1]); ?>;">
+                                        <?php echo esc_html($badge[0]); ?>
+                                    </span>
                                 </td>
                                 <td><code><?php echo esc_html($row->chain_slug); ?></code></td>
                                 <td>
@@ -420,32 +532,53 @@ final class VerifyCollectionsPage
                                     <?php endif; ?>
                                 </td>
                                 <td><?php echo number_format_i18n((int) ($row->unique_holders ?? 0)); ?></td>
-                                <td>
+                                <td class="bcc-vc-community">
                                     <?php
                                     // Reuse-join: collection (chain_id, contract) →
                                     // PeepSo group post id → member count.
                                     // Cell semantics:
-                                    //   unverified         → "—"           (no group exists)
-                                    //   verified, no group → "pending"     (cron hasn't provisioned yet)
-                                    //   verified + group   → number        (current member count)
+                                    //   unverified         → "—"               (no group possible)
+                                    //   verified, no group → "Create now" btn   (provision inline)
+                                    //   verified + group   → linked member count
                                     // N+1 caveat: 50 collections × 2 queries per row.
                                     // Acceptable on this admin-only page; revisit if
                                     // perf bites or perPage grows materially.
-                                    if ((int) $row->is_verified !== 1) {
+                                    if (!$rowVerified) {
                                         echo '<span style="color:#999;">&mdash;</span>';
                                     } else {
                                         $groupId = GatedGroupRepository::findGroupForCollection(
                                             (int) $row->chain_id,
                                             (string) $row->contract_address
                                         );
-                                        if ($groupId === null) {
-                                            echo '<span style="color:#999;font-size:11px;">pending</span>';
-                                        } else {
-                                            $count = PeepSoGroupRepository::countGroupMembers($groupId);
-                                            echo number_format_i18n($count);
-                                        }
+                                        if ($groupId === null): ?>
+                                            <button type="button"
+                                                    class="button button-small bcc-vc-create-community"
+                                                    title="Create the closed holder community for this collection now, instead of waiting for the daily sweep.">
+                                                Create now
+                                            </button>
+                                        <?php else:
+                                            $count    = PeepSoGroupRepository::countGroupMembers($groupId);
+                                            $permalink = get_permalink($groupId);
+                                            if (is_string($permalink) && $permalink !== ''): ?>
+                                                <a href="<?php echo esc_url($permalink); ?>" target="_blank" rel="noopener">
+                                                    <?php echo number_format_i18n($count); ?> member<?php echo $count === 1 ? '' : 's'; ?>
+                                                </a>
+                                            <?php else:
+                                                echo number_format_i18n($count) . ' member' . ($count === 1 ? '' : 's');
+                                            endif;
+                                        endif;
                                     }
                                     ?>
+                                </td>
+                                <td>
+                                    <button type="submit"
+                                            name="bcc_vc_action"
+                                            value="delete_<?php echo $rowId; ?>"
+                                            class="button button-small button-link-delete"
+                                            style="color:#b32d2e;"
+                                            onclick="return confirm('Remove this collection from the list? This deletes the row only. A collection with a live community can\'t be removed until its community is gone.');">
+                                        Remove
+                                    </button>
                                 </td>
                             </tr>
                         <?php endforeach; endif; ?>
@@ -453,7 +586,10 @@ final class VerifyCollectionsPage
                 </table>
 
                 <p class="submit">
-                    <button type="submit" class="button button-primary">Save Verification Changes</button>
+                    <button type="submit" class="button">Save Verification Changes</button>
+                    <span style="color:#646970;font-size:12px;margin-left:8px;">
+                        Verify toggles save instantly. This button is a fallback if JavaScript is off.
+                    </span>
                 </p>
             </form>
 
@@ -470,6 +606,79 @@ final class VerifyCollectionsPage
                 </div>
             <?php endif; ?>
         </div>
+        <script>
+        (function () {
+            var ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            var nonce   = <?php echo wp_json_encode(wp_create_nonce(self::AJAX_NONCE_KEY)); ?>;
+            var ACTION_TOGGLE    = <?php echo wp_json_encode(self::AJAX_ACTION_TOGGLE); ?>;
+            var ACTION_PROVISION = <?php echo wp_json_encode(self::AJAX_ACTION_PROVISION); ?>;
+
+            function post(action, collectionId, extra) {
+                var body = new FormData();
+                body.append('action', action);
+                body.append('nonce', nonce);
+                body.append('collection_id', collectionId);
+                if (extra) { Object.keys(extra).forEach(function (k) { body.append(k, extra[k]); }); }
+                return fetch(ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body })
+                    .then(function (r) { return r.json(); });
+            }
+
+            // Instant verify toggle.
+            document.querySelectorAll('.bcc-vc-verify').forEach(function (cb) {
+                cb.addEventListener('change', function () {
+                    var row    = cb.closest('tr');
+                    var id     = row && row.getAttribute('data-collection-id');
+                    var status = row && row.querySelector('.bcc-vc-toggle-status');
+                    if (!id) { return; }
+                    cb.disabled = true;
+                    if (status) { status.textContent = 'saving…'; status.style.color = '#999'; }
+                    post(ACTION_TOGGLE, id, { verify: cb.checked ? '1' : '0' })
+                        .then(function (resp) {
+                            cb.disabled = false;
+                            if (resp && resp.success) {
+                                if (status) { status.textContent = '✓'; status.style.color = '#00a32a'; }
+                                setTimeout(function () { if (status) { status.textContent = ''; } }, 1500);
+                            } else {
+                                cb.checked = !cb.checked; // revert
+                                if (status) { status.textContent = '✗'; status.style.color = '#d63638'; }
+                            }
+                        })
+                        .catch(function () {
+                            cb.disabled = false;
+                            cb.checked = !cb.checked;
+                            if (status) { status.textContent = '✗'; status.style.color = '#d63638'; }
+                        });
+                });
+            });
+
+            // Inline "Create now" community provisioning.
+            document.querySelectorAll('.bcc-vc-create-community').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    var row  = btn.closest('tr');
+                    var cell = btn.closest('.bcc-vc-community');
+                    var id   = row && row.getAttribute('data-collection-id');
+                    if (!id) { return; }
+                    btn.disabled = true;
+                    btn.textContent = 'Creating…';
+                    post(ACTION_PROVISION, id)
+                        .then(function (resp) {
+                            if (resp && resp.success) {
+                                if (cell) { cell.innerHTML = '<span style="color:#00a32a;font-size:12px;">Community created</span>'; }
+                            } else {
+                                btn.disabled = false;
+                                btn.textContent = 'Create now';
+                                alert((resp && resp.data && resp.data.message) || 'Could not create community.');
+                            }
+                        })
+                        .catch(function () {
+                            btn.disabled = false;
+                            btn.textContent = 'Create now';
+                            alert('Network error creating community.');
+                        });
+                });
+            });
+        })();
+        </script>
         <?php
     }
 
@@ -500,6 +709,13 @@ final class VerifyCollectionsPage
 
         if ($action === 'add_collection') {
             return self::handleAddCollection();
+        }
+
+        // Per-row "Remove" button. Encodes the collection id in the
+        // action value (`delete_<id>`), same shape as testquery_<id>.
+        if (strpos($action, 'delete_') === 0) {
+            $collectionId = (int) substr($action, strlen('delete_'));
+            return self::handleDeleteCollection($collectionId);
         }
 
         // V2 Phase 2: per-row "Test CW-721 query" button. Encodes the
@@ -585,6 +801,59 @@ final class VerifyCollectionsPage
                 $name,
                 $symbol
             ),
+        ]];
+    }
+
+    /**
+     * Per-row "Remove" handler. Deletes a single collection row, with a
+     * guard: a row whose holder community already exists is refused, so
+     * deletion can't silently orphan a live PeepSo group. The operator
+     * must unverify (and tear the group down) first.
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function handleDeleteCollection(int $collectionId): array
+    {
+        if ($collectionId <= 0) {
+            return [['type' => 'error', 'message' => 'Remove: invalid collection id.']];
+        }
+
+        $coll = CollectionRepository::getByIdWithChain($collectionId);
+        if ($coll === null) {
+            return [['type' => 'error', 'message' => 'Remove: collection not found (already deleted?).']];
+        }
+
+        $contract = (string) $coll->contract_address;
+        $chainId  = (int) $coll->chain_id;
+
+        $groupId = GatedGroupRepository::findGroupForCollection($chainId, $contract);
+        if ($groupId !== null) {
+            return [[
+                'type'    => 'warning',
+                'message' => sprintf(
+                    'Remove blocked: %s still has a holder community (group #%d). Unverify it and remove the community first, then delete.',
+                    $contract,
+                    $groupId
+                ),
+            ]];
+        }
+
+        $deleted = CollectionRepository::deleteById($collectionId);
+        if ($deleted < 1) {
+            return [['type' => 'error', 'message' => 'Remove: nothing was deleted.']];
+        }
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections remove', [
+            'action'        => 'verify_collections_remove',
+            'collection_id' => $collectionId,
+            'chain_id'      => $chainId,
+            'contract'      => $contract,
+            'operator'      => get_current_user_id(),
+        ]);
+
+        return [[
+            'type'    => 'success',
+            'message' => sprintf('Removed collection %s.', $contract),
         ]];
     }
 

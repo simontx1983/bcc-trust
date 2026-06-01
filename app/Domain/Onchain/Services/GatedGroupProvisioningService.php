@@ -121,6 +121,78 @@ final class GatedGroupProvisioningService {
     }
 
     /**
+     * Provision the holder community for a single collection by id.
+     * Powers the per-row "Create now" action on the admin page. Shares
+     * the exact create + gate-config path as provisionAll() so a row
+     * created here is identical to one the daily sweep would create.
+     *
+     * @return array{status: string, group_id: int, message: string}
+     *         status ∈ {created, exists, skipped, error}.
+     */
+    public function provisionOne(int $collectionId): array {
+        if (!class_exists('\\PeepSoGroup')) {
+            \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'peepso_absent');
+            return ['status' => 'error', 'group_id' => 0, 'message' => 'PeepSo Groups inactive.'];
+        }
+
+        $collection = CollectionRepository::getByIdWithChain($collectionId);
+        if ($collection === null) {
+            return ['status' => 'error', 'group_id' => 0, 'message' => 'Collection not found.'];
+        }
+
+        if ((int) $collection->is_verified !== 1) {
+            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Collection is not verified.'];
+        }
+
+        $chainId  = (int) $collection->chain_id;
+        $contract = strtolower((string) $collection->contract_address);
+        $name     = (string) ($collection->collection_name ?? '');
+
+        if ($chainId <= 0 || $contract === '') {
+            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Collection missing chain or contract.'];
+        }
+        if ($name === '') {
+            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Collection is still awaiting a name; cannot name the community.'];
+        }
+
+        $existing = GatedGroupRepository::findGroupForCollection($chainId, $contract);
+        if ($existing !== null) {
+            return ['status' => 'exists', 'group_id' => (int) $existing, 'message' => 'Community already exists.'];
+        }
+
+        $ownerId = $this->resolveOwnerId();
+        if ($ownerId === 0) {
+            \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'no_admin_owner');
+            return ['status' => 'error', 'group_id' => 0, 'message' => 'No administrator user to own the community.'];
+        }
+
+        $groupId = $this->createPeepSoGroup($ownerId, $name);
+        if ($groupId === 0) {
+            \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'group_create_failed');
+            return ['status' => 'error', 'group_id' => 0, 'message' => 'Community creation failed; see the bcc-trust error log.'];
+        }
+
+        GatedGroupRepository::writeGateConfig(
+            $groupId,
+            $chainId,
+            $contract,
+            self::DEFAULT_MIN_BALANCE,
+            $collectionId
+        );
+
+        Logger::info('[bcc-trust] Provisioned holder group (single)', [
+            'group_id'      => $groupId,
+            'collection_id' => $collectionId,
+            'chain_id'      => $chainId,
+            'contract'      => $contract,
+        ]);
+
+        do_action('bcc_gated_group_provisioned', $groupId, $collectionId, $chainId, $contract);
+
+        return ['status' => 'created', 'group_id' => $groupId, 'message' => 'Community created.'];
+    }
+
+    /**
      * Find the user who'll own auto-provisioned groups. First admin
      * (lowest ID) is the canonical choice.
      */

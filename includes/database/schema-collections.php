@@ -37,6 +37,7 @@ function bcc_onchain_create_collections_table(): void {
         image_url VARCHAR(500) DEFAULT NULL,
         show_on_profile TINYINT(1) NOT NULL DEFAULT 1,
         is_verified TINYINT(1) NOT NULL DEFAULT 0,
+        source VARCHAR(20) NOT NULL DEFAULT 'discovery',
         fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         expires_at DATETIME NOT NULL,
         PRIMARY KEY (id),
