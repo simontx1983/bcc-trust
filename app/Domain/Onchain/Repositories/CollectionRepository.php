@@ -272,6 +272,105 @@ final class CollectionRepository
     }
 
     /**
+     * Insert (or update) a single operator-curated collection by
+     * (chain_id, contract_address). Powers the admin "Add Collection"
+     * form on the Verify Collections page — the only path that creates
+     * a collection row for a chain with no auto-discovery (e.g. a
+     * curated Cosmos CW-721 contract not listed on Stargaze).
+     *
+     * Mirrors bulkUpsert()'s row shape and NULL-preservation, scoped to
+     * one row. wallet_link_id stays NULL (chain-level, not wallet-owned);
+     * is_verified stays 0 so the operator must still flip it via the
+     * existing verification checkbox before any holdings are queried.
+     *
+     * @param array{
+     *     chain_id: int,
+     *     contract_address: string,
+     *     collection_name?: ?string,
+     *     token_standard?: ?string,
+     *     total_supply?: ?int,
+     *     image_url?: ?string,
+     *     show_on_profile?: int
+     * } $data
+     * @param int $ttlSeconds  TTL for expires_at. Defaults long (30 days) so a
+     *                         curated entry isn't garbage-collected like a
+     *                         transient discovery row.
+     * @return int|false  Row ID on success, false on failure.
+     */
+    public static function addManual(array $data, int $ttlSeconds = 30 * DAY_IN_SECONDS)
+    {
+        $chainId  = (int) ($data['chain_id'] ?? 0);
+        $contract = isset($data['contract_address']) ? trim((string) $data['contract_address']) : '';
+
+        if ($chainId <= 0 || $contract === '') {
+            return false;
+        }
+
+        global $wpdb;
+        $table     = self::table();
+        $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
+        $now       = current_time('mysql', true);
+
+        // Build NULL-safe SQL fragments for the nullable numeric column
+        // (wpdb::prepare with %d turns null into 0 — see bulkUpsert note).
+        $supply    = $data['total_supply'] ?? null;
+        $sqlSupply = $supply !== null ? $wpdb->prepare('%d', (int) $supply) : 'NULL';
+
+        $name     = isset($data['collection_name']) ? sanitize_text_field((string) $data['collection_name']) : null;
+        $standard = isset($data['token_standard']) ? sanitize_text_field((string) $data['token_standard']) : null;
+        $image    = isset($data['image_url']) && is_string($data['image_url']) && $data['image_url'] !== ''
+            ? esc_url_raw($data['image_url'])
+            : null;
+        $showOnProfile = isset($data['show_on_profile']) ? (int) (bool) $data['show_on_profile'] : 1;
+
+        $result = $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$table}
+                (wallet_link_id, contract_address, chain_id, collection_name, token_standard,
+                 total_supply, image_url, show_on_profile, is_verified, fetched_at, expires_at)
+             VALUES (NULL, %s, %d, %s, %s, {$sqlSupply}, %s, %d, 0, %s, %s)
+             ON DUPLICATE KEY UPDATE
+                collection_name = VALUES(collection_name),
+                token_standard  = VALUES(token_standard),
+                total_supply    = VALUES(total_supply),
+                image_url       = VALUES(image_url),
+                show_on_profile = VALUES(show_on_profile),
+                fetched_at      = VALUES(fetched_at),
+                expires_at      = VALUES(expires_at)",
+            $contract,
+            $chainId,
+            $name,
+            $standard,
+            $image,
+            $showOnProfile,
+            $now,
+            $expiresAt
+        ));
+
+        if ($result === false) {
+            return false;
+        }
+
+        // Per-chain count display (admin Chains page) is a 1h TTL cache;
+        // drop it so the new row shows up immediately rather than lagging.
+        wp_cache_delete('collection_counts_by_chain', 'bcc_onchain');
+
+        // insert_id is 0 on a pure ON DUPLICATE KEY UPDATE; resolve the
+        // existing row id in that case so callers always get the row id.
+        $insertId = (int) $wpdb->insert_id;
+        if ($insertId > 0) {
+            return $insertId;
+        }
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$table}
+             WHERE chain_id = %d AND contract_address = %s
+             LIMIT 1",
+            $chainId,
+            $contract
+        )) ?: false;
+    }
+
+    /**
      * Get top collections filtered by chain type (evm, solana, cosmos).
      * Each chain type is ranked independently — no cross-chain mixing.
      *
@@ -570,6 +669,10 @@ final class CollectionRepository
      * rather than the unfiltered list — admins should never silently see
      * cross-chain rows when they asked for one chain.
      *
+     * Optional `$verified` filter splits the listing by verification
+     * state — `true` = verified only, `false` = unverified only, `null` =
+     * both. Powers the Verified / Unverified sub-tabs on the admin page.
+     *
      * @return array{items: list<object{
      *     id: string,
      *     contract_address: string,
@@ -587,7 +690,8 @@ final class CollectionRepository
         int $page = 1,
         int $perPage = 50,
         ?string $chainSlug = null,
-        ?string $tokenStandard = null
+        ?string $tokenStandard = null,
+        ?bool $verified = null
     ): array
     {
         global $wpdb;
@@ -622,6 +726,11 @@ final class CollectionRepository
         if ($tokenStandard !== null && $tokenStandard !== '') {
             $conditions[] = 'c.token_standard = %s';
             $params[]     = $tokenStandard;
+        }
+
+        if ($verified !== null) {
+            $conditions[] = 'c.is_verified = %d';
+            $params[]     = $verified ? 1 : 0;
         }
 
         $whereSql = $conditions === [] ? '' : 'WHERE ' . implode(' AND ', $conditions);
@@ -696,6 +805,61 @@ final class CollectionRepository
         );
 
         return $rows ?: [];
+    }
+
+    /**
+     * Count collections split by verification state, honouring the same
+     * optional chain / token-standard filters as the admin listing.
+     * Powers the "Unverified (N)" / "Verified (N)" sub-tab labels so the
+     * counts stay accurate under an active filter.
+     *
+     * Single bounded aggregate (GROUP BY on a 0/1 column → at most two
+     * rows), no LIMIT needed.
+     *
+     * @return array{verified: int, unverified: int}
+     */
+    public static function countByVerification(
+        ?string $chainSlug = null,
+        ?string $tokenStandard = null
+    ): array {
+        global $wpdb;
+        $table = self::table();
+
+        $conditions = [];
+        $params     = [];
+
+        if ($chainSlug !== null && $chainSlug !== '') {
+            $chain = ChainRepository::getBySlug($chainSlug);
+            if ($chain === null) {
+                return ['verified' => 0, 'unverified' => 0];
+            }
+            $conditions[] = 'chain_id = %d';
+            $params[]     = (int) $chain->id;
+        }
+
+        if ($tokenStandard !== null && $tokenStandard !== '') {
+            $conditions[] = 'token_standard = %s';
+            $params[]     = $tokenStandard;
+        }
+
+        $whereSql = $conditions === [] ? '' : 'WHERE ' . implode(' AND ', $conditions);
+        $sql      = "SELECT is_verified, COUNT(*) AS cnt FROM {$table} {$whereSql} GROUP BY is_verified";
+
+        /** @var list<object{is_verified: string, cnt: string}>|null $rows */
+        $rows = $params === []
+            ? $wpdb->get_results($sql)
+            : $wpdb->get_results($wpdb->prepare($sql, ...$params));
+
+        $out = ['verified' => 0, 'unverified' => 0];
+        foreach ($rows ?: [] as $row) {
+            if ((int) $row->is_verified === 1) {
+                $out['verified'] = (int) $row->cnt;
+            } else {
+                $out['unverified'] = (int) $row->cnt;
+            }
+        }
+
+        return $out;
     }
 
     /**
