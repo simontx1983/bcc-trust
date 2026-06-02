@@ -49,6 +49,7 @@ use BCC\Core\Wallet\WalletVerificationRequest;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
+use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\ApiResponse;
@@ -106,6 +107,31 @@ final class AuthEndpoint
      * chars so this is bug-or-misuse insurance, not an active budget.
      */
     private const RESET_PASSWORD_RATE_LIMIT = 10;
+    /**
+     * Anon-IP-keyed (hourly) throttle for /auth/verify-email. Caps OTP
+     * brute-force attempts — 10/hour against a 6-digit code is negligible
+     * attack surface given the 15-minute OTP TTL.
+     */
+    private const VERIFY_EMAIL_RATE_LIMIT = 10;
+    /**
+     * Anon-IP-keyed (hourly) throttle for /auth/resend-verification.
+     * Caps email-bomb abuse from a single source: 3/hour covers the
+     * "I didn't get it" retry pattern without enabling harassment.
+     */
+    private const RESEND_VERIFICATION_RATE_LIMIT = 3;
+
+    /**
+     * User meta key for email-verification state.
+     *   '0' = pending verification (set at email-signup).
+     *   '1' = verified (set by /auth/verify-email or at wallet-signup).
+     *   ''  = not present (legacy user, grandfathered through login gate).
+     */
+    private const META_EMAIL_VERIFIED = '_bcc_email_verified';
+
+    /** OTP transient TTL: 15 minutes. */
+    private const OTP_TTL = 900;
+    /** Verify-token transient TTL: 24 hours. */
+    private const TOKEN_TTL = 86400;
 
     /** Minimum password length at signup. WP itself accepts shorter, we don't. */
     private const SIGNUP_MIN_PASSWORD_LENGTH = 8;
@@ -450,6 +476,64 @@ final class AuthEndpoint
                 ],
             ]
         );
+
+        // POST /auth/verify-email — consume an OTP code or a one-shot
+        // token to confirm email ownership and complete signup. On
+        // success, marks the account verified and returns a JWT so the
+        // user is immediately signed in without a separate login step.
+        // Accepts either:
+        //   { email, code }  — OTP typed by the user (15-min TTL)
+        //   { token }        — one-shot link token from the email (24-h TTL)
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/verify-email',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'verifyEmail'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'email' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'default'           => '',
+                        'sanitize_callback' => 'sanitize_email',
+                    ],
+                    'code' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'default'           => '',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'token' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'default'           => '',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                ],
+            ]
+        );
+
+        // POST /auth/resend-verification — send a fresh OTP + verify
+        // link to the given email address. Always returns ok=true
+        // (anti-enumeration). Rate-limited per IP to prevent email-bomb
+        // abuse against any one inbox.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/resend-verification',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'resendVerification'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'email' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_email',
+                    ],
+                ],
+            ]
+        );
     }
 
     public function nonce(WP_REST_Request $request): WP_REST_Response
@@ -704,21 +788,26 @@ final class AuthEndpoint
         $userIdInt = (int) $userId;
         update_user_meta($userIdInt, HandleService::META_HANDLE, $handle);
 
-        // Auto-login for same-origin clients (admin tooling, server-rendered
-        // pages on the WP origin). For cross-origin headless clients
-        // (Next.js on a separate domain) the cookie won't be usable —
-        // those clients consume the `token` field in the response below
-        // and authenticate via Bearer header from there. The cookie call
-        // is harmless either way.
-        wp_set_current_user($userIdInt);
-        wp_set_auth_cookie($userIdInt, true);
+        // Mark the account as pending email verification. The login gate
+        // in login() checks this meta and blocks '0' values, so the user
+        // cannot sign in until /auth/verify-email succeeds.
+        // Wallet-signup users skip this path entirely and get '1' directly.
+        update_user_meta($userIdInt, self::META_EMAIL_VERIFIED, '0');
 
-        // Mint the JWT inline so headless clients don't need a second
-        // roundtrip to /auth/token (which would require the WP cookie
-        // they don't have on a cross-origin response). Same secret +
-        // payload shape as /auth/token — that endpoint stays for token
-        // refresh / re-mint after a session is established.
-        $token = JwtToken::encode($userIdInt, $handle);
+        // Generate a 6-digit OTP (OTP path) and a 32-byte hex token
+        // (link path). Store both so the user can verify via either route.
+        $otpCode     = self::generateOtp();
+        $verifyToken = self::generateVerifyToken();
+        self::storeOtpForUser($userIdInt, $otpCode);
+        self::storeVerifyToken($verifyToken, $userIdInt);
+
+        // Build the one-shot verify URL and dispatch the email.
+        // Best-effort: a mail failure records a DegradationMetric but
+        // does NOT roll back account creation — the user can resend from
+        // /verify-email via /auth/resend-verification.
+        $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
+        $verifyUrl  = FrontendRedirect::defaultReturn($verifyPath);
+        AuthMailer::sendVerificationEmail($userIdInt, $email, $otpCode, $verifyUrl);
 
         Logger::audit('user_signup', [
             'user_id' => $userIdInt,
@@ -728,17 +817,10 @@ final class AuthEndpoint
 
         do_action('bcc_user_signup', $userIdInt, $handle);
 
-        $response = ApiResponse::ok([
-            'user_id'          => $userIdInt,
-            'handle'           => $handle,
-            'token'            => $token,
-            'expires_in'       => self::JWT_TTL_SECONDS,
-            'token_type'       => 'Bearer',
-            // §I1 chrome signal — bounded-staleness boolean carried
-            // through the NextAuth JWT until next login. Fresh signups
-            // default to 'neutral' tier → true.
-            'in_good_standing' => self::resolveInGoodStanding($userIdInt),
-        ], 201);
+        // Return ok=true only — no JWT. The user must verify their email
+        // before /auth/login will mint a token. The frontend routes them
+        // to /verify-email?email=... on this response.
+        $response = ApiResponse::ok(['ok' => true, 'email' => $email], 201);
         $response->header('Cache-Control', 'no-store');
 
         return $response;
@@ -824,6 +906,20 @@ final class AuthEndpoint
 
         $userId = (int) $user->ID;
         $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
+
+        // Block accounts that are explicitly pending email verification.
+        // '0' = set at email-signup and cleared by /auth/verify-email.
+        // ''  = not present (legacy user, pre-verification-gate) → allow.
+        // '1' = verified → allow.
+        // Wallet-signup users have '1' set at wallet-signup time → allow.
+        $emailVerified = (string) get_user_meta($userId, self::META_EMAIL_VERIFIED, true);
+        if ($emailVerified === '0') {
+            return ApiResponse::error(
+                'bcc_email_not_verified',
+                'Please verify your email address before logging in.',
+                403
+            );
+        }
 
         // Legacy users created outside the BCC signup flow (wp-admin,
         // imports, social-login plugin) may lack a handle. Fail loud
@@ -1321,6 +1417,11 @@ final class AuthEndpoint
         $userIdInt = (int) $userId;
         update_user_meta($userIdInt, HandleService::META_HANDLE, $handle);
 
+        // Wallet-signup users authenticate via cryptographic signature —
+        // email is a placeholder or optional. Mark as verified so they
+        // are never blocked by the email-verification gate in login().
+        update_user_meta($userIdInt, self::META_EMAIL_VERIFIED, '1');
+
         // Link the wallet via the canonical write contract. If this
         // fails (concurrent signup race claimed the same wallet between
         // our existsForOtherUser check and here), roll back the
@@ -1381,6 +1482,290 @@ final class AuthEndpoint
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+
+    /**
+     * POST /auth/verify-email — confirm email ownership and complete signup.
+     *
+     * Accepts two verification paths in the same endpoint:
+     *
+     *   OTP path   { email, code }  — user types the 6-digit code from the
+     *                                  email into the /verify-email page.
+     *                                  TTL: 15 minutes. Rate-limited.
+     *
+     *   Token path { token }        — user clicks the link/button in the
+     *                                  email. Self-identifying (token encodes
+     *                                  the userId). TTL: 24 hours. Single-use.
+     *
+     * On success via either path: sets _bcc_email_verified = '1', deletes
+     * the OTP transient, sets the WP auth cookie, and mints a JWT so the
+     * user is signed in without a separate /auth/login roundtrip.
+     *
+     * Already-verified accounts return bcc_already_verified (409) on the
+     * OTP path; the token path silently succeeds (idempotent re-verify is
+     * harmless and avoids a confusing error when a user double-clicks).
+     */
+    public function verifyEmail(WP_REST_Request $request): WP_REST_Response
+    {
+        if (!\BCC\Core\Security\Throttle::allow('verify_email', self::VERIFY_EMAIL_RATE_LIMIT, 3600)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many attempts. Try again later.', 429);
+        }
+
+        $email = sanitize_email((string) $request->get_param('email'));
+        $code  = (string) $request->get_param('code');
+        $token = (string) $request->get_param('token');
+
+        if ($token === '' && ($email === '' || $code === '')) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'Supply a verification token or an email and code.',
+                422
+            );
+        }
+
+        // ── Token path ────────────────────────────────────────────────
+        if ($token !== '') {
+            $userId = self::consumeVerifyToken($token);
+            if ($userId === null) {
+                return ApiResponse::error(
+                    'bcc_invalid_verify_token',
+                    'This link has expired or has already been used.',
+                    400
+                );
+            }
+            return self::finalizeVerification($userId);
+        }
+
+        // ── OTP path ──────────────────────────────────────────────────
+        $user = get_user_by('email', $email);
+        if (!($user instanceof \WP_User)) {
+            // Generic error — don't reveal whether the address is registered.
+            return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
+        }
+
+        $userId = (int) $user->ID;
+
+        $emailVerified = (string) get_user_meta($userId, self::META_EMAIL_VERIFIED, true);
+        if ($emailVerified === '1') {
+            return ApiResponse::error('bcc_already_verified', 'This email is already verified.', 409);
+        }
+
+        if (!self::consumeOtpForUser($userId, $code)) {
+            return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
+        }
+
+        return self::finalizeVerification($userId);
+    }
+
+    /**
+     * POST /auth/resend-verification — send a fresh OTP + verify link.
+     *
+     * Always returns ok=true regardless of whether the email matches a
+     * registered unverified account (anti-enumeration; mirrors forgotPassword).
+     * Side effects fire only when a real account with _bcc_email_verified = '0'
+     * is found.
+     *
+     * On match: invalidates the existing OTP transient (overwrite), generates
+     * a fresh OTP + token, stores both, and dispatches a new email. Old
+     * verify-token transients are left to expire naturally (they're keyed by
+     * the token string, not by userId, so they can't be bulk-deleted without
+     * a full scan; their 24-hour TTL is short enough that this is safe).
+     */
+    public function resendVerification(WP_REST_Request $request): WP_REST_Response
+    {
+        if (!\BCC\Core\Security\Throttle::allow('resend_verification', self::RESEND_VERIFICATION_RATE_LIMIT, 3600)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
+        }
+
+        $email = sanitize_email((string) $request->get_param('email'));
+        if ($email === '' || !is_email($email)) {
+            return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
+        }
+
+        $user = get_user_by('email', $email);
+
+        if ($user instanceof \WP_User) {
+            $userId        = (int) $user->ID;
+            $emailVerified = (string) get_user_meta($userId, self::META_EMAIL_VERIFIED, true);
+
+            // Only resend for accounts that are explicitly pending
+            // verification. Already-verified and legacy accounts are
+            // silently skipped — the anti-enumeration response hides which.
+            if ($emailVerified === '0') {
+                // Overwrite the existing OTP (if any) so the previous code
+                // immediately stops working — only the new email is valid.
+                $otpCode     = self::generateOtp();
+                $verifyToken = self::generateVerifyToken();
+                self::storeOtpForUser($userId, $otpCode);
+                self::storeVerifyToken($verifyToken, $userId);
+
+                $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
+                $verifyUrl  = FrontendRedirect::defaultReturn($verifyPath);
+                AuthMailer::sendVerificationEmail($userId, $email, $otpCode, $verifyUrl);
+            }
+        }
+
+        $response = ApiResponse::ok(['ok' => true]);
+        $response->header('Cache-Control', 'no-store');
+
+        return $response;
+    }
+
+    // ── Verification helpers ───────────────────────────────────────────
+
+    /**
+     * Shared finalization path for both OTP and token verification.
+     *
+     * Sets _bcc_email_verified = '1', cleans up any remaining OTP
+     * transient, sets the WP session cookie, and mints a JWT. The
+     * response shape matches /auth/login so the frontend can treat
+     * both identically.
+     */
+    private static function finalizeVerification(int $userId): WP_REST_Response
+    {
+        $user = get_userdata($userId);
+        if (!($user instanceof \WP_User)) {
+            return ApiResponse::error('bcc_internal_error', 'User not found.', 500);
+        }
+
+        update_user_meta($userId, self::META_EMAIL_VERIFIED, '1');
+
+        // Clean up the OTP transient regardless of which path was used.
+        // Token-path verification bypasses consumeOtpForUser but the OTP
+        // transient should not linger past a successful verification.
+        delete_transient('bcc_otp_' . (string) $userId);
+
+        $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
+        if ($handle === '') {
+            return ApiResponse::error(
+                'bcc_invalid_state',
+                'Account is missing a handle.',
+                409
+            );
+        }
+
+        wp_set_current_user($userId);
+        wp_set_auth_cookie($userId, true);
+
+        $token = JwtToken::encode($userId, $handle);
+
+        Logger::audit('email_verified', [
+            'user_id' => $userId,
+            'via'     => 'rest',
+        ]);
+
+        do_action('bcc_email_verified', $userId);
+
+        $response = ApiResponse::ok([
+            'user_id'          => $userId,
+            'handle'           => $handle,
+            'token'            => $token,
+            'expires_in'       => self::JWT_TTL_SECONDS,
+            'token_type'       => 'Bearer',
+            'in_good_standing' => self::resolveInGoodStanding($userId),
+        ]);
+        $response->header('Cache-Control', 'no-store');
+
+        return $response;
+    }
+
+    // ── OTP / token generation and storage ────────────────────────────
+
+    /**
+     * Generate a 6-digit OTP string, zero-padded.
+     * Uses random_int() (CSPRNG). The string is returned in plain text
+     * so it can be shown to the user and emailed; storage is via
+     * storeOtpForUser() which HMAC-hashes it before writing.
+     */
+    private static function generateOtp(): string
+    {
+        return sprintf('%06d', random_int(0, 999999));
+    }
+
+    /**
+     * Generate a single-use verify token (64 hex chars = 256 bits).
+     * Stored in a transient keyed by the token string itself; the userId
+     * is the value. Consuming deletes the transient (single-use).
+     */
+    private static function generateVerifyToken(): string
+    {
+        return bin2hex(random_bytes(32));
+    }
+
+    /**
+     * Store an HMAC-SHA256 hash of the OTP for $userId.
+     *
+     * Keyed by `bcc_otp_{userId}` so any concurrent call (e.g. from
+     * resendVerification) overwrites the previous OTP atomically.
+     * TTL: OTP_TTL seconds (15 minutes).
+     */
+    private static function storeOtpForUser(int $userId, string $otpCode): void
+    {
+        $key  = 'bcc_otp_' . (string) $userId;
+        $hash = hash_hmac('sha256', $otpCode, (string) wp_salt('auth'));
+        set_transient($key, $hash, self::OTP_TTL);
+    }
+
+    /**
+     * Store a verify token mapped to $userId.
+     *
+     * Key: `bcc_vt_{token}`, value: string userId, TTL: TOKEN_TTL (24 h).
+     * Multiple tokens can be live at once (one per resend call); they
+     * expire naturally since we can't bulk-invalidate by userId.
+     */
+    private static function storeVerifyToken(string $token, int $userId): void
+    {
+        set_transient('bcc_vt_' . $token, (string) $userId, self::TOKEN_TTL);
+    }
+
+    /**
+     * Verify the submitted OTP code against the stored HMAC hash and,
+     * on match, delete the transient (single-use). Returns true on match,
+     * false on mismatch or expired/missing transient.
+     *
+     * Uses hash_equals() for timing-safe comparison — the HMAC prevents
+     * length-extension attacks; hash_equals() prevents timing oracles.
+     */
+    private static function consumeOtpForUser(int $userId, string $otpCode): bool
+    {
+        $key    = 'bcc_otp_' . (string) $userId;
+        $stored = get_transient($key);
+        if ($stored === false || !is_string($stored) || $stored === '') {
+            return false;
+        }
+
+        $expected = hash_hmac('sha256', $otpCode, (string) wp_salt('auth'));
+        if (!hash_equals($expected, $stored)) {
+            return false;
+        }
+
+        delete_transient($key);
+        return true;
+    }
+
+    /**
+     * Consume a verify token and return the associated userId, or null
+     * when the token is missing, malformed, or already used. Consuming
+     * deletes the transient immediately so the link is single-use.
+     */
+    private static function consumeVerifyToken(string $token): ?int
+    {
+        if ($token === '') {
+            return null;
+        }
+
+        $stored = get_transient('bcc_vt_' . $token);
+        if ($stored === false || !is_string($stored) || $stored === '') {
+            return null;
+        }
+
+        $userId = (int) $stored;
+        if ($userId <= 0) {
+            return null;
+        }
+
+        delete_transient('bcc_vt_' . $token);
+        return $userId;
     }
 
     public function token(WP_REST_Request $request): WP_REST_Response
