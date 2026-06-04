@@ -213,6 +213,75 @@ final class BlogService
     }
 
     /**
+     * Owner-only edit-read: hydrate a single blog post for the §D6
+     * composer's `?edit=<id>` cold-load / deep-link path.
+     *
+     * Mirrors {@see \BCC\Trust\Core\Services\PostsService::updateBlog}'s
+     * identify + ownership guards so the read and write sides agree on
+     * what "this is my blog post" means, then reuses
+     * {@see hydrateForPostId} for the body and appends `status`.
+     *
+     * Unlike the blog-tab list path ({@see getUserBlog}) this works for
+     * DRAFTS too: a draft has no `peepso_activities` row, so it never
+     * surfaces on `/users/:handle/blog` and can only be reached by id —
+     * which is exactly the cold-load edit case the composer needs.
+     *
+     * Returns an `{error, message}` envelope on failure (forwarded by the
+     * REST layer) or the body + `status` on success.
+     *
+     * @return array{error: string, message: string}|array{
+     *   excerpt: string,
+     *   full_text: string,
+     *   wp_post_id: int,
+     *   title: string,
+     *   category: ?string,
+     *   tags: list<string>,
+     *   chain_tags: list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}>,
+     *   disclosure: ?array{tickers: list<string>, note: string},
+     *   cover_image_url: ?string,
+     *   cover_image_id: ?int,
+     *   sources: list<string>,
+     *   status: string
+     * }
+     */
+    public function getBlogForEdit(int $postId, int $viewerId): array
+    {
+        if ($viewerId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+        if ($postId <= 0) {
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
+        }
+
+        $post = get_post($postId);
+        if (!$post instanceof \WP_Post) {
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
+        }
+
+        // Same discriminator as updateBlog: the canonical `peepso-post`
+        // CPT plus the `_bcc_activity_module='blog'` meta marker. A
+        // status / review post (shared CPT) or a foreign post type is
+        // "not found" for the blog-edit surface.
+        if ($post->post_type !== 'peepso-post') {
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
+        }
+        $module = get_post_meta($postId, '_bcc_activity_module', true);
+        if (!is_string($module) || $module !== 'blog') {
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
+        }
+
+        // Ownership — only the author may load their own post for
+        // editing (drafts included). Matches updateBlog's gate verbatim.
+        if ((int) $post->post_author !== $viewerId) {
+            return ['error' => 'bcc_forbidden', 'message' => 'You can only edit your own blog posts.'];
+        }
+
+        $body           = $this->hydrateForPostId($postId, true);
+        $body['status'] = (string) $post->post_status;
+        return $body;
+    }
+
+    /**
      * Internal body builder — pulled out of hydrateBlogBody so both
      * the activity-row path (`hydrateBlogBody`) and the direct
      * post-id path (`hydrateForPostId`) share one implementation.

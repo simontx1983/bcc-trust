@@ -230,6 +230,38 @@ final class PostsEndpoint
             ]
         );
 
+        // §D6 PR-C — owner edit-READ for blog posts (`?edit=<id>` cold
+        // load / deep link).
+        //
+        // GET sibling of the PATCH below on the same /posts/{id} route.
+        // WordPress merges the two register_rest_route() calls into one
+        // route with two method endpoints (READABLE + EDITABLE) — the
+        // second call array_merges its endpoint onto the first. Same
+        // current_user_can('read') gate as the PATCH; the service
+        // enforces post_author === viewer and returns bcc_forbidden
+        // otherwise. This read deliberately returns the author's own
+        // DRAFTS too — drafts have no peepso_activities row, so they
+        // never surface on /users/:handle/blog; the cold-load edit path
+        // is the only way to reach them.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/posts/(?P<id>\d+)',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'getBlogForEdit'],
+                'permission_callback' => static function (): bool {
+                    return current_user_can('read');
+                },
+                'args' => [
+                    'id' => [
+                        'required'          => true,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
+                    ],
+                ],
+            ]
+        );
+
         // §D6 PR-B — owner edit for blog posts (partial update).
         //
         // Methods: WP_REST_Server::EDITABLE = PATCH | PUT. Both verbs
@@ -673,6 +705,35 @@ final class PostsEndpoint
      * survives the request unchanged. The sentinel never escapes the
      * service boundary.
      */
+    /**
+     * GET /posts/{id} — owner-only edit-read for the §D6 blog composer's
+     * `?edit=<id>` cold-load / deep-link path.
+     *
+     * Returns the blog-edit view-model (body fields + `status`) so the
+     * frontend can hydrate the composer without the post already being
+     * in the per-user blog feed cache. Drafts included (author only).
+     * Ownership + type guards live in {@see BlogService::getBlogForEdit};
+     * this handler only resolves the viewer and forwards.
+     */
+    public function getBlogForEdit(WP_REST_Request $request): WP_REST_Response
+    {
+        $viewerId = get_current_user_id();
+        if ($viewerId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        $postId = (int) $request->get_param('id');
+        $result = Plugin::instance()->blogService()->getBlogForEdit($postId, $viewerId);
+
+        if (isset($result['error'])) {
+            return self::forwardServiceError($result);
+        }
+
+        $response = ApiResponse::ok($result);
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
     public function updateBlog(WP_REST_Request $request): WP_REST_Response
     {
         $viewerId = get_current_user_id();
