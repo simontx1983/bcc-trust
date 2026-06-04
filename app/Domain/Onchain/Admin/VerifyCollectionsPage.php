@@ -372,6 +372,39 @@ final class VerifyCollectionsPage
                 </div>
             <?php endif; ?>
 
+            <?php
+            $cosmosChains = array_values(array_filter(
+                $availableChains,
+                static fn($c) => (string) ($c->chain_type ?? '') === 'cosmos'
+            ));
+            if ($cosmosChains !== []):
+            ?>
+                <form method="post" action="" style="margin:0 0 12px 0;padding:8px 12px;background:#f6f7f7;border:1px solid #c3c4c7;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <?php wp_nonce_field(self::NONCE_KEY, self::NONCE_NAME); ?>
+                    <input type="hidden" name="bcc_vc_action" value="add_cosmos_collection">
+                    <strong style="margin-right:4px;">Add Cosmos collection:</strong>
+                    <label for="bcc-vc-add-chain" class="screen-reader-text">Chain</label>
+                    <select name="bcc_vc_add_chain_id" id="bcc-vc-add-chain" required>
+                        <?php foreach ($cosmosChains as $cosmosChain): ?>
+                            <option value="<?php echo (int) $cosmosChain->id; ?>">
+                                <?php echo esc_html((string) $cosmosChain->name); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <label for="bcc-vc-add-contract" class="screen-reader-text">CW-721 contract address</label>
+                    <input type="text"
+                           name="bcc_vc_add_contract"
+                           id="bcc-vc-add-contract"
+                           placeholder="CW-721 contract address (inj1… / stars1… / …)"
+                           style="flex:1;min-width:280px;font-family:monospace;font-size:12px;"
+                           required>
+                    <button type="submit" class="button">Add collection</button>
+                    <span style="color:#646970;font-size:11px;">
+                        Validates via <code>contract_info</code>. New row lands with <code>is_verified=0</code> — flip the checkbox below to enable provisioning.
+                    </span>
+                </form>
+            <?php endif; ?>
+
             <form method="get" action="" style="margin:0 0 12px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
                 <input type="hidden" name="page" value="<?php echo esc_attr(self::PAGE_SLUG); ?>">
                 <?php if ($isVerified): ?>
@@ -726,7 +759,106 @@ final class VerifyCollectionsPage
             return self::handleTestQuery($collectionId);
         }
 
+        if ($action === 'add_cosmos_collection') {
+            return self::handleAddCosmosCollection();
+        }
+
         return [];
+    }
+
+    /**
+     * Curated-admin path: insert a single Cosmos CW-721 collection by
+     * contract address. Validates via the existing `contract_info` probe
+     * (same one the per-row "Test CW-721" button uses) before writing.
+     * Lands with `is_verified=0`; admin still flips the checkbox to enable
+     * provisioning. Safe to re-submit an existing contract — `bulkUpsert`
+     * preserves `is_verified` on duplicates and only refreshes metadata.
+     *
+     * Safety valve for Cosmos chains without a registry contract identified
+     * (Kujira, Dungeon) and for non-Talis Injective collections that the
+     * Talis-whitelist auto-discovery wouldn't surface (e.g., DojoSwap mints,
+     * private-deploy CW-721s).
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function handleAddCosmosCollection(): array
+    {
+        $chainId  = isset($_POST['bcc_vc_add_chain_id']) ? (int) $_POST['bcc_vc_add_chain_id'] : 0;
+        $contract = isset($_POST['bcc_vc_add_contract'])
+            ? trim(sanitize_text_field((string) $_POST['bcc_vc_add_contract']))
+            : '';
+
+        if ($chainId <= 0 || $contract === '') {
+            return [['type' => 'error', 'message' => 'Add collection: chain and contract address are required.']];
+        }
+
+        $chain = ChainRepository::getById($chainId);
+        if ($chain === null) {
+            return [['type' => 'error', 'message' => 'Add collection: chain not found.']];
+        }
+
+        if ((string) $chain->chain_type !== 'cosmos') {
+            return [[
+                'type'    => 'error',
+                'message' => sprintf(
+                    'Add collection: %s is not a Cosmos chain. CW-721 validation only runs on cosmos-typed chains.',
+                    (string) $chain->slug
+                ),
+            ]];
+        }
+
+        if (!FetcherFactory::has_driver((string) $chain->chain_type)) {
+            return [['type' => 'error', 'message' => 'Add collection: no fetcher driver for ' . $chain->slug]];
+        }
+
+        $fetcher = FetcherFactory::make_for_chain($chain);
+        if (!($fetcher instanceof CosmosFetcher)) {
+            return [['type' => 'error', 'message' => 'Add collection: fetcher driver mismatch for ' . $chain->slug]];
+        }
+
+        $info = $fetcher->testCw721ContractInfo($contract);
+        if ($info === null) {
+            return [[
+                'type'    => 'error',
+                'message' => sprintf(
+                    'Add collection: contract_info FAILED on %s for %s. Confirm the address is a real CW-721 contract on this chain before retrying.',
+                    (string) $chain->slug,
+                    $contract
+                ),
+            ]];
+        }
+
+        $name = isset($info['name']) && is_string($info['name']) ? $info['name'] : null;
+
+        $written = CollectionRepository::bulkUpsert([[
+            'contract_address'   => $contract,
+            'chain_id'           => (int) $chain->id,
+            'collection_name'    => $name,
+            'token_standard'     => 'CW-721',
+            'total_supply'       => null,
+            'floor_price'        => null,
+            'floor_currency'     => null,
+            'unique_holders'     => null,
+            'total_volume'       => null,
+            'listed_percentage'  => null,
+            'royalty_percentage' => null,
+            'metadata_storage'   => null,
+            'image_url'          => null,
+        ]], 4 * HOUR_IN_SECONDS);
+
+        if ($written === 0) {
+            return [['type' => 'error', 'message' => 'Add collection: upsert returned 0 rows. Check the bcc-trust error log.']];
+        }
+
+        return [[
+            'type'    => 'success',
+            'message' => sprintf(
+                'Added %s on %s (name="%s"). Flip the Verified checkbox below to enable provisioning.',
+                $contract,
+                (string) $chain->slug,
+                $name ?? '(missing)'
+            ),
+        ]];
     }
 
     /**

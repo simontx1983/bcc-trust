@@ -885,22 +885,46 @@ class CosmosFetcher implements FetcherInterface
     }
 
     /**
-     * Fetch top NFT collections from Stargaze via the Constellations GraphQL API.
-     * Free, no authentication required.
+     * Per-chain dispatcher for "top NFT collections" discovery.
      *
-     * This is called for any Cosmos-type chain. Stargaze is the primary Cosmos
-     * NFT marketplace — collections from Backbone Labs and other Cosmos projects
-     * appear here if listed on Stargaze.
+     * Each Cosmos chain needs its own data source — there is no Cosmos-wide
+     * marketplace indexer covering all chains. Stargaze uses Constellations
+     * GraphQL (free, public, no auth). Injective uses on-chain enumeration of
+     * the Talis Collection Whitelist contract (no API key, no third-party
+     * dependency — DappRadar shut down in November 2025). Other curated Cosmos
+     * NFT chains (Kujira, Dungeon) have no public registry contract identified
+     * yet and explicitly return an empty list — manual curation via the
+     * "Add Cosmos collection" admin form fills the gap.
      *
      * @param int $limit Max collections to return.
-     * @return array<int, array<string, mixed>> Normalized collection rows for bulkUpsert().
+     * @return array<int, array<string, mixed>> Normalized rows for CollectionRepository::bulkUpsert().
      */
     public function fetch_top_collections(int $limit = 100): array
     {
-        // Resolve the Stargaze chain_id. All Cosmos NFT collections are stored
-        // under the Stargaze chain since that's where the marketplace data lives.
-        $stargaze = ChainRepository::getBySlug('stargaze');
-        $chainId  = $stargaze ? (int) $stargaze->id : (int) $this->chain->id;
+        $slug = (string) ($this->chain->slug ?? '');
+
+        switch ($slug) {
+            case 'stargaze':
+                return $this->fetchTopCollectionsStargaze($limit);
+            case 'injective':
+                return $this->fetchTopCollectionsInjectiveViaTalisWhitelist($limit);
+            default:
+                return [];
+        }
+    }
+
+    /**
+     * Stargaze top collections via the public Constellations GraphQL API.
+     * Free, no authentication required. Constellations indexes Stargaze (and
+     * Cosmos NFT projects listed on the Stargaze marketplace) only — NOT
+     * Injective / Kujira / Dungeon.
+     *
+     * @param int $limit Max collections to return.
+     * @return array<int, array<string, mixed>>
+     */
+    private function fetchTopCollectionsStargaze(int $limit): array
+    {
+        $chainId = (int) $this->chain->id;
 
         $query = 'query TopCollections($limit: Int, $offset: Int, $sortBy: CollectionSort) {
             collections(limit: $limit, offset: $offset, sortBy: $sortBy) {
@@ -963,9 +987,7 @@ class CosmosFetcher implements FetcherInterface
                 continue;
             }
 
-            // floorPriceStars is a decimal string in micro-STARS (already display-ready).
             $floorStars  = isset($item['floorPriceStars']) ? (float) $item['floorPriceStars'] / 1e6 : null;
-            // volumeTotal is in micro-STARS.
             $volumeStars = isset($item['stats']['volumeTotal']) ? (float) $item['stats']['volumeTotal'] / 1e6 : null;
 
             $tokenTotal  = $item['tokenCounts']['total'] ?? null;
@@ -989,6 +1011,117 @@ class CosmosFetcher implements FetcherInterface
                 'royalty_percentage' => $item['royaltyInfo']['sharePercent'] ?? null,
                 'metadata_storage'   => null,
                 'image_url'          => $imageUrl,
+            ];
+        }
+
+        return $collections;
+    }
+
+    /**
+     * Injective top NFT collections via on-chain enumeration of the Talis
+     * Collection Whitelist contract.
+     *
+     * Talis Protocol's whitelist contract (inj1s6areevunx3u32gnn5dpnxg40tpuf8hzurpvka,
+     * label "Talis Whitelist", code_id 1099) returns the list of every approved
+     * Talis NFT contract on Injective via the `{whitelist: {limit, start_after}}`
+     * smart query. Returns up to 30 entries per page (server-side cap). We walk
+     * the list up to BCC_TALIS_WHITELIST_PAGE_CAP pages per cron cycle (default
+     * 20 pages = 600 contracts) and enrich each address with `contract_info`
+     * for the collection name. No API key needed; reuses the existing
+     * `wasmSmartQuery` helper and `fetchContractInfo` (cached) so per-address
+     * costs are bounded across cycles.
+     *
+     * The whitelist exposes NO ranking / volume / holder-count signal — entries
+     * are sorted lexicographically by contract address. New rows land with
+     * `is_verified=0`; the existing VerifyCollectionsPage admin gate handles
+     * curation (this is the posture DappRadar would have served before its
+     * November 2025 shutdown).
+     *
+     * Override the contract address via BCC_TALIS_WHITELIST_CONTRACT and the
+     * page cap via BCC_TALIS_WHITELIST_PAGE_CAP.
+     *
+     * @param int $limit Max collections to return (caller-side cap, applied
+     *                   after the page walk).
+     * @return array<int, array<string, mixed>>
+     */
+    private function fetchTopCollectionsInjectiveViaTalisWhitelist(int $limit): array
+    {
+        $chainId = (int) $this->chain->id;
+
+        $whitelistContract = defined('BCC_TALIS_WHITELIST_CONTRACT')
+            ? (string) BCC_TALIS_WHITELIST_CONTRACT
+            : 'inj1s6areevunx3u32gnn5dpnxg40tpuf8hzurpvka';
+        $pageCap = defined('BCC_TALIS_WHITELIST_PAGE_CAP')
+            ? max(1, (int) BCC_TALIS_WHITELIST_PAGE_CAP)
+            : 20;
+        $pageSize = 30;
+
+        $contracts = [];
+        $cursor    = null;
+
+        for ($page = 0; $page < $pageCap; $page++) {
+            $params = ['limit' => $pageSize];
+            if ($cursor !== null) {
+                $params['start_after'] = $cursor;
+            }
+
+            $resp = $this->wasmSmartQuery($whitelistContract, ['whitelist' => $params]);
+            if (!is_array($resp)) {
+                \BCC\Core\Log\Logger::warning(
+                    '[Cosmos Fetcher] Talis whitelist query failed at page ' . $page
+                );
+                break;
+            }
+
+            $batch = $resp['whitelist'] ?? [];
+            if (!is_array($batch) || $batch === []) {
+                break;
+            }
+
+            foreach ($batch as $addr) {
+                if (is_string($addr) && $addr !== '') {
+                    $contracts[] = $addr;
+                }
+            }
+
+            if (count($batch) < $pageSize) {
+                break;
+            }
+
+            $last = end($batch);
+            if (!is_string($last) || $last === '') {
+                break;
+            }
+            $cursor = $last;
+        }
+
+        if ($contracts === []) {
+            return [];
+        }
+
+        $contracts = array_slice($contracts, 0, max(1, $limit));
+
+        $collections = [];
+        foreach ($contracts as $contract) {
+            $info = $this->fetchContractInfo($contract);
+            if ($info === null) {
+                continue;
+            }
+            $name = $info['name'] ?? null;
+            $collections[] = [
+                'contract_address'   => $contract,
+                'chain_id'           => $chainId,
+                'collection_name'    => is_string($name) ? $name : null,
+                'token_standard'     => 'CW-721',
+                'total_supply'       => null,
+                'floor_price'        => null,
+                'floor_currency'     => null,
+                'unique_holders'     => null,
+                'total_volume'       => null,
+                'listed_percentage'  => null,
+                'royalty_percentage' => null,
+                'metadata_storage'   => null,
+                'image_url'          => null,
             ];
         }
 
