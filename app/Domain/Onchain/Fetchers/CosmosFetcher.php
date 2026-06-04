@@ -119,6 +119,7 @@ class CosmosFetcher implements FetcherInterface
             'operator_address'         => $valoper,
             'chain_id'                 => (int) $this->chain->id,
             'moniker'                  => $val['description']['moniker'] ?? null,
+            'identity'                 => self::cleanIdentity($val['description']['identity'] ?? null),
             'status'                   => $status,
             'commission_rate'          => $commission_rate,
             'total_stake'              => $total_stake,
@@ -129,6 +130,24 @@ class CosmosFetcher implements FetcherInterface
             'jailed_count'             => $jailed_count,
             'voting_power_rank'        => $voting_power_rank,
         ];
+    }
+
+    /**
+     * Normalize a Cosmos `description.identity` value (a Keybase 16-hex
+     * key suffix). Returns a trimmed, length-capped string or null. The
+     * KeybaseLogoResolver does the strict format validation — here we
+     * only keep the column safe (≤64 chars) and collapse empties to null.
+     */
+    private static function cleanIdentity(mixed $raw): ?string
+    {
+        if (!is_string($raw)) {
+            return null;
+        }
+        $raw = trim($raw);
+        if ($raw === '') {
+            return null;
+        }
+        return function_exists('mb_substr') ? mb_substr($raw, 0, 64) : substr($raw, 0, 64);
     }
 
     /**
@@ -227,6 +246,7 @@ class CosmosFetcher implements FetcherInterface
             'operator_address'         => $valoper,
             'chain_id'                 => (int) $this->chain->id,
             'moniker'                  => $val['description']['moniker'] ?? null,
+            'identity'                 => self::cleanIdentity($val['description']['identity'] ?? null),
             'status'                   => $status,
             'commission_rate'          => $commission_rate,
             'total_stake'              => $total_stake,
@@ -288,6 +308,7 @@ class CosmosFetcher implements FetcherInterface
                 'operator_address'         => $val['operator_address'],
                 'chain_id'                 => (int) $this->chain->id,
                 'moniker'                  => $val['description']['moniker'] ?? null,
+                'identity'                 => self::cleanIdentity($val['description']['identity'] ?? null),
                 'status'                   => $this->parseStatus($val['status'] ?? ''),
                 'commission_rate'          => $commission,
                 'total_stake'              => isset($val['tokens']) ? $this->tokensToDisplay($val['tokens']) : null,

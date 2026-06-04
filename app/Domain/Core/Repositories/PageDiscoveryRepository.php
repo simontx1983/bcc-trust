@@ -59,7 +59,9 @@ final class PageDiscoveryRepository
         int $page,
         string $search,
         bool $good_standing_only = false,
-        string $chain_slug = ''
+        string $chain_slug = '',
+        string $status = '',
+        ?float $min_self_stake = null
     ): array {
         global $wpdb;
 
@@ -70,25 +72,39 @@ final class PageDiscoveryRepository
         $where  = ["p.post_status = 'publish'", "p.post_type = 'peepso-page'"];
         $params = [];
 
-        // Chain filter joins through `_bcc_onchain_validator_id` post_meta
-        // (written by ValidatorPageMinter and preserved across claim) →
-        // bcc_onchain_validators → bcc_onchain_chains. INNER JOINs because
-        // a chain filter only applies to rows backed by the indexer; any
+        // Validator on-chain JOIN — shared by the chain filter and the
+        // validator-only axes (status / min self-stake / self-stake sort).
+        // Joins through `_bcc_onchain_validator_id` post_meta (written by
+        // ValidatorPageMinter and preserved across claim) →
+        // bcc_onchain_validators; the bcc_onchain_chains slug JOIN is
+        // appended only when a chain slug is supplied. INNER JOINs because
+        // these axes only apply to rows backed by the indexer; any
         // pre-backfill validator page without the meta key is intentionally
-        // excluded from chain-scoped results.
+        // excluded once a validator axis is in play. The post_meta value is
+        // single-valued, so the join yields one validator row per page — no
+        // fan-out, no GROUP BY needed.
+        $needs_validator_join = $chain_slug !== ''
+            || $status !== ''
+            || $min_self_stake !== null
+            || $sort === 'self_stake';
+
         $chain_joins = '';
-        if ($chain_slug !== '') {
+        if ($needs_validator_join) {
             $chain_joins = "
                 INNER JOIN {$wpdb->postmeta} pm_validator
                         ON pm_validator.post_id   = p.ID
                        AND pm_validator.meta_key  = '_bcc_onchain_validator_id'
                 INNER JOIN {$validators_table} v_chain
                         ON v_chain.id = CAST(pm_validator.meta_value AS UNSIGNED)
+            ";
+            if ($chain_slug !== '') {
+                $chain_joins .= "
                 INNER JOIN {$chains_table} c_chain
                         ON c_chain.id   = v_chain.chain_id
                        AND c_chain.slug = %s
-            ";
-            $params[] = $chain_slug;
+                ";
+                $params[] = $chain_slug;
+            }
         }
 
         if (!empty($types)) {
@@ -110,6 +126,16 @@ final class PageDiscoveryRepository
             $ph       = implode(',', array_fill(0, count(UserViewService::GOOD_STANDING_TIERS), '%s'));
             $where[]  = "rm.reputation_tier IN ({$ph})";
             $params   = array_merge($params, UserViewService::GOOD_STANDING_TIERS);
+        }
+        if ($status !== '') {
+            // Validator-only — references the v_chain alias guaranteed
+            // present by $needs_validator_join above.
+            $where[]  = 'v_chain.status = %s';
+            $params[] = $status;
+        }
+        if ($min_self_stake !== null) {
+            $where[]  = 'v_chain.self_stake >= %f';
+            $params[] = $min_self_stake;
         }
         if ($min_confidence > 0) {
             $where[]  = 'rm.confidence_score >= %f';
@@ -146,6 +172,10 @@ final class PageDiscoveryRepository
             'endorsements' => 'rm.endorsement_count DESC',
             'newest'       => 'p.post_date DESC',
             'followers'    => 'rm.follower_count DESC',
+            // Validator-only — v_chain present via $needs_validator_join.
+            // MySQL sorts NULL last under DESC, so validators with no stake
+            // reading fall to the bottom.
+            'self_stake'   => 'v_chain.self_stake DESC',
             default        => $ranking_expr . ' DESC',
         };
 

@@ -68,6 +68,8 @@ class PageDiscoveryService {
         $search             = sanitize_text_field($args['search'] ?? '');
         $good_standing_only = (bool) ($args['good_standing_only'] ?? false);
         $chain_slug         = sanitize_key($args['chain_slug'] ?? '');
+        $status             = sanitize_key($args['status'] ?? '');
+        $min_self_stake     = isset($args['min_self_stake']) ? max(0.0, (float) $args['min_self_stake']) : null;
 
         // Validate tier against allowlist.
         if ($tier !== '' && !in_array($tier, self::ALLOWED_TIERS, true)) {
@@ -75,15 +77,18 @@ class PageDiscoveryService {
         }
 
         // Build cache key from all parameters.
-        $cache_key = $this->buildCacheKey($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug);
+        $cache_key = $this->buildCacheKey($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake);
         $cached    = wp_cache_get($cache_key, self::CACHE_GROUP);
 
         if (false !== $cached) {
             return $cached;
         }
 
+        // Validator-only axes (status / min self-stake / self-stake sort)
+        // are served by the read-model path only — same as the chain
+        // filter, which the legacy fallback does not implement either.
         $result = $this->canUseReadModel()
-            ? $this->executeReadModelQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug)
+            ? $this->executeReadModelQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake)
             : $this->executeQuery($types, $sort, $verified_only, $tier, $min_confidence, $new_only, $max_votes, $limit, $page, $search, $good_standing_only);
 
         /** @var int $ttl Filterable cache TTL. */
@@ -137,11 +142,13 @@ class PageDiscoveryService {
         int $page,
         string $search,
         bool $good_standing_only = false,
-        string $chain_slug = ''
+        string $chain_slug = '',
+        string $status = '',
+        ?float $min_self_stake = null
     ): array {
         $result = \BCC\Trust\Core\Repositories\PageDiscoveryRepository::queryFromReadModel(
             $types, $sort, $verified_only, $tier, $min_confidence,
-            $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug
+            $new_only, $max_votes, $limit, $page, $search, $good_standing_only, $chain_slug, $status, $min_self_stake
         );
 
         $rows = $result['rows'];
@@ -436,7 +443,9 @@ class PageDiscoveryService {
         int $page,
         string $search,
         bool $good_standing_only = false,
-        string $chain_slug = ''
+        string $chain_slug = '',
+        string $status = '',
+        ?float $min_self_stake = null
     ): string {
         sort($types);
         $type_str    = $types ? implode('-', $types) : 'all';
@@ -448,7 +457,9 @@ class PageDiscoveryService {
         $search_hash = $search !== '' ? md5($search) : '0';
         $gs_str      = $good_standing_only ? '1' : '0';
         $chain_str   = $chain_slug !== '' ? $chain_slug : '0';
+        $status_str  = $status !== '' ? $status : '0';
+        $stake_str   = $min_self_stake !== null ? (string) $min_self_stake : '0';
 
-        return "bcc_discovery_{$type_str}_{$sort}_{$verified}_{$tier_str}_{$conf_str}_{$new_str}_{$mv_str}_{$limit}_{$page}_{$search_hash}_gs{$gs_str}_ch{$chain_str}";
+        return "bcc_discovery_{$type_str}_{$sort}_{$verified}_{$tier_str}_{$conf_str}_{$new_str}_{$mv_str}_{$limit}_{$page}_{$search_hash}_gs{$gs_str}_ch{$chain_str}_st{$status_str}_ss{$stake_str}";
     }
 }

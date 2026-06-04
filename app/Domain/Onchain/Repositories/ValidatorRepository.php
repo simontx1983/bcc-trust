@@ -121,7 +121,8 @@ final class ValidatorRepository
     private const COLUMNS = 'id, wallet_link_id, operator_address, chain_id, moniker, status,
                  commission_rate, total_stake, self_stake, delegator_count, uptime_30d,
                  jailed_count, voting_power_rank, fetched_at, expires_at,
-                 last_enriched_at, next_enrichment_at, retry_after, enrichment_attempts';
+                 last_enriched_at, next_enrichment_at, retry_after, enrichment_attempts,
+                 identity, logo_url, logo_source_ref, logo_checked_at';
 
     public static function table(): string
     {
@@ -388,6 +389,7 @@ final class ValidatorRepository
             'total_stake'      => '%f',
             'jailed_count'     => '%d',
             'voting_power_rank'=> '%d',
+            'identity'         => '%s',
         ];
 
         foreach ($enrichable as $col => $fmt) {
@@ -1203,6 +1205,128 @@ final class ValidatorRepository
         ));
 
         return $row;
+    }
+
+    /**
+     * Resolve the auto-imported logo URL backing a peepso-page, if any.
+     *
+     * Mirrors findSignalsByPageId's two-path join (wallet_link first, then
+     * placeholder post_meta) but returns only the locally-hosted logo URL.
+     * Read by CardViewService as the lowest-precedence crest source, so a
+     * claimer/manual image always wins over the auto logo.
+     */
+    public static function findLogoByPageId(int $pageId): ?string
+    {
+        if ($pageId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+
+        $url = $wpdb->get_var($wpdb->prepare(
+            "SELECT v.logo_url
+               FROM {$table} v
+               JOIN {$wallets} w ON w.id = v.wallet_link_id
+              WHERE w.post_id = %d
+              LIMIT 1",
+            $pageId
+        ));
+
+        if (!is_string($url) || $url === '') {
+            // Placeholder-page fallback (no wallet_link yet).
+            $url = $wpdb->get_var($wpdb->prepare(
+                "SELECT v.logo_url
+                   FROM {$wpdb->postmeta} pm
+                   JOIN {$table} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
+                  WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                    AND pm.post_id  = %d
+                  LIMIT 1",
+                $pageId
+            ));
+        }
+
+        return is_string($url) && $url !== '' ? $url : null;
+    }
+
+    /**
+     * Read the logo-resolution state for a single validator (by PK).
+     * Used by ValidatorLogoService to gate re-resolution.
+     *
+     * @return object{id: string, chain_id: string, identity: string|null, logo_url: string|null, logo_source_ref: string|null, logo_checked_at: string|null}|null
+     */
+    public static function getLogoState(int $validatorId): ?object
+    {
+        if ($validatorId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var object{id: string, chain_id: string, identity: string|null, logo_url: string|null, logo_source_ref: string|null, logo_checked_at: string|null}|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT id, chain_id, identity, logo_url, logo_source_ref, logo_checked_at
+               FROM {$table}
+              WHERE id = %d
+              LIMIT 1",
+            $validatorId
+        ));
+
+        return $row;
+    }
+
+    /**
+     * Persist a resolved, locally-hosted logo for a validator. Stamps
+     * logo_checked_at so the resolver throttle restarts.
+     */
+    public static function setLogo(int $validatorId, string $localUrl, string $sourceRef): bool
+    {
+        if ($validatorId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+
+        $result = $wpdb->update(
+            self::table(),
+            [
+                'logo_url'        => $localUrl,
+                'logo_source_ref' => $sourceRef,
+                'logo_checked_at' => current_time('mysql', true),
+            ],
+            ['id' => $validatorId],
+            ['%s', '%s', '%s'],
+            ['%d']
+        );
+
+        return $result !== false;
+    }
+
+    /**
+     * Stamp logo_checked_at without changing the image — called after a
+     * resolution attempt that produced no change (already current, no
+     * identity match, or a swallowed failure) so the throttle window
+     * restarts and we don't re-hit the upstream every run.
+     */
+    public static function markLogoChecked(int $validatorId): bool
+    {
+        if ($validatorId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+
+        $result = $wpdb->update(
+            self::table(),
+            ['logo_checked_at' => current_time('mysql', true)],
+            ['id' => $validatorId],
+            ['%s'],
+            ['%d']
+        );
+
+        return $result !== false;
     }
 
     /**

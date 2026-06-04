@@ -18,7 +18,8 @@
  *   - tier   (legendary|rare|uncommon|    — translates to reputation
  *             common)                       tier via the §C1 mapping
  *   - sort   (trust|newest|endorsements|  — passed through verbatim;
- *             followers)                    PageDiscoveryService validates
+ *             followers|self_stake)         PageDiscoveryService validates.
+ *                                           `self_stake` is validator-only.
  *   - q      (search string)              — passed through verbatim
  *   - good_standing_only (0|1)            — when true, restricts results to
  *                                            §E1 good-standing tiers (neutral,
@@ -26,6 +27,11 @@
  *                                            `tier` via AND so the filter
  *                                            chip and per-row stamp can never
  *                                            disagree.
+ *   - chain  (chain slug)                 — validator-scoped; JOINs through
+ *                                            `_bcc_onchain_validator_id` meta.
+ *   - status (active|jailed|inactive)     — validator-only on-chain status.
+ *   - min_self_stake (number ≥ 0)         — validator-only bonded self-stake
+ *                                            floor.
  *   - page   (1-based)                    — capped at 20 (offset-FS
  *                                            guard inherited from the
  *                                            now-retired DiscoveryEndpoint
@@ -34,10 +40,11 @@
  *                                            pagination)
  *   - per_page (1..50)                    — hard ceiling
  *
- * Deferred to V1.5 (per scope discipline §P):
- *   - chain filter             — bcc_page_read_model has no chain column
- *   - self_bonded filter (§G2) — would need a sync extension to denormalize
- *                                 bcc_onchain_validators.self_stake
+ * The validator-only axes (chain / status / min_self_stake / self_stake
+ * sort) are served by the read-model query path's validator JOIN; the
+ * legacy posts-table fallback does not implement them (same as chain).
+ *
+ * Deferred (per scope discipline §P):
  *   - view-toggle (grid/table) — pure frontend concern, nothing here
  *
  * @package BCC\Trust\Core\REST
@@ -85,8 +92,23 @@ final class CardsListEndpoint
     /** @var list<string> */
     private const ALLOWED_KINDS = ['validator', 'project', 'creator'];
 
-    /** @var list<string> */
-    private const ALLOWED_SORTS = ['trust', 'newest', 'endorsements', 'followers'];
+    /**
+     * `self_stake` is validator-only (sorts by bonded self-stake DESC).
+     * It is served by the read-model path's validator JOIN — harmless on
+     * non-validator kinds (the JOIN simply yields no rows, so the result
+     * is empty rather than erroneous).
+     *
+     * @var list<string>
+     */
+    private const ALLOWED_SORTS = ['trust', 'newest', 'endorsements', 'followers', 'self_stake'];
+
+    /**
+     * Validator on-chain status filter values (subset of the column's
+     * domain; 'unknown' is intentionally not selectable).
+     *
+     * @var list<string>
+     */
+    private const ALLOWED_STATUSES = ['active', 'jailed', 'inactive'];
 
     public static function register(): void
     {
@@ -142,6 +164,15 @@ final class CardsListEndpoint
                         'required'          => false,
                         'type'              => 'string',
                         'sanitize_callback' => 'sanitize_key',
+                    ],
+                    'status' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_key',
+                    ],
+                    'min_self_stake' => [
+                        'required' => false,
+                        'type'     => 'number',
                     ],
                 ],
             ]
@@ -209,7 +240,7 @@ final class CardsListEndpoint
         if ($sortParam !== '' && !in_array($sortParam, self::ALLOWED_SORTS, true)) {
             return ApiResponse::error(
                 'bcc_invalid_request',
-                'sort must be trust, newest, endorsements, or followers.',
+                'sort must be trust, newest, endorsements, followers, or self_stake.',
                 400
             );
         }
@@ -238,6 +269,31 @@ final class CardsListEndpoint
             }
         }
 
+        // ── status filter (validator-only; rejected at the boundary for
+        //    unknown values, mirroring the chain-slug guard above).
+        $statusParam = (string) $request->get_param('status');
+        if ($statusParam !== '' && !in_array($statusParam, self::ALLOWED_STATUSES, true)) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'status must be active, jailed, or inactive.',
+                400
+            );
+        }
+
+        // ── min_self_stake filter (validator-only; bonded self-stake floor).
+        //    Negative values are nonsensical for a stake floor → reject.
+        $minSelfStake = null;
+        if ($request->get_param('min_self_stake') !== null) {
+            $minSelfStake = (float) $request->get_param('min_self_stake');
+            if ($minSelfStake < 0) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    'min_self_stake must be a non-negative number.',
+                    400
+                );
+            }
+        }
+
         // ── Run discovery ───────────────────────────────────────────────
         $discoveryService = new PageDiscoveryService();
         $discoveryResult = $discoveryService->query([
@@ -249,6 +305,8 @@ final class CardsListEndpoint
             'search'             => $query,
             'good_standing_only' => $goodStandingOnly,
             'chain_slug'         => $chainSlug,
+            'status'             => $statusParam,
+            'min_self_stake'     => $minSelfStake,
         ]);
 
         $rows = isset($discoveryResult['results']) && is_array($discoveryResult['results'])

@@ -687,6 +687,7 @@ final class CardViewService
      */
     private static function resolvePageAvatarUrl(int $pageId): string
     {
+        // 1. PeepSo page avatar (manual upload).
         if (class_exists('PeepSoPagePhoto')) {
             $photo = \PeepSoPagePhoto::get_instance();
             if ($photo) {
@@ -696,8 +697,23 @@ final class CardViewService
                 }
             }
         }
+
+        // 2. WP featured image — where a claimer's uploaded avatar lands
+        //    (POST /pages/{id}/avatar pins it via set_post_thumbnail).
         $thumb = get_the_post_thumbnail_url($pageId, 'thumbnail');
-        return is_string($thumb) ? $thumb : '';
+        if (is_string($thumb) && $thumb !== '') {
+            return $thumb;
+        }
+
+        // 3. Auto-imported validator logo (self-hosted). Lowest precedence,
+        //    so a claimer/manual image above always overrides it.
+        $logo = \BCC\Trust\Onchain\Repositories\ValidatorRepository::findLogoByPageId($pageId);
+        if (is_string($logo) && $logo !== '') {
+            return $logo;
+        }
+
+        // 4. Empty → frontend renders the initials monogram fallback.
+        return '';
     }
 
     /**
@@ -869,6 +885,7 @@ final class CardViewService
                 'can_endorse'        => $endorseEligibility,
                 'can_post_as_entity' => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
                 'can_edit_bio'       => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+                'can_edit_image'     => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
             ],
             // §J.6 Trust Attestation Layer permissions. Tier-gated +
             // self-target-prevented. The shapes are
@@ -934,6 +951,9 @@ final class CardViewService
                 'can_endorse'        => self::deny(null, 'not_applicable'),
                 'can_post_as_entity' => self::deny(null, 'not_applicable'),
                 'can_edit_bio'       => $isSelf ? self::allow() : self::deny(null, 'not_owner'),
+                // Page-image editing applies to claimed validator/project/
+                // creator pages; member self-avatars use /me/profile/avatar.
+                'can_edit_image'     => self::deny(null, 'not_applicable'),
             ],
             $attestationFields
         );
@@ -952,6 +972,7 @@ final class CardViewService
             'can_endorse'        => $sign,
             'can_post_as_entity' => $sign,
             'can_edit_bio'       => $sign,
+            'can_edit_image'     => $sign,
         ];
     }
 
@@ -968,6 +989,7 @@ final class CardViewService
             'can_endorse'        => self::deny(null, 'not_applicable'),
             'can_post_as_entity' => self::deny(null, 'not_applicable'),
             'can_edit_bio'       => $sign,
+            'can_edit_image'     => self::deny(null, 'not_applicable'),
         ];
     }
 

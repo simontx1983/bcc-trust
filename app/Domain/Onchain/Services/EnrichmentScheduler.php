@@ -335,6 +335,12 @@ final class EnrichmentScheduler
                 'ValidatorRepository::enrichByOperator returned false for ' . $row->operator_address
             );
         }
+
+        // Auto-import the validator's logo (Phase 1: Cosmos Keybase identity).
+        // Best-effort + throttled + self-swallowing — a logo miss is cosmetic
+        // and must never fail or slow the signal enrichment above.
+        ValidatorLogoService::maybeRefresh((int) $row->id);
+
         return true;
     }
 

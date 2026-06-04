@@ -35,6 +35,7 @@
 namespace BCC\Trust\Core\REST;
 
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Services\BlogCoverImageWriter;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Services\ClaimService;
@@ -89,6 +90,163 @@ final class PagesEndpoint
                 ],
             ]
         );
+
+        // Claimer-only page avatar: upload (POST) / remove (DELETE). Lets a
+        // verified operator override the auto-imported validator logo with
+        // their own image (stored as the page's featured image, which the
+        // crest resolver ranks above the auto logo).
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/pages/(?P<id>\d+)/avatar',
+            [
+                [
+                    'methods'             => WP_REST_Server::CREATABLE,
+                    'callback'            => [new self(), 'uploadAvatar'],
+                    'permission_callback' => '__return_true',
+                    'args' => [
+                        'id' => [
+                            'required'          => true,
+                            'type'              => 'integer',
+                            'minimum'           => 1,
+                            'sanitize_callback' => 'absint',
+                        ],
+                    ],
+                ],
+                [
+                    'methods'             => WP_REST_Server::DELETABLE,
+                    'callback'            => [new self(), 'deleteAvatar'],
+                    'permission_callback' => '__return_true',
+                    'args' => [
+                        'id' => [
+                            'required'          => true,
+                            'type'              => 'integer',
+                            'minimum'           => 1,
+                            'sanitize_callback' => 'absint',
+                        ],
+                    ],
+                ],
+            ]
+        );
+    }
+
+    /**
+     * POST /pages/:id/avatar — claimer uploads a page image.
+     *
+     * Gate: authenticated AND holds a verified `page` claim on this page.
+     * Persists via BlogCoverImageWriter (attachment owned by the uploader)
+     * then pins it with set_post_thumbnail so CardViewService's crest
+     * resolver picks it up above the auto-imported logo.
+     */
+    public function uploadAvatar(WP_REST_Request $request): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        $pageId = (int) $request->get_param('id');
+
+        $gate = self::requireClaimer($pageId, $userId);
+        if ($gate !== null) {
+            return $gate;
+        }
+
+        $files = $request->get_file_params();
+        $file  = isset($files['avatar']) && is_array($files['avatar']) ? $files['avatar'] : null;
+        if ($file === null) {
+            return ApiResponse::error('bcc_invalid_request', 'No image uploaded (expected field "avatar").', 400);
+        }
+
+        // Reuse the §D6 cover-image writer: validates size/MIME from file
+        // magic, rate-limits, and produces an uploader-owned attachment.
+        $result = (new BlogCoverImageWriter())->upload($userId, $file);
+        if (!isset($result['ok'])) {
+            /** @var array{error: string, message: string, data?: array<string, mixed>} $result */
+            $status = match ($result['error']) {
+                'bcc_unauthorized' => 401,
+                'bcc_rate_limited' => 429,
+                'bcc_invalid_request' => 400,
+                default            => 503,
+            };
+            return ApiResponse::error($result['error'], $result['message'], $status);
+        }
+
+        $attachmentId = (int) $result['attachment_id'];
+        set_post_thumbnail($pageId, $attachmentId);
+
+        Logger::audit('page_avatar_set', [
+            'user_id'       => $userId,
+            'page_id'       => $pageId,
+            'attachment_id' => $attachmentId,
+            'via'           => 'rest',
+        ]);
+
+        $response = ApiResponse::ok([
+            'page_id'   => $pageId,
+            'image_url' => (string) $result['url'],
+        ]);
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
+    /**
+     * DELETE /pages/:id/avatar — claimer removes their uploaded image,
+     * reverting to the auto-imported logo (or the initials crest).
+     */
+    public function deleteAvatar(WP_REST_Request $request): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        $pageId = (int) $request->get_param('id');
+
+        $gate = self::requireClaimer($pageId, $userId);
+        if ($gate !== null) {
+            return $gate;
+        }
+
+        delete_post_thumbnail($pageId);
+
+        Logger::audit('page_avatar_cleared', [
+            'user_id' => $userId,
+            'page_id' => $pageId,
+            'via'     => 'rest',
+        ]);
+
+        $response = ApiResponse::ok([
+            'page_id'   => $pageId,
+            'image_url' => null,
+        ]);
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
+    /**
+     * Shared gate for the avatar routes: returns an error response when the
+     * caller is unauthenticated, the page doesn't exist, or the caller does
+     * not hold a verified `page` claim on it; null when allowed to proceed.
+     */
+    private static function requireClaimer(int $pageId, int $userId): ?WP_REST_Response
+    {
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+        if ($pageId <= 0) {
+            return ApiResponse::error('bcc_invalid_request', 'page id is required.', 400);
+        }
+
+        $post = get_post($pageId);
+        if (!$post instanceof \WP_Post
+            || $post->post_type !== 'peepso-page'
+            || $post->post_status !== 'publish'
+        ) {
+            return ApiResponse::error('bcc_not_found', 'Page not found.', 404);
+        }
+
+        $claim = ClaimRepository::getUserClaim($userId, 'page', $pageId);
+        if ($claim === null || (string) $claim->status !== 'verified') {
+            return ApiResponse::error(
+                'bcc_forbidden',
+                'Only the verified operator of this page can change its image.',
+                403
+            );
+        }
+
+        return null;
     }
 
     public function claim(WP_REST_Request $request): WP_REST_Response
