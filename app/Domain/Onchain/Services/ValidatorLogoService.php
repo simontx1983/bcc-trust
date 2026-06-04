@@ -175,23 +175,32 @@ final class ValidatorLogoService
             return null;
         }
 
-        // MIME from file magic, not the response header (header is spoofable).
-        $check = wp_check_filetype_and_ext($tmp, 'logo');
-        $mime  = isset($check['type']) && is_string($check['type']) ? $check['type'] : '';
-        if ($mime === '' || !in_array($mime, self::ALLOWED_MIMES, true)) {
-            @unlink($tmp);
-            return null;
-        }
-
-        // Must be a real, decodable raster (rejects polyglots + truncations
-        // that pass the magic-byte sniff but aren't valid images).
+        // Primary validation: the real MIME from image content (rejects
+        // non-images, polyglots, and truncations that aren't decodable).
         $dims = @getimagesize($tmp);
         if ($dims === false || $dims[0] <= 0 || $dims[1] <= 0) {
             @unlink($tmp);
             return null;
         }
+        $mime = $dims['mime'];
+        if (!in_array($mime, self::ALLOWED_MIMES, true)) {
+            @unlink($tmp);
+            return null;
+        }
 
+        // The extension is derived from the content MIME, never the URL.
         $ext = self::extensionForMime($mime);
+
+        // Defense-in-depth: WP's own finfo+extension check must agree. It
+        // needs a filename WITH an extension — an extension-less name makes
+        // wp_check_filetype_and_ext return type=false and rejects every file.
+        $check  = wp_check_filetype_and_ext($tmp, "logo.{$ext}");
+        $wpMime = isset($check['type']) && is_string($check['type']) ? $check['type'] : '';
+        if ($wpMime !== $mime) {
+            @unlink($tmp);
+            return null;
+        }
+
         $fileArray = [
             'name'     => "validator-{$validatorId}-logo.{$ext}",
             'tmp_name' => $tmp,
