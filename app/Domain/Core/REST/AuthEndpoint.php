@@ -119,6 +119,14 @@ final class AuthEndpoint
      * "I didn't get it" retry pattern without enabling harassment.
      */
     private const RESEND_VERIFICATION_RATE_LIMIT = 3;
+    /** Anon-IP-keyed (per-minute) throttle for /auth/2fa/verify. */
+    private const TWO_FA_VERIFY_RATE_LIMIT = 10;
+    /** Anon-IP-keyed (per-minute) throttle for /auth/2fa/resend. */
+    private const TWO_FA_RESEND_RATE_LIMIT = 3;
+    /** 2FA OTP transient TTL: 5 minutes. */
+    private const TWO_FA_OTP_TTL = 300;
+    /** 2FA challenge-token transient TTL: 10 minutes. */
+    private const TWO_FA_CHALLENGE_TTL = 600;
 
     /**
      * User meta key for email-verification state.
@@ -534,6 +542,39 @@ final class AuthEndpoint
                 ],
             ]
         );
+
+        // POST /auth/2fa/verify — consume a challenge token + 6-digit OTP
+        // to complete login and receive a full JWT. Challenge token is
+        // issued by /auth/login when 2FA is required.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/2fa/verify',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'twoFaVerify'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'challenge_token' => ['required' => true, 'type' => 'string'],
+                    'code'            => ['required' => true, 'type' => 'string'],
+                ],
+            ]
+        );
+
+        // POST /auth/2fa/resend — generate a fresh 2FA OTP for an
+        // in-progress challenge. Validates the challenge token without
+        // consuming it. Always returns ok=true (anti-enumeration).
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/2fa/resend',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'twoFaResend'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'challenge_token' => ['required' => true, 'type' => 'string'],
+                ],
+            ]
+        );
     }
 
     public function nonce(WP_REST_Request $request): WP_REST_Response
@@ -933,8 +974,77 @@ final class AuthEndpoint
             );
         }
 
-        // Same auth-cookie behavior as signup: cookie for same-origin
-        // admin tooling, JWT in the response for headless clients.
+        // 2FA gate — generate a challenge token + OTP, email the code,
+        // and return a 2fa_required response. The client must complete
+        // /auth/2fa/verify to receive the actual JWT.
+        $otpCode        = self::generateOtp();
+        $challengeToken = bin2hex(random_bytes(32));
+        self::store2faOtp($userId, $otpCode);
+        self::store2faChallenge($challengeToken, $userId);
+
+        AuthMailer::send2faCode($userId, (string) $user->user_email, $otpCode);
+
+        Logger::audit('user_login_2fa_initiated', [
+            'user_id' => $userId,
+            'handle'  => $handle,
+        ]);
+
+        $response = ApiResponse::ok([
+            'status'          => '2fa_required',
+            'method'          => 'email',
+            'challenge_token' => $challengeToken,
+        ]);
+        $response->header('Cache-Control', 'no-store');
+
+        return $response;
+    }
+
+    /**
+     * POST /auth/2fa/verify — second factor: consume challenge + OTP → JWT.
+     *
+     * Accepts the challenge_token issued by /auth/login and the 6-digit OTP
+     * sent to the user's email. On success, behaves identically to a direct
+     * /auth/login response (same JWT payload shape).
+     *
+     * On wrong code: challenge token is preserved so the user can retry
+     * without restarting the login flow. Rate limiter is the brute-force
+     * fence; the challenge TTL (10 min) is the outer bound.
+     */
+    public function twoFaVerify(WP_REST_Request $request): WP_REST_Response
+    {
+        if (!\BCC\Core\Security\Throttle::allow('2fa_verify', self::TWO_FA_VERIFY_RATE_LIMIT, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many attempts. Wait a moment and try again.', 429);
+        }
+
+        $challengeToken = sanitize_text_field((string) $request->get_param('challenge_token'));
+        $code           = sanitize_text_field((string) $request->get_param('code'));
+
+        if ($challengeToken === '' || $code === '') {
+            return ApiResponse::error('bcc_invalid_request', 'challenge_token and code are required.', 422);
+        }
+
+        $userId = self::peek2faChallenge($challengeToken);
+        if ($userId === null) {
+            return ApiResponse::error('bcc_invalid_2fa_token', 'This session has expired. Please sign in again.', 401);
+        }
+
+        if (!self::consume2faOtp($userId, $code)) {
+            return ApiResponse::error('bcc_invalid_2fa_code', 'Incorrect or expired code.', 401);
+        }
+
+        // OTP matched — consume the challenge token so it can't be reused.
+        self::consume2faChallenge($challengeToken);
+
+        $user = get_userdata($userId);
+        if (!($user instanceof \WP_User)) {
+            return ApiResponse::error('bcc_invalid_state', 'Account not found.', 404);
+        }
+
+        $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
+        if ($handle === '') {
+            return ApiResponse::error('bcc_invalid_state', 'Account is missing a handle.', 409);
+        }
+
         wp_set_current_user($userId);
         wp_set_auth_cookie($userId, true);
 
@@ -943,7 +1053,7 @@ final class AuthEndpoint
         Logger::audit('user_login', [
             'user_id' => $userId,
             'handle'  => $handle,
-            'via'     => 'rest',
+            'via'     => '2fa',
         ]);
 
         do_action('bcc_user_login', $userId);
@@ -958,6 +1068,36 @@ final class AuthEndpoint
         ]);
         $response->header('Cache-Control', 'no-store');
 
+        return $response;
+    }
+
+    /**
+     * POST /auth/2fa/resend — send a fresh 2FA OTP for an in-progress challenge.
+     *
+     * Validates the challenge token without consuming it. Always returns
+     * ok=true regardless of whether the token is valid (anti-enumeration).
+     * Rate-limited per IP (3/min) to prevent email-bomb abuse.
+     */
+    public function twoFaResend(WP_REST_Request $request): WP_REST_Response
+    {
+        if (!\BCC\Core\Security\Throttle::allow('2fa_resend', self::TWO_FA_RESEND_RATE_LIMIT, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many resend requests. Wait a moment.', 429);
+        }
+
+        $challengeToken = sanitize_text_field((string) $request->get_param('challenge_token'));
+
+        $userId = $challengeToken !== '' ? self::peek2faChallenge($challengeToken) : null;
+        if ($userId !== null) {
+            $user = get_userdata($userId);
+            if ($user instanceof \WP_User) {
+                $otpCode = self::generateOtp();
+                self::store2faOtp($userId, $otpCode);
+                AuthMailer::send2faCode($userId, (string) $user->user_email, $otpCode);
+            }
+        }
+
+        $response = ApiResponse::ok(['ok' => true]);
+        $response->header('Cache-Control', 'no-store');
         return $response;
     }
 
@@ -2009,6 +2149,56 @@ final class AuthEndpoint
     private static function placeholderEmailForWallet(string $walletAddress): string
     {
         return 'wallet-' . substr(md5(strtolower($walletAddress)), 0, 16) . '@noreply.bcc.local';
+    }
+
+    // ── 2FA OTP / challenge-token helpers ─────────────────────────────
+
+    private static function store2faOtp(int $userId, string $otpCode): void
+    {
+        $hash = hash_hmac('sha256', $otpCode, (string) wp_salt('auth'));
+        set_transient('bcc_2fa_otp_' . (string) $userId, $hash, self::TWO_FA_OTP_TTL);
+    }
+
+    private static function consume2faOtp(int $userId, string $code): bool
+    {
+        $key    = 'bcc_2fa_otp_' . (string) $userId;
+        $stored = get_transient($key);
+        if ($stored === false || !is_string($stored) || $stored === '') {
+            return false;
+        }
+        $expected = hash_hmac('sha256', $code, (string) wp_salt('auth'));
+        if (!hash_equals($expected, $stored)) {
+            return false;
+        }
+        delete_transient($key);
+        return true;
+    }
+
+    private static function store2faChallenge(string $token, int $userId): void
+    {
+        set_transient('bcc_2fa_ct_' . $token, (string) $userId, self::TWO_FA_CHALLENGE_TTL);
+    }
+
+    /** Validate a challenge token without consuming it. Returns userId or null. */
+    private static function peek2faChallenge(string $token): ?int
+    {
+        if ($token === '') {
+            return null;
+        }
+        $stored = get_transient('bcc_2fa_ct_' . $token);
+        if ($stored === false || !is_string($stored) || $stored === '') {
+            return null;
+        }
+        $id = (int) $stored;
+        return $id > 0 ? $id : null;
+    }
+
+    /** Delete the challenge token transient (call after successful OTP verify). */
+    private static function consume2faChallenge(string $token): void
+    {
+        if ($token !== '') {
+            delete_transient('bcc_2fa_ct_' . $token);
+        }
     }
 
     // JWT mint/verify lives in BCC\Trust\Core\Support\JwtToken — single

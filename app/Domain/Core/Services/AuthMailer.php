@@ -35,6 +35,7 @@ final class AuthMailer
     private const VERIFY_EMAIL_FAILURE_EVENT      = 'verify_email_send_failed';
     private const WELCOME_FAILURE_EVENT            = 'welcome_email_send_failed';
     private const PASSWORD_RESET_FAILURE_EVENT     = 'password_reset_email_send_failed';
+    private const TWO_FA_FAILURE_EVENT             = '2fa_email_send_failed';
 
     private const LOGO_URL = 'https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png';
     private const SITE_URL = 'https://bluecollarcrypto.io';
@@ -556,6 +557,138 @@ HTML;
           <td align="center" style="padding:24px 16px 0;">
             <p style="margin:0;font-size:11px;color:#484f58;line-height:1.6;">
               You&rsquo;re receiving this because a password reset was requested for your {$safeSiteName} account.<br>
+              For your security, please do not forward this email.
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>
+HTML;
+    }
+
+    /**
+     * Send the 2FA login-verification email.
+     *
+     * Contains a 6-digit OTP the user enters on /login/two-factor to
+     * complete sign-in. TTL is 5 minutes (controlled by the transient
+     * in AuthEndpoint — this email just conveys the code).
+     */
+    public static function send2faCode(int $userId, string $to, string $otpCode): void
+    {
+        if ($to === '' || !is_email($to)) {
+            return;
+        }
+        $user = get_userdata($userId);
+        if (!($user instanceof \WP_User)) {
+            return;
+        }
+        $siteName    = get_bloginfo('name') ?: 'BCC';
+        $displayName = $user->display_name ?: $user->user_login;
+        $subject     = sprintf('[%s] Your login verification code', $siteName);
+        BccMailer::send(
+            $to,
+            $subject,
+            self::build2faHtml($siteName, $displayName, $otpCode),
+            self::TWO_FA_FAILURE_EVENT
+        );
+    }
+
+    private static function build2faHtml(
+        string $siteName,
+        string $displayName,
+        string $otpCode
+    ): string {
+        $safeSiteName    = htmlspecialchars($siteName,    ENT_QUOTES, 'UTF-8');
+        $safeDisplayName = htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8');
+        $safeOtp         = htmlspecialchars($otpCode,     ENT_QUOTES, 'UTF-8');
+
+        return <<<HTML
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="x-apple-disable-message-reformatting">
+<title>Login verification &mdash; {$safeSiteName}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d1117">
+  <tr>
+    <td align="center" style="padding:40px 16px 56px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;border-collapse:separate;">
+
+        <tr>
+          <td align="center" style="padding:0 0 24px;">
+            <img src="https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png"
+                 alt="{$safeSiteName}" width="130" height="auto"
+                 style="display:block;max-width:130px;height:auto;border:0;outline:none;text-decoration:none;">
+          </td>
+        </tr>
+
+        <tr>
+          <td bgcolor="#161b22" style="background-color:#161b22;border:1px solid #30363d;border-radius:16px;overflow:hidden;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+
+              <tr>
+                <td bgcolor="#16b5e6" style="background-color:#16b5e6;height:3px;font-size:3px;line-height:3px;">&nbsp;</td>
+              </tr>
+
+              <tr>
+                <td style="padding:36px 36px 28px;">
+
+                  <h1 style="margin:0 0 20px;font-size:22px;font-weight:600;color:#f0f6fc;line-height:1.3;">
+                    Login verification code
+                  </h1>
+                  <p style="margin:0 0 14px;font-size:16px;font-weight:500;color:#c9d1d9;line-height:1.5;">
+                    Hello, {$safeDisplayName}
+                  </p>
+                  <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#8b949e;">
+                    Someone (hopefully you) is signing in to your {$safeSiteName} account.
+                    Enter this code to complete your login. It expires in&nbsp;5&nbsp;minutes.
+                  </p>
+
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;border-collapse:separate;">
+                    <tr>
+                      <td align="center" bgcolor="#0d1117"
+                          style="background-color:#0d1117;border:1px solid #16b5e6;border-radius:12px;padding:28px 24px;">
+                        <span style="display:block;font-family:'Courier New',Courier,monospace;font-size:44px;font-weight:700;letter-spacing:14px;color:#16b5e6;line-height:1;padding-left:14px;">{$safeOtp}</span>
+                        <span style="display:block;margin-top:10px;font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#484f58;">Expires in 5 minutes &middot; one-time use</span>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <p style="margin:0;font-size:13px;line-height:1.65;color:#6e7681;">
+                    If you did <strong style="color:#8b949e;">not</strong> try to sign in,
+                    your password may be compromised &mdash; change it immediately and
+                    contact us if you need help.
+                  </p>
+
+                </td>
+              </tr>
+
+              <tr>
+                <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
+                  <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
+                    &copy; {$safeSiteName} &bull;
+                    <a href="https://bluecollarcrypto.io" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
+                  </p>
+                </td>
+              </tr>
+
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center" style="padding:24px 16px 0;">
+            <p style="margin:0;font-size:11px;color:#484f58;line-height:1.6;">
+              You&rsquo;re receiving this because a sign-in was attempted on your {$safeSiteName} account.<br>
               For your security, please do not forward this email.
             </p>
           </td>
