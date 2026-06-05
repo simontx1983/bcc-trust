@@ -1656,6 +1656,15 @@ final class AuthEndpoint
 
         do_action('bcc_email_verified', $userId);
 
+        // Welcome email — best-effort, never throws. Sent once at the moment
+        // the account transitions from pending → active. FrontendRedirect
+        // resolves the floor URL from the same env var used everywhere else.
+        AuthMailer::sendWelcomeEmail(
+            $user->user_email,
+            $handle,
+            FrontendRedirect::defaultReturn('/')
+        );
+
         $response = ApiResponse::ok([
             'user_id'          => $userId,
             'handle'           => $handle,
