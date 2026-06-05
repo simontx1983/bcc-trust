@@ -127,6 +127,14 @@ final class AuthEndpoint
     private const TWO_FA_OTP_TTL = 300;
     /** 2FA challenge-token transient TTL: 10 minutes. */
     private const TWO_FA_CHALLENGE_TTL = 600;
+    /** Anon-IP-keyed (per-minute) throttle for /auth/oauth. */
+    private const OAUTH_LOGIN_RATE_LIMIT = 10;
+    /** Anon-IP-keyed (per-minute) throttle for /auth/oauth-complete. */
+    private const OAUTH_COMPLETE_RATE_LIMIT = 5;
+    /** OAuth provider-token transient TTL: 15 minutes. */
+    private const OAUTH_PROVIDER_TOKEN_TTL = 900;
+    /** User meta key prefix for stored OAuth provider IDs, e.g. _bcc_oauth_google. */
+    private const META_OAUTH_PREFIX = '_bcc_oauth_';
 
     /**
      * User meta key for email-verification state.
@@ -572,6 +580,79 @@ final class AuthEndpoint
                 'permission_callback' => '__return_true',
                 'args' => [
                     'challenge_token' => ['required' => true, 'type' => 'string'],
+                ],
+            ]
+        );
+
+        // POST /auth/oauth — OAuth SSO bridge.
+        // Finds an existing BCC user by OAuth provider ID or email, mints a JWT
+        // (same AuthTokenResponse shape as /auth/login), and returns it. When no
+        // matching user is found, issues a short-lived provider_token and returns
+        // {status: "handle_required"} so the frontend can collect a handle before
+        // creating the account via /auth/oauth-complete.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/oauth',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'oauthLogin'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'provider' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_key',
+                    ],
+                    'provider_id' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'email' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'default'           => '',
+                        'sanitize_callback' => 'sanitize_email',
+                    ],
+                    'display_name' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'default'           => '',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                ],
+            ]
+        );
+
+        // POST /auth/oauth-complete — create a new BCC account from an OAuth
+        // handle-required challenge. Consumes the provider_token issued by
+        // /auth/oauth, validates and reserves the handle, creates the WP user,
+        // and returns a full JWT so the frontend can establish a NextAuth session
+        // via the bcc-verified bridge.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/auth/oauth-complete',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'oauthComplete'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'provider_token' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'handle' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'display_name' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'default'           => '',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
                 ],
             ]
         );
@@ -1097,6 +1178,234 @@ final class AuthEndpoint
         }
 
         $response = ApiResponse::ok(['ok' => true]);
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
+    /**
+     * POST /auth/oauth — OAuth SSO login bridge.
+     *
+     * Called by the Next.js `signIn` callback after a successful Google/Twitter
+     * OAuth redirect. Looks up the BCC user by provider ID (stored in user meta)
+     * or by email (first-time link for users who already have an email account).
+     *
+     * Existing user → mint JWT → return AuthTokenResponse (same as /auth/login).
+     * New user → generate provider_token → return {status:"handle_required", provider_token}.
+     *
+     * The caller checks `status === "handle_required"` and redirects to
+     * /signup/complete-profile?pt=<provider_token> to collect a handle before
+     * creating the account via /auth/oauth-complete.
+     */
+    public function oauthLogin(WP_REST_Request $request): WP_REST_Response
+    {
+        if (!\BCC\Core\Security\Throttle::allow('oauth_login', self::OAUTH_LOGIN_RATE_LIMIT, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
+        }
+
+        $provider    = (string) $request->get_param('provider');
+        $providerId  = (string) $request->get_param('provider_id');
+        $email       = sanitize_email((string) $request->get_param('email'));
+        $displayName = sanitize_text_field((string) $request->get_param('display_name'));
+
+        if (!in_array($provider, ['google', 'twitter'], true)) {
+            return ApiResponse::error('bcc_invalid_request', 'Unsupported OAuth provider.', 400);
+        }
+        if ($providerId === '') {
+            return ApiResponse::error('bcc_invalid_request', 'provider_id is required.', 400);
+        }
+
+        // Lookup order:
+        //   1. Exact provider-ID match in user meta (fastest; covers users who
+        //      previously signed in or linked via this provider).
+        //   2. Email match (covers users who signed up with email/password and
+        //      are signing in via OAuth for the first time with the same email).
+        //      Only applies when the provider supplies a verified email (Google
+        //      always does; Twitter generally does not).
+        $userId = self::findUserByOauthProvider($provider, $providerId);
+
+        if ($userId === null && $email !== '' && is_email($email)) {
+            $wpUser = get_user_by('email', $email);
+            if ($wpUser instanceof \WP_User) {
+                $userId = (int) $wpUser->ID;
+                // Store the OAuth link so the next sign-in skips the email lookup.
+                update_user_meta($userId, self::META_OAUTH_PREFIX . $provider, $providerId);
+            }
+        }
+
+        if ($userId !== null) {
+            $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
+            if ($handle === '') {
+                return ApiResponse::error(
+                    'bcc_invalid_state',
+                    'Account is missing a handle — contact support.',
+                    409
+                );
+            }
+
+            $token = JwtToken::encode($userId, $handle);
+
+            do_action('bcc_user_login', $userId, $handle);
+
+            Logger::audit('user_login_oauth', [
+                'user_id'  => $userId,
+                'provider' => $provider,
+            ]);
+
+            $response = ApiResponse::ok([
+                'user_id'          => $userId,
+                'handle'           => $handle,
+                'token'            => $token,
+                'expires_in'       => self::JWT_TTL_SECONDS,
+                'token_type'       => 'Bearer',
+                'in_good_standing' => self::resolveInGoodStanding($userId),
+            ]);
+            $response->header('Cache-Control', 'no-store');
+            return $response;
+        }
+
+        // No matching user — issue a provider_token so the frontend can
+        // collect a handle and create the account via /auth/oauth-complete.
+        $providerToken = bin2hex(random_bytes(32));
+        self::storeOauthProviderToken($providerToken, [
+            'provider'     => $provider,
+            'provider_id'  => $providerId,
+            'email'        => $email,
+            'display_name' => $displayName,
+        ]);
+
+        $response = ApiResponse::ok([
+            'status'         => 'handle_required',
+            'provider_token' => $providerToken,
+            'email'          => $email,
+            'display_name'   => $displayName,
+        ]);
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
+    /**
+     * POST /auth/oauth-complete — finish OAuth signup by choosing a handle.
+     *
+     * Consumes the provider_token issued by /auth/oauth, creates a BCC account
+     * (email pre-verified, random password), links the OAuth provider ID in user
+     * meta, and returns a full JWT.
+     *
+     * Validation errors (invalid handle, handle taken) leave the provider_token
+     * intact so the user can correct and retry without restarting the OAuth flow.
+     * The token is consumed only when user creation succeeds.
+     */
+    public function oauthComplete(WP_REST_Request $request): WP_REST_Response
+    {
+        if (!\BCC\Core\Security\Throttle::allow('oauth_complete', self::OAUTH_COMPLETE_RATE_LIMIT, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
+        }
+
+        $providerToken = sanitize_text_field((string) $request->get_param('provider_token'));
+        $handle        = strtolower(trim((string) $request->get_param('handle')));
+        $displayName   = sanitize_text_field((string) $request->get_param('display_name'));
+
+        if ($providerToken === '') {
+            return ApiResponse::error('bcc_invalid_request', 'provider_token is required.', 400);
+        }
+
+        // Peek without consuming — validation errors below leave the token intact.
+        $data = self::peekOauthProviderToken($providerToken);
+        if ($data === null) {
+            return ApiResponse::error(
+                'bcc_invalid_oauth_token',
+                'Session expired. Please sign in again.',
+                400
+            );
+        }
+
+        $handleService = Plugin::instance()->handleService();
+        $err           = $handleService->validate($handle);
+        if ($err !== null) {
+            return ApiResponse::error($err, self::handleErrorMessage($err), 422);
+        }
+        if (!$handleService->isAvailable($handle)) {
+            return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
+        }
+
+        $provider   = (string) ($data['provider'] ?? '');
+        $providerId = (string) ($data['provider_id'] ?? '');
+        $email      = (string) ($data['email'] ?? '');
+
+        if ($displayName === '') {
+            $displayName = (string) ($data['display_name'] ?? '');
+        }
+        if ($displayName === '') {
+            $displayName = $handle;
+        }
+
+        // OAuth signup users are email-verified by definition (Google/Twitter
+        // verified the email during the OAuth flow). If no email was supplied
+        // (Twitter), mint a stable placeholder keyed to the provider+id so the
+        // same wallet can't leak duplicates on retry.
+        if ($email === '' || !is_email($email)) {
+            $email = self::placeholderEmailForOauth($provider, $providerId);
+        }
+
+        $login    = self::deriveLogin($handle);
+        $password = wp_generate_password(64, true, true);
+
+        $userId = wp_insert_user([
+            'user_login'   => $login,
+            'user_email'   => $email,
+            'user_pass'    => $password,
+            'display_name' => $displayName,
+            'role'         => 'subscriber',
+        ]);
+
+        if (is_wp_error($userId)) {
+            $code = $userId->get_error_code();
+            if ($code === 'existing_user_login' || self::isDuplicateKeyError($userId)) {
+                return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
+            }
+            if ($code === 'existing_user_email') {
+                return ApiResponse::error(
+                    'bcc_conflict',
+                    'An account with that email already exists.',
+                    409
+                );
+            }
+            Logger::error('[bcc-trust] oauth-complete wp_insert_user failed', [
+                'code'     => $code,
+                'error'    => $userId->get_error_message(),
+                'provider' => $provider,
+            ]);
+            return ApiResponse::error('bcc_internal_error', 'Failed to create account.', 500);
+        }
+
+        $userIdInt = (int) $userId;
+        update_user_meta($userIdInt, HandleService::META_HANDLE, $handle);
+        update_user_meta($userIdInt, self::META_EMAIL_VERIFIED, '1');
+        if ($provider !== '' && $providerId !== '') {
+            update_user_meta($userIdInt, self::META_OAUTH_PREFIX . $provider, $providerId);
+        }
+
+        // Consume the provider_token only after the user row is committed.
+        self::consumeOauthProviderToken($providerToken);
+
+        $token = JwtToken::encode($userIdInt, $handle);
+
+        Logger::audit('user_signup', [
+            'user_id'  => $userIdInt,
+            'handle'   => $handle,
+            'via'      => 'oauth',
+            'provider' => $provider,
+        ]);
+
+        do_action('bcc_user_signup', $userIdInt, $handle);
+
+        $response = ApiResponse::ok([
+            'user_id'          => $userIdInt,
+            'handle'           => $handle,
+            'token'            => $token,
+            'expires_in'       => self::JWT_TTL_SECONDS,
+            'token_type'       => 'Bearer',
+            'in_good_standing' => self::resolveInGoodStanding($userIdInt),
+        ], 201);
         $response->header('Cache-Control', 'no-store');
         return $response;
     }
@@ -2199,6 +2508,68 @@ final class AuthEndpoint
         if ($token !== '') {
             delete_transient('bcc_2fa_ct_' . $token);
         }
+    }
+
+    // ── OAuth provider-token helpers ──────────────────────────────────
+
+    private static function storeOauthProviderToken(string $token, array $data): void
+    {
+        set_transient('bcc_oauth_pt_' . $token, wp_json_encode($data), self::OAUTH_PROVIDER_TOKEN_TTL);
+    }
+
+    /** Read the provider token without deleting it (safe for validation passes). */
+    private static function peekOauthProviderToken(string $token): ?array
+    {
+        if ($token === '') {
+            return null;
+        }
+        $raw = get_transient('bcc_oauth_pt_' . $token);
+        if ($raw === false || !is_string($raw) || $raw === '') {
+            return null;
+        }
+        $data = json_decode($raw, true);
+        return is_array($data) ? $data : null;
+    }
+
+    /** Delete the provider token (call after successful user creation). */
+    private static function consumeOauthProviderToken(string $token): void
+    {
+        if ($token !== '') {
+            delete_transient('bcc_oauth_pt_' . $token);
+        }
+    }
+
+    /**
+     * Find a WP user by OAuth provider ID stored in user meta.
+     * Returns the user ID or null if not found.
+     */
+    private static function findUserByOauthProvider(string $provider, string $providerId): ?int
+    {
+        if ($provider === '' || $providerId === '') {
+            return null;
+        }
+        $users = get_users([
+            'meta_key'   => self::META_OAUTH_PREFIX . $provider,
+            'meta_value' => $providerId,
+            'number'     => 1,
+            'fields'     => 'ID',
+        ]);
+        if (!empty($users)) {
+            $id = (int) reset($users);
+            return $id > 0 ? $id : null;
+        }
+        return null;
+    }
+
+    /**
+     * Deterministic placeholder email for an OAuth signup with no email.
+     * Twitter OAuth 2.0 does not expose user emails; we mint a stable
+     * placeholder so WP's user_email UNIQUE constraint is satisfied and
+     * the same provider+id always maps to the same placeholder on retry.
+     */
+    private static function placeholderEmailForOauth(string $provider, string $providerId): string
+    {
+        return 'oauth-' . $provider . '-' . substr(md5($providerId), 0, 16) . '@noreply.bcc.local';
     }
 
     // JWT mint/verify lives in BCC\Trust\Core\Support\JwtToken — single
