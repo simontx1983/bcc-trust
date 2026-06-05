@@ -202,7 +202,7 @@ final class AuthMailer
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d1117">
   <tr>
     <td align="center" style="padding:40px 16px 56px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;border-collapse:separate;">
 
         <tr>
           <td align="center" style="padding:0 0 24px;">
@@ -338,7 +338,7 @@ HTML;
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d1117">
   <tr>
     <td align="center" style="padding:40px 16px 56px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;border-collapse:separate;">
 
         <tr>
           <td align="center" style="padding:0 0 24px;">
@@ -468,7 +468,7 @@ HTML;
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d1117">
   <tr>
     <td align="center" style="padding:40px 16px 56px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;border-collapse:separate;">
 
         <tr>
           <td align="center" style="padding:0 0 24px;">
