@@ -8,9 +8,11 @@
  * effectively same-origin only. That keeps the backend safe by
  * default; opting in is explicit.
  *
- * Origin matching is exact-string (scheme + host + optional port).
- * Wildcard subdomain matching is intentionally NOT supported —
- * each environment must list its exact origin.
+ * Origin matching supports two modes per entry:
+ *   - Exact string (scheme + host + optional port) — the default.
+ *   - Regex pattern prefixed with "regex:" — matched case-insensitively
+ *     against the request Origin. Use for Vercel preview URLs whose
+ *     per-deployment hash changes on every push.
  *
  * Two hook points:
  *
@@ -30,7 +32,10 @@
  *
  * Configuration example (wp-config.php):
  *
- *   define('BCC_FRONTEND_ORIGIN', 'https://app.bcc.example,https://staging.bcc.example');
+ *   define('BCC_FRONTEND_ORIGIN',
+ *       'https://bluecollarcrypto.io' .
+ *       ',regex:^https://bcc-frontend-[a-z0-9]+-phillip-simon-s-projects\.vercel\.app$'
+ *   );
  *
  * @package BCC\Trust\Core\Support
  * @since V1 (2026-04, Phase 2 hardening)
@@ -154,6 +159,18 @@ final class CorsHandler
      * Resolve the request's Origin against the BCC_FRONTEND_ORIGIN
      * allowlist. Returns the matched origin to echo back, or null
      * when no match (or no allowlist configured).
+     *
+     * Each comma-separated entry is treated as either:
+     *   - An exact origin string (scheme + host + optional port).
+     *   - A regex pattern prefixed with "regex:" — the rest of the
+     *     entry is matched case-insensitively against the request
+     *     Origin. Use this for Vercel preview URLs:
+     *
+     *     regex:^https://bcc-frontend-[a-z0-9]+-phillip-simon-s-projects\.vercel\.app$
+     *
+     * Regex entries are evaluated after exact matches so the fast
+     * path is always tried first. A malformed regex is silently
+     * skipped (no match) so a typo can't break the allowlist.
      */
     private static function resolveAllowedOrigin(): ?string
     {
@@ -168,8 +185,30 @@ final class CorsHandler
             return null;
         }
 
-        $allowlist = array_map('trim', explode(',', (string) BCC_FRONTEND_ORIGIN));
-        return in_array($requestOrigin, $allowlist, true) ? $requestOrigin : null;
+        $exact   = [];
+        $regexes = [];
+        foreach (array_map('trim', explode(',', (string) BCC_FRONTEND_ORIGIN)) as $entry) {
+            if ($entry === '') {
+                continue;
+            }
+            if (str_starts_with($entry, 'regex:')) {
+                $regexes[] = substr($entry, 6);
+            } else {
+                $exact[] = $entry;
+            }
+        }
+
+        if (in_array($requestOrigin, $exact, true)) {
+            return $requestOrigin;
+        }
+
+        foreach ($regexes as $pattern) {
+            if (@preg_match('/' . $pattern . '/i', $requestOrigin) === 1) {
+                return $requestOrigin;
+            }
+        }
+
+        return null;
     }
 
     private static function emitHeaders(string $origin): void
