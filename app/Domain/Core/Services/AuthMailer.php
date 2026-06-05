@@ -8,6 +8,7 @@
  *
  * Current sends:
  *   - Email-address verification (OTP code + one-shot link)
+ *   - Signup welcome (sent after email is confirmed)
  *
  * Constraints (inherited from AccountSecurityMailer discipline):
  *   - Never throws. All sends are best-effort side channels.
@@ -32,6 +33,10 @@ if (!defined('ABSPATH')) {
 final class AuthMailer
 {
     private const VERIFY_EMAIL_FAILURE_EVENT = 'verify_email_send_failed';
+    private const WELCOME_FAILURE_EVENT      = 'welcome_email_send_failed';
+
+    private const LOGO_URL = 'https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png';
+    private const SITE_URL = 'https://bluecollarcrypto.io';
 
     /**
      * Send the email-address verification email.
@@ -71,118 +76,163 @@ final class AuthMailer
             return;
         }
 
-        $siteName = get_bloginfo('name') ?: 'BCC';
-        $subject  = sprintf('[%s] Verify your email address', $siteName);
+        $siteName    = get_bloginfo('name') ?: 'BCC';
+        $displayName = $user->display_name ?: $user->user_login;
+        $subject     = sprintf('[%s] Verify your email address', $siteName);
 
         BccMailer::send(
             $to,
             $subject,
-            self::buildHtml($siteName, $otpCode, $verifyUrl),
+            self::buildVerifyHtml($siteName, $displayName, $otpCode, $verifyUrl),
             self::VERIFY_EMAIL_FAILURE_EVENT
         );
     }
 
-    // ── HTML builder ──────────────────────────────────────────────
+    /**
+     * Send the post-verification welcome email.
+     *
+     * Dispatched after the user completes email verification — account is
+     * now active. Confirms their handle and surfaces a CTA to the floor.
+     *
+     * Never throws. Failure is logged + recorded under BccMailer::SUBSYSTEM /
+     * 'welcome_email_send_failed'. Callers MUST NOT block the verification
+     * response on the return value.
+     *
+     * @param string $to       Recipient address (the verified email).
+     * @param string $handle   The user's BCC handle (e.g. "tialuxe").
+     * @param string $loginUrl Frontend URL to sign in / go to the floor.
+     */
+    public static function sendWelcomeEmail(
+        string $to,
+        string $handle,
+        string $loginUrl
+    ): void {
+        if ($to === '' || !is_email($to)) {
+            return;
+        }
+
+        $siteName = get_bloginfo('name') ?: 'BCC';
+        $subject  = sprintf("Welcome to %s — you're on the floor", $siteName);
+
+        BccMailer::send(
+            $to,
+            $subject,
+            self::buildWelcomeHtml($siteName, $handle, $to, $loginUrl),
+            self::WELCOME_FAILURE_EVENT
+        );
+    }
+
+    // ── HTML builders ─────────────────────────────────────────────
 
     /**
-     * Build the HTML body for the verification email.
+     * Verification email HTML.
      *
-     * Table-based layout for maximum email-client compatibility.
-     * All user-supplied values are htmlspecialchars()-escaped.
-     * No external resources — self-contained, no tracking pixels.
+     * Dark-themed, table-based for maximum email-client compatibility.
+     * Top accent stripe: BCC blue (#16b5e6).
+     * OTP box: dark bg with blue border and blue digits.
+     * Two paths: enter code in app OR click the button (24h link).
      */
-    private static function buildHtml(string $siteName, string $otpCode, string $verifyUrl): string
-    {
-        $safeSiteName  = htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8');
-        $safeOtp       = htmlspecialchars($otpCode, ENT_QUOTES, 'UTF-8');
-        $safeVerifyUrl = htmlspecialchars($verifyUrl, ENT_QUOTES, 'UTF-8');
+    private static function buildVerifyHtml(
+        string $siteName,
+        string $displayName,
+        string $otpCode,
+        string $verifyUrl
+    ): string {
+        $safeSiteName    = htmlspecialchars($siteName,    ENT_QUOTES, 'UTF-8');
+        $safeDisplayName = htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8');
+        $safeOtp         = htmlspecialchars($otpCode,     ENT_QUOTES, 'UTF-8');
+        $safeVerifyUrl   = htmlspecialchars($verifyUrl,   ENT_QUOTES, 'UTF-8');
 
         return <<<HTML
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="x-apple-disable-message-reformatting">
 <title>Verify your email &mdash; {$safeSiteName}</title>
 </head>
-<body style="margin:0;padding:0;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
-
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0d1117;">
+<body style="margin:0;padding:0;background-color:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d1117">
   <tr>
-    <td align="center" style="padding:48px 16px 64px;">
+    <td align="center" style="padding:40px 16px 56px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
 
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;margin:0 auto;">
-
-        <!-- wordmark -->
         <tr>
           <td align="center" style="padding:0 0 24px;">
-            <span style="display:inline-block;font-size:13px;font-weight:700;letter-spacing:4px;text-transform:uppercase;color:#6e7681;">BLUE COLLAR CRYPTO</span>
+            <img src="https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png"
+                 alt="{$safeSiteName}" width="130" height="auto"
+                 style="display:block;max-width:130px;height:auto;border:0;outline:none;text-decoration:none;">
           </td>
         </tr>
 
-        <!-- card -->
         <tr>
-          <td style="background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;">
-
+          <td bgcolor="#161b22" style="background-color:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
 
-              <!-- card body -->
               <tr>
-                <td style="padding:40px 40px 32px;">
+                <td bgcolor="#16b5e6" style="background-color:#16b5e6;height:3px;font-size:3px;line-height:3px;">&nbsp;</td>
+              </tr>
 
-                  <h1 style="margin:0 0 12px;font-size:22px;font-weight:600;color:#f0f6fc;line-height:1.3;">
+              <tr>
+                <td style="padding:36px 36px 28px;">
+
+                  <h1 style="margin:0 0 8px;font-size:22px;font-weight:600;color:#f0f6fc;line-height:1.3;">
                     Verify your email address
                   </h1>
-                  <p style="margin:0 0 32px;font-size:15px;line-height:1.65;color:#8b949e;">
-                    Enter the code below in the app to confirm your email and finish setting up your account. The code is valid for 15&nbsp;minutes.
+                  <p style="margin:0 0 6px;font-size:14px;color:#6e7681;line-height:1.5;">
+                    Hello, {$safeDisplayName}
+                  </p>
+                  <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#8b949e;">
+                    Enter this code in the app to confirm your email and finish setting up your account.
+                    The code is valid for&nbsp;15&nbsp;minutes.
                   </p>
 
-                  <!-- OTP box -->
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;">
                     <tr>
-                      <td align="center" style="padding:28px 24px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
-                        <span style="display:block;font-family:'Courier New',Courier,monospace;font-size:48px;font-weight:700;letter-spacing:16px;color:#f0f6fc;line-height:1;">{$safeOtp}</span>
-                        <span style="display:block;margin-top:10px;font-size:13px;color:#6e7681;">Expires in 15 minutes</span>
+                      <td align="center" bgcolor="#0d1117"
+                          style="background-color:#0d1117;border:1px solid #16b5e6;border-radius:6px;padding:28px 24px;">
+                        <span style="display:block;font-family:'Courier New',Courier,monospace;font-size:44px;font-weight:700;letter-spacing:14px;color:#16b5e6;line-height:1;padding-left:14px;">{$safeOtp}</span>
+                        <span style="display:block;margin-top:10px;font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#484f58;">Expires in 15 minutes &middot; one-time use</span>
                       </td>
                     </tr>
                   </table>
 
-                  <!-- or divider -->
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;">
                     <tr>
-                      <td style="border-top:1px solid #30363d;"></td>
-                      <td align="center" style="font-size:13px;color:#6e7681;white-space:nowrap;padding:0 14px;">or</td>
-                      <td style="border-top:1px solid #30363d;"></td>
+                      <td style="border-top:1px solid #21262d;font-size:1px;line-height:1px;">&nbsp;</td>
+                      <td align="center" style="white-space:nowrap;padding:0 14px;font-size:13px;color:#484f58;">
+                        or verify by clicking below
+                      </td>
+                      <td style="border-top:1px solid #21262d;font-size:1px;line-height:1px;">&nbsp;</td>
                     </tr>
                   </table>
 
-                  <!-- verify button -->
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 32px;">
+                  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 32px;">
                     <tr>
-                      <td align="center">
+                      <td align="center" bgcolor="#16b5e6" style="background-color:#16b5e6;border-radius:6px;">
                         <a href="{$safeVerifyUrl}"
-                           style="display:inline-block;padding:13px 36px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-size:15px;font-weight:600;line-height:1.4;letter-spacing:0.2px;">
+                           style="display:inline-block;padding:13px 32px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;line-height:1.4;white-space:nowrap;">
                           Verify my email &rarr;
                         </a>
                       </td>
                     </tr>
                   </table>
 
-                  <!-- footnote -->
                   <p style="margin:0;font-size:13px;line-height:1.6;color:#6e7681;">
-                    The button link expires in 24&nbsp;hours. If you didn&rsquo;t create a {$safeSiteName} account, you can safely ignore this email &mdash; your address won&rsquo;t be used.
+                    The button link expires in 24&nbsp;hours. If you didn&rsquo;t create a {$safeSiteName} account,
+                    you can safely ignore this email &mdash; your address will not be used.
                   </p>
 
                 </td>
               </tr>
 
-              <!-- card footer -->
               <tr>
-                <td style="padding:18px 40px;border-top:1px solid #21262d;text-align:center;">
-                  <p style="margin:0;font-size:12px;color:#6e7681;">
+                <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
+                  <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
                     &copy; {$safeSiteName} &bull;
-                    <a href="https://bluecollarcrypto.io" style="color:#6e7681;text-decoration:none;">bluecollarcrypto.io</a>
+                    <a href="https://bluecollarcrypto.io" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
                   </p>
                 </td>
               </tr>
@@ -191,11 +241,145 @@ final class AuthMailer
           </td>
         </tr>
 
+        <tr>
+          <td align="center" style="padding:24px 16px 0;">
+            <p style="margin:0;font-size:11px;color:#484f58;line-height:1.6;">
+              You&rsquo;re receiving this because you registered a {$safeSiteName} account with this address.<br>
+              For your security, please do not forward this email.
+            </p>
+          </td>
+        </tr>
+
       </table>
     </td>
   </tr>
 </table>
+</body>
+</html>
+HTML;
+    }
 
+    /**
+     * Welcome email HTML.
+     *
+     * Dark-themed, same shell as the verify email.
+     * Top accent stripe: BCC orange (#f98a1c) — visually distinguishes
+     * it from the blue verify email in a crowded inbox.
+     * Shows @handle + email in an account info block, with a CTA to the floor.
+     * No password shown — account security improvement over the old WP default.
+     */
+    private static function buildWelcomeHtml(
+        string $siteName,
+        string $handle,
+        string $email,
+        string $loginUrl
+    ): string {
+        $safeSiteName = htmlspecialchars($siteName,  ENT_QUOTES, 'UTF-8');
+        $safeHandle   = htmlspecialchars($handle,    ENT_QUOTES, 'UTF-8');
+        $safeEmail    = htmlspecialchars($email,     ENT_QUOTES, 'UTF-8');
+        $safeLoginUrl = htmlspecialchars($loginUrl,  ENT_QUOTES, 'UTF-8');
+
+        return <<<HTML
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="x-apple-disable-message-reformatting">
+<title>Welcome to {$safeSiteName}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d1117">
+  <tr>
+    <td align="center" style="padding:40px 16px 56px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
+
+        <tr>
+          <td align="center" style="padding:0 0 24px;">
+            <img src="https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png"
+                 alt="{$safeSiteName}" width="130" height="auto"
+                 style="display:block;max-width:130px;height:auto;border:0;outline:none;text-decoration:none;">
+          </td>
+        </tr>
+
+        <tr>
+          <td bgcolor="#161b22" style="background-color:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+
+              <tr>
+                <td bgcolor="#f98a1c" style="background-color:#f98a1c;height:3px;font-size:3px;line-height:3px;">&nbsp;</td>
+              </tr>
+
+              <tr>
+                <td style="padding:36px 36px 28px;">
+
+                  <h1 style="margin:0 0 12px;font-size:22px;font-weight:600;color:#f0f6fc;line-height:1.3;">
+                    You&rsquo;re on the floor, {$safeHandle}.
+                  </h1>
+                  <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#8b949e;">
+                    Your email is confirmed and your account is ready. Welcome to a community of
+                    validators, builders, creators, and contributors.
+                  </p>
+
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                         style="margin:0 0 28px;background-color:#0d1117;border:1px solid #30363d;border-radius:6px;">
+                    <tr>
+                      <td style="padding:20px 24px;">
+                        <p style="margin:0 0 10px;font-size:12px;font-weight:600;color:#484f58;text-transform:uppercase;letter-spacing:0.8px;">
+                          Your account
+                        </p>
+                        <p style="margin:0 0 5px;font-size:15px;color:#f0f6fc;">@{$safeHandle}</p>
+                        <p style="margin:0;font-size:14px;color:#8b949e;">{$safeEmail}</p>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 32px;">
+                    <tr>
+                      <td align="center" bgcolor="#16b5e6" style="background-color:#16b5e6;border-radius:6px;">
+                        <a href="{$safeLoginUrl}"
+                           style="display:inline-block;padding:13px 32px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;line-height:1.4;white-space:nowrap;">
+                          Head to the floor &rarr;
+                        </a>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <p style="margin:0;font-size:14px;line-height:1.7;color:#8b949e;">
+                    See you on the floor,<br>
+                    <span style="color:#f0f6fc;font-weight:500;">The BCC Team</span>
+                  </p>
+
+                </td>
+              </tr>
+
+              <tr>
+                <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
+                  <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
+                    &copy; {$safeSiteName} &bull;
+                    <a href="https://bluecollarcrypto.io" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
+                  </p>
+                </td>
+              </tr>
+
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center" style="padding:24px 16px 0;">
+            <p style="margin:0;font-size:11px;color:#484f58;line-height:1.6;">
+              You&rsquo;re receiving this because you created a {$safeSiteName} account.<br>
+              Blue Collar Crypto &bull; blockchain-powered community for validators, builders, creators, and contributors.
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
 </body>
 </html>
 HTML;
