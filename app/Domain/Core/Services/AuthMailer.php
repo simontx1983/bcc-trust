@@ -234,7 +234,7 @@ final class AuthMailer
                     The code is valid for&nbsp;15&nbsp;minutes.
                   </p>
 
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;border-collapse:separate;">
                     <tr>
                       <td align="center" bgcolor="#0d1117"
                           style="background-color:#0d1117;border:1px solid #16b5e6;border-radius:12px;padding:28px 24px;">
@@ -368,7 +368,7 @@ HTML;
                   </p>
 
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-                         style="margin:0 0 28px;background-color:#0d1117;border:1px solid #30363d;border-radius:12px;">
+                         style="margin:0 0 28px;background-color:#0d1117;border:1px solid #30363d;border-radius:12px;border-collapse:separate;">
                     <tr>
                       <td style="padding:20px 24px;">
                         <p style="margin:0 0 10px;font-size:12px;font-weight:600;color:#484f58;text-transform:uppercase;letter-spacing:0.8px;">
@@ -501,7 +501,7 @@ HTML;
                   </p>
 
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-                         style="margin:0 0 28px;background-color:#0d1117;border:1px solid #30363d;border-radius:12px;">
+                         style="margin:0 0 28px;background-color:#0d1117;border:1px solid #30363d;border-radius:12px;border-collapse:separate;">
                     <tr>
                       <td style="padding:20px 24px;">
                         <p style="margin:0 0 8px;font-size:12px;font-weight:600;color:#484f58;text-transform:uppercase;letter-spacing:0.8px;">
