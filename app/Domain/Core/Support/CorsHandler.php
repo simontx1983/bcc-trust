@@ -203,7 +203,7 @@ final class CorsHandler
         }
 
         foreach ($regexes as $pattern) {
-            if (@preg_match('/' . $pattern . '/i', $requestOrigin) === 1) {
+            if (@preg_match('#' . $pattern . '#i', $requestOrigin) === 1) {
                 return $requestOrigin;
             }
         }
