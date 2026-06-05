@@ -1000,7 +1000,9 @@ final class AuthEndpoint
                 $path  = '/reset-password?key=' . rawurlencode($key) . '&login=' . rawurlencode($login);
                 $resetUrl = FrontendRedirect::defaultReturn($path);
 
-                AccountSecurityMailer::passwordResetRequested($userId, $resetUrl);
+                $parts     = explode(',', (string) ($_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? ''));
+                $requestIp = sanitize_text_field(trim($parts[0] ?? ''));
+                AuthMailer::sendPasswordResetEmail($userId, $email, $resetUrl, $requestIp);
 
                 AuditLogger::log('password_reset_requested', $userId, [
                     'email_hash' => sha1($email),

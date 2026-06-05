@@ -32,8 +32,9 @@ if (!defined('ABSPATH')) {
 
 final class AuthMailer
 {
-    private const VERIFY_EMAIL_FAILURE_EVENT = 'verify_email_send_failed';
-    private const WELCOME_FAILURE_EVENT      = 'welcome_email_send_failed';
+    private const VERIFY_EMAIL_FAILURE_EVENT      = 'verify_email_send_failed';
+    private const WELCOME_FAILURE_EVENT            = 'welcome_email_send_failed';
+    private const PASSWORD_RESET_FAILURE_EVENT     = 'password_reset_email_send_failed';
 
     private const LOGO_URL = 'https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png';
     private const SITE_URL = 'https://bluecollarcrypto.io';
@@ -122,6 +123,50 @@ final class AuthMailer
         );
     }
 
+    /**
+     * Send the password-reset request email.
+     *
+     * Dispatched when a user submits /auth/forgot-password. Contains a
+     * single-use reset link (24h TTL) and request metadata (timestamp +
+     * IP) so the user can recognise and investigate unexpected requests.
+     *
+     * Never throws. Failure is logged + recorded under BccMailer::SUBSYSTEM /
+     * 'password_reset_email_send_failed'. Callers MUST NOT block the
+     * forgot-password response on the return value.
+     *
+     * @param int    $userId     WP user ID.
+     * @param string $to         Recipient address.
+     * @param string $resetUrl   Single-use reset URL (24h TTL).
+     * @param string $requestIp  Requester IP (shown in email; empty = omit).
+     */
+    public static function sendPasswordResetEmail(
+        int $userId,
+        string $to,
+        string $resetUrl,
+        string $requestIp = ''
+    ): void {
+        if ($to === '' || !is_email($to)) {
+            return;
+        }
+
+        $user = get_userdata($userId);
+        if (!($user instanceof \WP_User)) {
+            return;
+        }
+
+        $siteName    = get_bloginfo('name') ?: 'BCC';
+        $displayName = $user->display_name ?: $user->user_login;
+        $requestedAt = gmdate('Y-m-d H:i:s') . ' UTC';
+        $subject     = sprintf('[%s] Reset your password', $siteName);
+
+        BccMailer::send(
+            $to,
+            $subject,
+            self::buildPasswordResetHtml($siteName, $displayName, $resetUrl, $requestIp, $requestedAt),
+            self::PASSWORD_RESET_FAILURE_EVENT
+        );
+    }
+
     // ── HTML builders ─────────────────────────────────────────────
 
     /**
@@ -168,7 +213,7 @@ final class AuthMailer
         </tr>
 
         <tr>
-          <td bgcolor="#161b22" style="background-color:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;">
+          <td bgcolor="#161b22" style="background-color:#161b22;border:1px solid #30363d;border-radius:16px;overflow:hidden;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
 
               <tr>
@@ -178,10 +223,10 @@ final class AuthMailer
               <tr>
                 <td style="padding:36px 36px 28px;">
 
-                  <h1 style="margin:0 0 8px;font-size:22px;font-weight:600;color:#f0f6fc;line-height:1.3;">
+                  <h1 style="margin:0 0 20px;font-size:22px;font-weight:600;color:#f0f6fc;line-height:1.3;">
                     Verify your email address
                   </h1>
-                  <p style="margin:0 0 6px;font-size:14px;color:#6e7681;line-height:1.5;">
+                  <p style="margin:0 0 14px;font-size:16px;font-weight:500;color:#c9d1d9;line-height:1.5;">
                     Hello, {$safeDisplayName}
                   </p>
                   <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#8b949e;">
@@ -192,7 +237,7 @@ final class AuthMailer
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;">
                     <tr>
                       <td align="center" bgcolor="#0d1117"
-                          style="background-color:#0d1117;border:1px solid #16b5e6;border-radius:6px;padding:28px 24px;">
+                          style="background-color:#0d1117;border:1px solid #16b5e6;border-radius:12px;padding:28px 24px;">
                         <span style="display:block;font-family:'Courier New',Courier,monospace;font-size:44px;font-weight:700;letter-spacing:14px;color:#16b5e6;line-height:1;padding-left:14px;">{$safeOtp}</span>
                         <span style="display:block;margin-top:10px;font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#484f58;">Expires in 15 minutes &middot; one-time use</span>
                       </td>
@@ -211,7 +256,7 @@ final class AuthMailer
 
                   <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 32px;">
                     <tr>
-                      <td align="center" bgcolor="#16b5e6" style="background-color:#16b5e6;border-radius:6px;">
+                      <td align="center" bgcolor="#16b5e6" style="background-color:#16b5e6;border-radius:8px;">
                         <a href="{$safeVerifyUrl}"
                            style="display:inline-block;padding:13px 32px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;line-height:1.4;white-space:nowrap;">
                           Verify my email &rarr;
@@ -304,7 +349,7 @@ HTML;
         </tr>
 
         <tr>
-          <td bgcolor="#161b22" style="background-color:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;">
+          <td bgcolor="#161b22" style="background-color:#161b22;border:1px solid #30363d;border-radius:16px;overflow:hidden;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
 
               <tr>
@@ -323,7 +368,7 @@ HTML;
                   </p>
 
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-                         style="margin:0 0 28px;background-color:#0d1117;border:1px solid #30363d;border-radius:6px;">
+                         style="margin:0 0 28px;background-color:#0d1117;border:1px solid #30363d;border-radius:12px;">
                     <tr>
                       <td style="padding:20px 24px;">
                         <p style="margin:0 0 10px;font-size:12px;font-weight:600;color:#484f58;text-transform:uppercase;letter-spacing:0.8px;">
@@ -337,7 +382,7 @@ HTML;
 
                   <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 32px;">
                     <tr>
-                      <td align="center" bgcolor="#16b5e6" style="background-color:#16b5e6;border-radius:6px;">
+                      <td align="center" bgcolor="#16b5e6" style="background-color:#16b5e6;border-radius:8px;">
                         <a href="{$safeLoginUrl}"
                            style="display:inline-block;padding:13px 32px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;line-height:1.4;white-space:nowrap;">
                           Head to the floor &rarr;
@@ -372,6 +417,146 @@ HTML;
             <p style="margin:0;font-size:11px;color:#484f58;line-height:1.6;">
               You&rsquo;re receiving this because you created a {$safeSiteName} account.<br>
               Blue Collar Crypto &bull; blockchain-powered community for validators, builders, creators, and contributors.
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>
+HTML;
+    }
+
+    /**
+     * Password reset request email HTML.
+     *
+     * Dark-themed, same shell as verify/welcome emails.
+     * Top accent stripe: red (#e5534b) — security-action colour.
+     * Shows request timestamp + IP so the user can identify unexpected
+     * requests. CTA uses BCC blue — consistent with all other emails.
+     */
+    private static function buildPasswordResetHtml(
+        string $siteName,
+        string $displayName,
+        string $resetUrl,
+        string $requestIp,
+        string $requestedAt
+    ): string {
+        $safeSiteName    = htmlspecialchars($siteName,    ENT_QUOTES, 'UTF-8');
+        $safeDisplayName = htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8');
+        $safeResetUrl    = htmlspecialchars($resetUrl,    ENT_QUOTES, 'UTF-8');
+        $safeRequestedAt = htmlspecialchars($requestedAt, ENT_QUOTES, 'UTF-8');
+        $ipLine = $requestIp !== ''
+            ? '<p style="margin:0;font-size:14px;color:#8b949e;"><span style="color:#6e7681;">IP:&nbsp;&nbsp;&nbsp;</span>'
+              . htmlspecialchars($requestIp, ENT_QUOTES, 'UTF-8') . '</p>'
+            : '';
+
+        return <<<HTML
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="x-apple-disable-message-reformatting">
+<title>Reset your password &mdash; {$safeSiteName}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d1117">
+  <tr>
+    <td align="center" style="padding:40px 16px 56px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
+
+        <tr>
+          <td align="center" style="padding:0 0 24px;">
+            <img src="https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png"
+                 alt="{$safeSiteName}" width="130" height="auto"
+                 style="display:block;max-width:130px;height:auto;border:0;outline:none;text-decoration:none;">
+          </td>
+        </tr>
+
+        <tr>
+          <td bgcolor="#161b22" style="background-color:#161b22;border:1px solid #30363d;border-radius:16px;overflow:hidden;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+
+              <tr>
+                <td bgcolor="#e5534b" style="background-color:#e5534b;height:3px;font-size:3px;line-height:3px;">&nbsp;</td>
+              </tr>
+
+              <tr>
+                <td style="padding:36px 36px 28px;">
+
+                  <h1 style="margin:0 0 20px;font-size:22px;font-weight:600;color:#f0f6fc;line-height:1.3;">
+                    Reset your password
+                  </h1>
+                  <p style="margin:0 0 14px;font-size:16px;font-weight:500;color:#c9d1d9;line-height:1.5;">
+                    Hello, {$safeDisplayName}
+                  </p>
+                  <p style="margin:0 0 24px;font-size:15px;line-height:1.65;color:#8b949e;">
+                    Someone requested a password reset for your {$safeSiteName} account.
+                    Click the button below to set a new password.
+                  </p>
+
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                         style="margin:0 0 28px;background-color:#0d1117;border:1px solid #30363d;border-radius:12px;">
+                    <tr>
+                      <td style="padding:20px 24px;">
+                        <p style="margin:0 0 8px;font-size:12px;font-weight:600;color:#484f58;text-transform:uppercase;letter-spacing:0.8px;">
+                          Request details
+                        </p>
+                        <p style="margin:0 0 4px;font-size:14px;color:#8b949e;">
+                          <span style="color:#6e7681;">When:&nbsp;</span>{$safeRequestedAt}
+                        </p>
+                        {$ipLine}
+                      </td>
+                    </tr>
+                  </table>
+
+                  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 28px;">
+                    <tr>
+                      <td align="center" bgcolor="#16b5e6" style="background-color:#16b5e6;border-radius:8px;">
+                        <a href="{$safeResetUrl}"
+                           style="display:inline-block;padding:13px 32px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;line-height:1.4;white-space:nowrap;">
+                          Reset my password &rarr;
+                        </a>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <p style="margin:0 0 20px;font-size:13px;line-height:1.6;color:#6e7681;">
+                    This link is single-use and expires in&nbsp;24&nbsp;hours.
+                  </p>
+
+                  <p style="margin:0;font-size:13px;line-height:1.65;color:#6e7681;">
+                    If you did <strong style="color:#8b949e;">not</strong> request this, ignore this email &mdash;
+                    your password stays the same. Repeated unexpected reset emails could mean someone
+                    is targeting your account; reply if you&rsquo;d like help investigating.
+                  </p>
+
+                </td>
+              </tr>
+
+              <tr>
+                <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
+                  <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
+                    &copy; {$safeSiteName} &bull;
+                    <a href="https://bluecollarcrypto.io" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
+                  </p>
+                </td>
+              </tr>
+
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center" style="padding:24px 16px 0;">
+            <p style="margin:0;font-size:11px;color:#484f58;line-height:1.6;">
+              You&rsquo;re receiving this because a password reset was requested for your {$safeSiteName} account.<br>
+              For your security, please do not forward this email.
             </p>
           </td>
         </tr>
