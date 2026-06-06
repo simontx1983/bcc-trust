@@ -46,6 +46,23 @@ final class PostsService
     public const STATUS_MAX_LENGTH = 500;
 
     /**
+     * Per-post visibility values (group-scoped posts only). Controls
+     * whether a group-tagged post syndicates to the GLOBAL feed:
+     *   - members_only — group-internal; never appears in the global feed.
+     *   - public_group — group-internal but discoverable as a group surface
+     *     (Phase 2/3 read-gate concern; in Phase 1 this is NOT global).
+     *   - public_all   — syndicates to the global feed.
+     * Default + fallback is `members_only` (defense in depth). Only the
+     * writer acts on this, and only when groupId > 0.
+     *
+     * @var list<string>
+     */
+    private const VISIBILITY_VALUES = ['members_only', 'public_group', 'public_all'];
+
+    /** Default + fallback per-post visibility. */
+    private const VISIBILITY_DEFAULT = 'members_only';
+
+    /**
      * §D2 — review bodies allow long-form text. The cap is generous
      * but bounded so the textarea + DB column stay reasonable;
      * `bcc_trust_votes.explanation` is `TEXT` (64KB), well above
@@ -170,6 +187,19 @@ final class PostsService
     }
 
     /**
+     * Clamp a per-post visibility value to the allowed set. Anything
+     * unrecognized collapses to the default (`members_only`) — the most
+     * conservative state, so a malformed value can never accidentally
+     * publish a group post to the global feed.
+     */
+    private static function normalizeVisibility(string $visibility): string
+    {
+        return in_array($visibility, self::VISIBILITY_VALUES, true)
+            ? $visibility
+            : self::VISIBILITY_DEFAULT;
+    }
+
+    /**
      * Create a status post on the viewer's own wall.
      *
      * Auth is the caller's responsibility (REST endpoint checks
@@ -188,11 +218,20 @@ final class PostsService
      *   act_id: int
      * }|array{error: string, message: string, data?: array<string, mixed>}
      */
-    public function createStatus(int $authorId, string $content, int $groupId = 0): array
-    {
+    public function createStatus(
+        int $authorId,
+        string $content,
+        int $groupId = 0,
+        string $visibility = self::VISIBILITY_DEFAULT
+    ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
         }
+
+        // Defense in depth: anything outside the allowed set falls back
+        // to members_only. The REST enum already gates this, but the
+        // service is the security boundary.
+        $visibility = self::normalizeVisibility($visibility);
 
         // Group-wall validation runs BEFORE content / mention / throttle
         // gates so a non-member never burns a throttle slot probing
@@ -257,7 +296,7 @@ final class PostsService
             return $mentionError;
         }
 
-        $result = PeepSoStatusWriter::createSelfStatus($authorId, $trimmed, $groupId);
+        $result = PeepSoStatusWriter::createSelfStatus($authorId, $trimmed, $groupId, $visibility);
         if ($result['ok'] === false) {
             return self::mapWriterError($result['reason']);
         }
@@ -1472,11 +1511,19 @@ final class PostsService
      *   photo_id: int
      * }|array{error: string, message: string, data?: array<string, mixed>}
      */
-    public function createPhotoPost(int $authorId, array $file, string $caption, int $groupId = 0): array
-    {
+    public function createPhotoPost(
+        int $authorId,
+        array $file,
+        string $caption,
+        int $groupId = 0,
+        string $visibility = self::VISIBILITY_DEFAULT
+    ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
         }
+
+        // Defense in depth — clamp to the allowed set (see createStatus).
+        $visibility = self::normalizeVisibility($visibility);
 
         // Group-wall validation runs BEFORE caption / throttle / file
         // gates — same ordering as createStatus.
@@ -1527,7 +1574,7 @@ final class PostsService
             return $mentionError;
         }
 
-        $result = PeepSoPhotoWriter::createSelfPhotoPost($authorId, $file, $captionTrimmed, $groupId);
+        $result = PeepSoPhotoWriter::createSelfPhotoPost($authorId, $file, $captionTrimmed, $groupId, $visibility);
         if ($result['ok'] === false) {
             return self::mapPhotoWriterError($result['reason']);
         }
@@ -1579,11 +1626,19 @@ final class PostsService
      *   act_id: int
      * }|array{error: string, message: string, data?: array<string, mixed>}
      */
-    public function createGifPost(int $authorId, string $url, string $caption, int $groupId = 0): array
-    {
+    public function createGifPost(
+        int $authorId,
+        string $url,
+        string $caption,
+        int $groupId = 0,
+        string $visibility = self::VISIBILITY_DEFAULT
+    ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
         }
+
+        // Defense in depth — clamp to the allowed set (see createStatus).
+        $visibility = self::normalizeVisibility($visibility);
 
         // Group-wall validation runs BEFORE caption / throttle / URL
         // gates — same ordering as createStatus / createPhotoPost.
@@ -1632,7 +1687,7 @@ final class PostsService
             return $mentionError;
         }
 
-        $result = PeepSoGifWriter::createSelfGifPost($authorId, $url, $captionTrimmed, $groupId);
+        $result = PeepSoGifWriter::createSelfGifPost($authorId, $url, $captionTrimmed, $groupId, $visibility);
         if ($result['ok'] === false) {
             return self::mapGifWriterError($result['reason']);
         }

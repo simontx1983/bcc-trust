@@ -239,26 +239,66 @@ final class FeedRankingService
      * Authorization is the caller's job. The endpoint
      * (GroupsDetailEndpoint::feed) enforces:
      *   - secret + non-member → 404
-     *   - closed + non-member → 403 with unlock_hint
-     *   - nft-gated + non-holder/non-member → 403 with unlock_hint
+     *   - everyone else (member OR non-member of nft/closed/open) → allowed
      * before this is invoked. The SQL filter then restricts the
      * candidate set to posts carrying `peepso_group_id` post-meta.
      *
+     * Phase 2 (per-post visibility teaser): `$publicOnly` is TRUE for
+     * non-members (set from the gate's `public_only` flag). When true we
+     * restrict the candidate set to `public_group` / `public_all` posts
+     * via the visibility INNER JOIN in
+     * PeepSoActivityRepository::getActivities — `members_only` and
+     * absent-meta posts are EXCLUDED for non-members (the security
+     * invariant). When false (a member is reading) no visibility filter
+     * is applied, so the member sees every post including members_only.
+     *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getGroupFeed(int $viewerId, int $groupId, ?string $cursor = null, int $limit = 20): array
+    public function getGroupFeed(int $viewerId, int $groupId, ?string $cursor = null, int $limit = 20, bool $publicOnly = false): array
     {
         if ($groupId <= 0) {
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
-        $excluded = self::mergeExclusions(
-            $this->reputationRepo->getCautionAndRiskyUserIds(),
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
-        );
+        // Block + blocker exclusions apply in EVERY feed surface — a
+        // personal block relationship must hold even inside a shared group.
+        $blockExclusions = $viewerId > 0
+            ? self::mergeExclusions(
+                PeepSoBlockRepository::getBlockedIds($viewerId),
+                PeepSoBlockRepository::getBlockerIds($viewerId)
+            )
+            : [];
+
+        // §O4.1 reputation shadow-limit (caution/risky authors) is a
+        // PUBLIC-FLOOR mechanism. Inside an NFT holder group the on-chain
+        // gate + membership IS the moderation boundary: a verified holder
+        // who was admitted must not be filtered out of the room they
+        // qualified for, nor hidden from fellow holders (a low-trust holder
+        // would otherwise see their own posts vanish into "empty room").
+        // So we drop the reputation exclusion for nft-type groups only —
+        // Local / plain groups keep it (their entry bar is lower). Block +
+        // the moderation-hidden list still apply everywhere. forGroup() is
+        // request-cached (the feed gate already resolved this group), so the
+        // lookup is free.
+        $ctx        = $this->groupContextResolver->forGroup($groupId);
+        $isNftGroup = $ctx !== null && $ctx->isHolderGroup();
+
+        $excluded = $isNftGroup
+            ? $blockExclusions
+            : self::mergeExclusions(
+                $this->reputationRepo->getCautionAndRiskyUserIds(),
+                $blockExclusions
+            );
 
         $hidden = $this->hiddenRepo->getAllHiddenIds();
+
+        // Per-post visibility scope. Non-members ($publicOnly === true) may
+        // only read posts marked `public_group` / `public_all`; null means
+        // "no visibility filter" (member read → all posts incl members_only).
+        // The downstream INNER JOIN excludes absent-meta posts for the
+        // non-member case, which is the security invariant (absent ⇒
+        // members_only ⇒ hidden).
+        $visibilityIn = $publicOnly ? ['public_group', 'public_all'] : null;
 
         $payload = $this->activityFeed->getFeed(
             $viewerId,
@@ -267,7 +307,9 @@ final class FeedRankingService
             $limit,
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
-            $groupId
+            $groupId,
+            null,
+            $visibilityIn
         );
 
         $payload['items'] = $this->hydrateBodies($payload['items']);

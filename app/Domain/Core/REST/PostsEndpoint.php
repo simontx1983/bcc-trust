@@ -127,6 +127,17 @@ final class PostsEndpoint
                         'type'              => 'integer',
                         'sanitize_callback' => 'absint',
                     ],
+                    // Per-post visibility (group-scoped status posts only).
+                    // Controls whether a group-tagged post syndicates to the
+                    // GLOBAL feed. Only meaningful when group_id > 0; ignored
+                    // for review / blog kinds (page-scoped / own-wall in V1).
+                    // Absent ⇒ members_only (default).
+                    'visibility' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['members_only', 'public_group', 'public_all'],
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
                     // ── §D6 crypto-blog composer (PR-A) fields ───────
                     //
                     // All optional at the REST layer; the service
@@ -225,6 +236,14 @@ final class PostsEndpoint
                         'required'          => false,
                         'type'              => 'integer',
                         'sanitize_callback' => 'absint',
+                    ],
+                    // Per-post visibility — same semantics as on /posts.
+                    // Only meaningful when group_id > 0. Absent ⇒ members_only.
+                    'visibility' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['members_only', 'public_group', 'public_all'],
+                        'sanitize_callback' => 'sanitize_text_field',
                     ],
                 ],
             ]
@@ -398,6 +417,14 @@ final class PostsEndpoint
                         'type'              => 'integer',
                         'sanitize_callback' => 'absint',
                     ],
+                    // Per-post visibility — same semantics as on /posts.
+                    // Only meaningful when group_id > 0. Absent ⇒ members_only.
+                    'visibility' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['members_only', 'public_group', 'public_all'],
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
                 ],
             ]
         );
@@ -417,10 +444,14 @@ final class PostsEndpoint
 
         $content = (string) $request->get_param('content');
         $groupId = (int) ($request->get_param('group_id') ?? 0);
+        // Per-post visibility — only threaded for kind=status (reviews are
+        // page-scoped, blogs are own-wall in V1). Only matters when
+        // group_id > 0; the service validates the value set.
+        $visibility = (string) ($request->get_param('visibility') ?? 'members_only');
         $service = Plugin::instance()->postsService();
 
         if ($kind === 'status') {
-            $result = $service->createStatus($viewerId, $content, $groupId);
+            $result = $service->createStatus($viewerId, $content, $groupId, $visibility);
         } elseif ($kind === 'review') {
             // Reviews are page-scoped, not wall-scoped — group_id is
             // ignored here on purpose. Surfacing it would create a
@@ -638,9 +669,10 @@ final class PostsEndpoint
             );
         }
 
-        $caption = (string) ($request->get_param('caption') ?? '');
-        $groupId = (int) ($request->get_param('group_id') ?? 0);
-        $result  = Plugin::instance()->postsService()->createPhotoPost($viewerId, $file, $caption, $groupId);
+        $caption    = (string) ($request->get_param('caption') ?? '');
+        $groupId    = (int) ($request->get_param('group_id') ?? 0);
+        $visibility = (string) ($request->get_param('visibility') ?? 'members_only');
+        $result     = Plugin::instance()->postsService()->createPhotoPost($viewerId, $file, $caption, $groupId, $visibility);
 
         if (isset($result['error'])) {
             return self::forwardServiceError($result);
@@ -669,11 +701,12 @@ final class PostsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        $url     = (string) $request->get_param('url');
-        $caption = (string) ($request->get_param('caption') ?? '');
-        $groupId = (int) ($request->get_param('group_id') ?? 0);
+        $url        = (string) $request->get_param('url');
+        $caption    = (string) ($request->get_param('caption') ?? '');
+        $groupId    = (int) ($request->get_param('group_id') ?? 0);
+        $visibility = (string) ($request->get_param('visibility') ?? 'members_only');
 
-        $result = Plugin::instance()->postsService()->createGifPost($viewerId, $url, $caption, $groupId);
+        $result = Plugin::instance()->postsService()->createGifPost($viewerId, $url, $caption, $groupId, $visibility);
         if (isset($result['error'])) {
             return self::forwardServiceError($result);
         }

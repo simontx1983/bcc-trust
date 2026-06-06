@@ -138,15 +138,18 @@ final class GroupsDetailEndpoint
         if ($gate['kind'] === 'not_found') {
             return ApiResponse::error('bcc_not_found', 'Group not found.', 404);
         }
-        if ($gate['kind'] === 'forbidden') {
-            return ApiResponse::error(
-                'bcc_permission_denied',
-                $gate['unlock_hint'],
-                403
-            );
-        }
+
+        // Phase 2: gateGroupFeed no longer returns `forbidden` — non-members
+        // of nft/closed/open groups are `allowed` with `public_only = true`
+        // (PUBLIC-only teaser), and secret + non-member is already mapped to
+        // `not_found` above. The only remaining kind here is `allowed`.
 
         // gate.kind === 'allowed'.
+        // Non-members get the PUBLIC-only teaser; members see everything.
+        // The flag drives the visibility INNER JOIN downstream so
+        // members_only / absent-meta posts can never reach a non-member.
+        $publicOnly = (bool) ($gate['public_only'] ?? false);
+
         $cursorRaw = $request->get_param('cursor');
         $cursor    = is_string($cursorRaw) && $cursorRaw !== '' ? $cursorRaw : null;
 
@@ -162,7 +165,8 @@ final class GroupsDetailEndpoint
             $viewerId,
             $groupId,
             $cursor,
-            $limit
+            $limit,
+            $publicOnly
         );
 
         $response = ApiResponse::ok($payload);

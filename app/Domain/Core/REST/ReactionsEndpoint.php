@@ -136,6 +136,11 @@ final class ReactionsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Invalid feed_id.', 400);
         }
 
+        $gateError = $this->gateGroupInteraction($userId, $actId);
+        if ($gateError !== null) {
+            return $gateError;
+        }
+
         $kind = (string) $request->get_param('reaction');
 
         // Cross-grammar guard: the kind MUST belong to the post's
@@ -192,6 +197,11 @@ final class ReactionsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Invalid feed_id.', 400);
         }
 
+        $gateError = $this->gateGroupInteraction($userId, $actId);
+        if ($gateError !== null) {
+            return $gateError;
+        }
+
         // Resolve the post's grammar so the response is in the right
         // shape regardless of whether the viewer had a prior reaction.
         $module  = PeepSoActivityRepository::getModuleIdByActId($actId) ?? '';
@@ -207,6 +217,50 @@ final class ReactionsEndpoint
         do_action('bcc_reaction_removed', $userId, $actId);
 
         return self::buildStateResponse($actId, $userId, $grammar);
+    }
+
+    /**
+     * §4.7.6 interaction gate. A reaction on a GROUP-scoped post requires
+     * active group membership — even when the post itself is publicly
+     * readable (`public_group` / `public_all`). Non-members may READ those
+     * posts but comments + reactions stay gated behind membership (e.g. NFT
+     * ownership). Mirrors the membership check in
+     * CommentService::gateForParent, reusing the canonical
+     * GroupsService::resolveGroupAccess seam.
+     *
+     * Returns an error response to short-circuit on, or null when the
+     * reaction is allowed (non-group post, or viewer is an active member).
+     */
+    private function gateGroupInteraction(int $userId, int $actId): ?WP_REST_Response
+    {
+        $row = PeepSoActivityRepository::getById($actId);
+        if ($row === null) {
+            // Unknown act — not a group-gate concern; let the writer's
+            // own failure path surface it.
+            return null;
+        }
+        $postId = (int) $row->act_external_id;
+        if ($postId <= 0) {
+            return null;
+        }
+
+        $groupId = (int) get_post_meta($postId, 'peepso_group_id', true);
+        if ($groupId <= 0) {
+            // Not a group-scoped post — no membership gate (PeepSo's own
+            // block-by-author rules still apply in the writer).
+            return null;
+        }
+
+        $access = Plugin::instance()->groupsService()->resolveGroupAccess($userId, $groupId);
+        if ($access === null || $access['isMember'] !== true) {
+            return ApiResponse::error(
+                'bcc_permission_denied',
+                'Join the group to react here.',
+                403
+            );
+        }
+
+        return null;
     }
 
     /**
