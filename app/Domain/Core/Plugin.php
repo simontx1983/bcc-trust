@@ -1112,6 +1112,11 @@ final class Plugin
         // the §F3 single-brain FeedRankingService.
         \BCC\Trust\Core\REST\FeedEndpoint::register();
 
+        // V1 contract: trending hashtags (GET /hashtags/trending) — a
+        // read-only projection over PeepSo's peepso_hashtags counter via
+        // bcc-core's PeepSoHashtagRepository. Non-personalized; public cache.
+        \BCC\Trust\Core\REST\HashtagsEndpoint::register();
+
         // Sprint 3 cold-start bridge surface — GET /feed/cold-start.
         // Composes three blocks for the home-feed empty state (locals +
         // recently-active operators + hot posts). Auth-permissive; anon
