@@ -675,7 +675,8 @@ final class Plugin
             $this->endorsementService(),
             $this->attestationService(),
             $this->newEntityVelocityCap(),
-            $this->divergenceClassifier()
+            $this->divergenceClassifier(),
+            $this->userViewService()
         );
     }
 

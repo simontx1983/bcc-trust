@@ -129,18 +129,18 @@ final class UserFollowsService
 
         $prefetched = MemberSummaryPrefetcher::primeFor($userIds);
 
-        $userView = Plugin::instance()->userViewService();
+        $cardView = Plugin::instance()->cardViewService();
         $items    = [];
         foreach ($userIds as $userId) {
-            $summary = $userView->getSummary($userId, $viewerId, $prefetched);
-            if ($summary === null) {
+            $card = $cardView->getMemberCardForList($userId, $viewerId, $prefetched);
+            if ($card === null) {
                 // Follower row references a user that no longer exists
                 // in wp_users (deleted/anonymized). Skip rather than
                 // 500 — total/items.length will momentarily disagree
                 // and self-heal on the next paginate.
                 continue;
             }
-            $items[] = $summary;
+            $items[] = $card;
         }
 
         $hasMore = ($offset + count($userIds)) < $total;
