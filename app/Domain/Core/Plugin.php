@@ -921,6 +921,21 @@ final class Plugin
         );
     }
 
+    private ?Services\SuggestionService $suggestionService = null;
+    public function suggestionService(): Services\SuggestionService
+    {
+        // Who-to-follow recommender (AFFINITY-only; see the service's
+        // doctype). Reuses UserViewService for member view-model
+        // hydration and ReputationRepository/SuspensionRepository for
+        // the exclusion-only reputation gate. No new graph/exclusion
+        // primitives — every read is a repository call.
+        return $this->suggestionService ??= new Services\SuggestionService(
+            $this->userViewService(),
+            $this->reputationRepository(),
+            $this->suspensionRepository()
+        );
+    }
+
     // ── Phase 3 services ────────────────────────────────────────────────
 
     private ?Services\CronService $cronService = null;
@@ -1116,6 +1131,13 @@ final class Plugin
         // read-only projection over PeepSo's peepso_hashtags counter via
         // bcc-core's PeepSoHashtagRepository. Non-personalized; public cache.
         \BCC\Trust\Core\REST\HashtagsEndpoint::register();
+
+        // V1.25 contract: personalized who-to-follow recommender
+        // (GET /suggestions/users). Auth-required; AFFINITY-only scoring
+        // (reciprocity / mutual follows / shared Locals + communities /
+        // shared validator backing) — NEVER ranked by trust or follower
+        // count. Reputation is exclusion-only. See SuggestionService.
+        \BCC\Trust\Core\REST\SuggestionsEndpoint::register();
 
         // Sprint 3 cold-start bridge surface — GET /feed/cold-start.
         // Composes three blocks for the home-feed empty state (locals +

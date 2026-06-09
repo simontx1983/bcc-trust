@@ -120,6 +120,101 @@ final class DelegationRepository
     }
 
     /**
+     * Shared-validator-backing overlap for the who-to-follow recommender.
+     *
+     * For the given viewer, find OTHER users who delegate to at least one
+     * of the same validators the viewer delegates to. Returns, per
+     * candidate user, the count of shared validators and a representative
+     * `(chain_id, validator_address)` pair the caller resolves to a
+     * moniker for the "Backs {moniker} too" reason label.
+     *
+     * Walk:
+     *   viewer's VERIFIED wallet_links
+     *     → viewer's delegations  → (chain_id, validator_address) set V
+     *   other users' delegations on a pair in V
+     *     → JOIN their VERIFIED wallet_links → candidate user_id
+     *
+     * Only VERIFIED wallets count on both sides (verified_at IS NOT NULL)
+     * — an unverified wallet is an unproven claim and must not seed an
+     * affinity edge. The viewer themselves is excluded
+     * (w2.user_id <> viewerId).
+     *
+     * This is an AFFINITY signal, not a trust/popularity one: the count
+     * is "how many validators you both back," and the representative
+     * validator is chosen deterministically (MIN by chain/address), NOT
+     * by stake size, voting power, or any ranking metric. The service
+     * layer applies its own affinity weight; ordering here is a
+     * SELECTION bound only.
+     *
+     * Bounded (§4): the candidate set is grouped and capped by `$limit`.
+     * The viewer-side delegation walk is naturally bounded — a single
+     * user's verified wallets × their delegations is small (tens), and
+     * the indexes `wallet_link_id` + `chain_validator (chain_id,
+     * validator_address)` keep the candidate-side join tight.
+     *
+     * @return array<int, array{shared_count: int, chain_id: int, validator_address: string}>
+     *         candidate user_id => shared-backing info
+     */
+    public static function getSharedValidatorBackers(int $viewerId, int $limit = 200): array
+    {
+        if ($viewerId <= 0 || $limit <= 0) {
+            return [];
+        }
+        if ($limit > 500) {
+            $limit = 500;
+        }
+
+        global $wpdb;
+        $delegations = self::table();
+        $wallets     = \BCC\Trust\Onchain\Repositories\WalletRepository::table();
+
+        // d1 = viewer's delegations (via their verified wallets, w1).
+        // d2 = anyone-else's delegations on the SAME (chain, validator),
+        //      joined to their verified wallets (w2) to get the user_id.
+        // MIN(d2.chain_id) + MIN(d2.validator_address) give a stable
+        // representative validator for the label; COUNT(DISTINCT ...) is
+        // the strength. The validator pair is chosen for determinism, not
+        // by stake — affinity, never popularity.
+        $sql = $wpdb->prepare(
+            "SELECT w2.user_id AS user_id,
+                    COUNT(DISTINCT CONCAT(d2.chain_id, ':', d2.validator_address)) AS shared_count,
+                    MIN(d2.chain_id)          AS chain_id,
+                    MIN(d2.validator_address) AS validator_address
+               FROM {$wallets} w1
+               INNER JOIN {$delegations} d1 ON d1.wallet_link_id = w1.id
+               INNER JOIN {$delegations} d2 ON d2.chain_id = d1.chain_id
+                                           AND d2.validator_address = d1.validator_address
+               INNER JOIN {$wallets} w2 ON w2.id = d2.wallet_link_id
+              WHERE w1.user_id = %d
+                AND w1.verified_at IS NOT NULL
+                AND w2.verified_at IS NOT NULL
+                AND w2.user_id <> %d
+              GROUP BY w2.user_id
+              ORDER BY shared_count DESC, w2.user_id ASC
+              LIMIT %d",
+            $viewerId,
+            $viewerId,
+            $limit
+        );
+
+        /** @var list<array{user_id: string, shared_count: string, chain_id: string, validator_address: string}>|null $rows */
+        $rows = $wpdb->get_results($sql, ARRAY_A);
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $userId = (int) $row['user_id'];
+            if ($userId > 0) {
+                $out[$userId] = [
+                    'shared_count'      => (int) $row['shared_count'],
+                    'chain_id'          => (int) $row['chain_id'],
+                    'validator_address' => (string) $row['validator_address'],
+                ];
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Load delegations for a wallet link, joined with validator metadata
      * (moniker, status, commission, rank) when the validator is indexed.
      *
