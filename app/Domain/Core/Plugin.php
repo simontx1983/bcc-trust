@@ -21,7 +21,6 @@ use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VerificationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\REST\Envelope;
-use BCC\Trust\Core\REST\PageEndpoint;
 use BCC\Trust\Core\Security\BehavioralAnalyzer;
 use BCC\Trust\Core\Security\DeviceFingerprinter;
 use BCC\Trust\Core\Security\TrustGraph;
@@ -1099,17 +1098,8 @@ final class Plugin
         // The Core domain listens to bcc_wallet_verified / bcc_wallet_disconnected
         // hooks in CronService::registerCacheInvalidation() for scoring updates.
 
-        // Page data endpoint
-        PageEndpoint::register();
-
-        // Page flag endpoint (signal only — no score impact)
-        \BCC\Trust\Core\REST\FlagEndpoint::register();
-
         // User endorsements endpoint (my endorsements)
         \BCC\Trust\Core\REST\UserEndorsementsEndpoint::register();
-
-        // Entity claim endpoint (replaces admin-ajax bcc_claim_entity)
-        \BCC\Trust\Core\REST\EntityClaimEndpoint::register();
 
         // Read model health monitoring (admin-only)
         \BCC\Trust\Core\REST\ReadModelHealthEndpoint::register();
@@ -1475,13 +1465,6 @@ final class Plugin
         // GET /admin/reports + POST /admin/reports/:id/resolve.
         // Capability-gated to manage_options (V1 = admins only).
         \BCC\Trust\Core\REST\AdminReportsEndpoint::register();
-
-        // API index
-        register_rest_route('bcc-trust/v1', '/', [
-            'methods'             => 'GET',
-            'callback'            => [$this, 'apiIndex'],
-            'permission_callback' => '__return_true',
-        ]);
     }
 
     /**
@@ -2469,49 +2452,4 @@ final class Plugin
         });
     }
 
-    /**
-     * API index endpoint — lists all registered bcc-trust/v1 routes.
-     */
-    public function apiIndex(): \WP_REST_Response
-    {
-        $routes    = rest_get_server()->get_routes('bcc-trust/v1');
-        $endpoints = [];
-
-        foreach ($routes as $route => $handlers) {
-            foreach ($handlers as $handler) {
-                $methods = [];
-                if (isset($handler['methods'])) {
-                    $methods = is_array($handler['methods'])
-                        ? array_keys($handler['methods'])
-                        : [$handler['methods']];
-                }
-
-                $callback = 'unknown';
-                if (isset($handler['callback'])) {
-                    if (is_array($handler['callback'])) {
-                        $callback = (is_object($handler['callback'][0])
-                            ? get_class($handler['callback'][0])
-                            : $handler['callback'][0])
-                            . '::' . $handler['callback'][1];
-                    } elseif (is_string($handler['callback'])) {
-                        $callback = $handler['callback'];
-                    }
-                }
-
-                $endpoints[] = [
-                    'route'    => $route,
-                    'methods'  => $methods,
-                    'callback' => $callback,
-                ];
-            }
-        }
-
-        return new \WP_REST_Response([
-            'success' => true,
-            'data'    => [
-                'namespace' => 'bcc-trust/v1',
-                'routes'    => $endpoints,
-            ],
-        ], 200);
-    }
 }

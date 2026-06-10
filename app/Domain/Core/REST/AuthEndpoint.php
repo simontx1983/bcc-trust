@@ -84,8 +84,6 @@ final class AuthEndpoint
     private const WALLET_LOGIN_RATE_LIMIT = 5;
     /** Anon-IP-keyed throttle for wallet-signup. Sibling of /auth/signup. */
     private const WALLET_SIGNUP_RATE_LIMIT = 5;
-    /** Per-user-per-minute throttle for /auth/token mints. */
-    private const TOKEN_RATE_LIMIT = 30;
     /**
      * IP-keyed (unauthed) + per-user (authed) throttle for /auth/refresh.
      * Refresh is the mobile-survivability silent-retry path on 401; a
@@ -255,17 +253,6 @@ final class AuthEndpoint
                         'sanitize_callback' => 'sanitize_text_field',
                     ],
                 ],
-            ]
-        );
-
-        // POST /auth/token — mint a JWT for the authenticated user.
-        register_rest_route(
-            self::ROUTE_NAMESPACE,
-            '/auth/token',
-            [
-                'methods'             => WP_REST_Server::CREATABLE,
-                'callback'            => [$instance, 'token'],
-                'permission_callback' => '__return_true',
             ]
         );
 
@@ -1768,42 +1755,6 @@ final class AuthEndpoint
         return $userId;
     }
 
-    public function token(WP_REST_Request $request): WP_REST_Response
-    {
-        $userId = get_current_user_id();
-        if ($userId <= 0) {
-            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
-        }
-
-        if (!\BCC\Core\Security\Throttle::allow('auth_token', self::TOKEN_RATE_LIMIT, 60)) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many token requests.', 429);
-        }
-
-        $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
-        if ($handle === '') {
-            // Per §B6 every account has a handle from signup. A missing
-            // handle means somebody created the user outside the BCC
-            // signup flow (wp-admin user create, legacy import, etc.).
-            // Fail loud — the JWT contract requires a handle.
-            return ApiResponse::error(
-                'bcc_invalid_state',
-                'Account is missing a handle — set one before requesting a token.',
-                409
-            );
-        }
-
-        $token = JwtToken::encode((int) $userId, $handle);
-
-        $response = ApiResponse::ok([
-            'token'      => $token,
-            'expires_in' => self::JWT_TTL_SECONDS,
-            'token_type' => 'Bearer',
-        ]);
-        $response->header('Cache-Control', 'no-store');
-
-        return $response;
-    }
-
     /**
      * POST /auth/logout-everywhere — destructive credential-class
      * mutation. Bumps the user's token-version counter so every
@@ -1991,13 +1942,17 @@ final class AuthEndpoint
      * same wallet collides with itself rather than leaking unique
      * placeholders across the wp_users table.
      *
-     * Domain is `noreply.bcc.local` — `noreply` makes the no-mail
-     * intent explicit; `.local` keeps it firmly out of any real-MX
-     * collision class.
+     * Domain is AccountRecoveryService::PLACEHOLDER_EMAIL_DOMAIN
+     * (`noreply.bcc.local`) — the single source of truth that
+     * AccountRecoveryService::isPlaceholderEmail() reads back to tell a
+     * real recovery email from a synthetic one. `noreply` makes the
+     * no-mail intent explicit; `.local` keeps it firmly out of any
+     * real-MX collision class.
      */
     private static function placeholderEmailForWallet(string $walletAddress): string
     {
-        return 'wallet-' . substr(md5(strtolower($walletAddress)), 0, 16) . '@noreply.bcc.local';
+        return 'wallet-' . substr(md5(strtolower($walletAddress)), 0, 16)
+            . '@' . \BCC\Trust\Core\Services\AccountRecoveryService::PLACEHOLDER_EMAIL_DOMAIN;
     }
 
     // JWT mint/verify lives in BCC\Trust\Core\Support\JwtToken — single
