@@ -3,9 +3,12 @@
 namespace BCC\Trust\Onchain\Controllers;
 
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
+use BCC\Trust\Onchain\Repositories\NftSelectionRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
 if (!defined('ABSPATH')) {
@@ -89,10 +92,22 @@ class WalletController
             return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
-        $wallets = WalletRepository::getForUser(get_current_user_id());
+        $userId  = get_current_user_id();
+        $wallets = WalletRepository::getForUser($userId);
         $items   = array_map([self::class, 'projectWalletFields'], $wallets);
 
-        $resp = ApiResponse::ok(['items' => $items]);
+        // Account-recovery posture for the settings UI: drives the
+        // "set up a recovery method" banner and mirrors the unlink
+        // self-lockout guard client-side. has_recovery_email = a real
+        // (non-placeholder) email is set; verified_wallet_count = wallets
+        // usable for wallet login.
+        $resp = ApiResponse::ok([
+            'items'    => $items,
+            'recovery' => [
+                'has_recovery_email'    => AccountRecoveryService::hasRecoveryEmail($userId),
+                'verified_wallet_count' => WalletRepository::getVerifiedCountsForUsers([$userId])[$userId] ?? 0,
+            ],
+        ]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
     }
@@ -126,14 +141,50 @@ class WalletController
         // above re: leaking existence; absent rows just produce removed=false.
         $existing = WalletRepository::getById($walletLinkId);
 
+        // Self-lockout guard: refuse to remove the user's LAST verified
+        // wallet when the account has no real recovery email. A wallet-only
+        // signup carries a random, never-shown password and an
+        // undeliverable placeholder email, so its last verified wallet is
+        // the sole way back in — deleting it locks the user out for good.
+        // Only trips for the caller's own, verified wallet; foreign/absent
+        // ids fall through to the idempotent no-op below, and users with a
+        // real recovery email or a second verified wallet are unaffected.
+        if (
+            $existing !== null
+            && (int) $existing->user_id === $userId
+            && !empty($existing->verified_at)
+            && !AccountRecoveryService::hasRecoveryEmail($userId)
+        ) {
+            $verifiedCount = WalletRepository::getVerifiedCountsForUsers([$userId])[$userId] ?? 0;
+            if ($verifiedCount <= 1) {
+                return ApiResponse::error(
+                    'bcc_last_recovery_method',
+                    'This is your only verified wallet and your account has no recovery email. Add a recovery email or link another wallet before removing this one.',
+                    409
+                );
+            }
+        }
+
         $removed = WalletRepository::delete($walletLinkId, $userId);
 
         // Audit only on a true state transition (own-wallet deletion) — a
         // double-tap unlink against an already-gone row yields removed=false
         // and gets no log line, mirroring the unblock pattern.
         if ($removed && $existing !== null && (int) $existing->user_id === $userId) {
+            $chainSlug     = (string) ($existing->chain_slug ?? '');
+            $walletAddress = (string) ($existing->wallet_address ?? '');
+
+            // Per-wallet on-chain data is keyed by wallet_link_id, which is
+            // gone after this request. Clear it now, while we still hold the
+            // id, so the disconnected wallet's NFTs stop showing in the
+            // gallery/profile and a later re-link starts clean. The
+            // bcc_wallet_disconnected listeners below can't do this — they
+            // only receive (userId, chainSlug, walletAddress).
+            NftHoldingsRepository::deleteForWalletLink($walletLinkId);
+            NftSelectionRepository::deleteForWalletLink($walletLinkId, $userId);
+
             AuditLogger::log('wallet_unlinked', $walletLinkId, [
-                'chain' => (string) ($existing->chain_slug ?? ''),
+                'chain' => $chainSlug,
                 'via'   => 'rest',
             ], 'wallet', $userId);
 
@@ -141,11 +192,19 @@ class WalletController
             // surface but still worth telling the user so an attacker
             // who removes their wallet (e.g. to block account recovery)
             // can't do it silently. Best-effort; never throws.
-            AccountSecurityMailer::walletUnlinked(
-                $userId,
-                (string) ($existing->chain_slug ?? ''),
-                (string) ($existing->wallet_address ?? '')
-            );
+            AccountSecurityMailer::walletUnlinked($userId, $chainSlug, $walletAddress);
+
+            // Fire the canonical disconnect event so the trust-signal
+            // teardown, claim revocation + score recalc, and Helius
+            // unsubscribe listeners run. This REST path deletes the row
+            // directly (it does not route through
+            // WalletIdentityService::unlinkWallet), so without this the
+            // event — and every listener registered on it — never fires
+            // and the user keeps stale trust/claims from a wallet they no
+            // longer control. Listeners key on (userId, chainSlug,
+            // walletAddress); the wallet_links row being already gone is
+            // the expected, documented state for them.
+            do_action('bcc_wallet_disconnected', $userId, $chainSlug, $walletAddress);
         }
 
         // Idempotent: removed=false on a foreign or already-deleted id

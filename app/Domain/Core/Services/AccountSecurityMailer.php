@@ -176,6 +176,49 @@ final class AccountSecurityMailer
     }
 
     /**
+     * Recovery email confirmed — a logged-in, wallet-authenticated user just
+     * verified and promoted a real recovery email onto an account that
+     * previously had only the synthetic wallet-signup placeholder. There is
+     * no old inbox to canary (the placeholder is undeliverable), so this is a
+     * single confirmation to the NEW address.
+     *
+     * When REPLACING a real old email, callers use emailChanged() instead so
+     * the old address still gets the both-addresses canary. Shares the
+     * 'email_changed_send_failed' health bucket — it is an email-change-class
+     * notification.
+     */
+    public static function recoveryEmailConfirmed(int $userId, string $newEmail): void
+    {
+        if ($newEmail === '' || !is_email($newEmail)) {
+            return;
+        }
+
+        $user        = get_userdata($userId);
+        $displayName  = $user instanceof \WP_User ? $user->display_name : 'there';
+
+        $siteName = get_bloginfo('name') ?: 'BCC';
+        $subject  = sprintf('[%s] Recovery email added', $siteName);
+        $body     = sprintf(
+            "Hello %s,\n\n"
+            . "This address is now the recovery email on your %s account. If you ever lose "
+            . "access to your wallet, you can regain access from here using the "
+            . "\"forgot password\" flow.\n\n"
+            . "When: %s\n"
+            . "IP:   %s\n\n"
+            . "If you did NOT add this recovery email, your account may be compromised. "
+            . "Reply to this email or contact support immediately.\n\n"
+            . "— The %s Team",
+            $displayName,
+            $siteName,
+            gmdate('Y-m-d H:i:s') . ' UTC',
+            self::clientIp(),
+            $siteName
+        );
+
+        self::send($newEmail, $subject, $body, 'email_changed_send_failed', $userId);
+    }
+
+    /**
      * Account deletion — caller MUST pass the email explicitly because
      * by the time wp_delete_user() returns, the wp_users row is gone
      * and get_userdata($userId) returns false. Capture before calling

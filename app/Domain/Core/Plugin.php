@@ -1314,6 +1314,13 @@ final class Plugin
         // PeepSo's `site_registration_allowdelete` toggle.
         \BCC\Trust\Core\REST\MyAccountEndpoint::register();
 
+        // Wallet recovery (phase 2): let a wallet-only account attach a real,
+        // verified recovery email, authenticated by a fresh wallet signature
+        // instead of the password it never had. Verify-before-promote.
+        //   POST /me/account/recovery-email         — prove wallet, mail OTP
+        //   POST /me/account/recovery-email/verify  — confirm OTP, set user_email
+        \BCC\Trust\Core\REST\RecoveryEmailEndpoint::register();
+
         // Tier D: in-app account-activity timeline — paginated read of
         // the user's own bcc_trust_activity rows filtered to the 6
         // user-facing security events (email change, password change,

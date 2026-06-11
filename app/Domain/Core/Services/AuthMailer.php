@@ -702,4 +702,134 @@ HTML;
 </html>
 HTML;
     }
+
+    /**
+     * Send the recovery-email confirmation OTP.
+     *
+     * Mailed to a NEW address that a logged-in, wallet-authenticated user is
+     * adding as their account-recovery email. Reading the OTP back is what
+     * promotes the address to `user_email` (see RecoveryEmailEndpoint).
+     * OTP-only — no auto-verify link — because the user is already signed in
+     * and enters the code in-app.
+     *
+     * Never throws. Failure is recorded under BccMailer::SUBSYSTEM /
+     * 'verify_email_send_failed' — a recovery OTP is an email-verification
+     * send and shares the verify-email health bucket.
+     *
+     * @param string $to      The new recovery address being verified.
+     * @param string $otpCode 6-digit plain-text OTP (not the hash).
+     */
+    public static function sendRecoveryEmailOtp(string $to, string $otpCode): void
+    {
+        if ($to === '' || !is_email($to)) {
+            return;
+        }
+
+        $siteName = get_bloginfo('name') ?: 'BCC';
+        $subject  = sprintf('[%s] Confirm your recovery email', $siteName);
+
+        BccMailer::send(
+            $to,
+            $subject,
+            self::buildRecoveryOtpHtml($siteName, $otpCode),
+            self::VERIFY_EMAIL_FAILURE_EVENT
+        );
+    }
+
+    /**
+     * Recovery-email OTP HTML.
+     *
+     * Same dark shell as the verify email, blue accent, single code box —
+     * no auto-verify link (the user is already signed in and types the code
+     * in-app). Uses the shared LOGO_URL / SITE_URL constants.
+     */
+    private static function buildRecoveryOtpHtml(string $siteName, string $otpCode): string
+    {
+        $safeSiteName = htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8');
+        $safeOtp      = htmlspecialchars($otpCode,  ENT_QUOTES, 'UTF-8');
+        $logoUrl      = htmlspecialchars(self::LOGO_URL, ENT_QUOTES, 'UTF-8');
+        $siteUrl      = htmlspecialchars(self::SITE_URL, ENT_QUOTES, 'UTF-8');
+
+        return <<<HTML
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="x-apple-disable-message-reformatting">
+<title>Confirm your recovery email &mdash; {$safeSiteName}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d1117">
+  <tr>
+    <td align="center" style="padding:40px 16px 56px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
+
+        <tr>
+          <td align="center" style="padding:0 0 24px;">
+            <img src="{$logoUrl}" alt="{$safeSiteName}" width="130" height="auto"
+                 style="display:block;max-width:130px;height:auto;border:0;outline:none;text-decoration:none;">
+          </td>
+        </tr>
+
+        <tr>
+          <td bgcolor="#161b22" style="background-color:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+
+              <tr>
+                <td bgcolor="#16b5e6" style="background-color:#16b5e6;height:3px;font-size:3px;line-height:3px;">&nbsp;</td>
+              </tr>
+
+              <tr>
+                <td style="padding:36px 36px 28px;">
+
+                  <h1 style="margin:0 0 8px;font-size:22px;font-weight:600;color:#f0f6fc;line-height:1.3;">
+                    Confirm your recovery email
+                  </h1>
+                  <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#8b949e;">
+                    Enter this code in the app to set this address as your account-recovery
+                    email. It lets you regain access if you ever lose your wallet. The code is
+                    valid for&nbsp;15&nbsp;minutes.
+                  </p>
+
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;">
+                    <tr>
+                      <td align="center" bgcolor="#0d1117"
+                          style="background-color:#0d1117;border:1px solid #16b5e6;border-radius:6px;padding:28px 24px;">
+                        <span style="display:block;font-family:'Courier New',Courier,monospace;font-size:44px;font-weight:700;letter-spacing:14px;color:#16b5e6;line-height:1;padding-left:14px;">{$safeOtp}</span>
+                        <span style="display:block;margin-top:10px;font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#484f58;">Expires in 15 minutes &middot; one-time use</span>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <p style="margin:0;font-size:13px;line-height:1.6;color:#6e7681;">
+                    If you didn&rsquo;t request a recovery email on your {$safeSiteName} account,
+                    you can ignore this message &mdash; nothing changes until the code is entered.
+                  </p>
+
+                </td>
+              </tr>
+
+              <tr>
+                <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
+                  <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
+                    &copy; {$safeSiteName} &bull;
+                    <a href="{$siteUrl}" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
+                  </p>
+                </td>
+              </tr>
+
+            </table>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>
+HTML;
+    }
 }
