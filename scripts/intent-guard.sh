@@ -115,6 +115,12 @@ require_tools() {
     done
 }
 
+# Windows jq builds emit CRLF line endings; the stray \r makes string
+# compares fail ($status == "real" vs "real\r") and silently breaks the
+# numeric [[ -gt ]] checks (which error → false → fake PASS on drift).
+# Strip \r from all jq output while preserving jq's exit status for -e.
+jq() { command jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
+
 wp_eval() { wp "${WP_ARGS[@]}" eval "$1" 2>&1; }
 
 # Invoke a WordPress REST route in-process, bypassing HTTP auth. Admin-only
