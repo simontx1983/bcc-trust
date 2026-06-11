@@ -22,7 +22,11 @@
  * bcc-core's ActivityFeedService returns body=[] for those because they
  * read from bcc-trust sidecar tables (bcc_pull_batches, bcc_pull_meta,
  * bcc_onchain_claims) which bcc-core can't see. Bulk-loaded across the
- * whole feed page so per-page query cost stays bounded.
+ * whole feed page so per-page query cost stays bounded. The per-kind
+ * loaders live in the sibling *BodyHydrator classes (PullBatchBodyHydrator,
+ * ReviewBodyHydrator, PhotoBodyHydrator, GifBodyHydrator,
+ * PageClaimBodyHydrator); this service keeps the bucket-and-dispatch
+ * pass plus the mention overlay.
  *
  * @package BCC\Trust\Core\Services\Feed
  * @since V1 (2026-04)
@@ -34,23 +38,16 @@ use BCC\Core\Feed\ActivityFeedService;
 use BCC\Core\Feed\ReactionGrammarMap;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
-use BCC\Trust\Core\Repositories\WatchingRepository;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\GifRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
-use BCC\Trust\Core\Repositories\PhotoRepository;
-use BCC\Trust\Core\Repositories\PhotoAltRepository;
-use BCC\Trust\Core\Repositories\PullBatchRepository;
-use BCC\Trust\Core\Repositories\PullMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
-use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
 use BCC\Trust\Core\Services\BlogService;
 use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
-use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
@@ -61,26 +58,22 @@ if (!defined('ABSPATH')) {
 
 final class FeedRankingService
 {
-    /** §C3 cap for pull_batch top_cards display. */
-    private const TOP_CARDS_DISPLAY = 3;
-
     public function __construct(
         private readonly ActivityFeedService $activityFeed,
         private readonly ReputationRepository $reputationRepo,
-        private readonly PullBatchRepository $pullBatchRepo,
-        private readonly PullMetaRepository $pullMetaRepo,
-        private readonly WatchingRepository $watchingRepo,
         private readonly PeepSoReactionRepository $reactionRepo,
-        private readonly VoteRepository $voteRepo,
         private readonly HiddenActivityRepository $hiddenRepo,
         private readonly GroupContextResolver $groupContextResolver,
         private readonly CommentRepository $commentRepo,
-        private readonly PhotoRepository $photoRepo,
-        private readonly PhotoAltRepository $photoAltRepo,
         private readonly GifRepository $gifRepo,
         private readonly MentionOverlayService $mentionOverlay,
         private readonly AuthorBadgeResolver $authorBadgeResolver,
-        private readonly BlogService $blogService
+        private readonly BlogService $blogService,
+        private readonly PullBatchBodyHydrator $pullBatchBodyHydrator,
+        private readonly ReviewBodyHydrator $reviewBodyHydrator,
+        private readonly PhotoBodyHydrator $photoBodyHydrator,
+        private readonly GifBodyHydrator $gifBodyHydrator,
+        private readonly PageClaimBodyHydrator $pageClaimBodyHydrator
     ) {
     }
 
@@ -616,11 +609,11 @@ final class FeedRankingService
             }
         }
 
-        $pullBatchBodies = $this->loadPullBatchBodies(array_values(array_unique($pullBatchExtToSid)));
-        $pageClaimBodies = $this->loadPageClaimBodies(array_values(array_unique($pageClaimExtToSid)));
-        $reviewBodies    = $this->loadReviewBodies(array_values(array_unique($reviewExtToSid)));
-        $photoBodies     = $this->loadPhotoBodies(array_keys($photoExtIds));
-        $gifBodies       = $this->loadGifBodies(array_keys($gifExtIds), $gifUrlByExtId);
+        $pullBatchBodies = $this->pullBatchBodyHydrator->loadPullBatchBodies(array_values(array_unique($pullBatchExtToSid)));
+        $pageClaimBodies = $this->pageClaimBodyHydrator->loadPageClaimBodies(array_values(array_unique($pageClaimExtToSid)));
+        $reviewBodies    = $this->reviewBodyHydrator->loadReviewBodies(array_values(array_unique($reviewExtToSid)));
+        $photoBodies     = $this->photoBodyHydrator->loadPhotoBodies(array_keys($photoExtIds));
+        $gifBodies       = $this->gifBodyHydrator->loadGifBodies(array_keys($gifExtIds), $gifUrlByExtId);
         $blogBodies      = $this->loadBlogBodies(array_keys($blogExtIds));
 
         $hydrated = [];
@@ -757,288 +750,6 @@ final class FeedRankingService
             $out[$postId] = $this->blogService->hydrateForPostId($postId, false);
         }
         return $out;
-    }
-
-    /**
-     * Bulk-load photo bodies for v1.5 photo posts. Returns a map
-     * keyed by wp_post.ID → body shape per api-contract-v1.md §3.3:
-     *
-     *   {
-     *     caption:   string | null,   // wp_posts.post_content; null when whitespace-only
-     *     photo_url: string,           // canonical full image URL
-     *     alt:       string | null     // author-supplied; null when not set
-     *   }
-     *
-     * Two bounded SELECTs: PhotoRepository::findByPostIds (peepso_photos)
-     * gives us pho_id + filename; PhotoAltRepository::findManyByPhotoIds
-     * (bcc_photo_alts sidecar) attaches the author-supplied alt text in a
-     * single round-trip keyed by pho_id. Photos with no alt-row return
-     * null and the frontend renders `<img alt="">` (decorative).
-     *
-     * Defensive posture: when a photo row is missing (rare race —
-     * activity row landed but save_images hasn't completed), the body
-     * falls back to caption-only with `photo_url: ''`. The frontend
-     * gracefully omits the image when the URL is empty.
-     *
-     * @param list<int> $postIds
-     * @return array<int, array<string, mixed>>
-     */
-    private function loadPhotoBodies(array $postIds): array
-    {
-        if ($postIds === []) {
-            return [];
-        }
-        $rowsByPost = $this->photoRepo->findByPostIds($postIds);
-
-        // Collect pho_ids for the alt-text sidecar lookup. Posts without
-        // a photo row (race window) contribute nothing; the alt map
-        // simply won't have an entry for them.
-        $phoIdsByPost = [];
-        foreach ($rowsByPost as $postId => $row) {
-            $phoIdsByPost[$postId] = (int) $row->pho_id;
-        }
-        $altsByPhoId = $this->photoAltRepo->findManyByPhotoIds(array_values($phoIdsByPost));
-
-        $out = [];
-        foreach ($postIds as $postId) {
-            $caption = self::resolvePhotoCaption($postId);
-            $row     = $rowsByPost[$postId] ?? null;
-            $photoUrl = $row !== null ? PhotoRepository::resolvePhotoUrl($row) : '';
-
-            $phoId = $phoIdsByPost[$postId] ?? 0;
-            $alt   = $phoId > 0 ? ($altsByPhoId[$phoId] ?? null) : null;
-
-            $out[$postId] = [
-                'caption'   => $caption,
-                'photo_url' => $photoUrl,
-                'alt'       => $alt,
-            ];
-        }
-        return $out;
-    }
-
-    /**
-     * Read the caption for a photo post from `wp_posts.post_content`.
-     * PeepSo's add_post stores the user's caption text there; the
-     * writer pads with a single space when empty (see PeepSoPhotoWriter
-     * docblock) so the field is never NULL on the DB side. We collapse
-     * a whitespace-only post_content back to null at this layer so
-     * the frontend treats photo-only posts as caption-less.
-     */
-    private static function resolvePhotoCaption(int $postId): ?string
-    {
-        if ($postId <= 0) {
-            return null;
-        }
-        $post = get_post($postId);
-        if (!($post instanceof \WP_Post)) {
-            return null;
-        }
-        $caption = trim((string) $post->post_content);
-        return $caption === '' ? null : $caption;
-    }
-
-    /**
-     * Bulk-build GIF bodies for v1.5 GIF posts. Caller has already
-     * batch-fetched the giphy URLs via GifRepository in the layer-2
-     * promotion pass, so this is just a per-post composition step:
-     * read the wp_post for the caption, pair with the URL.
-     *
-     * Body shape (api-contract-v1.md §3.3.10):
-     *
-     *   {
-     *     caption:  string | null,    // wp_posts.post_content; null when whitespace-only
-     *     gif_url:  string,            // Giphy CDN URL
-     *     provider: 'giphy'            // forward-stable for future Tenor / sticker providers
-     *   }
-     *
-     * @param list<int> $postIds
-     * @param array<int, string> $gifUrlByExtId
-     * @return array<int, array<string, mixed>>
-     */
-    private function loadGifBodies(array $postIds, array $gifUrlByExtId): array
-    {
-        if ($postIds === []) {
-            return [];
-        }
-
-        $out = [];
-        foreach ($postIds as $postId) {
-            $url = $gifUrlByExtId[$postId] ?? '';
-            if ($url === '') {
-                continue;
-            }
-            $out[$postId] = [
-                'caption'  => self::resolvePhotoCaption($postId),
-                'gif_url'  => $url,
-                'provider' => 'giphy',
-            ];
-        }
-        return $out;
-    }
-
-    /**
-     * Bulk-load review bodies. Returns map keyed by bcc_trust_votes.id.
-     *
-     * Body shape (per FeedItemNormalizer's review contract):
-     *   {
-     *     grade:        'trust' | 'neutral' | 'caution',  // symbolic, not vote_type int
-     *     text:         string,                           // the explanation column
-     *     page_id:      int,                              // target peepso-page id
-     *     page_handle:  string,                           // target page slug
-     *     page_name:    string,                           // target page display name
-     *     page_kind:    'validator'|'project'|'creator'|'',// drives /v|/p|/c link prefix
-     *   }
-     *
-     * Two queries: votes by id (bulk) + posts by id (WP's get_posts
-     * batch). The page lookup is fast — WP's per-process post cache
-     * makes repeats free, and the feed page caps at 50 items.
-     *
-     * @param list<int> $voteIds
-     * @return array<int, array<string, mixed>>
-     */
-    private function loadReviewBodies(array $voteIds): array
-    {
-        if ($voteIds === []) {
-            return [];
-        }
-
-        $votes = $this->voteRepo->findManyByIds($voteIds);
-        if ($votes === []) {
-            return [];
-        }
-
-        // Bulk-resolve target page handles. WP's get_posts caches
-        // per-process, so per-id lookups are fine after this prime.
-        $pageIds = [];
-        foreach ($votes as $vote) {
-            $pageIds[(int) ($vote->page_id ?? 0)] = true;
-        }
-        unset($pageIds[0]);
-        $pages = [];
-        if ($pageIds !== []) {
-            /** @var list<\WP_Post> $rows */
-            $rows = get_posts([
-                'post_type'      => 'any',
-                'post__in'       => array_keys($pageIds),
-                'posts_per_page' => count($pageIds),
-                'post_status'    => 'any',
-                // Suppress WP's default ordering so unstable orderings
-                // don't shuffle the FK lookup; we re-key by id below.
-                'orderby'        => 'post__in',
-            ]);
-            foreach ($rows as $post) {
-                $pages[$post->ID] = $post;
-            }
-        }
-
-        $bodies = [];
-        foreach ($votes as $voteId => $vote) {
-            $voteType   = (int) ($vote->vote_type ?? 0);
-            $explanation = (string) ($vote->explanation ?? '');
-            $pageId     = (int) ($vote->page_id ?? 0);
-            $page       = $pages[$pageId] ?? null;
-
-            $pageKind = '';
-            if ($page !== null) {
-                $rawType = (string) get_post_meta($page->ID, '_bcc_page_type', true);
-                if ($rawType !== '') {
-                    $pageKind = PageTypeMap::kindForPageType($rawType) ?? '';
-                }
-            }
-
-            $bodies[$voteId] = [
-                'grade'       => self::voteTypeToGrade($voteType),
-                'text'        => $explanation,
-                'page_id'     => $pageId,
-                'page_handle' => $page !== null ? (string) $page->post_name  : '',
-                'page_name'   => $page !== null ? (string) $page->post_title : '',
-                'page_kind'   => $pageKind,
-            ];
-        }
-        return $bodies;
-    }
-
-    /**
-     * Convert the integer vote_type stored in bcc_trust_votes back to
-     * the symbolic grade key the frontend speaks. Mirror of
-     * PostsService::REVIEW_GRADE_TO_VOTE_TYPE.
-     */
-    private static function voteTypeToGrade(int $voteType): string
-    {
-        if ($voteType > 0) return 'trust';
-        if ($voteType < 0) return 'caution';
-        return 'neutral';
-    }
-
-    /**
-     * Bulk-load pull_batch bodies: snapshot + top 3 card handles per
-     * batch. Returns map keyed by bcc_pull_batches.id.
-     *
-     * Frozen-history rule (§C3): card_count and more_count come from
-     * the bcc_pull_batches snapshot taken at emit time, NOT a live
-     * COUNT(*) on bcc_pull_meta — subsequent unpulls don't shift the
-     * displayed numbers.
-     *
-     * @param list<int> $batchRowIds
-     * @return array<int, array<string, mixed>>
-     */
-    private function loadPullBatchBodies(array $batchRowIds): array
-    {
-        if ($batchRowIds === []) {
-            return [];
-        }
-
-        $batches = $this->pullBatchRepo->findManyByIds($batchRowIds);
-        if ($batches === []) {
-            return [];
-        }
-
-        // Pull all member rows for these batches in one query.
-        $batchIds = [];
-        foreach ($batches as $batch) {
-            $batchIds[] = (string) $batch->batch_id;
-        }
-        $membersByBatchId = $this->pullMetaRepo->findManyByBatchIds($batchIds);
-
-        // Collect top-3 follow_ids per batch + dedupe across batches
-        // for one bulk handle lookup.
-        $topFollowIdsPerBatch = [];
-        $allFollowIds = [];
-        foreach ($membersByBatchId as $batchId => $members) {
-            $top = array_slice($members, 0, self::TOP_CARDS_DISPLAY);
-            $topIds = [];
-            foreach ($top as $row) {
-                $followId = (int) $row->follow_id;
-                $topIds[] = $followId;
-                $allFollowIds[$followId] = true;
-            }
-            $topFollowIdsPerBatch[$batchId] = $topIds;
-        }
-        $handleMap = $this->watchingRepo->findHandlesForFollowIds(array_keys($allFollowIds));
-
-        // Compose bodies indexed by bcc_pull_batches.id (matches
-        // act_external_id at the call site).
-        $bodies = [];
-        foreach ($batches as $internalId => $batch) {
-            $batchIdStr = (string) $batch->batch_id;
-            $topIds     = $topFollowIdsPerBatch[$batchIdStr] ?? [];
-            $topCards   = [];
-            foreach ($topIds as $fid) {
-                $topCards[] = [
-                    'follow_id'   => $fid,
-                    'card_handle' => $handleMap[$fid] ?? '',
-                ];
-            }
-
-            $bodies[$internalId] = [
-                'batch_id'   => $batchIdStr,
-                'card_count' => (int) $batch->card_count,
-                'more_count' => (int) $batch->more_count,
-                'top_cards'  => $topCards,
-            ];
-        }
-        return $bodies;
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1466,52 +1177,9 @@ final class FeedRankingService
         return $hydrated;
     }
 
-    /**
-     * Bulk-load page_claim bodies. Returns map keyed by
-     * bcc_onchain_claims.id.
-     *
-     * @param list<int> $claimIds
-     * @return array<int, array<string, mixed>>
-     */
-    private function loadPageClaimBodies(array $claimIds): array
-    {
-        if ($claimIds === []) {
-            return [];
-        }
-
-        $claims = ClaimRepository::findManyByIds($claimIds);
-        $bodies = [];
-        foreach ($claims as $id => $claim) {
-            $role = (string) $claim->claim_role;
-            $bodies[$id] = [
-                'claim_id'    => (int) $claim->id,
-                'entity_type' => (string) $claim->entity_type,
-                'entity_id'   => (int) $claim->entity_id,
-                'role'        => $role,
-                'verified_at' => self::toIso8601((string) ($claim->verified_at ?? '')),
-                // Pre-rendered summary per §A2 — frontend renders verbatim.
-                // Page name resolution would add a query per feed page;
-                // until that's worth it, "this page" stands in.
-                'summary'     => $role !== ''
-                    ? "Claimed this page as {$role}."
-                    : 'Claimed this page.',
-            ];
-        }
-        return $bodies;
-    }
-
     // ──────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────
-
-    private static function toIso8601(string $mysqlDatetime): string
-    {
-        if ($mysqlDatetime === '' || $mysqlDatetime === '0000-00-00 00:00:00') {
-            return '';
-        }
-        $ts = strtotime($mysqlDatetime . ' UTC');
-        return $ts === false ? '' : gmdate('Y-m-d\TH:i:s\Z', $ts);
-    }
 
     /**
      * §K1 Phase B — set `permissions.can_report.allowed` per item based

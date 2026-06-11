@@ -3,7 +3,10 @@
 namespace BCC\Trust\Disputes\Admin;
 
 use BCC\Trust\Disputes\Services\DisputeNotificationService;
+use BCC\Trust\Disputes\Repositories\DisputeAdminRepository;
+use BCC\Trust\Disputes\Repositories\DisputePanelRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use BCC\Trust\Disputes\Repositories\UserReportRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -80,7 +83,7 @@ class DisputeAdmin
 
     private static function render_detail(int $dispute_id): void
     {
-        $dispute = DisputeRepository::getDisputeDetailForAdmin($dispute_id);
+        $dispute = DisputeAdminRepository::getDisputeDetailForAdmin($dispute_id);
 
         if (!$dispute) {
             echo '<div class="wrap"><h1>' . esc_html__('Dispute Not Found', 'bcc-disputes') . '</h1></div>';
@@ -96,7 +99,7 @@ class DisputeAdmin
         }
 
         // Panel votes.
-        $panelists = DisputeRepository::getPanelistsForDispute($dispute_id);
+        $panelists = DisputePanelRepository::getPanelistsForDispute($dispute_id);
 
         $back_url = admin_url('admin.php?page=bcc-disputes');
         $is_open  = $dispute->status === 'reviewing';
@@ -471,7 +474,7 @@ class DisputeAdmin
 
         // updateReportStatus uses WHERE status = 'open', so it handles
         // non-existent and already-resolved reports in one atomic check.
-        $update_ok = DisputeRepository::updateReportStatus($report_id, $action);
+        $update_ok = UserReportRepository::updateReportStatus($report_id, $action);
 
         if (!$update_ok) {
             wp_safe_redirect(add_query_arg(
@@ -506,14 +509,14 @@ class DisputeAdmin
 
         // Claim the report atomically FIRST — prevents double-penalize race.
         // updateReportStatus uses WHERE status = 'open', so only one request wins.
-        $update_ok = DisputeRepository::updateReportStatus($report_id, 'penalized');
+        $update_ok = UserReportRepository::updateReportStatus($report_id, 'penalized');
 
         if (!$update_ok) {
             wp_die(__('Report not found or already resolved.', 'bcc-disputes'));
         }
 
         // Status claimed — now safe to apply penalty (only runs once).
-        $report = DisputeRepository::getReportById($report_id);
+        $report = UserReportRepository::getReportById($report_id);
         if (!$report) {
             wp_die(__('Report data could not be loaded.', 'bcc-disputes'));
         }

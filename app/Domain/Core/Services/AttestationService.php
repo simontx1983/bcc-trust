@@ -181,6 +181,26 @@ final class AttestationService
             $targetId
         );
 
+        return $this->shapeViewerAttestationFromRows($rows);
+    }
+
+    /**
+     * Shape a pair of raw active-attestation rows into the locked
+     * §4.20 viewer_attestation wire shape. The ONE place the shaping
+     * lives: getViewerAttestation routes its single-target repo read
+     * through here, and the cards-list path shapes
+     * PageCardPrefetcher's batched `viewer_attestations[$pageId]`
+     * rows through the same method — so the two paths can never emit
+     * divergent shapes.
+     *
+     * @param array{vouch: object|null, stand_behind: object|null} $rows
+     * @return array{
+     *   vouch: array{id: int, created_at: string}|null,
+     *   stand_behind: array{id: int, created_at: string}|null
+     * }
+     */
+    public function shapeViewerAttestationFromRows(array $rows): array
+    {
         return [
             'vouch'        => self::shapeViewerSlot($rows['vouch']),
             'stand_behind' => self::shapeViewerSlot($rows['stand_behind']),

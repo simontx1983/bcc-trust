@@ -52,10 +52,33 @@ if (!defined('ABSPATH')) {
 
 /**
  * @phpstan-import-type PageReadModelRow from PageReadModelRepository
+ * @phpstan-import-type ClaimRow from ClaimRepository
+ * @phpstan-import-type ValidatorCardRow from ValidatorRepository
  * @phpstan-type Flag string
  * @phpstan-type Stat array{key: string, label: string, value: string, raw: int|float|string, format: string}
  * @phpstan-type Permission array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
  * @phpstan-type Action array{method: string, href: string, body?: array<string, mixed>, idempotent: bool, requires_auth: bool}
+ *
+ * The page-card prefetch bundle produced by
+ * Support\PageCardPrefetcher::primeFor(). Keys are optional here (the
+ * consumer falls back to single-page queries per key) even though the
+ * prefetcher always emits all of them — partial-bundle safety mirrors
+ * how getSummary treats the MemberSummaryPrefetcher map.
+ *
+ * @phpstan-type PageCardPrefetch array{
+ *   read_models?: array<int, PageReadModelRow>,
+ *   claimed_pages?: array<int, bool>,
+ *   viewer_claims?: array<int, ClaimRow>,
+ *   viewer_votes?: array<int, true>,
+ *   viewer_endorsements?: array<int, true>,
+ *   viewer_attestations?: array<int, array{vouch: object|null, stand_behind: object|null}>,
+ *   endorse_eligibility?: array<int, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>,
+ *   dispute_active_counts?: array<int, int>,
+ *   attestation_active_counts?: array<int, int>,
+ *   attestation_revoked_counts?: array<int, int>,
+ *   validator_rows?: array<int, list<ValidatorCardRow>>,
+ *   page_entities?: array<int, array{entity_type: string, entity_id: int}>
+ * }
  */
 final class CardViewService
 {
@@ -99,9 +122,35 @@ final class CardViewService
     // ──────────────────────────────────────────────────────────────────
 
     /**
+     * Public list accessor — mirror of getMemberCardForList for the
+     * page kinds. The two list producers (cards directory, onboarding
+     * suggestions) call this per page with a shared
+     * `PageCardPrefetcher::primeFor()` bundle so the per-card signal
+     * hydration inside getPageCard doesn't N+1. Thin wrapper over
+     * getPageCard; exists so callers don't reach into a private method.
+     *
+     * @param array<string, mixed>|null $prefetched
+     * @phpstan-param PageCardPrefetch|null $prefetched
      * @return array<string, mixed>|null
      */
-    private function getPageCard(string $kind, string $id, int $viewerId): ?array
+    public function getPageCardForList(string $kind, int $pageId, int $viewerId, ?array $prefetched): ?array
+    {
+        return $this->getPageCard($kind, (string) $pageId, $viewerId, $prefetched);
+    }
+
+    /**
+     * `$prefetched` (when non-null) is the shared PageCardPrefetcher
+     * bundle; every per-card read below prefers its map and falls back
+     * to the existing single-page query when the key is absent — the
+     * same prefer-prefetched contract UserViewService::getSummary uses,
+     * so single-card callers (CardsEndpoint, MemberProfileComposer)
+     * keep working with no prefetch ceremony.
+     *
+     * @param array<string, mixed>|null $prefetched
+     * @phpstan-param PageCardPrefetch|null $prefetched
+     * @return array<string, mixed>|null
+     */
+    private function getPageCard(string $kind, string $id, int $viewerId, ?array $prefetched = null): ?array
     {
         $expectedPageType = PageTypeMap::KIND_TO_PAGE_TYPE[$kind] ?? null;
         if ($expectedPageType === null) {
@@ -126,7 +175,11 @@ final class CardViewService
         }
 
         $pageId = (int) $post->ID;
-        $rm     = $this->pageReadModelRepo->getByPageId($pageId);
+        if ($prefetched !== null && isset($prefetched['read_models'])) {
+            $rm = $prefetched['read_models'][$pageId] ?? null;
+        } else {
+            $rm = $this->pageReadModelRepo->getByPageId($pageId);
+        }
 
         $tier        = $rm !== null ? (string) $rm->reputation_tier : 'neutral';
         $trustScore  = $rm !== null ? (int) round((float) $rm->trust_score) : 50;
@@ -140,17 +193,75 @@ final class CardViewService
 
         $name   = (string) $post->post_title;
         $handle = (string) $post->post_name;
-        $isClaimed = self::isPageClaimed($pageId);
-        $isClaimedByViewer = $viewerId > 0 && self::viewerHasClaim($viewerId, $pageId);
-        $viewerHasReviewed = $viewerId > 0 && $this->voteService->hasUserVotedPage($pageId, $viewerId);
-        $viewerHasEndorsed = $viewerId > 0 && $this->endorsementService->hasEndorsedPage($pageId, $viewerId, 'general');
-        $endorseEligibility = $this->endorsementService->getEndorseEligibility($viewerId, $pageId);
+
+        if ($prefetched !== null && isset($prefetched['claimed_pages'])) {
+            $isClaimed = $prefetched['claimed_pages'][$pageId] ?? false;
+        } else {
+            $isClaimed = self::isPageClaimed($pageId);
+        }
+
+        if ($viewerId <= 0) {
+            $isClaimedByViewer = false;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_claims'])) {
+            // Anon-safe by construction: the prefetcher emits an empty
+            // map for viewerId<=0, but the gate above already handled
+            // that. Same status==='verified' reduction as the fallback.
+            $isClaimedByViewer = self::claimRowIsVerified($prefetched['viewer_claims'][$pageId] ?? null);
+        } else {
+            $isClaimedByViewer = self::viewerHasClaim($viewerId, $pageId);
+        }
+
+        if ($viewerId <= 0) {
+            $viewerHasReviewed = false;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_votes'])) {
+            $viewerHasReviewed = isset($prefetched['viewer_votes'][$pageId]);
+        } else {
+            $viewerHasReviewed = $this->voteService->hasUserVotedPage($pageId, $viewerId);
+        }
+
+        if ($viewerId <= 0) {
+            $viewerHasEndorsed = false;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_endorsements'])) {
+            $viewerHasEndorsed = isset($prefetched['viewer_endorsements'][$pageId]);
+        } else {
+            $viewerHasEndorsed = $this->endorsementService->hasEndorsedPage($pageId, $viewerId, 'general');
+        }
+
+        if ($prefetched !== null && isset($prefetched['endorse_eligibility'])) {
+            // Anon viewers get an empty prefetch map; the single-page
+            // fallback short-circuits to the auth_required shape with
+            // zero queries, so the `??` keeps anon byte-identical.
+            $endorseEligibility = $prefetched['endorse_eligibility'][$pageId]
+                ?? $this->endorsementService->getEndorseEligibility($viewerId, $pageId);
+        } else {
+            $endorseEligibility = $this->endorsementService->getEndorseEligibility($viewerId, $pageId);
+        }
+
         // §J.6 viewer_attestation — present only for authed viewers.
         // Maps the card kind to the locked target_kind set per §J.1.
         // Always null for anon (the service returns null on viewerId<=0).
         $cardTargetKind = self::cardKindToTargetKind($kind);
-        $viewerAttestation = ($viewerId > 0 && $cardTargetKind !== null)
-            ? $this->attestationService->getViewerAttestation($viewerId, $cardTargetKind, $pageId)
+        $viewerAttestation = null;
+        if ($viewerId > 0 && $cardTargetKind !== null) {
+            if ($prefetched !== null && isset($prefetched['viewer_attestations'])) {
+                // Batched raw rows shaped through the SAME service
+                // method getViewerAttestation uses, so the two paths
+                // can never emit divergent shapes.
+                $viewerAttestation = $this->attestationService->shapeViewerAttestationFromRows(
+                    $prefetched['viewer_attestations'][$pageId] ?? ['vouch' => null, 'stand_behind' => null]
+                );
+            } else {
+                $viewerAttestation = $this->attestationService->getViewerAttestation($viewerId, $cardTargetKind, $pageId);
+            }
+        }
+
+        // Validator on-chain projection — one shared batch row-set per
+        // page feeds claim_target + chains + onchain_signals + the logo
+        // step below (replacing 4 per-page queries). `null` = no bundle,
+        // helpers fall back to their per-page queries; `[]` = bundle
+        // present and the page has no validator rows.
+        $validatorRows = ($prefetched !== null && isset($prefetched['validator_rows']))
+            ? ($prefetched['validator_rows'][$pageId] ?? [])
             : null;
 
         return [
@@ -197,19 +308,19 @@ final class CardViewService
             // to drive the four-step modal. Server resolves these from
             // the page id (per §A2/§L5 — frontend never derives). Null
             // for already-claimed pages or non-validator kinds.
-            'claim_target'        => self::resolveClaimTarget($kind, $pageId, $isClaimed),
+            'claim_target'        => self::resolveClaimTarget($kind, $pageId, $isClaimed, $validatorRows),
             // §K3 — chains an operator runs on. Null for single-chain
             // pages (the common case) so the frontend doesn't render
             // a dead one-tab strip. Validator-only in V1.5; creator
             // gallery chain filter is V2 (per §H1).
-            'chains'              => self::resolveChains($kind, $pageId),
+            'chains'              => self::resolveChains($kind, $pageId, $validatorRows),
             // On-chain validator signals — status, uptime, commission,
             // voting power, stake. Validator-only; null for other kinds
             // and for validator pages with no resolvable on-chain row
             // (transient indexer state). Surfaces the chain's own data
             // on a card so unclaimed placeholders still show what the
             // operator actually does on-chain.
-            'onchain_signals'     => self::resolveOnchainSignals($kind, $pageId),
+            'onchain_signals'     => self::resolveOnchainSignals($kind, $pageId, $validatorRows),
             // member_dossier is member-only — always null on page cards
             // for shape uniformity (matches how `chains`/`onchain_signals`
             // are always present). The frontend's CardFactory reads
@@ -223,7 +334,7 @@ final class CardViewService
                 $name,
                 'tier',
                 $card['key'] ?? 'common',
-                self::resolvePageAvatarUrl($pageId)
+                self::resolvePageAvatarUrl($pageId, $validatorRows)
             ),
             'stats'               => self::buildPageStats($trustScore, $rm),
             'permissions'         => $this->resolvePagePermissions(
@@ -245,10 +356,11 @@ final class CardViewService
             // §J.9 reports extend to user_profile / card target kinds.
             'negative_signals'    => $this->buildNegativeSignals(
                 $cardTargetKind,
-                $pageId
+                $pageId,
+                $prefetched
             ),
             'links'               => self::buildLinks($kind, $handle),
-            'actions'             => self::buildPageActions($kind, $pageId),
+            'actions'             => self::buildPageActions($kind, $pageId, $prefetched),
         ];
     }
 
@@ -263,6 +375,14 @@ final class CardViewService
      * contract-stable — FE renders without branching on whether
      * the field is "real" vs "baseline."
      *
+     * Prefetched path: `has_active ≡ count > 0` (both per-page reads
+     * use the identical `status = 'reviewing'` predicate, so one
+     * grouped count yields both signals), and the divergence state
+     * routes through classifyFromCounts — the same single heuristic
+     * implementation classify() delegates to.
+     *
+     * @param array<string, mixed>|null $prefetched
+     * @phpstan-param PageCardPrefetch|null $prefetched
      * @return array{
      *   under_review: bool,
      *   divergence_state: string,
@@ -270,14 +390,34 @@ final class CardViewService
      *   unresolved_claims_count: int
      * }
      */
-    private function buildNegativeSignals(?string $targetKind, int $pageId): array
+    private function buildNegativeSignals(?string $targetKind, int $pageId, ?array $prefetched = null): array
     {
-        $hasActive   = \BCC\Trust\Disputes\Repositories\DisputeRepository::hasActiveDisputeForPage($pageId);
-        $activeCount = \BCC\Trust\Disputes\Repositories\DisputeRepository::countActiveDisputesForPage($pageId);
+        if (
+            $prefetched !== null
+            && isset($prefetched['dispute_active_counts'])
+            && isset($prefetched['attestation_active_counts'])
+            && isset($prefetched['attestation_revoked_counts'])
+        ) {
+            $activeCount = $prefetched['dispute_active_counts'][$pageId] ?? 0;
+            $hasActive   = $activeCount > 0;
 
-        $state = $targetKind !== null
-            ? $this->divergenceClassifier->classify($targetKind, $pageId)
-            : DivergenceStateClassifier::STATE_UNTESTED;
+            $state = $targetKind !== null
+                ? $this->divergenceClassifier->classifyFromCounts(
+                    $targetKind,
+                    $pageId,
+                    $hasActive,
+                    $prefetched['attestation_active_counts'][$pageId] ?? 0,
+                    $prefetched['attestation_revoked_counts'][$pageId] ?? 0
+                )
+                : DivergenceStateClassifier::STATE_UNTESTED;
+        } else {
+            $hasActive   = \BCC\Trust\Disputes\Repositories\DisputeRepository::hasActiveDisputeForPage($pageId);
+            $activeCount = \BCC\Trust\Disputes\Repositories\DisputeRepository::countActiveDisputesForPage($pageId);
+
+            $state = $targetKind !== null
+                ? $this->divergenceClassifier->classify($targetKind, $pageId)
+                : DivergenceStateClassifier::STATE_UNTESTED;
+        }
 
         return [
             'under_review'             => $hasActive,
@@ -492,7 +632,20 @@ final class CardViewService
 
     private static function viewerHasClaim(int $viewerId, int $pageId): bool
     {
-        $claim = ClaimRepository::getUserClaim($viewerId, 'page', $pageId);
+        return self::claimRowIsVerified(
+            ClaimRepository::getUserClaim($viewerId, 'page', $pageId)
+        );
+    }
+
+    /**
+     * The status==='verified' reduction shared by the single-page
+     * fallback (viewerHasClaim) and the prefetched path — one place,
+     * so the two can never disagree on what "claimed by viewer" means.
+     *
+     * @phpstan-param ClaimRow|null $claim
+     */
+    private static function claimRowIsVerified(?object $claim): bool
+    {
         if ($claim === null) {
             return false;
         }
@@ -508,14 +661,23 @@ final class CardViewService
      * later via the same shape — different `entity_type`, different
      * resolver. Project pages don't claim (they aggregate validators).
      *
+     * `$validatorRows` (when non-null) is the page's slice of the
+     * PageCardPrefetcher batch — its first row replaces the
+     * findFirstByPageId query. The batch is chain-name ordered, so
+     * "first" is deterministic where the old LIMIT 1 was arbitrary
+     * on multi-chain pages (benign tightening).
+     *
+     * @phpstan-param list<ValidatorCardRow>|null $validatorRows
      * @return array{entity_type: string, entity_id: int, chain_slug: string}|null
      */
-    private static function resolveClaimTarget(string $kind, int $pageId, bool $isClaimed): ?array
+    private static function resolveClaimTarget(string $kind, int $pageId, bool $isClaimed, ?array $validatorRows = null): ?array
     {
         if ($isClaimed || $kind !== 'validator') {
             return null;
         }
-        $row = ValidatorRepository::findFirstByPageId($pageId);
+        $row = $validatorRows !== null
+            ? ($validatorRows[0] ?? null)
+            : ValidatorRepository::findFirstByPageId($pageId);
         if ($row === null) {
             return null;
         }
@@ -548,13 +710,23 @@ final class CardViewService
      *     jailed_count: int|null,
      *     last_fetched_at: string|null
      * }|null
+     *
+     * `$validatorRows` (when non-null) is the page's slice of the
+     * PageCardPrefetcher batch — its first row replaces the
+     * findSignalsByPageId query (same columns, same two-path
+     * resolution; chain-name-ASC "first" is the documented benign
+     * tightening over the old arbitrary LIMIT 1).
+     *
+     * @phpstan-param list<ValidatorCardRow>|null $validatorRows
      */
-    private static function resolveOnchainSignals(string $kind, int $pageId): ?array
+    private static function resolveOnchainSignals(string $kind, int $pageId, ?array $validatorRows = null): ?array
     {
         if ($kind !== 'validator') {
             return null;
         }
-        $row = ValidatorRepository::findSignalsByPageId($pageId);
+        $row = $validatorRows !== null
+            ? ($validatorRows[0] ?? null)
+            : ValidatorRepository::findSignalsByPageId($pageId);
         if ($row === null) {
             return null;
         }
@@ -611,14 +783,19 @@ final class CardViewService
      * V1.5: validator-only. Creators get their multi-chain treatment
      * via the gallery chain filter (V2 per §H1).
      *
+     * `$validatorRows` (when non-null) is the page's slice of the
+     * PageCardPrefetcher batch — replaces the findAllByPageId query
+     * (same rows, same chain-name-ASC order).
+     *
+     * @phpstan-param list<ValidatorCardRow>|null $validatorRows
      * @return list<array{slug: string, name: string, operator_address: string}>|null
      */
-    private static function resolveChains(string $kind, int $pageId): ?array
+    private static function resolveChains(string $kind, int $pageId, ?array $validatorRows = null): ?array
     {
         if ($kind !== 'validator') {
             return null;
         }
-        $rows = ValidatorRepository::findAllByPageId($pageId);
+        $rows = $validatorRows ?? ValidatorRepository::findAllByPageId($pageId);
         if (count($rows) < 2) {
             // Single-chain (or no validator data) → no tabs to render.
             // Returning null keeps the contract uniform with member
@@ -757,8 +934,14 @@ final class CardViewService
      * Resolve a peepso-page's avatar URL — PeepSoPagePhoto first, post
      * thumbnail second. Empty string when neither resolves; the
      * frontend renders the initials monogram fallback in that case.
+     *
+     * `$validatorRows` (when non-null) is the page's slice of the
+     * PageCardPrefetcher batch — its first row's logo_url replaces the
+     * findLogoByPageId query in step 3.
+     *
+     * @phpstan-param list<ValidatorCardRow>|null $validatorRows
      */
-    private static function resolvePageAvatarUrl(int $pageId): string
+    private static function resolvePageAvatarUrl(int $pageId, ?array $validatorRows = null): string
     {
         // 1. PeepSo page avatar (manual upload).
         if (class_exists('PeepSoPagePhoto')) {
@@ -780,7 +963,18 @@ final class CardViewService
 
         // 3. Auto-imported validator logo (self-hosted). Lowest precedence,
         //    so a claimer/manual image above always overrides it.
-        $logo = \BCC\Trust\Onchain\Repositories\ValidatorRepository::findLogoByPageId($pageId);
+        if ($validatorRows !== null) {
+            $first = $validatorRows[0] ?? null;
+            $logo  = $first !== null ? $first->logo_url : null;
+            if (!is_string($logo) || $logo === '') {
+                // The batch can't see the `_bcc_onchain_validator_id`
+                // meta-bound validator when wallet-link rows exist; the
+                // per-page fallback restores single-card-path semantics.
+                $logo = \BCC\Trust\Onchain\Repositories\ValidatorRepository::findLogoByPageId($pageId);
+            }
+        } else {
+            $logo = \BCC\Trust\Onchain\Repositories\ValidatorRepository::findLogoByPageId($pageId);
+        }
         if (is_string($logo) && $logo !== '') {
             return $logo;
         }
@@ -1151,9 +1345,15 @@ final class CardViewService
      * on-chain entity (validator or collection); the page isn't
      * claimable from this surface.
      *
+     * `$prefetched` routes the page→entity resolution through the
+     * PageCardPrefetcher batch (resolveEntitiesForPages) instead of
+     * the per-page resolveEntityForPage query.
+     *
+     * @param array<string, mixed>|null $prefetched
+     * @phpstan-param PageCardPrefetch|null $prefetched
      * @return array<string, Action>
      */
-    private static function buildPageActions(string $kind, int $pageId): array
+    private static function buildPageActions(string $kind, int $pageId, ?array $prefetched = null): array
     {
         $actions = [
             'pull' => [
@@ -1168,7 +1368,11 @@ final class CardViewService
             ],
         ];
 
-        $entity = WalletRepository::resolveEntityForPage($pageId);
+        if ($prefetched !== null && isset($prefetched['page_entities'])) {
+            $entity = $prefetched['page_entities'][$pageId] ?? null;
+        } else {
+            $entity = WalletRepository::resolveEntityForPage($pageId);
+        }
         if ($entity !== null) {
             $actions['claim'] = [
                 'method'        => 'POST',

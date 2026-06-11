@@ -5,18 +5,10 @@ namespace BCC\Trust\Disputes\Repositories;
 use BCC\Core\DB\DB;
 use BCC\Core\DTO\RowAssert;
 use BCC\Trust\Disputes\Domain\DisputeStatus;
-use BCC\Trust\Disputes\Domain\PanelDecision;
-use BCC\Trust\Disputes\Domain\ReportStatus;
-use BCC\Trust\Disputes\DTO\AdminDisputeRowDTO;
-use BCC\Trust\Disputes\DTO\AdminReportRowDTO;
 use BCC\Trust\Disputes\DTO\DisputeCoreDTO;
 use BCC\Trust\Disputes\DTO\DisputeDetailDTO;
 use BCC\Trust\Disputes\DTO\DisputeResolutionCandidateDTO;
 use BCC\Trust\Disputes\DTO\OrphanedDisputeDTO;
-use BCC\Trust\Disputes\DTO\PanelEntryFullDTO;
-use BCC\Trust\Disputes\DTO\PanelEntrySlimDTO;
-use BCC\Trust\Disputes\DTO\PanelistQueueItemDTO;
-use BCC\Trust\Disputes\DTO\UserReportDTO;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -25,16 +17,13 @@ if (!defined('ABSPATH')) {
 class DisputeRepository
 {
     /** Cache group for all dispute-related keys. */
-    private const CACHE_GROUP = 'bcc_disputes';
+    private const CACHE_GROUP = DisputeRepositorySupport::CACHE_GROUP;
 
     /** TTL for data that changes frequently (counts, active queues). */
-    private const TTL_HOT  = 60;
+    private const TTL_HOT = DisputeRepositorySupport::TTL_HOT;
 
     /** TTL for data that changes less often (individual dispute lookups). */
-    private const TTL_WARM = 300;
-
-    /** User reports table columns. */
-    private const REPORT_COLUMNS = 'id, reported_id, reporter_id, reason_key, reason_detail, status, created_at, reviewed_at';
+    private const TTL_WARM = DisputeRepositorySupport::TTL_WARM;
 
     public static function disputes_table(): string
     {
@@ -46,73 +35,10 @@ class DisputeRepository
         return DB::table('dispute_panel');
     }
 
-    public static function user_reports_table(): string
-    {
-        return DB::table('user_reports');
-    }
-
-    // ── Raw-transaction guards ──────────────────────────────────────────────
-    //
-    // Every raw `$wpdb->query('START TRANSACTION')` site MUST route through
-    // these helpers.  `$wpdb->query()` returns false on driver error
-    // (connection reset, managed-MySQL failover, implicit-commit at DDL),
-    // and a silent false return leaves the session in autocommit — which
-    // turns every FOR UPDATE into a plain read and every subsequent
-    // ROLLBACK into a no-op.  The dispute-create path in particular relies
-    // on gap locks for the per-page limit, per-reporter limit, and
-    // duplicate-vote protection; losing the transaction silently bypasses
-    // all three.
-    //
-    // These helpers are intentionally minimal — they log and surface
-    // failure to the caller, leaving retry/return-shape decisions where
-    // they belong (per-method).
-
-    /**
-     * Begin a transaction.  Returns false on driver error so the caller
-     * can return a structured failure to its API layer instead of
-     * proceeding under autocommit.
-     */
-    private static function beginTx(): bool
-    {
-        global $wpdb;
-        return $wpdb->query('START TRANSACTION') !== false;
-    }
-
-    /**
-     * Commit.  A false return means MySQL rolled the transaction back on
-     * its own (commit-time deadlock, serialization failure, connection
-     * drop).  Callers MUST NOT treat a failed COMMIT as a successful
-     * write — the persisted row may have been auto-incremented and then
-     * immediately rolled back, yielding a dead insert_id.
-     */
-    private static function commitTx(string $op): bool
-    {
-        global $wpdb;
-        if ($wpdb->query('COMMIT') !== false) {
-            return true;
-        }
-        \BCC\Core\Log\Logger::error('[bcc-disputes] COMMIT failed', [
-            'op'       => $op,
-            'db_error' => (string) $wpdb->last_error,
-        ]);
-        return false;
-    }
-
-    /**
-     * Rollback.  Never throws — rollback always runs on the error path
-     * and secondary failures there must not mask the primary cause.
-     * Logs on driver error so the forensic trail survives.
-     */
-    private static function rollbackTx(string $op): void
-    {
-        global $wpdb;
-        if ($wpdb->query('ROLLBACK') === false) {
-            \BCC\Core\Log\Logger::error('[bcc-disputes] ROLLBACK failed', [
-                'op'       => $op,
-                'db_error' => (string) $wpdb->last_error,
-            ]);
-        }
-    }
+    // The §1.0 raw-transaction guards (beginTx / commitTx / rollbackTx)
+    // live in DisputeRepositorySupport — shared with UserReportRepository
+    // so every raw `START TRANSACTION` site in the dispute domain routes
+    // through one audited implementation.
 
     // ── Verdict calculation (shared, single source of truth) ──────────────
 
@@ -197,49 +123,9 @@ class DisputeRepository
         return $votesCast >= self::quorumFor($panelSize);
     }
 
-    // ── Cache helpers ────────────────────────────────────────────────────────
-
-    /**
-     * Get the current generation counter for a cache namespace.
-     *
-     * Generation counters solve the wildcard-deletion problem: instead of
-     * deleting panel_queue:{userId}:* (impossible with wp_cache), we
-     * increment the generation and all old keys become unreachable,
-     * expiring naturally via TTL.
-     */
-    private static function getGeneration(string $genKey): int
-    {
-        $gen = wp_cache_get($genKey, self::CACHE_GROUP);
-        if ($gen === false) {
-            $gen = 1;
-            wp_cache_set($genKey, $gen, self::CACHE_GROUP, 0);
-        }
-        return (int) $gen;
-    }
-
-    /**
-     * Atomically increment a generation counter, invalidating all keys that embed it.
-     *
-     * Uses wp_cache_incr() which maps to Redis INCR — a single atomic operation
-     * when a persistent object cache is available. The fallback (no object cache)
-     * uses set-if-missing which is not fully atomic but acceptable for cache
-     * invalidation (worst case: one extra DB query).
-     */
-    private static function bumpGeneration(string $genKey): void
-    {
-        $result = wp_cache_incr($genKey, 1, self::CACHE_GROUP);
-        if ($result === false) {
-            // incr failed — key may not exist. Verify before overwriting.
-            $current = wp_cache_get($genKey, self::CACHE_GROUP);
-            if ($current === false) {
-                // Key truly doesn't exist — set to 2 (first bump from implicit gen=1).
-                wp_cache_set($genKey, 2, self::CACHE_GROUP, 0);
-            } else {
-                // Key exists but incr failed (transient backend issue) — force set incremented value.
-                wp_cache_set($genKey, (int) $current + 1, self::CACHE_GROUP, 0);
-            }
-        }
-    }
+    // Generation-counter cache helpers (getGeneration / bumpGeneration)
+    // live in DisputeRepositorySupport — shared with DisputePanelRepository
+    // so panel-queue keys and the invalidation bumps here stay in lockstep.
 
     // ── Advisory locks ────────────────────────────────────────────────────────
 
@@ -476,6 +362,64 @@ class DisputeRepository
     }
 
     /**
+     * Grouped variant of countActiveDisputesForPage — one bounded
+     * GROUP BY query for a whole cards-list page. Same `status =
+     * 'reviewing'` predicate as both per-page methods (verified:
+     * hasActiveDisputeForPage and countActiveDisputesForPage use the
+     * identical active-state definition, so `has_active ≡ count > 0`
+     * and consumers derive both signals from this single map).
+     *
+     * Pages with zero active disputes are absent from the map —
+     * consumers default with `?? 0`.
+     *
+     * Bounded: caller-paginated IN-list (cards per_page ≤ 50), one
+     * row per page via GROUP BY on the (page_id, status) index.
+     *
+     * @param list<int> $pageIds
+     * @return array<int, int> page_id => active (reviewing) dispute count.
+     */
+    public static function countActiveDisputesForPages(array $pageIds): array
+    {
+        $ids = [];
+        foreach ($pageIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::disputes_table();
+        $ph    = implode(',', array_fill(0, count($ids), '%d'));
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT page_id, COUNT(*) AS c FROM {$table}
+              WHERE page_id IN ({$ph}) AND status = 'reviewing'
+              GROUP BY page_id
+              LIMIT 100",
+            ...array_keys($ids)
+        ));
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->page_id, $row->c)) {
+                continue;
+            }
+            $pageId = (int) $row->page_id;
+            if ($pageId > 0) {
+                $out[$pageId] = (int) $row->c;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Atomically create a dispute row and its panel assignments.
      *
      * @param array<string, mixed> $disputeData  Dispute column values.
@@ -488,7 +432,7 @@ class DisputeRepository
         $disputeTable = self::disputes_table();
         $panelTable   = self::panel_table();
 
-        if (!self::beginTx()) {
+        if (!DisputeRepositorySupport::beginTx()) {
             \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in createDisputeWithPanel', [
                 'db_error' => (string) $wpdb->last_error,
             ]);
@@ -506,7 +450,7 @@ class DisputeRepository
             $pageId
         ));
         if ($recentCount >= BCC_DISPUTES_MAX_PER_PAGE) {
-            self::rollbackTx('createDisputeWithPanel:dispute_limit_reached');
+            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:dispute_limit_reached');
             return ['id' => null, 'failed_panelist' => null, 'db_error' => 'dispute_limit_reached'];
         }
 
@@ -520,7 +464,7 @@ class DisputeRepository
             $reporterId
         ));
         if ($activeReporterCount >= BCC_DISPUTES_REPORTER_MAX_ACTIVE) {
-            self::rollbackTx('createDisputeWithPanel:reporter_limit_reached');
+            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:reporter_limit_reached');
             return ['id' => null, 'failed_panelist' => null, 'db_error' => 'reporter_limit_reached'];
         }
 
@@ -538,7 +482,7 @@ class DisputeRepository
             $voteId
         ));
         if ($existingForVote) {
-            self::rollbackTx('createDisputeWithPanel:already_disputed');
+            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:already_disputed');
             return ['id' => null, 'failed_panelist' => null, 'db_error' => 'already_disputed'];
         }
 
@@ -553,7 +497,7 @@ class DisputeRepository
         // (fail-closed).
         $trustRead = \BCC\Core\ServiceLocator::resolveTrustReadService();
         if (!$trustRead->lockActiveVoteForDispute($voteId)) {
-            self::rollbackTx('createDisputeWithPanel:vote_no_longer_active');
+            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:vote_no_longer_active');
             return ['id' => null, 'failed_panelist' => null, 'db_error' => 'vote_no_longer_active'];
         }
 
@@ -587,7 +531,7 @@ class DisputeRepository
             }));
 
             if (count($panelistIds) < BCC_DISPUTES_PANEL_SIZE) {
-                self::rollbackTx('createDisputeWithPanel:insufficient_panelists');
+                DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:insufficient_panelists');
                 return ['id' => null, 'failed_panelist' => null, 'db_error' => 'insufficient_panelists'];
             }
         }
@@ -611,10 +555,10 @@ class DisputeRepository
             // db_error strings. Preserve the original INSERT failure reason.
             $insertError = (string) $wpdb->last_error;
             if ($insertError !== '' && stripos($insertError, 'Duplicate entry') !== false) {
-                self::rollbackTx('createDisputeWithPanel:duplicate_entry');
+                DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:duplicate_entry');
                 return ['id' => null, 'failed_panelist' => null, 'db_error' => 'already_disputed'];
             }
-            self::rollbackTx('createDisputeWithPanel:insert_failed');
+            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:insert_failed');
             return ['id' => null, 'failed_panelist' => null, 'db_error' => $insertError];
         }
 
@@ -626,12 +570,12 @@ class DisputeRepository
 
             if ($wpdb->last_error) {
                 $error = $wpdb->last_error;
-                self::rollbackTx('createDisputeWithPanel:panel_insert_failed');
+                DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:panel_insert_failed');
                 return ['id' => null, 'failed_panelist' => $uid, 'db_error' => $error];
             }
         }
 
-        if (!self::commitTx('createDisputeWithPanel')) {
+        if (!DisputeRepositorySupport::commitTx('createDisputeWithPanel')) {
             // COMMIT failed → MySQL rolled back.  Returning here with
             // db_error='commit_failed' lets the controller surface a 5xx and
             // the reporter retry, instead of returning a dead insert_id.
@@ -640,9 +584,9 @@ class DisputeRepository
 
         // Invalidate: each panelist's queue cache, reporter's dispute list, status counts.
         foreach ($panelistIds as $uid) {
-            self::bumpGeneration("panel_q_gen:{$uid}");
+            DisputeRepositorySupport::bumpGeneration("panel_q_gen:{$uid}");
         }
-        self::bumpGeneration("reporter_gen:{$disputeData['reporter_id']}");
+        DisputeRepositorySupport::bumpGeneration("reporter_gen:{$disputeData['reporter_id']}");
         wp_cache_delete('dispute_status_counts', self::CACHE_GROUP);
 
         // Invalidate the "is this vote disputed?" cache so the newly-disputed
@@ -720,7 +664,7 @@ class DisputeRepository
     public static function countByReporter(int $userId, ?int $pageId = null): int
     {
         $pageSuffix = $pageId !== null ? ":{$pageId}" : '';
-        $gen      = self::getGeneration("reporter_gen:{$userId}");
+        $gen      = DisputeRepositorySupport::getGeneration("reporter_gen:{$userId}");
         $cacheKey = "reporter_count:{$userId}:{$gen}{$pageSuffix}";
         $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
         if ($cached !== false) {
@@ -755,10 +699,10 @@ class DisputeRepository
     public static function getByReporterPaginated(int $userId, int $limit, int $offset, ?int $pageId = null): array
     {
         $pageSuffix = $pageId !== null ? ":{$pageId}" : '';
-        $gen      = self::getGeneration("reporter_gen:{$userId}");
+        $gen      = DisputeRepositorySupport::getGeneration("reporter_gen:{$userId}");
         $cacheKey = "reporter:{$userId}:{$gen}:{$limit}:{$offset}{$pageSuffix}";
         $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
-        $validated = self::validateCachedDtoList($cached, DisputeDetailDTO::class);
+        $validated = DisputeRepositorySupport::validateCachedDtoList($cached, DisputeDetailDTO::class);
         if ($validated !== null) {
             return $validated;
         }
@@ -804,7 +748,7 @@ class DisputeRepository
             // take down the whole reporter view. Single-entity reads
             // (getDisputeById, castPanelVoteAtomic) remain fail-fast.
             try {
-                $dtos[] = self::hydrateDisputeDetail($row);
+                $dtos[] = DisputeRepositorySupport::hydrateDisputeDetail($row);
             } catch (\LogicException $e) {
                 \BCC\Core\Log\Logger::error('[bcc-disputes] invalid_dispute_row_skipped', [
                     'source'     => 'getByReporterPaginated',
@@ -816,176 +760,6 @@ class DisputeRepository
 
         wp_cache_set($cacheKey, $dtos, self::CACHE_GROUP, self::TTL_HOT);
         return $dtos;
-    }
-
-    /**
-     * Strict hydration into DisputeDetailDTO. Shared by getByReporterPaginated
-     * and getDisputeDetailForAdmin (both SELECT the same 16 columns).
-     *
-     * @param array<string, scalar|null> $row
-     */
-    private static function hydrateDisputeDetail(array $row): DisputeDetailDTO
-    {
-        return new DisputeDetailDTO(
-            id:            RowAssert::requireDigitInt($row, 'id'),
-            vote_id:       RowAssert::requireDigitInt($row, 'vote_id'),
-            page_id:       RowAssert::requireDigitInt($row, 'page_id'),
-            voter_id:      RowAssert::requireDigitInt($row, 'voter_id'),
-            reporter_id:   RowAssert::requireDigitInt($row, 'reporter_id'),
-            reason:        RowAssert::requireString($row, 'reason'),
-            evidence_url:  RowAssert::optString($row, 'evidence_url'),
-            status:        DisputeStatus::assert(RowAssert::requireString($row, 'status')),
-            panel_accepts: RowAssert::requireDigitInt($row, 'panel_accepts'),
-            panel_rejects: RowAssert::requireDigitInt($row, 'panel_rejects'),
-            panel_size:    RowAssert::requireDigitInt($row, 'panel_size'),
-            created_at:    RowAssert::requireString($row, 'created_at'),
-            resolved_at:   RowAssert::optString($row, 'resolved_at'),
-            page_title:    RowAssert::optString($row, 'page_title'),
-            reporter_name: RowAssert::optString($row, 'reporter_name'),
-            voter_name:    RowAssert::optString($row, 'voter_name'),
-        );
-    }
-
-    /**
-     * Count active disputes assigned to a panelist.
-     */
-    public static function countPanelQueueForUser(int $userId): int
-    {
-        $gen      = self::getGeneration("panel_q_gen:{$userId}");
-        $cacheKey = "panel_q_count:{$userId}:{$gen}";
-        $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
-        if ($cached !== false) {
-            return (int) $cached;
-        }
-
-        global $wpdb;
-        $disputeTable = self::disputes_table();
-        $panelTable   = self::panel_table();
-
-        $count = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*)
-             FROM {$panelTable} pan
-             JOIN {$disputeTable} d ON d.id = pan.dispute_id
-             WHERE pan.panelist_user_id = %d AND d.status = 'reviewing'",
-            $userId
-        ));
-
-        wp_cache_set($cacheKey, $count, self::CACHE_GROUP, self::TTL_HOT);
-        return $count;
-    }
-
-    /**
-     * Paginated active disputes assigned to a panelist, with display names.
-     *
-     * @return list<PanelistQueueItemDTO>
-     */
-    public static function getPanelQueueForUser(int $userId, int $limit, int $offset): array
-    {
-        $gen      = self::getGeneration("panel_q_gen:{$userId}");
-        $cacheKey = "panel_q:{$userId}:{$gen}:{$limit}:{$offset}";
-        $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
-        $validated = self::validateCachedDtoList($cached, PanelistQueueItemDTO::class);
-        if ($validated !== null) {
-            return $validated;
-        }
-
-        global $wpdb;
-        $disputeTable = self::disputes_table();
-        $panelTable   = self::panel_table();
-
-        // Bounded: WHERE pan.panelist_user_id = %d AND status='reviewing'
-        // plus LIMIT %d OFFSET %d at the tail of the prepared SQL.
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT d.id, d.vote_id, d.page_id, d.reason, d.evidence_url, d.status,
-                    d.panel_accepts, d.panel_rejects, d.panel_size,
-                    d.voter_id, d.reporter_id, d.created_at, d.resolved_at,
-                    pan.decision AS my_decision,
-                    p.post_title AS page_title,
-                    u.display_name AS voter_name,
-                    r.display_name AS reporter_name
-             FROM {$panelTable} pan
-             JOIN {$disputeTable} d ON d.id = pan.dispute_id
-             LEFT JOIN {$wpdb->posts} p ON d.page_id = p.ID
-             LEFT JOIN {$wpdb->users} u ON d.voter_id = u.ID
-             LEFT JOIN {$wpdb->users} r ON d.reporter_id = r.ID
-             WHERE pan.panelist_user_id = %d
-               AND d.status = 'reviewing'
-             ORDER BY d.created_at ASC
-             LIMIT %d OFFSET %d",
-            $userId, $limit, $offset
-        ), ARRAY_A);
-
-        if (!is_array($rows)) {
-            return [];
-        }
-
-        $dtos = [];
-        foreach ($rows as $row) {
-            // Fail-soft at the list edge: a single corrupt row must not take
-            // down the panelist's whole queue. castPanelVoteAtomic remains
-            // fail-fast for the single-dispute path.
-            try {
-                $myDecision = RowAssert::optString($row, 'my_decision');
-                $dtos[] = new PanelistQueueItemDTO(
-                    id:            RowAssert::requireDigitInt($row, 'id'),
-                    vote_id:       RowAssert::requireDigitInt($row, 'vote_id'),
-                    page_id:       RowAssert::requireDigitInt($row, 'page_id'),
-                    voter_id:      RowAssert::requireDigitInt($row, 'voter_id'),
-                    reporter_id:   RowAssert::requireDigitInt($row, 'reporter_id'),
-                    reason:        RowAssert::requireString($row, 'reason'),
-                    evidence_url:  RowAssert::optString($row, 'evidence_url'),
-                    status:        DisputeStatus::assert(RowAssert::requireString($row, 'status')),
-                    panel_accepts: RowAssert::requireDigitInt($row, 'panel_accepts'),
-                    panel_rejects: RowAssert::requireDigitInt($row, 'panel_rejects'),
-                    panel_size:    RowAssert::requireDigitInt($row, 'panel_size'),
-                    created_at:    RowAssert::requireString($row, 'created_at'),
-                    resolved_at:   RowAssert::optString($row, 'resolved_at'),
-                    page_title:    RowAssert::optString($row, 'page_title'),
-                    reporter_name: RowAssert::optString($row, 'reporter_name'),
-                    voter_name:    RowAssert::optString($row, 'voter_name'),
-                    my_decision:   $myDecision,
-                );
-            } catch (\LogicException $e) {
-                \BCC\Core\Log\Logger::error('[bcc-disputes] invalid_dispute_row_skipped', [
-                    'source'     => 'getPanelQueueForUser',
-                    'dispute_id' => $row['id'] ?? null,
-                    'error'      => $e->getMessage(),
-                ]);
-            }
-        }
-
-        wp_cache_set($cacheKey, $dtos, self::CACHE_GROUP, self::TTL_HOT);
-        return $dtos;
-    }
-
-    /**
-     * Get a panelist's assignment for a dispute.
-     *
-     * @return PanelEntrySlimDTO|null  Entry id + current decision, or null if no assignment.
-     */
-    public static function getPanelAssignment(int $disputeId, int $userId): ?PanelEntrySlimDTO
-    {
-        global $wpdb;
-        $table = self::panel_table();
-
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT id, decision FROM {$table} WHERE dispute_id = %d AND panelist_user_id = %d LIMIT 1",
-            $disputeId, $userId
-        ), ARRAY_A);
-
-        if (!is_array($row)) {
-            return null;
-        }
-
-        $decisionRaw = $row['decision'] ?? null;
-        if ($decisionRaw !== null && !is_string($decisionRaw)) {
-            throw new \LogicException('PanelAssignment: decision has non-null, non-string value');
-        }
-
-        return new PanelEntrySlimDTO(
-            id:       RowAssert::requireDigitInt($row, 'id'),
-            decision: $decisionRaw,
-        );
     }
 
     /**
@@ -1094,30 +868,6 @@ class DisputeRepository
     }
 
     /**
-     * Validate a cached value as list<$dtoClass>. Returns the typed list when
-     * valid (even when empty), null otherwise. For display-tier list caches
-     * only — callers treat null as a miss and re-fetch. Trust-critical
-     * single-entry caches (see getDisputeById) fail-fast on poisoning instead.
-     *
-     * @template T of object
-     * @param mixed $cached
-     * @param class-string<T> $dtoClass
-     * @return list<T>|null
-     */
-    private static function validateCachedDtoList($cached, string $dtoClass): ?array
-    {
-        if (!is_array($cached) || !array_is_list($cached)) {
-            return null;
-        }
-        foreach ($cached as $entry) {
-            if (!$entry instanceof $dtoClass) {
-                return null;
-            }
-        }
-        return $cached;
-    }
-
-    /**
      * Atomically cast a panel vote: lock dispute, record decision, update tally, re-read.
      *
      * This method encapsulates the entire cast_vote transaction:
@@ -1135,7 +885,7 @@ class DisputeRepository
         $disputeTable = self::disputes_table();
         $panelTable   = self::panel_table();
 
-        if (!self::beginTx()) {
+        if (!DisputeRepositorySupport::beginTx()) {
             \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in castPanelVoteAtomic', [
                 'dispute_id' => $disputeId,
                 'db_error'   => (string) $wpdb->last_error,
@@ -1152,7 +902,7 @@ class DisputeRepository
         ), ARRAY_A);
 
         if (!is_array($lockedRow)) {
-            self::rollbackTx('castPanelVoteAtomic:dispute_closed');
+            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:dispute_closed');
             return ['status' => 'error', 'code' => 'dispute_closed', 'message' => 'This dispute is no longer open.', 'http' => 410, 'dispute' => null, 'accepts' => 0, 'rejects' => 0];
         }
 
@@ -1161,12 +911,12 @@ class DisputeRepository
         try {
             $dispute = self::hydrateDisputeCore($lockedRow);
         } catch (\LogicException $e) {
-            self::rollbackTx('castPanelVoteAtomic:hydrate_failed');
+            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:hydrate_failed');
             throw $e;
         }
 
         if ($dispute->status !== DisputeStatus::REVIEWING) {
-            self::rollbackTx('castPanelVoteAtomic:dispute_closed');
+            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:dispute_closed');
             return ['status' => 'error', 'code' => 'dispute_closed', 'message' => 'This dispute is no longer open.', 'http' => 410, 'dispute' => null, 'accepts' => 0, 'rejects' => 0];
         }
 
@@ -1179,11 +929,11 @@ class DisputeRepository
 
         if ($voted === false) {
             $voteError = (string) $wpdb->last_error; // capture before ROLLBACK clears it
-            self::rollbackTx('castPanelVoteAtomic:vote_update_failed');
+            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:vote_update_failed');
             return ['status' => 'error', 'code' => 'db_error', 'message' => 'Failed to record vote.', 'http' => 500, 'step' => 'panel_vote_update', 'dispute' => null, 'accepts' => 0, 'rejects' => 0, 'db_error' => $voteError];
         }
         if ($voted === 0) {
-            self::rollbackTx('castPanelVoteAtomic:already_voted');
+            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:already_voted');
             return ['status' => 'error', 'code' => 'already_voted', 'message' => 'You have already voted on this dispute.', 'http' => 409, 'dispute' => null, 'accepts' => 0, 'rejects' => 0];
         }
 
@@ -1201,7 +951,7 @@ class DisputeRepository
 
         if ($tally_ok === false) {
             $tallyError = (string) $wpdb->last_error; // capture before ROLLBACK clears it
-            self::rollbackTx('castPanelVoteAtomic:tally_update_failed');
+            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:tally_update_failed');
             return ['status' => 'error', 'code' => 'db_error', 'message' => 'Failed to update tally.', 'http' => 500, 'step' => 'tally_increment', 'dispute' => null, 'accepts' => 0, 'rejects' => 0, 'db_error' => $tallyError];
         }
 
@@ -1216,14 +966,14 @@ class DisputeRepository
         if (!is_array($updatedRow)) {
             // Dispute row disappeared between FOR UPDATE lock and re-read —
             // this should be impossible under normal MySQL isolation.
-            self::rollbackTx('castPanelVoteAtomic:row_vanished');
+            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:row_vanished');
             throw new \LogicException("Dispute {$disputeId} vanished inside its own transaction");
         }
 
         try {
             $dispute = self::hydrateDisputeCore($updatedRow);
         } catch (\LogicException $e) {
-            self::rollbackTx('castPanelVoteAtomic:rehydrate_failed');
+            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:rehydrate_failed');
             throw $e;
         }
 
@@ -1245,7 +995,7 @@ class DisputeRepository
         $liveAccepts = is_array($derived) ? (int) $derived['accepts'] : 0;
         $liveRejects = is_array($derived) ? (int) $derived['rejects'] : 0;
 
-        if (!self::commitTx('castPanelVoteAtomic')) {
+        if (!DisputeRepositorySupport::commitTx('castPanelVoteAtomic')) {
             // COMMIT failed → vote was rolled back by MySQL.  Do NOT
             // invalidate caches or return success — let the panelist retry.
             return ['status' => 'error', 'code' => 'db_error', 'message' => 'Failed to finalize vote.', 'http' => 500, 'step' => 'commit', 'dispute' => null, 'accepts' => 0, 'rejects' => 0, 'db_error' => (string) $wpdb->last_error];
@@ -1264,504 +1014,6 @@ class DisputeRepository
             'accepts' => $liveAccepts,
             'rejects' => $liveRejects,
         ];
-    }
-
-    /**
-     * Check whether an active (open) report already exists from reporter to reported user.
-     */
-    public static function hasActiveReport(int $reporterId, int $reportedId): bool
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $existing = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$table}
-             WHERE reporter_id = %d AND reported_id = %d AND status IN ('open', 'reviewing')
-             LIMIT 1",
-            $reporterId, $reportedId
-        ));
-
-        return (bool) $existing;
-    }
-
-    /**
-     * Count reports submitted by a user within the last 24 hours.
-     */
-    public static function countRecentReportsByReporter(int $reporterId): int
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table}
-             WHERE reporter_id = %d
-               AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)",
-            $reporterId
-        ));
-    }
-
-    /**
-     * Insert a user report row.
-     *
-     * @return int|null  The new report ID, or null on failure.
-     */
-    public static function createReport(int $reportedId, int $reporterId, string $reasonKey, string $reasonDetail): ?int
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        if (!self::beginTx()) {
-            \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in createReport', [
-                'db_error' => (string) $wpdb->last_error,
-            ]);
-            return null;
-        }
-
-        // Atomic daily limit + duplicate check under FOR UPDATE lock.
-        $recentCount = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table}
-             WHERE reporter_id = %d
-               AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
-             FOR UPDATE",
-            $reporterId
-        ));
-        if ($recentCount >= 5) {
-            self::rollbackTx('createReport:daily_limit');
-            return null;
-        }
-
-        $hasDupe = (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$table}
-             WHERE reporter_id = %d AND reported_id = %d AND status IN ('open', 'reviewing')
-             FOR UPDATE
-             LIMIT 1",
-            $reporterId, $reportedId
-        ));
-        if ($hasDupe) {
-            self::rollbackTx('createReport:duplicate');
-            return null;
-        }
-
-        // Enforce the per-target ceiling atomically inside the transaction.
-        // The controller-level check is pre-transaction and subject to TOCTOU.
-        // This FOR UPDATE lock serialises concurrent reporters targeting the
-        // same user, preventing coordinated ceiling bypass.
-        $targetOpenCount = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table}
-             WHERE reported_id = %d AND status = 'open'
-             FOR UPDATE",
-            $reportedId
-        ));
-        if ($targetOpenCount >= 10) {
-            self::rollbackTx('createReport:target_ceiling');
-            return null;
-        }
-
-        $wpdb->insert($table, [
-            'reported_id'   => $reportedId,
-            'reporter_id'   => $reporterId,
-            'reason_key'    => $reasonKey,
-            'reason_detail' => $reasonDetail,
-            'status'        => 'open',
-        ], ['%d', '%d', '%s', '%s', '%s']);
-
-        $id = (int) $wpdb->insert_id;
-        if (!$id) {
-            self::rollbackTx('createReport:insert_failed');
-            return null;
-        }
-
-        if (!self::commitTx('createReport')) {
-            // COMMIT failed → insert was rolled back by MySQL.  Return null
-            // so the caller treats this as a write failure and the user can retry.
-            return null;
-        }
-
-        wp_cache_delete('report_status_counts', self::CACHE_GROUP);
-
-        return $id;
-    }
-
-    // ── Admin query methods ──────────────────────────────────────────────────
-
-    /**
-     * Get a dispute with joined page title and user display names for admin detail view.
-     */
-    public static function getDisputeDetailForAdmin(int $disputeId): ?DisputeDetailDTO
-    {
-        global $wpdb;
-        $table = self::disputes_table();
-
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT d.id, d.vote_id, d.page_id, d.reporter_id, d.voter_id,
-                    d.reason, d.evidence_url, d.status,
-                    d.panel_accepts, d.panel_rejects, d.panel_size,
-                    d.created_at, d.resolved_at,
-                    p.post_title   AS page_title,
-                    reporter.display_name AS reporter_name,
-                    voter.display_name    AS voter_name
-             FROM {$table} d
-             LEFT JOIN {$wpdb->posts} p         ON d.page_id     = p.ID
-             LEFT JOIN {$wpdb->users} reporter  ON d.reporter_id = reporter.ID
-             LEFT JOIN {$wpdb->users} voter     ON d.voter_id    = voter.ID
-             WHERE d.id = %d
-             LIMIT 1",
-            $disputeId
-        ), ARRAY_A);
-
-        if (!is_array($row)) {
-            return null;
-        }
-        return self::hydrateDisputeDetail($row);
-    }
-
-    /**
-     * Get all panelists for a dispute with display names.
-     *
-     * @return list<PanelEntryFullDTO>
-     */
-    public static function getPanelistsForDispute(int $disputeId): array
-    {
-        global $wpdb;
-        $table = self::panel_table();
-
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT pan.id, pan.dispute_id, pan.panelist_user_id,
-                    pan.decision, pan.note, pan.assigned_at, pan.voted_at,
-                    u.display_name
-             FROM {$table} pan
-             LEFT JOIN {$wpdb->users} u ON pan.panelist_user_id = u.ID
-             WHERE pan.dispute_id = %d
-             ORDER BY pan.assigned_at ASC
-             LIMIT %d",
-            $disputeId, BCC_DISPUTES_PANEL_SIZE
-        ), ARRAY_A);
-
-        if (!is_array($rows)) {
-            return [];
-        }
-
-        $dtos = [];
-        foreach ($rows as $row) {
-            $decision = RowAssert::optString($row, 'decision');
-            if ($decision !== null) {
-                PanelDecision::assert($decision);
-            }
-            $dtos[] = new PanelEntryFullDTO(
-                id:               RowAssert::requireDigitInt($row, 'id'),
-                dispute_id:       RowAssert::requireDigitInt($row, 'dispute_id'),
-                panelist_user_id: RowAssert::requireDigitInt($row, 'panelist_user_id'),
-                decision:         $decision,
-                note:             RowAssert::optString($row, 'note'),
-                assigned_at:      RowAssert::requireString($row, 'assigned_at'),
-                voted_at:         RowAssert::optString($row, 'voted_at'),
-                display_name:     RowAssert::optString($row, 'display_name'),
-            );
-        }
-        return $dtos;
-    }
-
-    /**
-     * Get dispute counts grouped by status.
-     *
-     * @return array<string, int>
-     */
-    public static function getDisputeStatusCounts(): array
-    {
-        $cacheKey = 'dispute_status_counts';
-        $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
-        if ($cached !== false) {
-            return $cached;
-        }
-
-        global $wpdb;
-        $table = self::disputes_table();
-
-        $rows = $wpdb->get_results(
-            "SELECT status, COUNT(*) AS cnt FROM {$table} GROUP BY status LIMIT 10"
-        );
-
-        $counts = [];
-        foreach ($rows as $r) {
-            $counts[$r->status] = (int) $r->cnt;
-        }
-
-        wp_cache_set($cacheKey, $counts, self::CACHE_GROUP, self::TTL_HOT);
-        return $counts;
-    }
-
-    /**
-     * Count disputes for admin list, optionally filtered by status.
-     */
-    public static function countDisputesForAdminList(?string $status): int
-    {
-        global $wpdb;
-        $table = self::disputes_table();
-
-        if ($status) {
-            return (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*) FROM {$table} WHERE status = %s",
-                $status
-            ));
-        }
-
-        return (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
-    }
-
-    /**
-     * Paginated dispute list for admin, with joined page title and user names.
-     *
-     * @return list<AdminDisputeRowDTO>
-     */
-    public static function getDisputesForAdminList(?string $status, string $orderBy, string $order, int $limit, int $offset): array
-    {
-        global $wpdb;
-        $table = self::disputes_table();
-
-        $allowed = ['id', 'status', 'created_at'];
-        if (!in_array($orderBy, $allowed, true)) {
-            $orderBy = 'id';
-        }
-        $order = strtoupper($order) === 'ASC' ? 'ASC' : 'DESC';
-
-        $where  = '1=1';
-        $params = [];
-
-        if ($status) {
-            $where   .= ' AND d.status = %s';
-            $params[] = $status;
-        }
-
-        $sql = "SELECT d.id, d.vote_id, d.page_id, d.reporter_id, d.voter_id,
-                       d.reason, d.status,
-                       d.panel_accepts, d.panel_rejects, d.panel_size,
-                       d.created_at, d.resolved_at,
-                       p.post_title   AS page_title,
-                       reporter.display_name AS reporter_name,
-                       voter.display_name    AS voter_name
-                FROM {$table} d
-                LEFT JOIN {$wpdb->posts} p         ON d.page_id     = p.ID
-                LEFT JOIN {$wpdb->users} reporter  ON d.reporter_id = reporter.ID
-                LEFT JOIN {$wpdb->users} voter     ON d.voter_id    = voter.ID
-                WHERE {$where}
-                ORDER BY d.{$orderBy} {$order}
-                LIMIT %d OFFSET %d";
-
-        $params[] = $limit;
-        $params[] = $offset;
-
-        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params), ARRAY_A);
-        if (!is_array($rows)) {
-            return [];
-        }
-
-        $dtos = [];
-        foreach ($rows as $row) {
-            // Fail-soft at the admin-list edge: one corrupt legacy row must
-            // not 500 the whole admin screen. Per-entity admin reads
-            // (getDisputeDetailForAdmin) remain fail-fast.
-            try {
-                $dtos[] = new AdminDisputeRowDTO(
-                    id:            RowAssert::requireDigitInt($row, 'id'),
-                    vote_id:       RowAssert::requireDigitInt($row, 'vote_id'),
-                    page_id:       RowAssert::requireDigitInt($row, 'page_id'),
-                    reporter_id:   RowAssert::requireDigitInt($row, 'reporter_id'),
-                    voter_id:      RowAssert::requireDigitInt($row, 'voter_id'),
-                    reason:        RowAssert::requireString($row, 'reason'),
-                    status:        DisputeStatus::assert(RowAssert::requireString($row, 'status')),
-                    panel_accepts: RowAssert::requireDigitInt($row, 'panel_accepts'),
-                    panel_rejects: RowAssert::requireDigitInt($row, 'panel_rejects'),
-                    panel_size:    RowAssert::requireDigitInt($row, 'panel_size'),
-                    created_at:    RowAssert::requireString($row, 'created_at'),
-                    resolved_at:   RowAssert::optString($row, 'resolved_at'),
-                    page_title:    RowAssert::optString($row, 'page_title'),
-                    reporter_name: RowAssert::optString($row, 'reporter_name'),
-                    voter_name:    RowAssert::optString($row, 'voter_name'),
-                );
-            } catch (\LogicException $e) {
-                \BCC\Core\Log\Logger::error('[bcc-disputes] invalid_dispute_row_skipped', [
-                    'source'     => 'getDisputesForAdminList',
-                    'dispute_id' => $row['id'] ?? null,
-                    'error'      => $e->getMessage(),
-                ]);
-            }
-        }
-        return $dtos;
-    }
-
-    /**
-     * Get report counts grouped by status.
-     *
-     * @return array<string, int>
-     */
-    public static function getReportStatusCounts(): array
-    {
-        $cacheKey = 'report_status_counts';
-        $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
-        if ($cached !== false) {
-            return $cached;
-        }
-
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $rows = $wpdb->get_results(
-            "SELECT status, COUNT(*) AS cnt FROM {$table} GROUP BY status LIMIT 10"
-        );
-
-        $counts = [];
-        foreach ($rows as $r) {
-            $counts[$r->status] = (int) $r->cnt;
-        }
-
-        wp_cache_set($cacheKey, $counts, self::CACHE_GROUP, self::TTL_HOT);
-        return $counts;
-    }
-
-    /**
-     * Count reports for admin list, optionally filtered by status.
-     */
-    public static function countReportsForAdminList(?string $status): int
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        if ($status) {
-            return (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*) FROM {$table} WHERE status = %s",
-                $status
-            ));
-        }
-
-        return (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
-    }
-
-    /**
-     * Paginated report list for admin, with joined user display names.
-     *
-     * @return list<AdminReportRowDTO>
-     */
-    public static function getReportsForAdminList(?string $status, string $orderBy, string $order, int $limit, int $offset): array
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $allowed = ['id', 'status', 'created_at'];
-        if (!in_array($orderBy, $allowed, true)) {
-            $orderBy = 'id';
-        }
-        $order = strtoupper($order) === 'ASC' ? 'ASC' : 'DESC';
-
-        $where  = '1=1';
-        $params = [];
-
-        if ($status) {
-            $where   .= ' AND r.status = %s';
-            $params[] = $status;
-        }
-
-        $sql = "SELECT r.id, r.reported_id, r.reporter_id, r.reason_key, r.reason_detail,
-                       r.status, r.created_at, r.reviewed_at,
-                       reported.display_name AS reported_name,
-                       reporter.display_name AS reporter_name
-                FROM {$table} r
-                LEFT JOIN {$wpdb->users} reported ON r.reported_id = reported.ID
-                LEFT JOIN {$wpdb->users} reporter ON r.reporter_id = reporter.ID
-                WHERE {$where}
-                ORDER BY r.{$orderBy} {$order}
-                LIMIT %d OFFSET %d";
-
-        $params[] = $limit;
-        $params[] = $offset;
-
-        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params), ARRAY_A);
-        if (!is_array($rows)) {
-            return [];
-        }
-
-        $dtos = [];
-        foreach ($rows as $row) {
-            $dtos[] = new AdminReportRowDTO(
-                id:            RowAssert::requireDigitInt($row, 'id'),
-                reported_id:   RowAssert::requireDigitInt($row, 'reported_id'),
-                reporter_id:   RowAssert::requireDigitInt($row, 'reporter_id'),
-                reason_key:    RowAssert::requireString($row, 'reason_key'),
-                reason_detail: RowAssert::requireString($row, 'reason_detail'),
-                status:        ReportStatus::assert(RowAssert::requireString($row, 'status')),
-                created_at:    RowAssert::requireString($row, 'created_at'),
-                reviewed_at:   RowAssert::optString($row, 'reviewed_at'),
-                reported_name: RowAssert::optString($row, 'reported_name'),
-                reporter_name: RowAssert::optString($row, 'reporter_name'),
-            );
-        }
-        return $dtos;
-    }
-
-    /**
-     * Count open reports against a single target user.
-     * Used to cap coordinated report campaigns.
-     */
-    public static function countActiveReportsAgainst(int $reportedId): int
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table} WHERE reported_id = %d AND status = 'open'",
-            $reportedId
-        ));
-    }
-
-    public static function getReportById(int $reportId): ?UserReportDTO
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT " . self::REPORT_COLUMNS . " FROM {$table} WHERE id = %d LIMIT 1",
-            $reportId
-        ), ARRAY_A);
-
-        if (!is_array($row)) {
-            return null;
-        }
-
-        return new UserReportDTO(
-            id:            RowAssert::requireDigitInt($row, 'id'),
-            reported_id:   RowAssert::requireDigitInt($row, 'reported_id'),
-            reporter_id:   RowAssert::requireDigitInt($row, 'reporter_id'),
-            reason_key:    RowAssert::requireString($row, 'reason_key'),
-            reason_detail: RowAssert::requireString($row, 'reason_detail'),
-            status:        ReportStatus::assert(RowAssert::requireString($row, 'status')),
-            created_at:    RowAssert::requireString($row, 'created_at'),
-            reviewed_at:   RowAssert::optString($row, 'reviewed_at'),
-        );
-    }
-
-    /**
-     * Transition a report from 'open' to the given status.
-     *
-     * The WHERE clause includes `status = 'open'` to prevent invalid
-     * state transitions (e.g., dismissed -> reviewed).
-     *
-     * @return bool True if exactly one row was updated, false otherwise.
-     */
-    public static function updateReportStatus(int $reportId, string $status): bool
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET status = %s, reviewed_at = %s WHERE id = %d AND status = 'open'",
-            $status,
-            gmdate('Y-m-d H:i:s'),
-            $reportId
-        ));
-
-        if ($result !== false && $result > 0) {
-            wp_cache_delete('report_status_counts', self::CACHE_GROUP);
-        }
-
-        return $result !== false && $result > 0;
     }
 
     /**
@@ -1810,148 +1062,6 @@ class DisputeRepository
         ));
 
         return $affected > 0;
-    }
-
-    /**
-     * Read-only check: has the resolved-dispute email already been marked as sent?
-     * Used by the async handler to short-circuit idempotently before calling
-     * wp_mail a second time after an Action Scheduler retry.
-     */
-    public static function isResolvedNotified(int $disputeId): bool
-    {
-        global $wpdb;
-        $table = self::disputes_table();
-
-        return (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT resolved_notified_at IS NOT NULL FROM {$table} WHERE id = %d LIMIT 1",
-            $disputeId
-        ));
-    }
-
-    /**
-     * Atomically claim the right to send the reported-user email.
-     * Claim half of claim-before-send; see markResolvedNotified().
-     */
-    public static function markReportNotified(int $reportId, string $ts): bool
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET notified_at = %s WHERE id = %d AND notified_at IS NULL",
-            $ts,
-            $reportId
-        ));
-
-        return $affected > 0;
-    }
-
-    /**
-     * Release a tentative reported-user claim when the send failed.
-     * Scoped by $ts so only our own claim is cleared.
-     */
-    public static function clearReportNotified(int $reportId, string $ts): bool
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET notified_at = NULL
-             WHERE id = %d AND notified_at = %s",
-            $reportId,
-            $ts
-        ));
-
-        return $affected > 0;
-    }
-
-    /**
-     * Read-only check: has the reported-user email already been sent?
-     */
-    public static function isReportNotified(int $reportId): bool
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        return (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT notified_at IS NOT NULL FROM {$table} WHERE id = %d LIMIT 1",
-            $reportId
-        ));
-    }
-
-    /**
-     * Atomically claim the right to send the admin-report email.
-     * Claim half of claim-before-send; see markResolvedNotified().
-     * Uses the dedicated admin_notified_at column so admin notifications
-     * have their own idempotency slot separate from the user-facing
-     * notified_at.
-     */
-    public static function markAdminReportNotified(int $reportId, string $ts): bool
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET admin_notified_at = %s WHERE id = %d AND admin_notified_at IS NULL",
-            $ts,
-            $reportId
-        ));
-
-        return $affected > 0;
-    }
-
-    /**
-     * Release a tentative admin-report claim when the send failed.
-     * Scoped by $ts so only our own claim is cleared.
-     */
-    public static function clearAdminReportNotified(int $reportId, string $ts): bool
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET admin_notified_at = NULL
-             WHERE id = %d AND admin_notified_at = %s",
-            $reportId,
-            $ts
-        ));
-
-        return $affected > 0;
-    }
-
-    /**
-     * Read-only check: has the admin-report email already been sent?
-     */
-    public static function isAdminReportNotified(int $reportId): bool
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        return (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT admin_notified_at IS NOT NULL FROM {$table} WHERE id = %d LIMIT 1",
-            $reportId
-        ));
-    }
-
-    /**
-     * Read-only check: has this panelist already been marked as notified?
-     * Lets the async notification handler short-circuit AS retries that ran
-     * AFTER a successful wp_mail but BEFORE AS committed its own completion
-     * log (crash window).
-     */
-    public static function isPanelistNotified(int $disputeId, int $panelistUserId): bool
-    {
-        global $wpdb;
-        $table = self::panel_table();
-
-        return (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT notified_at IS NOT NULL
-             FROM {$table}
-             WHERE dispute_id = %d AND panelist_user_id = %d
-             LIMIT 1",
-            $disputeId,
-            $panelistUserId
-        ));
     }
 
     // ── Scheduler query methods ─────────────────────────────────────────────
@@ -2108,7 +1218,7 @@ class DisputeRepository
         global $wpdb;
         $table = self::disputes_table();
 
-        if (!self::beginTx()) {
+        if (!DisputeRepositorySupport::beginTx()) {
             $startError = (string) $wpdb->last_error;
             \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in beginResolveTransaction', [
                 'dispute_id' => $disputeId,
@@ -2127,12 +1237,12 @@ class DisputeRepository
 
         if ($result === false) {
             $updateError = (string) $wpdb->last_error; // capture before ROLLBACK clears it
-            self::rollbackTx('beginResolveTransaction:update_failed');
+            DisputeRepositorySupport::rollbackTx('beginResolveTransaction:update_failed');
             return ['success' => false, 'affected_rows' => 0, 'db_error' => $updateError, 'race' => false];
         }
 
         if ($result === 0) {
-            self::rollbackTx('beginResolveTransaction:race');
+            DisputeRepositorySupport::rollbackTx('beginResolveTransaction:race');
             return ['success' => false, 'affected_rows' => 0, 'db_error' => null, 'race' => true];
         }
 
@@ -2152,7 +1262,7 @@ class DisputeRepository
      */
     public static function commitTransaction(): bool
     {
-        return self::commitTx('resolve_commit');
+        return DisputeRepositorySupport::commitTx('resolve_commit');
     }
 
     /**
@@ -2160,7 +1270,7 @@ class DisputeRepository
      */
     public static function rollbackTransaction(): void
     {
-        self::rollbackTx('resolve_rollback');
+        DisputeRepositorySupport::rollbackTx('resolve_rollback');
     }
 
     // ── Adjudication status tracking ──────────────────────────────────────
@@ -2404,54 +1514,6 @@ class DisputeRepository
         ));
     }
 
-    /**
-     * Get permanently orphaned disputes for admin review.
-     *
-     * @return list<object>
-     */
-    public static function getPermanentOrphans(int $limit = 20): array
-    {
-        global $wpdb;
-        $table = self::disputes_table();
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT id, vote_id, page_id, reporter_id, voter_id, status,
-                    adjudication_status, reopen_count, resolved_at
-             FROM {$table}
-             WHERE status IN ('accepted', 'rejected')
-               AND adjudication_status IN ('pending', 'failed')
-               AND reopen_count >= %d
-             ORDER BY resolved_at ASC
-             LIMIT %d",
-            (int) BCC_DISPUTES_MAX_REOPEN_ATTEMPTS,
-            $limit
-        )) ?: [];
-    }
-
-    /**
-     * Reset reopen_count for a dispute, allowing reconciliation to retry.
-     * Used by admin "force re-adjudicate" action.
-     */
-    public static function resetReopenCount(int $disputeId): bool
-    {
-        global $wpdb;
-        $table = self::disputes_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table}
-             SET reopen_count = 0, adjudication_status = 'pending'
-             WHERE id = %d AND reopen_count >= %d",
-            $disputeId,
-            (int) BCC_DISPUTES_MAX_REOPEN_ATTEMPTS
-        ));
-
-        if ($affected > 0) {
-            self::invalidateDispute($disputeId);
-        }
-
-        return $affected > 0;
-    }
-
     // ── Cache invalidation ─────────────────────────────────────────────────
 
     /**
@@ -2485,7 +1547,7 @@ class DisputeRepository
         ));
 
         if ($dispute) {
-            self::bumpGeneration("reporter_gen:{$dispute->reporter_id}");
+            DisputeRepositorySupport::bumpGeneration("reporter_gen:{$dispute->reporter_id}");
             if (!empty($dispute->vote_id)) {
                 wp_cache_delete("disputed_vote:{$dispute->vote_id}", self::CACHE_GROUP);
             }
@@ -2497,48 +1559,8 @@ class DisputeRepository
         ));
 
         foreach ($panelistIds as $uid) {
-            self::bumpGeneration("panel_q_gen:{$uid}");
+            DisputeRepositorySupport::bumpGeneration("panel_q_gen:{$uid}");
         }
-    }
-
-    /**
-     * Batch-count active panel assignments for multiple users in a single query.
-     *
-     * Returns an associative array of user_id => active_count. Users with zero
-     * active assignments are included with count 0.
-     *
-     * @param int[] $userIds
-     * @return array<int, int>
-     */
-    public static function batchCountActivePanelAssignments(array $userIds): array
-    {
-        if (empty($userIds)) {
-            return [];
-        }
-
-        $result = array_fill_keys($userIds, 0);
-
-        global $wpdb;
-        $panelTable   = self::panel_table();
-        $disputeTable = self::disputes_table();
-
-        $placeholders = implode(',', array_fill(0, count($userIds), '%d'));
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT p.panelist_user_id, COUNT(*) AS active_count
-             FROM {$panelTable} p
-             INNER JOIN {$disputeTable} d ON d.id = p.dispute_id
-             WHERE p.panelist_user_id IN ({$placeholders})
-               AND d.status = 'reviewing'
-               AND p.decision IS NULL
-             GROUP BY p.panelist_user_id",
-            ...$userIds
-        ));
-
-        foreach ($rows as $row) {
-            $result[(int) $row->panelist_user_id] = (int) $row->active_count;
-        }
-
-        return $result;
     }
 
     // ── User deletion cleanup ──────────────────────────────────────────────
@@ -2561,7 +1583,7 @@ class DisputeRepository
         global $wpdb;
         $disputes = self::disputes_table();
         $panel    = self::panel_table();
-        $reports  = self::user_reports_table();
+        $reports  = UserReportRepository::user_reports_table();
 
         // Collect affected dispute IDs BEFORE modifying rows so callers
         // can invalidate caches after the transaction commits.
@@ -2588,7 +1610,7 @@ class DisputeRepository
         )));
 
         try {
-            if (!self::beginTx()) {
+            if (!DisputeRepositorySupport::beginTx()) {
                 throw new \RuntimeException(
                     '[bcc-disputes] START TRANSACTION failed in cleanupForDeletedUser: ' . (string) $wpdb->last_error
                 );
@@ -2646,14 +1668,14 @@ class DisputeRepository
                 $userId, $userId
             ));
 
-            if (!self::commitTx('cleanupForDeletedUser')) {
+            if (!DisputeRepositorySupport::commitTx('cleanupForDeletedUser')) {
                 // COMMIT failed → all cleanup writes were rolled back by MySQL.
                 // Return committed=false so the caller does NOT invalidate
                 // caches and a future retry path can re-run the cleanup.
                 return ['affected_dispute_ids' => [], 'committed' => false];
             }
         } catch (\Throwable $e) {
-            self::rollbackTx('cleanupForDeletedUser:exception');
+            DisputeRepositorySupport::rollbackTx('cleanupForDeletedUser:exception');
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error('[bcc-disputes] delete_user_cleanup_failed', [
                     'user_id' => $userId,
@@ -2727,57 +1749,6 @@ class DisputeRepository
     // ── Notification reconciliation ────────────────────────────────────────
 
     /**
-     * Find panel rows for active disputes whose initial notification enqueue
-     * never completed (notified_at IS NULL after the grace period).
-     *
-     * Two failure modes are caught by this query:
-     *   (a) Action Scheduler / wp-cron enqueue returned a falsy value, so the
-     *       notifyPanelist worker never ran.
-     *   (b) The worker ran but wp_mail() failed — notifyPanelist only sets
-     *       notified_at on a confirmed send, by design — so the email was
-     *       never delivered.
-     *
-     * Cutoff excludes freshly-created disputes to give the initial enqueue
-     * time to fire. Bounded LIMIT prevents a flood of stuck rows from
-     * blowing up the reconcile tick.
-     *
-     * @return list<array{dispute_id:int, panelist_user_id:int, page_id:int}>
-     */
-    public static function getPendingPanelistNotifications(string $cutoff, int $limit = 20): array
-    {
-        global $wpdb;
-        $disputeTable = self::disputes_table();
-        $panelTable   = self::panel_table();
-
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT p.dispute_id, p.panelist_user_id, d.page_id
-             FROM {$panelTable} p
-             INNER JOIN {$disputeTable} d ON d.id = p.dispute_id
-             WHERE p.notified_at IS NULL
-               AND d.status = 'reviewing'
-               AND p.assigned_at <= %s
-             ORDER BY p.assigned_at ASC
-             LIMIT %d",
-            $cutoff,
-            $limit
-        ), ARRAY_A);
-
-        if (!is_array($rows)) {
-            return [];
-        }
-
-        $result = [];
-        foreach ($rows as $row) {
-            $result[] = [
-                'dispute_id'       => (int) $row['dispute_id'],
-                'panelist_user_id' => (int) $row['panelist_user_id'],
-                'page_id'          => (int) $row['page_id'],
-            ];
-        }
-        return $result;
-    }
-
-    /**
      * Find resolved disputes whose reporter-result email has not yet been
      * sent. Used by the reconciliation cron to catch gaps where the async
      * enqueue soft-failed OR wp_mail failed and Action Scheduler exhausted
@@ -2830,67 +1801,6 @@ class DisputeRepository
     // ── Notification idempotency ───────────────────────────────────────────
 
     /**
-     * Atomically claim the right to send the panelist notification email.
-     * Claim half of claim-before-send; see markResolvedNotified().
-     */
-    public static function markPanelistNotified(int $disputeId, int $panelistUserId, string $ts): bool
-    {
-        global $wpdb;
-        $table = self::panel_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET notified_at = %s
-             WHERE dispute_id = %d AND panelist_user_id = %d AND notified_at IS NULL",
-            $ts,
-            $disputeId,
-            $panelistUserId
-        ));
-
-        return $affected !== false && $affected > 0;
-    }
-
-    /**
-     * Reset stuck panelist-notification claims so the standard sweep picks
-     * them up again.
-     *
-     * The claim-before-send pattern (markPanelistNotified → wp_mail → on
-     * failure clearPanelistNotified) relies on the try/finally running to
-     * release the claim when wp_mail fails.  If the PHP worker dies
-     * between the mark and the finally (OOM-killer, Action Scheduler
-     * SIGKILL at timeout, memory_limit fatal inside wp_mail's hook
-     * chain), the claim is stuck: notified_at is set, no email was ever
-     * sent, and getPendingPanelistNotifications' "WHERE notified_at IS
-     * NULL" filter will never pick it up again.  Panelist never votes →
-     * quorum may fail → reporter loses even when evidence was valid.
-     *
-     * Sweep policy: reset notified_at to NULL where the claim is older
-     * than $cutoff AND the panelist has NOT voted (decision IS NULL) AND
-     * the dispute is still reviewing.  The "not voted" guard prevents
-     * double-emailing a panelist who already acted on the original email.
-     *
-     * @return int Number of stuck claims released (0 on driver error).
-     */
-    public static function resetStuckPanelistClaims(string $cutoff): int
-    {
-        global $wpdb;
-        $panelTable   = self::panel_table();
-        $disputeTable = self::disputes_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$panelTable} p
-             INNER JOIN {$disputeTable} d ON d.id = p.dispute_id
-             SET p.notified_at = NULL
-             WHERE p.notified_at IS NOT NULL
-               AND p.notified_at < %s
-               AND p.decision IS NULL
-               AND d.status = 'reviewing'",
-            $cutoff
-        ));
-
-        return $affected === false ? 0 : (int) $affected;
-    }
-
-    /**
      * Reset stuck reporter-result email claims (same rationale as
      * resetStuckPanelistClaims but targets disputes.resolved_notified_at).
      *
@@ -2917,81 +1827,6 @@ class DisputeRepository
         ));
 
         return $affected === false ? 0 : (int) $affected;
-    }
-
-    /**
-     * Reset stuck reported-user notification claims
-     * (user_reports.notified_at — the email sent to the user being
-     * reported telling them a report was filed).
-     *
-     * Guard: report is still 'open'.  Reviewed/dismissed reports are
-     * terminal and resetting their claim would email a user about a
-     * report that is no longer actionable.
-     *
-     * @return int Number of stuck claims released (0 on driver error).
-     */
-    public static function resetStuckReportedUserClaims(string $cutoff): int
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table}
-             SET notified_at = NULL
-             WHERE notified_at IS NOT NULL
-               AND notified_at < %s
-               AND status = 'open'",
-            $cutoff
-        ));
-
-        return $affected === false ? 0 : (int) $affected;
-    }
-
-    /**
-     * Reset stuck admin-report notification claims
-     * (user_reports.admin_notified_at — the email sent to moderators
-     * when a new report arrives).
-     *
-     * Guard: report is still 'open'.  Same reasoning as
-     * resetStuckReportedUserClaims.
-     *
-     * @return int Number of stuck claims released (0 on driver error).
-     */
-    public static function resetStuckAdminReportClaims(string $cutoff): int
-    {
-        global $wpdb;
-        $table = self::user_reports_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table}
-             SET admin_notified_at = NULL
-             WHERE admin_notified_at IS NOT NULL
-               AND admin_notified_at < %s
-               AND status = 'open'",
-            $cutoff
-        ));
-
-        return $affected === false ? 0 : (int) $affected;
-    }
-
-    /**
-     * Release a tentative panelist claim when the send failed.
-     * Scoped by $ts so only our own claim is cleared.
-     */
-    public static function clearPanelistNotified(int $disputeId, int $panelistUserId, string $ts): bool
-    {
-        global $wpdb;
-        $table = self::panel_table();
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET notified_at = NULL
-             WHERE dispute_id = %d AND panelist_user_id = %d AND notified_at = %s",
-            $disputeId,
-            $panelistUserId,
-            $ts
-        ));
-
-        return $affected !== false && $affected > 0;
     }
 
     // ── Schema installation ──────────────────────────────────────────────────
@@ -3052,7 +1887,7 @@ class DisputeRepository
         ) {$charset};
         ";
 
-        $reports = self::user_reports_table();
+        $reports = UserReportRepository::user_reports_table();
 
         $sql .= "
         CREATE TABLE {$reports} (
@@ -3148,8 +1983,10 @@ class DisputeRepository
                 'error' => $err,
             ]);
             // Persist failure marker for admin_notices (see warnIfConstraintMissing).
-            // Autoloaded so the warn hook can cheaply check it every admin page.
-            update_option('bcc_disputes_constraint_missing', $err, true);
+            // NOT autoloaded — the warn hook only get_option()s it on admin
+            // pages, where one cheap keyed query beats carrying the row in
+            // the alloptions blob on every front-end request.
+            update_option('bcc_disputes_constraint_missing', $err, false);
             return;
         }
 
@@ -3167,7 +2004,7 @@ class DisputeRepository
     {
         global $wpdb;
 
-        $table = self::user_reports_table();
+        $table = UserReportRepository::user_reports_table();
 
         $colExists = $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
@@ -3188,8 +2025,9 @@ class DisputeRepository
             ]);
             // Fail-loud: without this column, admin emails will duplicate on
             // every Action Scheduler retry (the idempotency gate becomes a
-            // no-op since the SELECT returns NULL forever).
-            update_option('bcc_disputes_admin_notified_missing', $wpdb->last_error, true);
+            // no-op since the SELECT returns NULL forever). NOT autoloaded —
+            // read only by the admin_notices hook (one cheap keyed query).
+            update_option('bcc_disputes_admin_notified_missing', $wpdb->last_error, false);
         }
     }
 }

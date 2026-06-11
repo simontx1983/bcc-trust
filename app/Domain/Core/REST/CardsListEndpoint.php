@@ -56,6 +56,7 @@ namespace BCC\Trust\Core\REST;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\PageDiscoveryService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\PageCardPrefetcher;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use WP_REST_Request;
@@ -320,8 +321,13 @@ final class CardsListEndpoint
         // WP_Post-style key — so $postId silently defaulted to 0 and
         // every row got skipped, leaving items[] empty even when
         // pagination reported many pages of results.
-        $cardService = Plugin::instance()->cardViewService();
-        $items = [];
+        //
+        // Two passes: collect the (page_id, kind) pairs first, then
+        // prime one PageCardPrefetcher bundle for the whole page so
+        // per-card hydration doesn't N+1 (~20 reads × 24 cards → a
+        // flat batch set). Every discovery row is a page kind here —
+        // kindForPageType never yields 'member'.
+        $pairs = [];
         foreach ($rows as $row) {
             $rowArr = is_array($row) ? $row : (array) $row;
             $postId = isset($rowArr['page_id']) ? (int) $rowArr['page_id'] : 0;
@@ -335,10 +341,21 @@ final class CardsListEndpoint
                 // in V1). Skip rather than surface a half-shaped row.
                 continue;
             }
+            $pairs[] = [$postId, $kind];
+        }
 
-            $card = $cardService->getCard($kind, (string) $postId, $viewerId);
-            if ($card !== null) {
-                $items[] = $card;
+        $cardService = Plugin::instance()->cardViewService();
+        $items = [];
+        if ($pairs !== []) {
+            $prefetched = PageCardPrefetcher::primeFor(
+                array_map(static fn(array $pair): int => $pair[0], $pairs),
+                $viewerId
+            );
+            foreach ($pairs as [$postId, $kind]) {
+                $card = $cardService->getPageCardForList($kind, $postId, $viewerId, $prefetched);
+                if ($card !== null) {
+                    $items[] = $card;
+                }
             }
         }
 

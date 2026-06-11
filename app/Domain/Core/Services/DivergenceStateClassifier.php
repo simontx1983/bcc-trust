@@ -77,6 +77,13 @@ final class DivergenceStateClassifier
     /**
      * Classify a target into one of the five §J.8 states.
      *
+     * Thin I/O wrapper: fetches the three inputs (dispute existence,
+     * active-cast count, revoked-cast count) and delegates the actual
+     * decision to classifyFromCounts() — the ONE heuristic
+     * implementation, shared with the batch path where
+     * PageCardPrefetcher supplies the same three inputs from grouped
+     * queries instead of per-target reads.
+     *
      * @return self::STATE_*
      */
     public function classify(string $targetKind, int $targetId): string
@@ -88,20 +95,57 @@ final class DivergenceStateClassifier
             return self::STATE_UNTESTED;
         }
 
-        // 1. Disputed wins over every other state — an active dispute
-        //    is the strongest single signal. user_profile disputes are
-        //    Phase 1.5; this branch is page-scoped only in V1.
-        if (
-            $targetKind !== 'user_profile'
-            && DisputeRepository::hasActiveDisputeForPage($targetId)
-        ) {
-            return self::STATE_DISPUTED;
-        }
+        // user_profile disputes are Phase 1.5; the dispute read is
+        // page-scoped only in V1 — skip it entirely for user_profile.
+        $hasActiveDispute = $targetKind !== 'user_profile'
+            && DisputeRepository::hasActiveDisputeForPage($targetId);
 
-        // 2. Count active attestations on the target.
         $counts = $this->repo->countByTarget($targetKind, $targetId);
         $activeTotal = (int) ($counts['total'] ?? 0);
 
+        $revokedTotal = $this->repo->countRevokedByTarget($targetKind, $targetId);
+
+        return $this->classifyFromCounts(
+            $targetKind,
+            $targetId,
+            $hasActiveDispute,
+            $activeTotal,
+            $revokedTotal
+        );
+    }
+
+    /**
+     * Pure §J.8 classification from pre-fetched inputs — no I/O. The
+     * single source of the five-state heuristic; classify() feeds it
+     * per-target reads, PageCardPrefetcher consumers feed it grouped
+     * batch counts. Keep ALL decision logic here so the two paths can
+     * never diverge.
+     *
+     * @return self::STATE_*
+     */
+    public function classifyFromCounts(
+        string $targetKind,
+        int $targetId,
+        bool $hasActiveDispute,
+        int $activeTotal,
+        int $revokedTotal
+    ): string {
+        if (!in_array($targetKind, AttestationRepository::TARGET_KINDS, true)) {
+            return self::STATE_UNTESTED;
+        }
+        if ($targetId <= 0) {
+            return self::STATE_UNTESTED;
+        }
+
+        // 1. Disputed wins over every other state — an active dispute
+        //    is the strongest single signal. user_profile disputes are
+        //    Phase 1.5; the flag can only be true page-scoped in V1
+        //    (the guard keeps a stray true harmless for user_profile).
+        if ($targetKind !== 'user_profile' && $hasActiveDispute) {
+            return self::STATE_DISPUTED;
+        }
+
+        // 2. Active attestation floor.
         if ($activeTotal <= self::UNTESTED_ATTESTATION_FLOOR) {
             return self::STATE_UNTESTED;
         }
@@ -113,7 +157,6 @@ final class DivergenceStateClassifier
         //    activeTotal > 2 ⇒ activeTotal >= 3 ⇒ >= POORLY_MIN). Only
         //    the ratio check remains. If those constants ever diverge,
         //    re-add the explicit min-total check.
-        $revokedTotal = $this->repo->countRevokedByTarget($targetKind, $targetId);
         if ($revokedTotal > $activeTotal * self::POORLY_REGARDED_REVOCATION_RATIO) {
             return self::STATE_POORLY_REGARDED;
         }

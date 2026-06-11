@@ -5,7 +5,9 @@ namespace BCC\Trust\Disputes\Services;
 use BCC\Core\Contracts\DisputeAdjudicationInterface;
 use BCC\Core\ServiceLocator;
 use BCC\Trust\Disputes\Services\DisputeResolver;
+use BCC\Trust\Disputes\Repositories\DisputePanelRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use BCC\Trust\Disputes\Repositories\UserReportRepository;
 use BCC\Core\Log\Logger as CoreLogger;
 
 if (!defined('ABSPATH')) {
@@ -480,10 +482,10 @@ class DisputeScheduler
     {
         $cutoff = gmdate('Y-m-d H:i:s', time() - 600); // 10 minutes
 
-        $panelistReleased       = DisputeRepository::resetStuckPanelistClaims($cutoff);
+        $panelistReleased       = DisputePanelRepository::resetStuckPanelistClaims($cutoff);
         $reporterResultReleased = DisputeRepository::resetStuckReporterResultClaims($cutoff);
-        $reportedUserReleased   = DisputeRepository::resetStuckReportedUserClaims($cutoff);
-        $adminReportReleased    = DisputeRepository::resetStuckAdminReportClaims($cutoff);
+        $reportedUserReleased   = UserReportRepository::resetStuckReportedUserClaims($cutoff);
+        $adminReportReleased    = UserReportRepository::resetStuckAdminReportClaims($cutoff);
 
         $total = $panelistReleased + $reporterResultReleased
                + $reportedUserReleased + $adminReportReleased;
@@ -521,7 +523,7 @@ class DisputeScheduler
     private static function reconcilePendingPanelistNotifications(): void
     {
         $cutoff  = gmdate('Y-m-d H:i:s', time() - 120);
-        $pending = DisputeRepository::getPendingPanelistNotifications($cutoff, 20);
+        $pending = DisputePanelRepository::getPendingPanelistNotifications($cutoff, 20);
 
         if (empty($pending)) {
             return;

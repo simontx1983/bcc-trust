@@ -667,53 +667,146 @@ class EndorsementService {
             }
         }
 
+        // Viewer-level gates (quest / account-age / fraud) — extracted
+        // so the batch path can evaluate them ONCE per request instead
+        // of once per card. Gate order inside is unchanged.
+        $viewerGate = $this->evaluateViewerEndorseGates($viewerId);
+        if ($viewerGate !== null) {
+            return $viewerGate;
+        }
+
+        return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+    }
+
+    /**
+     * The viewer-level (page-independent) endorse gates: quest /
+     * account-age / fraud-score, in that order — exactly the order
+     * getEndorseEligibility evaluated them inline before extraction.
+     * Returns the first failing gate's Permission shape, or null when
+     * every gate passes (including BCC_TRUST_TEST_MODE, which skips
+     * all three).
+     *
+     * Page-level gates (auth, self-endorse) stay with the callers —
+     * this method only owns what's constant across pages for a viewer,
+     * so getEndorseEligibilityForPages can memoize one result for a
+     * whole cards-list page.
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}|null
+     */
+    private function evaluateViewerEndorseGates(int $viewerId): ?array {
+        $testMode = defined('BCC_TRUST_TEST_MODE') && \BCC_TRUST_TEST_MODE;
+        if ($testMode) {
+            return null;
+        }
+
         // Quest gate (identity verification).
-        if (!$testMode) {
-            $questService = \BCC\Trust\Core\Plugin::instance()->questProgressService();
-            if (!$questService->canEndorse($viewerId)) {
-                $progress = $questService->getEndorseProgress($viewerId);
-                $hint = is_string($progress['missing_reason'] ?? null) && $progress['missing_reason'] !== ''
-                    ? (string) $progress['missing_reason']
-                    : 'Verify your identity to unlock endorsements.';
-                return ['allowed' => false, 'unlock_hint' => $hint, 'reason_code' => 'identity_required'];
-            }
+        $questService = \BCC\Trust\Core\Plugin::instance()->questProgressService();
+        if (!$questService->canEndorse($viewerId)) {
+            $progress = $questService->getEndorseProgress($viewerId);
+            $hint = is_string($progress['missing_reason'] ?? null) && $progress['missing_reason'] !== ''
+                ? (string) $progress['missing_reason']
+                : 'Verify your identity to unlock endorsements.';
+            return ['allowed' => false, 'unlock_hint' => $hint, 'reason_code' => 'identity_required'];
         }
 
         // Account-age gate.
-        if (!$testMode) {
-            $user = get_userdata($viewerId);
-            if ($user instanceof \WP_User) {
-                $registeredTs = strtotime($user->user_registered);
-                $accountAgeDays = $registeredTs !== false
-                    ? (int) floor((time() - $registeredTs) / DAY_IN_SECONDS)
-                    : 0;
-                /** @var int $minAgeDays */
-                $minAgeDays = (int) apply_filters('bcc_trust_endorse_min_account_age_days', 7);
-                if ($accountAgeDays < $minAgeDays) {
-                    return [
-                        'allowed' => false,
-                        'unlock_hint' => sprintf('Your account must be at least %d days old to endorse.', $minAgeDays),
-                        'reason_code' => 'account_too_new',
-                    ];
-                }
+        $user = get_userdata($viewerId);
+        if ($user instanceof \WP_User) {
+            $registeredTs = strtotime($user->user_registered);
+            $accountAgeDays = $registeredTs !== false
+                ? (int) floor((time() - $registeredTs) / DAY_IN_SECONDS)
+                : 0;
+            /** @var int $minAgeDays */
+            $minAgeDays = (int) apply_filters('bcc_trust_endorse_min_account_age_days', 7);
+            if ($accountAgeDays < $minAgeDays) {
+                return [
+                    'allowed' => false,
+                    'unlock_hint' => sprintf('Your account must be at least %d days old to endorse.', $minAgeDays),
+                    'reason_code' => 'account_too_new',
+                ];
             }
         }
 
         // Fraud-score gate. Defense-in-depth — endorsePage() re-checks
         // inside the transaction.
-        if (!$testMode) {
-            $userInfo = $this->userInfoRepo->getByUserId($viewerId);
-            if ($userInfo !== null && (int) $userInfo->fraud_score >= BCC_TRUST_FRAUD_HIGH) {
-                // Coarse reason — never echo the actual fraud score.
-                return [
-                    'allowed' => false,
-                    'unlock_hint' => 'Endorsements are temporarily restricted on this account.',
-                    'reason_code' => 'account_restricted',
-                ];
-            }
+        $userInfo = $this->userInfoRepo->getByUserId($viewerId);
+        if ($userInfo !== null && (int) $userInfo->fraud_score >= BCC_TRUST_FRAUD_HIGH) {
+            // Coarse reason — never echo the actual fraud score.
+            return [
+                'allowed' => false,
+                'unlock_hint' => 'Endorsements are temporarily restricted on this account.',
+                'reason_code' => 'account_restricted',
+            ];
         }
 
-        return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+        return null;
+    }
+
+    /**
+     * Batch variant of getEndorseEligibility for the cards-list path.
+     * The viewer-level gates (quest / account-age / fraud) are
+     * page-independent, so they're evaluated ONCE; per page only the
+     * self-endorse check remains. Per-page gate order is unchanged
+     * relative to getEndorseEligibility: self-check first, then the
+     * memoized viewer-gate result.
+     *
+     * The self-check resolves owners through PageOwnerResolver — the
+     * same canonical source getEndorseEligibility reaches via
+     * PeepSoPageResolver::getOwnerId (PeepSo member_owner first,
+     * post_author fallback) — batched once via primeOwnerCache so the
+     * per-page lookups are cache hits.
+     *
+     * Anon viewers get an empty map (per the PageCardPrefetcher bundle
+     * contract); the per-card consumer falls back to
+     * getEndorseEligibility, which short-circuits to the auth_required
+     * shape with zero queries.
+     *
+     * @param list<int> $pageIds Bounded by caller (cards per_page ≤ 50).
+     * @return array<int, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>
+     *     Keyed by page_id.
+     */
+    public function getEndorseEligibilityForPages(int $viewerId, array $pageIds): array {
+        if ($viewerId <= 0 || $pageIds === []) {
+            return [];
+        }
+
+        $testMode = defined('BCC_TRUST_TEST_MODE') && \BCC_TRUST_TEST_MODE;
+        $viewerGate = $this->evaluateViewerEndorseGates($viewerId);
+        $allowed = ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+
+        // Canonical owner resolution, batched (1-3 queries for the whole
+        // page) — keeps the self-check on the same PeepSo-first source
+        // getEndorseEligibility uses via PeepSoPageResolver::getOwnerId.
+        $ownerResolver = \BCC\Trust\Core\Plugin::instance()->pageOwnerResolver();
+        if (!$testMode) {
+            $ownerResolver->primeOwnerCache($pageIds);
+        }
+
+        $out = [];
+        foreach ($pageIds as $pageId) {
+            $pageId = (int) $pageId;
+            if ($pageId <= 0) {
+                continue;
+            }
+
+            // Self-endorse blocked except in BCC_TRUST_TEST_MODE —
+            // same first position it holds in getEndorseEligibility.
+            if (!$testMode) {
+                $ownerId = $ownerResolver->getPageOwner($pageId);
+                if ($ownerId === $viewerId) {
+                    $out[$pageId] = [
+                        'allowed' => false,
+                        'unlock_hint' => "You can't endorse your own page.",
+                        'reason_code' => 'self_action_blocked',
+                    ];
+                    continue;
+                }
+            }
+
+            $out[$pageId] = $viewerGate ?? $allowed;
+        }
+
+        return $out;
     }
 
     /**

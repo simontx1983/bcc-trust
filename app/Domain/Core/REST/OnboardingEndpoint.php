@@ -37,6 +37,7 @@ use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\PageCardPrefetcher;
 use BCC\Trust\Core\Support\RankCatalog;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -237,7 +238,14 @@ final class OnboardingEndpoint
             'creators'   => [],
         ];
 
+        // Two passes: collect every bucket's page ids first, then prime
+        // ONE PageCardPrefetcher bundle across all 12 candidates so the
+        // per-card hydration below doesn't N+1 (all three buckets are
+        // page kinds — the bundle groups by target_kind internally).
+        $bucketPageIds = [];
         foreach (self::BUCKETS as $bucket => $spec) {
+            $bucketPageIds[$bucket] = [];
+
             $result = $discovery->query([
                 'types'         => [$spec['page_type']],
                 'sort'          => 'trust',
@@ -255,9 +263,19 @@ final class OnboardingEndpoint
                 if ($pageId <= 0) {
                     continue;
                 }
-                $card = $cardSvc->getCard($spec['card_kind'], (string) $pageId, $userId);
-                if ($card !== null) {
-                    $out[$bucket][] = $card;
+                $bucketPageIds[$bucket][] = $pageId;
+            }
+        }
+
+        $allPageIds = array_merge(...array_values($bucketPageIds));
+        if ($allPageIds !== []) {
+            $prefetched = PageCardPrefetcher::primeFor($allPageIds, $userId);
+            foreach (self::BUCKETS as $bucket => $spec) {
+                foreach ($bucketPageIds[$bucket] as $pageId) {
+                    $card = $cardSvc->getPageCardForList($spec['card_kind'], $pageId, $userId, $prefetched);
+                    if ($card !== null) {
+                        $out[$bucket][] = $card;
+                    }
                 }
             }
         }

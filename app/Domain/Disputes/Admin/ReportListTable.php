@@ -3,7 +3,7 @@
 namespace BCC\Trust\Disputes\Admin;
 
 use BCC\Trust\Disputes\DTO\AdminReportRowDTO;
-use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use BCC\Trust\Disputes\Repositories\UserReportRepository;
 use WP_List_Table;
 
 if (!defined('ABSPATH')) {
@@ -62,7 +62,7 @@ class ReportListTable extends WP_List_Table
         $current = isset($_GET['report_status']) ? sanitize_key($_GET['report_status']) : 'all';
         $base    = admin_url('admin.php?page=bcc-reports');
 
-        $counts = DisputeRepository::getReportStatusCounts();
+        $counts = UserReportRepository::getReportStatusCounts();
         $total  = array_sum($counts);
 
         $views = [];
@@ -104,7 +104,7 @@ class ReportListTable extends WP_List_Table
         $order = isset($_GET['order']) && strtoupper($_GET['order']) === 'ASC' ? 'ASC' : 'DESC';
 
         // Count
-        $total = DisputeRepository::countReportsForAdminList($status_filter ?: null);
+        $total = UserReportRepository::countReportsForAdminList($status_filter ?: null);
 
         // Pagination
         $per_page = 20;
@@ -118,7 +118,7 @@ class ReportListTable extends WP_List_Table
         ]);
 
         // Query via repository — explicit columns, no SELECT *.
-        $this->items = DisputeRepository::getReportsForAdminList(
+        $this->items = UserReportRepository::getReportsForAdminList(
             $status_filter ?: null,
             $orderby,
             $order,

@@ -71,6 +71,41 @@ if (!defined('ABSPATH')) {
  *     chain_name: string
  * }
  *
+ * @phpstan-type ValidatorCardRow object{
+ *     validator_id: int|numeric-string,
+ *     chain_slug: string,
+ *     chain_name: string,
+ *     operator_address: string,
+ *     status: string,
+ *     uptime_30d: string|null,
+ *     commission_rate: string|null,
+ *     voting_power_rank: string|null,
+ *     total_stake: string|null,
+ *     self_stake: string|null,
+ *     delegator_count: string|null,
+ *     jailed_count: string|null,
+ *     fetched_at: string,
+ *     logo_url: string|null
+ * }
+ *
+ * @phpstan-type ValidatorCardPageRow object{
+ *     page_id: int|numeric-string,
+ *     validator_id: int|numeric-string,
+ *     chain_slug: string,
+ *     chain_name: string,
+ *     operator_address: string,
+ *     status: string,
+ *     uptime_30d: string|null,
+ *     commission_rate: string|null,
+ *     voting_power_rank: string|null,
+ *     total_stake: string|null,
+ *     self_stake: string|null,
+ *     delegator_count: string|null,
+ *     jailed_count: string|null,
+ *     fetched_at: string,
+ *     logo_url: string|null
+ * }
+ *
  * @phpstan-type ValidatorAggregateStats object{
  *     chains_count: string,
  *     active_count: string|null,
@@ -363,6 +398,120 @@ final class ValidatorRepository
                 'operator_address' => $row->operator_address,
             ];
         }
+        return $out;
+    }
+
+    /**
+     * Batch card-projection for a whole cards-list page of validator
+     * pages. One combined fetch replacing the 4 per-page projections
+     * (findFirstByPageId / findAllByPageId / findSignalsByPageId /
+     * findLogoByPageId) the per-card path runs — the row carries the
+     * union of their columns so CardViewService derives claim_target +
+     * chains + onchain_signals + logo from a single map.
+     *
+     * Preserves the two-path resolution semantics of the per-page
+     * methods: wallet_link join first for every page; the
+     * `_bcc_onchain_validator_id` post_meta fallback runs ONLY for
+     * pages the first query missed (placeholder pages with no
+     * wallet_link yet), and contributes at most one row per page —
+     * matching the per-page fallbacks' LIMIT 1.
+     *
+     * Rows are ordered chain-name ASC per page. Note: the per-page
+     * LIMIT 1 projections (claim_target / signals / logo) picked an
+     * arbitrary row on multi-chain pages; "first row" from this batch
+     * is deterministically the alphabetically-first chain — a benign
+     * tightening, not a behavior contract change.
+     *
+     * Bounded: caller-paginated IN-list (cards per_page ≤ 50) × the
+     * defensive 32-chain ceiling per page → LIMIT 1600.
+     *
+     * @param list<int> $pageIds
+     * @return array<int, list<object>> page_id => rows (chain-name ASC).
+     * @phpstan-return array<int, list<ValidatorCardRow>>
+     */
+    public static function findCardRowsByPageIds(array $pageIds): array
+    {
+        $ids = [];
+        foreach ($pageIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $idList = array_keys($ids);
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+        $chains  = ChainRepository::table();
+
+        $selectCols =
+            "v.id AS validator_id, c.slug AS chain_slug, c.name AS chain_name,
+             v.operator_address, v.status, v.uptime_30d, v.commission_rate,
+             v.voting_power_rank, v.total_stake, v.self_stake,
+             v.delegator_count, v.jailed_count, v.fetched_at, v.logo_url";
+
+        $ph = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<ValidatorCardPageRow> $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT w.post_id AS page_id, {$selectCols}
+               FROM {$table} v
+               JOIN {$wallets} w ON w.id = v.wallet_link_id
+               JOIN {$chains}  c ON c.id = v.chain_id
+              WHERE w.post_id IN ({$ph})
+              ORDER BY w.post_id ASC, c.name ASC
+              LIMIT 1600",
+            ...$idList
+        ));
+
+        $out = [];
+        foreach ($rows as $row) {
+            $pageId = (int) $row->page_id;
+            if ($pageId > 0) {
+                $out[$pageId][] = $row;
+            }
+        }
+
+        // Fallback ONLY for pages the wallet_link join missed —
+        // placeholder pages bind to a single validator via post_meta
+        // until a real claim creates a wallet_link.
+        $missing = [];
+        foreach ($idList as $id) {
+            if (!isset($out[$id])) {
+                $missing[] = $id;
+            }
+        }
+        if ($missing !== []) {
+            $phMissing = implode(',', array_fill(0, count($missing), '%d'));
+
+            /** @var list<ValidatorCardPageRow> $fallbackRows */
+            $fallbackRows = $wpdb->get_results($wpdb->prepare(
+                "SELECT pm.post_id AS page_id, {$selectCols}
+                   FROM {$wpdb->postmeta} pm
+                   JOIN {$table} v  ON v.id = CAST(pm.meta_value AS UNSIGNED)
+                   JOIN {$chains} c ON c.id = v.chain_id
+                  WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                    AND pm.post_id IN ({$phMissing})
+                  ORDER BY pm.post_id ASC, c.name ASC
+                  LIMIT 1600",
+                ...$missing
+            ));
+
+            foreach ($fallbackRows as $row) {
+                $pageId = (int) $row->page_id;
+                // First row per page only — mirrors the per-page
+                // fallbacks' LIMIT 1 (one placeholder = one validator
+                // by construction; dup meta rows are pathological).
+                if ($pageId > 0 && !isset($out[$pageId])) {
+                    $out[$pageId] = [$row];
+                }
+            }
+        }
+
         return $out;
     }
 

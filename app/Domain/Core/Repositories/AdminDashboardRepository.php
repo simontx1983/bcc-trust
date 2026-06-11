@@ -1958,7 +1958,7 @@ class AdminDashboardRepository
             'timeout_rate_pct'      => $timeoutRatePct,
             'lopsided_count'        => $lopsided,
             'split_count'           => $split,
-            'all_time_status_counts' => \BCC\Trust\Disputes\Repositories\DisputeRepository::getDisputeStatusCounts(),
+            'all_time_status_counts' => \BCC\Trust\Disputes\Repositories\DisputeAdminRepository::getDisputeStatusCounts(),
         ];
     }
 

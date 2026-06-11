@@ -300,6 +300,61 @@ class VoteRepository {
     }
 
     /**
+     * Batch-check which of the given pages this voter has an active
+     * vote on. Used by PageCardPrefetcher so the cards-list path can
+     * resolve `viewer_has_reviewed` for a whole page of cards in one
+     * round trip instead of N per-card `get()` calls.
+     *
+     * Replicates the exact predicate `get($voterId, $pageId)` uses on
+     * the null-category path (voter + page + status = 1) — kept in
+     * lockstep so the batch and single-card answers can never diverge.
+     *
+     * Bounded: the IN-list is caller-paginated (cards per_page ≤ 50);
+     * DISTINCT caps the result at one row per page.
+     *
+     * @param list<int> $pageIds
+     * @return array<int, true> Set keyed by page_id for O(1) lookup.
+     */
+    public function getVotedPageIdsForVoter(int $voterId, array $pageIds): array
+    {
+        if ($voterId <= 0 || $pageIds === []) {
+            return [];
+        }
+
+        // Sanitize + dedupe — same defensive posture as findManyByIds.
+        $ids = [];
+        foreach ($pageIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $idList = implode(',', array_keys($ids));
+
+        global $wpdb;
+        /** @var list<object{page_id: int|numeric-string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT DISTINCT page_id FROM {$this->table}
+              WHERE voter_user_id = %d
+                AND page_id IN ({$idList})
+                AND status = 1",
+            $voterId
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $pageId = (int) $row->page_id;
+            if ($pageId > 0) {
+                $out[$pageId] = true;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Set the long-form `explanation` body on a single vote row.
      *
      * Per §D2 reviews this is the persistence path for the review's

@@ -645,21 +645,59 @@ final class Plugin
                 new \BCC\Core\PeepSo\PeepSoGraphService()
             ),
             $this->reputationRepository(),
-            $this->pullBatchRepository(),
-            $this->pullMetaRepository(),
-            $this->watchingRepository(),
             $this->peepSoReactionRepository(),
-            $this->voteRepository(),
             $this->hiddenActivityRepository(),
             $this->groupContextResolver(),
             $this->commentRepository(),
-            $this->photoRepository(),
-            $this->photoAltRepository(),
             $this->gifRepository(),
             $this->mentionOverlayService(),
             $this->authorBadgeResolver(),
-            $this->blogService()
+            $this->blogService(),
+            $this->pullBatchBodyHydrator(),
+            $this->reviewBodyHydrator(),
+            $this->photoBodyHydrator(),
+            $this->gifBodyHydrator(),
+            $this->pageClaimBodyHydrator()
         );
+    }
+
+    private ?Services\Feed\PullBatchBodyHydrator $pullBatchBodyHydrator = null;
+    public function pullBatchBodyHydrator(): Services\Feed\PullBatchBodyHydrator
+    {
+        return $this->pullBatchBodyHydrator ??= new Services\Feed\PullBatchBodyHydrator(
+            $this->pullBatchRepository(),
+            $this->pullMetaRepository(),
+            $this->watchingRepository()
+        );
+    }
+
+    private ?Services\Feed\ReviewBodyHydrator $reviewBodyHydrator = null;
+    public function reviewBodyHydrator(): Services\Feed\ReviewBodyHydrator
+    {
+        return $this->reviewBodyHydrator ??= new Services\Feed\ReviewBodyHydrator(
+            $this->voteRepository()
+        );
+    }
+
+    private ?Services\Feed\PhotoBodyHydrator $photoBodyHydrator = null;
+    public function photoBodyHydrator(): Services\Feed\PhotoBodyHydrator
+    {
+        return $this->photoBodyHydrator ??= new Services\Feed\PhotoBodyHydrator(
+            $this->photoRepository(),
+            $this->photoAltRepository()
+        );
+    }
+
+    private ?Services\Feed\GifBodyHydrator $gifBodyHydrator = null;
+    public function gifBodyHydrator(): Services\Feed\GifBodyHydrator
+    {
+        return $this->gifBodyHydrator ??= new Services\Feed\GifBodyHydrator();
+    }
+
+    private ?Services\Feed\PageClaimBodyHydrator $pageClaimBodyHydrator = null;
+    public function pageClaimBodyHydrator(): Services\Feed\PageClaimBodyHydrator
+    {
+        return $this->pageClaimBodyHydrator ??= new Services\Feed\PageClaimBodyHydrator();
     }
 
     private ?Services\CardViewService $cardViewService = null;

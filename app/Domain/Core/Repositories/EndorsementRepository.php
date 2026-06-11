@@ -478,6 +478,67 @@ class EndorsementRepository {
     }
 
     /**
+     * Batch-check which of the given pages this user has actively
+     * endorsed. Used by PageCardPrefetcher so the cards-list path can
+     * resolve `viewer_has_endorsed` for a whole page of cards in one
+     * round trip instead of N per-card `hasEndorsed()` calls.
+     *
+     * Replicates hasEndorsed()'s filters exactly (endorser + page +
+     * status = 1, plus context when truthy) — kept in lockstep so the
+     * batch and single-card answers can never diverge.
+     *
+     * Bounded: the IN-list is caller-paginated (cards per_page ≤ 50);
+     * DISTINCT caps the result at one row per page.
+     *
+     * @param list<int> $pageIds
+     * @return array<int, true> Set keyed by page_id for O(1) lookup.
+     */
+    public function getEndorsedPageIdsForUser(int $userId, array $pageIds, ?string $context = null): array
+    {
+        if ($userId <= 0 || $pageIds === []) {
+            return [];
+        }
+
+        $ids = [];
+        foreach ($pageIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $idList = implode(',', array_keys($ids));
+
+        global $wpdb;
+
+        $sql = "SELECT DISTINCT page_id FROM {$this->table}
+                WHERE endorser_user_id = %d
+                AND page_id IN ({$idList})
+                AND status = 1";
+
+        $params = [$userId];
+
+        if ($context) {
+            $sql .= " AND context = %s";
+            $params[] = $context;
+        }
+
+        /** @var list<object{page_id: int|numeric-string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare($sql, $params));
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $pageId = (int) $row->page_id;
+            if ($pageId > 0) {
+                $out[$pageId] = true;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Get endorsement weight for a user tier
      */
     public function getEndorsementWeight(string $tier): float {

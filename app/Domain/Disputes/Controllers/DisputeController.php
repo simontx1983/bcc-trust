@@ -14,8 +14,11 @@ use BCC\Trust\Disputes\DTO\DisputeCoreDTO;
 use BCC\Trust\Disputes\DTO\DisputeDetailDTO;
 use BCC\Trust\Disputes\DTO\PanelistQueueItemDTO;
 use BCC\Trust\Disputes\DTO\VoteContextDTO;
+use BCC\Trust\Disputes\Repositories\DisputeAdminRepository;
 use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
+use BCC\Trust\Disputes\Repositories\DisputePanelRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use BCC\Trust\Disputes\Repositories\UserReportRepository;
 use BCC\Trust\Disputes\Services\DisputeNotificationService;
 use BCC\Trust\Disputes\Services\DisputeParticipationService;
 use BCC\Trust\Disputes\Services\DisputeScheduler;
@@ -382,8 +385,8 @@ class DisputeController
         $per_page = min(100, max(1, (int) ($req->get_param('per_page') ?: 20)));
         $offset   = ($page - 1) * $per_page;
 
-        $total = DisputeRepository::countPanelQueueForUser($userId);
-        $rows  = DisputeRepository::getPanelQueueForUser($userId, $per_page, $offset);
+        $total = DisputePanelRepository::countPanelQueueForUser($userId);
+        $rows  = DisputePanelRepository::getPanelQueueForUser($userId, $per_page, $offset);
 
         $response = ApiResponse::ok(array_map([$this, 'formatDispute'], $rows));
         $response->header('X-WP-Total', (string) $total);
@@ -408,7 +411,7 @@ class DisputeController
         }
 
         // Confirm this user is assigned to this dispute
-        $assignment = DisputeRepository::getPanelAssignment($dispute_id, $userId);
+        $assignment = DisputePanelRepository::getPanelAssignment($dispute_id, $userId);
         if (!$assignment) {
             return $this->error('not_assigned', 'You are not assigned to this dispute.', 403);
         }
@@ -786,7 +789,7 @@ class DisputeController
         // Uses a batch query to avoid N+1 (one query per candidate).
         $maxActivePanels = (int) apply_filters('bcc_disputes_max_active_panels_per_user', 10);
 
-        $loadMap = DisputeRepository::batchCountActivePanelAssignments($candidates);
+        $loadMap = DisputePanelRepository::batchCountActivePanelAssignments($candidates);
 
         // Load-filter — collect ALL candidates with load < cap (no truncate
         // here; affinity ranking does the final truncate).
@@ -993,20 +996,20 @@ class DisputeController
             return $this->error('detail_required', 'Please provide at least ' . BCC_DISPUTES_MIN_DETAIL_LENGTH . ' characters describing your reason.', 400);
         }
 
-        if ( DisputeRepository::countRecentReportsByReporter($reporter_id) >= 5 ) {
+        if ( UserReportRepository::countRecentReportsByReporter($reporter_id) >= 5 ) {
             return $this->error('report_limit_reached', 'You have reached the daily report limit. Please try again later.', 429);
         }
 
-        if ( DisputeRepository::hasActiveReport($reporter_id, $reported_id) ) {
+        if ( UserReportRepository::hasActiveReport($reporter_id, $reported_id) ) {
             return $this->error('already_reported', 'You have already submitted an active report against this user.', 409);
         }
 
         // Protect targets from coordinated report campaigns.
-        if ( DisputeRepository::countActiveReportsAgainst($reported_id) >= 10 ) {
+        if ( UserReportRepository::countActiveReportsAgainst($reported_id) >= 10 ) {
             return $this->error('target_report_limit', 'This user already has reports pending review.', 429);
         }
 
-        $report_id = DisputeRepository::createReport($reported_id, $reporter_id, $reason_key, $reason_detail);
+        $report_id = UserReportRepository::createReport($reported_id, $reporter_id, $reason_key, $reason_detail);
         if ( ! $report_id ) {
             return $this->error('db_error', 'Failed to submit report.', 500);
         }
@@ -1135,7 +1138,7 @@ class DisputeController
         $lastAutoResolve = (int) get_option('bcc_disputes_auto_resolve_last_run', 0);
 
         // Count disputes in each status for queue depth.
-        $statusCounts = DisputeRepository::getDisputeStatusCounts();
+        $statusCounts = DisputeAdminRepository::getDisputeStatusCounts();
 
         // Orphaned disputes (committed but adjudication pending/failed).
         $orphanCount = DisputeRepository::countOrphanedDisputes();

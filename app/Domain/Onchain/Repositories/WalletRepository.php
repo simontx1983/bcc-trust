@@ -557,6 +557,100 @@ final class WalletRepository
     }
 
     /**
+     * Batch variant of resolveEntityForPage — one bounded pass per
+     * entity table for a whole cards-list page instead of up to 2N
+     * per-card lookups. Used by PageCardPrefetcher to feed the
+     * pre-baked `actions.claim` body on every card in the list.
+     *
+     * Mirrors the single-page semantics exactly: validator preferred
+     * over collection (the collection query only runs for pages the
+     * validator query missed), ORDER BY is_primary DESC, created_at
+     * ASC, first row per page wins in PHP — the global sort preserves
+     * each page's internal order, so keep-first replicates the
+     * per-page LIMIT 1.
+     *
+     * Pages with no linked entity are absent from the map — consumers
+     * default with `?? null`.
+     *
+     * Bounded: caller-paginated IN-list (cards per_page ≤ 50); LIMIT
+     * is belt-and-suspenders.
+     *
+     * @param list<int> $postIds
+     * @return array<int, array{entity_type: string, entity_id: int}>
+     *     Keyed by post_id; entity_type is 'validator'|'collection'.
+     */
+    public static function resolveEntitiesForPages(array $postIds): array
+    {
+        $ids = [];
+        foreach ($postIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $idList = array_keys($ids);
+
+        global $wpdb;
+        $walletLinks = self::table();
+        $validators  = ValidatorRepository::table();
+        $collections = CollectionRepository::table();
+
+        $out = [];
+
+        $ph = implode(',', array_fill(0, count($idList), '%d'));
+        /** @var list<object{post_id: int|numeric-string, entity_id: int|numeric-string}> $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT w.post_id, v.id AS entity_id
+               FROM {$walletLinks} w
+               INNER JOIN {$validators} v ON v.wallet_link_id = w.id
+              WHERE w.post_id IN ({$ph})
+              ORDER BY w.post_id ASC, w.is_primary DESC, w.created_at ASC
+              LIMIT 500",
+            ...$idList
+        ));
+        foreach ($rows as $row) {
+            $postId = (int) $row->post_id;
+            if ($postId > 0 && !isset($out[$postId])) {
+                $out[$postId] = ['entity_type' => 'validator', 'entity_id' => (int) $row->entity_id];
+            }
+        }
+
+        // Collection fallback ONLY for pages with no validator entity —
+        // matches the single-page method's validator-over-collection
+        // preference.
+        $missing = [];
+        foreach ($idList as $id) {
+            if (!isset($out[$id])) {
+                $missing[] = $id;
+            }
+        }
+        if ($missing !== []) {
+            $phMissing = implode(',', array_fill(0, count($missing), '%d'));
+            /** @var list<object{post_id: int|numeric-string, entity_id: int|numeric-string}> $rows */
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT w.post_id, c.id AS entity_id
+                   FROM {$walletLinks} w
+                   INNER JOIN {$collections} c ON c.wallet_link_id = w.id
+                  WHERE w.post_id IN ({$phMissing})
+                  ORDER BY w.post_id ASC, w.is_primary DESC, w.created_at ASC
+                  LIMIT 500",
+                ...$missing
+            ));
+            foreach ($rows as $row) {
+                $postId = (int) $row->post_id;
+                if ($postId > 0 && !isset($out[$postId])) {
+                    $out[$postId] = ['entity_type' => 'collection', 'entity_id' => (int) $row->entity_id];
+                }
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Resolve post_id from an entity row via wallet_link.
      * Works for both validators and collections.
      *

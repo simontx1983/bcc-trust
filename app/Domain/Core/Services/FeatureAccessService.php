@@ -185,13 +185,28 @@ final class FeatureAccessService
      */
     public function canPerform(int $userId, string $featureKey): array
     {
+        // Per-request memoisation: card-list hydration asks the same
+        // (viewer, action) pair once per card (24× write_review + 24×
+        // sign_dispute on a directory page). The answer is constant
+        // within a request, so dedupe repeat lookups — same precedent
+        // as UserViewService::resolveFlags' static memo. No reset
+        // needed: mutations that would change the answer complete
+        // before the next request.
+        /** @var array<string, array{allowed: bool, unlock_hint: ?string}> $memo */
+        static $memo = [];
+
+        $memoKey = $userId . ':' . $featureKey;
+        if (isset($memo[$memoKey])) {
+            return $memo[$memoKey];
+        }
+
         if (!isset(self::FEATURE_REQUIREMENTS[$featureKey])) {
             // Unknown features fail closed — never accidentally grant.
-            return ['allowed' => false, 'unlock_hint' => null];
+            return $memo[$memoKey] = ['allowed' => false, 'unlock_hint' => null];
         }
 
         if ($userId <= 0) {
-            return ['allowed' => false, 'unlock_hint' => null];
+            return $memo[$memoKey] = ['allowed' => false, 'unlock_hint' => null];
         }
 
         // Per-user override — see class-level doc. Checked before the
@@ -200,12 +215,12 @@ final class FeatureAccessService
         // fail closed above so an override on a nonexistent feature
         // never grants anything.
         if (self::hasFeatureOverride($userId, $featureKey)) {
-            return ['allowed' => true, 'unlock_hint' => null];
+            return $memo[$memoKey] = ['allowed' => true, 'unlock_hint' => null];
         }
 
         $stats = $this->getUserStats($userId);
         $level = $this->resolveLevel($stats);
-        return $this->resolveFeature($featureKey, $level, $stats);
+        return $memo[$memoKey] = $this->resolveFeature($featureKey, $level, $stats);
     }
 
     /**

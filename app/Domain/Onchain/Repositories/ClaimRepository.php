@@ -313,6 +313,52 @@ class ClaimRepository {
     }
 
     /**
+     * Batch variant of getUserClaim — one bounded query for a whole
+     * cards-list page of entities instead of N per-card lookups. Used
+     * by PageCardPrefetcher to feed `is_claimed_by_viewer` resolution.
+     *
+     * Mirrors getUserClaim's WHERE exactly (user + entity_type +
+     * entity_id IN, no status filter — the caller checks
+     * status === 'verified', same as the single path). First row per
+     * entity wins, matching get_row()'s first-row semantics.
+     *
+     * Bounded: caller-paginated IN-list (cards per_page ≤ 50); LIMIT
+     * is belt-and-suspenders.
+     *
+     * @param int[] $entityIds
+     * @return array<int, object> entity_id => claim row.
+     * @phpstan-return array<int, ClaimRow>
+     */
+    public static function getUserClaimsForEntities(int $userId, string $entityType, array $entityIds): array {
+        if ($userId <= 0 || empty($entityIds)) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $ph    = implode(',', array_fill(0, count($entityIds), '%d'));
+
+        /** @var list<ClaimRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$table}
+             WHERE user_id = %d AND entity_type = %s AND entity_id IN ({$ph})
+             LIMIT 500",
+            $userId,
+            $entityType,
+            ...$entityIds
+        ));
+
+        $map = [];
+        foreach ($rows ?: [] as $row) {
+            $entityId = (int) $row->entity_id;
+            if (!isset($map[$entityId])) {
+                $map[$entityId] = $row;
+            }
+        }
+        return $map;
+    }
+
+    /**
      * Batch-check which page IDs have any verified primary claim
      * (operator or creator). Returns page_id => claimer_name map.
      *
@@ -375,7 +421,10 @@ class ClaimRepository {
      * Batch-load all verified claims for multiple entities of the same type.
      * Single query replacing N per-entity lookups.
      *
-     * @param string $entityType 'validator' or 'collection'
+     * @param string $entityType 'validator', 'collection', or 'page'
+     *                           (page claims back the card-level
+     *                           is_claimed flag; see CardViewService /
+     *                           PageCardPrefetcher).
      * @param int[]  $entityIds
      * @return array<int, list<ClaimWithClaimer>> entity_id => array of claim objects
      */

@@ -145,6 +145,99 @@ final class AttestationRepository
     }
 
     /**
+     * Batch variant of findActiveByAttestorAndTarget — one bounded
+     * query for a whole cards-list page of targets instead of N
+     * per-card round trips. Used by PageCardPrefetcher to feed the
+     * `viewer_attestation` field on every card in the list.
+     *
+     * Same COLUMNS projection and WHERE predicate as the single-target
+     * method (attestor + target_kind + target_id IN + revoked_at IS
+     * NULL) — kept in lockstep so batch and single answers can never
+     * diverge.
+     *
+     * Every requested target id is present in the result (empty slots
+     * for targets the viewer hasn't attested against), so consumers
+     * can index without an existence check.
+     *
+     * Bounded: the IN-list is caller-paginated (cards per_page ≤ 50)
+     * and the unique key caps rows at 2 per (attestor, target); the
+     * LIMIT is belt-and-suspenders at 2 × 50.
+     *
+     * @param list<int> $targetIds
+     * @return array<int, array{vouch: object|null, stand_behind: object|null}>
+     *     Keyed by target_id.
+     */
+    public function findActiveByAttestorForTargets(
+        int $attestorUserId,
+        string $targetKind,
+        array $targetIds
+    ): array {
+        if ($attestorUserId <= 0) {
+            return [];
+        }
+        if (!in_array($targetKind, self::TARGET_KINDS, true)) {
+            return [];
+        }
+
+        $ids = [];
+        foreach ($targetIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+
+        $result = [];
+        foreach (array_keys($ids) as $id) {
+            $result[$id] = ['vouch' => null, 'stand_behind' => null];
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $sql = "SELECT " . self::COLUMNS
+            . " FROM `{$table}`"
+            . " WHERE attestor_user_id = %d"
+            . " AND target_kind = %s"
+            . " AND target_id IN ({$placeholders})"
+            . " AND revoked_at IS NULL"
+            . " LIMIT 100";
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $attestorUserId, $targetKind, ...array_keys($ids));
+        if (!is_string($prepared)) {
+            return $result;
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return $result;
+        }
+
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->kind, $row->target_id) || !is_string($row->kind)) {
+                continue;
+            }
+            $targetId = (int) $row->target_id;
+            if (!isset($result[$targetId])) {
+                continue;
+            }
+            if ($row->kind === 'vouch') {
+                $result[$targetId]['vouch'] = $row;
+            } elseif ($row->kind === 'stand_behind') {
+                $result[$targetId]['stand_behind'] = $row;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
      * Find one attestation by id. Returns the raw row (with all
      * columns including soft-delete state) — caller decides what to
      * surface based on revoked_at + owner.
@@ -538,6 +631,106 @@ final class AttestationRepository
 
         $raw = $wpdb->get_var($prepared);
         return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
+     * Grouped variant of countByTarget's active total — one bounded
+     * GROUP BY query for a whole cards-list page of targets. Same
+     * WHERE predicate (target_kind + target_id IN + revoked_at IS
+     * NULL); collapses the per-kind split because the only batch
+     * consumer (DivergenceStateClassifier via PageCardPrefetcher)
+     * reads the total only.
+     *
+     * Targets with zero active attestations are absent from the map —
+     * consumers default with `?? 0`.
+     *
+     * Bounded: caller-paginated IN-list (cards per_page ≤ 50), one
+     * row per target via GROUP BY.
+     *
+     * @param list<int> $targetIds
+     * @return array<int, int> target_id => active attestation count.
+     */
+    public function countActiveByTargets(string $targetKind, array $targetIds): array
+    {
+        return $this->countByTargetsWhereRevoked($targetKind, $targetIds, false);
+    }
+
+    /**
+     * Grouped variant of countRevokedByTarget — one bounded GROUP BY
+     * query for a whole cards-list page of targets. Same WHERE
+     * predicate (target_kind + target_id IN + revoked_at IS NOT NULL).
+     *
+     * Targets with zero revoked attestations are absent from the map —
+     * consumers default with `?? 0`.
+     *
+     * @param list<int> $targetIds
+     * @return array<int, int> target_id => revoked attestation count.
+     */
+    public function countRevokedByTargets(string $targetKind, array $targetIds): array
+    {
+        return $this->countByTargetsWhereRevoked($targetKind, $targetIds, true);
+    }
+
+    /**
+     * Shared SQL for the two grouped count variants above — identical
+     * shape except for the revoked_at IS NULL / IS NOT NULL predicate.
+     *
+     * @param list<int> $targetIds
+     * @return array<int, int> target_id => count.
+     */
+    private function countByTargetsWhereRevoked(string $targetKind, array $targetIds, bool $revoked): array
+    {
+        if (!in_array($targetKind, self::TARGET_KINDS, true)) {
+            return [];
+        }
+
+        $ids = [];
+        foreach ($targetIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $revokedPredicate = $revoked ? 'IS NOT NULL' : 'IS NULL';
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $sql = "SELECT target_id, COUNT(*) AS c"
+            . " FROM `{$table}`"
+            . ' WHERE target_kind = %s'
+            . " AND target_id IN ({$placeholders})"
+            . " AND revoked_at {$revokedPredicate}"
+            . ' GROUP BY target_id'
+            . ' LIMIT 100';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $targetKind, ...array_keys($ids));
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->target_id, $row->c)) {
+                continue;
+            }
+            $targetId = (int) $row->target_id;
+            if ($targetId > 0) {
+                $out[$targetId] = (int) $row->c;
+            }
+        }
+        return $out;
     }
 
     /**

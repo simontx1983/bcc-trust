@@ -3,7 +3,7 @@
 namespace BCC\Trust\Disputes\Admin;
 
 use BCC\Trust\Disputes\DTO\AdminDisputeRowDTO;
-use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use BCC\Trust\Disputes\Repositories\DisputeAdminRepository;
 use WP_List_Table;
 
 if (!defined('ABSPATH')) {
@@ -71,7 +71,7 @@ class DisputeListTable extends WP_List_Table
         $current = isset($_GET['dispute_status']) ? sanitize_key($_GET['dispute_status']) : 'all';
         $base    = admin_url('admin.php?page=bcc-disputes');
 
-        $counts = DisputeRepository::getDisputeStatusCounts();
+        $counts = DisputeAdminRepository::getDisputeStatusCounts();
         $total  = array_sum($counts);
 
         $views = [];
@@ -119,7 +119,7 @@ class DisputeListTable extends WP_List_Table
         $order = isset($_GET['order']) && strtoupper($_GET['order']) === 'ASC' ? 'ASC' : 'DESC';
 
         // Count
-        $total = DisputeRepository::countDisputesForAdminList($status_filter ?: null);
+        $total = DisputeAdminRepository::countDisputesForAdminList($status_filter ?: null);
 
         // Pagination
         $per_page = 20;
@@ -133,7 +133,7 @@ class DisputeListTable extends WP_List_Table
         ]);
 
         // Query via repository — explicit columns, no SELECT *.
-        $items = DisputeRepository::getDisputesForAdminList(
+        $items = DisputeAdminRepository::getDisputesForAdminList(
             $status_filter ?: null,
             $orderby,
             $order,

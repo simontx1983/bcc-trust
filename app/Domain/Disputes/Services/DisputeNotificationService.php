@@ -2,7 +2,9 @@
 
 namespace BCC\Trust\Disputes\Services;
 
+use BCC\Trust\Disputes\Repositories\DisputePanelRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use BCC\Trust\Disputes\Repositories\UserReportRepository;
 use WP_User;
 
 if (!defined('ABSPATH')) {
@@ -172,7 +174,7 @@ class DisputeNotificationService
         // one lost the mark race. Under AS replay / reconcile overlap that
         // produced duplicate panelist emails.
         $ts = gmdate('Y-m-d H:i:s');
-        if (!DisputeRepository::markPanelistNotified($dispute_id, $uid, $ts)) {
+        if (!DisputePanelRepository::markPanelistNotified($dispute_id, $uid, $ts)) {
             // Someone else already claimed or completed the send.
             return;
         }
@@ -207,7 +209,7 @@ class DisputeNotificationService
                 // Release our claim so the next AS retry (or reconciliation
                 // sweep) can re-attempt. Scoped to $ts so we never clear a
                 // concurrent successful send's marker.
-                DisputeRepository::clearPanelistNotified($dispute_id, $uid, $ts);
+                DisputePanelRepository::clearPanelistNotified($dispute_id, $uid, $ts);
             }
         }
 
@@ -228,7 +230,7 @@ class DisputeNotificationService
     {
         // Claim-before-send: see notifyPanelist() for rationale.
         $ts = gmdate('Y-m-d H:i:s');
-        if (!DisputeRepository::markReportNotified($report_id, $ts)) {
+        if (!UserReportRepository::markReportNotified($report_id, $ts)) {
             return;
         }
 
@@ -246,7 +248,7 @@ class DisputeNotificationService
             $sent = (bool) wp_mail($reported_user->user_email, $subject, $body);
         } finally {
             if (!$sent) {
-                DisputeRepository::clearReportNotified($report_id, $ts);
+                UserReportRepository::clearReportNotified($report_id, $ts);
             }
         }
 
@@ -268,7 +270,7 @@ class DisputeNotificationService
         // admin emails previously leaked via the check-then-mark TOCTOU and
         // looked like a spam attack to moderators.
         $ts = gmdate('Y-m-d H:i:s');
-        if (!DisputeRepository::markAdminReportNotified($report_id, $ts)) {
+        if (!UserReportRepository::markAdminReportNotified($report_id, $ts)) {
             return;
         }
 
@@ -330,7 +332,7 @@ class DisputeNotificationService
             $sent = (bool) wp_mail($admin_email, $subject, $body);
         } finally {
             if (!$sent) {
-                DisputeRepository::clearAdminReportNotified($report_id, $ts);
+                UserReportRepository::clearAdminReportNotified($report_id, $ts);
             }
         }
 
