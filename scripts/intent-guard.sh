@@ -56,6 +56,11 @@ fi
 
 WP_ARGS=()
 [[ -n "$WP_PATH" ]] && WP_ARGS+=("--path=$WP_PATH")
+# rest_do_request() honors permission_callback even in-process — without a
+# current user, the admin-gated health routes return rest_forbidden and the
+# jq defaults make every metric parse as 0 (coverage "fails" at 0%, drift
+# silently "passes"). Run as an admin; override with BCC_GUARD_WP_USER.
+WP_ARGS+=("--user=${BCC_GUARD_WP_USER:-1}")
 
 # Strictness thresholds (local ↔ ci).
 if [[ "$CI_MODE" == "1" ]]; then
