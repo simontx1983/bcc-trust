@@ -640,6 +640,12 @@ final class AuthEndpoint
                         'default'           => '',
                         'sanitize_callback' => 'sanitize_text_field',
                     ],
+                    'email' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'default'           => '',
+                        'sanitize_callback' => 'sanitize_email',
+                    ],
                 ],
             ]
         );
@@ -1323,9 +1329,13 @@ final class AuthEndpoint
      * (email pre-verified, random password), links the OAuth provider ID in user
      * meta, and returns a full JWT.
      *
-     * Validation errors (invalid handle, handle taken) leave the provider_token
-     * intact so the user can correct and retry without restarting the OAuth flow.
-     * The token is consumed only when user creation succeeds.
+     * If /auth/oauth didn't capture an email for this provider (Twitter), the
+     * `email` param is required here — /signup/complete-profile collects it.
+     *
+     * Validation errors (invalid handle, handle taken, invalid/missing email,
+     * email taken) leave the provider_token intact so the user can correct and
+     * retry without restarting the OAuth flow. The token is consumed only when
+     * user creation succeeds.
      */
     public function oauthComplete(WP_REST_Request $request): WP_REST_Response
     {
@@ -1377,12 +1387,19 @@ final class AuthEndpoint
         }
 
         // OAuth signup users are email-verified by definition (Google/Twitter
-        // verified the email during the OAuth flow). If no email was supplied
-        // (Twitter), mint a stable placeholder keyed to the provider+id so the
-        // same wallet can't leak duplicates on retry.
-        $hasRealEmail = $email !== '' && is_email($email);
-        if (!$hasRealEmail) {
-            $email = self::placeholderEmailForOauth($provider, $providerId);
+        // verified the email during the OAuth flow). Twitter's OAuth2
+        // user-context never returns an email, so /signup/complete-profile
+        // collects one directly — required here whenever the provider didn't
+        // supply one.
+        if ($email === '' || !is_email($email)) {
+            $email = sanitize_email((string) $request->get_param('email'));
+            if ($email === '' || !is_email($email)) {
+                return ApiResponse::error(
+                    'bcc_invalid_email',
+                    'A valid email address is required.',
+                    422
+                );
+            }
         }
 
         $login    = self::deriveLogin($handle);
@@ -1438,16 +1455,13 @@ final class AuthEndpoint
         do_action('bcc_user_signup', $userIdInt, $handle);
 
         // Welcome email — best-effort, mirrors finalizeVerification(). OAuth
-        // accounts are active immediately (no separate verify-email step),
-        // so send here. Skipped when no real email was supplied (Twitter
-        // without email scope) — the placeholder address can't receive mail.
-        if ($hasRealEmail) {
-            AuthMailer::sendWelcomeEmail(
-                $email,
-                $handle,
-                FrontendRedirect::defaultReturn('/')
-            );
-        }
+        // accounts are active immediately (no separate verify-email step), so
+        // send here; $email is guaranteed real (validated above).
+        AuthMailer::sendWelcomeEmail(
+            $email,
+            $handle,
+            FrontendRedirect::defaultReturn('/')
+        );
 
         $response = ApiResponse::ok([
             'user_id'          => $userIdInt,
@@ -2585,17 +2599,6 @@ final class AuthEndpoint
             return $id > 0 ? $id : null;
         }
         return null;
-    }
-
-    /**
-     * Deterministic placeholder email for an OAuth signup with no email.
-     * Twitter OAuth 2.0 does not expose user emails; we mint a stable
-     * placeholder so WP's user_email UNIQUE constraint is satisfied and
-     * the same provider+id always maps to the same placeholder on retry.
-     */
-    private static function placeholderEmailForOauth(string $provider, string $providerId): string
-    {
-        return 'oauth-' . $provider . '-' . substr(md5($providerId), 0, 16) . '@noreply.bcc.local';
     }
 
     // JWT mint/verify lives in BCC\Trust\Core\Support\JwtToken — single
