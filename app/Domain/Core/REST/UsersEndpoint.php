@@ -666,12 +666,12 @@ final class UsersEndpoint
         // PK-on-`bcc_reputation_scores` read, cheap.
         $prefetched = MemberSummaryPrefetcher::primeFor($userIds);
 
-        $userView = Plugin::instance()->userViewService();
+        $cardView = Plugin::instance()->cardViewService();
         $items    = [];
         foreach ($userIds as $userId) {
-            $summary = $userView->getSummary($userId, $viewerId, $prefetched);
-            if ($summary !== null) {
-                $items[] = $summary;
+            $card = $cardView->getMemberCardForList($userId, $viewerId, $prefetched);
+            if ($card !== null) {
+                $items[] = $card;
             }
         }
 

@@ -228,51 +228,51 @@ final class GroupsService
      *
      * Returns:
      *   - {kind: 'not_found'}     — group missing OR secret + non-member
-     *   - {kind: 'forbidden', unlock_hint: string}
-     *                              — closed/secret/nft-gated, non-member
-     *                                or non-holder; copy is server-pinned
-     *   - {kind: 'allowed', group_id: int}
-     *                              — open OR member; caller proceeds
-     *                                with FeedRankingService::getGroupFeed
+     *   - {kind: 'allowed', group_id: int, public_only: bool}
+     *                              — caller proceeds with
+     *                                FeedRankingService::getGroupFeed.
+     *                                `public_only` is FALSE for members
+     *                                (they see members_only posts too) and
+     *                                TRUE for non-members of any surviving
+     *                                kind (nft / closed / open) — they get
+     *                                the PUBLIC-only teaser feed.
+     *
+     * Phase 2 (per-post visibility teaser): non-members of nft/closed
+     * groups are NO LONGER `forbidden` here. Instead they are `allowed`
+     * with `public_only = true`, and the SQL filter in
+     * PeepSoActivityRepository::getActivities restricts their candidate
+     * set to `public_group` / `public_all` posts via an INNER JOIN —
+     * `members_only` and absent-meta posts can never reach them. Secret
+     * groups still short-circuit to `not_found` above (never leak
+     * existence), so the security invariant holds at two layers: the
+     * 404 here for secret, and the visibility INNER JOIN downstream for
+     * the rest.
      *
      * Same defense-in-depth model as `getGroup()` but returns a typed
      * gate decision rather than a view-model, so the endpoint can
      * separately set 404 vs 403 status codes per the contract.
      *
-     * @return array{kind: 'not_found'}|array{kind: 'forbidden', unlock_hint: string}|array{kind: 'allowed', group_id: int}
+     * @return array{kind: 'not_found'}|array{kind: 'allowed', group_id: int, public_only: bool}
      */
     public function gateGroupFeed(int $viewerId, int $groupId): array
     {
         $access = $this->resolveGroupAccess($viewerId, $groupId);
         if ($access === null) {
+            // Covers: missing group AND secret + non-member (never leaked).
             return ['kind' => 'not_found'];
         }
 
-        $ctx      = $access['ctx'];
         $isMember = $access['isMember'];
 
         if ($isMember) {
-            return ['kind' => 'allowed', 'group_id' => $groupId];
+            // Members read the full feed, including members_only posts.
+            return ['kind' => 'allowed', 'group_id' => $groupId, 'public_only' => false];
         }
 
-        // From here on: non-member with the group existence allowed to
-        // surface (open / closed / nft).
-        if ($ctx->type === GroupType::Nft) {
-            return [
-                'kind'        => 'forbidden',
-                'unlock_hint' => self::nftUnlockHint(),
-            ];
-        }
-
-        if ($ctx->privacy === PeepSoPrivacy::Closed) {
-            return [
-                'kind'        => 'forbidden',
-                'unlock_hint' => 'Join the group to read its feed.',
-            ];
-        }
-
-        // Open + non-member: feed is public per PeepSo's privacy rules.
-        return ['kind' => 'allowed', 'group_id' => $groupId];
+        // Non-member of a surviving (non-secret) group — nft / closed /
+        // open. They get the PUBLIC-only teaser; the downstream INNER JOIN
+        // enforces that members_only / absent-meta posts are excluded.
+        return ['kind' => 'allowed', 'group_id' => $groupId, 'public_only' => true];
     }
 
     /**
@@ -636,44 +636,27 @@ final class GroupsService
      */
     private function resolveCanReadFeed(GroupContext $ctx, int $viewerId, bool $isMember): array
     {
-        if ($isMember) {
-            return [
-                'allowed'     => true,
-                'unlock_hint' => null,
-                'reason_code' => null,
-            ];
-        }
-
-        // Non-member from here. Open groups expose their feed publicly
-        // (matches PeepSo's own privacy semantics for `is_open` walls).
-        if ($ctx->privacy === PeepSoPrivacy::Open && $ctx->type !== GroupType::Nft) {
-            return [
-                'allowed'     => true,
-                'unlock_hint' => null,
-                'reason_code' => null,
-            ];
-        }
-
-        if ($ctx->type === GroupType::Nft) {
-            return [
-                'allowed'     => false,
-                'unlock_hint' => self::nftUnlockHint(),
-                'reason_code' => 'not_eligible',
-            ];
-        }
-
-        if ($viewerId <= 0) {
-            return [
-                'allowed'     => false,
-                'unlock_hint' => 'Sign in to read this feed.',
-                'reason_code' => 'auth_required',
-            ];
-        }
+        // Phase 2 (per-post visibility teaser): the feed surface is now
+        // readable by EVERYONE who reaches this method — members get the
+        // full feed, non-members (and anonymous viewers) get a PUBLIC-only
+        // teaser. `feed_visible` therefore mirrors the gate: it is true so
+        // the FE renders the (filtered) feed instead of a locked notice.
+        //
+        // Secret groups never reach here — getGroup() short-circuits to a
+        // 404 for secret + non-member upstream (defense-in-depth gate #1),
+        // so the only groups whose view-model is built are non-secret
+        // (open / closed / nft) plus any privacy for an active member.
+        //
+        // The members_only / absent-meta posts are never exposed to
+        // non-members: the SQL INNER JOIN in
+        // PeepSoActivityRepository::getActivities (driven by the gate's
+        // `public_only` flag) enforces that, NOT this advisory flag.
+        unset($ctx, $viewerId, $isMember);
 
         return [
-            'allowed'     => false,
-            'unlock_hint' => 'Join the group to read its feed.',
-            'reason_code' => 'membership_required',
+            'allowed'     => true,
+            'unlock_hint' => null,
+            'reason_code' => null,
         ];
     }
 

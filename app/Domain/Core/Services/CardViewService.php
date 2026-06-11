@@ -74,7 +74,8 @@ final class CardViewService
         private readonly EndorsementService $endorsementService,
         private readonly AttestationService $attestationService,
         private readonly NewEntityReputationVelocityCap $newEntityVelocityCap,
-        private readonly DivergenceStateClassifier $divergenceClassifier
+        private readonly DivergenceStateClassifier $divergenceClassifier,
+        private readonly UserViewService $userViewService
     ) {
     }
 
@@ -209,6 +210,11 @@ final class CardViewService
             // on a card so unclaimed placeholders still show what the
             // operator actually does on-chain.
             'onchain_signals'     => self::resolveOnchainSignals($kind, $pageId),
+            // member_dossier is member-only — always null on page cards
+            // for shape uniformity (matches how `chains`/`onchain_signals`
+            // are always present). The frontend's CardFactory reads
+            // `member_dossier` only on the member face.
+            'member_dossier'      => null,
             // V1: tier-keyed coloring for entity cards (chain-keyed lands
             // alongside §K3 chain-wiring in V1.5). `background_value` per
             // §2.9 is the card_tier slug; falls back to 'common' on the
@@ -290,9 +296,60 @@ final class CardViewService
         if ($userId === 0) {
             return null;
         }
+        // Single-card path stays handle-based and passes no prefetch —
+        // the single-user fallback inside getSummary is fine for one card.
+        return $this->getMemberCardByUserId($userId, $viewerId, null);
+    }
+
+    /**
+     * Public list accessor — the three list producers (/members,
+     * entity watchers, followers/following) call this per user with a
+     * shared `MemberSummaryPrefetcher::primeFor()` map so the per-row
+     * dossier hydration inside getSummary doesn't N+1. Thin wrapper over
+     * getMemberCardByUserId; exists so callers don't reach into a
+     * private method.
+     *
+     * @param array<string, mixed>|null $prefetched
+     * @return array<string, mixed>|null
+     */
+    public function getMemberCardForList(int $userId, int $viewerId, ?array $prefetched): ?array
+    {
+        return $this->getMemberCardByUserId($userId, $viewerId, $prefetched);
+    }
+
+    /**
+     * Build the member Card view-model keyed by user id. Resolves the
+     * full member dossier (rank_label, verifications, engagement,
+     * owned_pages_by_type, primary_local) by delegating to
+     * UserViewService::getSummary once — the SAME resolution the
+     * MemberSummary surfaces use, so there is no parallel dossier query.
+     *
+     * `$prefetched` (when non-null) is the shared
+     * MemberSummaryPrefetcher batch; getSummary reads it and falls back
+     * to single-user queries when null.
+     *
+     * Returns null when the user doesn't resolve (deleted mid-flight).
+     *
+     * @param array<string, mixed>|null $prefetched
+     * @return array<string, mixed>|null
+     */
+    private function getMemberCardByUserId(int $userId, int $viewerId, ?array $prefetched = null): ?array
+    {
+        if ($userId <= 0) {
+            return null;
+        }
 
         $user = get_userdata($userId);
         if ($user === false) {
+            return null;
+        }
+
+        // Single delegation to the canonical member-dossier resolver.
+        // getSummary returns null for a user that vanished between the
+        // id list and hydration — propagate that as a null card so the
+        // list producers skip the row rather than emit a half-built card.
+        $summary = $this->userViewService->getSummary($userId, $viewerId, $prefetched);
+        if ($summary === null) {
             return null;
         }
 
@@ -317,10 +374,10 @@ final class CardViewService
             'reputation_tier'     => $tier,
             'card_tier'           => $card['key'],
             'tier_label'          => $card['label'],
-            // STUB: rank-label resolved by /users/:handle; cards stay
-            // tight per V1. Field is ALWAYS emitted (nullable) per the
-            // contract.
-            'rank_label'          => null,
+            // Real rank label now — resolved once via getSummary's
+            // RankService path (no longer a hard-stubbed null). Pages
+            // still emit null (§E2 ranks are member-only).
+            'rank_label'          => $summary['rank_label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::buildFlags($userId),
             // §V1.5 endorse fields stay present on member cards for
@@ -350,11 +407,27 @@ final class CardViewService
                 $card['key'] ?? 'common',
                 self::resolveMemberAvatarUrl($userId)
             ),
-            'stats'               => $this->buildMemberStats($userId, $trustScore),
+            'stats'               => $this->buildMemberStats(
+                $userId,
+                $trustScore,
+                (int) $summary['followers_count']
+            ),
             'permissions'         => $this->resolveMemberPermissions($userId, $viewerId),
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
             'social_proof'        => null,
+            // member_dossier — the back-of-card signal blocks the
+            // /members + watchers + followers lists used to carry as a
+            // bare MemberSummary. Copied straight from getSummary's
+            // already-resolved sub-arrays (same wire keys) so nothing is
+            // lost when those lists move to the Card view-model. Page
+            // cards emit `member_dossier: null` for shape uniformity.
+            'member_dossier'      => [
+                'verifications'       => $summary['verifications'],
+                'engagement'          => $summary['engagement'],
+                'owned_pages_by_type' => $summary['owned_pages_by_type'],
+                'primary_local'       => $summary['primary_local'],
+            ],
             'links'               => self::buildLinks('member', $resolvedHandle),
             'actions'             => self::buildMemberActions($userId),
         ];
@@ -821,15 +894,19 @@ final class CardViewService
     }
 
     /**
+     * @param int $watchersCount Passed in from getSummary's
+     *                           `followers_count` so the 3-col
+     *                           StatsPanel isn't sparse — no re-query.
      * @return list<Stat>
      */
-    private function buildMemberStats(int $userId, int $trustScore): array
+    private function buildMemberStats(int $userId, int $trustScore, int $watchersCount): array
     {
         $reviewsWritten = (int) $this->voteRepo->countByVoter($userId);
 
         return [
-            ['key' => 'trust',           'label' => 'Trust',   'value' => (string) $trustScore,    'raw' => $trustScore,    'format' => 'score'],
-            ['key' => 'reviews_written', 'label' => 'Reviews', 'value' => (string) $reviewsWritten, 'raw' => $reviewsWritten, 'format' => 'count'],
+            ['key' => 'trust',           'label' => 'Trust',    'value' => (string) $trustScore,     'raw' => $trustScore,     'format' => 'score'],
+            ['key' => 'reviews_written', 'label' => 'Reviews',  'value' => (string) $reviewsWritten, 'raw' => $reviewsWritten, 'format' => 'count'],
+            ['key' => 'watchers',        'label' => 'Watchers', 'value' => (string) $watchersCount,  'raw' => $watchersCount,  'format' => 'count'],
         ];
     }
 

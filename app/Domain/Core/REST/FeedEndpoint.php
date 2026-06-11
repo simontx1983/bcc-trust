@@ -87,6 +87,25 @@ final class FeedEndpoint
             ]
         );
 
+        // GET /feed/tag — anonymous-OK hashtag feed. Same posture +
+        // envelope as /feed/hot; narrowed to one hashtag (§F3 — one brain).
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/feed/tag',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'tagFeed'],
+                'permission_callback' => '__return_true',
+                'args'                => $sharedArgs + [
+                    'tag' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                ],
+            ]
+        );
+
         // GET /feed — auth-required personalized feed (§N6)
         register_rest_route(
             self::ROUTE_NAMESPACE,
@@ -120,6 +139,32 @@ final class FeedEndpoint
         // §F2 hot feed is anonymous-cacheable; volatile but tolerable to
         // serve slightly stale to anonymous viewers.
         $response->header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+
+        return $response;
+    }
+
+    public function tagFeed(WP_REST_Request $request): WP_REST_Response
+    {
+        // Public, same posture as the anon hot feed. 0 = anonymous viewer.
+        $viewerId = get_current_user_id();
+
+        [$cursor, $limit] = $this->paginationArgs($request);
+
+        // Strip a leading '#' the client may have passed; the repository
+        // LIKE rebuilds the '#tag' token itself.
+        $tagParam = $request->get_param('tag');
+        $tag      = is_string($tagParam) ? ltrim(trim($tagParam), '#') : '';
+        if ($tag === '') {
+            return ApiResponse::error('bcc_invalid_request', 'A tag is required.', 400);
+        }
+
+        $payload = Plugin::instance()->feedRankingService()->getTagFeed($viewerId, $tag, $cursor, $limit);
+
+        $response = ApiResponse::ok($payload);
+        // Same cache style as the existing personalized feed: viewer state
+        // (viewer_reaction, can_report) varies the response, so no shared cache.
+        $response->header('Cache-Control', 'private, max-age=15');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }

@@ -98,14 +98,14 @@ final class CardWatchersService
 
         $prefetched = MemberSummaryPrefetcher::primeFor($userIds);
 
-        $userView = Plugin::instance()->userViewService();
+        $cardView = Plugin::instance()->cardViewService();
         $items    = [];
         foreach ($userIds as $userId) {
-            $summary = $userView->getSummary($userId, $viewerId, $prefetched);
-            if ($summary === null) {
+            $card = $cardView->getMemberCardForList($userId, $viewerId, $prefetched);
+            if ($card === null) {
                 continue;
             }
-            $items[] = $summary;
+            $items[] = $card;
         }
 
         $hasMore = ($offset + count($userIds)) < $total;

@@ -21,7 +21,6 @@ use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VerificationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\REST\Envelope;
-use BCC\Trust\Core\REST\PageEndpoint;
 use BCC\Trust\Core\Security\BehavioralAnalyzer;
 use BCC\Trust\Core\Security\DeviceFingerprinter;
 use BCC\Trust\Core\Security\TrustGraph;
@@ -675,7 +674,8 @@ final class Plugin
             $this->endorsementService(),
             $this->attestationService(),
             $this->newEntityVelocityCap(),
-            $this->divergenceClassifier()
+            $this->divergenceClassifier(),
+            $this->userViewService()
         );
     }
 
@@ -920,6 +920,21 @@ final class Plugin
         );
     }
 
+    private ?Services\SuggestionService $suggestionService = null;
+    public function suggestionService(): Services\SuggestionService
+    {
+        // Who-to-follow recommender (AFFINITY-only; see the service's
+        // doctype). Reuses UserViewService for member view-model
+        // hydration and ReputationRepository/SuspensionRepository for
+        // the exclusion-only reputation gate. No new graph/exclusion
+        // primitives — every read is a repository call.
+        return $this->suggestionService ??= new Services\SuggestionService(
+            $this->userViewService(),
+            $this->reputationRepository(),
+            $this->suspensionRepository()
+        );
+    }
+
     // ── Phase 3 services ────────────────────────────────────────────────
 
     private ?Services\CronService $cronService = null;
@@ -1083,17 +1098,8 @@ final class Plugin
         // The Core domain listens to bcc_wallet_verified / bcc_wallet_disconnected
         // hooks in CronService::registerCacheInvalidation() for scoring updates.
 
-        // Page data endpoint
-        PageEndpoint::register();
-
-        // Page flag endpoint (signal only — no score impact)
-        \BCC\Trust\Core\REST\FlagEndpoint::register();
-
         // User endorsements endpoint (my endorsements)
         \BCC\Trust\Core\REST\UserEndorsementsEndpoint::register();
-
-        // Entity claim endpoint (replaces admin-ajax bcc_claim_entity)
-        \BCC\Trust\Core\REST\EntityClaimEndpoint::register();
 
         // Read model health monitoring (admin-only)
         \BCC\Trust\Core\REST\ReadModelHealthEndpoint::register();
@@ -1110,6 +1116,18 @@ final class Plugin
         // V1 contract: hot feed (§F2 zero-follow fallback) — routes through
         // the §F3 single-brain FeedRankingService.
         \BCC\Trust\Core\REST\FeedEndpoint::register();
+
+        // V1 contract: trending hashtags (GET /hashtags/trending) — a
+        // read-only projection over PeepSo's peepso_hashtags counter via
+        // bcc-core's PeepSoHashtagRepository. Non-personalized; public cache.
+        \BCC\Trust\Core\REST\HashtagsEndpoint::register();
+
+        // V1.25 contract: personalized who-to-follow recommender
+        // (GET /suggestions/users). Auth-required; AFFINITY-only scoring
+        // (reciprocity / mutual follows / shared Locals + communities /
+        // shared validator backing) — NEVER ranked by trust or follower
+        // count. Reputation is exclusion-only. See SuggestionService.
+        \BCC\Trust\Core\REST\SuggestionsEndpoint::register();
 
         // Sprint 3 cold-start bridge surface — GET /feed/cold-start.
         // Composes three blocks for the home-feed empty state (locals +
@@ -1447,13 +1465,6 @@ final class Plugin
         // GET /admin/reports + POST /admin/reports/:id/resolve.
         // Capability-gated to manage_options (V1 = admins only).
         \BCC\Trust\Core\REST\AdminReportsEndpoint::register();
-
-        // API index
-        register_rest_route('bcc-trust/v1', '/', [
-            'methods'             => 'GET',
-            'callback'            => [$this, 'apiIndex'],
-            'permission_callback' => '__return_true',
-        ]);
     }
 
     /**
@@ -2441,49 +2452,4 @@ final class Plugin
         });
     }
 
-    /**
-     * API index endpoint — lists all registered bcc-trust/v1 routes.
-     */
-    public function apiIndex(): \WP_REST_Response
-    {
-        $routes    = rest_get_server()->get_routes('bcc-trust/v1');
-        $endpoints = [];
-
-        foreach ($routes as $route => $handlers) {
-            foreach ($handlers as $handler) {
-                $methods = [];
-                if (isset($handler['methods'])) {
-                    $methods = is_array($handler['methods'])
-                        ? array_keys($handler['methods'])
-                        : [$handler['methods']];
-                }
-
-                $callback = 'unknown';
-                if (isset($handler['callback'])) {
-                    if (is_array($handler['callback'])) {
-                        $callback = (is_object($handler['callback'][0])
-                            ? get_class($handler['callback'][0])
-                            : $handler['callback'][0])
-                            . '::' . $handler['callback'][1];
-                    } elseif (is_string($handler['callback'])) {
-                        $callback = $handler['callback'];
-                    }
-                }
-
-                $endpoints[] = [
-                    'route'    => $route,
-                    'methods'  => $methods,
-                    'callback' => $callback,
-                ];
-            }
-        }
-
-        return new \WP_REST_Response([
-            'success' => true,
-            'data'    => [
-                'namespace' => 'bcc-trust/v1',
-                'routes'    => $endpoints,
-            ],
-        ], 200);
-    }
 }

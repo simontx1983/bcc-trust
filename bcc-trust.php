@@ -982,8 +982,14 @@ add_action('plugins_loaded', function (): void {
         \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::removeAddress($walletLinkId, $walletAddress);
     }, 10, 2);
 
-    // User deletion: clean up wallet links, signals, and claims.
+    // User deletion: clean up wallet links, signals, claims, and the
+    // per-wallet on-chain data hung off them (NFT holdings + profile
+    // selections). NftHoldings resolves ownership by joining wallet_links,
+    // so it MUST run BEFORE WalletRepository::deleteForUser deletes those
+    // rows — otherwise the join finds nothing and holdings orphan.
     add_action('delete_user', function (int $userId): void {
+        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::deleteForUser($userId);
+        \BCC\Trust\Onchain\Repositories\NftSelectionRepository::deleteForUser($userId);
         \BCC\Trust\Onchain\Repositories\WalletRepository::deleteForUser($userId);
         \BCC\Trust\Onchain\Repositories\SignalRepository::deleteForUser($userId);
         \BCC\Trust\Onchain\Repositories\ClaimRepository::deleteForUser($userId);
@@ -991,7 +997,6 @@ add_action('plugins_loaded', function (): void {
 
     // REST API.
     add_action('rest_api_init', [\BCC\Trust\Onchain\Controllers\SignalController::class, 'registerRoutes']);
-    add_action('rest_api_init', [\BCC\Trust\Onchain\Controllers\CollectionController::class, 'registerRoutes']);
     add_action('rest_api_init', [\BCC\Trust\Onchain\Controllers\NftSelectionController::class, 'register_rest_routes']);
     // V2 Phase 1b: Helius webhook receiver. Always-200 + tx_signature
     // dedupe — see HeliusWebhookEndpoint for the auth + replay model.

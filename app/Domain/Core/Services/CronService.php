@@ -7,7 +7,6 @@ use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Repositories\WalletSignalRepository;
-use BCC\Trust\Core\REST\PageEndpoint;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -673,15 +672,15 @@ class CronService
     public static function registerCacheInvalidation(): void
     {
         add_action('bcc_trust_vote_cast', function ($voterId, $pageId) {
-            PageEndpoint::bustCache((int) $pageId);
+            PageDataLoader::bust((int) $pageId);
         }, 10, 2);
 
         add_action('bcc_trust_vote_removed', function ($voterId, $pageId) {
-            PageEndpoint::bustCache((int) $pageId);
+            PageDataLoader::bust((int) $pageId);
         }, 10, 2);
 
         add_action('bcc_trust_vote_changed', function ($voterId, $pageId) {
-            PageEndpoint::bustCache((int) $pageId);
+            PageDataLoader::bust((int) $pageId);
         }, 10, 2);
 
         // Priority 5: run BEFORE the onchain-signals WalletSeedService listener
@@ -690,7 +689,7 @@ class CronService
         // even if downstream seed calls hit a timeout.
         add_action('bcc_wallet_verified', function ($userId, $chain = '', $address = '') {
             try {
-                PageEndpoint::bustCacheForUser((int) $userId);
+                PageDataLoader::bustForUser((int) $userId);
 
                 // Ensure an onchain_signals row exists so wallets verified via
                 // the Onchain domain's AJAX path still appear in trust scoring.
@@ -722,12 +721,12 @@ class CronService
         // zero the scoring row so trust scores update immediately.
         add_action('bcc_wallet_disconnected', function ($userId, $chain) {
             WalletSignalRepository::disconnect((int) $userId, $chain);
-            PageEndpoint::bustCacheForUser((int) $userId);
+            PageDataLoader::bustForUser((int) $userId);
         }, 10, 2);
 
         add_action('save_post', function ($postId, $post) {
             if (in_array($post->post_type, ['peepso-page', 'post', 'page'], true)) {
-                PageEndpoint::bustCache((int) $postId);
+                PageDataLoader::bust((int) $postId);
             }
         }, 10, 2);
     }

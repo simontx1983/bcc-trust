@@ -123,6 +123,80 @@ final class FeedRankingService
     }
 
     /**
+     * Tag feed (`GET /bcc/v1/feed/tag`) — the global hot feed, narrowed to
+     * posts carrying a single hashtag.
+     *
+     * SECURITY INVARIANT (load-bearing): the tag feed must NEVER surface a
+     * post the public hot feed would not. This method is therefore a literal
+     * mirror of `getHotFeed()` for everything that governs VISIBILITY:
+     *
+     *   - same `$excluded` set: $this->reputationRepo->getCautionAndRiskyUserIds()
+     *     (§O4.1 caution/risky shadow-limit) — IDENTICAL call, no merge.
+     *   - same `$hidden` set: $this->hiddenRepo->getAllHiddenIds()
+     *     (§K1-C moderation hide) — IDENTICAL call.
+     *   - same restricted-group exclusion computed with `self::resolveRestrictedGroupIds(0)`
+     *     — deliberately the ANONYMOUS posture (viewer id 0), exactly as
+     *     getHotFeed does. We do NOT subtract the real viewer's memberships
+     *     here: doing so would WIDEN the candidate set to include the viewer's
+     *     own gated-group posts, which the public hot feed never shows. The
+     *     tag feed's visible set is thus a strict subset of the hot feed's.
+     *   - same global-feed visibility gate: `onlyForGroupId = null` →
+     *     PeepSoActivityRepository applies the `public_all` LEFT JOIN gate
+     *     (group posts surface only when `_bcc_post_visibility = 'public_all'`;
+     *     non-group posts pass through).
+     *
+     * The ONLY difference from getHotFeed is the trailing `$hashtag` argument
+     * forwarded to `activityFeed->getFeed(...)`, which is a pure NARROWING
+     * predicate (`post_content LIKE '%#tag%'`). A narrowing predicate can only
+     * remove rows from the already-gated candidate set — it can never add one
+     * — so the visibility parity with the hot feed holds by construction.
+     *
+     * Hydration is IDENTICAL to getHotFeed (bodies, reactions, author badges,
+     * author ranks, social-proof reactors, viewer permissions, group
+     * contexts, comment counts). The real `$viewerId` is passed ONLY to the
+     * hydration steps that personalize NON-visibility chrome (viewer_reaction,
+     * can_report, gated comment-count zeroing). Personalization tightens or
+     * annotates per-viewer state; it never reveals a post the gate dropped.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    public function getTagFeed(int $viewerId, string $hashtag, ?string $cursor = null, int $limit = 20): array
+    {
+        $hashtag = ltrim(trim($hashtag), '#');
+        if ($hashtag === '') {
+            return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+        }
+
+        // Visibility gates — computed IDENTICALLY to getHotFeed (see docblock).
+        $excluded       = $this->reputationRepo->getCautionAndRiskyUserIds();
+        $hidden         = $this->hiddenRepo->getAllHiddenIds();
+        $excludedGroups = self::resolveRestrictedGroupIds(0);
+
+        $payload = $this->activityFeed->getFeed(
+            $viewerId,
+            ActivityFeedService::SCOPE_FOR_YOU,
+            $cursor,
+            $limit,
+            $excluded === [] ? null : $excluded,
+            $hidden === []   ? null : $hidden,
+            null,
+            $excludedGroups === [] ? null : $excludedGroups,
+            null,
+            $hashtag
+        );
+
+        $payload['items'] = $this->hydrateBodies($payload['items']);
+        $payload['items'] = $this->hydrateReactions($payload['items'], $viewerId);
+        $payload['items'] = $this->hydrateAuthorBadges($payload['items']);
+        $payload['items'] = $this->hydrateAuthorRanks($payload['items']);
+        $payload['items'] = $this->hydrateSocialProofReactors($payload['items']);
+        $payload['items'] = self::hydrateViewerPermissions($payload['items'], $viewerId);
+        $payload['items'] = $this->hydrateGroupContexts($payload['items']);
+        $payload['items'] = $this->hydrateCommentCounts($payload['items'], $viewerId);
+        return $payload;
+    }
+
+    /**
      * Personalized feed (§N6) — auth-required, three scopes.
      *
      * @param 'for_you'|'following'|'signals' $scope
@@ -239,26 +313,66 @@ final class FeedRankingService
      * Authorization is the caller's job. The endpoint
      * (GroupsDetailEndpoint::feed) enforces:
      *   - secret + non-member → 404
-     *   - closed + non-member → 403 with unlock_hint
-     *   - nft-gated + non-holder/non-member → 403 with unlock_hint
+     *   - everyone else (member OR non-member of nft/closed/open) → allowed
      * before this is invoked. The SQL filter then restricts the
      * candidate set to posts carrying `peepso_group_id` post-meta.
      *
+     * Phase 2 (per-post visibility teaser): `$publicOnly` is TRUE for
+     * non-members (set from the gate's `public_only` flag). When true we
+     * restrict the candidate set to `public_group` / `public_all` posts
+     * via the visibility INNER JOIN in
+     * PeepSoActivityRepository::getActivities — `members_only` and
+     * absent-meta posts are EXCLUDED for non-members (the security
+     * invariant). When false (a member is reading) no visibility filter
+     * is applied, so the member sees every post including members_only.
+     *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getGroupFeed(int $viewerId, int $groupId, ?string $cursor = null, int $limit = 20): array
+    public function getGroupFeed(int $viewerId, int $groupId, ?string $cursor = null, int $limit = 20, bool $publicOnly = false): array
     {
         if ($groupId <= 0) {
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
-        $excluded = self::mergeExclusions(
-            $this->reputationRepo->getCautionAndRiskyUserIds(),
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
-            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
-        );
+        // Block + blocker exclusions apply in EVERY feed surface — a
+        // personal block relationship must hold even inside a shared group.
+        $blockExclusions = $viewerId > 0
+            ? self::mergeExclusions(
+                PeepSoBlockRepository::getBlockedIds($viewerId),
+                PeepSoBlockRepository::getBlockerIds($viewerId)
+            )
+            : [];
+
+        // §O4.1 reputation shadow-limit (caution/risky authors) is a
+        // PUBLIC-FLOOR mechanism. Inside an NFT holder group the on-chain
+        // gate + membership IS the moderation boundary: a verified holder
+        // who was admitted must not be filtered out of the room they
+        // qualified for, nor hidden from fellow holders (a low-trust holder
+        // would otherwise see their own posts vanish into "empty room").
+        // So we drop the reputation exclusion for nft-type groups only —
+        // Local / plain groups keep it (their entry bar is lower). Block +
+        // the moderation-hidden list still apply everywhere. forGroup() is
+        // request-cached (the feed gate already resolved this group), so the
+        // lookup is free.
+        $ctx        = $this->groupContextResolver->forGroup($groupId);
+        $isNftGroup = $ctx !== null && $ctx->isHolderGroup();
+
+        $excluded = $isNftGroup
+            ? $blockExclusions
+            : self::mergeExclusions(
+                $this->reputationRepo->getCautionAndRiskyUserIds(),
+                $blockExclusions
+            );
 
         $hidden = $this->hiddenRepo->getAllHiddenIds();
+
+        // Per-post visibility scope. Non-members ($publicOnly === true) may
+        // only read posts marked `public_group` / `public_all`; null means
+        // "no visibility filter" (member read → all posts incl members_only).
+        // The downstream INNER JOIN excludes absent-meta posts for the
+        // non-member case, which is the security invariant (absent ⇒
+        // members_only ⇒ hidden).
+        $visibilityIn = $publicOnly ? ['public_group', 'public_all'] : null;
 
         $payload = $this->activityFeed->getFeed(
             $viewerId,
@@ -267,7 +381,9 @@ final class FeedRankingService
             $limit,
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
-            $groupId
+            $groupId,
+            null,
+            $visibilityIn
         );
 
         $payload['items'] = $this->hydrateBodies($payload['items']);

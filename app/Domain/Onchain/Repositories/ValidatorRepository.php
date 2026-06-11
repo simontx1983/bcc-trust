@@ -130,6 +130,79 @@ final class ValidatorRepository
     }
 
     /**
+     * Batched moniker resolution for a set of (chain_id, operator_address)
+     * pairs. Used by the who-to-follow recommender to label the
+     * "Backs {moniker} too" reason line without an N+1 across candidates.
+     *
+     * Returns a map keyed `"<chainId>:<operatorAddress>"` → moniker.
+     * Pairs that don't resolve (un-indexed validator) are absent from
+     * the map; the caller falls back to a generic label.
+     *
+     * Bounded (§4): an explicit `IN (...)` over the composite key,
+     * capped at 100 pairs (the recommender only resolves monikers for
+     * its final, already-bounded result set). Reads `moniker` only — no
+     * SELECT *.
+     *
+     * @param list<array{chain_id: int, operator_address: string}> $pairs
+     * @return array<string, string>  "chainId:operatorAddress" => moniker
+     */
+    public static function getMonikersByAddresses(array $pairs): array
+    {
+        if ($pairs === []) {
+            return [];
+        }
+
+        // Dedupe by composite key; cap defensively.
+        $clean = [];
+        foreach ($pairs as $pair) {
+            $chainId = (int) ($pair['chain_id'] ?? 0);
+            $address = (string) ($pair['operator_address'] ?? '');
+            if ($chainId > 0 && $address !== '') {
+                $clean[$chainId . ':' . $address] = ['chain_id' => $chainId, 'operator_address' => $address];
+            }
+            if (count($clean) >= 100) {
+                break;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $conditions = [];
+        $params     = [];
+        foreach ($clean as $pair) {
+            $conditions[] = '(chain_id = %d AND operator_address = %s)';
+            $params[]     = $pair['chain_id'];
+            $params[]     = $pair['operator_address'];
+        }
+        $whereSql = implode(' OR ', $conditions);
+
+        /** @var list<array{chain_id: string, operator_address: string, moniker: string|null}>|null $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT chain_id, operator_address, moniker
+                   FROM {$table}
+                  WHERE {$whereSql}
+                  LIMIT 100",
+                ...$params
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $moniker = $row['moniker'];
+            if ($moniker !== null && $moniker !== '') {
+                $out[(int) $row['chain_id'] . ':' . (string) $row['operator_address']] = (string) $moniker;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Resolve the first validator row backing a peepso-page, with its
      * chain slug. Used by CardViewService to surface `claim_target`
      * on the validator card view-model so the §N8 claim flow knows

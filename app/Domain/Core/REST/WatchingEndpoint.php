@@ -1,24 +1,12 @@
 <?php
 /**
- * Watching Endpoints — canonical /bcc/v1/me/watching/* routes plus the
- * deprecated /bcc/v1/me/binder/* alias family.
+ * Watching Endpoints — canonical /bcc/v1/me/watching/* routes.
  *
- * Canonical routes (release N, this file):
+ * Routes:
  *   - GET    /me/watching                   — viewer's watchlist, paginated (§C2)
  *   - GET    /me/watching/summary           — §N9 identity-snapshot summary
  *   - POST   /me/watching/watch             — watch a card (creates follow + meta)
  *   - DELETE /me/watching/:follow_id        — unwatch (flips uf_follow=0, deletes meta)
- *
- * Deprecated alias routes (kept through release N, removed in N+1):
- *   - GET    /me/binder                     — alias of /me/watching
- *   - GET    /me/binder/summary             — alias of /me/watching/summary
- *   - POST   /me/binder/pull                — alias of /me/watching/watch
- *   - DELETE /me/binder/:follow_id          — alias of /me/watching/:follow_id
- *
- * Each legacy response carries three RFC 8594 deprecation headers:
- *   - Deprecation: true
- *   - Sunset: Sun, 01 Nov 2026 00:00:00 GMT  (placeholder cut-date)
- *   - Link: <https://docs/api-contract-v1.md#45-watching>; rel="deprecation"
  *
  * Per §C2: the watchlist is a UI-layer projection of PeepSo follows.
  * Mutations route through bcc-core's PeepSoFollowWriter (the canonical
@@ -66,18 +54,6 @@ final class WatchingEndpoint
     private const ROUTE_NAMESPACE   = 'bcc/v1';
     private const DEFAULT_PAGE_SIZE = 20;
     private const MAX_PAGE_SIZE     = 50;
-
-    /**
-     * Deprecation headers attached to every legacy /me/binder/* response
-     * per RFC 8594. The Sunset date is a placeholder for release N+1's
-     * actual cut-date and may shift; the date is recorded in the
-     * api-contract changelog when finalised.
-     */
-    private const LEGACY_DEPRECATION_HEADERS = [
-        'Deprecation' => 'true',
-        'Sunset'      => 'Sun, 01 Nov 2026 00:00:00 GMT',
-        'Link'        => '<https://docs/api-contract-v1.md#45-watching>; rel="deprecation"',
-    ];
 
     // Watch / unwatch rate limits migrated 2026-05-13 from hardcoded
     // class constants (Throttle::allow primitive) to the bcc-trust
@@ -139,59 +115,10 @@ final class WatchingEndpoint
                 'args'                => self::unwatchArgs(),
             ]
         );
-
-        // ── Deprecated /me/binder/* family (kept through release N) ──
-        //
-        // Each legacy route delegates to the same handler with the
-        // $deprecated=true flag, which attaches RFC 8594 Deprecation /
-        // Sunset / Link headers to the response. Removed in release N+1.
-
-        register_rest_route(
-            self::ROUTE_NAMESPACE,
-            '/me/binder',
-            [
-                'methods'             => WP_REST_Server::READABLE,
-                'callback'            => [$instance, 'listLegacy'],
-                'permission_callback' => '__return_true',
-                'args'                => self::listArgs(),
-            ]
-        );
-
-        register_rest_route(
-            self::ROUTE_NAMESPACE,
-            '/me/binder/summary',
-            [
-                'methods'             => WP_REST_Server::READABLE,
-                'callback'            => [$instance, 'summaryLegacy'],
-                'permission_callback' => '__return_true',
-            ]
-        );
-
-        register_rest_route(
-            self::ROUTE_NAMESPACE,
-            '/me/binder/pull',
-            [
-                'methods'             => WP_REST_Server::CREATABLE,
-                'callback'            => [$instance, 'watchLegacy'],
-                'permission_callback' => '__return_true',
-                'args'                => self::watchArgs(),
-            ]
-        );
-
-        register_rest_route(
-            self::ROUTE_NAMESPACE,
-            '/me/binder/(?P<follow_id>\d+)',
-            [
-                'methods'             => WP_REST_Server::DELETABLE,
-                'callback'            => [$instance, 'unwatchLegacy'],
-                'permission_callback' => '__return_true',
-                'args'                => self::unwatchArgs(),
-            ]
-        );
     }
 
     /**
-     * Shared arg spec for the list (GET /me/watching, GET /me/binder).
+     * Arg spec for the list (GET /me/watching).
      *
      * @return array<string, array<string, mixed>>
      */
@@ -217,8 +144,7 @@ final class WatchingEndpoint
     }
 
     /**
-     * Shared arg spec for the watch action
-     * (POST /me/watching/watch, POST /me/binder/pull).
+     * Arg spec for the watch action (POST /me/watching/watch).
      *
      * @return array<string, array<string, mixed>>
      */
@@ -240,8 +166,7 @@ final class WatchingEndpoint
     }
 
     /**
-     * Shared arg spec for the unwatch action
-     * (DELETE /me/watching/{follow_id}, DELETE /me/binder/{follow_id}).
+     * Arg spec for the unwatch action (DELETE /me/watching/{follow_id}).
      *
      * @return array<string, array<string, mixed>>
      */
@@ -271,70 +196,14 @@ final class WatchingEndpoint
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Canonical handlers (release N+)
+    // Handlers
     // ──────────────────────────────────────────────────────────────────
 
     public function list(WP_REST_Request $request): WP_REST_Response
     {
-        return $this->handleList($request, false);
-    }
-
-    public function summary(WP_REST_Request $request): WP_REST_Response
-    {
-        return $this->handleSummary($request, false);
-    }
-
-    public function watch(WP_REST_Request $request): WP_REST_Response
-    {
-        return $this->handleWatch($request, false);
-    }
-
-    public function unwatch(WP_REST_Request $request): WP_REST_Response
-    {
-        return $this->handleUnwatch($request, false);
-    }
-
-    // ──────────────────────────────────────────────────────────────────
-    // Legacy handlers (release N — removed in release N+1)
-    //
-    // Identical to the canonical handlers but attach the RFC 8594
-    // deprecation header trio. Frontend cuts over to /me/watching/* in
-    // release N; these stay alive one release for external clients
-    // (mobile, public API consumers) per the Sunset date.
-    // ──────────────────────────────────────────────────────────────────
-
-    public function listLegacy(WP_REST_Request $request): WP_REST_Response
-    {
-        return $this->handleList($request, true);
-    }
-
-    public function summaryLegacy(WP_REST_Request $request): WP_REST_Response
-    {
-        return $this->handleSummary($request, true);
-    }
-
-    public function watchLegacy(WP_REST_Request $request): WP_REST_Response
-    {
-        return $this->handleWatch($request, true);
-    }
-
-    public function unwatchLegacy(WP_REST_Request $request): WP_REST_Response
-    {
-        return $this->handleUnwatch($request, true);
-    }
-
-    // ──────────────────────────────────────────────────────────────────
-    // Shared implementations (called by both canonical + legacy handlers)
-    // ──────────────────────────────────────────────────────────────────
-
-    private function handleList(WP_REST_Request $request, bool $deprecated): WP_REST_Response
-    {
         $userId = get_current_user_id();
         if ($userId <= 0) {
-            return $this->maybeDeprecate(
-                ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401),
-                $deprecated
-            );
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
         $page     = (int) $request->get_param('page');
@@ -350,19 +219,16 @@ final class WatchingEndpoint
 
         $response = ApiResponse::ok($payload);
         $response->header('Cache-Control', 'no-store');
-        return $this->maybeDeprecate($response, $deprecated);
+        return $response;
     }
 
-    private function handleSummary(WP_REST_Request $request, bool $deprecated): WP_REST_Response
+    public function summary(WP_REST_Request $request): WP_REST_Response
     {
         unset($request);
 
         $userId = get_current_user_id();
         if ($userId <= 0) {
-            return $this->maybeDeprecate(
-                ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401),
-                $deprecated
-            );
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
         $payload = Plugin::instance()->watchingSummaryService()->compose($userId);
@@ -371,24 +237,18 @@ final class WatchingEndpoint
         // Per-viewer; no shared cache. Same posture as the list:
         // a freshly-watched card should reflect immediately.
         $response->header('Cache-Control', 'private, no-store');
-        return $this->maybeDeprecate($response, $deprecated);
+        return $response;
     }
 
-    private function handleWatch(WP_REST_Request $request, bool $deprecated): WP_REST_Response
+    public function watch(WP_REST_Request $request): WP_REST_Response
     {
         $userId = get_current_user_id();
         if ($userId <= 0) {
-            return $this->maybeDeprecate(
-                ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401),
-                $deprecated
-            );
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
         if (!\BCC\Trust\Core\Security\RateLimiter::allow('pull')) {
-            return $this->maybeDeprecate(
-                ApiResponse::error('bcc_rate_limited', 'Too many watches. Please wait.', 429),
-                $deprecated
-            );
+            return ApiResponse::error('bcc_rate_limited', 'Too many watches. Please wait.', 429);
         }
 
         $targetKind = (string) $request->get_param('target_kind');
@@ -404,10 +264,7 @@ final class WatchingEndpoint
                 'bcc_internal_error'   => 500,
                 default                => 400,
             };
-            return $this->maybeDeprecate(
-                ApiResponse::error($code, (string) $result['message'], $status),
-                $deprecated
-            );
+            return ApiResponse::error($code, (string) $result['message'], $status);
         }
 
         $response = ApiResponse::ok([
@@ -415,24 +272,18 @@ final class WatchingEndpoint
             'item'   => $result['item'],
         ]);
         $response->header('Cache-Control', 'no-store');
-        return $this->maybeDeprecate($response, $deprecated);
+        return $response;
     }
 
-    private function handleUnwatch(WP_REST_Request $request, bool $deprecated): WP_REST_Response
+    public function unwatch(WP_REST_Request $request): WP_REST_Response
     {
         $userId = get_current_user_id();
         if ($userId <= 0) {
-            return $this->maybeDeprecate(
-                ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401),
-                $deprecated
-            );
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
         if (!\BCC\Trust\Core\Security\RateLimiter::allow('unpull')) {
-            return $this->maybeDeprecate(
-                ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429),
-                $deprecated
-            );
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
         }
 
         $followId  = (int) $request->get_param('follow_id');
@@ -449,10 +300,7 @@ final class WatchingEndpoint
                 'bcc_internal_error'   => 500,
                 default                => 400,
             };
-            return $this->maybeDeprecate(
-                ApiResponse::error($code, (string) $result['message'], $status),
-                $deprecated
-            );
+            return ApiResponse::error($code, (string) $result['message'], $status);
         }
 
         $response = ApiResponse::ok([
@@ -460,21 +308,6 @@ final class WatchingEndpoint
             'follow_id' => $result['follow_id'],
         ]);
         $response->header('Cache-Control', 'no-store');
-        return $this->maybeDeprecate($response, $deprecated);
-    }
-
-    /**
-     * Attach RFC 8594 deprecation headers when the request arrived
-     * via a legacy /me/binder/* route. No-op for canonical routes.
-     */
-    private function maybeDeprecate(WP_REST_Response $response, bool $deprecated): WP_REST_Response
-    {
-        if (!$deprecated) {
-            return $response;
-        }
-        foreach (self::LEGACY_DEPRECATION_HEADERS as $name => $value) {
-            $response->header($name, $value);
-        }
         return $response;
     }
 }
