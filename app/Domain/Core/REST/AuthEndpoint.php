@@ -1329,7 +1329,8 @@ final class AuthEndpoint
         // verified the email during the OAuth flow). If no email was supplied
         // (Twitter), mint a stable placeholder keyed to the provider+id so the
         // same wallet can't leak duplicates on retry.
-        if ($email === '' || !is_email($email)) {
+        $hasRealEmail = $email !== '' && is_email($email);
+        if (!$hasRealEmail) {
             $email = self::placeholderEmailForOauth($provider, $providerId);
         }
 
@@ -1384,6 +1385,18 @@ final class AuthEndpoint
         ]);
 
         do_action('bcc_user_signup', $userIdInt, $handle);
+
+        // Welcome email — best-effort, mirrors finalizeVerification(). OAuth
+        // accounts are active immediately (no separate verify-email step),
+        // so send here. Skipped when no real email was supplied (Twitter
+        // without email scope) — the placeholder address can't receive mail.
+        if ($hasRealEmail) {
+            AuthMailer::sendWelcomeEmail(
+                $email,
+                $handle,
+                FrontendRedirect::defaultReturn('/')
+            );
+        }
 
         $response = ApiResponse::ok([
             'user_id'          => $userIdInt,
