@@ -599,6 +599,33 @@ final class NftHoldingsRepository
     }
 
     /**
+     * Delete every holding for a single wallet link. Called on wallet
+     * unlink (WalletController::rest_unlink_wallet) so a disconnected
+     * wallet's NFTs don't linger in the gallery / gating reads, and so a
+     * later re-link starts from a clean slate. Bumps the wallet generation
+     * so any cached read invalidates on the next request.
+     *
+     * Returns the number of rows removed.
+     */
+    public static function deleteForWalletLink(int $walletLinkId): int
+    {
+        if ($walletLinkId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $deleted = $wpdb->delete($table, ['wallet_link_id' => $walletLinkId], ['%d']);
+        $count   = is_int($deleted) ? $deleted : 0;
+
+        if ($count > 0) {
+            self::bumpWalletGeneration($walletLinkId);
+        }
+        return $count;
+    }
+
+    /**
      * Atomic batch ingest used by NftHoldingsIndexer. Wraps upsertMany +
      * per-row deletes in a single transaction so a mid-batch DB hiccup
      * cannot leave the chain checkpoint out of sync with row state.

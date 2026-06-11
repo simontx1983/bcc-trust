@@ -199,6 +199,31 @@ final class NftSelectionRepository
     }
 
     /**
+     * Delete every selection backed by a single wallet link. Called on
+     * wallet unlink so a disconnected wallet's NFTs stop showing on the
+     * user's profile. Rows are keyed by wallet_link_id, but the §5 cache
+     * counter is per-user, so the owning user id is passed in to bump it.
+     * Returns the number of rows removed.
+     */
+    public static function deleteForWalletLink(int $walletLinkId, int $userId): int
+    {
+        if ($walletLinkId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->delete($table, ['wallet_link_id' => $walletLinkId], ['%d']);
+        $count  = is_int($result) ? $result : 0;
+
+        if ($count > 0 && $userId > 0) {
+            self::bumpUserGeneration($userId);
+        }
+        return $count;
+    }
+
+    /**
      * List all selections for a user, joined with chain metadata.
      *
      * @return list<NftSelectionWithChain>
