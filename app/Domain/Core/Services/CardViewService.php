@@ -1149,6 +1149,17 @@ final class CardViewService
                 'can_pull'           => self::allow(),
                 'can_review'         => self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
                 'can_dispute'        => self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
+                // §4.4 can_open_dispute — the OWNER vote-dispute entry
+                // (DisputeCallout → OpenDisputeModal → POST /disputes).
+                // Mirrors the write gate exactly: DisputeController
+                // requires Permissions::owns_page and nothing else — no
+                // feature-ladder gate on the write path. Distinct from
+                // can_dispute (the §J attestation cast, sign_dispute
+                // ladder). owns_page resolves through PageOwnerResolver,
+                // request-cached and pre-primed on cards-list paths.
+                'can_open_dispute'   => \BCC\Core\Permissions\Permissions::owns_page($targetId, $viewerId)
+                    ? self::allow()
+                    : self::deny(null, 'not_page_owner'),
                 // §V1.5 — endorse eligibility is precomputed by
                 // EndorsementService::getEndorseEligibility (mirrors the
                 // gates inside endorsePage but read-only). Pass-through the
@@ -1217,6 +1228,9 @@ final class CardViewService
                 'can_dispute'        => $isSelf
                     ? self::deny(null, 'self_action_blocked')
                     : self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
+                // Owner vote-disputes target page-cards only — member
+                // profiles have no disputable page votes.
+                'can_open_dispute'   => self::deny(null, 'not_applicable'),
                 // Endorsements target page-cards (validator/project/creator)
                 // only. Members are followed/reviewed via different surfaces.
                 'can_endorse'        => self::deny(null, 'not_applicable'),
@@ -1240,6 +1254,7 @@ final class CardViewService
             'can_pull'           => $sign,
             'can_review'         => $sign,
             'can_dispute'        => $sign,
+            'can_open_dispute'   => $sign,
             'can_endorse'        => $sign,
             'can_post_as_entity' => $sign,
             'can_edit_bio'       => $sign,
@@ -1257,6 +1272,7 @@ final class CardViewService
             'can_pull'           => $sign,
             'can_review'         => $sign,
             'can_dispute'        => $sign,
+            'can_open_dispute'   => self::deny(null, 'not_applicable'),
             'can_endorse'        => self::deny(null, 'not_applicable'),
             'can_post_as_entity' => self::deny(null, 'not_applicable'),
             'can_edit_bio'       => $sign,
