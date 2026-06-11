@@ -477,8 +477,8 @@ class DisputeRepository
         $existingForVote = $wpdb->get_var($wpdb->prepare(
             "SELECT id FROM {$disputeTable}
              WHERE vote_id = %d AND status = 'reviewing'
-             FOR UPDATE
-             LIMIT 1",
+             LIMIT 1
+             FOR UPDATE",
             $voteId
         ));
         if ($existingForVote) {

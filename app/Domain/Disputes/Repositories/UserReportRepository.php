@@ -105,8 +105,8 @@ class UserReportRepository
         $hasDupe = (bool) $wpdb->get_var($wpdb->prepare(
             "SELECT id FROM {$table}
              WHERE reporter_id = %d AND reported_id = %d AND status IN ('open', 'reviewing')
-             FOR UPDATE
-             LIMIT 1",
+             LIMIT 1
+             FOR UPDATE",
             $reporterId, $reportedId
         ));
         if ($hasDupe) {
