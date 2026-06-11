@@ -2531,12 +2531,19 @@ final class AuthEndpoint
 
     // ── OAuth provider-token helpers ──────────────────────────────────
 
+    /**
+     * @param array{provider: string, provider_id: string, email: string, display_name: string} $data
+     */
     private static function storeOauthProviderToken(string $token, array $data): void
     {
         set_transient('bcc_oauth_pt_' . $token, wp_json_encode($data), self::OAUTH_PROVIDER_TOKEN_TTL);
     }
 
-    /** Read the provider token without deleting it (safe for validation passes). */
+    /**
+     * Read the provider token without deleting it (safe for validation passes).
+     *
+     * @return array<array-key, mixed>|null
+     */
     private static function peekOauthProviderToken(string $token): ?array
     {
         if ($token === '') {
