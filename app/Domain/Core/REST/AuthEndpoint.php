@@ -1170,6 +1170,44 @@ final class AuthEndpoint
     }
 
     /**
+     * Server-to-server gate for the OAuth SSO bridge.
+     *
+     * `/auth/oauth` trusts the caller's asserted OAuth identity (provider +
+     * email) to mint a JWT, so it MUST only be reachable by the trusted
+     * NextAuth backend — which performs the actual Google/Twitter token
+     * verification before calling here. We enforce that with a shared secret
+     * (`BCC_OAUTH_BRIDGE_SECRET`) compared in constant time, mirroring the
+     * internal indexer-tick / Helius-webhook machine-to-machine pattern.
+     *
+     * Without this gate the endpoint is a pre-auth account takeover: an
+     * anonymous caller could POST a victim's email and receive a valid session
+     * JWT for that account (password + email-2FA both bypassed).
+     *
+     * Fail-closed: if the secret isn't configured on both ends, refuse — OAuth
+     * SSO stays disabled until an operator pins the secret rather than running
+     * open.
+     *
+     * @return WP_REST_Response|null  Error response when the gate fails; null when OK.
+     */
+    private function oauthBridgeGate(WP_REST_Request $request): ?WP_REST_Response
+    {
+        $expected = defined('BCC_OAUTH_BRIDGE_SECRET')
+            ? (string) constant('BCC_OAUTH_BRIDGE_SECRET')
+            : '';
+        if ($expected === '') {
+            \BCC\Core\Log\Logger::error('[AuthEndpoint] BCC_OAUTH_BRIDGE_SECRET not configured — /auth/oauth disabled');
+            return ApiResponse::error('bcc_internal', 'OAuth bridge not configured.', 500);
+        }
+
+        $provided = (string) $request->get_header('x-bcc-oauth-secret');
+        if ($provided === '' || !hash_equals($expected, $provided)) {
+            return ApiResponse::error('bcc_unauthorized', 'OAuth bridge authentication failed.', 401);
+        }
+
+        return null;
+    }
+
+    /**
      * POST /auth/oauth — OAuth SSO login bridge.
      *
      * Called by the Next.js `signIn` callback after a successful Google/Twitter
@@ -1187,6 +1225,14 @@ final class AuthEndpoint
     {
         if (!\BCC\Core\Security\Throttle::allow('oauth_login', self::OAUTH_LOGIN_RATE_LIMIT, 60)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
+        }
+
+        // Server-to-server secret — only the NextAuth backend (which already
+        // verified the Google/Twitter token) may reach this. Closes the
+        // pre-auth account-takeover; see oauthBridgeGate().
+        $gate = $this->oauthBridgeGate($request);
+        if ($gate !== null) {
+            return $gate;
         }
 
         $provider    = (string) $request->get_param('provider');
@@ -1287,6 +1333,11 @@ final class AuthEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
         }
 
+        // No server-to-server secret gate here (unlike /auth/oauth): this
+        // endpoint is browser-called from /signup/complete-profile, and its
+        // security rests on the provider_token — an unforgeable, single-use,
+        // server-issued capability that ONLY the secret-gated /auth/oauth can
+        // mint, carrying server-stored (not client-supplied) provider data.
         $providerToken = sanitize_text_field((string) $request->get_param('provider_token'));
         $handle        = strtolower(trim((string) $request->get_param('handle')));
         $displayName   = sanitize_text_field((string) $request->get_param('display_name'));
