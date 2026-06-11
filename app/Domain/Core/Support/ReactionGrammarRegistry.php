@@ -170,8 +170,13 @@ final class ReactionGrammarRegistry
         }
 
         foreach (self::PEEPSO_DEFAULT_TITLES as $title => $kind) {
+            // PeepSo stores its default reaction TYPE posts as
+            // `peepso_reaction`; `peepso_reaction_user` rows are users'
+            // cast reactions (plus the BCC-seeded type posts, which
+            // ReactionTypeRegistry resolves separately). Accept both so
+            // the lookup survives PeepSo versions that renamed the CPT.
             $posts = get_posts([
-                'post_type'      => 'peepso_reaction_user',
+                'post_type'      => ['peepso_reaction', 'peepso_reaction_user'],
                 'post_status'    => 'publish',
                 'title'          => $title,
                 'posts_per_page' => 1,
