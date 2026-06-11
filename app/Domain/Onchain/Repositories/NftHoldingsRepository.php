@@ -578,6 +578,27 @@ final class NftHoldingsRepository
     }
 
     /**
+     * Delete all holdings for every wallet linked to a user (full
+     * account cleanup). nft_holdings has no user_id column of its own,
+     * so ownership is resolved via a join to wallet_links — this MUST
+     * run BEFORE WalletRepository::deleteForUser, or the join finds
+     * nothing and holdings orphan.
+     */
+    public static function deleteForUser(int $userId): void
+    {
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+
+        $wpdb->query($wpdb->prepare(
+            "DELETE h FROM {$table} h
+             INNER JOIN {$wallets} w ON w.id = h.wallet_link_id
+             WHERE w.user_id = %d",
+            $userId
+        ));
+    }
+
+    /**
      * Atomic batch ingest used by NftHoldingsIndexer. Wraps upsertMany +
      * per-row deletes in a single transaction so a mid-batch DB hiccup
      * cannot leave the chain checkpoint out of sync with row state.

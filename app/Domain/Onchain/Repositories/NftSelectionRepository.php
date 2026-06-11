@@ -189,6 +189,16 @@ final class NftSelectionRepository
     }
 
     /**
+     * Delete all selections for a user (full account cleanup).
+     */
+    public static function deleteForUser(int $userId): void
+    {
+        global $wpdb;
+        $table = self::table();
+        $wpdb->delete($table, ['user_id' => $userId], ['%d']);
+    }
+
+    /**
      * List all selections for a user, joined with chain metadata.
      *
      * @return list<NftSelectionWithChain>
