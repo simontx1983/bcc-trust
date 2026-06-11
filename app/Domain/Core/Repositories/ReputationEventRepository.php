@@ -109,4 +109,22 @@ final class ReputationEventRepository
         ));
         return $rows ?: [];
     }
+
+    /**
+     * Hard-delete every reputation-event row for a deleted user. Distinct
+     * from ReputationRepository::delete (which clears the bcc_trust_reputation
+     * snapshot row) — this clears the bcc_reputation_events ledger that keys
+     * on user_id and was previously left behind on hard account deletion.
+     *
+     * Called from UserLifecycleService::onUserDelete (delete_user).
+     */
+    public function deleteForUser(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+
+        global $wpdb;
+        $wpdb->delete($this->table, ['user_id' => $userId], ['%d']);
+    }
 }

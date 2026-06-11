@@ -135,4 +135,41 @@ final class TargetDivergenceStateRepository
         }
         $wpdb->query($prepared);
     }
+
+    /**
+     * Hard-delete the divergence-state sidecar rows for a deleted page —
+     * rows whose `target_id` is the page and whose `target_kind` is one of
+     * the card kinds. Mirrors AttestationRepository::deleteForPageTarget so
+     * the §J.8 notifier's prior-state memory doesn't keep a dangling row
+     * for a target that no longer exists.
+     *
+     * Reuses AttestationRepository::PAGE_TARGET_KINDS as the single source
+     * of truth for "which target_kinds are page-keyed" — the two cleanups
+     * must never diverge.
+     *
+     * Called from UserLifecycleService::onPageDelete (before_delete_post).
+     */
+    public function deleteForPageTarget(int $pageId): void
+    {
+        if ($pageId <= 0) {
+            return;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::targetDivergenceState();
+
+        $kinds            = AttestationRepository::PAGE_TARGET_KINDS;
+        $kindPlaceholders = implode(',', array_fill(0, count($kinds), '%s'));
+        $sql = "DELETE FROM `{$table}`"
+            . ' WHERE target_id = %d'
+            . " AND target_kind IN ({$kindPlaceholders})";
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $pageId, ...$kinds);
+        if (!is_string($prepared)) {
+            return;
+        }
+        $wpdb->query($prepared);
+    }
 }

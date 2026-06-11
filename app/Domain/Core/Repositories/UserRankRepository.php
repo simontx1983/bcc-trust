@@ -210,4 +210,21 @@ class UserRankRepository
 
         return (int) $result;
     }
+
+    /**
+     * Hard-delete every rank-award row (active and historical) for a
+     * deleted user. Closes the orphan gap on hard account deletion —
+     * bcc_user_ranks keys on user_id.
+     *
+     * Called from UserLifecycleService::onUserDelete (delete_user).
+     */
+    public function deleteForUser(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+
+        global $wpdb;
+        $wpdb->delete($this->table, ['user_id' => $userId], ['%d']);
+    }
 }

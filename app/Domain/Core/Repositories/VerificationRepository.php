@@ -193,4 +193,22 @@ class VerificationRepository {
             'types' => array_map(fn($r) => $r->type, $rows),
         ];
     }
+
+    /**
+     * Hard-delete every identity-verification row (github / x / wallet)
+     * owned by a deleted user. Closes the orphan gap on hard account
+     * deletion — bcc_trust_user_verifications keys on user_id.
+     *
+     * Called from UserLifecycleService::onUserDelete (delete_user).
+     */
+    public function deleteForUser(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+
+        global $wpdb;
+        $table = \BCC\Trust\Core\Database\TableRegistry::userVerifications();
+        $wpdb->delete($table, ['user_id' => $userId], ['%d']);
+    }
 }

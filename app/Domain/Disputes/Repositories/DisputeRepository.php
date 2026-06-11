@@ -4,6 +4,7 @@ namespace BCC\Trust\Disputes\Repositories;
 
 use BCC\Core\DB\DB;
 use BCC\Core\DTO\RowAssert;
+use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Disputes\Domain\DisputeStatus;
 use BCC\Trust\Disputes\DTO\DisputeCoreDTO;
 use BCC\Trust\Disputes\DTO\DisputeDetailDTO;
@@ -39,6 +40,155 @@ class DisputeRepository
     // live in DisputeRepositorySupport — shared with UserReportRepository
     // so every raw `START TRANSACTION` site in the dispute domain routes
     // through one audited implementation.
+
+    // ── Delete-cascade (page deletion) ────────────────────────────────────
+
+    /**
+     * Hard-delete every dispute attached to a deleted page, cascading its
+     * children FIRST so no panel / participation rows orphan.
+     *
+     * Order is load-bearing: bcc_dispute_panel + bcc_dispute_participations
+     * are keyed on dispute_id with no FK ON DELETE CASCADE, so they MUST be
+     * removed before their parent dispute rows. The whole cascade runs in
+     * one transaction — a mid-cascade failure rolls back rather than leaving
+     * a half-deleted dispute tree.
+     *
+     * Called from UserLifecycleService::onPageDelete (before_delete_post) so
+     * a permanently-deleted page leaves no dispute residue. Disputes are
+     * page-scoped via the disputes.page_id column.
+     */
+    public static function deleteForPage(int $pageId): void
+    {
+        if ($pageId <= 0) {
+            return;
+        }
+
+        global $wpdb;
+        $disputeTable       = self::disputes_table();
+        $panelTable         = self::panel_table();
+        $participationTable = TableRegistry::disputeParticipations();
+
+        if (!DisputeRepositorySupport::beginTx()) {
+            \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in deleteForPage', [
+                'page_id'  => $pageId,
+                'db_error' => (string) $wpdb->last_error,
+            ]);
+            return;
+        }
+
+        try {
+            // Resolve the dispute ids for this page once, then cascade
+            // children by that id set. Bounded by BCC_DISPUTES_MAX_PER_PAGE-
+            // class volume; LIMIT is belt-and-suspenders.
+            $disputeIds = $wpdb->get_col($wpdb->prepare(
+                "SELECT id FROM {$disputeTable} WHERE page_id = %d LIMIT 5000",
+                $pageId
+            ));
+            $disputeIds = array_values(array_filter(
+                array_map('intval', $disputeIds),
+                static fn(int $id): bool => $id > 0
+            ));
+
+            if ($disputeIds !== []) {
+                $placeholders = implode(',', array_fill(0, count($disputeIds), '%d'));
+
+                // Children FIRST — panel rows then participation rows.
+                $wpdb->query($wpdb->prepare(
+                    "DELETE FROM {$panelTable} WHERE dispute_id IN ({$placeholders})",
+                    ...$disputeIds
+                ));
+                $wpdb->query($wpdb->prepare(
+                    "DELETE FROM {$participationTable} WHERE dispute_id IN ({$placeholders})",
+                    ...$disputeIds
+                ));
+            }
+
+            // Parent disputes LAST.
+            $wpdb->delete($disputeTable, ['page_id' => $pageId], ['%d']);
+
+            if (!DisputeRepositorySupport::commitTx('deleteForPage')) {
+                \BCC\Core\Log\Logger::error('[bcc-disputes] COMMIT failed in deleteForPage', [
+                    'page_id'  => $pageId,
+                    'db_error' => (string) $wpdb->last_error,
+                ]);
+                return;
+            }
+        } catch (\Throwable $e) {
+            DisputeRepositorySupport::rollbackTx('deleteForPage:exception');
+            \BCC\Core\Log\Logger::error('[bcc-disputes] deleteForPage cascade failed', [
+                'page_id' => $pageId,
+                'error'   => $e->getMessage(),
+            ]);
+            return;
+        }
+
+        // Invalidate the status-counts cache so post-delete reads reflect
+        // the empty state.
+        wp_cache_delete('dispute_status_counts', self::CACHE_GROUP);
+    }
+
+    /**
+     * Hard-delete every dispute-domain row a deleted user appears in,
+     * cascading by user FK across the three user-keyed tables:
+     *   - bcc_dispute_panel.panelist_user_id (the user sat on a panel)
+     *   - bcc_dispute_participations.user_id (the user's credited votes)
+     *   - bcc_user_reports.reporter_id / reported_id (both directions)
+     *
+     * Dispute ROWS themselves are NOT deleted here — a dispute is
+     * page-scoped, not user-scoped, and its reporter_id/voter_id are
+     * historical references that survive the user. The verdict math already
+     * derives from the authoritative panel rows (getExpiredDisputes /
+     * castPanelVoteAtomic re-derive tallies), so a deleted panelist's panel
+     * row vanishing is exactly the drift those paths were built to tolerate.
+     * Single transaction so the user's dispute footprint is removed atomically.
+     *
+     * Called from UserLifecycleService::onUserDelete (delete_user).
+     */
+    public static function deleteForUser(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+
+        global $wpdb;
+        $panelTable         = self::panel_table();
+        $participationTable = TableRegistry::disputeParticipations();
+        $reportsTable       = UserReportRepository::user_reports_table();
+
+        if (!DisputeRepositorySupport::beginTx()) {
+            \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in deleteForUser', [
+                'user_id'  => $userId,
+                'db_error' => (string) $wpdb->last_error,
+            ]);
+            return;
+        }
+
+        try {
+            $wpdb->delete($panelTable, ['panelist_user_id' => $userId], ['%d']);
+            $wpdb->delete($participationTable, ['user_id' => $userId], ['%d']);
+            // bcc_user_reports keys the user in BOTH directions — clean each.
+            $wpdb->delete($reportsTable, ['reporter_id' => $userId], ['%d']);
+            $wpdb->delete($reportsTable, ['reported_id' => $userId], ['%d']);
+
+            if (!DisputeRepositorySupport::commitTx('deleteForUser')) {
+                \BCC\Core\Log\Logger::error('[bcc-disputes] COMMIT failed in deleteForUser', [
+                    'user_id'  => $userId,
+                    'db_error' => (string) $wpdb->last_error,
+                ]);
+                return;
+            }
+        } catch (\Throwable $e) {
+            DisputeRepositorySupport::rollbackTx('deleteForUser:exception');
+            \BCC\Core\Log\Logger::error('[bcc-disputes] deleteForUser cascade failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return;
+        }
+
+        wp_cache_delete('dispute_status_counts', self::CACHE_GROUP);
+        wp_cache_delete('report_status_counts', self::CACHE_GROUP);
+    }
 
     // ── Verdict calculation (shared, single source of truth) ──────────────
 

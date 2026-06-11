@@ -58,6 +58,21 @@ final class AttestationRepository
     ];
 
     /**
+     * The subset of TARGET_KINDS whose `target_id` is a peepso-page post
+     * id (validator / project / creator cards all key on the page — see
+     * CardViewService::cardKindToTargetKind). `user_profile` is excluded
+     * because its target_id is a user id. Used by the page-deletion
+     * cleanup cascade so a deleted page's card-attestations don't orphan.
+     *
+     * @var list<string>
+     */
+    public const PAGE_TARGET_KINDS = [
+        'validator_card',
+        'project_card',
+        'creator_card',
+    ];
+
+    /**
      * Allowed kind values for V1 per §J.1. Dispute lives in a
      * separate table (stake + panel mechanics don't fit this shape).
      *
@@ -1228,5 +1243,79 @@ final class AttestationRepository
         }
 
         return (int) $result > 0;
+    }
+
+    // ── Delete-cascade (page / user deletion) ─────────────────────────────
+
+    /**
+     * Hard-delete every attestation cast AGAINST a deleted page — i.e. rows
+     * whose `target_id` is the page and whose `target_kind` is one of the
+     * card kinds (validator/project/creator). Closes the §J orphan gap when
+     * a peepso-page is permanently deleted.
+     *
+     * A hard delete (not a soft revoke) is correct here: revoke models the
+     * attestor withdrawing judgment on a live target, whereas the target
+     * itself ceasing to exist leaves the row pointing at nothing. The
+     * sibling vote/endorsement soft-delete-on-page-delete policy does not
+     * apply — those carry audit value for the page's score history;
+     * card-attestations against a now-gone card do not.
+     *
+     * Called from UserLifecycleService::onPageDelete (before_delete_post).
+     */
+    public function deleteForPageTarget(int $pageId): void
+    {
+        if ($pageId <= 0) {
+            return;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $kindPlaceholders = implode(',', array_fill(0, count(self::PAGE_TARGET_KINDS), '%s'));
+        $sql = "DELETE FROM `{$table}`"
+            . ' WHERE target_id = %d'
+            . " AND target_kind IN ({$kindPlaceholders})";
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $pageId, ...self::PAGE_TARGET_KINDS);
+        if (!is_string($prepared)) {
+            return;
+        }
+        $wpdb->query($prepared);
+    }
+
+    /**
+     * Hard-delete every attestation tied to a deleted user — both the rows
+     * the user CAST (attestor_user_id) and the rows cast AGAINST the user's
+     * profile (target_kind='user_profile' AND target_id=userId). Closes the
+     * §J orphan gap on hard account deletion.
+     *
+     * Two scoped DELETEs rather than one OR'd predicate so each uses its own
+     * index cleanly and the intent is explicit. Card-attestations the user
+     * cast on still-living pages are removed via attestor_user_id; the page
+     * itself (if also deleted) is handled by deleteForPageTarget.
+     *
+     * Called from UserLifecycleService::onUserDelete (delete_user).
+     */
+    public function deleteForUser(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        // Rows the user cast.
+        $wpdb->delete($table, ['attestor_user_id' => $userId], ['%d']);
+
+        // Rows cast against the user's profile.
+        $wpdb->delete(
+            $table,
+            ['target_kind' => 'user_profile', 'target_id' => $userId],
+            ['%s', '%d']
+        );
     }
 }

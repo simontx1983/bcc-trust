@@ -114,6 +114,36 @@ class UserLifecycleService
             TableRegistry::scoreEvents() => 'actor_user_id',
         ]);
 
+        // Identity verifications (github / x / wallet).
+        $plugin->verificationRepository()->deleteForUser($userId);
+
+        // Rank awards + reputation-event ledger (the reputation SNAPSHOT row
+        // is already cleared above via reputationRepository()->delete()).
+        $plugin->userRankRepository()->deleteForUser($userId);
+        $plugin->reputationEventRepository()->deleteForUser($userId);
+
+        // Push subscriptions.
+        (new \BCC\Trust\Core\Repositories\PushSubscriptionRepository())->deleteAllForUser($userId);
+
+        // Trust attestations: rows the user cast AND rows cast against the
+        // user's profile (target_kind='user_profile').
+        $plugin->attestationRepository()->deleteForUser($userId);
+
+        // Dispute footprint: panel seats, credited participations, and
+        // user-reports in both directions (reporter + reported). Dispute
+        // rows themselves are page-scoped and survive — see deleteForUser.
+        \BCC\Trust\Disputes\Repositories\DisputeRepository::deleteForUser($userId);
+
+        // On-chain wallet data. NFT holdings have no user_id of their own —
+        // they resolve ownership via a join to wallet_links, so they MUST be
+        // deleted BEFORE the wallet links are removed (otherwise the join
+        // finds nothing and the holdings orphan). Selections key on user_id
+        // directly. Claims and onchain signals also key on user_id.
+        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::deleteForUser($userId);
+        \BCC\Trust\Onchain\Repositories\NftSelectionRepository::deleteForUser($userId);
+        \BCC\Trust\Onchain\Repositories\ClaimRepository::deleteForUser($userId);
+        \BCC\Trust\Onchain\Repositories\WalletRepository::deleteForUser($userId);
+
         // Wallet signals: delegate to onchain-signals via contract.
         \BCC\Trust\Core\Repositories\WalletSignalRepository::deleteForUser($userId);
     }
@@ -147,6 +177,17 @@ class UserLifecycleService
             TableRegistry::dirtyQueue()    => 'page_id',
             TableRegistry::pageReadModel() => 'page_id',
         ]);
+
+        // Disputes attached to this page — cascade panel + participation
+        // children FIRST, then the disputes, in one transaction (the SQL
+        // lives in the Disputes domain per §1).
+        \BCC\Trust\Disputes\Repositories\DisputeRepository::deleteForPage($postId);
+
+        // Card-attestations cast AGAINST this page (validator/project/creator
+        // target_kinds key target_id = page_id) and the §J.8 divergence-state
+        // sidecar rows for the same page-keyed kinds.
+        $plugin->attestationRepository()->deleteForPageTarget($postId);
+        $plugin->targetDivergenceStateRepository()->deleteForPageTarget($postId);
 
         // Invalidate caches.
         $plugin->scoreRepository()->invalidateCache($postId);
