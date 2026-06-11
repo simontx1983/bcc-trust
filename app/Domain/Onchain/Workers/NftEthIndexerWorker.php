@@ -261,6 +261,16 @@ final class NftEthIndexerWorker
         $totalDel  = 0;
         $totalSkip = 0;
 
+        // Highest block number observed across every transfer ingested this
+        // tick. Alchemy getAssetTransfers returns rows in ascending
+        // (blockNum, logIndex) order, so after reading N pages every block
+        // STRICTLY LESS THAN $maxBlockSeen is fully covered — the only block
+        // that could still hold un-read transfers in the pages we didn't
+        // fetch is $maxBlockSeen itself (the page may have cut mid-block at
+        // the boundary). This is the safe-advance watermark used in Step 8
+        // when the range only partially drains. 0 = no transfers seen.
+        $maxBlockSeen = 0;
+
         // Track remaining budget locally — addCuUsage below persists the
         // authoritative server-side value, but we don't need to re-read
         // it per page just to gate the loop. The pre-loop value (Step 3)
@@ -279,6 +289,12 @@ final class NftEthIndexerWorker
 
             $transfers = $page['transfers'];
             if ($transfers !== []) {
+                foreach ($transfers as $transfer) {
+                    $blockNumber = (int) ($transfer['block_number'] ?? 0);
+                    if ($blockNumber > $maxBlockSeen) {
+                        $maxBlockSeen = $blockNumber;
+                    }
+                }
                 $batchResult = NftHoldingsIndexer::ingest($chainId, $transfers);
                 $totalIns  += $batchResult['inserts'];
                 $totalDel  += $batchResult['deletes'];
@@ -291,22 +307,89 @@ final class NftEthIndexerWorker
             }
         }
 
-        // Step 8: advance checkpoint. Only mark up to $rangeTo because
-        // a multi-page range that exhausted MAX_PAGES_PER_TICK still
-        // covered everything in [rangeFrom, rangeTo] — pagination is
-        // within the range, not across it.
-        ChainCheckpointRepository::recordSuccess($chainId, $rangeTo, $headBlock);
+        // Step 8: advance checkpoint — INVARIANT: the checkpoint only
+        // advances over FULLY-READ blocks.
+        //
+        // Full drain ($pageKey === null): the whole [rangeFrom, rangeTo]
+        // range is read; advance to $rangeTo exactly. Happy path, common
+        // case, unchanged.
+        //
+        // Partial drain ($pageKey !== null): the loop broke early on
+        // MAX_PAGES_PER_TICK or the CU budget, so unread pages of
+        // [rangeFrom, rangeTo] still hold Transfer events. Advancing to
+        // $rangeTo would compute $rangeFrom = $rangeTo + 1 next tick and
+        // PERMANENTLY SKIP those unread pages — the original data-loss bug.
+        // But leaving the checkpoint at $lastProcessed unconditionally is a
+        // LIVELOCK: a range whose transfer count exceeds the page budget
+        // (MAX_PAGES_PER_TICK × ALCHEMY_MAX_COUNT) never drains, so the
+        // checkpoint never moves and Step 6 recomputes the identical range
+        // forever, re-reading the same pages and burning CU with zero
+        // forward progress.
+        //
+        // SAFE PARTIAL ADVANCE resolves both: Alchemy returns transfers in
+        // ascending (blockNum, logIndex) order, so after reading N pages
+        // every block STRICTLY LESS THAN $maxBlockSeen is fully covered —
+        // only $maxBlockSeen itself might have more transfers in the unread
+        // tail (the page can cut mid-block at the boundary). So the highest
+        // block we can SAFELY claim as processed is $maxBlockSeen - 1. We
+        // advance the checkpoint there; the next tick resumes at
+        // $maxBlockSeen, re-reading only the boundary block onward. That
+        // re-read is loss-free because ingest is idempotent: the holdings
+        // UPSERT is `INSERT ... ON DUPLICATE KEY UPDATE` keyed on
+        // (wallet_link_id, contract_address, token_id) with
+        // GREATEST(last_seen_block, VALUES(last_seen_block)) /
+        // GREATEST(confirmed_at, ...) (NftHoldingsRepository::upsertMany),
+        // and the OUT-leg delete is a no-op on a missing row. Re-reading the
+        // boundary block re-upserts identical state — it converges.
+        // This guarantees monotonic progress whenever the read pages span
+        // >= 2 distinct blocks (the overwhelmingly common case).
+        //
+        // PATHOLOGICAL edge: $safeBlock < $rangeFrom means even the FIRST
+        // block of the range couldn't be fully covered in the page budget
+        // ($maxBlockSeen == $rangeFrom, i.e. all 5000+ transfers landed in a
+        // single block). We can't safely advance — advancing to
+        // $maxBlockSeen would skip the unread tail of that same block. So we
+        // hold the checkpoint AND emit a DegradationMetric so an operator
+        // sees the dense-block stall instead of a silent CU-burning spin.
+        // A single block carrying >5000 transfers of one tracked contract is
+        // near-impossible under block gas limits, so this is visibility, not
+        // a path we expect to hit.
+        $rangeFullyDrained = ($pageKey === null);
+        $checkpointTarget  = null;
+        if ($rangeFullyDrained) {
+            $checkpointTarget = $rangeTo;
+        } elseif ($maxBlockSeen > 0) {
+            $safeBlock = $maxBlockSeen - 1;
+            if ($safeBlock >= $rangeFrom) {
+                $checkpointTarget = $safeBlock;
+            } else {
+                // Dense single-block stall — cannot advance without loss.
+                \BCC\Core\Observability\DegradationMetrics::record('nft_indexer', 'dense_block_stall');
+            }
+        }
+        // ($maxBlockSeen === 0 on a partial drain means the read pages held
+        // zero ingestable transfers yet Alchemy still returned a pageKey —
+        // we can't prove any block is fully covered, so we hold and let the
+        // next tick re-read. No metric: this is a benign re-read, not a
+        // stuck dense block.)
+
+        if ($checkpointTarget !== null) {
+            ChainCheckpointRepository::recordSuccess($chainId, $checkpointTarget, $headBlock);
+        }
         OnchainCircuitBreaker::recordSuccess($chainId);
 
         \BCC\Core\Log\Logger::info('[NftEthIndexerWorker] tick complete', [
-            'chain_id'      => $chainId,
-            'range'         => "[{$rangeFrom}, {$rangeTo}]",
-            'head_block'    => $headBlock,
-            'cu_used'       => $cuUsed,
-            'inserts'       => $totalIns,
-            'deletes'       => $totalDel,
-            'skipped'       => $totalSkip,
-            'paginated'     => $pageKey !== null,
+            'chain_id'             => $chainId,
+            'range'                => "[{$rangeFrom}, {$rangeTo}]",
+            'head_block'           => $headBlock,
+            'cu_used'              => $cuUsed,
+            'inserts'              => $totalIns,
+            'deletes'              => $totalDel,
+            'skipped'              => $totalSkip,
+            'paginated'            => $pageKey !== null,
+            'max_block_seen'       => $maxBlockSeen,
+            'checkpoint_advanced'  => $checkpointTarget !== null,
+            'checkpoint_block'     => $checkpointTarget,
         ]);
     }
 
