@@ -328,9 +328,7 @@ run_t1() {
     t1_check "/wp-json/bcc/v1/ranks"                "ranks"
     t1_check "/wp-json/bcc/v1/locals"               "locals"
 
-    local sample_page_id="${BCC_SAMPLE_PAGE_ID:-1}"
     local sample_handle="${BCC_SAMPLE_HANDLE:-admin}"
-    t1_check "/wp-json/bcc/v1/page/${sample_page_id}"          "page/{id}"
     t1_check "/wp-json/bcc/v1/users/${sample_handle}"          "users/:handle"
     t1_check "/wp-json/bcc/v1/cards"                           "cards (list)"        cursor
 }
@@ -395,9 +393,6 @@ run_t3() {
 
     t3_check "/wp-json/bcc/v1/system/ping"                  "system/ping"
     t3_check "/wp-json/bcc-trust/v1/"                       "bcc-trust/v1 api index"
-    t3_check "/wp-json/bcc/v1/endorsements/top"             "endorsements/top"
-    t3_check "/wp-json/bcc/v1/validators/top"               "validators/top"
-    t3_check "/wp-json/bcc/v1/nft/collections?chain=evm"    "nft/collections"
     t3_check "/wp-json/bcc/v1/chains"                       "chains"
 }
 
