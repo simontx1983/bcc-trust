@@ -178,6 +178,19 @@ class PageReadModelRepository
     {
         global $wpdb;
 
+        // ── Ghost-row guard ──────────────────────────────────────────
+        // UserLifecycleService::onPageDelete removes the row on
+        // before_delete_post, but a later syncPage($staleId) — dirty-queue
+        // straggler, cleanup script, race with deletion — would re-insert
+        // a row from empty meta for a post that no longer exists. Treat
+        // sync-of-missing/unpublished as delete instead of upsert.
+        $post = get_post($pageId);
+        if ($post === null || $post->post_type !== 'peepso-page' || $post->post_status !== 'publish') {
+            $wpdb->delete($this->table, ['page_id' => $pageId], ['%d']);
+            $this->invalidateCache($pageId);
+            return;
+        }
+
         // ── Pre-fetch WP meta outside the transaction ────────────────
         // These WP API calls may run uncached queries against wp_postmeta /
         // wp_usermeta. Fetching them before the transaction avoids holding
