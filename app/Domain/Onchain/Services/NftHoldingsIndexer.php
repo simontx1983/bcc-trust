@@ -51,6 +51,32 @@ if (!defined('ABSPATH')) {
  *     spam_filtered: int,
  *     skipped: int
  * }
+ *
+ * @phpstan-type UpsertRow array{
+ *     wallet_link_id: int,
+ *     chain_id: int,
+ *     contract_address: string,
+ *     token_id: string,
+ *     token_standard: ?string,
+ *     balance: int,
+ *     metadata_status: int,
+ *     last_seen_block: int,
+ *     confirmed_at: string
+ * }
+ * @phpstan-type DeleteRow array{
+ *     wallet_link_id: int,
+ *     contract: string,
+ *     token_id: string
+ * }
+ * @phpstan-type NetEntry array{
+ *     op: 'upsert',
+ *     order: array{int, int},
+ *     row: UpsertRow
+ * }|array{
+ *     op: 'delete',
+ *     order: array{int, int},
+ *     del: DeleteRow
+ * }
  */
 final class NftHoldingsIndexer
 {
@@ -99,9 +125,27 @@ final class NftHoldingsIndexer
         // pattern; cache prevents re-running for the same contract across the batch.
         $spamCache = [];
 
-        // Step 3: pre-resolve all upserts/deletes; persist in a transaction.
-        $upsertRows = [];
-        $deletes    = [];
+        // Step 3: net every (wallet_link_id, contract, token_id) key down to
+        // its LAST operation, then persist in a transaction.
+        //
+        // The flat-list approach (collect all OUTs, all INs, then apply
+        // upserts-then-deletes in ingestBatch) is WRONG for intra-batch
+        // churn. For a token that leaves and returns to the same wallet
+        // within one batch — events [B→C] then [C→B] — B lands in BOTH the
+        // upserts (the C→B inbound leg) AND the deletes (the B→C outbound
+        // leg). ingestBatch applies all upserts then all deletes, so B's
+        // upserted row gets DELETED → B falsely shows NOT holding a token
+        // whose last transfer was inbound to B.
+        //
+        // Fix: collapse to one operation per key, keyed by the LAST event
+        // that touched it. Events arrive ascending by (block_number,
+        // log-index) from the fetcher (Alchemy order=asc), and we assign a
+        // per-event monotonic $seq so equal block_numbers still order
+        // deterministically. The highest (block, seq) wins the key. After
+        // the loop each key is in EXACTLY ONE of $upsertRows / $deletes, so
+        // ingestBatch's apply order can no longer clobber a net-held key.
+        $net = self::emptyNetMap();
+        $seq = 0;
 
         foreach ($events as $e) {
             if (!is_array($e) || (int) ($e['chain_id'] ?? 0) !== $chainId) {
@@ -131,16 +175,31 @@ final class NftHoldingsIndexer
                 continue;
             }
 
-            // OUT leg first — delete from the sender (a transfer-out
-            // that races a transfer-in to the same wallet still nets
-            // correctly because IN leg upserts the (wallet, contract,
-            // token_id) row regardless).
+            // Monotonic per-event sequence — incremented ONCE per processed
+            // event, BEFORE both legs, so the OUT and IN legs of the same
+            // event share an order tuple. Combined with $blkNum it gives a
+            // total order even when multiple events land in one block.
+            $seq++;
+            $order = [$blkNum, $seq];
+
+            // OUT leg — the sender no longer holds this token. Record a
+            // delete only if no later event has already claimed this key.
+            // "<=" (not "<") means a self-transfer's IN leg, which shares
+            // this exact order tuple but runs LATER in code, overwrites the
+            // delete → a from==to self-transfer correctly keeps the token.
             if ($fromLinkId > 0) {
-                $deletes[] = [
-                    'wallet_link_id' => $fromLinkId,
-                    'contract'       => $contract,
-                    'token_id'       => $tokenId,
-                ];
+                $key = $fromLinkId . '|' . $contract . '|' . $tokenId;
+                if (!isset($net[$key]) || self::orderLte($net[$key]['order'], $order)) {
+                    $net[$key] = [
+                        'op'    => 'delete',
+                        'order' => $order,
+                        'del'   => [
+                            'wallet_link_id' => $fromLinkId,
+                            'contract'       => $contract,
+                            'token_id'       => $tokenId,
+                        ],
+                    ];
+                }
             }
 
             // IN leg — upsert into the receiver, with spam decision baked in.
@@ -158,7 +217,7 @@ final class NftHoldingsIndexer
                     ? $e['token_standard']
                     : null;
 
-                $upsertRows[] = [
+                $upsertRow = [
                     'wallet_link_id'   => $toLinkId,
                     'chain_id'         => $chainId,
                     'contract_address' => $contract,
@@ -172,9 +231,34 @@ final class NftHoldingsIndexer
                     'confirmed_at'     => $confAt,
                 ];
 
+                $key = $toLinkId . '|' . $contract . '|' . $tokenId;
+                if (!isset($net[$key]) || self::orderLte($net[$key]['order'], $order)) {
+                    $net[$key] = [
+                        'op'    => 'upsert',
+                        'order' => $order,
+                        'row'   => $upsertRow,
+                    ];
+                }
+
                 if ($isSpam) {
                     $result['spam_filtered']++;
                 }
+            }
+        }
+
+        // Split the netted map back into the two flat lists ingestBatch
+        // expects. Each key resolved to exactly one op, so a key can no
+        // longer appear in both lists. For the B→C→B churn case this nets
+        // to: upsert(B,tok) [last event C→B was inbound to B] +
+        // delete(C,tok) [C's last event was the C→B outbound] — B holds the
+        // token, C does not. Correct.
+        $upsertRows = [];
+        $deletes    = [];
+        foreach ($net as $entry) {
+            if ($entry['op'] === 'upsert') {
+                $upsertRows[] = $entry['row'];
+            } else {
+                $deletes[] = $entry['del'];
             }
         }
 
@@ -206,5 +290,34 @@ final class NftHoldingsIndexer
         }
 
         return $result;
+    }
+
+    /**
+     * Typed empty seed for the net map. Exists purely so PHPStan infers
+     * `array<string, NetEntry>` for `$net` from the first assignment
+     * (rather than `array{}`), keeping the per-entry access type-clean
+     * without a `@var` suppression.
+     *
+     * @return array<string, NetEntry>
+     */
+    private static function emptyNetMap(): array
+    {
+        return [];
+    }
+
+    /**
+     * True when order tuple $a is less-than-or-equal-to $b under the
+     * (block_number, seq) total order. Used so a later event — or a
+     * same-event IN leg that runs after the OUT leg — wins the key.
+     *
+     * @param array{int, int} $a
+     * @param array{int, int} $b
+     */
+    private static function orderLte(array $a, array $b): bool
+    {
+        if ($a[0] !== $b[0]) {
+            return $a[0] < $b[0];
+        }
+        return $a[1] <= $b[1];
     }
 }
