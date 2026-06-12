@@ -79,6 +79,30 @@ if (!defined('ABSPATH')) {
  *   validator_rows?: array<int, list<ValidatorCardRow>>,
  *   page_entities?: array<int, array{entity_type: string, entity_id: int}>
  * }
+ *
+ * Already-loaded group data the community-card composer consumes. Both
+ * producers (GroupsDiscoveryEndpoint list rows, GroupsService::getGroup
+ * detail composition) have every key in hand before calling — the
+ * composer performs ZERO queries (pure composition), so adding a card
+ * to a page of discovery items costs nothing beyond the one batched
+ * membership lookup the endpoint already does.
+ *
+ * @phpstan-type CommunityGroupData array{
+ *   group_id: int,
+ *   slug: string,
+ *   name: string,
+ *   type: string,
+ *   privacy: string,
+ *   member_count: int,
+ *   description: string|null,
+ *   image_url: string|null,
+ *   verification: array{kind: string, label: string}|null,
+ *   collection_stats: array<string, mixed>|null,
+ *   chain_tag: string|null,
+ *   trust_min: int|null,
+ *   viewer_is_member: bool,
+ *   posts_last_7d: int
+ * }
  */
 final class CardViewService
 {
@@ -326,6 +350,9 @@ final class CardViewService
             // are always present). The frontend's CardFactory reads
             // `member_dossier` only on the member face.
             'member_dossier'      => null,
+            // community_dossier is community-only — always null on page
+            // cards (same always-present/null pattern as member_dossier).
+            'community_dossier'   => null,
             // V1: tier-keyed coloring for entity cards (chain-keyed lands
             // alongside §K3 chain-wiring in V1.5). `background_value` per
             // §2.9 is the card_tier slug; falls back to 'common' on the
@@ -568,8 +595,176 @@ final class CardViewService
                 'owned_pages_by_type' => $summary['owned_pages_by_type'],
                 'primary_local'       => $summary['primary_local'],
             ],
+            // community_dossier is community-only — always null on
+            // member cards (mirror of member_dossier on the other kinds).
+            'community_dossier'   => null,
             'links'               => self::buildLinks('member', $resolvedHandle),
             'actions'             => self::buildMemberActions($userId),
+        ];
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Community cards (PeepSo groups — §4.7 card convergence)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Server-owned kicker copy per group type. Mirrors (and supersedes,
+     * per §L5) the frontend GroupCard's KICKER_BY_TYPE map — the FE now
+     * renders `tier_label` verbatim instead of deriving from `type`.
+     */
+    private const COMMUNITY_TIER_LABEL_BY_TYPE = [
+        'nft'    => 'HOLDERS GROUP',
+        'local'  => 'LOCAL CHAPTER',
+        'system' => 'SYSTEM GROUP',
+        'user'   => 'COMMUNITY',
+    ];
+
+    /**
+     * Compose the community Card (card_kind: "community") FROM
+     * ALREADY-LOADED group data — never from a fresh query. Both
+     * callers (GroupsDiscoveryEndpoint per list item, GroupsService::
+     * getGroup for the detail response) hold every input in hand, so
+     * this is pure composition: zero DB reads, zero N+1 risk on the
+     * bounded discovery loop.
+     *
+     * Shape rules (locked, contract §3.2.4):
+     *   - trust fields are shape-stable placeholders — communities have
+     *     no trust system (trust_score 0 / reputation_tier "neutral" /
+     *     card_tier "common"); tier_label carries the group-type kicker.
+     *   - crest: chain-keyed background for NFT groups with a chain_tag,
+     *     tier-keyed "common" otherwise; image_url = collection cover
+     *     (nullable → FE monogram fallback).
+     *   - permissions: every action denied `not_applicable` for ALL
+     *     viewers (anon and authed alike) — groups use JOIN, not the
+     *     watch/review/attest verbs, and the join gate lives on the
+     *     group detail's own permissions block, not the card.
+     *   - community_dossier: the community-only block (always present
+     *     on the wire; null on the other card kinds — mirror of how
+     *     member_dossier behaves).
+     *
+     * Privacy: callers only compose cards for groups their endpoints
+     * already returned — the secret-group gates stay upstream; no new
+     * privacy logic here.
+     *
+     * @param array<string, mixed> $groupData
+     * @phpstan-param CommunityGroupData $groupData
+     * @return array<string, mixed>
+     */
+    public function getCommunityCardFromGroupData(array $groupData, int $viewerId): array
+    {
+        $groupId     = $groupData['group_id'];
+        $name        = $groupData['name'];
+        $slug        = $groupData['slug'];
+        $type        = $groupData['type'];
+        $chainTag    = $groupData['chain_tag'];
+        $imageUrl    = $groupData['image_url'];
+        $memberCount = $groupData['member_count'];
+        $posts7d     = $groupData['posts_last_7d'];
+        // Defensive: membership is only meaningful for authed viewers.
+        $viewerIsMember = $viewerId > 0 && $groupData['viewer_is_member'];
+
+        // NFT groups with a resolved chain get the chain-keyed band
+        // (same crest grammar page cards will use in V1.5); everything
+        // else gets the tier band at the fixed "common" tier.
+        if ($type === 'nft' && $chainTag !== null && $chainTag !== '') {
+            $backgroundKind  = 'chain';
+            $backgroundValue = $chainTag;
+        } else {
+            $backgroundKind  = 'tier';
+            $backgroundValue = 'common';
+        }
+
+        return [
+            'id'                  => $groupId,
+            'name'                => $name,
+            'handle'              => $slug,
+            'card_kind'           => 'community',
+            // Producers already truncate the description to ~200 chars
+            // (same bound as truncateBio) — pass through; '' when unset
+            // to match the page/member bio convention.
+            'bio'                 => $groupData['description'] ?? '',
+            'trust_score'         => 0,
+            'reputation_tier'     => 'neutral',
+            'card_tier'           => 'common',
+            'tier_label'          => self::COMMUNITY_TIER_LABEL_BY_TYPE[$type] ?? 'COMMUNITY',
+            'rank_label'          => null,
+            'is_in_good_standing' => true,
+            'flags'               => [],
+            'viewer_has_reviewed' => false,
+            'viewer_has_endorsed' => false,
+            'endorse_unlock_hint' => null,
+            'viewer_attestation'  => null,
+            'chains'              => null,
+            'is_claimed'          => true,
+            'claim_target'        => null,
+            'onchain_signals'     => null,
+            'member_dossier'      => null,
+            // The community-only back-face block. collection_stats is
+            // the §4.7.4 NFT market block (null for non-NFT kinds) —
+            // replaces FlippableNftCard's bespoke stats display.
+            'community_dossier'   => [
+                'type'             => $type,
+                'privacy'          => $groupData['privacy'],
+                'member_count'     => $memberCount,
+                'verification'     => $groupData['verification'],
+                'chain_tag'        => $chainTag !== '' ? $chainTag : null,
+                'trust_min'        => $groupData['trust_min'],
+                'collection_stats' => $groupData['collection_stats'],
+                'viewer_is_member' => $viewerIsMember,
+            ],
+            'crest'               => self::buildCrest(
+                $name,
+                $backgroundKind,
+                $backgroundValue,
+                $imageUrl ?? ''
+            ),
+            'stats'               => [
+                ['key' => 'members',  'label' => 'Members',    'value' => (string) $memberCount, 'raw' => $memberCount, 'format' => 'count'],
+                ['key' => 'posts_7d', 'label' => 'Posts (7d)', 'value' => (string) $posts7d,     'raw' => $posts7d,     'format' => 'count'],
+            ],
+            'permissions'         => self::communityPermissions(),
+            'social_proof'        => null,
+            'links'               => ['self' => '/communities/' . $slug],
+            // `open` is the only card action — communities are joined
+            // via the group detail's own join flow, never watched, so
+            // no `pull`/`watch` action is emitted. Self-describing GET
+            // of the §4.7.5 detail endpoint, mirroring the page-card
+            // action grammar.
+            'actions'             => [
+                'open' => [
+                    'method'        => 'GET',
+                    'href'          => '/wp-json/bcc/v1/groups/' . $slug,
+                    'idempotent'    => true,
+                    'requires_auth' => false,
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * The full §3.2 permission key set, every entry denied with
+     * `not_applicable` — identical for anon and authed viewers because
+     * none of the card verbs (watch / review / dispute / endorse /
+     * attest / edit) exist for communities regardless of auth state.
+     * Signing in unlocks nothing here, so no `signin_required` copy.
+     *
+     * @return array<string, Permission>
+     */
+    private static function communityPermissions(): array
+    {
+        $na = self::deny(null, 'not_applicable');
+        return [
+            'can_pull'           => $na,
+            'can_review'         => $na,
+            'can_dispute'        => $na,
+            'can_open_dispute'   => $na,
+            'can_endorse'        => $na,
+            'can_post_as_entity' => $na,
+            'can_edit_bio'       => $na,
+            'can_edit_image'     => $na,
+            'can_vouch'          => $na,
+            'can_stand_behind'   => $na,
+            'can_report'         => $na,
         ];
     }
 

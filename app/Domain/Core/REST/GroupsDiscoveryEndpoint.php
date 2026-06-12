@@ -230,8 +230,47 @@ final class GroupsDiscoveryEndpoint
         $offset     = ($page - 1) * $pageSize;
         $pagedRows  = array_slice($rows, $offset, $pageSize);
 
+        // Viewer membership for the PAGE of items only — one batched
+        // repo call (active-status filtered), powering each item card's
+        // community_dossier.viewer_is_member without a per-item query.
+        $pagedGroupIds = [];
+        foreach ($pagedRows as $row) {
+            $pagedGroupIds[] = (int) $row['group_id'];
+        }
+        $membershipByGroup = ($viewerId > 0 && $pagedGroupIds !== [])
+            ? PeepSoGroupRepository::findUserMemberships($viewerId, $pagedGroupIds)
+            : [];
+
+        $cardView = Plugin::instance()->cardViewService();
+
         $items = [];
         foreach ($pagedRows as $row) {
+            $groupId = (int) $row['group_id'];
+            /** @var GroupContext $ctx */
+            $ctx     = $row['context'];
+            $display = $row['display'];
+            // §4.4 community Card — pure composition from the row data
+            // already in hand (zero queries per item). Additive: the
+            // legacy flat fields stay untouched for the migration window.
+            $card = $cardView->getCommunityCardFromGroupData(
+                [
+                    'group_id'         => $groupId,
+                    'slug'             => $display !== null ? (string) $display->post_name : '',
+                    'name'             => $display !== null ? (string) $display->post_title : '',
+                    'type'             => $ctx->type->value,
+                    'privacy'          => $ctx->privacy->value,
+                    'member_count'     => $display !== null ? (int) $display->member_count : 0,
+                    'description'      => $row['description'],
+                    'image_url'        => $row['image_url'],
+                    'verification'     => $ctx->verification?->toApiResponse(),
+                    'collection_stats' => $row['collection_stats'],
+                    'chain_tag'        => $row['chain_tag'],
+                    'trust_min'        => $row['trust_min'],
+                    'viewer_is_member' => isset($membershipByGroup[$groupId]),
+                    'posts_last_7d'    => (int) ($row['activity']['posts_last_7d'] ?? 0),
+                ],
+                $viewerId
+            );
             $items[] = $this->composeItem(
                 $row['context'],
                 $row['display'],
@@ -240,11 +279,16 @@ final class GroupsDiscoveryEndpoint
                 $row['collection_stats'],
                 $row['description'],
                 $row['chain_tag'],
-                $row['trust_min']
+                $row['trust_min'],
+                $card
             );
         }
 
-        return $this->respond($items, $page, $pageSize, $total, $mineOnly);
+        // Authed responses now carry viewer_is_member inside each item's
+        // card.community_dossier — viewer-scoped data must never sit in
+        // a shared cache. Anon responses stay viewer-agnostic (membership
+        // is always false) and keep the 60s public cache.
+        return $this->respond($items, $page, $pageSize, $total, $mineOnly || $viewerId > 0);
     }
 
     /**
@@ -276,6 +320,7 @@ final class GroupsDiscoveryEndpoint
      * @param object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}|null $display
      * @param array{posts_last_7d: int, last_activity_at: string|null, heat: string, heat_label: string} $activity
      * @param array<string, mixed>|null $stats
+     * @param array<string, mixed> $card
      * @return array<string, mixed>
      */
     private function composeItem(
@@ -286,7 +331,8 @@ final class GroupsDiscoveryEndpoint
         ?array $stats,
         ?string $description,
         ?string $chainTag,
-        ?int $trustMin
+        ?int $trustMin,
+        array $card
     ): array {
         return [
             'group_id'         => $ctx->groupId,
@@ -304,6 +350,11 @@ final class GroupsDiscoveryEndpoint
             // view-model — single contract shape across all surfaces.
             'chain_tag'        => $chainTag,
             'trust_min'        => $trustMin,
+            // §4.4 card convergence (additive): the full community Card
+            // view-model. New consumers render `item.card` via the
+            // CardFactory; the flat fields above remain for the
+            // migration window.
+            'card'             => $card,
         ];
     }
 

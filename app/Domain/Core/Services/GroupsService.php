@@ -111,7 +111,8 @@ final class GroupsService
      *   members_visible: bool,
      *   chain_tag: string|null,
      *   trust_min: int|null,
-     *   links: array{self: string}
+     *   links: array{self: string},
+     *   card: array<string, mixed>
      * }|null
      */
     public function getGroup(int $viewerId, string $slug): ?array
@@ -196,13 +197,40 @@ final class GroupsService
         $chainMap = ChainRepository::resolveSlugsForGroups([$groupId]);
         $chainTag = $chainMap[$groupId] ?? null;
 
+        $description  = self::truncateDescription((string) $row->post_content);
+        $trustMinWire = $trustGateMin > 0 ? $trustGateMin : null;
+
+        // §4.4 card convergence (additive): the full community Card,
+        // composed from the data already resolved above — zero extra
+        // queries. New consumers render `group.card` via CardFactory;
+        // the flat fields below remain for the migration window.
+        $card = Plugin::instance()->cardViewService()->getCommunityCardFromGroupData(
+            [
+                'group_id'         => $groupId,
+                'slug'             => (string) $row->post_name,
+                'name'             => (string) $row->post_title,
+                'type'             => $ctx->type->value,
+                'privacy'          => $ctx->privacy->value,
+                'member_count'     => (int) $row->member_count,
+                'description'      => $description,
+                'image_url'        => $imageUrl,
+                'verification'     => $ctx->verification?->toApiResponse(),
+                'collection_stats' => $collectionStats,
+                'chain_tag'        => $chainTag,
+                'trust_min'        => $trustMinWire,
+                'viewer_is_member' => $isMember,
+                'posts_last_7d'    => (int) $activity['posts_last_7d'],
+            ],
+            $viewerId
+        );
+
         return [
             'id'                => $groupId,
             'slug'              => (string) $row->post_name,
             'name'              => (string) $row->post_title,
             'type'              => $ctx->type->value,
             'privacy'           => $ctx->privacy->value,
-            'description'       => self::truncateDescription((string) $row->post_content),
+            'description'       => $description,
             'image_url'         => $imageUrl,
             'member_count'      => (int) $row->member_count,
             'verification'      => $ctx->verification?->toApiResponse(),
@@ -218,8 +246,9 @@ final class GroupsService
             // under the hood for trust groups). `chain_tag` is the chain
             // slug; null means untagged.
             'chain_tag'         => $chainTag,
-            'trust_min'         => $trustGateMin > 0 ? $trustGateMin : null,
+            'trust_min'         => $trustMinWire,
             'links'             => ['self' => '/groups/' . (string) $row->post_name],
+            'card'              => $card,
         ];
     }
 
