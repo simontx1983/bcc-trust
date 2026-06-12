@@ -1259,15 +1259,29 @@ final class AuthEndpoint
         //   2. Email match (covers users who signed up with email/password and
         //      are signing in via OAuth for the first time with the same email).
         //      Only applies when the provider supplies a verified email (Google
-        //      always does; Twitter generally does not).
+        //      always does; Twitter never does) AND the matched account's own
+        //      email is not pending verification — see the gate below.
         $userId = self::findUserByOauthProvider($provider, $providerId);
 
         if ($userId === null && $email !== '' && is_email($email)) {
             $wpUser = get_user_by('email', $email);
             if ($wpUser instanceof \WP_User) {
-                $userId = (int) $wpUser->ID;
-                // Store the OAuth link so the next sign-in skips the email lookup.
-                update_user_meta($userId, self::META_OAUTH_PREFIX . $provider, $providerId);
+                $candidateId = (int) $wpUser->ID;
+                // Anti-pre-registration gate: never link into an account whose
+                // email is pending verification ('0'). Such an email is
+                // user-typed (email signup, or X signup via oauth-complete) —
+                // its owner hasn't proven inbox control, so an email match
+                // proves nothing about identity. Without this gate, an
+                // attacker could sign up via X with a victim's address and the
+                // victim's first Google sign-in would land inside the
+                // attacker's account. '' (legacy) and '1' allow, matching the
+                // login() convention.
+                $emailVerified = (string) get_user_meta($candidateId, self::META_EMAIL_VERIFIED, true);
+                if ($emailVerified !== '0') {
+                    $userId = $candidateId;
+                    // Store the OAuth link so the next sign-in skips the email lookup.
+                    update_user_meta($userId, self::META_OAUTH_PREFIX . $provider, $providerId);
+                }
             }
         }
 
@@ -1386,12 +1400,15 @@ final class AuthEndpoint
             $displayName = $handle;
         }
 
-        // OAuth signup users are email-verified by definition (Google/Twitter
-        // verified the email during the OAuth flow). Twitter's OAuth2
-        // user-context never returns an email, so /signup/complete-profile
-        // collects one directly — required here whenever the provider didn't
-        // supply one.
-        if ($email === '' || !is_email($email)) {
+        // Google supplies a provider-verified email. Twitter's OAuth2
+        // user-context never returns one, so /signup/complete-profile
+        // collects it directly — required here whenever the provider didn't
+        // supply one. A collected email is USER-TYPED, not provider-verified:
+        // it must NOT be trusted for identity (see the email-fallback gate in
+        // oauthLogin()), so it starts pending and goes through the standard
+        // verify-email flow.
+        $emailProviderVerified = $email !== '' && is_email($email);
+        if (!$emailProviderVerified) {
             $email = sanitize_email((string) $request->get_param('email'));
             if ($email === '' || !is_email($email)) {
                 return ApiResponse::error(
@@ -1435,7 +1452,12 @@ final class AuthEndpoint
 
         $userIdInt = (int) $userId;
         update_user_meta($userIdInt, HandleService::META_HANDLE, $handle);
-        update_user_meta($userIdInt, self::META_EMAIL_VERIFIED, '1');
+        // Provider-verified email (Google) → '1'. User-typed email (Twitter)
+        // → '0' until /auth/verify-email succeeds. '0' blocks password login
+        // (see login()) and the oauthLogin() email-fallback link, but NOT
+        // provider sign-in — oauthLogin matches by provider ID first, so the
+        // user keeps signing in with the provider they signed up with.
+        update_user_meta($userIdInt, self::META_EMAIL_VERIFIED, $emailProviderVerified ? '1' : '0');
         if ($provider !== '' && $providerId !== '') {
             update_user_meta($userIdInt, self::META_OAUTH_PREFIX . $provider, $providerId);
         }
@@ -1454,14 +1476,35 @@ final class AuthEndpoint
 
         do_action('bcc_user_signup', $userIdInt, $handle);
 
-        // Welcome email — best-effort, mirrors finalizeVerification(). OAuth
-        // accounts are active immediately (no separate verify-email step), so
-        // send here; $email is guaranteed real (validated above).
-        AuthMailer::sendWelcomeEmail(
-            $email,
-            $handle,
-            FrontendRedirect::defaultReturn('/')
-        );
+        if ($emailProviderVerified) {
+            // Welcome email — best-effort, mirrors finalizeVerification().
+            // Provider-verified accounts are fully active immediately (no
+            // separate verify-email step), so send here.
+            AuthMailer::sendWelcomeEmail(
+                $email,
+                $handle,
+                FrontendRedirect::defaultReturn('/')
+            );
+        } else {
+            // User-typed email: send the standard verification email instead
+            // (same OTP + link machinery as the email-signup path above).
+            // finalizeVerification() sends the welcome email once verified;
+            // /auth/resend-verification works for this account because the
+            // flag is '0'. Best-effort — a mail failure does not roll back
+            // the signup, and the JWT below is issued regardless.
+            $otpCode     = self::generateOtp();
+            $verifyToken = self::generateVerifyToken();
+            self::storeOtpForUser($userIdInt, $otpCode);
+            self::storeVerifyToken($verifyToken, $userIdInt);
+
+            $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
+            AuthMailer::sendVerificationEmail(
+                $userIdInt,
+                $email,
+                $otpCode,
+                FrontendRedirect::defaultReturn($verifyPath)
+            );
+        }
 
         $response = ApiResponse::ok([
             'user_id'          => $userIdInt,
