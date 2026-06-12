@@ -17,7 +17,7 @@
  * to 403 with reason_code = "watching_hidden" so the frontend can
  * render the right empty-state instead of a generic error.
  *
- * Hydration: routes through {@see MemberSummaryPrefetcher::primeFor()}
+ * Hydration: routes through {@see MemberCardPrefetcher::primeFor()}
  * for the eleven-key per-user signal map UserViewService::getSummary
  * reads. The same helper powers /members, /groups/:id/members, and
  * the entity-card Watchers tab.
@@ -35,7 +35,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Trust\Core\Plugin;
-use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
+use BCC\Trust\Core\Support\MemberCardPrefetcher;
 use BCC\Trust\Core\Support\PrivacySettings;
 
 if (!defined('ABSPATH')) {
@@ -127,7 +127,7 @@ final class UserFollowsService
             ];
         }
 
-        $prefetched = MemberSummaryPrefetcher::primeFor($userIds);
+        $prefetched = MemberCardPrefetcher::primeFor($userIds, $viewerId);
 
         $cardView = Plugin::instance()->cardViewService();
         $items    = [];

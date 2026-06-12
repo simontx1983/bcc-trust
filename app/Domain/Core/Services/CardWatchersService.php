@@ -14,7 +14,7 @@
  *
  * Same item shape + pagination as `/users/:handle/followers`
  * (offset-based MemberSummary list). Hydration goes through the same
- * shared {@see MemberSummaryPrefetcher}.
+ * shared {@see MemberCardPrefetcher}.
  *
  * Privacy: entity watchers aren't privacy-gated. There's no entity-
  * level `watching_hidden` flag (only user profiles carry one) — the
@@ -32,7 +32,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Trust\Core\Plugin;
-use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
+use BCC\Trust\Core\Support\MemberCardPrefetcher;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -96,7 +96,7 @@ final class CardWatchersService
             ];
         }
 
-        $prefetched = MemberSummaryPrefetcher::primeFor($userIds);
+        $prefetched = MemberCardPrefetcher::primeFor($userIds, $viewerId);
 
         $cardView = Plugin::instance()->cardViewService();
         $items    = [];

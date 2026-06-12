@@ -33,7 +33,7 @@ use BCC\Trust\Core\Repositories\UserRankRepository;
 use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
-use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
+use BCC\Trust\Core\Support\MemberCardPrefetcher;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
@@ -655,16 +655,12 @@ final class UsersEndpoint
         $rawIds = $query->get_results();
         $userIds = array_map('intval', $rawIds);
 
-        // Prefetch the per-user signals that would otherwise N+1 across
-        // the page (24 rows × 11 single-user queries each). Each batched
-        // call inside `MemberSummaryPrefetcher::primeFor` is one SQL
-        // keyed on `IN (userIds)`, so the total query budget for these
-        // signals is bounded regardless of `per_page`. Trust score is
-        // request-memoized on UserViewService itself
-        // (`$trustScoreCache`); we don't need a separate prefetch for
-        // it — the per-row `resolveAugmentedTrustScore` lookup is a
-        // PK-on-`bcc_reputation_scores` read, cheap.
-        $prefetched = MemberSummaryPrefetcher::primeFor($userIds);
+        // Prefetch everything the member-card rows read — the eleven
+        // summary signals PLUS the card-level reads (reputation rows,
+        // WP users/usermeta, participation bonus counts, viewer
+        // attestations). Each batch is one SQL keyed on `IN (userIds)`,
+        // so the query budget is bounded regardless of `per_page`.
+        $prefetched = MemberCardPrefetcher::primeFor($userIds, $viewerId);
 
         $cardView = Plugin::instance()->cardViewService();
         $items    = [];

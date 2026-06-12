@@ -299,7 +299,8 @@ final class UserViewService
      *   disputes_signed_counts?: array<int, int>,
      *   wallets_verified_counts?: array<int, int>,
      *   x_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>,
-     *   github_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>
+     *   github_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>,
+     *   viewer_attestations?: array<int, array{vouch: object|null, stand_behind: object|null}>
      * }|null $prefetched
      *
      * @return array{

@@ -33,6 +33,71 @@ if (!defined('ABSPATH')) {
 final class DisputeParticipationRepository
 {
     /**
+     * Request-scoped memo of {credited_lifetime, correct} count pairs,
+     * consulted by countCreditedLifetime/countCorrect. Member-card list
+     * surfaces read getEarnedLifetimeTrust per row (2 queries each);
+     * primeCountsForUsers() collapses a page of rows into one GROUP BY.
+     * recordParticipation() and backfillOutcomeMatches() drop affected
+     * entries so a read-after-write stays fresh.
+     *
+     * @var array<int, array{credited: int, correct: int}>
+     */
+    private static array $countsMemo = [];
+
+    /**
+     * Bulk-warm the lifetime-counts memo for a bounded id list — one
+     * GROUP BY query for both counts. Ids with no rows memoize as zero.
+     *
+     * @param list<int> $userIds
+     */
+    public function primeCountsForUsers(array $userIds): void
+    {
+        $wanted = [];
+        foreach ($userIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0 && !isset(self::$countsMemo[$intId])) {
+                $wanted[$intId] = true;
+            }
+        }
+        if ($wanted === []) {
+            return;
+        }
+
+        global $wpdb;
+        $table        = TableRegistry::disputeParticipations();
+        $idList       = array_keys($wanted);
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<object{user_id: int|numeric-string, credited: int|numeric-string, correct: int|numeric-string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT user_id,
+                    COUNT(*) AS credited,
+                    COALESCE(SUM(outcome_match = 1), 0) AS correct
+               FROM {$table}
+              WHERE user_id IN ({$placeholders})
+                AND was_credited = 1
+              GROUP BY user_id",
+            ...$idList
+        ));
+
+        foreach ($idList as $id) {
+            self::$countsMemo[$id] = ['credited' => 0, 'correct' => 0];
+        }
+        foreach ($rows ?: [] as $row) {
+            self::$countsMemo[(int) $row->user_id] = [
+                'credited' => (int) $row->credited,
+                'correct'  => (int) $row->correct,
+            ];
+        }
+    }
+
+    /** Drop a user's memoized counts after a write. */
+    private static function forgetCounts(int $userId): void
+    {
+        unset(self::$countsMemo[$userId]);
+    }
+
+    /**
      * Insert a participation row.
      *
      * @param int         $userId        Panelist user id.
@@ -59,6 +124,7 @@ final class DisputeParticipationRepository
         bool $wasCredited,
         ?string $skipReason
     ): array {
+        self::forgetCounts($userId);
         global $wpdb;
         $table = TableRegistry::disputeParticipations();
 
@@ -127,6 +193,9 @@ final class DisputeParticipationRepository
         if ($userId <= 0) {
             return 0;
         }
+        if (isset(self::$countsMemo[$userId])) {
+            return self::$countsMemo[$userId]['credited'];
+        }
         global $wpdb;
         $table = TableRegistry::disputeParticipations();
 
@@ -149,6 +218,9 @@ final class DisputeParticipationRepository
     {
         if ($userId <= 0) {
             return 0;
+        }
+        if (isset(self::$countsMemo[$userId])) {
+            return self::$countsMemo[$userId]['correct'];
         }
         global $wpdb;
         $table = TableRegistry::disputeParticipations();
@@ -293,6 +365,10 @@ final class DisputeParticipationRepository
             ]);
             return 0;
         }
+        // Outcome backfill touches every panelist on the dispute; the
+        // affected user ids aren't known here, so drop the whole memo.
+        self::$countsMemo = [];
+
         global $wpdb;
         $table = TableRegistry::disputeParticipations();
 

@@ -52,27 +52,98 @@ class ReputationRepository {
     }
 
     /**
+     * Request-scoped row memo. getTier/getScore/getVoteWeight all funnel
+     * through getByUserId, and list surfaces (member cards) read several
+     * of them per row — without a memo a 24-row page re-reads the same
+     * rows up to 4× each. Stores misses (null) too. Primed in bulk by
+     * primeByUserIds(); every write path calls forget() so a
+     * read-after-write in the same request sees fresh data.
+     *
+     * @var array<int, object|null>
+     * @phpstan-var array<int, ReputationRow|null>
+     */
+    private static array $rowMemo = [];
+
+    /**
+     * Bulk-warm the row memo for a bounded id list (one IN query).
+     * Ids absent from the table are memoized as null so the per-user
+     * fallback query is skipped for them as well.
+     *
+     * @param list<int> $userIds
+     */
+    public function primeByUserIds(array $userIds): void {
+        $wanted = [];
+        foreach ($userIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0 && !array_key_exists($intId, self::$rowMemo)) {
+                $wanted[$intId] = true;
+            }
+        }
+        if ($wanted === []) {
+            return;
+        }
+
+        global $wpdb;
+        $idList       = array_keys($wanted);
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<\stdClass>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE user_id IN ({$placeholders})",
+            ...$idList
+        ));
+
+        foreach ($idList as $id) {
+            self::$rowMemo[$id] = null;
+        }
+        foreach ($rows ?: [] as $row) {
+            // Same numeric casts getByUserId applies on the single-row path.
+            $row->reputation_score     = (float) $row->reputation_score;
+            $row->total_votes_cast     = (int) $row->total_votes_cast;
+            $row->total_votes_received = (int) $row->total_votes_received;
+            $row->flag_count           = (int) $row->flag_count;
+            $row->vote_weight          = (float) $row->vote_weight;
+
+            /** @phpstan-var ReputationRow $row */
+            self::$rowMemo[(int) $row->user_id] = $row;
+        }
+    }
+
+    /** Drop a user's memoized row after a write so re-reads are fresh. */
+    private static function forget(int $userId): void {
+        unset(self::$rowMemo[$userId]);
+    }
+
+    /**
      * Get reputation record by user ID
      *
      * @phpstan-return ReputationRow|null
      */
     public function getByUserId(int $userId): ?object {
+        if (array_key_exists($userId, self::$rowMemo)) {
+            return self::$rowMemo[$userId];
+        }
+
         global $wpdb;
-        
+
+        /** @var \stdClass|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE user_id = %d",
             $userId
         ));
-        
+
         if ($row) {
             // Cast numeric fields
-            $row->reputation_score = (float) $row->reputation_score;
-            $row->total_votes_cast = (int) $row->total_votes_cast;
+            $row->reputation_score     = (float) $row->reputation_score;
+            $row->total_votes_cast     = (int) $row->total_votes_cast;
             $row->total_votes_received = (int) $row->total_votes_received;
-            $row->flag_count = (int) $row->flag_count;
-            $row->vote_weight = (float) $row->vote_weight;
+            $row->flag_count           = (int) $row->flag_count;
+            $row->vote_weight          = (float) $row->vote_weight;
         }
-        
+
+        /** @phpstan-var ReputationRow|null $row */
+        self::$rowMemo[$userId] = $row;
+
         return $row;
     }
 
@@ -82,6 +153,7 @@ class ReputationRepository {
      * @param array<string, mixed> $data
      */
     public function createOrUpdate(int $userId, array $data): void {
+        self::forget($userId);
         global $wpdb;
 
         // Validate and sanitize input data
@@ -160,6 +232,7 @@ class ReputationRepository {
      * @throws RuntimeException if the UPDATE query fails
      */
     public function update(int $userId, array $data): bool {
+        self::forget($userId);
         global $wpdb;
 
         $validated = $this->validateData($data);
@@ -200,6 +273,7 @@ class ReputationRepository {
      * @throws RuntimeException if the UPDATE query fails
      */
     public function incrementVotesCast(int $userId, int $count = 1): void {
+        self::forget($userId);
         global $wpdb;
 
         $result = $wpdb->query($wpdb->prepare(
@@ -225,6 +299,7 @@ class ReputationRepository {
      * @throws RuntimeException if the UPDATE query fails
      */
     public function incrementVotesReceived(int $userId, int $count = 1): void {
+        self::forget($userId);
         global $wpdb;
 
         $result = $wpdb->query($wpdb->prepare(
@@ -250,6 +325,7 @@ class ReputationRepository {
      * @throws RuntimeException if the UPDATE query fails
      */
     public function incrementFlagCount(int $userId, int $count = 1): void {
+        self::forget($userId);
         global $wpdb;
 
         $result = $wpdb->query($wpdb->prepare(
@@ -275,6 +351,7 @@ class ReputationRepository {
      * @throws RepositoryException on database failure
      */
     public function updateVoteWeight(int $userId, float $weight): void {
+        self::forget($userId);
         global $wpdb;
 
         $weight = max(BCC_TRUST_MIN_VOTE_WEIGHT, min(BCC_TRUST_MAX_VOTE_WEIGHT, $weight));
@@ -326,6 +403,7 @@ class ReputationRepository {
      * @throws RepositoryException on database failure
      */
     public function delete(int $userId): void {
+        self::forget($userId);
         global $wpdb;
 
         $result = $wpdb->delete(
@@ -589,6 +667,10 @@ class ReputationRepository {
             return 0;
         }
 
+        foreach (array_keys($updates) as $memoUserId) {
+            self::forget((int) $memoUserId);
+        }
+
         $totalAffected = 0;
         $chunks        = array_chunk( $updates, 500, true );
 
@@ -672,6 +754,7 @@ class ReputationRepository {
      * @param string $reason  Audit label (e.g. 'dispute_rejected').
      */
     public function adjustScore(int $userId, float $delta, string $reason = ''): void {
+        self::forget($userId);
         global $wpdb;
 
         // Ensure a row exists first (atomic upsert with defaults).

@@ -526,10 +526,19 @@ final class CardViewService
         $resolvedHandle = self::resolveMemberHandle($user);
         // §J.6 viewer_attestation on member cards. Member card
         // target_kind is `user_profile` per §J.1. Anon viewers get
-        // null (service returns null when viewerId<=0).
-        $viewerAttestation = $viewerId > 0
-            ? $this->attestationService->getViewerAttestation($viewerId, 'user_profile', $userId)
-            : null;
+        // null (service returns null when viewerId<=0). Same
+        // batched-rows-or-single-read split as the page-card path —
+        // both shapes flow through shapeViewerAttestationFromRows.
+        $viewerAttestation = null;
+        if ($viewerId > 0) {
+            if ($prefetched !== null && isset($prefetched['viewer_attestations'])) {
+                $viewerAttestation = $this->attestationService->shapeViewerAttestationFromRows(
+                    $prefetched['viewer_attestations'][$userId] ?? ['vouch' => null, 'stand_behind' => null]
+                );
+            } else {
+                $viewerAttestation = $this->attestationService->getViewerAttestation($viewerId, 'user_profile', $userId);
+            }
+        }
 
         return [
             'id'                  => $userId,
