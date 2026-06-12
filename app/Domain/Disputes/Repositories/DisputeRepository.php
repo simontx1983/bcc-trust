@@ -466,7 +466,7 @@ class DisputeRepository
 
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT DISTINCT page_id FROM {$table}
-              WHERE created_at >= %s OR reviewed_at >= %s
+              WHERE created_at >= %s OR resolved_at >= %s
               LIMIT 5000",
             $sinceMysqlUtc,
             $sinceMysqlUtc

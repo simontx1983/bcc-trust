@@ -577,7 +577,8 @@ final class CardViewService
             'stats'               => $this->buildMemberStats(
                 $userId,
                 $trustScore,
-                (int) $summary['followers_count']
+                (int) $summary['followers_count'],
+                $prefetched
             ),
             'permissions'         => $this->resolveMemberPermissions($userId, $viewerId),
             // STUB: social_proof composition deferred (§O4). Field is
@@ -1286,11 +1287,22 @@ final class CardViewService
      * @param int $watchersCount Passed in from getSummary's
      *                           `followers_count` so the 3-col
      *                           StatsPanel isn't sparse — no re-query.
+     * @param array<string, mixed>|null $prefetched MemberSummaryPrefetcher
+     *                           batch; its `reviews_written_counts` map is
+     *                           consulted before falling back to a
+     *                           per-member countByVoter() query.
      * @return list<Stat>
      */
-    private function buildMemberStats(int $userId, int $trustScore, int $watchersCount): array
+    private function buildMemberStats(int $userId, int $trustScore, int $watchersCount, ?array $prefetched = null): array
     {
-        $reviewsWritten = (int) $this->voteRepo->countByVoter($userId);
+        // Same read pattern as UserViewService::getSummary — when the
+        // batch map is present, a missing key means zero (countByVoters
+        // GROUP BY omits zero-count voters), not "not prefetched".
+        if ($prefetched !== null && isset($prefetched['reviews_written_counts'])) {
+            $reviewsWritten = (int) ($prefetched['reviews_written_counts'][$userId] ?? 0);
+        } else {
+            $reviewsWritten = (int) $this->voteRepo->countByVoter($userId);
+        }
 
         return [
             ['key' => 'trust',           'label' => 'Trust',    'value' => (string) $trustScore,     'raw' => $trustScore,     'format' => 'score'],
