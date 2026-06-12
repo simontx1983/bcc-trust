@@ -206,6 +206,10 @@ function bcc_trust_create_tables() {
 
     \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Database installation completed', []);
 
+    // Tables changed — drop any cached existence answers so the next
+    // tableExists() call re-probes.
+    \BCC\Trust\Core\Database\TableRegistry::flushExistenceCache();
+
     return true;
 }
 
@@ -270,4 +274,28 @@ function bcc_trust_verify_all_tables() {
     }
 
     return $missing;
+}
+
+/**
+ * Acquire the schema-migration advisory lock (non-blocking).
+ *
+ * Prevents N concurrent requests from stampeding dbDelta when a deploy
+ * bumps BCC_TRUST_SCHEMA_VERSION. Lives here (not in the bootstrap)
+ * because direct $wpdb access is confined to the database layer.
+ *
+ * @return bool True if this request holds the lock.
+ */
+function bcc_trust_acquire_schema_lock(): bool {
+    global $wpdb;
+
+    return (int) $wpdb->get_var("SELECT GET_LOCK('bcc_trust_schema_migration', 0)") === 1;
+}
+
+/**
+ * Release the schema-migration advisory lock.
+ */
+function bcc_trust_release_schema_lock(): void {
+    global $wpdb;
+
+    $wpdb->query("SELECT RELEASE_LOCK('bcc_trust_schema_migration')");
 }

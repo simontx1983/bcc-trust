@@ -57,8 +57,7 @@ class AuditLogRepository {
      * Check if the activity table exists.
      */
     public function tableExists(): bool {
-        global $wpdb;
-        return $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $this->table ) ) === $this->table;
+        return \BCC\Trust\Core\Database\TableRegistry::exists( $this->table );
     }
 
     /**
@@ -501,6 +500,9 @@ class AuditLogRepository {
      *
      * Generic helper used by admin repair tools that iterate over
      * TableRegistry entries.
+     *
+     * Intentionally NOT routed through TableRegistry::exists() — repair
+     * surfaces must see ground truth, never a cached answer.
      *
      * @param string $tableName Fully-qualified table name.
      * @return bool

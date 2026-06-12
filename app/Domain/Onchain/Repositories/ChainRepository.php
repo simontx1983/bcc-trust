@@ -96,6 +96,13 @@ final class ChainRepository
         return null;
     }
 
+    /** @var array<int, ChainRow|null> Request-scoped memo for the getById()
+     *  inactive-chain fallback. Callers loop getById() per feed/blog item,
+     *  so an id outside the cached active set would otherwise hit the DB
+     *  once per item. Stores misses (null) too. Request-scoped only — no
+     *  shared-cache writes, so the CACHE INVARIANT is untouched. */
+    private static array $byIdMemo = [];
+
     /** @return ChainRow|null */
     public static function getById(int $chainId): ?object
     {
@@ -106,15 +113,23 @@ final class ChainRepository
             }
         }
 
+        if (array_key_exists($chainId, self::$byIdMemo)) {
+            return self::$byIdMemo[$chainId];
+        }
+
         // Fallback: inactive chain or cache miss — direct query.
         global $wpdb;
         $table = self::table();
 
-        /** @var ChainRow|null */
-        return $wpdb->get_row($wpdb->prepare(
+        /** @var ChainRow|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table} WHERE id = %d LIMIT 1",
             $chainId
         ));
+
+        self::$byIdMemo[$chainId] = $row;
+
+        return $row;
     }
 
     /** @return list<ChainRow> */
@@ -297,6 +312,7 @@ final class ChainRepository
      */
     public static function clearCache(): void
     {
+        self::$byIdMemo = [];
         wp_cache_delete('active_all', self::CACHE_GROUP);
         delete_transient('bcc_active_chains');
     }

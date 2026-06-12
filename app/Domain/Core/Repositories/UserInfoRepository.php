@@ -1395,9 +1395,7 @@ class UserInfoRepository {
      */
     public function tableExists(): bool
     {
-        global $wpdb;
-
-        return $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $this->table)) === $this->table;
+        return \BCC\Trust\Core\Database\TableRegistry::exists($this->table);
     }
 
     /**

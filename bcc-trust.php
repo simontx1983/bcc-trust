@@ -249,20 +249,63 @@ function bcc_onchain_ensure_schema(): void {
     if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\SignalRepository')) {
         \BCC\Trust\Onchain\Repositories\SignalRepository::install_own_table();
     }
+
+    // Tables changed — drop any cached existence answers so the next
+    // tableExists() call re-probes.
+    \BCC\Trust\Core\Database\TableRegistry::flushExistenceCache();
 }
 
 // Schema migration: re-run dbDelta when any schema file changes.
 // Covers Core + Onchain + Disputes schemas (the hash is derived from
 // every schema-*.php file, so all domains are re-installed on any edit).
+//
+// The full installer is ~200 queries (dbDelta DESCRIBE/SHOW sweeps +
+// chain seeds), so a persistently mismatching option — e.g. a stale
+// persistent-object-cache entry serving an old value to get_option —
+// silently turns it into a per-request boot tax. Hence: the firing is
+// logged loudly, the write is verified through a cache-bypassed
+// re-read, and a GET_LOCK guard stops concurrent requests from
+// stampeding dbDelta during a legitimate deploy bump.
 add_action('plugins_loaded', function (): void {
     $stored = get_option('bcc_trust_schema_version', '');
-    if ($stored !== BCC_TRUST_SCHEMA_VERSION) {
+    if ($stored === BCC_TRUST_SCHEMA_VERSION) {
+        return;
+    }
+
+    if (!function_exists('bcc_trust_acquire_schema_lock') || !bcc_trust_acquire_schema_lock()) {
+        return; // Another request is migrating; this one proceeds un-migrated (same race as before, minus the stampede).
+    }
+
+    try {
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] schema migration firing', [
+                'stored'   => $stored,
+                'computed' => BCC_TRUST_SCHEMA_VERSION,
+            ]);
+        }
+
         if (function_exists('bcc_trust_create_tables')) {
             bcc_trust_create_tables();
         }
         bcc_onchain_ensure_schema();
         \BCC\Trust\Disputes\Repositories\DisputeRepository::install();
         update_option('bcc_trust_schema_version', BCC_TRUST_SCHEMA_VERSION, false);
+
+        // Verify the write actually landed where the next request will
+        // read it. A poisoned persistent object cache makes update_option
+        // succeed while get_option keeps returning the old value — the
+        // exact failure mode that turns this gate into a per-request tax.
+        wp_cache_delete('bcc_trust_schema_version', 'options');
+        wp_cache_delete('alloptions', 'options');
+        $reread = get_option('bcc_trust_schema_version', '');
+        if ($reread !== BCC_TRUST_SCHEMA_VERSION && class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] schema version write did not stick — object cache likely stale', [
+                'reread'   => $reread,
+                'computed' => BCC_TRUST_SCHEMA_VERSION,
+            ]);
+        }
+    } finally {
+        bcc_trust_release_schema_lock();
     }
 }, 5);
 

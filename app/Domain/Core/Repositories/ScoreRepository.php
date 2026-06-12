@@ -1459,9 +1459,7 @@ class ScoreRepository {
 
         // ── Tier concentration ──────────────────────────────────────────────
         $reputationTable = \BCC\Trust\Core\Database\TableRegistry::reputation();
-        $tableExists     = $wpdb->get_var(
-            $wpdb->prepare('SHOW TABLES LIKE %s', $reputationTable)
-        ) === $reputationTable;
+        $tableExists     = \BCC\Trust\Core\Database\TableRegistry::exists($reputationTable);
 
         if ($tableExists && !empty($voterIds)) {
             $placeholders = implode(',', array_fill(0, count($voterIds), '%d'));
@@ -1952,9 +1950,7 @@ class ScoreRepository {
      */
     public function tableExists(): bool
     {
-        global $wpdb;
-
-        return $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $this->table)) === $this->table;
+        return \BCC\Trust\Core\Database\TableRegistry::exists($this->table);
     }
 
     /**

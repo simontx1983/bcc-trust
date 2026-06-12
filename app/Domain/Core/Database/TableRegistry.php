@@ -15,9 +15,73 @@ if (!defined('ABSPATH')) {
  * This class is intentionally static: table names are derived from
  * $wpdb->prefix which is a global singleton, and the methods are pure
  * getters with no side effects.
+ *
+ * exists() is the one non-getter: the shared table-existence check
+ * behind the per-repository tableExists() methods, so the SHOW TABLES
+ * probes that used to run per-request collapse into a warm object
+ * cache read.
  */
 final class TableRegistry
 {
+    private const EXISTS_CACHE_GROUP = 'bcc_tables';
+    private const EXISTS_CACHE_TTL   = HOUR_IN_SECONDS;
+
+    /** @var array<string, bool> Request-scoped memo (positive AND negative). */
+    private static array $existsMemo = [];
+
+    /**
+     * Table-existence check: static memo → wp_cache (1h) → SHOW TABLES.
+     *
+     * Only POSITIVE results are cached cross-request. A `false` stays
+     * request-scoped, so a table created moments ago (activation,
+     * schema migration) is visible to the very next request — no
+     * negative poisoning. Tables don't un-exist outside installers,
+     * and installers call flushExistenceCache().
+     *
+     * Diagnostic/repair surfaces (AdminDashboardRepository repair data,
+     * RepairService, bcc_trust_verify_all_tables) intentionally do NOT
+     * route through here — they must see ground truth.
+     */
+    public static function exists(string $table): bool
+    {
+        if (isset(self::$existsMemo[$table])) {
+            return self::$existsMemo[$table];
+        }
+
+        $cached = wp_cache_get('exists_' . $table, self::EXISTS_CACHE_GROUP);
+        if ($cached === '1') {
+            self::$existsMemo[$table] = true;
+            return true;
+        }
+
+        global $wpdb;
+        $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) === $table;
+
+        self::$existsMemo[$table] = $exists;
+        if ($exists) {
+            wp_cache_set('exists_' . $table, '1', self::EXISTS_CACHE_GROUP, self::EXISTS_CACHE_TTL);
+        }
+
+        return $exists;
+    }
+
+    /**
+     * Drop all cached existence answers. Called by the installers
+     * (bcc_trust_create_tables, bcc_onchain_ensure_schema) after they
+     * run, so anything cached mid-install is re-probed.
+     */
+    public static function flushExistenceCache(): void
+    {
+        $tables = array_unique(array_merge(
+            array_keys(self::$existsMemo),
+            array_values(self::all())
+        ));
+        foreach ($tables as $table) {
+            wp_cache_delete('exists_' . $table, self::EXISTS_CACHE_GROUP);
+        }
+        self::$existsMemo = [];
+    }
+
     public static function votes(): string
     {
         global $wpdb;

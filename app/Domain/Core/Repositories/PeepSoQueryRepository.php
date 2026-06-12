@@ -15,24 +15,13 @@ if (!defined('ABSPATH')) {
  */
 final class PeepSoQueryRepository
 {
-    /** @var array<string, bool> Per-request cache of table existence */
-    private static array $tableCache = [];
-
     /**
-     * Check whether a PeepSo table exists (cached per-request).
+     * Check whether a PeepSo table exists (request memo + object cache
+     * via the shared TableRegistry::exists seam).
      */
     public static function tableExists(string $tableName): bool
     {
-        if (isset(self::$tableCache[$tableName])) {
-            return self::$tableCache[$tableName];
-        }
-
-        global $wpdb;
-        self::$tableCache[$tableName] = ($wpdb->get_var(
-            $wpdb->prepare('SHOW TABLES LIKE %s', $tableName)
-        ) === $tableName);
-
-        return self::$tableCache[$tableName];
+        return \BCC\Trust\Core\Database\TableRegistry::exists($tableName);
     }
 
     /**
