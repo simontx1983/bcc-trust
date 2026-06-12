@@ -176,6 +176,49 @@ final class GatedGroupRepository {
     }
 
     /**
+     * Opted-in auto-join user IDs, cursor-paged by user_id ASC.
+     *
+     * Drives the twicedaily reconcile sweep's rotation: callers pass the
+     * last-seen user_id as `$afterId` so every opted-in user is eventually
+     * processed instead of the query re-hitting the first N forever. A
+     * short result (< $limit) means the cursor reached the end → caller
+     * wraps to 0.
+     *
+     * Bounded (§4): `LIMIT %d`, unique-key meta filter, cursor bound.
+     * Explicit single column. The meta_key/meta_value pair matches
+     * NftGroupGateService::USER_META_AUTO_JOIN = '1' (the only opted-in
+     * marker).
+     *
+     * @return list<int>
+     */
+    public static function listAutoJoinUserIdsAfter(int $afterId, int $limit = 20): array {
+        if ($limit <= 0) {
+            return [];
+        }
+        if ($afterId < 0) {
+            $afterId = 0;
+        }
+
+        global $wpdb;
+
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT user_id
+               FROM {$wpdb->usermeta}
+              WHERE meta_key   = %s
+                AND meta_value = %s
+                AND user_id    > %d
+              ORDER BY user_id ASC
+              LIMIT %d",
+            \BCC\Trust\Onchain\Services\NftGroupGateService::USER_META_AUTO_JOIN,
+            '1',
+            $afterId,
+            $limit
+        ));
+
+        return array_values(array_map('intval', $rows ?: []));
+    }
+
+    /**
      * Write the five gate post-meta keys atomically (PeepSo group post must exist).
      *
      * @param int    $groupId          Existing peepso-group post ID.

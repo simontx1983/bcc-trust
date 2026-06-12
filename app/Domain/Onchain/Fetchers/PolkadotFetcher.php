@@ -76,9 +76,9 @@ class PolkadotFetcher implements FetcherInterface
         return []; // Polkadot nominations discovery not implemented yet.
     }
 
-    public function count_holdings(string $wallet, string $contract): int
+    public function count_holdings(string $wallet, string $contract): ?int
     {
-        return 0;
+        return 0; // No NFT ownership model — definite "no holdings," not an outage.
     }
 
     /**

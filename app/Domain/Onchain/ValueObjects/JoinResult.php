@@ -23,6 +23,11 @@ final class JoinResult {
     public const CODE_OPT_OUT_ACTIVE      = 'opt_out_active';
     public const CODE_NOT_A_HOLDER_GROUP  = 'not_a_holder_group';
     public const CODE_CHAIN_UNSUPPORTED   = 'chain_unsupported';
+    // Provider could not verify ownership (timeout / 429 / breaker-open /
+    // malformed RPC). Distinct from NOT_ELIGIBLE: we are NOT saying the
+    // user fails the gate, only that we couldn't check right now. Join
+    // fails CLOSED on this — never add a member during an outage.
+    public const CODE_VERIFY_UNAVAILABLE  = 'verify_unavailable';
 
     public function __construct(
         public readonly bool   $success,
@@ -53,5 +58,9 @@ final class JoinResult {
 
     public static function chainUnsupported(int $minBalance): self {
         return new self(false, self::CODE_CHAIN_UNSUPPORTED, $minBalance);
+    }
+
+    public static function verifyUnavailable(int $minBalance): self {
+        return new self(false, self::CODE_VERIFY_UNAVAILABLE, $minBalance);
     }
 }

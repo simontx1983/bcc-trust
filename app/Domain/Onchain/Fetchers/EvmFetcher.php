@@ -149,10 +149,12 @@ class EvmFetcher implements FetcherInterface
      * lookups through `NftHoldingsRepository::countVisibleByContract()`
      * (the persistent transfer index, see HoldingsService::countFromCacheOrFetch).
      */
-    public function count_holdings(string $wallet, string $contract): int
+    public function count_holdings(string $wallet, string $contract): ?int
     {
         $addr = strtolower($wallet);
         if (!preg_match('/^0x[a-f0-9]{40}$/', $addr)) {
+            // Malformed input, not a provider outage — a definite "no
+            // holdings for this nonsense address." Stays a real 0.
             return 0;
         }
 
@@ -166,13 +168,18 @@ class EvmFetcher implements FetcherInterface
         $paddedWallet = str_pad(substr($addr, 2), 64, '0', STR_PAD_LEFT);
         $data = '0x' . $selector . $paddedWallet;
 
+        // ethCall returns null ONLY on transport/RPC error (WP_Error,
+        // non-200, JSON-RPC error envelope, unparseable body). A
+        // SUCCESSFUL balanceOf always returns a hex string — "0x0" decodes
+        // to a real zero below. So null here = UNKNOWN, never "owns none".
         $result = $this->ethCall($to, $data);
         if ($result === null) {
-            return 0;
+            return null;
         }
 
         $hex = ltrim(substr($result, 2), '0');
         if ($hex === '') {
+            // Successful call, all-zero hex word = genuine balance of 0.
             return 0;
         }
 

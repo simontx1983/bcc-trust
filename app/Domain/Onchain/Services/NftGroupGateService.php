@@ -76,13 +76,24 @@ final class NftGroupGateService {
             return JoinResult::chainUnsupported($config->minBalance);
         }
 
-        $balance = HoldingsService::ownsAny(
+        // Three-outcome verdict. JOIN fails CLOSED: on UNKNOWN (provider
+        // outage) we refuse to add the user — never bring someone into a
+        // gated group during an RPC hiccup, since we can't actually prove
+        // they qualify. They retry once the provider recovers.
+        $verdict = HoldingsService::eligibilityVerdict(
             $userId,
             (string) $chain->slug,
-            $config->contractAddress
+            $config->contractAddress,
+            $config->minBalance
         );
-        if ($balance < $config->minBalance) {
-            return JoinResult::notEligible($config->minBalance, $balance);
+        if ($verdict->isUnknown()) {
+            return JoinResult::verifyUnavailable($config->minBalance);
+        }
+        if (!$verdict->isEligible()) {
+            return JoinResult::notEligible(
+                $config->minBalance,
+                $verdict->bestKnownBalance ?? 0
+            );
         }
 
         \BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId);
@@ -147,8 +158,13 @@ final class NftGroupGateService {
         $eligible = [];
         foreach ($candidates as [$cfg, $slug]) {
             $key = $slug . ':' . $cfg->contractAddress;
-            $balance = $balances[$key] ?? 0;
-            if ($balance >= $cfg->minBalance) {
+            // Use array_key_exists, NOT `?? 0`: a present value of null is
+            // UNKNOWN (provider couldn't verify), and `??` would silently
+            // collapse that null to 0 — re-introducing the exact fail-open
+            // bug Part 1 exists to fix. findEligibleGroups feeds auto-join
+            // which fails CLOSED: an unverifiable wallet is NOT eligible.
+            $balance = array_key_exists($key, $balances) ? $balances[$key] : 0;
+            if ($balance !== null && $balance >= $cfg->minBalance) {
                 $eligible[] = $cfg;
             }
         }

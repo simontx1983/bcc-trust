@@ -494,6 +494,7 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
         'bcc_onchain_retry_bonus'         => ['interval' => 'hourly',               'description' => 'onchain bonus-application retry'],
         'bcc_gated_group_provision'       => ['interval' => 'daily',                'description' => 'holder-group provisioning (PeepSo write surface)'],
         'bcc_gated_group_reconcile_sweep' => ['interval' => 'twicedaily',           'description' => 'holder-group reconcile sweep'],
+        'bcc_gated_group_revoke_sweep'    => ['interval' => 'twicedaily',           'description' => 'holder-group revoke re-verification sweep'],
         'bcc_nft_eth_indexer_tick'        => ['interval' => 'bcc_one_minute',       'description' => 'NFT EVM indexer per-chain tick'],
         'bcc_helius_dedupe_sweep'         => ['interval' => 'bcc_five_minutes',     'description' => 'Helius signature replay LRU eviction'],
         'bcc_nft_enrichment_tick'         => ['interval' => 'bcc_five_minutes',     'description' => 'NFT metadata backfill (name + image_url)'],
@@ -569,6 +570,14 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled('bcc_trust_divergence_state_sweep')) {
         wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_divergence_state_sweep');
     }
+
+    // Holder-group revoke (re-verification) sweep self-heal. This hook is
+    // NEW — sites updated without a reactivation would otherwise never
+    // schedule it (the exact silent-drift failure mode documented above
+    // and in the V2 NFT cron-drift incident memory). Guarded + additive.
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK)) {
+        wp_schedule_event(time() + 120 * MINUTE_IN_SECONDS, 'twicedaily', \BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK);
+    }
 }, 5);
 
 // PR-8b — daily divergence-state sweep callback. Runs the worker;
@@ -591,17 +600,34 @@ add_action('bcc_trust_divergence_state_sweep', static function (): void {
 });
 
 add_action('bcc_gated_group_reconcile_sweep', function () {
-    $userIds = get_users([
-        'meta_key'   => \BCC\Trust\Onchain\Services\NftGroupGateService::USER_META_AUTO_JOIN,
-        'meta_value' => '1',
-        'fields'     => 'ID',
-        'number'     => 20,
-        'orderby'    => 'ID',
-        'order'      => 'ASC',
-    ]);
-    if (!is_array($userIds) || $userIds === []) {
+    // Rotation cursor — without it the prior `ORDER BY ID ASC LIMIT 20`
+    // re-processed the SAME first-20 opted-in users on every tick forever,
+    // so the 21st-onward auto-join users were never reconciled. Mirrors
+    // CronService::dailyFraudRefresh: page forward by user_id, advance the
+    // cursor to the largest id returned, wrap to 0 on a short batch.
+    $batchSize    = 20;
+    $cursorOption = 'bcc_gated_group_reconcile_cursor';
+    $afterId      = (int) get_option($cursorOption, 0);
+
+    // Cursor-paged via the repository (§1 — no direct $wpdb in bootstrap).
+    $userIds = \BCC\Trust\Onchain\Repositories\GatedGroupRepository::listAutoJoinUserIdsAfter(
+        $afterId,
+        $batchSize
+    );
+
+    if ($userIds === []) {
+        // End of the cursor — reset so the next tick wraps to the start.
+        if ($afterId > 0) {
+            update_option($cursorOption, 0, false);
+        }
         return;
     }
+
+    // Advance the cursor to the largest id returned. A short batch
+    // (< $batchSize) means we reached the end → wrap to 0 next tick.
+    $maxReturned = (int) max(array_map('intval', $userIds));
+    $nextCursor  = count($userIds) < $batchSize ? 0 : $maxReturned;
+    update_option($cursorOption, $nextCursor, false);
 
     $service     = \BCC\Trust\Core\Plugin::instance()->nftGroupGateService();
     $totalJoined = 0;
@@ -624,21 +650,72 @@ add_action('bcc_gated_group_reconcile_sweep', function () {
     }
 });
 
+// V2 (PR revoke): NFT-gated holder-group RE-VERIFICATION revoke sweep.
+// Twicedaily. Re-derives eligibility for current members of every gated
+// group and removes the ones we are CERTAIN no longer qualify
+// (INELIGIBLE = real-zero across all wallets). UNKNOWN (provider outage /
+// breaker-open) members are SKIPPED — never revoked on a hiccup. Bounded
+// + rotated (see NftGroupRevokeService) so a single tick never does
+// unbounded RPC and every member is eventually covered.
+add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, function () {
+    try {
+        $stats = \BCC\Trust\Core\Plugin::instance()
+            ->nftGroupRevokeService()
+            ->sweep();
+        if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0) {
+            \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group revoke sweep', $stats);
+        }
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::warning('[bcc-trust] Holder-group revoke sweep failed', [
+            'error' => $e->getMessage(),
+        ]);
+    }
+});
+
 // V2: when PeepSo evicts a user from a group via mod action, record a
-// permanent opt-out so our reconcile sweep (PR 4) won't re-add a banned
-// user. Only writes opt-out for our holder groups; ignores others.
+// permanent opt-out so our reconcile sweep won't re-add a banned user.
+// Only writes opt-out for our holder groups; ignores others.
+//
+// ┌─ Permanent-opt-out trap (DO NOT "simplify" away the guard) ─────────┐
+// │ This listener fires on EVERY peepso_action_group_user_delete,       │
+// │ including the leave() calls our own NftGroupRevokeService makes in  │
+// │ cron. In cron there is no current user, so the                      │
+// │ `$userId === get_current_user_id()` self-leave check below does NOT │
+// │ match — without the system-revoke guard, our automated              │
+// │ re-verification revoke would be mis-classified as a mod eviction    │
+// │ and write a PERMANENT opt-out, locking the user out FOREVER even    │
+// │ after they re-acquire the NFT. The guard flag lets us skip the      │
+// │ permanent opt-out for OUR leaves while still writing it for genuine │
+// │ PeepSo-UI mod removals.                                             │
+// │                                                                     │
+// │ Distinction test (the three paths through this listener):           │
+// │   1. User leaves via the app  → $userId === current user → return   │
+// │      early (REST endpoint already wrote a TTL'd opt-out).            │
+// │   2. System revoke sweep      → $systemRevokeInProgress === true →   │
+// │      return early, NO opt-out (user re-qualifies on re-acquire).     │
+// │   3. Mod evicts via PeepSo UI → neither of the above → PERMANENT     │
+// │      opt-out written (the intended behaviour — a banned user must    │
+// │      not be auto-re-added).                                          │
+// └─────────────────────────────────────────────────────────────────────┘
 add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     $groupId = (int) $groupId;
     $userId  = (int) $userId;
     if ($groupId <= 0 || $userId <= 0) {
         return;
     }
-    if ($userId === get_current_user_id()) {
-        // Voluntary leave (user removed self via UI) — TTL'd opt-out is
-        // recorded by the REST endpoint or the gate service. Skip here
-        // to avoid double-writing the opt-out timestamp.
+    if (\BCC\Trust\Onchain\Services\NftGroupRevokeService::$systemRevokeInProgress) {
+        // Path 2: our automated re-verification revoke. NOT a mod
+        // eviction — skip the permanent opt-out so the user can rejoin
+        // the instant they re-acquire the gating NFT.
         return;
     }
+    if ($userId === get_current_user_id()) {
+        // Path 1: voluntary leave (user removed self via UI) — TTL'd
+        // opt-out is recorded by the REST endpoint or the gate service.
+        // Skip here to avoid double-writing the opt-out timestamp.
+        return;
+    }
+    // Path 3: mod-initiated eviction via the PeepSo UI.
     $config = \BCC\Trust\Onchain\Repositories\GatedGroupRepository::getGateConfig($groupId);
     if ($config === null) {
         return; // Not a holder group.
@@ -1398,6 +1475,15 @@ function bcc_trust_activate() {
         // sweep tries to auto-join opted-in users.
         wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
     }
+    // Holder-group revoke (re-verification) sweep — twicedaily, bounded +
+    // rotated. Offset 120m so it trails provision + reconcile; a member
+    // mid-acquire isn't revoked before the add side has had its window.
+    // Self-heal mirror lives in Plugin::registerAsyncJobs (plugins_loaded)
+    // per the V2 cron-drift memory — sites updated WITHOUT a reactivation
+    // still get this scheduled. DO NOT remove either as "redundant."
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK)) {
+        wp_schedule_event(time() + 120 * MINUTE_IN_SECONDS, 'twicedaily', \BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK);
+    }
 
     // PR-8b — daily divergence-state sweep. Detects targets that
     // transitioned into polarizing/disputed and fires the §J.7
@@ -1510,6 +1596,7 @@ function bcc_trust_deactivate() {
         'bcc_onchain_retry_bonus',
         'bcc_gated_group_provision',
         'bcc_gated_group_reconcile_sweep',
+        'bcc_gated_group_revoke_sweep',
         // V2 Phase 1a: NFT indexer tick.
         \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK,
         // V2 Phase 1b: Helius dedupe-sweep.

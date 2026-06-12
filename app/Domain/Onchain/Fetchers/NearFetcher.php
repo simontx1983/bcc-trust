@@ -77,9 +77,9 @@ class NearFetcher implements FetcherInterface
         return []; // NEAR delegation discovery is per-pool and not implemented yet.
     }
 
-    public function count_holdings(string $wallet, string $contract): int
+    public function count_holdings(string $wallet, string $contract): ?int
     {
-        return 0;
+        return 0; // No NFT ownership model — definite "no holdings," not an outage.
     }
 
     /**

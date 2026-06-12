@@ -347,13 +347,19 @@ class CosmosFetcher implements FetcherInterface
      * PER_CONTRACT_TOKEN_CAP and returns the count. Does NOT fetch per-token
      * metadata — count-only path stays cheap.
      */
-    public function count_holdings(string $wallet, string $contract): int
+    public function count_holdings(string $wallet, string $contract): ?int
     {
         if ($wallet === '' || $contract === '') {
+            // Empty input is a definite "no holdings," not an LCD outage.
             return 0;
         }
+        // cw721AllTokensForOwner returns null when the LCD query FAILED
+        // (transport error / non-200 / unparseable). A SUCCESSFUL query
+        // for a wallet that owns nothing returns an empty list → 0. We
+        // surface null straight through so the caller fails open rather
+        // than reading a breaker-open LCD as "owns none."
         $tokenIds = $this->cw721AllTokensForOwner($contract, $wallet);
-        return count($tokenIds);
+        return $tokenIds === null ? null : count($tokenIds);
     }
 
     /**
@@ -400,8 +406,12 @@ class CosmosFetcher implements FetcherInterface
             // batch (mirror Phase 1c NftEnrichmentService::runForChain
             // structural isolation pattern).
             try {
+                // list_holdings is the gallery (cold) path — a failed or
+                // empty contract is simply omitted from the gallery (the
+                // pre-fail-open behaviour). The count (gate) path above is
+                // where the null vs empty distinction is load-bearing.
                 $tokenIds = $this->cw721AllTokensForOwner($contract, $wallet);
-                if ($tokenIds === []) {
+                if ($tokenIds === null || $tokenIds === []) {
                     continue;
                 }
                 if (count($tokenIds) >= self::PER_CONTRACT_TOKEN_CAP) {
@@ -497,9 +507,16 @@ class CosmosFetcher implements FetcherInterface
      * Returns ONE page of token_ids. Caller is responsible for paginating
      * via {@see cw721AllTokensForOwner}.
      *
-     * @return list<string>
+     * Return contract (fail-open distinction):
+     *   - `list<string>` (possibly empty) → SUCCESSFUL query. An empty
+     *     list means "this page genuinely has no tokens for the owner."
+     *   - `null` → the LCD smart-query FAILED (transport error, non-200,
+     *     unparseable body, or breaker-open). Caller must treat this as
+     *     "unknown," never as "owns none."
+     *
+     * @return list<string>|null
      */
-    private function cw721Tokens(string $contract, string $owner, ?string $startAfter = null, int $limit = self::TOKENS_PAGE_SIZE): array
+    private function cw721Tokens(string $contract, string $owner, ?string $startAfter = null, int $limit = self::TOKENS_PAGE_SIZE): ?array
     {
         if ($contract === '' || $owner === '') {
             return [];
@@ -530,8 +547,19 @@ class CosmosFetcher implements FetcherInterface
             $query['tokens']['start_after'] = $startAfter;
         }
 
+        // wasmSmartQuery returns null on transport / non-200 / unparseable
+        // (it threads through lcdGet which inherits the per-chain
+        // CircuitBreaker — a breaker-open chain yields null here). Surface
+        // that as a failed page so the page-walk can distinguish "couldn't
+        // verify" from "verified empty," and do NOT cache it (caching a
+        // failed query would poison the TTL window with a false empty).
         $data = $this->wasmSmartQuery($contract, $query);
-        if (!is_array($data) || !isset($data['tokens']) || !is_array($data['tokens'])) {
+        if ($data === null) {
+            return null;
+        }
+        if (!isset($data['tokens']) || !is_array($data['tokens'])) {
+            // Successful response with no `tokens` envelope — treat as a
+            // genuine empty page (owns none under this contract).
             return [];
         }
 
@@ -551,14 +579,30 @@ class CosmosFetcher implements FetcherInterface
      * PER_CONTRACT_TOKEN_CAP. Caller's `count_holdings` returns the count;
      * caller's `list_holdings` consumes the token_ids.
      *
-     * @return list<string>
+     * Return contract (fail-open distinction):
+     *   - `list<string>` (possibly empty) → the walk COMPLETED. An empty
+     *     list means the owner genuinely holds none under this contract.
+     *   - `null` → an LCD page query FAILED before we could finish (and
+     *     before any early cap-return), so we could not verify holdings.
+     *     A partial walk can't be trusted as a low/zero count, so we
+     *     surface UNKNOWN rather than an undercount.
+     *
+     * Note: the early cap-return (≥ PER_CONTRACT_TOKEN_CAP) short-circuits
+     * BEFORE any later-page failure can matter — once we know the owner
+     * holds at least the cap, the gate verdict is already decided.
+     *
+     * @return list<string>|null
      */
-    private function cw721AllTokensForOwner(string $contract, string $owner): array
+    private function cw721AllTokensForOwner(string $contract, string $owner): ?array
     {
         $all       = [];
         $cursor    = null;
         for ($page = 0; $page < ceil(self::PER_CONTRACT_TOKEN_CAP / self::TOKENS_PAGE_SIZE); $page++) {
             $pageResult = $this->cw721Tokens($contract, $owner, $cursor, self::TOKENS_PAGE_SIZE);
+            if ($pageResult === null) {
+                // LCD query failed mid-walk — cannot complete verification.
+                return null;
+            }
             if ($pageResult === []) {
                 break;
             }

@@ -399,7 +399,7 @@ class SolanaFetcher implements FetcherInterface
      * Cap exists so a malicious wallet stuffed with millions of assets
      * can't run our RPC budget into the ground.
      */
-    public function count_holdings(string $wallet, string $contract): int
+    public function count_holdings(string $wallet, string $contract): ?int
     {
         $target  = strtolower($contract);
         $count   = 0;
@@ -408,6 +408,11 @@ class SolanaFetcher implements FetcherInterface
         $maxPage = 10; // 10 × 1000 = 10,000 assets scanned per wallet — realistic upper bound.
 
         while ($page <= $maxPage) {
+            // rpcCall returns null ONLY on a failed call (WP_Error,
+            // non-200, JSON-RPC error envelope, unparseable body); a
+            // SUCCESSFUL "owns nothing" response yields an EMPTY ARRAY.
+            // We must NOT conflate the two: break-on-error → UNKNOWN
+            // (return null), break-on-empty → real end of the wallet.
             $items = $this->rpcCall('getAssetsByOwner', [
                 'ownerAddress'   => $wallet,
                 'displayOptions' => ['showCollectionMetadata' => false],
@@ -415,7 +420,16 @@ class SolanaFetcher implements FetcherInterface
                 'page'           => $page,
             ]);
 
-            if (!is_array($items) || $items === []) {
+            if ($items === null) {
+                // Provider error. Any count accumulated so far is a
+                // partial walk we can't trust — surface UNKNOWN so the
+                // caller fails open (never revoke / never false-negative
+                // a gate on a transient RPC failure).
+                return null;
+            }
+
+            if ($items === []) {
+                // Successful response, no (more) assets — genuine end.
                 break;
             }
 

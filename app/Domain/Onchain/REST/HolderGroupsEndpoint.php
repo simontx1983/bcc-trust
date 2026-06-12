@@ -195,8 +195,18 @@ final class HolderGroupsEndpoint
             if ($slug === null) {
                 continue;
             }
-            $balance = $balances[$slug . ':' . $cfg->contractAddress] ?? 0;
-            if ($balance >= $cfg->minBalance) {
+            // null = UNKNOWN (provider outage). Do NOT surface an
+            // unverifiable group as "eligible to join" — a false-positive
+            // suggestion that 503s on the actual join attempt is worse than
+            // silently omitting it this poll. The user simply doesn't see
+            // the suggestion until verification succeeds (next request, once
+            // the holdings cache warms or the provider recovers).
+            //
+            // array_key_exists (NOT `?? 0`): a present null is UNKNOWN and
+            // `??` would collapse it to a false real-0.
+            $balKey  = $slug . ':' . $cfg->contractAddress;
+            $balance = array_key_exists($balKey, $balances) ? $balances[$balKey] : 0;
+            if ($balance !== null && $balance >= $cfg->minBalance) {
                 $eligible[] = $item;
             }
         }
@@ -456,6 +466,18 @@ final class HolderGroupsEndpoint
                 return ApiResponse::error(
                     'bcc_internal_error',
                     'This community is on an unsupported chain right now. Please try again later.',
+                    503
+                );
+
+            case JoinResult::CODE_VERIFY_UNAVAILABLE:
+                // Provider couldn't verify ownership (timeout / 429 /
+                // breaker-open). NOT a "you don't qualify" — a transient
+                // "we couldn't check." 503 + retry framing so the client
+                // re-attempts rather than telling the user they failed the
+                // gate. Fail-closed: we did NOT join them.
+                return ApiResponse::error(
+                    'bcc_upstream_unavailable',
+                    'We could not verify your NFT ownership right now. Please try again in a moment.',
                     503
                 );
         }

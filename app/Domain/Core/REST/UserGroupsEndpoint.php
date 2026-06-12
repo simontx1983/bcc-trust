@@ -252,11 +252,20 @@ final class UserGroupsEndpoint
             if ($slug === null) {
                 continue;
             }
-            $balance = $balances[$slug . ':' . $cfg->contractAddress] ?? 0;
+            // null = UNKNOWN (provider couldn't verify). Fail closed on the
+            // eligibility flag — never render a false "eligible" badge from
+            // an outage. The `balance` field stays an int for wire-shape
+            // stability (coerce the unknown to 0); `eligible:false` is what
+            // the frontend actually gates on.
+            //
+            // array_key_exists (NOT `?? 0`): a present null is UNKNOWN and
+            // `??` would collapse it to a false real-0 before we can test it.
+            $balKey     = $slug . ':' . $cfg->contractAddress;
+            $rawBalance = array_key_exists($balKey, $balances) ? $balances[$balKey] : 0;
             $out[$groupId] = [
-                'eligible'    => $balance >= $cfg->minBalance,
+                'eligible'    => $rawBalance !== null && $rawBalance >= $cfg->minBalance,
                 'min_balance' => $cfg->minBalance,
-                'balance'     => $balance,
+                'balance'     => $rawBalance ?? 0,
             ];
         }
         return $out;

@@ -79,13 +79,26 @@ interface FetcherInterface
      * Count NFT tokens this wallet holds in a specific collection.
      *
      * Hot path — must be cheap. Used for gate checks on every protected
-     * page load. Drivers that don't support NFT ownership queries
-     * (e.g. Cosmos) return 0.
+     * page load.
+     *
+     * Return contract (fail-open distinction — load-bearing for the
+     * holder-group revoke sweep):
+     *   - `int >= 0` → a REAL count from a SUCCESSFUL provider response.
+     *                  0 means "wallet genuinely holds none."
+     *   - `null`     → the provider COULD NOT be reached / answered with an
+     *                  error (timeout, 429, circuit-breaker-open via
+     *                  ApiRetry WP_Error, malformed RPC). This is NOT a
+     *                  zero — callers must treat it as "unknown," never as
+     *                  "owns none."
+     *
+     * Drivers that don't support NFT ownership queries (e.g. validator-only
+     * chains) return 0 — that is a definite "no holdings here," not an
+     * outage, so it stays a real zero rather than null.
      *
      * @param string $wallet   Wallet / account address.
      * @param string $contract Collection contract / mint address.
      */
-    public function count_holdings(string $wallet, string $contract): int;
+    public function count_holdings(string $wallet, string $contract): ?int;
 
     /**
      * Enumerate all NFTs this wallet holds across all collections on this chain.

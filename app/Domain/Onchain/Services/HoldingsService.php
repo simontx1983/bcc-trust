@@ -84,9 +84,19 @@ final class HoldingsService
      *     applicable. Trade-off: indexer-cadence freshness lag (~1 min);
      *     acceptable for the soft-gate UX.
      *
-     * Returns 0 if no matching chain is connected or no wallet holds any.
+     * Returns:
+     *   - `int >= 0` → highest REAL single-wallet balance (0 if no wallet
+     *                  holds any, OR if the chain/driver is unsupported or
+     *                  no wallet is connected — those are definite zeros).
+     *   - `null`     → every wallet that COULD have qualified failed to
+     *                  verify (provider outage). Caller must fail open /
+     *                  fail closed per its own posture — never read null
+     *                  as a real zero.
+     *
+     * For a three-way verdict (ELIGIBLE / INELIGIBLE / UNKNOWN) prefer
+     * {@see eligibilityVerdict}; this method is the raw nullable balance.
      */
-    public static function ownsAny(int $userId, string $chainSlug, string $contract): int
+    public static function ownsAny(int $userId, string $chainSlug, string $contract): ?int
     {
         $chain = ChainRepository::getBySlug($chainSlug);
         if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
@@ -106,7 +116,8 @@ final class HoldingsService
         $chainId       = (int) $chain->id;
         $tokenStandard = CollectionRepository::findTokenStandard($chainId, $contract);
 
-        $max = 0;
+        $max     = null; // highest REAL count seen
+        $sawNull = false; // at least one wallet couldn't verify
         foreach ($wallets as $w) {
             $count = self::countFromCacheOrFetch(
                 $fetcher,
@@ -116,12 +127,103 @@ final class HoldingsService
                 $chainId,
                 $tokenStandard
             );
-            if ($count > $max) {
+            if ($count === null) {
+                $sawNull = true;
+                continue;
+            }
+            if ($max === null || $count > $max) {
                 $max = $count;
             }
         }
 
-        return $max;
+        // If we have any real count, that's the answer (a real ≥ threshold
+        // wallet makes the unknown wallets moot). If every wallet failed,
+        // return null (UNKNOWN). $max === null && !$sawNull can't happen
+        // (the empty-wallets case returned 0 above).
+        if ($max !== null) {
+            return $max;
+        }
+        return $sawNull ? null : 0;
+    }
+
+    /**
+     * Reduce a user's wallet set on one (chain, contract) to a single
+     * three-outcome verdict. This is the canonical gate decision used by
+     * both the JOIN path (fail CLOSED on UNKNOWN — never add during an
+     * outage) and the REVOKE sweep (fail OPEN on UNKNOWN — never evict on
+     * a hiccup; the next sweep retries).
+     *
+     * Outcomes:
+     *   - ELIGIBLE   → some wallet's REAL count ≥ minBalance.
+     *   - INELIGIBLE → every wallet returned a REAL count and none reached
+     *                  minBalance (certain non-qualification).
+     *   - UNKNOWN    → no wallet reached minBalance AND at least one wallet
+     *                  could not be verified (provider error).
+     *
+     * Unsupported chain / no connected wallet → INELIGIBLE (a definite
+     * "not a holder here," not an outage).
+     */
+    public static function eligibilityVerdict(
+        int $userId,
+        string $chainSlug,
+        string $contract,
+        int $minBalance
+    ): \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict {
+        $min = max(1, $minBalance);
+
+        $chain = ChainRepository::getBySlug($chainSlug);
+        if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
+            return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::ineligible($min, 0);
+        }
+
+        $fetcher = FetcherFactory::make_for_chain($chain);
+        if (!$fetcher->supports_feature('holdings_count')) {
+            return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::ineligible($min, 0);
+        }
+
+        $wallets = self::walletsForUserOnChain($userId, (int) $chain->id);
+        if (empty($wallets)) {
+            return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::ineligible($min, 0);
+        }
+
+        $chainId       = (int) $chain->id;
+        $tokenStandard = CollectionRepository::findTokenStandard($chainId, $contract);
+
+        $bestReal = null; // highest REAL count
+        $sawNull  = false;
+        foreach ($wallets as $w) {
+            $count = self::countFromCacheOrFetch(
+                $fetcher,
+                (int) $w->id,
+                $w->wallet_address,
+                $contract,
+                $chainId,
+                $tokenStandard
+            );
+            if ($count === null) {
+                $sawNull = true;
+                continue;
+            }
+            if ($bestReal === null || $count > $bestReal) {
+                $bestReal = $count;
+            }
+            if ($count >= $min) {
+                // A real wallet clears the bar — definitively eligible,
+                // regardless of any unknown siblings.
+                return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::eligible($min, $count);
+            }
+        }
+
+        // No wallet cleared the bar.
+        if ($sawNull) {
+            // Some wallet couldn't be verified — we can't be SURE they
+            // don't qualify. UNKNOWN.
+            return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::unknown($min, $bestReal);
+        }
+
+        // Every wallet returned a real count and none reached the bar —
+        // certain non-qualification.
+        return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::ineligible($min, $bestReal ?? 0);
     }
 
     /**
@@ -257,10 +359,14 @@ final class HoldingsService
     /**
      * Batched ownership check across multiple (chain, contract) pairs.
      *
-     * Returns a map keyed `"<chain_slug>:<contract>"` of max-balance ints
-     * (same semantics as ownsAny — highest single-wallet balance, not
-     * sum). Pairs that resolve to unsupported chains return 0; unknown
-     * keys are absent from the result.
+     * Returns a map keyed `"<chain_slug>:<contract>"` of nullable
+     * max-balance ints (same semantics as ownsAny — highest REAL
+     * single-wallet balance, not sum):
+     *   - `int >= 0` → real count (0 = definite none / unsupported chain /
+     *                  no connected wallet).
+     *   - `null`     → every candidate wallet failed to verify (UNKNOWN);
+     *                  caller must not read this as a zero.
+     * Unknown keys are absent from the result.
      *
      * Amortizes ChainRepository, FetcherFactory, and walletsForUserOnChain
      * lookups across all pairs sharing a chain. The per-(wallet, contract)
@@ -268,7 +374,7 @@ final class HoldingsService
      * unbatched path.
      *
      * @param list<array{0: string, 1: string}> $pairs
-     * @return array<string, int>
+     * @return array<string, ?int>
      */
     public static function ownsAnyMany(int $userId, array $pairs): array
     {
@@ -290,6 +396,7 @@ final class HoldingsService
         foreach ($byChain as $chainSlug => $contracts) {
             $chain = ChainRepository::getBySlug($chainSlug);
             if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
+                // Unsupported chain — definite 0, not an outage.
                 foreach ($contracts as $c) {
                     $result[$chainSlug . ':' . $c] = 0;
                 }
@@ -313,7 +420,8 @@ final class HoldingsService
                     continue;
                 }
                 $tokenStandard = CollectionRepository::findTokenStandard($chainId, $contract);
-                $max = 0;
+                $max     = null;
+                $sawNull = false;
                 foreach ($wallets as $w) {
                     $count = self::countFromCacheOrFetch(
                         $fetcher,
@@ -323,11 +431,16 @@ final class HoldingsService
                         $chainId,
                         $tokenStandard
                     );
-                    if ($count > $max) {
+                    if ($count === null) {
+                        $sawNull = true;
+                        continue;
+                    }
+                    if ($max === null || $count > $max) {
                         $max = $count;
                     }
                 }
-                $result[$key] = $max;
+                // Any real count wins; all-failed → null (UNKNOWN).
+                $result[$key] = $max !== null ? $max : ($sawNull ? null : 0);
             }
         }
 
@@ -680,11 +793,14 @@ final class HoldingsService
         string $contract,
         int $chainId,
         ?string $tokenStandard
-    ): int {
+    ): ?int {
         if ($tokenStandard !== null && stripos($tokenStandard, '1155') !== false) {
             if ($walletLinkId <= 0 || $chainId <= 0) {
                 return 0;
             }
+            // ERC-1155 reads the persistent transfer index (DB), never an
+            // RPC — there is no provider-outage failure mode here, so a 0
+            // is always a real 0.
             $byWallet = NftHoldingsRepository::countVisibleByContract($chainId, $contract, [$walletLinkId]);
             return (int) ($byWallet[$walletLinkId] ?? 0);
         }
@@ -709,15 +825,23 @@ final class HoldingsService
             // min_balance=1 gate — fine even if the truncated tail
             // would have produced more matches). Only fall through to
             // RPC for the false-negative-on-whales case: cache present,
-            // truncated, AND zero matches.
+            // truncated, AND zero matches. A cache HIT is by definition a
+            // previously-SUCCESSFUL list walk, so its count is real.
             if (!$truncated || $matches > 0) {
                 return $matches;
             }
         }
 
         // Cache miss (or truncated-with-zero-matches whale fallback).
-        // Fresh RPC — same path as the pre-cache implementation.
-        return (int) $fetcher->count_holdings($walletAddress, $contract);
+        // Fresh RPC — threads the fetcher's nullable fail-open result:
+        //   null  → provider could not verify (UNKNOWN) — propagate null,
+        //           and (critically) do NOT write any transient, so a
+        //           failed fetch never poisons the 24h holdings cache.
+        //   int   → real count (0 included).
+        // count_holdings is a read-only RPC; it writes no transient on
+        // its own, so the no-poison guarantee holds simply by NOT
+        // caching the result here.
+        return $fetcher->count_holdings($walletAddress, $contract);
     }
 
     /**

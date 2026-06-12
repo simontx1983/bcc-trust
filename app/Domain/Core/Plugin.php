@@ -1068,6 +1068,12 @@ final class Plugin
         return $this->nftGroupGateService ??= new NftGroupGateService();
     }
 
+    private ?\BCC\Trust\Onchain\Services\NftGroupRevokeService $nftGroupRevokeService = null;
+    public function nftGroupRevokeService(): \BCC\Trust\Onchain\Services\NftGroupRevokeService
+    {
+        return $this->nftGroupRevokeService ??= new \BCC\Trust\Onchain\Services\NftGroupRevokeService();
+    }
+
     private ?GatedGroupProvisioningService $gatedGroupProvisioningService = null;
     public function gatedGroupProvisioningService(): GatedGroupProvisioningService
     {

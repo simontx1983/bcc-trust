@@ -81,9 +81,9 @@ class ThorchainFetcher implements FetcherInterface
         return []; // THORChain uses a bond-provider model — no per-account delegation set.
     }
 
-    public function count_holdings(string $wallet, string $contract): int
+    public function count_holdings(string $wallet, string $contract): ?int
     {
-        return 0;
+        return 0; // No NFT ownership model — definite "no holdings," not an outage.
     }
 
     /**
