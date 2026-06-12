@@ -104,17 +104,45 @@ final class HeliusSeenSignaturesRepository
         $deletedOverflow = 0;
 
         if ($remaining > $maxRows) {
-            $excess = $remaining - $maxRows;
+            // 3. Re-ground to a real COUNT(*) BEFORE any destructive
+            // overflow trim. The cached size ($bcc_helius_dedupe_size) is
+            // a fast estimate that can drift high between sweeps; trusting
+            // it to size the overflow DELETE let a drifted-high cache evict
+            // still-in-window (< maxAgeSeconds) signatures — reopening the
+            // replay window for any evicted sig. Pay the COUNT(*) ONLY when
+            // the cached estimate claims we're over the cap (rare), so the
+            // common non-overflow path stays count-free.
+            $actual = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
 
-            // SQL: DELETE FROM ... ORDER BY seen_at ASC LIMIT %d
-            // (MySQL accepts LIMIT on DELETE, which is the cheapest way
-            // to trim oldest-N without a subquery).
-            $deletedOverflow = (int) $wpdb->query($wpdb->prepare(
-                "DELETE FROM {$table} ORDER BY seen_at ASC LIMIT %d",
-                $excess
-            ));
+            if ($actual > $maxRows) {
+                $excess = $actual - $maxRows;
 
-            $remaining = max(0, $remaining - $deletedOverflow);
+                // SQL: DELETE FROM ... ORDER BY seen_at ASC LIMIT %d
+                // (MySQL accepts LIMIT on DELETE, which is the cheapest way
+                // to trim oldest-N without a subquery).
+                //
+                // Residual tradeoff (intentional, NOT the bug being fixed):
+                // on a GENUINE >maxRows in-window burst this cap still
+                // evicts oldest-first rows that are still in the replay
+                // window. Those are the rows closest to aging out, so the
+                // residual replay risk is minimal — this is a deliberate
+                // size safety-valve. We do NOT add a `WHERE seen_at < cutoff`
+                // guard here: step 1 already removed every out-of-window
+                // row, so such a guard would match nothing and make the cap
+                // un-enforceable. Re-grounding to COUNT(*) is the actual
+                // correctness fix — it stops cache drift from ever driving
+                // eviction.
+                $deletedOverflow = (int) $wpdb->query($wpdb->prepare(
+                    "DELETE FROM {$table} ORDER BY seen_at ASC LIMIT %d",
+                    $excess
+                ));
+
+                $remaining = max(0, $actual - $deletedOverflow);
+            } else {
+                // Cache was drifted high; the table is actually within cap.
+                // Correct $remaining to the real count, trim nothing.
+                $remaining = $actual;
+            }
         }
 
         update_option(self::SIZE_OPTION, $remaining, false);
