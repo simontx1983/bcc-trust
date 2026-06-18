@@ -3,8 +3,9 @@
  * Feed Endpoints — handles /bcc/v1/feed/* routes.
  *
  * Phase 1 routes registered:
- *   - GET /feed/hot — global trending / zero-follow fallback (§F2)
- *   - GET /feed     — personalized feed, three scopes (§N6)
+ *   - GET /feed/hot      — global trending / zero-follow fallback (§F2)
+ *   - GET /feed          — personalized feed, three scopes (§N6)
+ *   - GET /feed/{id}     — single-item permalink read, backs /post/{id} (V1.6)
  *
  * Locals do NOT get their own feed route. A Local is a semantic wrapper
  * around a PeepSo group; the Local detail page consumes
@@ -106,6 +107,26 @@ final class FeedEndpoint
             ]
         );
 
+        // GET /feed/{id} — anonymous-OK single-item permalink read (V1.6).
+        // Numeric-constrained so it can't collide with the literal
+        // /feed/hot and /feed/tag routes above.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/feed/(?P<id>\d+)',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'item'],
+                'permission_callback' => '__return_true',
+                'args'                => [
+                    'id' => [
+                        'required'          => true,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
+                    ],
+                ],
+            ]
+        );
+
         // GET /feed — auth-required personalized feed (§N6)
         register_rest_route(
             self::ROUTE_NAMESPACE,
@@ -139,6 +160,27 @@ final class FeedEndpoint
         // §F2 hot feed is anonymous-cacheable; volatile but tolerable to
         // serve slightly stale to anonymous viewers.
         $response->header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+
+        return $response;
+    }
+
+    public function item(WP_REST_Request $request): WP_REST_Response
+    {
+        // Anonymous-OK — a pasted permalink and its OG crawler both need
+        // this to resolve without auth, same posture as /feed/hot.
+        $viewerId = get_current_user_id();
+        $actId    = (int) $request->get_param('id');
+
+        $item = Plugin::instance()->feedRankingService()->getFeedItemById($viewerId, $actId);
+        if ($item === null) {
+            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+        }
+
+        $response = ApiResponse::ok($item);
+        // Per-viewer permissions/comment-gating vary the response —
+        // same no-shared-cache posture as the personalized feed.
+        $response->header('Cache-Control', 'private, max-age=15');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }

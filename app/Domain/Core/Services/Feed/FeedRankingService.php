@@ -116,6 +116,86 @@ final class FeedRankingService
     }
 
     /**
+     * Single-item permalink read (`GET /bcc/v1/feed/{id}`) — backs the
+     * `/post/{id}` detail page + its intercepting modal. Anonymous-OK,
+     * same posture as `getHotFeed()`: a pasted permalink and its OG
+     * crawler both need to resolve without auth.
+     *
+     * Visibility parity with the list endpoints (load-bearing — a
+     * permalink must never surface a post the feed itself would hide):
+     *   - §O4.1 caution/risky author shadow-limit — same set as getHotFeed.
+     *   - §K1 Phase C moderation hide — same set as getHotFeed.
+     *   - Global-feed group-visibility gate — mirrors the
+     *     `PeepSoActivityRepository::getActivities` SQL gate exactly: a
+     *     group-tagged post (`peepso_group_id` post-meta) only resolves
+     *     here when it also carries `_bcc_post_visibility = 'public_all'`;
+     *     non-group posts are unconditionally visible. A members_only
+     *     group post 404s here even for a member — the group's own feed
+     *     (`getGroupFeed()`) is the membership-aware read path for that.
+     *
+     * Hydration chain is otherwise identical to `getHotFeed()` (body,
+     * reactions, author badges/ranks, social proof, permissions, group
+     * context, comment counts) so the detail view and the feed card
+     * render the same item shape.
+     *
+     * @return array<string, mixed>|null null = not found OR not visible
+     *         to this viewer (both collapse to the endpoint's 404 — we
+     *         don't distinguish "doesn't exist" from "hidden" on the wire).
+     */
+    public function getFeedItemById(int $viewerId, int $actId): ?array
+    {
+        if ($actId <= 0) {
+            return null;
+        }
+
+        $item = $this->activityFeed->getActivityById($actId, $viewerId);
+        if ($item === null) {
+            return null;
+        }
+
+        $extId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
+        if ($extId <= 0 || !self::isGloballyVisible($extId)) {
+            return null;
+        }
+
+        $author   = is_array($item['author'] ?? null) ? $item['author'] : [];
+        $authorId = is_int($author['user_id'] ?? null) ? $author['user_id'] : 0;
+        if ($authorId > 0 && in_array($authorId, $this->reputationRepo->getCautionAndRiskyUserIds(), true)) {
+            return null;
+        }
+        if (in_array($actId, $this->hiddenRepo->getAllHiddenIds(), true)) {
+            return null;
+        }
+
+        $items = [$item];
+        $items = $this->hydrateBodies($items);
+        $items = $this->hydrateReactions($items, $viewerId);
+        $items = $this->hydrateAuthorBadges($items);
+        $items = $this->hydrateAuthorRanks($items);
+        $items = $this->hydrateSocialProofReactors($items);
+        $items = self::hydrateViewerPermissions($items, $viewerId);
+        $items = $this->hydrateGroupContexts($items);
+        $items = $this->hydrateCommentCounts($items, $viewerId);
+
+        return $items[0] ?? null;
+    }
+
+    /**
+     * Mirrors the global-feed visibility WHERE clause in
+     * `PeepSoActivityRepository::getActivities` (the `gx_pm`/`vis_pm`
+     * LEFT JOIN gate): a non-group post is always visible; a group-tagged
+     * post is visible only when `_bcc_post_visibility = 'public_all'`.
+     */
+    private static function isGloballyVisible(int $externalPostId): bool
+    {
+        $groupId = (int) get_post_meta($externalPostId, 'peepso_group_id', true);
+        if ($groupId <= 0) {
+            return true;
+        }
+        return get_post_meta($externalPostId, '_bcc_post_visibility', true) === 'public_all';
+    }
+
+    /**
      * Tag feed (`GET /bcc/v1/feed/tag`) — the global hot feed, narrowed to
      * posts carrying a single hashtag.
      *
