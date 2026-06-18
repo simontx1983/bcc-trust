@@ -1210,15 +1210,9 @@ final class CardViewService
      */
     private static function resolveMemberAvatarUrl(int $userId): string
     {
-        if ($userId > 0 && class_exists('\\PeepSoUser')) {
-            $peepso = \PeepSoUser::get_instance($userId);
-            $url    = $peepso->get_avatar('full');
-            if ($url !== '') {
-                return $url;
-            }
-        }
-        $url = get_avatar_url($userId);
-        return is_string($url) ? $url : '';
+        // Cached, shared seam (§11) — see MemberAvatarResolver for the
+        // PeepSo-first resolution + why caching the URL is safe.
+        return \BCC\Trust\Core\Support\MemberAvatarResolver::resolve($userId);
     }
 
     /**

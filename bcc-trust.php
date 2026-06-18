@@ -1418,6 +1418,30 @@ add_action('plugins_loaded', function () {
 
 /*
 |--------------------------------------------------------------------------
+| AVATAR-URL CACHE INVALIDATION (perf audit P1-B)
+|--------------------------------------------------------------------------
+| MemberAvatarResolver caches the resolved member avatar URL (PeepSo's
+| get_avatar costs a per-user peepso_users SELECT + file_exists stat).
+| PeepSo writes `peepso_avatar_hash` via update_user_meta on avatar change,
+| and `peepso_use_gravatar` toggles the gravatar branch — so bust that one
+| user's entry whenever either key is added/updated/deleted. Staleness is
+| cosmetic (a stale URL 404s to the initials monogram), so a missed path is
+| backstopped by the resolver's TTL rather than risking a leak. Mirrors the
+| non-open-group privacy-meta bust wired in bcc-core.php.
+*/
+$bccBustMemberAvatarCache = static function ($_metaIdOrIds, $objectId, $metaKey): void {
+    if (is_string($metaKey)
+        && \BCC\Trust\Core\Support\MemberAvatarResolver::isBustMetaKey($metaKey)
+    ) {
+        \BCC\Trust\Core\Support\MemberAvatarResolver::bust((int) $objectId);
+    }
+};
+add_action('added_user_meta',   $bccBustMemberAvatarCache, 10, 3);
+add_action('updated_user_meta', $bccBustMemberAvatarCache, 10, 3);
+add_action('deleted_user_meta', $bccBustMemberAvatarCache, 10, 3);
+
+/*
+|--------------------------------------------------------------------------
 | WP-CLI commands (V2 Phase 1 onwards)
 |--------------------------------------------------------------------------
 | Registered only when WP-CLI is loaded. Each sub-namespace lives in its
