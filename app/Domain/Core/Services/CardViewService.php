@@ -1210,9 +1210,9 @@ final class CardViewService
      */
     private static function resolveMemberAvatarUrl(int $userId): string
     {
-        // Cached, shared seam (§11) — see MemberAvatarResolver for the
+        // Cached, shared seam (§11) — see MemberMediaCache for the
         // PeepSo-first resolution + why caching the URL is safe.
-        return \BCC\Trust\Core\Support\MemberAvatarResolver::resolve($userId);
+        return \BCC\Trust\Core\Support\MemberMediaCache::avatarUrl($userId);
     }
 
     /**
