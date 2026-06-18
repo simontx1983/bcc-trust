@@ -750,15 +750,9 @@ final class UserViewService
      */
     private static function resolveAvatar(int $userId): string
     {
-        if ($userId > 0 && class_exists('\\PeepSoUser')) {
-            $peepso = \PeepSoUser::get_instance($userId);
-            $url    = $peepso->get_avatar('full');
-            if ($url !== '') {
-                return $url;
-            }
-        }
-        $url = get_avatar_url($userId);
-        return is_string($url) ? $url : '';
+        // Cached, shared seam (§11) — see bcc-core PeepSoMediaCache for the
+        // PeepSo-first resolution + why caching the URL is safe.
+        return \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);
     }
 
     private static function resolveBio(\WP_User $user): string
@@ -779,18 +773,11 @@ final class UserViewService
      */
     private static function resolveCoverPhotoUrl(int $userId): ?string
     {
-        if ($userId <= 0) {
-            return null;
-        }
-        if (!class_exists('\\PeepSoUser')) {
-            return null;
-        }
-        $instance = \PeepSoUser::get_instance($userId);
-        if (!$instance->has_cover()) {
-            return null;
-        }
-        $url = $instance->get_cover();
-        return $url !== '' ? $url : null;
+        // Cached, shared seam (§11) — see bcc-core PeepSoMediaCache.
+        // Resolving this constructs a PeepSoUser (a per-user peepso_users
+        // SELECT), so it is cached alongside the avatar and busted on
+        // peepso_cover_hash user-meta writes.
+        return \BCC\Core\PeepSo\PeepSoMediaCache::coverPhotoUrl($userId);
     }
 
     /**

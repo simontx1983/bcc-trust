@@ -1038,8 +1038,16 @@ final class FeedRankingService
                 ? $u->display_name
                 : (string) $u->user_login;
 
-            $avatarUrl = get_avatar_url($id);
-            $avatarUrl = is_string($avatarUrl) ? $avatarUrl : '';
+            // Cached, shared seam (§11). get_avatar_url() here runs through
+            // PeepSo's get_avatar_url filter, which constructs a PeepSoUser
+            // and calls get_avatar() — the same per-user peepso_users SELECT
+            // + usr_avatar_custom write the member-card path already routes
+            // through bcc-core PeepSoMediaCache. filter_avatar resolves
+            // get_avatar() ('full'), identical to what avatarUrl() returns,
+            // so this is a behavior-preserving swap that also aligns the feed
+            // with the "resolve PeepSo directly" convention CardViewService
+            // documents.
+            $avatarUrl = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($id);
 
             $out[$id] = [
                 'handle'       => $handle,

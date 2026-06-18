@@ -1416,6 +1416,10 @@ add_action('plugins_loaded', function () {
     \BCC\Trust\Core\Plugin::instance()->registerAsyncJobs();
 }, 5);
 
+// PeepSo media (avatar/cover) cache invalidation is wired in bcc-core.php
+// alongside PeepSoMediaCache (relocated there so the bcc-core activity feed
+// shares the same cache — bcc-trust depends on bcc-core, not vice versa).
+
 /*
 |--------------------------------------------------------------------------
 | WP-CLI commands (V2 Phase 1 onwards)
