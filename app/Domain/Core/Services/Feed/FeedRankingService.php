@@ -1042,11 +1042,12 @@ final class FeedRankingService
             // PeepSo's get_avatar_url filter, which constructs a PeepSoUser
             // and calls get_avatar() — the same per-user peepso_users SELECT
             // + usr_avatar_custom write the member-card path already routes
-            // through MemberMediaCache. filter_avatar resolves get_avatar()
-            // ('full'), identical to what avatarUrl() returns, so this is a
-            // behavior-preserving swap that also aligns the feed with the
-            // "resolve PeepSo directly" convention CardViewService documents.
-            $avatarUrl = \BCC\Trust\Core\Support\MemberMediaCache::avatarUrl($id);
+            // through bcc-core PeepSoMediaCache. filter_avatar resolves
+            // get_avatar() ('full'), identical to what avatarUrl() returns,
+            // so this is a behavior-preserving swap that also aligns the feed
+            // with the "resolve PeepSo directly" convention CardViewService
+            // documents.
+            $avatarUrl = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($id);
 
             $out[$id] = [
                 'handle'       => $handle,

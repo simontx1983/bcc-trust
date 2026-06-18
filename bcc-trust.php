@@ -1416,30 +1416,9 @@ add_action('plugins_loaded', function () {
     \BCC\Trust\Core\Plugin::instance()->registerAsyncJobs();
 }, 5);
 
-/*
-|--------------------------------------------------------------------------
-| MEMBER MEDIA CACHE INVALIDATION (perf audit P1-B / P1-C)
-|--------------------------------------------------------------------------
-| MemberMediaCache caches resolved member avatar + cover-photo URLs (each
-| costs a per-user peepso_users SELECT + file_exists stat via PeepSoUser).
-| PeepSo writes `peepso_avatar_hash` / `peepso_cover_hash` via
-| update_user_meta on change, and `peepso_use_gravatar` toggles the avatar
-| branch — so bust that user's entries whenever any of those keys is
-| added/updated/deleted. Staleness is cosmetic (a stale URL 404s to the
-| monogram / default cover), so a missed path is backstopped by the cache
-| TTL rather than risking a leak. Mirrors the non-open-group privacy-meta
-| bust wired in bcc-core.php.
-*/
-$bccBustMemberMediaCache = static function ($_metaIdOrIds, $objectId, $metaKey): void {
-    if (is_string($metaKey)
-        && \BCC\Trust\Core\Support\MemberMediaCache::isBustMetaKey($metaKey)
-    ) {
-        \BCC\Trust\Core\Support\MemberMediaCache::bust((int) $objectId);
-    }
-};
-add_action('added_user_meta',   $bccBustMemberMediaCache, 10, 3);
-add_action('updated_user_meta', $bccBustMemberMediaCache, 10, 3);
-add_action('deleted_user_meta', $bccBustMemberMediaCache, 10, 3);
+// PeepSo media (avatar/cover) cache invalidation is wired in bcc-core.php
+// alongside PeepSoMediaCache (relocated there so the bcc-core activity feed
+// shares the same cache — bcc-trust depends on bcc-core, not vice versa).
 
 /*
 |--------------------------------------------------------------------------
