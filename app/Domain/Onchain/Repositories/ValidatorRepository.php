@@ -1473,6 +1473,84 @@ final class ValidatorRepository
     }
 
     /**
+     * Batch variant of {@see findLogoByPageId} — resolves auto-imported
+     * logo URLs for many pages in TWO queries (wallet-link path + the
+     * placeholder post_meta path), keyed by page id. Eliminates the
+     * per-validator-card N+1 on the /cards directory: PageCardPrefetcher
+     * feeds the result into CardViewService::resolvePageAvatarUrl so a
+     * validator card whose batched row carries an empty logo no longer
+     * triggers a per-page findLogoByPageId (2 queries each).
+     *
+     * Precedence mirrors findLogoByPageId — the wallet-link logo wins over
+     * the placeholder meta-bound one (the meta map is written first, then
+     * overwritten by the wallet-link map). Only non-empty logos are
+     * returned; an absent page means "no auto logo" (caller falls back to
+     * '' → frontend monogram).
+     *
+     * @param list<int> $pageIds Bounded by caller (cards per_page ≤ 50).
+     * @return array<int, string> pageId => non-empty logo URL
+     */
+    public static function findLogosByPageIds(array $pageIds): array
+    {
+        $ids = [];
+        foreach ($pageIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $idList = array_keys($ids);
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+        $ph      = implode(',', array_fill(0, count($idList), '%d'));
+
+        $out = [];
+
+        // Placeholder meta-bound path first so the wallet-link path below
+        // can overwrite it (higher precedence — same order findLogoByPageId
+        // resolves in).
+        /** @var list<object{post_id: numeric-string, logo_url: string|null}> $metaRows */
+        $metaRows = $wpdb->get_results($wpdb->prepare(
+            "SELECT pm.post_id, v.logo_url
+               FROM {$wpdb->postmeta} pm
+               JOIN {$table} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
+              WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                AND pm.post_id IN ({$ph})",
+            ...$idList
+        ));
+        foreach ($metaRows as $row) {
+            $pid  = (int) $row->post_id;
+            $logo = is_string($row->logo_url) ? $row->logo_url : '';
+            if ($pid > 0 && $logo !== '') {
+                $out[$pid] = $logo;
+            }
+        }
+
+        /** @var list<object{post_id: numeric-string, logo_url: string|null}> $walletRows */
+        $walletRows = $wpdb->get_results($wpdb->prepare(
+            "SELECT w.post_id, v.logo_url
+               FROM {$table} v
+               JOIN {$wallets} w ON w.id = v.wallet_link_id
+              WHERE w.post_id IN ({$ph})",
+            ...$idList
+        ));
+        foreach ($walletRows as $row) {
+            $pid  = (int) $row->post_id;
+            $logo = is_string($row->logo_url) ? $row->logo_url : '';
+            if ($pid > 0 && $logo !== '') {
+                $out[$pid] = $logo;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Read the logo-resolution state for a single validator (by PK).
      * Used by ValidatorLogoService to gate re-resolution.
      *
