@@ -621,6 +621,19 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK)) {
         wp_schedule_event(time() + 120 * MINUTE_IN_SECONDS, 'twicedaily', \BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK);
     }
+
+    // Holder-group provision + reconcile self-heal. Same silent-drift class
+    // as the revoke sweep above: these two were scheduled only in
+    // bcc_trust_activate(), so a site updated via composer/git/SFTP (no
+    // deactivate→reactivate) would never schedule them and holder-group
+    // provisioning/reconciliation would silently never run. Guarded +
+    // additive; mirrors the activation-side schedule exactly.
+    if (!wp_next_scheduled('bcc_gated_group_provision')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_gated_group_provision');
+    }
+    if (!wp_next_scheduled('bcc_gated_group_reconcile_sweep')) {
+        wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
+    }
 }, 5);
 
 // PR-8b — daily divergence-state sweep callback. Runs the worker;
