@@ -24,6 +24,20 @@ class AdminDashboardRepository
     private const CACHE_TTL   = 300; // 5 minutes
 
     /**
+     * Persistent fallback for the overview aggregate snapshot (F4(c)).
+     *
+     * The object cache (CACHE_GROUP) is per-request without a persistent
+     * backend (Redis), so on shared hosting `getOverviewData()` would
+     * recompute ~10 COUNT/aggregate scans over million-row tables on EVERY
+     * admin load. This option survives across requests and is refreshed at
+     * most once per OVERVIEW_SNAPSHOT_TTL window, so the expensive scans run
+     * occasionally instead of per-request. Stored with autoload=no.
+     */
+    private const OVERVIEW_SNAPSHOT_OPTION = 'bcc_trust_admin_overview_snapshot';
+    private const OVERVIEW_SNAPSHOT_TTL    = 300; // 5 minutes
+    private const OVERVIEW_REFRESH_LOCK    = 'overview_refresh_lock';
+
+    /**
      * Escape a string for use in a LIKE clause.
      *
      * Centralises `$wpdb->esc_like()` so admin templates do not need
@@ -82,17 +96,71 @@ class AdminDashboardRepository
     /**
      * Get overview statistics for the dashboard.
      *
-     * Cached via transient for 5 minutes — the underlying queries are expensive at scale.
+     * Three-tier read so the ~10 COUNT/aggregate scans never land on the
+     * request path under steady state (F4(c) / F6):
+     *   L1  object cache (fast; persistent only with Redis)
+     *   L2  persistent option snapshot (survives without Redis; at most one
+     *       recompute per OVERVIEW_SNAPSHOT_TTL window, shared across requests)
+     *   L3  cold compute, single-flight — concurrent callers that can't take
+     *       the lock serve the stale snapshot instead of stampeding.
      *
      * @return array<string, mixed> Dashboard overview data.
      */
     public function getOverviewData(): array
     {
+        // L1 — object cache.
         $cached = wp_cache_get('overview_stats', self::CACHE_GROUP);
-        if ($cached !== false) {
+        if (is_array($cached)) {
             return $cached;
         }
 
+        // L2 — persistent snapshot, if still fresh.
+        $snapshot = get_option(self::OVERVIEW_SNAPSHOT_OPTION);
+        $snapshotData = (is_array($snapshot) && isset($snapshot['data']) && is_array($snapshot['data']))
+            ? $snapshot['data']
+            : null;
+        $snapshotAge = (is_array($snapshot) && isset($snapshot['computed_at']))
+            ? (time() - (int) $snapshot['computed_at'])
+            : PHP_INT_MAX;
+
+        if ($snapshotData !== null && $snapshotAge < self::OVERVIEW_SNAPSHOT_TTL) {
+            wp_cache_set('overview_stats', $snapshotData, self::CACHE_GROUP, self::CACHE_TTL);
+            return $snapshotData;
+        }
+
+        // L3 — stale or missing. Single-flight: if another request already
+        // holds the refresh lock and we have a stale snapshot, serve it
+        // rather than pile a second full scan onto the DB. (The lock is a
+        // no-op without a persistent cache, but on shared hosting concurrent
+        // admin loads are effectively nil, so the snapshot still bounds the
+        // recompute rate to once per TTL window.)
+        if (
+            $snapshotData !== null
+            && wp_cache_add(self::OVERVIEW_REFRESH_LOCK, 1, self::CACHE_GROUP, 60) === false
+        ) {
+            return $snapshotData;
+        }
+
+        $data = $this->computeOverviewData();
+        wp_cache_set('overview_stats', $data, self::CACHE_GROUP, self::CACHE_TTL);
+        update_option(
+            self::OVERVIEW_SNAPSHOT_OPTION,
+            ['data' => $data, 'computed_at' => time()],
+            false
+        );
+
+        return $data;
+    }
+
+    /**
+     * Compute the overview aggregates from source tables. Expensive at
+     * scale (~10 COUNT/aggregate scans) — callers reach this only via the
+     * L3 path in getOverviewData(); never call it directly on a hot path.
+     *
+     * @return array<string, mixed> Dashboard overview data.
+     */
+    private function computeOverviewData(): array
+    {
         global $wpdb;
 
         $votesTable        = TableRegistry::votes();
@@ -232,8 +300,6 @@ class AdminDashboardRepository
                 'tier_caution'      => BCC_TRUST_TIER_CAUTION,
             ],
         ];
-
-        wp_cache_set('overview_stats', $data, self::CACHE_GROUP, self::CACHE_TTL);
 
         return $data;
     }

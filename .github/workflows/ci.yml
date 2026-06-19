@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  php:
+    name: PHP — PHPStan L8 · PHPUnit · guardrails
+    runs-on: ubuntu-latest
+    # Checked out INTO the WordPress plugins layout so arch-guardrails.sh
+    # resolves its sibling-plugin paths (scripts/../../<plugin>).
+    defaults:
+      run:
+        working-directory: app/public/wp-content/plugins/bcc-trust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app/public/wp-content/plugins/bcc-trust
+
+      # bcc-trust's phpstan.neon scans ../bcc-core/src for cross-plugin type
+      # resolution (ServiceLocator, DB helpers, logging). Check out the public
+      # sibling into the WP layout so the path resolves.
+      - uses: actions/checkout@v4
+        with:
+          repository: simontx1983/bcc-core
+          path: app/public/wp-content/plugins/bcc-core
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          # gmp is required by simplito/elliptic-php (on-chain crypto).
+          extensions: gmp, mbstring, intl
+          tools: composer:v2
+          coverage: none
+
+      # composer.lock is gitignored in this repo (production vendor/ is committed,
+      # dev deps restored on demand), so resolve from composer.json.
+      - name: Install dependencies
+        run: composer update --no-interaction --no-progress --prefer-dist
+
+      - name: PHPStan (level 8)
+        run: composer phpstan
+
+      - name: Unit tests
+        run: composer test
+
+      - name: Architecture guardrails (incl. PHP syntax)
+        run: bash scripts/arch-guardrails.sh bcc-trust
+
+  integration:
+    name: PHP integration (MySQL)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=15
+    defaults:
+      run:
+        working-directory: app/public/wp-content/plugins/bcc-trust
+    env:
+      BCC_TEST_DB_HOST: 127.0.0.1
+      BCC_TEST_DB_PORT: '3306'
+      BCC_TEST_DB_USER: root
+      BCC_TEST_DB_PASS: root
+      BCC_TEST_DB_NAME: bcc_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app/public/wp-content/plugins/bcc-trust
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: gmp, mbstring, mysqli
+          tools: composer:v2
+          coverage: none
+      - name: Install dependencies
+        run: composer update --no-interaction --no-progress --prefer-dist
+      - name: Integration tests (real $wpdb vs MySQL)
+        run: composer test:integration

@@ -127,4 +127,59 @@ final class ReputationEventRepository
         global $wpdb;
         $wpdb->delete($this->table, ['user_id' => $userId], ['%d']);
     }
+
+    /**
+     * Retention sweep: hard-delete reputation-event rows older than the
+     * configured horizon, in bounded batches. The view-model only surfaces
+     * the last few changes per user (getRecentForUser), so aged rows are
+     * safe to drop — a user dormant past the horizon simply shows no recent
+     * changes, which is correct.
+     *
+     * Mirrors VoteRepository::cleanupOldDeleted (batched, capped, fail-loud).
+     * created_at is written in UTC (current_time('mysql', true)), so the
+     * cutoff is UTC_TIMESTAMP() to match.
+     *
+     * @return int rows deleted
+     */
+    public function cleanupOld(): int
+    {
+        global $wpdb;
+
+        $days = defined('BCC_TRUST_CLEANUP_REPUTATION_EVENTS')
+            ? max(1, (int) BCC_TRUST_CLEANUP_REPUTATION_EVENTS)
+            : 180;
+
+        $batchSize     = 5000;
+        $maxIterations = 20;
+        $total         = 0;
+
+        for ($i = 0; $i < $maxIterations; $i++) {
+            $affected = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$this->table}
+                  WHERE created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY)
+                  LIMIT %d",
+                $days,
+                $batchSize
+            ));
+
+            if ($affected === false) {
+                if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] reputation_events cleanup DB error', [
+                        'iteration' => $i,
+                        'total'     => $total,
+                        'db_error'  => $wpdb->last_error,
+                    ]);
+                }
+                break;
+            }
+
+            $total += (int) $affected;
+
+            if ((int) $affected < $batchSize) {
+                break;
+            }
+        }
+
+        return $total;
+    }
 }

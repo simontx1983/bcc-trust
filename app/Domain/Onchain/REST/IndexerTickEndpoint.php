@@ -109,7 +109,10 @@ final class IndexerTickEndpoint
             \BCC\Core\Log\Logger::error('[IndexerTickEndpoint] runAllChains threw', [
                 'error' => $e->getMessage(),
             ]);
-            return self::error(500, 'bcc_internal', 'Indexer run threw: ' . $e->getMessage());
+            // Detail is logged server-side above; the client (our own Vercel
+            // cron) only needs a generic failure. Never echo $e->getMessage()
+            // — it can carry DB errors, file paths, or RPC URLs.
+            return self::error(500, 'bcc_internal', 'Indexer run failed.');
         }
 
         $elapsedMs = (int) round((microtime(true) - $startedAt) * 1000);

@@ -72,81 +72,11 @@ class ScoreEventRepository
     }
 
     /**
-     * Get recent score events for a page.
-     *
-     * @param int $pageId
-     * @param int $limit
-     * @return list<object>
-     */
-    public function getForPage(int $pageId, int $limit = 20): array
-    {
-        global $wpdb;
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT id, page_id, event_type, score_before, score_after, delta,
-                    tier_before, tier_after, reason, actor_user_id, meta, created_at
-             FROM {$this->table}
-             WHERE page_id = %d
-             ORDER BY created_at DESC
-             LIMIT %d",
-            $pageId,
-            $limit
-        )) ?: [];
-    }
-
-    /**
-     * Get recent events for a user (pages they affected by voting/endorsing).
-     *
-     * @param int $actorUserId
-     * @param int $limit
-     * @return list<object>
-     */
-    public function getForActor(int $actorUserId, int $limit = 20): array
-    {
-        global $wpdb;
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT id, page_id, event_type, score_before, score_after, delta,
-                    tier_before, tier_after, reason, actor_user_id, meta, created_at
-             FROM {$this->table}
-             WHERE actor_user_id = %d
-             ORDER BY created_at DESC
-             LIMIT %d",
-            $actorUserId,
-            $limit
-        )) ?: [];
-    }
-
-    /**
-     * Get tier change events for a page (only events where tier actually changed).
-     *
-     * @param int $pageId
-     * @param int $limit
-     * @return list<object>
-     */
-    public function getTierChanges(int $pageId, int $limit = 10): array
-    {
-        global $wpdb;
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT id, page_id, event_type, score_before, score_after, delta,
-                    tier_before, tier_after, reason, created_at
-             FROM {$this->table}
-             WHERE page_id = %d AND tier_before != tier_after AND tier_before IS NOT NULL
-             ORDER BY created_at DESC
-             LIMIT %d",
-            $pageId,
-            $limit
-        )) ?: [];
-    }
-
-    /**
      * Recent score events across a SET of pages, since a SQL timestamp.
      *
      * Drives §O2.1 EXTERNAL-slot resolver in HighlightsService — the
-     * "something happened to a page you watch" surface. Existing single-
-     * page reads (`getForPage`, `getTierChanges`) don't compose
-     * cross-page; this is the multi-page read seam.
+     * "something happened to a page you watch" surface. This is the
+     * multi-page read seam — the sole read path on this table.
      *
      * Filters:
      *   - `page_id IN ($pageIds)`  bounded by caller (typical: ≤ 500
@@ -244,5 +174,59 @@ class ScoreEventRepository
         /** @var list<object>|null $rows */
         $rows = $wpdb->get_results($sql);
         return $rows ?: [];
+    }
+
+    /**
+     * Retention sweep: hard-delete score-event rows older than the
+     * configured horizon, in bounded batches. This is an audit/debug
+     * ledger; reads are all "last N" bounded with no time floor, so aged
+     * rows carry no view-model dependency.
+     *
+     * Mirrors VoteRepository::cleanupOldDeleted (batched, capped, fail-loud).
+     * created_at is written by the column's CURRENT_TIMESTAMP default, so
+     * the cutoff uses MySQL NOW() to match. Uses idx_created_at.
+     *
+     * @return int rows deleted
+     */
+    public function cleanupOld(): int
+    {
+        global $wpdb;
+
+        $days = defined('BCC_TRUST_CLEANUP_SCORE_EVENTS')
+            ? max(1, (int) BCC_TRUST_CLEANUP_SCORE_EVENTS)
+            : 90;
+
+        $batchSize     = 5000;
+        $maxIterations = 20;
+        $total         = 0;
+
+        for ($i = 0; $i < $maxIterations; $i++) {
+            $affected = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$this->table}
+                  WHERE created_at < DATE_SUB(NOW(), INTERVAL %d DAY)
+                  LIMIT %d",
+                $days,
+                $batchSize
+            ));
+
+            if ($affected === false) {
+                if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] score_events cleanup DB error', [
+                        'iteration' => $i,
+                        'total'     => $total,
+                        'db_error'  => $wpdb->last_error,
+                    ]);
+                }
+                break;
+            }
+
+            $total += (int) $affected;
+
+            if ((int) $affected < $batchSize) {
+                break;
+            }
+        }
+
+        return $total;
     }
 }

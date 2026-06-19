@@ -113,6 +113,7 @@ namespace BCC\Trust\Disputes\Repositories {
             public static bool $quorumMet    = true;
             public static bool $setAdjResult = true;
             public static string $adjStatus  = 'completed';
+            public static bool $commitResult = true;
 
             /**
              * @return array{success:bool,affected_rows:int,db_error:?string,race:bool}
@@ -123,9 +124,10 @@ namespace BCC\Trust\Disputes\Repositories {
                 return self::$beginResult;
             }
 
-            public static function commitTransaction(): void
+            public static function commitTransaction(): bool
             {
                 self::$calls[] = ['commitTransaction'];
+                return self::$commitResult;
             }
 
             public static function rollbackTransaction(): void
@@ -168,6 +170,31 @@ namespace BCC\Trust\Disputes\Repositories {
                 self::$quorumMet    = true;
                 self::$setAdjResult = true;
                 self::$adjStatus    = 'completed';
+                self::$commitResult = true;
+            }
+        }
+    }
+
+    // §D5 outcome-match backfill collaborator. Added to DisputeResolver::handle()
+    // after this test was written; the real repo reaches TableRegistry + $wpdb,
+    // which a pure unit test must not touch — so stub it like the rest.
+    if (!class_exists(__NAMESPACE__ . '\\DisputeParticipationRepository', false)) {
+        final class DisputeParticipationRepository
+        {
+            /** @var list<array{0:int,1:string}> */
+            public static array $calls = [];
+            public static int $backfillResult = 0;
+
+            public function backfillOutcomeMatch(int $disputeId, string $finalDecision): int
+            {
+                self::$calls[] = [$disputeId, $finalDecision];
+                return self::$backfillResult;
+            }
+
+            public static function reset(): void
+            {
+                self::$calls          = [];
+                self::$backfillResult = 0;
             }
         }
     }
@@ -203,5 +230,5 @@ namespace BCC\Trust\Disputes\Services {
 // ── Finally, load the REAL resolver — all collaborators are now stubbed ────
 
 namespace {
-    require_once __DIR__ . '/../../app/Services/DisputeResolver.php';
+    require_once __DIR__ . '/../../app/Domain/Disputes/Services/DisputeResolver.php';
 }

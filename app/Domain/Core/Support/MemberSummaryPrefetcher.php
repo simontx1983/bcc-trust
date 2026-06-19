@@ -64,6 +64,24 @@ final class MemberSummaryPrefetcher
      */
     public static function primeFor(array $userIds): array
     {
+        // Warm WP's request-global user + user-meta caches in two batch
+        // queries before any per-row hydration runs. CardViewService /
+        // UserViewService resolve each member's avatar via
+        // `PeepSoUser::get_instance($id)->get_avatar('full')`, which on a
+        // cold cache fires `get_user_by()` + `get_user_meta()`
+        // (peepso_avatar_hash / peepso_use_gravatar) per member — an N+1
+        // across the page. These two primers collapse that into one users
+        // query + one usermeta query for the whole batch; the per-row
+        // PeepSo calls then hit the primed caches. (PeepSo's own
+        // `SELECT * FROM peepso_users` in its constructor still runs per
+        // user — it queries the DB directly and consults no WP cache — so
+        // it is not removable here without duplicating PeepSo internals.)
+        // Read-only priming: no behavior change, no invalidation needed.
+        if ($userIds !== []) {
+            cache_users($userIds);
+            update_meta_cache('user', $userIds);
+        }
+
         $solidId = ReactionTypeRegistry::solidId();
         $solidsReceivedCounts = $solidId === null
             ? []

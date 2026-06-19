@@ -65,6 +65,7 @@ if (!defined('ABSPATH')) {
  *   attestation_active_counts: array<int, int>,
  *   attestation_revoked_counts: array<int, int>,
  *   validator_rows: array<int, list<ValidatorCardRow>>,
+ *   validator_logos: array<int, string>,
  *   page_entities: array<int, array{entity_type: string, entity_id: int}>
  * }
  */
@@ -129,6 +130,7 @@ final class PageCardPrefetcher
             'attestation_active_counts'  => [],
             'attestation_revoked_counts' => [],
             'validator_rows'             => [],
+            'validator_logos'            => [],
             'page_entities'              => [],
         ];
         if ($pageIds === []) {
@@ -221,6 +223,15 @@ final class PageCardPrefetcher
             ? ValidatorRepository::findCardRowsByPageIds($validatorPageIds)
             : [];
 
+        // Auto-imported logo URLs, batched across all validator pages in
+        // two queries. resolvePageAvatarUrl reads this instead of calling
+        // findLogoByPageId per card — a validator whose card row carries an
+        // empty logo (wallet-link row present, logo only on a meta-bound
+        // validator) used to fall through to 2 per-page queries.
+        $validatorLogos = $validatorPageIds !== []
+            ? ValidatorRepository::findLogosByPageIds($validatorPageIds)
+            : [];
+
         $pageEntities = WalletRepository::resolveEntitiesForPages($pageIds);
 
         // ── 4. Viewer-keyed batches (skipped entirely for anon) ─────
@@ -258,6 +269,7 @@ final class PageCardPrefetcher
             'attestation_active_counts'  => $activeCounts,
             'attestation_revoked_counts' => $revokedCounts,
             'validator_rows'             => $validatorRows,
+            'validator_logos'            => $validatorLogos,
             'page_entities'              => $pageEntities,
         ];
     }

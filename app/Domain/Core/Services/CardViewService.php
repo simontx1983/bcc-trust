@@ -287,6 +287,12 @@ final class CardViewService
         $validatorRows = ($prefetched !== null && isset($prefetched['validator_rows']))
             ? ($prefetched['validator_rows'][$pageId] ?? [])
             : null;
+        // Batched auto-logo for the crest step — replaces the per-card
+        // findLogoByPageId N+1 when a bundle is present. null in single-card
+        // mode so resolvePageAvatarUrl keeps its per-page fallback.
+        $validatorLogo = ($prefetched !== null && isset($prefetched['validator_logos']))
+            ? ($prefetched['validator_logos'][$pageId] ?? null)
+            : null;
 
         return [
             'id'                  => $pageId,
@@ -361,7 +367,7 @@ final class CardViewService
                 $name,
                 'tier',
                 $card['key'] ?? 'common',
-                self::resolvePageAvatarUrl($pageId, $validatorRows)
+                self::resolvePageAvatarUrl($pageId, $validatorRows, $validatorLogo)
             ),
             'stats'               => self::buildPageStats($trustScore, $rm),
             'permissions'         => $this->resolvePagePermissions(
@@ -1146,7 +1152,7 @@ final class CardViewService
      *
      * @phpstan-param list<ValidatorCardRow>|null $validatorRows
      */
-    private static function resolvePageAvatarUrl(int $pageId, ?array $validatorRows = null): string
+    private static function resolvePageAvatarUrl(int $pageId, ?array $validatorRows = null, ?string $batchedValidatorLogo = null): string
     {
         // 1. PeepSo page avatar (manual upload).
         if (class_exists('PeepSoPagePhoto')) {
@@ -1172,12 +1178,16 @@ final class CardViewService
             $first = $validatorRows[0] ?? null;
             $logo  = $first !== null ? $first->logo_url : null;
             if (!is_string($logo) || $logo === '') {
-                // The batch can't see the `_bcc_onchain_validator_id`
-                // meta-bound validator when wallet-link rows exist; the
-                // per-page fallback restores single-card-path semantics.
-                $logo = \BCC\Trust\Onchain\Repositories\ValidatorRepository::findLogoByPageId($pageId);
+                // Prefetch mode: the card row's logo is empty (e.g. a
+                // wallet-link row whose logo lives only on a meta-bound
+                // validator the card-rows batch couldn't surface). Read the
+                // page's slice of PageCardPrefetcher's validator_logos batch
+                // instead of a per-card findLogoByPageId (the old N+1 —
+                // 2 queries per validator card).
+                $logo = $batchedValidatorLogo;
             }
         } else {
+            // Single-card path (no prefetch bundle) — per-page resolution.
             $logo = \BCC\Trust\Onchain\Repositories\ValidatorRepository::findLogoByPageId($pageId);
         }
         if (is_string($logo) && $logo !== '') {
@@ -1210,15 +1220,9 @@ final class CardViewService
      */
     private static function resolveMemberAvatarUrl(int $userId): string
     {
-        if ($userId > 0 && class_exists('\\PeepSoUser')) {
-            $peepso = \PeepSoUser::get_instance($userId);
-            $url    = $peepso->get_avatar('full');
-            if ($url !== '') {
-                return $url;
-            }
-        }
-        $url = get_avatar_url($userId);
-        return is_string($url) ? $url : '';
+        // Cached, shared seam (§11) — see bcc-core PeepSoMediaCache for the
+        // PeepSo-first resolution + why caching the URL is safe.
+        return \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);
     }
 
     /**

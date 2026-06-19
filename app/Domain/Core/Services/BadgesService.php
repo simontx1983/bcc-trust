@@ -20,9 +20,10 @@
  *   - Group: `bcc_badges`
  *   - Generation key:   `me_badges_gen:{userId}`
  *   - Payload key:      `me_badges:{userId}:gen{N}:{openThreadsKey}`
- *   - TTL:              BADGE_CACHE_TTL_SECONDS (15s — safety net so
+ *   - TTL:              BADGE_CACHE_TTL_SECONDS (30s — safety net so
  *                       a missed bump cannot leave a viewer permanently
- *                       stale)
+ *                       stale; sized at/above the F1 client poll cadence
+ *                       so typical polls hit the cache)
  *
  *   Bumped by every mutation that could change a viewer's badge state:
  *     - NotificationDispatcher::dispatch          (bell row created)
@@ -30,7 +31,7 @@
  *     - MessagesService::sendMessage              (DM arrives)
  *     - MessagesService::markRead / getThread     (DM viewed)
  *
- *   The 15s TTL means worst-case staleness is 15s when an invalidation
+ *   The 30s TTL means worst-case staleness is 30s when an invalidation
  *   point is missed (or when PeepSo's own write path emits a bell row
  *   that BCC didn't trigger — PeepSo can do that for plugin-internal
  *   reasons). Acceptable for badge UX.
@@ -53,8 +54,18 @@ final class BadgesService
     /** Cache group for the badge generation counters + payloads. */
     public const CACHE_GROUP = 'bcc_badges';
 
-    /** Payload TTL — safety net if a bump is missed. */
-    public const BADGE_CACHE_TTL_SECONDS = 15;
+    /**
+     * Payload TTL — safety net if a generation bump is missed.
+     *
+     * Set to 30s to sit at/above the F1 client poll cadence (dominant
+     * unread-but-idle tab polls every 25s). With the prior 15s TTL the poll
+     * interval exceeded the TTL, so most single-tab polls missed the per-user
+     * cache and recomputed the unread COUNTs every time. 30s lets the typical
+     * poll hit cache, cutting badge DB load ~2-3x. Real badge events still
+     * refresh immediately via the generation counter (bumpForUser) — only the
+     * worst-case missed-bump staleness window widens 15s → 30s.
+     */
+    public const BADGE_CACHE_TTL_SECONDS = 30;
 
     /** Hard cap on how many open-thread hints the endpoint will project. */
     public const OPEN_THREADS_MAX = 5;

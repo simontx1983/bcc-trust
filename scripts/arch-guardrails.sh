@@ -41,6 +41,27 @@ ALL_PLUGINS=(
     blue-collar-crypto-peepso-integration
 )
 
+# ── Known-debt allowlist for Rule 1 ($wpdb outside Repositories) ─────────────
+#
+# These files pre-date the directory-scan fix that made Rule 1 actually run
+# (before, it scanned app/Services/Controllers/Admin — dirs that don't exist
+# post-M1, so the rule was a silent no-op). Each is a real §1 violation that
+# is SAFE today (no injected input) but must be paid down by moving its $wpdb
+# into a Repository. Tracked in docs/TODO.md.
+#
+# This list is a RATCHET: it freezes the existing debt so the guard goes green
+# and enforces every NEW file, while the legacy sites are remediated one at a
+# time. Remove an entry the moment its file's $wpdb moves into a Repository —
+# never ADD to this list for new code.
+WPDB_DEBT_ALLOWLIST=(
+    "bcc-trust/app/Domain/Core/Application/TrustReadService.php"      # raw read -> read repository
+    "bcc-trust/app/Domain/Core/REST/GroupsDiscoveryEndpoint.php"     # query in REST handler -> Repository
+    "bcc-trust/app/Domain/Core/Services/Reactions/ReactionSeeder.php" # SHOW/CREATE INDEX DDL -> Infrastructure migration
+    "bcc-trust/app/Domain/Core/Services/WatchingService.php"         # read-model tier lookup -> PageReadModelRepository
+    "bcc-trust/app/Domain/Core/Support/NotificationPrefs.php"        # pref read/write -> Repository
+    "bcc-trust/app/Domain/Onchain/Support/OnchainCircuitBreaker.php" # breaker-state store -> Repository/Infrastructure
+)
+
 if [[ -n "$TARGET" && "$TARGET" != "--json" ]]; then
     PLUGINS=("$TARGET")
 else
@@ -105,9 +126,21 @@ check_wpdb_leaks() {
 
     [[ -d "$plugin_dir" ]] || return
 
-    # Directories where $wpdb is FORBIDDEN
+    # Directories where $wpdb is FORBIDDEN.
+    #
+    # Post-M1 merge, all bcc-trust code lives under app/Domain/** (Services,
+    # REST, Controllers, Support, Application, Workers, Factories, Fetchers,
+    # …). $wpdb is allowed ONLY in Repositories/ and Infrastructure/, which are
+    # exempted in the case statement below. So we scan the whole of app/Domain
+    # and let the exemptions carve out the allowed homes — this catches every
+    # forbidden layer instead of a hand-maintained subdir list that silently
+    # rots when a new domain folder appears.
+    #
+    # The legacy flat dirs (app/Services etc.) are kept so the rule still works
+    # for any plugin that hasn't moved to the Domain layout (bcc-core/src is
+    # an allowed exception and is NOT listed).
     local -a forbidden_dirs=()
-    for d in app/Services app/Controllers app/Admin app/Integration templates blocks includes/renderers includes/partials; do
+    for d in app/Domain app/Services app/Controllers app/Admin app/Integration templates blocks includes/renderers includes/partials; do
         [[ -d "$plugin_dir/$d" ]] && forbidden_dirs+=("$plugin_dir/$d")
     done
 
@@ -130,13 +163,41 @@ check_wpdb_leaks() {
         # Normalize path for display
         local rel="${file#$PLUGINS_DIR/}"
 
-        # Known exceptions
+        # Known exceptions — the allowed homes for $wpdb (CLAUDE.md §1).
         case "$rel" in
+            */Repositories/*)                  continue ;;  # the allowed home for $wpdb
+            */Infrastructure/*)                continue ;;  # allowed per §1
             */Security/TransactionManager.php) continue ;;  # BEGIN/COMMIT/ROLLBACK
             */Database/TableRegistry.php)      continue ;;  # table name helper
             */uninstall.php)                   continue ;;  # cleanup on plugin delete
             */phpstan-bootstrap.php)           continue ;;  # PHPStan stubs
         esac
+
+        # Known-debt allowlist (tracked, pre-existing §1 violations slated for
+        # extraction into Repositories — see WPDB_DEBT_ALLOWLIST near the top of
+        # this script and docs/TODO.md). Remove a file from the allowlist when
+        # its $wpdb is moved into a Repository; the guard then enforces it.
+        local waived=false
+        for debt in "${WPDB_DEBT_ALLOWLIST[@]}"; do
+            if [[ "$rel" == "$debt" ]]; then
+                waived=true
+                break
+            fi
+        done
+        $waived && continue
+
+        # Surgical per-hit waiver for one-off cases: an
+        #   arch-guardrails:allow-wpdb — <reason>
+        # marker on the same line or the line directly above. New code must
+        # delegate to a Repository instead of relying on this.
+        if echo "$content" | grep -q 'arch-guardrails:allow-wpdb'; then
+            continue
+        fi
+        local prev_line
+        prev_line=$(sed -n "$((line > 1 ? line - 1 : 1))p" "$file" 2>/dev/null || true)
+        if echo "$prev_line" | grep -q 'arch-guardrails:allow-wpdb'; then
+            continue
+        fi
 
         violation "$plugin" "WPDB_OUTSIDE_REPO" "$rel" "$line" "— direct \$wpdb in forbidden layer"
     done < <(grep -rn 'global \$wpdb\|\$wpdb->' "${forbidden_dirs[@]}" "${root_files[@]}" --include='*.php' 2>/dev/null || true)
