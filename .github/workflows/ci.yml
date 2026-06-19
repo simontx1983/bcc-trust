@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  php:
+    name: PHP — PHPStan L8 · PHPUnit · guardrails
+    runs-on: ubuntu-latest
+    # Checked out INTO the WordPress plugins layout so arch-guardrails.sh
+    # resolves its sibling-plugin paths (scripts/../../<plugin>).
+    defaults:
+      run:
+        working-directory: app/public/wp-content/plugins/bcc-trust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app/public/wp-content/plugins/bcc-trust
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          # gmp is required by simplito/elliptic-php (on-chain crypto).
+          extensions: gmp, mbstring, intl
+          tools: composer:v2
+          coverage: none
+
+      # composer.lock is gitignored in this repo (production vendor/ is committed,
+      # dev deps restored on demand), so resolve from composer.json.
+      - name: Install dependencies
+        run: composer update --no-interaction --no-progress --prefer-dist
+
+      - name: PHPStan (level 8)
+        run: composer phpstan
+
+      - name: Unit tests
+        run: composer test
+
+      - name: Architecture guardrails (incl. PHP syntax)
+        run: bash scripts/arch-guardrails.sh bcc-trust
