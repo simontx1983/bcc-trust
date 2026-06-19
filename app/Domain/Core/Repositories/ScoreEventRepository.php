@@ -72,81 +72,11 @@ class ScoreEventRepository
     }
 
     /**
-     * Get recent score events for a page.
-     *
-     * @param int $pageId
-     * @param int $limit
-     * @return list<object>
-     */
-    public function getForPage(int $pageId, int $limit = 20): array
-    {
-        global $wpdb;
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT id, page_id, event_type, score_before, score_after, delta,
-                    tier_before, tier_after, reason, actor_user_id, meta, created_at
-             FROM {$this->table}
-             WHERE page_id = %d
-             ORDER BY created_at DESC
-             LIMIT %d",
-            $pageId,
-            $limit
-        )) ?: [];
-    }
-
-    /**
-     * Get recent events for a user (pages they affected by voting/endorsing).
-     *
-     * @param int $actorUserId
-     * @param int $limit
-     * @return list<object>
-     */
-    public function getForActor(int $actorUserId, int $limit = 20): array
-    {
-        global $wpdb;
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT id, page_id, event_type, score_before, score_after, delta,
-                    tier_before, tier_after, reason, actor_user_id, meta, created_at
-             FROM {$this->table}
-             WHERE actor_user_id = %d
-             ORDER BY created_at DESC
-             LIMIT %d",
-            $actorUserId,
-            $limit
-        )) ?: [];
-    }
-
-    /**
-     * Get tier change events for a page (only events where tier actually changed).
-     *
-     * @param int $pageId
-     * @param int $limit
-     * @return list<object>
-     */
-    public function getTierChanges(int $pageId, int $limit = 10): array
-    {
-        global $wpdb;
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT id, page_id, event_type, score_before, score_after, delta,
-                    tier_before, tier_after, reason, created_at
-             FROM {$this->table}
-             WHERE page_id = %d AND tier_before != tier_after AND tier_before IS NOT NULL
-             ORDER BY created_at DESC
-             LIMIT %d",
-            $pageId,
-            $limit
-        )) ?: [];
-    }
-
-    /**
      * Recent score events across a SET of pages, since a SQL timestamp.
      *
      * Drives §O2.1 EXTERNAL-slot resolver in HighlightsService — the
-     * "something happened to a page you watch" surface. Existing single-
-     * page reads (`getForPage`, `getTierChanges`) don't compose
-     * cross-page; this is the multi-page read seam.
+     * "something happened to a page you watch" surface. This is the
+     * multi-page read seam — the sole read path on this table.
      *
      * Filters:
      *   - `page_id IN ($pageIds)`  bounded by caller (typical: ≤ 500
