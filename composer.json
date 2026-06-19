@@ -30,6 +30,7 @@
     },
     "scripts": {
         "phpstan": "phpstan analyse --memory-limit=4G",
-        "test": "phpunit"
+        "test": "phpunit",
+        "test:integration": "phpunit -c phpunit-integration.xml.dist"
     }
 }
