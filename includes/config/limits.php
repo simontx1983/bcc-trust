@@ -125,6 +125,12 @@ define('BCC_TRUST_CLEANUP_FRAUD_ANALYSIS', 90);
 define('BCC_TRUST_CLEANUP_ACTIVITY', 90);
 define('BCC_TRUST_CLEANUP_VOTES', 30);
 define('BCC_TRUST_CLEANUP_SUSPENSIONS', 30);
+// Append-only trust ledgers. reputation_events feeds the user view-model's
+// "last few changes" so keep a generous horizon; score_events + resolved
+// content_reports are audit/debug and prune sooner. Days.
+define('BCC_TRUST_CLEANUP_REPUTATION_EVENTS', 180);
+define('BCC_TRUST_CLEANUP_SCORE_EVENTS', 90);
+define('BCC_TRUST_CLEANUP_CONTENT_REPORTS', 90);
 
 // ======================================================
 // ADMIN UI SETTINGS

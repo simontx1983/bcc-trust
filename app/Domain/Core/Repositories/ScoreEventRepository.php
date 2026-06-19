@@ -245,4 +245,58 @@ class ScoreEventRepository
         $rows = $wpdb->get_results($sql);
         return $rows ?: [];
     }
+
+    /**
+     * Retention sweep: hard-delete score-event rows older than the
+     * configured horizon, in bounded batches. This is an audit/debug
+     * ledger; reads are all "last N" bounded with no time floor, so aged
+     * rows carry no view-model dependency.
+     *
+     * Mirrors VoteRepository::cleanupOldDeleted (batched, capped, fail-loud).
+     * created_at is written by the column's CURRENT_TIMESTAMP default, so
+     * the cutoff uses MySQL NOW() to match. Uses idx_created_at.
+     *
+     * @return int rows deleted
+     */
+    public function cleanupOld(): int
+    {
+        global $wpdb;
+
+        $days = defined('BCC_TRUST_CLEANUP_SCORE_EVENTS')
+            ? max(1, (int) BCC_TRUST_CLEANUP_SCORE_EVENTS)
+            : 90;
+
+        $batchSize     = 5000;
+        $maxIterations = 20;
+        $total         = 0;
+
+        for ($i = 0; $i < $maxIterations; $i++) {
+            $affected = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$this->table}
+                  WHERE created_at < DATE_SUB(NOW(), INTERVAL %d DAY)
+                  LIMIT %d",
+                $days,
+                $batchSize
+            ));
+
+            if ($affected === false) {
+                if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] score_events cleanup DB error', [
+                        'iteration' => $i,
+                        'total'     => $total,
+                        'db_error'  => $wpdb->last_error,
+                    ]);
+                }
+                break;
+            }
+
+            $total += (int) $affected;
+
+            if ((int) $affected < $batchSize) {
+                break;
+            }
+        }
+
+        return $total;
+    }
 }

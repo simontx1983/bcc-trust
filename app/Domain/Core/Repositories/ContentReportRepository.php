@@ -457,4 +457,63 @@ final class ContentReportRepository
             $targetId
         ));
     }
+
+    /**
+     * Retention sweep: hard-delete CLOSED reports (resolved or dismissed)
+     * whose resolution is older than the configured horizon, in bounded
+     * batches. PENDING reports (status = 0) are NEVER deleted — the admin
+     * queue still needs them — and the delete keys on resolved_at, so a
+     * row is only eligible once it has actually been acted on.
+     *
+     * Mirrors VoteRepository::cleanupOldDeleted (batched, capped, fail-loud).
+     * resolved_at is written in site time (current_time('mysql')); NOW() is
+     * close enough at a 90-day horizon (a sub-day tz skew is immaterial and
+     * never risks deleting an un-resolved row — the status guard does that).
+     *
+     * @return int rows deleted
+     */
+    public function cleanupResolved(): int
+    {
+        global $wpdb;
+        $table = TableRegistry::contentReports();
+
+        $days = defined('BCC_TRUST_CLEANUP_CONTENT_REPORTS')
+            ? max(1, (int) BCC_TRUST_CLEANUP_CONTENT_REPORTS)
+            : 90;
+
+        $batchSize     = 5000;
+        $maxIterations = 20;
+        $total         = 0;
+
+        for ($i = 0; $i < $maxIterations; $i++) {
+            $affected = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$table}
+                  WHERE status      <> 0
+                    AND resolved_at IS NOT NULL
+                    AND resolved_at < DATE_SUB(NOW(), INTERVAL %d DAY)
+                  LIMIT %d",
+                $days,
+                $batchSize
+            ));
+
+            if ($affected === false) {
+                if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] content_reports cleanup DB error', [
+                        'iteration' => $i,
+                        'total'     => $total,
+                        'db_error'  => $wpdb->last_error,
+                    ]);
+                }
+                break;
+            }
+
+            $total += (int) $affected;
+
+            if ((int) $affected < $batchSize) {
+                break;
+            }
+        }
+
+        return $total;
+    }
 }

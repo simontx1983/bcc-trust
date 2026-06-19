@@ -77,6 +77,17 @@ class CronService
 
         // Archive old activity logs (90+ days) to archive table.
         Plugin::instance()->userLifecycleService()->archiveActivity();
+
+        // Retention sweep for the append-only trust ledgers. These tables
+        // had no cleanup and grew unbounded under the daily recalc loop.
+        // Each repo method is batched + capped + fail-loud and runs under
+        // the bcc_cron_cleanup_lock already held above. Horizons in
+        // includes/config/limits.php (reputation 180d, score 90d,
+        // resolved reports 90d). content_reports cleanup never touches
+        // pending rows.
+        Plugin::instance()->reputationEventRepository()->cleanupOld();
+        Plugin::instance()->scoreEventRepository()->cleanupOld();
+        Plugin::instance()->contentReportRepository()->cleanupResolved();
         } finally {
             $this->releaseLock('bcc_cron_cleanup_lock');
         }
