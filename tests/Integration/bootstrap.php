@@ -90,7 +90,73 @@ if (!class_exists('BCC\\Core\\Log\\Logger')) {
     }');
 }
 
+// Minimal WP option + sanitizer stubs used by schema migrations + repositories.
+if (!function_exists('get_option')) {
+    /** @param mixed $default @return mixed */
+    function get_option(string $key, $default = false)
+    {
+        return $default;
+    }
+    /** @param mixed $value */
+    function update_option(string $key, $value, $autoload = null): bool
+    {
+        return true;
+    }
+    /** @param mixed $value */
+    function add_option(string $key, $value = '', $deprecated = '', $autoload = 'yes'): bool
+    {
+        return true;
+    }
+    function sanitize_text_field(string $s): string
+    {
+        return trim((string) preg_replace('/[\r\n\t]+/', ' ', $s));
+    }
+    function sanitize_textarea_field(string $s): string
+    {
+        return trim($s);
+    }
+    /** @param mixed $v */
+    function absint($v): int
+    {
+        return abs((int) $v);
+    }
+}
+
+// Plugin config constants (vote weights, fraud thresholds, cleanup horizons,
+// tiers, scoring) some repos read in their constructor. The aggregator is a
+// pure set of define()s.
+require_once dirname(__DIR__, 2) . '/includes/config.php';
+
+// current_time('mysql') is used by some repositories (e.g. VoteRepository).
+if (!function_exists('current_time')) {
+    /** @return string|int */
+    function current_time(string $type, int $gmt = 0)
+    {
+        if ($type === 'timestamp' || $type === 'U') {
+            return time();
+        }
+        return $gmt ? gmdate('Y-m-d H:i:s') : date('Y-m-d H:i:s');
+    }
+}
+
 // ── Install the schema(s) the integration tests touch ───────────────────────
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-content-reports.php';
 bcc_trust_create_content_reports_table();
+
+// WordPress core wp_options (the rate limiter is option-backed via $wpdb->options).
+$GLOBALS['wpdb']->query(
+    "CREATE TABLE `wp_options` (
+        option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        option_name VARCHAR(191) NOT NULL DEFAULT '',
+        option_value LONGTEXT NOT NULL,
+        autoload VARCHAR(20) NOT NULL DEFAULT 'yes',
+        PRIMARY KEY (option_id),
+        UNIQUE KEY option_name (option_name)
+    ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+);
+
+// Core tables (votes, scores, endorsements, …) via the real installer; its
+// endorsement migration uses get_option/update_option (stubbed above).
+require_once dirname(__DIR__, 2) . '/includes/database/schema-core.php';
+bcc_trust_create_core_tables();
