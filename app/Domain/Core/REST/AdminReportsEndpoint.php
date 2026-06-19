@@ -47,7 +47,7 @@ final class AdminReportsEndpoint
             [
                 'methods'             => WP_REST_Server::READABLE,
                 'callback'            => [$instance, 'list'],
-                'permission_callback' => '__return_true',
+                'permission_callback' => [\BCC\Trust\Core\Support\BearerAuth::class, 'requireAdmin'],
                 'args' => [
                     'status' => [
                         'required'          => false,
@@ -113,7 +113,7 @@ final class AdminReportsEndpoint
             [
                 'methods'             => WP_REST_Server::CREATABLE,
                 'callback'            => [$instance, 'resolve'],
-                'permission_callback' => '__return_true',
+                'permission_callback' => [\BCC\Trust\Core\Support\BearerAuth::class, 'requireAdmin'],
                 'args' => [
                     'id' => [
                         'required'          => true,
@@ -146,7 +146,7 @@ final class AdminReportsEndpoint
             [
                 'methods'             => WP_REST_Server::CREATABLE,
                 'callback'            => [$instance, 'undo'],
-                'permission_callback' => '__return_true',
+                'permission_callback' => [\BCC\Trust\Core\Support\BearerAuth::class, 'requireAdmin'],
                 'args' => [
                     'token' => [
                         'required'          => true,

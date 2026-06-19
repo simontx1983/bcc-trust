@@ -60,7 +60,7 @@ final class AdminDigestEndpoint
             [
                 'methods'             => WP_REST_Server::CREATABLE,
                 'callback'            => [$instance, 'runNow'],
-                'permission_callback' => '__return_true',
+                'permission_callback' => [\BCC\Trust\Core\Support\BearerAuth::class, 'requireAdmin'],
             ]
         );
     }

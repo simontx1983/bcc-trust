@@ -59,6 +59,22 @@ final class BearerAuth
     }
 
     /**
+     * REST permission_callback for admin-only routes.
+     *
+     * Safe to use as a permission_callback because authenticateBearer()
+     * (priority 30 on determine_current_user) has already resolved the
+     * bearer user by the time the REST server dispatches permission
+     * checks — so current_user_can() sees the correct user. This is the
+     * single shared helper for admin gating; routes keep their in-handler
+     * adminGate() as defense-in-depth (it also emits the canonical
+     * envelope that a bare permission_callback rejection does not).
+     */
+    public static function requireAdmin(): bool
+    {
+        return current_user_can('manage_options');
+    }
+
+    /**
      * @param  int|false|\WP_Error $userId existing-user-id (false = unauthenticated, int = already authed)
      * @return int|false
      */
