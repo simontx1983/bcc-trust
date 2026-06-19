@@ -23,8 +23,8 @@
     },
     "require-dev": {
         "php-stubs/wp-cli-stubs": "^2.12",
-        "phpstan/phpstan": "^2.0",
-        "phpunit/phpunit": "^11",
+        "phpstan/phpstan": "2.1.51",
+        "phpunit/phpunit": "11.5.55",
         "szepeviktor/phpstan-wordpress": "^2.0"
     },
     "scripts": {
