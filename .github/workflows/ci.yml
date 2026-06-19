@@ -26,6 +26,14 @@ jobs:
         with:
           path: app/public/wp-content/plugins/bcc-trust
 
+      # bcc-trust's phpstan.neon scans ../bcc-core/src for cross-plugin type
+      # resolution (ServiceLocator, DB helpers, logging). Check out the public
+      # sibling into the WP layout so the path resolves.
+      - uses: actions/checkout@v4
+        with:
+          repository: simontx1983/bcc-core
+          path: app/public/wp-content/plugins/bcc-core
+
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
