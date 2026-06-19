@@ -15,8 +15,7 @@
     </testsuites>
     <source>
         <include>
-            <file>app/Repositories/DisputeRepository.php</file>
-            <file>app/Services/ResolveDisputeService.php</file>
+            <directory>app</directory>
         </include>
     </source>
 </phpunit>

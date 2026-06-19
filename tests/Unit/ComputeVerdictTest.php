@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Disputes\Tests\Unit;
 
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
+use PHPUnit\Framework\Attributes\CoversMethod;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -15,10 +16,9 @@ use PHPUnit\Framework\TestCase;
  * method directly. The class file's `use` imports are lazy; only the class
  * definition itself is parsed at load time, and computeVerdict's body uses
  * only stdlib + self::quorumFor.
- *
- * @covers \BCC\Trust\Disputes\Repositories\DisputeRepository::computeVerdict
- * @covers \BCC\Trust\Disputes\Repositories\DisputeRepository::quorumFor
  */
+#[CoversMethod(DisputeRepository::class, 'computeVerdict')]
+#[CoversMethod(DisputeRepository::class, 'quorumFor')]
 final class ComputeVerdictTest extends TestCase
 {
     /**

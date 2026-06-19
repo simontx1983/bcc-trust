@@ -8,4 +8,13 @@
 /vendor/szepeviktor/
 composer.lock
 .phpunit.result.cache
+.phpunit.cache/
 *.log
+# Dev-only test deps (PHPUnit tree) — restored via composer install, not shipped.
+/vendor/phpunit/
+/vendor/myclabs/
+/vendor/nikic/
+/vendor/phar-io/
+/vendor/sebastian/
+/vendor/staabm/
+/vendor/theseer/

@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Disputes\Tests\Unit;
 
+use BCC\Trust\Disputes\Services\DisputeResolver;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -11,26 +15,23 @@ use PHPUnit\Framework\TestCase;
  *
  * ## Isolation strategy
  *
- * Every test method runs in its OWN PHP subprocess via
- * @runTestsInSeparateProcesses + @preserveGlobalState disabled. Inside
- * the subprocess, setUp() pulls in tests/Stubs/resolver-stubs.php which
- * defines in-namespace test doubles (DisputeRepository,
- * DisputeNotificationService, ServiceLocator, Logger, and the
- * DisputeAdjudicationInterface itself) at the exact production FQNs,
- * then manually requires the real DisputeResolver.php. Because
- * the stubs are registered before the resolver references them,
- * Composer's autoloader never loads the real production classes in
- * the subprocess.
+ * Every test method runs in its OWN PHP subprocess (see the
+ * RunTestsInSeparateProcesses + PreserveGlobalState(false) attributes
+ * below). Inside the subprocess, setUp() pulls in
+ * tests/Stubs/resolver-stubs.php which defines in-namespace test doubles
+ * (DisputeRepository, DisputeNotificationService, ServiceLocator, Logger,
+ * and the DisputeAdjudicationInterface itself) at the exact production
+ * FQNs, then manually requires the real DisputeResolver.php. Because the
+ * stubs are registered before the resolver references them, Composer's
+ * autoloader never loads the real production classes in the subprocess.
  *
  * The main PHPUnit process — where ComputeVerdictTest runs — is
  * completely untouched: the stubs file is never included there, so
  * the real DisputeRepository loads normally via PSR-4.
- *
- * @covers \BCC\Trust\Disputes\Services\DisputeResolver
- *
- * @runTestsInSeparateProcesses
- * @preserveGlobalState disabled
  */
+#[CoversClass(DisputeResolver::class)]
+#[RunTestsInSeparateProcesses]
+#[PreserveGlobalState(false)]
 final class DisputeResolverTest extends TestCase
 {
     private const DISPUTE_ID  = 42;
