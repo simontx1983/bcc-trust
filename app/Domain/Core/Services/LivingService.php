@@ -31,7 +31,6 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
-use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\RankCatalog;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
@@ -53,7 +52,6 @@ final class LivingService
     public function __construct(
         private readonly VoteRepository $voteRepo,
         private readonly FlagsRepository $flagsRepo,
-        private readonly ReputationRepository $reputationRepo,
         private readonly PeepSoReactionRepository $reactionRepo
     ) {
     }
@@ -80,8 +78,15 @@ final class LivingService
      *   },
      *   comparison: array{headline: string, kind: string, as_of: string}|null
      * }
+     *
+     * @param array{
+     *   level: int,
+     *   next_level_thresholds: list<array{metric: string, label: string, current: int, required: int}>
+     * } $featureAccess  The viewer's feature_access block (§2.6), passed
+     *                   in so the rank-progress bar reuses the canonical
+     *                   level thresholds rather than re-deriving them.
      */
-    public function compose(int $userId, string $rankKey): array
+    public function compose(int $userId, string $rankKey, array $featureAccess): array
     {
         $today = $this->today($userId);
         $streak = $this->streakDays($userId);
@@ -90,7 +95,7 @@ final class LivingService
             'streak_days'   => $streak,
             'today'         => $today,
             'recent_impact' => self::recentImpactHeadline($today),
-            'rank_progress' => $this->rankProgress($userId, $rankKey),
+            'rank_progress' => self::rankProgress($rankKey, $featureAccess),
             'comparison'    => self::networkComparison($userId),
         ];
     }
@@ -267,69 +272,83 @@ final class LivingService
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Build the §N11 progression block.
+     * Build the §N11 progression block — honestly, from the **real**
+     * capability gates.
      *
-     * V1 rank derivation rule (per RankService::autoDerivedRank):
-     *   - Apprentice = trust_score < BCC_TRUST_NEUTRAL_SCORE (50)
-     *   - Journeyman = trust_score >= BCC_TRUST_NEUTRAL_SCORE
-     *   - Foreman+   = admin-conferred (no further auto-promotion)
+     * Rank now mirrors the feature-access level (Apprentice=New,
+     * Journeyman=Active, Master=Veteran). The bar therefore reflects the
+     * actual level thresholds the user is working toward (pulls /
+     * reviews / days active — supplied verbatim in `next_level_thresholds`),
+     * NOT a fabricated trust-score percentage. `percent` is the limiting
+     * (closest-to-blocking) gate's ratio; `remaining_label` names what's
+     * left. At Master (top of ladder, no thresholds) it reads complete.
      *
-     * Cases:
-     *   - Apprentice → linear progress toward 50; capped at 99 because
-     *                  hitting 100 would mean already promoted.
-     *   - Journeyman → next is Foreman (admin-conferred); progress=100;
-     *                  remaining hint clarifies it's admin-awarded.
-     *   - Foreman+   → no next; progress=100; remaining hint says so.
+     * Pure: derives entirely from the passed-in feature_access block, so
+     * it's trivially testable and adds no queries.
      *
+     * @param array{
+     *   level: int,
+     *   next_level_thresholds: list<array{metric: string, label: string, current: int, required: int}>
+     * } $featureAccess
      * @return array{current_rank: string, next_rank: string|null, percent: int, remaining_label: string}
      */
-    private function rankProgress(int $userId, string $rankKey): array
+    private static function rankProgress(string $rankKey, array $featureAccess): array
     {
         $nextRankKey = RankCatalog::getNextRank($rankKey);
+        $thresholds  = $featureAccess['next_level_thresholds'];
 
-        if ($rankKey === RankCatalog::RANK_APPRENTICE) {
-            $score     = $this->reputationRepo->getScore($userId);
-            $threshold = (float) BCC_TRUST_NEUTRAL_SCORE;
-
-            $pct = ($score / $threshold) * 100.0;
-            // Clamp to [0, 99] for Apprentice — 100 implies promoted,
-            // which the rank-derivation service should already have done.
-            $pctInt   = (int) max(0, min(99, (int) round($pct)));
-            $remaining = max(0, (int) ceil($threshold - $score));
-            $label = $remaining === 0
-                ? 'Almost there — promotion lands shortly.'
-                : sprintf('%d trust point%s to Journeyman.', $remaining, $remaining === 1 ? '' : 's');
-
-            return [
-                'current_rank'    => $rankKey,
-                'next_rank'       => $nextRankKey,
-                'percent'         => $pctInt,
-                'remaining_label' => $label,
-            ];
-        }
-
-        if ($nextRankKey !== null && !RankCatalog::isAutoAssigned($nextRankKey)) {
-            // Journeyman → Foreman: next exists in catalog but is
-            // admin-conferred. Progress is "complete" for the
-            // auto-ladder; the remaining hint explains the gate.
+        // Top of the ladder (Master) or no remaining gates.
+        if ($nextRankKey === null || $thresholds === []) {
             return [
                 'current_rank'    => $rankKey,
                 'next_rank'       => $nextRankKey,
                 'percent'         => 100,
-                'remaining_label' => sprintf(
-                    '%s is conferred, not earned.',
-                    (string) RankCatalog::getLabel($nextRankKey)
-                ),
+                'remaining_label' => 'Top of the trade.',
             ];
         }
 
-        // Top of the ladder (Foreman or any unknown-but-validated rank
-        // with no next slot).
+        // percent = the limiting gate (smallest current/required ratio),
+        // clamped to [0, 99] — 100 implies already promoted, which the
+        // level resolver would have done.
+        $ratios   = [];
+        $unmet    = [];
+        foreach ($thresholds as $t) {
+            $required = $t['required'];
+            $current  = $t['current'];
+            $ratios[] = $required > 0 ? min(1.0, $current / $required) : 1.0;
+            $remaining = $required - $current;
+            if ($remaining > 0) {
+                $unmet[] = sprintf('%d more %s', $remaining, strtolower($t['label']));
+            }
+        }
+        $percent = (int) max(0, min(99, (int) round(min($ratios) * 100)));
+
+        $nextLabel = (string) RankCatalog::getLabel($nextRankKey);
+        $label = $unmet === []
+            ? 'Almost there — promotion lands shortly.'
+            : sprintf('%s to reach %s.', self::joinPhrases($unmet), $nextLabel);
+
         return [
             'current_rank'    => $rankKey,
-            'next_rank'       => null,
-            'percent'         => 100,
-            'remaining_label' => 'Top of the ladder.',
+            'next_rank'       => $nextRankKey,
+            'percent'         => $percent,
+            'remaining_label' => $label,
         ];
+    }
+
+    /**
+     * Join short clauses into a natural-language list:
+     * ["a"] → "a"; ["a","b"] → "a and b"; ["a","b","c"] → "a, b and c".
+     *
+     * @param list<string> $parts
+     */
+    private static function joinPhrases(array $parts): string
+    {
+        $count = count($parts);
+        if ($count === 1) {
+            return $parts[0];
+        }
+        $last = array_pop($parts);
+        return implode(', ', $parts) . ' and ' . $last;
     }
 }

@@ -254,6 +254,87 @@ final class FeatureAccessService
     }
 
     /**
+     * Batched level resolver — the integer level (1/2/3) for many users
+     * in a bounded set of queries. For hot list surfaces (feed/comment
+     * author chips via AuthorBadgeResolver) that need rank-from-level
+     * without N× full getFeatureAccess() computations.
+     *
+     * Reuses the same count sources as the per-user path, batched:
+     *   pulls   ← PeepSoFollowerRepository::getFollowingCountForUsers
+     *   reviews ← VoteRepository::countByVoters
+     *   days    ← user_registered (WP user cache primed once)
+     *
+     * Wallet + reputation-tier stats are intentionally omitted — they
+     * gate individual features, not the level (resolveLevel reads only
+     * pulls/reviews/days). Users absent from a count map default to 0.
+     *
+     * @param list<int> $userIds Bounded by caller (page-size capped).
+     * @return array<int, int> user_id → level (1|2|3)
+     */
+    public function getLevelsForUsers(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $clean[$intId] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $ids = array_keys($clean);
+
+        $pulls   = $this->countPullsForUsers($ids);
+        $reviews = $this->voteRepo->countByVoters($ids);
+
+        // Prime the WP user cache once so each per-id days_active read
+        // below is a cache hit rather than a separate query.
+        if (function_exists('cache_users')) {
+            cache_users($ids);
+        }
+
+        $out = [];
+        foreach ($ids as $uid) {
+            $out[$uid] = $this->resolveLevel([
+                'pulls'           => (int) ($pulls[$uid] ?? 0),
+                'reviews_written' => (int) ($reviews[$uid] ?? 0),
+                'days_active'     => $this->countDaysActive($uid),
+                'has_wallet'      => false,     // unused by resolveLevel
+                'reputation_tier' => 'neutral', // unused by resolveLevel
+            ]);
+        }
+        return $out;
+    }
+
+    /**
+     * Batched pulls (= follows per §C2) for a set of users via the
+     * bcc-core batch sibling. Falls back to the per-user path only when
+     * bcc-core isn't loaded at all (same defensive class_exists posture
+     * as countPulls — both plugins ship together, so the method is
+     * guaranteed present whenever the class is).
+     *
+     * @param list<int> $userIds
+     * @return array<int, int> user_id → following count
+     */
+    private function countPullsForUsers(array $userIds): array
+    {
+        if (class_exists('\\BCC\\Core\\Repositories\\PeepSoFollowerRepository')) {
+            return \BCC\Core\Repositories\PeepSoFollowerRepository::getFollowingCountForUsers($userIds);
+        }
+
+        $out = [];
+        foreach ($userIds as $uid) {
+            $out[(int) $uid] = $this->countPulls((int) $uid);
+        }
+        return $out;
+    }
+
+    /**
      * Admin-tunable thresholds. Reads wp_options('bcc_level_thresholds')
      * and merges over the defaults so partial overrides are safe.
      *

@@ -4,14 +4,17 @@
  * auto-derived rank changes and emitting the §O1.2 Heavy celebration.
  *
  * The existing `RankService::autoDerivedRank()` is reactive — it
- * computes the current rank on every read from the user's reputation
- * tier. That's correct for view-models, but it means a user crosses
- * tier boundaries silently: their rank flips Apprentice → Journeyman
- * with no event, no toast, no audit trail. This listener watches
- * activity events that could plausibly nudge reputation, compares
- * the user's last-seen rank against the current auto-derived rank,
- * and on a strict promotion stashes a celebration + emits
- * `bcc_rank_awarded`.
+ * computes the current rank on every read from the user's feature-access
+ * **level** (Apprentice=New, Journeyman=Active, Master=Veteran). That's
+ * correct for view-models, but it means a user crosses level boundaries
+ * silently: their rank flips Apprentice → Journeyman with no event, no
+ * toast, no audit trail. This listener watches activity events that
+ * could plausibly nudge the level inputs (pulls, reviews, days active),
+ * compares the user's last-seen rank against the current auto-derived
+ * rank, and on a strict promotion stashes a celebration + emits
+ * `bcc_rank_awarded`. This is the single user-facing progression toast —
+ * LevelProgressionListener detects the same crossing but intentionally
+ * stays silent to avoid a double celebration.
  *
  * Why subscribe to activity events (not a hypothetical
  * `bcc_reputation_changed` event):

@@ -419,7 +419,7 @@ final class Plugin
     {
         return $this->rankService ??= new Services\RankService(
             $this->userRankRepository(),
-            $this->reputationRepository()
+            $this->featureAccessService()
         );
     }
 
@@ -571,7 +571,8 @@ final class Plugin
     public function authorBadgeResolver(): Services\AuthorBadgeResolver
     {
         return $this->authorBadgeResolver ??= new Services\AuthorBadgeResolver(
-            $this->reputationRepository()
+            $this->reputationRepository(),
+            $this->featureAccessService()
         );
     }
 
@@ -604,7 +605,6 @@ final class Plugin
         return $this->livingService ??= new Services\LivingService(
             $this->voteRepository(),
             $this->flagsRepository(),
-            $this->reputationRepository(),
             $this->peepSoReactionRepository()
         );
     }

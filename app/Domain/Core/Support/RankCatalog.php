@@ -1,11 +1,16 @@
 <?php
 /**
- * Canonical rank catalog per §E2 of the V1 plan.
+ * Canonical rank catalog — the earned **Rank** axis (one of three
+ * orthogonal identity axes; see docs/glossary.md §1 and api-contract §4.8).
  *
- * Apprentice + Journeyman are auto-assigned (by FeatureAccessService /
- * RankService activity-and-reputation derivation). Foreman+ are
- * admin-conferred (intentionally scarce — represent trust, not just
- * activity).
+ * Rank mirrors the feature-access **level** (§2.6) and is fully
+ * auto-derived from activity by RankService::rankForLevel():
+ *   Apprentice = level New · Journeyman = level Active · Master = level Veteran.
+ *
+ * **Foreman is NOT on this ladder.** It is a conferred *Role*
+ * (moderator authority), orthogonal to Rank — see self::ROLES /
+ * self::isRole(). Reaching Master does not confer it; it is surfaced
+ * via a separate `foreman_insignia` flag, never as a rank label.
  *
  * This class is the single source of rank labels and metadata. Every
  * other code path — the /ranks endpoint, UserRankRepository validation,
@@ -25,14 +30,16 @@ final class RankCatalog
 {
     public const RANK_APPRENTICE = 'apprentice';
     public const RANK_JOURNEYMAN = 'journeyman';
-    public const RANK_FOREMAN    = 'foreman';
+    public const RANK_MASTER     = 'master';
+
+    /** Conferred Role key — orthogonal to the earned ladder. */
+    public const RANK_FOREMAN = 'foreman';
 
     /**
-     * Canonical catalog. Order matches the user-facing progression
-     * (Apprentice → Journeyman → Foreman). The `auto_assigned` flag
-     * distinguishes auto-derived ranks (cleared on revocation back to
-     * the next-lower auto-derived rank per §E2) from admin-conferred
-     * ranks (which can be revoked back to the user's auto-derived rank).
+     * Canonical earned ladder. Order matches the user-facing
+     * progression (Apprentice → Journeyman → Master). All three are
+     * auto-assigned (derived from feature-access level); there is no
+     * auto-conferred rank above Master.
      *
      * @var list<array{key: string, label: string, description: string, auto_assigned: bool, order: int}>
      */
@@ -52,13 +59,38 @@ final class RankCatalog
             'order'         => 2,
         ],
         [
-            'key'           => self::RANK_FOREMAN,
-            'label'         => 'Foreman',
-            'description'   => 'Conferred for trust.',
-            'auto_assigned' => false,
+            'key'           => self::RANK_MASTER,
+            'label'         => 'Master',
+            'description'   => 'Master of the trade.',
+            'auto_assigned' => true,
             'order'         => 3,
         ],
     ];
+
+    /**
+     * Conferred **Roles** — assigned, never auto-earned, orthogonal to
+     * the Rank ladder. A user can hold a role at any rank (a Journeyman
+     * Foreman is valid). Stored as rows in `bcc_user_ranks` alongside
+     * earned ranks, but resolved separately: a role row sets the
+     * `foreman_insignia` flag and never changes the user's earned rank.
+     *
+     * Today: Foreman only. Future roles register here.
+     *
+     * @var array<string, string> role key → display label
+     */
+    private const ROLES = [
+        self::RANK_FOREMAN => 'Foreman',
+    ];
+
+    /**
+     * Whether a key is a conferred Role (vs an earned rank). Used by
+     * RankService::getViewerBlock to surface `foreman_insignia` without
+     * letting the role bleed into the earned-rank fields.
+     */
+    public static function isRole(string $key): bool
+    {
+        return isset(self::ROLES[$key]);
+    }
 
     /**
      * The full catalog, shaped for the /ranks endpoint response.
@@ -71,10 +103,15 @@ final class RankCatalog
     }
 
     /**
-     * Whether a rank key exists in the catalog.
+     * Whether a key is a valid `rank_key` for `bcc_user_ranks` — an
+     * earned rank OR a conferred role. Roles are valid stored keys even
+     * though they're off the earned ladder.
      */
     public static function isValid(string $key): bool
     {
+        if (self::isRole($key)) {
+            return true;
+        }
         foreach (self::CATALOG as $rank) {
             if ($rank['key'] === $key) {
                 return true;
@@ -99,10 +136,14 @@ final class RankCatalog
     }
 
     /**
-     * Display label for a rank key, or null if the key is unknown.
+     * Display label for an earned rank OR a conferred role, or null if
+     * the key is unknown.
      */
     public static function getLabel(string $key): ?string
     {
+        if (isset(self::ROLES[$key])) {
+            return self::ROLES[$key];
+        }
         foreach (self::CATALOG as $rank) {
             if ($rank['key'] === $key) {
                 return $rank['label'];
