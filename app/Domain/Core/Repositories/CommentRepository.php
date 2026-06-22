@@ -194,6 +194,34 @@ final class CommentRepository
     }
 
     /**
+     * Count published comments AUTHORED by a user since a MySQL DATETIME
+     * boundary. A contribution-recovery signal ("helpful comments"); the
+     * `post_status = 'publish'` predicate is the quality floor (deleted /
+     * unapproved comments don't count). Aggregate COUNT — bounded.
+     */
+    public function countByAuthorSince(int $authorId, string $sinceMysql): int
+    {
+        if ($authorId <= 0 || $sinceMysql === '') {
+            return 0;
+        }
+
+        global $wpdb;
+        $activities = self::activitiesTable();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*)
+               FROM {$activities} a
+               INNER JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+              WHERE p.post_author          = %d
+                AND a.act_comment_object_id > 0
+                AND p.post_status           = 'publish'
+                AND p.post_date_gmt        >= %s",
+            $authorId,
+            $sinceMysql
+        ));
+    }
+
+    /**
      * Single-comment full-row lookup keyed by the comment's wp_post.ID.
      * Used by the create-comment path: PeepSoActivity::add_comment
      * returns the new wp_post.ID but not the act_id, so we resolve the

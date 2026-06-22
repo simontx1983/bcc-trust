@@ -77,6 +77,7 @@ $cron_hooks = [
     'bcc_trust_daily_maintenance',
     'bcc_trust_initial_read_model_sync',
     'bcc_trust_deferred_rm_sync',
+    'bcc_trust_daily_contribution_recovery',
 ];
 
 foreach ($cron_hooks as $hook) {

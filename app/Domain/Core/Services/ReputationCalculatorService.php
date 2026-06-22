@@ -112,15 +112,23 @@ class ReputationCalculatorService {
         $negativeWeight = abs((float) $stats->negative_weight);
         $totalWeight    = $positiveWeight + $negativeWeight;
 
-        // Simple reputation score: base NEUTRAL, adjusted by vote ratio
+        // Genuine reputation: base NEUTRAL, adjusted by vote ratio (the
+        // "primary trust signals" — votes + dispute/fraud penalties).
         $neutral = (float) BCC_TRUST_NEUTRAL_SCORE;
-        $score   = $neutral;
+        $genuine = $neutral;
         if ($totalWeight > 0) {
-            $ratio = ($positiveWeight - $negativeWeight) / $totalWeight;
-            $score = $neutral + ($ratio * $neutral);
+            $ratio   = ($positiveWeight - $negativeWeight) / $totalWeight;
+            $genuine = $neutral + ($ratio * $neutral);
         }
+        $genuine = max(0.0, min(100.0, $genuine));
 
-        $score = max(0.0, min(100.0, $score));
+        // Trust Recovery Through Contribution: blend the persisted, capped
+        // contribution+consistency bonus under the Rule-2 ceiling. The bonus
+        // is the INPUT (refreshed daily by the contribution evaluator);
+        // reputation_score is the OUTPUT — same derived-column pattern as
+        // endorsement_bonus, so vote-recalcs never clobber the bonus.
+        $contributionBonus = $this->reputationRepo->getContributionBonus($userId);
+        $score = self::blendContribution($genuine, $contributionBonus);
 
         // Snapshot the BEFORE score before the persist call so we can
         // log a delta event. If no row exists yet, getScore returns
@@ -136,5 +144,26 @@ class ReputationCalculatorService {
         if ($this->eventRepo !== null && abs($score - $scoreBefore) >= self::EVENT_NOISE_FLOOR) {
             $this->eventRepo->record($userId, $scoreBefore, $score, $reason);
         }
+    }
+
+    /**
+     * Blend the genuine (vote/dispute) reputation with the capped
+     * contribution+consistency bonus under the Rule-2 ceiling.
+     *
+     * Pure — unit-testable. The ceiling means contribution alone can lift a
+     * user toward Neutral but never into Trusted/Proven: it only applies
+     * while the *genuine* score is below Trusted, so a user who has
+     * independently earned Trusted keeps their full score.
+     */
+    public static function blendContribution(float $genuine, float $contributionBonus): float
+    {
+        $bonus     = max(0.0, $contributionBonus);
+        $effective = $genuine + $bonus;
+
+        if ($genuine < (float) BCC_TRUST_TIER_TRUSTED) {
+            $effective = min($effective, (float) BCC_CONTRIB_CEILING);
+        }
+
+        return max(0.0, min(100.0, $effective));
     }
 }

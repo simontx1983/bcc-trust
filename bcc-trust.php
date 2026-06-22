@@ -177,6 +177,7 @@ if (!defined('BCC_ENCRYPTION_KEY')) {
         'bcc_trust_daily_ml_update', 'bcc_trust_daily_graph_update',
         'bcc_trust_daily_vesting', 'bcc_trust_process_recalculations',
         'bcc_trust_daily_maintenance', 'bcc_trust_deferred_rm_sync',
+        'bcc_trust_daily_contribution_recovery',
     ];
     foreach ($hooks_to_clear as $hook) {
         wp_clear_scheduled_hook($hook);
@@ -377,6 +378,18 @@ add_action('bcc_trust_weekly_digest', function () {
 add_action('bcc_trust_weekly_slow_ring_scan', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->weeklySlowRingScan();
 });
+// Trust Recovery Through Contribution (2026-06-22): daily evaluation of
+// the caution/risky cohort — sustained contribution + consistency feed a
+// capped, ceiling'd bonus into reputation_score so users can climb out of
+// Risky without popularity ever creating trust.
+add_action('bcc_trust_daily_contribution_recovery', function () {
+    $summary = \BCC\Trust\Core\Plugin::instance()
+        ->contributionRecoveryEvaluator()
+        ->runDaily();
+    if ($summary['adjusted'] > 0 || $summary['failed'] > 0) {
+        \BCC\Core\Log\Logger::info('[bcc-trust] contribution-recovery sweep', $summary);
+    }
+});
 
 // V2: NFT-gated holder groups — daily provisioning sweep. Reads
 // wp_bcc_onchain_collections.is_verified=1 and creates a closed PeepSo
@@ -529,6 +542,7 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
         'bcc_trust_daily_vesting'         => ['interval' => 'daily',                'description' => 'vote-weight vesting promotion'],
         'bcc_trust_process_recalculations'=> ['interval' => 'bcc_five_minutes',     'description' => 'recalc queue worker'],
         'bcc_trust_daily_maintenance'     => ['interval' => 'daily',                'description' => 'read-model sync safety net'],
+        'bcc_trust_daily_contribution_recovery' => ['interval' => 'daily',          'description' => 'trust recovery through contribution (caution/risky cohort)'],
         'bcc_trust_weekly_digest'         => ['interval' => 'bcc_weekly',           'description' => 'weekly digest mailer'],
         'bcc_trust_deferred_rm_sync'      => ['interval' => 'bcc_thirty_seconds',   'description' => 'read-model deferred-rebuild for staleness recovery'],
         'bcc_trust_divergence_state_sweep'=> ['interval' => 'daily',                'description' => 'divergence-state classification + §J.7 notifications'],

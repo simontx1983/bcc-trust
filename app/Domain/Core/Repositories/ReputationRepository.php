@@ -26,6 +26,7 @@ use BCC\Trust\Core\Exceptions\RepositoryException;
  *   user_id: int|numeric-string,
  *   reputation_score: float,
  *   reputation_tier: string,
+ *   contribution_bonus: float,
  *   total_votes_cast: int,
  *   total_votes_received: int,
  *   flag_count: int,
@@ -36,7 +37,7 @@ use BCC\Trust\Core\Exceptions\RepositoryException;
 class ReputationRepository {
 
     /** Explicit column list for bcc_trust_reputation table. */
-    private const COLUMNS = 'id, user_id, reputation_score, reputation_tier, total_votes_cast, total_votes_received, flag_count, vote_weight, last_calculated_at';
+    private const COLUMNS = 'id, user_id, reputation_score, reputation_tier, contribution_bonus, total_votes_cast, total_votes_received, flag_count, vote_weight, last_calculated_at';
 
     private string $table;
 
@@ -99,6 +100,7 @@ class ReputationRepository {
         foreach ($rows ?: [] as $row) {
             // Same numeric casts getByUserId applies on the single-row path.
             $row->reputation_score     = (float) $row->reputation_score;
+            $row->contribution_bonus   = (float) $row->contribution_bonus;
             $row->total_votes_cast     = (int) $row->total_votes_cast;
             $row->total_votes_received = (int) $row->total_votes_received;
             $row->flag_count           = (int) $row->flag_count;
@@ -135,6 +137,7 @@ class ReputationRepository {
         if ($row) {
             // Cast numeric fields
             $row->reputation_score     = (float) $row->reputation_score;
+            $row->contribution_bonus   = (float) $row->contribution_bonus;
             $row->total_votes_cast     = (int) $row->total_votes_cast;
             $row->total_votes_received = (int) $row->total_votes_received;
             $row->flag_count           = (int) $row->flag_count;
@@ -431,6 +434,7 @@ class ReputationRepository {
         // Allowed fields and their types
         $allowedFields = [
             'reputation_score' => 'float',
+            'contribution_bonus' => 'float',
             'total_votes_cast' => 'int',
             'total_votes_received' => 'int',
             'flag_count' => 'int',
@@ -449,6 +453,11 @@ class ReputationRepository {
                         }
                         if ($field === 'vote_weight') {
                             $validated[$field] = max(BCC_TRUST_MIN_VOTE_WEIGHT, min(BCC_TRUST_MAX_VOTE_WEIGHT, $validated[$field]));
+                        }
+                        if ($field === 'contribution_bonus') {
+                            // Stored bonus is the already-capped contribution+consistency
+                            // total; clamp to the configured maximum as a fail-safe.
+                            $validated[$field] = max(0.0, min(BCC_CONTRIB_MAX + BCC_CONSIST_MAX, $validated[$field]));
                         }
                         break;
                     case 'int':
@@ -488,6 +497,7 @@ class ReputationRepository {
             switch ($field) {
                 case 'reputation_score':
                 case 'vote_weight':
+                case 'contribution_bonus':
                     $formats[] = '%f';
                     break;
                 case 'total_votes_cast':
@@ -541,6 +551,17 @@ class ReputationRepository {
     public function getScore(int $userId): float {
         $record = $this->getByUserId($userId);
         return $record ? (float) $record->reputation_score : self::DEFAULT_REPUTATION_SCORE;
+    }
+
+    /**
+     * Get the persisted contribution+consistency bonus for a user (the
+     * "Trust Recovery Through Contribution" input refreshed by the daily
+     * evaluator). Blended into reputation_score by
+     * ReputationCalculatorService; 0.0 when no row / never evaluated.
+     */
+    public function getContributionBonus(int $userId): float {
+        $record = $this->getByUserId($userId);
+        return $record ? (float) $record->contribution_bonus : 0.0;
     }
 
     /**

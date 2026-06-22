@@ -351,6 +351,7 @@ function bcc_trust_create_core_tables() {
         user_id BIGINT UNSIGNED NOT NULL,
         reputation_score DECIMAL(5,2) NOT NULL DEFAULT 50.00,
         reputation_tier VARCHAR(20) NOT NULL DEFAULT 'neutral',
+        contribution_bonus DECIMAL(5,2) NOT NULL DEFAULT 0.00,
         total_votes_cast INT UNSIGNED NOT NULL DEFAULT 0,
         total_votes_received INT UNSIGNED NOT NULL DEFAULT 0,
         flag_count INT UNSIGNED NOT NULL DEFAULT 0,

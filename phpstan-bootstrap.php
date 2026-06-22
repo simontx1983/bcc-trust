@@ -52,6 +52,7 @@ $configDir = __DIR__ . '/includes/config/';
 $configs = [
     'tiers.php',
     'scoring.php',
+    'contribution.php',
     'trust-weights.php',
     'fraud-detection.php',
     'limits.php',
