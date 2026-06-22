@@ -451,15 +451,6 @@ final class Plugin
         );
     }
 
-    /** §O5 / §O1.2 — fires "you're now Active" / "Veteran" Heavy moment. */
-    private ?Services\LevelProgressionListener $levelProgressionListener = null;
-    public function levelProgressionListener(): Services\LevelProgressionListener
-    {
-        return $this->levelProgressionListener ??= new Services\LevelProgressionListener(
-            $this->featureAccessService()
-        );
-    }
-
     // ── §I1 notifications ────────────────────────────────────────────
 
     private ?Repositories\NotificationRepository $notificationRepository = null;
@@ -2036,72 +2027,6 @@ final class Plugin
                 ]);
             }
         }, 25, 1);
-
-        // ── §O5 / §O1.2 level-progression listener ───────────────────────
-        //
-        // Detects Level 1 → 2 → 3 crossings on the §O5 thresholds and
-        // stashes a Heavy "You're now Active" celebration. Mirrors the
-        // tier listener; same five activity events.
-        //
-        // Priority 26 (after tier at 25) — same single-slot stash policy:
-        // when both fire on the same event, level-up wins. In practice
-        // they rarely coincide (tier needs reputation movement; level
-        // needs activity-count movement), but the ordering is stable.
-
-        add_action('bcc_post_created', function (int $authorId): void {
-            try {
-                $this->levelProgressionListener()->onActivityEvent($authorId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression post_created failed', [
-                    'user_id' => $authorId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 26, 1);
-
-        add_action('bcc_review_published', function (int $authorId): void {
-            try {
-                $this->levelProgressionListener()->onActivityEvent($authorId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression review failed', [
-                    'user_id' => $authorId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 26, 1);
-
-        add_action('bcc_blog_post_created', function (int $authorId): void {
-            try {
-                $this->levelProgressionListener()->onActivityEvent($authorId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression blog failed', [
-                    'user_id' => $authorId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 26, 1);
-
-        add_action('bcc_card_watched', function (int $viewerId): void {
-            try {
-                $this->levelProgressionListener()->onActivityEvent($viewerId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression watch failed', [
-                    'user_id' => $viewerId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 26, 1);
-
-        add_action('bcc_trust_vote_cast', function (int $voterId): void {
-            try {
-                $this->levelProgressionListener()->onActivityEvent($voterId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] level_progression vote failed', [
-                    'user_id' => $voterId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 26, 1);
 
         // ── §K1 Phase C — auto-hide threshold subscriber ─────────────────
         //

@@ -12,9 +12,9 @@
  * could plausibly nudge the level inputs (pulls, reviews, days active),
  * compares the user's last-seen rank against the current auto-derived
  * rank, and on a strict promotion stashes a celebration + emits
- * `bcc_rank_awarded`. This is the single user-facing progression toast —
- * LevelProgressionListener detects the same crossing but intentionally
- * stays silent to avoid a double celebration.
+ * `bcc_rank_awarded`. This is the single user-facing progression toast:
+ * because Rank mirrors the feature-access level 1:1, a level crossing is
+ * a rank-up, so there is no separate level-up celebration to de-dupe.
  *
  * Why subscribe to activity events (not a hypothetical
  * `bcc_reputation_changed` event):

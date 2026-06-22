@@ -81,20 +81,22 @@ final class IdentityRankLevelTest extends TestCase
         self::assertFalse(RankCatalog::isRole(RankCatalog::RANK_APPRENTICE));
     }
 
-    public function testForemanStaysAValidStoredKeyWithALabelButNotAuto(): void
+    public function testForemanStaysAValidStoredKeyWithALabelButOffTheLadder(): void
     {
         // A conferred Foreman row must still validate + resolve a label,
-        // even though it's off the earned ladder.
+        // even though it's off the earned ladder (a Role, not in all()).
         self::assertTrue(RankCatalog::isValid(RankCatalog::RANK_FOREMAN));
         self::assertSame('Foreman', RankCatalog::getLabel(RankCatalog::RANK_FOREMAN));
-        self::assertFalse(RankCatalog::isAutoAssigned(RankCatalog::RANK_FOREMAN));
+        self::assertNotContains(RankCatalog::RANK_FOREMAN, array_column(RankCatalog::all(), 'key'));
     }
 
-    public function testMasterResolvesLabelAndIsValid(): void
+    public function testMasterResolvesLabelAndIsAnAutoEarnedRung(): void
     {
         self::assertTrue(RankCatalog::isValid(RankCatalog::RANK_MASTER));
         self::assertSame('Master', RankCatalog::getLabel(RankCatalog::RANK_MASTER));
-        self::assertTrue(RankCatalog::isAutoAssigned(RankCatalog::RANK_MASTER));
+        $master = array_values(array_filter(RankCatalog::all(), static fn ($r) => $r['key'] === RankCatalog::RANK_MASTER));
+        self::assertCount(1, $master);
+        self::assertTrue($master[0]['auto_assigned'], 'Master is an auto-earned rung');
     }
 
     // ── ReputationTierMap — honest member trust labels ───────────────

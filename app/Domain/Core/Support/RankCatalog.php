@@ -121,21 +121,6 @@ final class RankCatalog
     }
 
     /**
-     * Whether a rank can be assigned automatically (vs admin-only).
-     * Foreman+ return false; Apprentice/Journeyman return true.
-     * Unknown keys return false (fail-closed for admin gates).
-     */
-    public static function isAutoAssigned(string $key): bool
-    {
-        foreach (self::CATALOG as $rank) {
-            if ($rank['key'] === $key) {
-                return $rank['auto_assigned'];
-            }
-        }
-        return false;
-    }
-
-    /**
      * Display label for an earned rank OR a conferred role, or null if
      * the key is unknown.
      */
