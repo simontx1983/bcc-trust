@@ -78,6 +78,7 @@ class VoteEligibilityChecker {
         // --- Page checks: always live (page-specific) ---
         $this->assertPageExists($pageId);
         $this->assertNotSelfVote($voterId, $pageId);
+        $this->assertNotRetaliatoryDownvote($voterId, $pageId, $voteType);
 
         // --- User-level checks: served from cache when available ---
         $this->assertUserLevelEligibility($voterId, $voteType);
@@ -218,6 +219,18 @@ class VoteEligibilityChecker {
     }
 
     private function assertPageExists(int $pageId): void {
+        // Self-page (Slice 2, Architecture A): a member IS a trust subject.
+        // Self-pages live only in bcc_trust_page_scores — there is no
+        // peepso_pages / wp_posts row — so validate via the deterministic
+        // id scheme + the owning user actually existing.
+        if (\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageId)) {
+            $ownerId = \BCC\Trust\Core\Services\MemberSelfPageService::ownerOfSelfPage($pageId);
+            if ($ownerId > 0 && get_userdata($ownerId) !== false) {
+                return;
+            }
+            throw new VoteEligibilityException('Invalid page');
+        }
+
         if (\BCC\Trust\Core\Repositories\PeepSoQueryRepository::pageExists($pageId)) {
             return;
         }
@@ -259,6 +272,53 @@ class VoteEligibilityChecker {
 
         if ($ownerId === $voterId) {
             throw new VoteEligibilityException('Page owner cannot vote on their own page.');
+        }
+    }
+
+    /**
+     * Retaliation guard for direct person-reviews (Slice 2).
+     *
+     * Refuses a DOWN-review on a member's self-page when that member
+     * filed a user-report against the voter within
+     * BCC_TRUST_RETALIATION_WINDOW_DAYS. Closes the "you reported me, so
+     * I'll down-rate you" path that opens once people are directly
+     * down-voteable.
+     *
+     * Scoped narrowly so it cannot affect the existing entity-vote flow:
+     *   - only downvotes (voteType === -1) — upvotes are never retaliatory;
+     *   - only self-pages — entity pages carry no reporter/voter relation;
+     *   - runs LIVE (page-specific + relational), never cached, since the
+     *     user-level eligibility cache is keyed only by (voter, voteType).
+     */
+    private function assertNotRetaliatoryDownvote(int $voterId, int $pageId, int $voteType): void {
+        if ($voteType !== -1) {
+            return;
+        }
+        if (defined('BCC_TRUST_TEST_MODE') && \BCC_TRUST_TEST_MODE) {
+            return;
+        }
+        if (!\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageId)) {
+            return;
+        }
+
+        $targetUserId = \BCC\Trust\Core\Services\MemberSelfPageService::ownerOfSelfPage($pageId);
+        if ($targetUserId <= 0) {
+            return; // assertNotSelfVote already fails closed on a bad owner.
+        }
+
+        $windowDays = defined('BCC_TRUST_RETALIATION_WINDOW_DAYS')
+            ? (int) BCC_TRUST_RETALIATION_WINDOW_DAYS
+            : 14;
+        $cutoff = gmdate('Y-m-d H:i:s', (int) current_time('timestamp') - ($windowDays * DAY_IN_SECONDS));
+
+        if (\BCC\Trust\Disputes\Repositories\UserReportRepository::existsRecentReportBetween(
+            $targetUserId,
+            $voterId,
+            $cutoff
+        )) {
+            throw new VoteEligibilityException(
+                'You recently were reported by this member, so you cannot down-review them right now.'
+            );
         }
     }
 
