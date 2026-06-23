@@ -1032,6 +1032,15 @@ final class Plugin
         return $this->pageOwnerResolver ??= new Services\PageOwnerResolver();
     }
 
+    /** People-as-first-class-trust-subjects keystone — member self-pages. */
+    private ?Services\MemberSelfPageService $memberSelfPageService = null;
+    public function memberSelfPageService(): Services\MemberSelfPageService
+    {
+        return $this->memberSelfPageService ??= new Services\MemberSelfPageService(
+            $this->scoreRepository()
+        );
+    }
+
     private ?Integration\PeepSoIntegration $peepSoIntegration = null;
     public function peepSoIntegration(): Integration\PeepSoIntegration
     {
