@@ -81,6 +81,7 @@ function bcc_trust_create_core_tables() {
         negative_score DECIMAL(5,2) NOT NULL DEFAULT 0,
         endorsement_bonus DECIMAL(10,2) NOT NULL DEFAULT 0.00,
         onchain_bonus DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        contribution_bonus DECIMAL(10,2) NOT NULL DEFAULT 0.00,
         vote_count INT UNSIGNED NOT NULL DEFAULT 0,
         unique_voters INT UNSIGNED NOT NULL DEFAULT 0,
         confidence_score DECIMAL(3,2) NOT NULL DEFAULT 0,

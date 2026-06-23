@@ -52,7 +52,7 @@ if (!defined('ABSPATH')) {
 class ScoreRepository {
 
     /** Explicit column list for bcc_trust_scores table. */
-    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, endorsement_bonus, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
+    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, endorsement_bonus, contribution_bonus, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
 
     private string $table;
 
@@ -885,11 +885,11 @@ class ScoreRepository {
                 (page_id, category_id, page_owner_id, total_score,
                  positive_score, negative_score, vote_count, unique_voters,
                  confidence_score, reputation_tier, endorsement_count,
-                 endorsement_bonus, onchain_bonus, last_calculated_at)
+                 endorsement_bonus, onchain_bonus, contribution_bonus, last_calculated_at)
              VALUES (%d, 0, %d, %f,
                      0.0, 0.0, 0, 0,
                      0.0, 'neutral', 0,
-                     0.0, 0.0, %s)",
+                     0.0, 0.0, 0.0, %s)",
             $pageId,
             $ownerId,
             $neutralScore,
@@ -1093,6 +1093,45 @@ class ScoreRepository {
         if ($result === false) {
             throw new Exception(
                 'Failed to derive endorsement bonus for page ' . $pageId . ': ' . $wpdb->last_error
+            );
+        }
+    }
+
+    /**
+     * Write a member self-page's `contribution_bonus` (the "Trust Recovery
+     * Through Contribution" term, Architecture A) and recompute total_score
+     * via the canonical formula. Unlike endorsement_bonus this is an absolute
+     * value computed upstream (ContributionRecoveryEvaluator) and clamped
+     * before it reaches here. Locks the score row FOR UPDATE to serialise with
+     * concurrent vote/endorsement deltas; safe inside an existing transaction.
+     *
+     * @throws Exception on database failure
+     */
+    public function applyContributionBonus(int $pageId, float $bonus): void {
+        global $wpdb;
+
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $now           = current_time('mysql');
+
+        $wpdb->get_results($wpdb->prepare(
+            "SELECT page_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
+            $pageId
+        ));
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET contribution_bonus = %f,
+                 total_score         = {$totalScoreSql},
+                 last_calculated_at  = %s
+             WHERE page_id = %d",
+            $bonus,
+            $now,
+            $pageId
+        ));
+
+        if ($result === false) {
+            throw new Exception(
+                'Failed to apply contribution bonus for page ' . $pageId . ': ' . $wpdb->last_error
             );
         }
     }

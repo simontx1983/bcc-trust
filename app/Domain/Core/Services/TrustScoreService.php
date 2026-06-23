@@ -27,9 +27,14 @@ if (!defined('ABSPATH')) {
  *         BCC_TRUST_NEUTRAL_SCORE
  *           + (positive_score - negative_score) * 2
  *           + endorsement_bonus
- *           + onchain_bonus,
+ *           + onchain_bonus
+ *           + contribution_bonus,
  *         0, 100
  *     )
+ *
+ * `contribution_bonus` is 0 for entity pages; it carries the "Trust
+ * Recovery Through Contribution" term on member self-pages (Architecture A —
+ * a person is a page; their tier is this formula on their self-page).
  *
  * Two read paths exist for callers who want the trust score for a page:
  *
@@ -79,10 +84,11 @@ final class TrustScoreService
         float $positiveScore,
         float $negativeScore,
         float $endorsementBonus,
-        float $onchainBonus
+        float $onchainBonus,
+        float $contributionBonus = 0.0
     ): float {
         $base  = (float) self::neutral() + ($positiveScore - $negativeScore) * 2.0;
-        $bonus = $endorsementBonus + $onchainBonus;
+        $bonus = $endorsementBonus + $onchainBonus + $contributionBonus;
         $total = $base + $bonus;
         return max((float) self::MIN, min((float) self::MAX, $total));
     }
@@ -99,7 +105,7 @@ final class TrustScoreService
     {
         return 'LEAST(' . self::MAX . ', GREATEST(' . self::MIN . ', '
              . self::neutral()
-             . ' + (positive_score - negative_score) * 2 + endorsement_bonus + onchain_bonus))';
+             . ' + (positive_score - negative_score) * 2 + endorsement_bonus + onchain_bonus + contribution_bonus))';
     }
 
     /**

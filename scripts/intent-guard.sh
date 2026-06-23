@@ -229,6 +229,7 @@ check_trust_scores() {
                 'negative_score'    => (float)\$r->negative_score,
                 'endorsement_bonus' => (float)\$r->endorsement_bonus,
                 'onchain_bonus'     => (float)\$r->onchain_bonus,
+                'contribution_bonus'=> (float)(\$r->contribution_bonus ?? 0),
             ];
         }
         echo wp_json_encode(\$out);
@@ -269,7 +270,8 @@ check_trust_scores() {
                 (float) \$r['positive_score'],
                 (float) \$r['negative_score'],
                 (float) \$r['endorsement_bonus'],
-                (float) \$r['onchain_bonus']
+                (float) \$r['onchain_bonus'],
+                (float) (\$r['contribution_bonus'] ?? 0)
             );
             \$diff = abs(\$r['trust_score'] - \$expected);
             \$out[] = [

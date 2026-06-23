@@ -1393,8 +1393,9 @@ class VoteService {
         $endorsementRows = $this->endorsementRepo->getActiveWithFraudScoresForPage($pageId);
 
         // Preserve fields that recalculation does not recompute.
-        $onchainBonus  = $existing ? $existing->getOnchainBonus() : 0.0;
-        $fraudMetadata = $existing ? $existing->getFraudMetadata() : null;
+        $onchainBonus      = $existing ? $existing->getOnchainBonus() : 0.0;
+        $contributionBonus = $existing ? $existing->getContributionBonus() : 0.0;
+        $fraudMetadata     = $existing ? $existing->getFraudMetadata() : null;
 
         // SINGLE SOURCE OF TRUTH — DO NOT DIVERGE.
         // Delegate endorsement_bonus computation to EndorsementWeightCalculator
@@ -1406,8 +1407,17 @@ class VoteService {
         $endorsementBonus = (float) $derived['bonus'];
         $endorsementCount = (int)   $derived['count'];
 
-        // Canonical formula: includes endorsement_bonus + onchain_bonus
-        $totalScore = max(0, min(100, 50 + ($netScore * 2) + $endorsementBonus + $onchainBonus));
+        // Canonical formula (single source of truth — TrustScoreService):
+        // base + endorsement_bonus + onchain_bonus + contribution_bonus.
+        // contribution_bonus is 0 for entity pages; non-zero only on member
+        // self-pages (preserved here, written by ScoreRepository::applyContributionBonus).
+        $totalScore = \BCC\Trust\Core\Services\TrustScoreService::compute(
+            $positive,
+            $negative,
+            $endorsementBonus,
+            $onchainBonus,
+            $contributionBonus
+        );
 
         $confidenceScore = $this->calculateConfidenceScore($voteCount, $uniqueVoters, $matureUniqueVoters, $positive, $negative);
         $tier            = $this->determineTier($totalScore);
@@ -1420,7 +1430,8 @@ class VoteService {
             new DateTimeImmutable(),
             $fraudMetadata,
             $endorsementBonus,
-            $onchainBonus
+            $onchainBonus,
+            $contributionBonus
         );
     }
 
