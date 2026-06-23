@@ -32,6 +32,19 @@ final class PageScoreContributionTest extends TestCase
         self::assertStringContainsString('contribution_bonus', TrustScoreService::formulaSql());
     }
 
+    public function testTierSqlMapsScoreExpressionToTierThresholds(): void
+    {
+        $sql = TrustScoreService::tierSql(TrustScoreService::formulaSql());
+        // Highest-first CASE covering every tier + the risky floor.
+        self::assertStringContainsString("THEN 'elite'", $sql);
+        self::assertStringContainsString("THEN 'trusted'", $sql);
+        self::assertStringContainsString("THEN 'neutral'", $sql);
+        self::assertStringContainsString("THEN 'caution'", $sql);
+        self::assertStringContainsString("ELSE 'risky'", $sql);
+        // The score expression (incl. contribution_bonus) is what's bucketed.
+        self::assertStringContainsString('contribution_bonus', $sql);
+    }
+
     public function testPageScoreCarriesContributionAndPassesTheFormulaCheck(): void
     {
         // total 78 = 50 + (10-0)*2 + 0 + 0 + 8(contribution) — must validate.

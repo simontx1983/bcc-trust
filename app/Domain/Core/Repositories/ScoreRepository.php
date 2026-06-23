@@ -1056,6 +1056,7 @@ class ScoreRepository {
         global $wpdb;
 
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
 
         // Lock score rows to serialise with concurrent recalculations
         // and other delta writes (applyVoteDelta, applyBonus).
@@ -1082,6 +1083,7 @@ class ScoreRepository {
              SET endorsement_count  = %d,
                  endorsement_bonus  = %f,
                  total_score        = {$totalScoreSql},
+                 reputation_tier    = {$tierSql},
                  last_calculated_at = %s
              WHERE page_id = %d",
             $count,
@@ -1111,6 +1113,7 @@ class ScoreRepository {
         global $wpdb;
 
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
         $now           = current_time('mysql');
 
         $wpdb->get_results($wpdb->prepare(
@@ -1118,10 +1121,14 @@ class ScoreRepository {
             $pageId
         ));
 
+        // contribution_bonus is SET before total_score/reputation_tier so the
+        // formula + tier CASE read the NEW value (MySQL evaluates SET clauses
+        // left-to-right) — same pattern as deriveAndWriteEndorsementBonus.
         $result = $wpdb->query($wpdb->prepare(
             "UPDATE {$this->table}
              SET contribution_bonus = %f,
                  total_score         = {$totalScoreSql},
+                 reputation_tier     = {$tierSql},
                  last_calculated_at  = %s
              WHERE page_id = %d",
             $bonus,

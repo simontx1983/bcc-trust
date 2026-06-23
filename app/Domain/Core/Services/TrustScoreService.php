@@ -109,6 +109,32 @@ final class TrustScoreService
     }
 
     /**
+     * The canonical SQL `CASE` that maps a score expression to a
+     * reputation_tier, mirroring ReputationRepository::calculateTier() /
+     * VoteService::determineTier() — single source of truth for the tier
+     * thresholds in SQL. Used by score-row writes that recompute total_score
+     * inline (endorsement/contribution bonus applies) so reputation_tier never
+     * goes stale relative to total_score.
+     *
+     * Pass the same expression you pass for total_score (e.g. formulaSql()).
+     * The caller wraps it as `reputation_tier = <tierSql>` in the SET clause.
+     */
+    public static function tierSql(string $scoreExpr): string
+    {
+        $elite   = defined('BCC_TRUST_TIER_ELITE')   ? (int) BCC_TRUST_TIER_ELITE   : 80;
+        $trusted = defined('BCC_TRUST_TIER_TRUSTED') ? (int) BCC_TRUST_TIER_TRUSTED : 65;
+        $neutral = defined('BCC_TRUST_TIER_NEUTRAL') ? (int) BCC_TRUST_TIER_NEUTRAL : 45;
+        $caution = defined('BCC_TRUST_TIER_CAUTION') ? (int) BCC_TRUST_TIER_CAUTION : 30;
+
+        return 'CASE'
+             . " WHEN ({$scoreExpr}) >= {$elite} THEN 'elite'"
+             . " WHEN ({$scoreExpr}) >= {$trusted} THEN 'trusted'"
+             . " WHEN ({$scoreExpr}) >= {$neutral} THEN 'neutral'"
+             . " WHEN ({$scoreExpr}) >= {$caution} THEN 'caution'"
+             . " ELSE 'risky' END";
+    }
+
+    /**
      * Read the trust score for a page (and optional category). Prefers the
      * denormalized read model for hot-path reads; falls back to live score
      * computation when the read model row is absent (race window between
