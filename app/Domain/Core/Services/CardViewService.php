@@ -302,12 +302,16 @@ final class CardViewService
             'bio'                 => self::resolvePageBio($post),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
+            // Entity cards use card_tier rarity, not the member trust chip.
+            'reputation_tier_label' => null,
             'card_tier'           => $card['key'],
             'tier_label'          => $card['label'],
-            // §E2: ranks are member-only — but the field is ALWAYS
-            // emitted (nullable) per the contract, so the frontend can
-            // render `card.rank_label ?? '—'` without a type check.
+            // Rank + Foreman Role are member-only — but the fields are
+            // ALWAYS emitted (nullable / false) per the contract, so the
+            // frontend can render without a kind check.
             'rank_label'          => null,
+            'current_rank_label'  => null,
+            'foreman_insignia'    => false,
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::buildFlags((int) $post->post_author),
             'is_claimed'          => $isClaimed,
@@ -554,12 +558,15 @@ final class CardViewService
             'bio'                 => self::resolveMemberBio($user),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
+            // Honest member trust chip (Risky…Proven), distinct from card_tier rarity.
+            'reputation_tier_label' => $summary['reputation_tier_label'],
             'card_tier'           => $card['key'],
             'tier_label'          => $card['label'],
-            // Real rank label now — resolved once via getSummary's
-            // RankService path (no longer a hard-stubbed null). Pages
-            // still emit null (§E2 ranks are member-only).
+            // Real (level-derived) rank label now — resolved once via
+            // getSummary's RankService path (no longer a hard-stubbed null).
             'rank_label'          => $summary['rank_label'],
+            'current_rank_label'  => $summary['current_rank_label'],
+            'foreman_insignia'    => $summary['foreman_insignia'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::buildFlags($userId),
             // §V1.5 endorse fields stay present on member cards for
@@ -701,9 +708,12 @@ final class CardViewService
             'bio'                 => $groupData['description'] ?? '',
             'trust_score'         => 0,
             'reputation_tier'     => 'neutral',
+            'reputation_tier_label' => null,
             'card_tier'           => 'common',
             'tier_label'          => self::COMMUNITY_TIER_LABEL_BY_TYPE[$type] ?? 'COMMUNITY',
             'rank_label'          => null,
+            'current_rank_label'  => null,
+            'foreman_insignia'    => false,
             'is_in_good_standing' => true,
             'flags'               => [],
             'viewer_has_reviewed' => false,

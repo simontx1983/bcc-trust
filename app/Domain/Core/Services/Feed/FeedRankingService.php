@@ -815,7 +815,9 @@ final class FeedRankingService
 
     /**
      * Overlay rank-chip fields on every author block: reputation_tier,
-     * card_tier, tier_label, rank_label. Server-resolved per §A2 so the
+     * reputation_tier_label, card_tier, tier_label, rank_label. The
+     * rank_label is now level-derived (not tier-derived); reputation_tier_label
+     * is the honest member trust chip. Server-resolved per §A2 so the
      * frontend's AuthorBadge never derives card_tier from
      * reputation_tier client-side.
      *
@@ -867,10 +869,11 @@ final class FeedRankingService
             $uid    = is_int($author['id'] ?? null) ? $author['id'] : 0;
             if ($uid > 0 && isset($badgeMap[$uid])) {
                 $badge = $badgeMap[$uid];
-                $author['reputation_tier'] = $badge['reputation_tier'];
-                $author['card_tier']       = $badge['card_tier'];
-                $author['tier_label']      = $badge['tier_label'];
-                $author['rank_label']      = $badge['rank_label'];
+                $author['reputation_tier']       = $badge['reputation_tier'];
+                $author['reputation_tier_label'] = $badge['reputation_tier_label'];
+                $author['card_tier']             = $badge['card_tier'];
+                $author['tier_label']            = $badge['tier_label'];
+                $author['rank_label']            = $badge['rank_label'];
                 $item['author'] = $author;
             }
             $hydrated[] = $item;

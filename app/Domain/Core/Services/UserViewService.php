@@ -154,10 +154,19 @@ final class UserViewService
             'is_self'             => $isSelf,
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
             'reputation_tier'     => $tier,
+            // Honest member trust chip (Risky…Proven) — distinct from the
+            // entity-card rarity words in card_tier/tier_label.
+            'reputation_tier_label' => ReputationTierMap::toReputationTierLabel($tier),
             'card_tier'           => $card['key'],
             'tier_label'          => $card['label'],
             'rank'                => $rank['key'],
             'rank_label'          => $rank['label'],
+            'current_rank_label'  => $rank['label'],
+            // Foreman is a conferred Role, orthogonal to Rank (see §4.8).
+            // Conferral is a later slice (roadmap C2); no member holds the
+            // role in V1, so this is a shape-stable false. The authoritative
+            // per-viewer computation lives in RankService::getViewerBlock.
+            'foreman_insignia'    => false,
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
             'bio'                 => self::resolveBio($user),
@@ -176,14 +185,20 @@ final class UserViewService
         ];
 
         if ($isSelf) {
+            // Build the feature_access block once and reuse it for the
+            // rank-progress bar + the §2.5 progression block — Rank now
+            // mirrors the level, so all three surfaces share one set of
+            // canonical level thresholds (no re-derivation, no drift).
+            $featureAccess = $this->featureAccess->getFeatureAccess($userId);
+
             // §O3 living header — composed by LivingService:
             //   - streak_days (peepso_activities walker)
             //   - today (reviews + disputes_signed; solids stub)
-            //   - rank_progress_pct (trust_score / NEUTRAL_THRESHOLD)
+            //   - rank_progress (level thresholds toward the next rank)
             //   - comparison (V1 stub; §O3.1 percentile aggregator deferred)
-            $payload['living']         = $this->livingService->compose($userId, $rank['key']);
-            $payload['progression']    = $this->resolveProgression($rank, $userId);
-            $payload['feature_access'] = $this->featureAccess->getFeatureAccess($userId);
+            $payload['living']         = $this->livingService->compose($userId, $rank['key'], $featureAccess);
+            $payload['progression']    = $this->resolveProgression($rank, $userId, $featureAccess);
+            $payload['feature_access'] = $featureAccess;
             $payload['ux_helpers']     = self::resolveUxHelpers($userId);
         }
 
@@ -310,9 +325,13 @@ final class UserViewService
      *   avatar_url: string,
      *   cover_photo_url: string|null,
      *   joined_at: string,
+     *   reputation_tier: string,
+     *   reputation_tier_label: string,
      *   card_tier: string|null,
      *   tier_label: string|null,
      *   rank_label: string,
+     *   current_rank_label: string,
+     *   foreman_insignia: bool,
      *   is_in_good_standing: bool,
      *   flags: list<string>,
      *   trust_score: int,
@@ -469,9 +488,15 @@ final class UserViewService
             'avatar_url'          => self::resolveAvatar($userId),
             'cover_photo_url'     => self::resolveCoverPhotoUrl($userId),
             'joined_at'           => self::toIso8601((string) $user->user_registered),
+            'reputation_tier'       => $tier,
+            'reputation_tier_label' => ReputationTierMap::toReputationTierLabel($tier),
             'card_tier'           => $card['key'],
             'tier_label'          => $card['label'],
             'rank_label'          => $rank['label'],
+            'current_rank_label'  => $rank['label'],
+            // Foreman Role conferral is a later slice (roadmap C2); always
+            // false in V1 (see getUser + contract §4.8).
+            'foreman_insignia'    => false,
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
@@ -1176,42 +1201,34 @@ final class UserViewService
      *   trust_score_recent_changes: list<array{delta: int, reason: string, at: string}>
      * }
      */
-    private function resolveProgression(array $rank, int $userId): array
+    /**
+     * §2.5 / §N11 progression block. Rank mirrors the feature-access
+     * level, so the next-rank gate is exactly the level's
+     * `next_level_thresholds` (pulls / reviews / days active) — the real
+     * capability requirements, not a trust-score proxy. At Master (top
+     * of the ladder) `next_rank` is null and thresholds are empty.
+     *
+     * @param array{key: string, label: string} $rank
+     * @param array{next_level_thresholds: list<array{metric: string, label: string, current: int, required: int}>} $featureAccess
+     * @return array{
+     *   current_rank: string,
+     *   current_rank_label: string,
+     *   next_rank: string|null,
+     *   next_rank_label: string|null,
+     *   next_rank_thresholds: list<array{metric: string, label: string, current: int, required: int}>,
+     *   trust_score_recent_changes: list<array{delta: int, reason: string, at: string}>
+     * }
+     */
+    private function resolveProgression(array $rank, int $userId, array $featureAccess): array
     {
-        // Auto-derived ranks only have one promotion path (Apprentice
-        // → Journeyman per §E2). Foreman+ are admin-conferred and
-        // therefore have no auto next_rank.
-        $next       = null;
-        $thresholds = [];
-
-        if ($rank['key'] === RankCatalog::RANK_APPRENTICE) {
-            $next = RankCatalog::RANK_JOURNEYMAN;
-            // V1 promotion rule (per RankService::autoDerivedRank):
-            //   Apprentice → Journeyman = reach reputation_tier neutral
-            //   = trust_score >= BCC_TRUST_NEUTRAL_SCORE (50).
-            //
-            // The §N11 example shape used `reviews_written` / `days_active`
-            // — those are aspirational thresholds for a future activity-
-            // based promotion model. V1 ships what V1 actually checks:
-            // a single trust_score threshold. When activity-based
-            // promotion lands (post-V1), thresholds[] grows additional
-            // entries; the contract field stays the same.
-            $score = (int) round($this->reputationRepo->getScore($userId));
-            $thresholds[] = [
-                'metric'   => 'trust_score',
-                'label'    => 'Trust score',
-                'current'  => $score,
-                'required' => (int) BCC_TRUST_NEUTRAL_SCORE,
-            ];
-        }
-        // Journeyman+ has no auto-promotion target; thresholds stays [].
+        $next = RankCatalog::getNextRank($rank['key']); // master → null
 
         return [
             'current_rank'               => $rank['key'],
             'current_rank_label'         => $rank['label'],
             'next_rank'                  => $next,
             'next_rank_label'            => $next !== null ? RankCatalog::getLabel($next) : null,
-            'next_rank_thresholds'       => $thresholds,
+            'next_rank_thresholds'       => $featureAccess['next_level_thresholds'],
             'trust_score_recent_changes' => $this->resolveTrustScoreRecentChanges($userId),
         ];
     }

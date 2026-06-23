@@ -248,7 +248,11 @@ final class HighlightsService
         $rankKey = $this->rankService->autoDerivedRank($viewerId);
         $rankLabel = RankCatalog::getLabel($rankKey) ?? 'Member';
 
-        $living = $this->livingService->compose($viewerId, $rankKey);
+        // compose() needs the viewer's feature_access block for the rank
+        // bar; this slot only reads `today`, but the block is the viewer's
+        // own (cached counts), so the extra resolve is cheap.
+        $featureAccess = Plugin::instance()->featureAccessService()->getFeatureAccess($viewerId);
+        $living = $this->livingService->compose($viewerId, $rankKey, $featureAccess);
 
         $today = $living['today'];
         $todayKey = gmdate('Y-m-d');

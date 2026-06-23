@@ -12,15 +12,20 @@
  * The frontend's AuthorBadge MUST NOT manufacture a reputation→
  * card_tier mapping; this resolver IS that mapping.
  *
- * Same field semantics as UserViewService::getUser / getSummary —
- * canonical ReputationTierMap::resolve($tier) for card_tier+tier_label,
- * RankService::deriveRankFromTier($tier) for rank slug, then
- * RankCatalog::getLabel() for the rank_label. Single source of truth
- * shared across surfaces; do not duplicate the mapping logic elsewhere.
+ * Field semantics (canonical, shared across surfaces — do not
+ * duplicate the mapping elsewhere):
+ *   - card_tier + tier_label   → ReputationTierMap::resolve($tier) (entity rarity)
+ *   - reputation_tier_label    → ReputationTierMap::toReputationTierLabel($tier) (honest member chip)
+ *   - rank_label               → RankService::rankForLevel($level) → RankCatalog::getLabel()
  *
- * Bounded: one batched ReputationRepository::getTiersForUsers() call,
- * regardless of input size. Callers pre-cap inputs to their page size
- * (feed: 50, comment drawer: 50).
+ * **Rank is level-derived, not tier-derived** (the three-axes identity
+ * model — see RankService). Tier supplies the trust chip; the
+ * feature-access **level** supplies the rank. Both are batched.
+ *
+ * Bounded: one batched ReputationRepository::getTiersForUsers() call +
+ * one batched FeatureAccessService::getLevelsForUsers() call, regardless
+ * of input size. Callers pre-cap inputs to their page size (feed: 50,
+ * comment drawer: 50).
  *
  * @package BCC\Trust\Core\Services
  * @since v1.6 (2026-05, Sprint 1 Identity Grammar cohesion)
@@ -39,7 +44,8 @@ if (!defined('ABSPATH')) {
 final class AuthorBadgeResolver
 {
     public function __construct(
-        private readonly ReputationRepository $reputationRepo
+        private readonly ReputationRepository $reputationRepo,
+        private readonly FeatureAccessService $featureAccess
     ) {
     }
 
@@ -47,11 +53,11 @@ final class AuthorBadgeResolver
      * Resolve rank/tier chip fields for a list of user IDs.
      *
      * Users without a reputation row default to `neutral` tier
-     * (mirrors `ReputationRepository::getTier()` single-user
-     * fallback), which maps to `uncommon` / "Uncommon" + Apprentice
-     * rank. Missing-user fallback semantics are intentional: a
-     * brand-new account looks like every other neutral account on
-     * the feed rather than a special "unknown" badge.
+     * (mirrors `ReputationRepository::getTier()` single-user fallback)
+     * → "Neutral" chip; users at level New map to the Apprentice rank.
+     * Missing-user fallback semantics are intentional: a brand-new
+     * account looks like every other neutral/Apprentice account on the
+     * feed rather than a special "unknown" badge.
      *
      * `user_id <= 0` entries are skipped — system actors / sentinel
      * rows don't carry a badge.
@@ -59,6 +65,7 @@ final class AuthorBadgeResolver
      * @param list<int> $userIds
      * @return array<int, array{
      *   reputation_tier: string,
+     *   reputation_tier_label: string,
      *   card_tier: string|null,
      *   tier_label: string|null,
      *   rank_label: string,
@@ -83,21 +90,25 @@ final class AuthorBadgeResolver
         }
         $ids = array_keys($clean);
 
-        $tierByUser = $this->reputationRepo->getTiersForUsers($ids);
+        $tierByUser  = $this->reputationRepo->getTiersForUsers($ids);
+        $levelByUser = $this->featureAccess->getLevelsForUsers($ids);
 
         $out = [];
         foreach ($ids as $uid) {
             // Match ReputationRepository::getTier() single-user fallback.
-            $tier = $tierByUser[$uid] ?? 'neutral';
-            $card = ReputationTierMap::resolve($tier);
-            $rankKey = RankService::deriveRankFromTier($tier);
-            $rankLabel = RankCatalog::getLabel($rankKey) ?? '';
+            $tier  = $tierByUser[$uid] ?? 'neutral';
+            $rep   = ReputationTierMap::resolveReputation($tier);
+            // Absent level defaults to New (Apprentice) — same floor as
+            // FeatureAccessService::getLevel for an unknown user.
+            $level = $levelByUser[$uid] ?? FeatureAccessService::LEVEL_NEW;
+            $rankLabel = RankCatalog::getLabel(RankService::rankForLevel($level)) ?? '';
 
             $out[$uid] = [
-                'reputation_tier' => $tier,
-                'card_tier'       => $card['key'],
-                'tier_label'      => $card['label'],
-                'rank_label'      => $rankLabel,
+                'reputation_tier'       => $tier,
+                'reputation_tier_label' => $rep['reputation_tier_label'],
+                'card_tier'             => $rep['card_tier'],
+                'tier_label'            => $rep['tier_label'],
+                'rank_label'            => $rankLabel,
             ];
         }
         return $out;
@@ -111,6 +122,7 @@ final class AuthorBadgeResolver
      *
      * @return array{
      *   reputation_tier: string,
+     *   reputation_tier_label: string,
      *   card_tier: string|null,
      *   tier_label: string|null,
      *   rank_label: string,
@@ -122,13 +134,14 @@ final class AuthorBadgeResolver
         return $map[$userId] ?? [
             // Falls through for $userId <= 0 — caller's view-model
             // omits the badge when handed an empty payload.
-            'reputation_tier' => 'neutral',
-            'card_tier'       => ReputationTierMap::toCardTier('neutral'),
-            'tier_label'      => ReputationTierMap::toCardTierLabel(
+            'reputation_tier'       => 'neutral',
+            'reputation_tier_label' => ReputationTierMap::toReputationTierLabel('neutral'),
+            'card_tier'             => ReputationTierMap::toCardTier('neutral'),
+            'tier_label'            => ReputationTierMap::toCardTierLabel(
                 ReputationTierMap::toCardTier('neutral')
             ),
-            'rank_label'      => RankCatalog::getLabel(
-                RankService::deriveRankFromTier('neutral')
+            'rank_label'            => RankCatalog::getLabel(
+                RankService::rankForLevel(FeatureAccessService::LEVEL_NEW)
             ) ?? '',
         ];
     }

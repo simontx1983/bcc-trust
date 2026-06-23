@@ -434,6 +434,7 @@ final class CommentService
      *                              round-trip.
      * @param array{
      *   reputation_tier: string,
+     *   reputation_tier_label: string,
      *   card_tier: string|null,
      *   tier_label: string|null,
      *   rank_label: string,
@@ -456,9 +457,10 @@ final class CommentService
         if ($badge !== null) {
             // Server-resolved per §A2; the frontend never derives
             // card_tier from reputation_tier client-side.
-            $author['reputation_tier'] = $badge['reputation_tier'];
-            $author['card_tier']       = $badge['card_tier'];
-            $author['tier_label']      = $badge['tier_label'];
+            $author['reputation_tier']       = $badge['reputation_tier'];
+            $author['reputation_tier_label'] = $badge['reputation_tier_label'];
+            $author['card_tier']             = $badge['card_tier'];
+            $author['tier_label']            = $badge['tier_label'];
             // rank_label is `''` (empty string) when RankCatalog
             // doesn't resolve a label — the FE AuthorBadge treats
             // empty as "no chip"; keep as nullable-string equivalent
