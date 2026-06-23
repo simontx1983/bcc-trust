@@ -649,6 +649,7 @@ class CronService
             'bcc_trust_daily_maintenance'      => 'daily',            // read model sync safety net
             'bcc_trust_weekly_digest'          => 'bcc_weekly',       // §I1 email digest
             'bcc_trust_weekly_slow_ring_scan'  => 'bcc_weekly',       // scale-hardening: slow endorsement-ring detection
+            'bcc_trust_daily_contribution_recovery' => 'daily',      // trust recovery through contribution
         ];
 
         // Clear retired hooks so they don't fire orphaned actions.

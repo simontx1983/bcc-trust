@@ -64,6 +64,54 @@ final class PeepSoReactionRepository
     }
 
     /**
+     * Rule 4 (trust-weighted engagement) primitive for the contribution-
+     * recovery evaluator: who reacted to this owner's content since a
+     * boundary, so the contribution's "usefulness" can be weighted by the
+     * REACTOR's reputation tier (new/low-tier reaction farming is worthless).
+     *
+     * Returns reactor_user_id → reaction count (any reaction type) on the
+     * owner's activities since $sinceMysql, EXCLUDING self-reactions.
+     * Bounded to the $maxReactors most-active distinct reactors — this is
+     * the heaviest contribution-recovery query, so the caller caps it and
+     * only runs it on the daily cron, never the request path.
+     *
+     * @return array<int, int> reactor_user_id → count
+     */
+    public function getReactorCountsForOwnerSince(int $ownerId, string $sinceMysql, int $maxReactors): array
+    {
+        if ($ownerId <= 0 || $sinceMysql === '' || $maxReactors <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+        $reactions  = self::table();
+        $activities = self::activitiesTable();
+
+        /** @var list<array{uid: string, c: string}> $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT r.reaction_user_id AS uid, COUNT(*) AS c
+               FROM {$reactions} r
+               INNER JOIN {$activities} a ON a.act_id = r.reaction_act_id
+              WHERE a.act_owner_id       = %d
+                AND r.reaction_user_id  <> %d
+                AND r.reaction_timestamp >= %s
+              GROUP BY r.reaction_user_id
+              ORDER BY c DESC
+              LIMIT %d",
+            $ownerId,
+            $ownerId,
+            $sinceMysql,
+            $maxReactors
+        ), ARRAY_A);
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['uid']] = (int) $row['c'];
+        }
+        return $out;
+    }
+
+    /**
      * Lifetime count of a given reaction kind RECEIVED by a user —
      * reactions placed on activities owned by the user
      * (`peepso_activities.act_owner_id = $ownerId`).

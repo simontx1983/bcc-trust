@@ -228,6 +228,30 @@ final class Plugin
         );
     }
 
+    /** Trust Recovery Through Contribution — per-user bonus computation. */
+    private ?Services\ContributionScoreService $contributionScoreService = null;
+    public function contributionScoreService(): Services\ContributionScoreService
+    {
+        return $this->contributionScoreService ??= new Services\ContributionScoreService(
+            $this->commentRepository(),
+            $this->contentReportRepository(),
+            $this->peepSoReactionRepository(),
+            $this->reputationRepository(),
+            $this->userInfoRepository()
+        );
+    }
+
+    /** Trust Recovery Through Contribution — the daily batch evaluator. */
+    private ?Services\ContributionRecoveryEvaluator $contributionRecoveryEvaluator = null;
+    public function contributionRecoveryEvaluator(): Services\ContributionRecoveryEvaluator
+    {
+        return $this->contributionRecoveryEvaluator ??= new Services\ContributionRecoveryEvaluator(
+            $this->contributionScoreService(),
+            $this->reputationRepository(),
+            $this->reputationCalculatorService()
+        );
+    }
+
     private ?EndorsementService $endorsementService = null;
     public function endorsementService(): EndorsementService
     {

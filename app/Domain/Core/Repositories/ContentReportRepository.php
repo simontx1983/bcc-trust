@@ -97,6 +97,31 @@ final class ContentReportRepository
     }
 
     /**
+     * Count UPHELD (status = 1, resolved) reports filed by a user since a
+     * MySQL DATETIME boundary. A contribution-recovery signal ("reporting
+     * scams"). Only upheld reports count — dismissed (status = 2) and
+     * still-pending (status = 0) reports earn nothing, so spam/false
+     * reporting can't farm recovery. Aggregate COUNT — bounded.
+     */
+    public function countUpheldByReporterSince(int $reporterUserId, string $sinceMysql): int
+    {
+        if ($reporterUserId <= 0 || $sinceMysql === '') {
+            return 0;
+        }
+        global $wpdb;
+        $table = TableRegistry::contentReports();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table}
+              WHERE reporter_user_id = %d
+                AND status           = 1
+                AND created_at      >= %s",
+            $reporterUserId,
+            $sinceMysql
+        ));
+    }
+
+    /**
      * Single-row read by id — used by the admin resolve endpoint.
      *
      * @return object{
