@@ -480,7 +480,11 @@ final class PostsEndpoint
             $grade = (string) ($request->get_param('grade') ?? '');
             if ((string) $request->get_param('target_kind') === 'user_profile') {
                 $targetUserId = (int) $request->get_param('target_user_id');
-                if ($targetUserId <= 0) {
+                // Reject a missing/unknown member BEFORE provisioning a
+                // self-page, so a bogus target_user_id can't seed neutral
+                // score rows for non-existent users (the eligibility gate
+                // would refuse the vote anyway, but don't write first).
+                if ($targetUserId <= 0 || get_userdata($targetUserId) === false) {
                     $result = ['error' => 'bcc_invalid_request', 'message' => 'A valid member is required.'];
                 } else {
                     $targetPageId = Plugin::instance()->memberSelfPageService()->ensureSelfPage($targetUserId);
