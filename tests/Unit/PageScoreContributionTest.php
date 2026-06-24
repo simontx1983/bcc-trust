@@ -32,6 +32,44 @@ final class PageScoreContributionTest extends TestCase
         self::assertStringContainsString('contribution_bonus', TrustScoreService::formulaSql());
     }
 
+    public function testComputeSubtractsThePenaltyTerm(): void
+    {
+        // penalty_adjustment is negative (dispute/admin penalties subtract).
+        self::assertSame(45.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, 0.0, -5.0));
+        // Stacks with votes + the other terms…
+        self::assertSame(73.0, TrustScoreService::compute(10.0, 0.0, 0.0, 0.0, 8.0, -5.0));
+        // …and is still clamped to [0, 100] (a big penalty floors at 0).
+        self::assertSame(0.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, 0.0, -200.0));
+        // Default 0 leaves the formula unchanged (entity pages never penalised).
+        self::assertSame(50.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+    }
+
+    public function testFormulaSqlIncludesPenaltyAdjustment(): void
+    {
+        self::assertStringContainsString('penalty_adjustment', TrustScoreService::formulaSql());
+    }
+
+    public function testPageScoreCarriesAndValidatesANegativePenalty(): void
+    {
+        // total 45 = 50 + 0 + (-5 penalty) — must validate.
+        $score = new PageScore(
+            1_000_000_004, 4, 45.0, 0.0, 0.0, 0, 0, 0.0, 'neutral',
+            0, null, null, null, 0.0, 0.0, 0.0, -5.0
+        );
+        self::assertSame(-5.0, $score->getPenaltyAdjustment());
+        self::assertSame(45.0, $score->getTotalScore());
+    }
+
+    public function testPageScoreRejectsTotalThatIgnoresThePenalty(): void
+    {
+        // total 50 ignores the -5 penalty (expected 45) — beyond tolerance.
+        $this->expectException(\InvalidArgumentException::class);
+        new PageScore(
+            1_000_000_004, 4, 50.0, 0.0, 0.0, 0, 0, 0.0, 'neutral',
+            0, null, null, null, 0.0, 0.0, 0.0, -5.0
+        );
+    }
+
     public function testTierSqlMapsScoreExpressionToTierThresholds(): void
     {
         $sql = TrustScoreService::tierSql(TrustScoreService::formulaSql());

@@ -52,7 +52,7 @@ if (!defined('ABSPATH')) {
 class ScoreRepository {
 
     /** Explicit column list for bcc_trust_scores table. */
-    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, endorsement_bonus, contribution_bonus, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
+    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, endorsement_bonus, contribution_bonus, penalty_adjustment, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
 
     private string $table;
 
@@ -885,11 +885,11 @@ class ScoreRepository {
                 (page_id, category_id, page_owner_id, total_score,
                  positive_score, negative_score, vote_count, unique_voters,
                  confidence_score, reputation_tier, endorsement_count,
-                 endorsement_bonus, onchain_bonus, contribution_bonus, last_calculated_at)
+                 endorsement_bonus, onchain_bonus, contribution_bonus, penalty_adjustment, last_calculated_at)
              VALUES (%d, 0, %d, %f,
                      0.0, 0.0, 0, 0,
                      0.0, 'neutral', 0,
-                     0.0, 0.0, 0.0, %s)",
+                     0.0, 0.0, 0.0, 0.0, %s)",
             $pageId,
             $ownerId,
             $neutralScore,
@@ -1139,6 +1139,51 @@ class ScoreRepository {
         if ($result === false) {
             throw new Exception(
                 'Failed to apply contribution bonus for page ' . $pageId . ': ' . $wpdb->last_error
+            );
+        }
+    }
+
+    /**
+     * Apply a dispute/admin penalty to a member self-page (Architecture A).
+     * `$delta` is the score change (negative for a penalty, e.g. -5) and
+     * ACCUMULATES into `penalty_adjustment` — the clobber-safe home for
+     * non-vote signals, so Slice-2 vote recalcs (which rewrite positive/
+     * negative_score) never wipe it. total_score + reputation_tier are
+     * recomputed inline via the canonical formula. Replaces the legacy
+     * ReputationRepository::adjustScore path. Locks the row FOR UPDATE.
+     *
+     * @throws Exception on database failure
+     */
+    public function applyPenalty(int $pageId, float $delta): void {
+        global $wpdb;
+
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $now           = current_time('mysql');
+
+        $wpdb->get_results($wpdb->prepare(
+            "SELECT page_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
+            $pageId
+        ));
+
+        // penalty_adjustment accumulates (+= delta) and is SET before
+        // total_score/reputation_tier so the formula + tier CASE read the
+        // NEW value (MySQL evaluates SET clauses left-to-right).
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET penalty_adjustment = penalty_adjustment + %f,
+                 total_score         = {$totalScoreSql},
+                 reputation_tier     = {$tierSql},
+                 last_calculated_at  = %s
+             WHERE page_id = %d",
+            $delta,
+            $now,
+            $pageId
+        ));
+
+        if ($result === false) {
+            throw new Exception(
+                'Failed to apply penalty for page ' . $pageId . ': ' . $wpdb->last_error
             );
         }
     }
