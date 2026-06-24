@@ -117,7 +117,8 @@ final class NotificationDispatcher
      * Skips when the actor IS the author (self-reactions don't
      * generate noise — the user already knows they reacted).
      *
-     * @param string $kind §D5 reaction key — 'solid', 'vouch', 'stand_behind'
+     * @param string $kind reaction key — 'solid' or 'vouch' (trust),
+     *                      or a social kind. (stand_behind retired in Slice 3.)
      */
     public function onReactionAdded(int $actorId, int $actId, string $kind): void
     {
@@ -1159,19 +1160,7 @@ final class NotificationDispatcher
      */
     private function resolveActAuthor(int $actId): int
     {
-        $row = PeepSoActivityRepository::getById($actId);
-        if ($row === null) {
-            return 0;
-        }
-        $postId = isset($row->act_external_id) ? (int) $row->act_external_id : 0;
-        if ($postId <= 0) {
-            return 0;
-        }
-        $post = get_post($postId);
-        if (!$post instanceof \WP_Post) {
-            return 0;
-        }
-        return (int) $post->post_author;
+        return PeepSoActivityRepository::getAuthorId($actId);
     }
 
     private static function resolveHandle(int $userId): string
@@ -1197,7 +1186,7 @@ final class NotificationDispatcher
     }
 
     /**
-     * Map §D5 reaction kinds to the verb that reads naturally in
+     * Map trust reaction kinds to the verb that reads naturally in
      * the notification headline. Plain-English first per §N1 — the
      * user shouldn't have to learn the brand name to understand
      * what just happened.
@@ -1205,10 +1194,9 @@ final class NotificationDispatcher
     private static function reactionVerb(string $kind): string
     {
         return match ($kind) {
-            'solid'        => 'agreed with',
-            'vouch'        => 'vouched for',
-            'stand_behind' => 'is standing behind',
-            default        => 'reacted to',
+            'solid' => 'agreed with',
+            'vouch' => 'vouched for',
+            default => 'reacted to',
         };
     }
 }

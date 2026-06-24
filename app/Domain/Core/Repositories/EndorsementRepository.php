@@ -70,6 +70,7 @@ use BCC\Trust\Core\Repositories\EdgeRepository;
  * @phpstan-type EndorsementFraudRow object{
  *   weight: float|numeric-string,
  *   base_weight: float|numeric-string,
+ *   context: string,
  *   created_at: string,
  *   endorser_user_id: int|numeric-string,
  *   fraud_score_at_endorsement: int|numeric-string|null,
@@ -903,7 +904,7 @@ class EndorsementRepository {
      * with retroactive fraud discounts.
      *
      * @param int $pageId
-     * @return object[]  Array of objects with weight, base_weight, created_at,
+     * @return object[]  Array of objects with weight, base_weight, context, created_at,
      *                   endorser_user_id, fraud_score_at_endorsement, current_fraud_score.
      * @phpstan-return list<EndorsementFraudRow>
      */
@@ -913,7 +914,7 @@ class EndorsementRepository {
         $userInfoTable = \BCC\Trust\Core\Database\TableRegistry::userInfo();
 
         return $wpdb->get_results( $wpdb->prepare(
-            "SELECT e.weight, e.base_weight, e.created_at, e.endorser_user_id,
+            "SELECT e.weight, e.base_weight, e.context, e.created_at, e.endorser_user_id,
                     e.fraud_score_at_endorsement,
                     COALESCE(ui.fraud_score, 0) AS current_fraud_score
              FROM {$this->table} e

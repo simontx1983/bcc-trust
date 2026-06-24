@@ -26,6 +26,11 @@ define('BCC_TRUST_ENDORSE_CAUTION', 0.1);
 define('BCC_TRUST_ENDORSE_RISKY', 0.08);
 define('BCC_TRUST_MAX_ENDORSE_WEIGHT', 2.0);
 
+// Light per-post "vouch" weight (Slice 3). A vouch is a FIXED-weight,
+// NON-vesting endorsement (context='post_vouch') — ~10% of a top
+// (elite=1.0) endorsement. Filterable via 'bcc_trust_vouch_weight'.
+define('BCC_TRUST_VOUCH_WEIGHT', 0.1);
+
 // ======================================================
 // UNIFIED VESTING (5-stage graduated model)
 //

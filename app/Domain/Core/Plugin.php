@@ -2089,6 +2089,45 @@ final class Plugin
             $this->notificationDispatcher()->onReactionAdded($actorId, $actId, $kind);
         }, 30, 3);
 
+        // Slice 3 — Vouch. The 'vouch' trust reaction lands a light, permanent
+        // post_vouch endorsement on the post author's self-page (Architecture A).
+        // Priority 35 so it runs after the notification dispatcher (30).
+        add_action('bcc_reaction_added', function (int $actorId, int $actId, string $kind): void {
+            if ($kind !== \BCC\Trust\Core\Support\ReactionTypeRegistry::KIND_VOUCH) {
+                return;
+            }
+            try {
+                $authorId = \BCC\Core\Repositories\PeepSoActivityRepository::getAuthorId($actId);
+                if ($authorId > 0) {
+                    $this->endorsementService()->vouchForAuthor($actorId, $authorId);
+                }
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] vouch add failed', ['actor' => $actorId, 'act' => $actId, 'error' => $e->getMessage()]);
+            }
+        }, 35, 3);
+
+        // Ref-counted revoke: lift the vouch only when the voucher has no
+        // remaining vouch-reaction on ANY of the author's content.
+        add_action('bcc_reaction_removed', function (int $actorId, int $actId, string $kind = ''): void {
+            if ($kind !== \BCC\Trust\Core\Support\ReactionTypeRegistry::KIND_VOUCH) {
+                return;
+            }
+            try {
+                $authorId = \BCC\Core\Repositories\PeepSoActivityRepository::getAuthorId($actId);
+                if ($authorId <= 0) {
+                    return;
+                }
+                $vouchTypeId = \BCC\Trust\Core\Support\ReactionTypeRegistry::vouchId();
+                $stillVouches = $vouchTypeId !== null
+                    && $this->peepSoReactionRepository()->hasGivenReactionOnAuthorContent($actorId, $authorId, $vouchTypeId);
+                if (!$stillVouches) {
+                    $this->endorsementService()->revokeVouchForAuthor($actorId, $authorId);
+                }
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] vouch revoke failed', ['actor' => $actorId, 'act' => $actId, 'error' => $e->getMessage()]);
+            }
+        }, 35, 3);
+
         add_action('bcc_review_published', function (int $authorId, int $pageId, int $voteId, string $explanation): void {
             $this->notificationDispatcher()->onReviewPublished($authorId, $pageId, $voteId, $explanation);
         }, 30, 4);
