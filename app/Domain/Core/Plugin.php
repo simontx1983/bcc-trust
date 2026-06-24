@@ -223,8 +223,7 @@ final class Plugin
     {
         return $this->reputationCalculatorService ??= new Services\ReputationCalculatorService(
             $this->reputationRepository(),
-            $this->userInfoRepository(),
-            $this->reputationEventRepository()
+            $this->userInfoRepository()
         );
     }
 
@@ -247,8 +246,7 @@ final class Plugin
     {
         return $this->contributionRecoveryEvaluator ??= new Services\ContributionRecoveryEvaluator(
             $this->contributionScoreService(),
-            $this->reputationRepository(),
-            $this->reputationCalculatorService()
+            $this->reputationRepository()
         );
     }
 
@@ -1579,19 +1577,12 @@ final class Plugin
             }
         });
 
-        // Reputation tier recalculation for page owner
-        add_action('bcc_trust_async_reputation_recalculate', function (int $voteId) {
-            $vote = $this->voteRepository()->getById($voteId);
-            if (!$vote || (int) $vote->status !== 1) return;
-            $ownerId = (int) Services\PeepSoPageResolver::getOwnerId((int) $vote->page_id);
-            if ($ownerId) {
-                try {
-                    $this->reputationCalculatorService()->recalculateUserReputation($ownerId, 'vote_recalc');
-                } catch (\Throwable $e) {
-                    \BCC\Core\Log\Logger::error('[bcc-trust] ReputationRecalc failed', ['user_id' => $ownerId, 'error' => $e->getMessage()]);
-                }
-            }
-        });
+        // Architecture A: votes on an ENTITY page no longer recompute the
+        // page owner's PERSONAL trust tier (deliberate decoupling — a member's
+        // tier is their self-page total_score, driven by reviews/endorsements
+        // ON the person, not by reviews of pages they happen to own). The
+        // legacy owner-reputation recalc listener was removed here; the
+        // entity-page score itself is updated by the vote write path.
 
         // Voter stats refresh (votes_cast counter)
         add_action('bcc_trust_async_stats_refresh', function (int $voteId) {

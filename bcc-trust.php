@@ -958,11 +958,16 @@ add_action('bcc.trust.recalculate_score', function (int $pageId) {
 // Admin report penalty — fired by the disputes admin panel.
 add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points, string $reason): void {
     try {
-        \BCC\Trust\Core\Plugin::instance()->reputationRepository()->adjustScore(
-            $userId,
-            -1 * abs($points),
-            'admin_report_penalty'
-        );
+        // Architecture A: the penalty lands on the member's self-page.
+        // applyPenalty accumulates penalty_adjustment (a negative delta) and
+        // recomputes total_score + reputation_tier inline. Magnitude semantics
+        // preserved: always a negative score change of abs($points).
+        $pageId = \BCC\Trust\Core\Plugin::instance()
+            ->memberSelfPageService()
+            ->ensureSelfPage($userId);
+        \BCC\Trust\Core\Plugin::instance()
+            ->scoreRepository()
+            ->applyPenalty($pageId, (float) (-1 * abs($points)));
     } catch (\Throwable $e) {
         \BCC\Core\Log\Logger::error('[bcc-trust] admin_report_penalty_failed', [
             'user_id' => $userId,

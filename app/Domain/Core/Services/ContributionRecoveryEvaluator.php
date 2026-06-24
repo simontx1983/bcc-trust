@@ -5,10 +5,11 @@
  *
  * For each recovery-eligible user it:
  *   1. computes the capped contribution+consistency bonus (ContributionScoreService),
- *   2. persists it to `bcc_trust_reputation.contribution_bonus` (the INPUT),
- *   3. re-derives reputation_score + tier via recalculateUserReputation
- *      (which blends the bonus under the Rule-2 ceiling — the OUTPUT),
- *   4. audit-logs a real adjustment.
+ *   2. writes it to the member's self-page `contribution_bonus` column
+ *      (Architecture A) via ScoreRepository::applyContributionBonus, which
+ *      recomputes the self-page total_score + reputation_tier inline under
+ *      the canonical formula — so no separate reputation recalc is needed,
+ *   3. audit-logs a real adjustment.
  *
  * Scope (MVP): caution + risky users — the population that actually needs
  * recovery, which also bounds the batch naturally. Reinforcement for
@@ -39,8 +40,7 @@ final class ContributionRecoveryEvaluator
 
     public function __construct(
         private readonly ContributionScoreService $contributionScore,
-        private readonly ReputationRepository $reputationRepo,
-        private readonly ReputationCalculatorService $reputationCalc
+        private readonly ReputationRepository $reputationRepo
     ) {
     }
 
@@ -69,11 +69,18 @@ final class ContributionRecoveryEvaluator
                 $newBonus   = round($components['contribution'] + $components['consistency'], 2);
                 $oldBonus   = $this->reputationRepo->getContributionBonus($userId);
 
-                // Persist the input, then re-derive reputation_score + tier
-                // (the blend applies the ceiling). Always re-derive so a
-                // genuine-score change since the last run is reflected too.
-                $this->reputationRepo->update($userId, ['contribution_bonus' => $newBonus]);
-                $this->reputationCalc->recalculateUserReputation($userId, 'contribution_recovery');
+                // Write the bonus directly onto the member's self-page
+                // (Architecture A). applyContributionBonus SETs
+                // contribution_bonus and recomputes total_score +
+                // reputation_tier inline via the canonical formula, so the
+                // legacy two-step (update reputation row + recalc) collapses
+                // to a single self-page write.
+                $pageId = \BCC\Trust\Core\Plugin::instance()
+                    ->memberSelfPageService()
+                    ->ensureSelfPage($userId);
+                \BCC\Trust\Core\Plugin::instance()
+                    ->scoreRepository()
+                    ->applyContributionBonus($pageId, $newBonus);
 
                 if (abs($newBonus - $oldBonus) >= self::CHANGE_FLOOR) {
                     $adjusted++;

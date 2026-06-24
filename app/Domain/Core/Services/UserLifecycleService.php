@@ -98,7 +98,11 @@ class UserLifecycleService
 
         // Hard-delete analytics data
         $plugin->userInfoRepository()->deleteByUserId($userId);
-        $plugin->reputationRepository()->delete($userId);
+        // Architecture A: the member's trust now lives on their self-page
+        // score row, not the legacy reputation snapshot — delete that instead.
+        $plugin->scoreRepository()->deleteSelfPage(
+            MemberSelfPageService::selfPageId($userId)
+        );
         (new \BCC\Trust\Core\Repositories\DeviceFingerprintRepository())->deleteForUser($userId);
         $plugin->fraudAnalysisRepository()->deleteForUser($userId);
 
@@ -117,8 +121,9 @@ class UserLifecycleService
         // Identity verifications (github / x / wallet).
         $plugin->verificationRepository()->deleteForUser($userId);
 
-        // Rank awards + reputation-event ledger (the reputation SNAPSHOT row
-        // is already cleared above via reputationRepository()->delete()).
+        // Rank awards + reputation-event ledger. (The member's trust snapshot
+        // is the self-page score row, cleared above via deleteSelfPage(); the
+        // legacy bcc_trust_reputation table is retired in Stage E.)
         $plugin->userRankRepository()->deleteForUser($userId);
         $plugin->reputationEventRepository()->deleteForUser($userId);
 

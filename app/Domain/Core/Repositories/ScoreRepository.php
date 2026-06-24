@@ -269,6 +269,9 @@ class ScoreRepository {
         if ($result === false) {
             throw new Exception('Failed to save page score to database');
         }
+
+        // Self-page tier change → refresh the user_info denorm (RateLimiter).
+        $this->mirrorSelfPageTierToUserInfo($score->getPageId());
     }
 
     /**
@@ -319,6 +322,9 @@ class ScoreRepository {
                 'Failed to update recalculated score for page ' . $pageId
             );
         }
+
+        // Self-page tier change (cron recompute) → refresh user_info denorm.
+        $this->mirrorSelfPageTierToUserInfo((int) $pageId);
     }
 
     /**
@@ -445,6 +451,11 @@ class ScoreRepository {
         // are unavailable inside VALUES on a new row.
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        // Recompute reputation_tier inline on the delta path so it never lags
+        // total_score (the cron recalc would otherwise be the only fixer). The
+        // self-page facade reads reputation_tier directly, so it must track the
+        // score immediately — same rule Stage 1 applied to the bonus writers.
+        $tierSql = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
         $result = $wpdb->query(
             $wpdb->prepare(
                 "INSERT INTO {$this->table}
@@ -464,6 +475,7 @@ class ScoreRepository {
                      positive_score     = positive_score  + VALUES(positive_score),
                      negative_score     = negative_score  + VALUES(negative_score),
                      total_score        = {$totalScoreSql},
+                     reputation_tier    = {$tierSql},
                      vote_count         = vote_count + 1,
                      unique_voters      = unique_voters + VALUES(unique_voters),
                      last_vote_at       = VALUES(last_vote_at),
@@ -484,6 +496,10 @@ class ScoreRepository {
         if ($result === false) {
             throw new Exception('Failed to upsert vote delta for page ' . $pageId);
         }
+
+        // Keep the user_info.reputation_tier denorm fresh for self-pages
+        // (RateLimiter reads it every request); no-op for entity pages.
+        $this->mirrorSelfPageTierToUserInfo($pageId);
     }
 
     /**
@@ -522,20 +538,21 @@ class ScoreRepository {
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         // MySQL evaluates multi-assignment SET left-to-right: by the time
         // total_score is evaluated, positive_score / negative_score already
-        // hold the NEW post-GREATEST values. Referencing `positive_score` and
-        // `negative_score` directly is therefore correct and avoids
-        // double-applying the delta (previous bug: re-added %f inside the
-        // total_score expression, drifting total_score by 2*delta per flip).
+        // hold the NEW post-GREATEST values, and reputation_tier (last) reads
+        // the new total_score. Use the canonical formulaSql()/tierSql() rather
+        // than a hand-inlined subset — the previous literal omitted
+        // contribution_bonus + penalty_adjustment (harmless on entity pages
+        // where both are 0, but wrong on member self-pages that carry them).
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
         $result = $wpdb->query(
             $wpdb->prepare(
                 "UPDATE {$this->table}
                  SET
                    positive_score     = GREATEST(0, positive_score + %f),
                    negative_score     = GREATEST(0, negative_score + %f),
-                   total_score        = LEAST(100, GREATEST(0,
-                                           50 + (positive_score - negative_score) * 2
-                                           + endorsement_bonus + onchain_bonus
-                                       )),
+                   total_score        = {$totalScoreSql},
+                   reputation_tier    = {$tierSql},
                    last_calculated_at = %s
                  WHERE page_id = %d
                    AND category_id = %d",
@@ -550,6 +567,10 @@ class ScoreRepository {
         if ($result === false) {
             throw new Exception('Failed to reverse-and-reapply vote delta for page ' . $pageId);
         }
+
+        // Keep the user_info.reputation_tier denorm fresh for self-pages
+        // (RateLimiter reads it every request); no-op for entity pages.
+        $this->mirrorSelfPageTierToUserInfo($pageId);
     }
 
     /**
@@ -1097,6 +1118,48 @@ class ScoreRepository {
                 'Failed to derive endorsement bonus for page ' . $pageId . ': ' . $wpdb->last_error
             );
         }
+
+        $this->mirrorSelfPageTierToUserInfo($pageId);
+    }
+
+    /**
+     * Mirror a member self-page's reputation_tier onto the denormalised
+     * `bcc_trust_user_info.reputation_tier` column (Architecture A).
+     *
+     * RateLimiter reads this denorm on EVERY request, so it must stay fresh.
+     * Under the legacy model the four ReputationRepository writers kept it in
+     * sync via mirrorTierToUserInfo(); those writers are retired, so the
+     * self-page write paths now own the mirror. Called at the END of each
+     * ScoreRepository method that changes a self-page's reputation_tier.
+     *
+     * No-op for entity pages (only self-page ids map to a member user_id).
+     * Bounded by the single page_id → single owner user_id.
+     */
+    private function mirrorSelfPageTierToUserInfo(int $pageId): void {
+        if (!\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageId)) {
+            return;
+        }
+
+        $userId = \BCC\Trust\Core\Services\MemberSelfPageService::ownerOfSelfPage($pageId);
+        if ($userId <= 0) {
+            return;
+        }
+
+        global $wpdb;
+        $userInfoTable = \BCC\Trust\Core\Database\TableRegistry::userInfo();
+
+        // Single UPDATE…JOIN: copy the self-page's freshly-written tier onto
+        // the member's user_info denorm. category_id = 0 selects the canonical
+        // self-page row.
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$userInfoTable} ui
+             INNER JOIN {$this->table} s
+                     ON s.page_id = %d AND s.category_id = 0
+             SET ui.reputation_tier = s.reputation_tier
+             WHERE ui.user_id = %d",
+            $pageId,
+            $userId
+        ));
     }
 
     /**
@@ -1141,6 +1204,8 @@ class ScoreRepository {
                 'Failed to apply contribution bonus for page ' . $pageId . ': ' . $wpdb->last_error
             );
         }
+
+        $this->mirrorSelfPageTierToUserInfo($pageId);
     }
 
     /**
@@ -1186,6 +1251,8 @@ class ScoreRepository {
                 'Failed to apply penalty for page ' . $pageId . ': ' . $wpdb->last_error
             );
         }
+
+        $this->mirrorSelfPageTierToUserInfo($pageId);
     }
 
     /**
@@ -1235,7 +1302,13 @@ class ScoreRepository {
             $pageId
         ));
 
-        return is_int($result) && $result > 0;
+        $seeded = is_int($result) && $result > 0;
+        if ($seeded) {
+            // Only mirror when the pristine-guard actually wrote a new tier.
+            $this->mirrorSelfPageTierToUserInfo($pageId);
+        }
+
+        return $seeded;
     }
 
     /**
@@ -1317,6 +1390,37 @@ class ScoreRepository {
 
         if ($result === false) {
             throw new RepositoryException('ScoreRepository::delete failed for page ' . $pageId . ': ' . $wpdb->last_error);
+        }
+
+        $this->invalidateCache($pageId);
+    }
+
+    /**
+     * Delete a member's self-page score row (Architecture A) on user deletion.
+     *
+     * Scoped to the synthetic self-page row (page_id + category_id = 0) rather
+     * than the generic delete(page_id) so it can never touch an entity page.
+     * No-op for a non-self-page id (defence-in-depth — onUserDelete always
+     * passes MemberSelfPageService::selfPageId()). Bounded by the single
+     * page_id + category_id composite key.
+     *
+     * @throws RepositoryException on database failure
+     */
+    public function deleteSelfPage(int $pageId): void {
+        global $wpdb;
+
+        if (!\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageId)) {
+            return;
+        }
+
+        $result = $wpdb->delete(
+            $this->table,
+            ['page_id' => $pageId, 'category_id' => 0],
+            ['%d', '%d']
+        );
+
+        if ($result === false) {
+            throw new RepositoryException('ScoreRepository::deleteSelfPage failed for page ' . $pageId . ': ' . $wpdb->last_error);
         }
 
         $this->invalidateCache($pageId);

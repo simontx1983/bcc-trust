@@ -781,36 +781,11 @@ class ReputationRepository {
         return $totalAffected;
     }
 
-    /**
-     * Get aggregate voting stats for pages owned by a user.
-     *
-     * Returns an object with positive_weight, negative_weight, and unique_voters
-     * or null if no data is found.
-     *
-     * @phpstan-return object{
-     *   positive_weight: float|numeric-string,
-     *   negative_weight: float|numeric-string,
-     *   unique_voters: int|numeric-string
-     * }|null
-     */
-    public function getVotingStatsForOwner(int $userId): ?object {
-        global $wpdb;
-
-        $votesTable  = \BCC\Trust\Core\Database\TableRegistry::votes();
-        $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
-
-        return $wpdb->get_row($wpdb->prepare(
-            "SELECT
-                COALESCE(SUM(CASE WHEN v.vote_type > 0 THEN v.weight ELSE 0 END), 0) as positive_weight,
-                COALESCE(SUM(CASE WHEN v.vote_type < 0 THEN v.weight ELSE 0 END), 0) as negative_weight,
-                COUNT(DISTINCT v.voter_user_id) as unique_voters
-             FROM {$votesTable} v
-             INNER JOIN {$scoresTable} s ON v.page_id = s.page_id
-             WHERE s.page_owner_id = %d
-               AND v.status = 1",
-            $userId
-        ));
-    }
+    // getVotingStatsForOwner() REMOVED (Architecture A — reputation cutover
+    // Stage D). Its sole caller was ReputationCalculatorService::
+    // recalculateUserReputation(), which is gone. A member's vote-driven
+    // trust is now the self-page total_score, derived inline by
+    // ScoreRepository via the canonical TrustScoreService formula.
 
     /**
      * Adjust a user's reputation score by a delta (positive or negative).
