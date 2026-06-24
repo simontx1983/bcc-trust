@@ -125,10 +125,10 @@ define('BCC_TRUST_CLEANUP_FRAUD_ANALYSIS', 90);
 define('BCC_TRUST_CLEANUP_ACTIVITY', 90);
 define('BCC_TRUST_CLEANUP_VOTES', 30);
 define('BCC_TRUST_CLEANUP_SUSPENSIONS', 30);
-// Append-only trust ledgers. reputation_events feeds the user view-model's
-// "last few changes" so keep a generous horizon; score_events + resolved
-// content_reports are audit/debug and prune sooner. Days.
-define('BCC_TRUST_CLEANUP_REPUTATION_EVENTS', 180);
+// Append-only trust ledgers. score_events both feeds the user view-model's
+// "last few changes" (self-page rows) AND serves as audit/debug; resolved
+// content_reports are audit/debug. Days. (The legacy reputation_events
+// ledger + its horizon were removed in the reputation cutover.)
 define('BCC_TRUST_CLEANUP_SCORE_EVENTS', 90);
 define('BCC_TRUST_CLEANUP_CONTENT_REPORTS', 90);
 

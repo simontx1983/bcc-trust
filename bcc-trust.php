@@ -223,6 +223,10 @@ require_once BCC_TRUST_PATH . 'includes/database/seed-self-pages.php';
 // Drops the retired bcc_trust_reputation table after the seed has run
 // (fires on init priority 25 > the seed's 20). Guarded; no-op once done.
 require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-reputation.php';
+// Drops the orphaned bcc_reputation_events ledger (lost its only writer in
+// the reputation cutover; recent changes now read bcc_trust_score_events).
+// Guarded by bcc_reputation_events_dropped; no-op once done.
+require_once BCC_TRUST_PATH . 'includes/database/drop-reputation-events.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**

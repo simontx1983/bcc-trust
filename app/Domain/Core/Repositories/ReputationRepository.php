@@ -13,8 +13,11 @@ namespace BCC\Trust\Core\Repositories;
 if (!defined('ABSPATH')) exit;
 
 /**
- * Row shape returned by bcc_trust_reputation reads. getByUserId() casts the
- * numeric fields before returning, so consumers receive real types — other
+ * Row shape returned by reputation reads. Under Architecture A a member's
+ * trust lives on their self-page row in bcc_trust_page_scores (the legacy
+ * bcc_trust_reputation table is retired), and the accessors here resolve
+ * tier/score from that self-page row. getByUserId() casts the numeric
+ * fields before returning, so consumers receive real types — other
  * accessors that return raw $wpdb rows keep string forms.
  *
  * @phpstan-type ReputationRow object{
@@ -207,7 +210,7 @@ class ReputationRepository {
      * CommentService::shapeCommentRow) to avoid N+1 across a page of
      * authors.
      *
-     * Returns only users with a real bcc_trust_reputation row.
+     * Returns only users with a self-page score row (Architecture A).
      * Callers that need a sentinel for unseen users default to
      * `neutral` (mirrors `getTier()`'s missing-row fallback).
      *
@@ -295,10 +298,10 @@ class ReputationRepository {
     }
 
     // getVotingStatsForOwner() REMOVED (Architecture A — reputation cutover
-    // Stage D). Its sole caller was ReputationCalculatorService::
-    // recalculateUserReputation(), which is gone. A member's vote-driven
-    // trust is now the self-page total_score, derived inline by
-    // ScoreRepository via the canonical TrustScoreService formula.
+    // Stage D). Its sole caller, the now-removed per-user vote-ratio recalc,
+    // is gone. A member's vote-driven trust is now the self-page total_score,
+    // derived inline by ScoreRepository via the canonical TrustScoreService
+    // formula.
 
     /**
      * Get eligible panelist candidates (trusted/elite tier, not high-fraud, not suspended).

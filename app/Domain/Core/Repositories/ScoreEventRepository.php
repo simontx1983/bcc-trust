@@ -16,6 +16,22 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-type ScoreEventRow object{
+ *     id: int|numeric-string,
+ *     page_id: int|numeric-string,
+ *     event_type: string,
+ *     score_before: float|numeric-string|null,
+ *     score_after: float|numeric-string|null,
+ *     delta: float|numeric-string|null,
+ *     tier_before: string|null,
+ *     tier_after: string|null,
+ *     reason: string|null,
+ *     actor_user_id: int|numeric-string|null,
+ *     meta: string|null,
+ *     created_at: string
+ * }
+ */
 class ScoreEventRepository
 {
     /** @var string */
@@ -173,6 +189,47 @@ class ScoreEventRepository
 
         /** @var list<object>|null $rows */
         $rows = $wpdb->get_results($sql);
+        return $rows ?: [];
+    }
+
+    /**
+     * Recent score events for a SINGLE page, newest first. Drives
+     * `progression.trust_score_recent_changes` on the user view-model
+     * (§N11) — the "why did my score move" surface.
+     *
+     * Deliberately has NO `wp_posts` INNER JOIN (unlike findForPagesSince):
+     * member self-pages have synthetic page_ids (MemberSelfPageService::
+     * ID_BASE + user_id) that are NOT real wp_posts rows, so an inner join
+     * would silently drop every self-page event. The caller passes a
+     * self-page id; we read straight off the ledger.
+     *
+     * Bounded: WHERE page_id = %d (single key) + LIMIT (clamped 1–20),
+     * fully prepared. Uses idx_page_created (page_id, created_at DESC).
+     * Each row exposes `delta`, `reason`, `created_at` (among others).
+     *
+     * @phpstan-return list<ScoreEventRow>
+     */
+    public function getRecentForPage(int $pageId, int $limit = 5): array
+    {
+        if ($pageId <= 0) {
+            return [];
+        }
+        $limit = max(1, min(20, $limit));
+
+        global $wpdb;
+        /** @var list<ScoreEventRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, page_id, event_type,
+                    score_before, score_after, delta,
+                    tier_before, tier_after,
+                    reason, actor_user_id, meta, created_at
+               FROM {$this->table}
+              WHERE page_id = %d
+              ORDER BY created_at DESC, id DESC
+              LIMIT %d",
+            $pageId,
+            $limit
+        ));
         return $rows ?: [];
     }
 

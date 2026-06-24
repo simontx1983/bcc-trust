@@ -222,12 +222,6 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_pull_batches';
     }
 
-    public static function reputationEvents(): string
-    {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_reputation_events';
-    }
-
     public static function contentReports(): string
     {
         global $wpdb;
@@ -322,7 +316,6 @@ final class TableRegistry
             'pull_meta'          => self::pullMeta(),
             'user_ranks'         => self::userRanks(),
             'pull_batches'       => self::pullBatches(),
-            'reputation_events'  => self::reputationEvents(),
             'content_reports'    => self::contentReports(),
             'hidden_activities'  => self::hiddenActivities(),
             'dispute_participations' => self::disputeParticipations(),

@@ -212,20 +212,11 @@ final class Plugin
         );
     }
 
-    private ?Repositories\ReputationEventRepository $reputationEventRepository = null;
-    public function reputationEventRepository(): Repositories\ReputationEventRepository
-    {
-        return $this->reputationEventRepository ??= new Repositories\ReputationEventRepository();
-    }
-
-    private ?Services\ReputationCalculatorService $reputationCalculatorService = null;
-    public function reputationCalculatorService(): Services\ReputationCalculatorService
-    {
-        return $this->reputationCalculatorService ??= new Services\ReputationCalculatorService(
-            $this->reputationRepository(),
-            $this->userInfoRepository()
-        );
-    }
+    // ReputationCalculatorService is now a static-only helper
+    // (ReputationCalculatorService::blendContribution, called by
+    // ContributionRecoveryEvaluator). The instance accessor + its
+    // reputation/userInfo deps were removed in the reputation cutover —
+    // calculateRecommendedVoteWeight had zero callers.
 
     /** Trust Recovery Through Contribution — per-user bonus computation. */
     private ?Services\ContributionScoreService $contributionScoreService = null;
@@ -632,7 +623,7 @@ final class Plugin
             $this->featureAccessService(),
             $this->flagsRepository(),
             $this->livingService(),
-            $this->reputationEventRepository(),
+            $this->scoreEventRepository(),
             $this->peepSoReactionRepository(),
             $this->disputeParticipationRepository(),
             $this->attestationService()

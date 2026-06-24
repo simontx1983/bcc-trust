@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Repositories\Tests;
 
 use BCC\Trust\Core\Repositories\ContentReportRepository;
-use BCC\Trust\Core\Repositories\ReputationEventRepository;
 use BCC\Trust\Core\Repositories\ScoreEventRepository;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
@@ -19,7 +18,6 @@ use PHPUnit\Framework\TestCase;
  * the repository builds can be asserted without a database.
  */
 #[CoversClass(ContentReportRepository::class)]
-#[CoversClass(ReputationEventRepository::class)]
 #[CoversClass(ScoreEventRepository::class)]
 final class RetentionCleanupTest extends TestCase
 {
@@ -92,20 +90,6 @@ final class RetentionCleanupTest extends TestCase
 
         // Parameterized horizon (90d) + batch size (5000), never interpolated.
         self::assertSame([90, 5000], self::fakeWpdb()->prepared[0]['args']);
-    }
-
-    // ── reputation_events: UTC clock, 180-day horizon ──────────────────────
-
-    public function testReputationEventsCleanupHorizonAndClock(): void
-    {
-        (new ReputationEventRepository())->cleanupOld();
-
-        $sql = self::norm(self::fakeWpdb()->prepared[0]['sql']);
-
-        self::assertStringContainsString('DELETE FROM wp_bcc_reputation_events', $sql);
-        // created_at is written in UTC, so the cutoff must use UTC_TIMESTAMP().
-        self::assertStringContainsString('created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY)', $sql);
-        self::assertSame([180, 5000], self::fakeWpdb()->prepared[0]['args']);
     }
 
     // ── trust_score_events: MySQL NOW() clock, 90-day horizon ──────────────
