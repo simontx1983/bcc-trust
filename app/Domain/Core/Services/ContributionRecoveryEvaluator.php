@@ -66,15 +66,25 @@ final class ContributionRecoveryEvaluator
 
             try {
                 $components = $this->contributionScore->computeBonus($userId);
-                $newBonus   = round($components['contribution'] + $components['consistency'], 2);
+                $rawBonus   = round($components['contribution'] + $components['consistency'], 2);
                 $oldBonus   = $this->reputationRepo->getContributionBonus($userId);
 
-                // Write the bonus directly onto the member's self-page
-                // (Architecture A). applyContributionBonus SETs
+                // Rule R2 — contribution alone can lift a member toward Neutral
+                // but never into Trusted. The self-page formula adds
+                // contribution_bonus RAW, so the ceiling must be applied here
+                // (the legacy recalc applied it via blendContribution at blend
+                // time). Cap the bonus so genuine + bonus can't exceed
+                // BCC_CONTRIB_CEILING while the genuine (non-contribution) score
+                // is below Trusted. blendContribution is the single source of
+                // the ceiling rule — we derive the writable bonus back out of it.
+                $genuine        = $this->reputationRepo->getScore($userId) - $oldBonus;
+                $effectiveTotal = ReputationCalculatorService::blendContribution($genuine, $rawBonus);
+                $newBonus       = round(max(0.0, $effectiveTotal - $genuine), 2);
+
+                // Write the (ceiling'd) bonus directly onto the member's
+                // self-page (Architecture A). applyContributionBonus SETs
                 // contribution_bonus and recomputes total_score +
-                // reputation_tier inline via the canonical formula, so the
-                // legacy two-step (update reputation row + recalc) collapses
-                // to a single self-page write.
+                // reputation_tier inline via the canonical formula.
                 $pageId = \BCC\Trust\Core\Plugin::instance()
                     ->memberSelfPageService()
                     ->ensureSelfPage($userId);
@@ -90,6 +100,7 @@ final class ContributionRecoveryEvaluator
                         [
                             'previous_bonus' => $oldBonus,
                             'new_bonus'      => $newBonus,
+                            'raw_bonus'      => $rawBonus,
                             'contribution'   => round($components['contribution'], 2),
                             'consistency'    => round($components['consistency'], 2),
                         ],
