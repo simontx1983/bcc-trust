@@ -36,10 +36,16 @@ use BCC\Trust\Core\Exceptions\RepositoryException;
  */
 class ReputationRepository {
 
-    /** Explicit column list for bcc_trust_reputation table. */
-    private const COLUMNS = 'id, user_id, reputation_score, reputation_tier, contribution_bonus, total_votes_cast, total_votes_received, flag_count, vote_weight, last_calculated_at';
-
     private string $table;
+
+    /**
+     * The member self-page score table (Architecture A). Reads resolve a
+     * member's tier/score from their self-page row here (page_id =
+     * MemberSelfPageService::ID_BASE + user_id, category_id = 0) instead of
+     * the retired bcc_trust_reputation table. Writes still target $this->table
+     * until Stage D repoints them.
+     */
+    private string $scoreTable;
 
     private const CACHE_GROUP = 'bcc_trust_reputation';
 
@@ -49,7 +55,35 @@ class ReputationRepository {
     private const DEFAULT_VOTE_WEIGHT = 1.0;
 
     public function __construct() {
-        $this->table = \BCC\Trust\Core\Database\TableRegistry::reputation();
+        $this->table      = \BCC\Trust\Core\Database\TableRegistry::reputation();
+        $this->scoreTable = \BCC\Trust\Core\Database\TableRegistry::scores();
+    }
+
+    /**
+     * Map a self-page score row to the legacy ReputationRow shape so the
+     * ~40 facade callers keep working unchanged after the cutover. The
+     * user-centric counters (total_votes_cast, flag_count, vote_weight) are
+     * vestigial under Architecture A — total_votes_cast's real source is
+     * user_info.votes_cast; the others have no live gate — so they map to
+     * harmless defaults. Only reputation_score / reputation_tier /
+     * contribution_bonus / total_votes_received are load-bearing.
+     *
+     * @param object{total_score: float|numeric-string, reputation_tier: string, contribution_bonus: float|numeric-string, vote_count: int|numeric-string, last_calculated_at?: string|null} $row
+     * @phpstan-return ReputationRow
+     */
+    private function mapSelfPageRow(int $userId, object $row): object {
+        return (object) [
+            'id'                   => \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($userId),
+            'user_id'              => $userId,
+            'reputation_score'     => (float) $row->total_score,
+            'reputation_tier'      => (string) $row->reputation_tier,
+            'contribution_bonus'   => (float) $row->contribution_bonus,
+            'total_votes_cast'     => 0,
+            'total_votes_received' => (int) $row->vote_count,
+            'flag_count'           => 0,
+            'vote_weight'          => self::DEFAULT_VOTE_WEIGHT,
+            'last_calculated_at'   => (string) ($row->last_calculated_at ?? ''),
+        ];
     }
 
     /**
@@ -85,29 +119,33 @@ class ReputationRepository {
         }
 
         global $wpdb;
-        $idList       = array_keys($wanted);
-        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+        $idList = array_keys($wanted);
+        // Resolve each user to their deterministic self-page id, querying
+        // bcc_trust_page_scores in one bounded IN (Architecture A).
+        $pageIds      = array_map(
+            static fn(int $uid): int => \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($uid),
+            $idList
+        );
+        $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
 
-        /** @var list<\stdClass>|null $rows */
+        /** @var list<object{page_owner_id: int|numeric-string, total_score: float|numeric-string, reputation_tier: string, contribution_bonus: float|numeric-string, vote_count: int|numeric-string, last_calculated_at?: string|null}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE user_id IN ({$placeholders})",
-            ...$idList
+            "SELECT page_owner_id, total_score, reputation_tier, contribution_bonus, vote_count, last_calculated_at
+               FROM {$this->scoreTable}
+              WHERE page_id IN ({$placeholders}) AND category_id = 0",
+            ...$pageIds
         ));
 
         foreach ($idList as $id) {
             self::$rowMemo[$id] = null;
         }
-        foreach ($rows ?: [] as $row) {
-            // Same numeric casts getByUserId applies on the single-row path.
-            $row->reputation_score     = (float) $row->reputation_score;
-            $row->contribution_bonus   = (float) $row->contribution_bonus;
-            $row->total_votes_cast     = (int) $row->total_votes_cast;
-            $row->total_votes_received = (int) $row->total_votes_received;
-            $row->flag_count           = (int) $row->flag_count;
-            $row->vote_weight          = (float) $row->vote_weight;
-
-            /** @phpstan-var ReputationRow $row */
-            self::$rowMemo[(int) $row->user_id] = $row;
+        foreach ($rows ?: [] as $raw) {
+            $uid = (int) $raw->page_owner_id;
+            if ($uid > 0) {
+                /** @phpstan-var ReputationRow $mapped */
+                $mapped = $this->mapSelfPageRow($uid, $raw);
+                self::$rowMemo[$uid] = $mapped;
+            }
         }
     }
 
@@ -128,21 +166,20 @@ class ReputationRepository {
 
         global $wpdb;
 
-        /** @var \stdClass|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE user_id = %d",
-            $userId
+        // Architecture A: a member's tier/score lives on their self-page row
+        // in bcc_trust_page_scores, not bcc_trust_reputation. Resolve by the
+        // deterministic self-page id and map to the legacy ReputationRow shape.
+        $pageId = \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($userId);
+
+        /** @var object{total_score: float|numeric-string, reputation_tier: string, contribution_bonus: float|numeric-string, vote_count: int|numeric-string, last_calculated_at?: string|null}|null $raw */
+        $raw = $wpdb->get_row($wpdb->prepare(
+            "SELECT page_owner_id, total_score, reputation_tier, contribution_bonus, vote_count, last_calculated_at
+               FROM {$this->scoreTable}
+              WHERE page_id = %d AND category_id = 0",
+            $pageId
         ));
 
-        if ($row) {
-            // Cast numeric fields
-            $row->reputation_score     = (float) $row->reputation_score;
-            $row->contribution_bonus   = (float) $row->contribution_bonus;
-            $row->total_votes_cast     = (int) $row->total_votes_cast;
-            $row->total_votes_received = (int) $row->total_votes_received;
-            $row->flag_count           = (int) $row->flag_count;
-            $row->vote_weight          = (float) $row->vote_weight;
-        }
+        $row = $raw !== null ? $this->mapSelfPageRow($userId, $raw) : null;
 
         /** @phpstan-var ReputationRow|null $row */
         self::$rowMemo[$userId] = $row;
@@ -613,21 +650,26 @@ class ReputationRepository {
         if ($clean === []) {
             return [];
         }
-        $idList = array_keys($clean);
-        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+        $idList  = array_keys($clean);
+        // Self-page ids (Architecture A); map page_owner_id back to user.
+        $pageIds = array_map(
+            static fn(int $uid): int => \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($uid),
+            $idList
+        );
+        $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
 
         global $wpdb;
-        /** @var list<object{user_id: int|numeric-string, reputation_tier: string}>|null $rows */
+        /** @var list<object{page_owner_id: int|numeric-string, reputation_tier: string}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT user_id, reputation_tier
-               FROM {$this->table}
-              WHERE user_id IN ({$placeholders})",
-            ...$idList
+            "SELECT page_owner_id, reputation_tier
+               FROM {$this->scoreTable}
+              WHERE page_id IN ({$placeholders}) AND category_id = 0",
+            ...$pageIds
         ));
 
         $out = [];
         foreach ($rows ?: [] as $row) {
-            $uid = (int) $row->user_id;
+            $uid = (int) $row->page_owner_id;
             if ($uid > 0) {
                 $out[$uid] = (string) $row->reputation_tier;
             }
@@ -649,18 +691,23 @@ class ReputationRepository {
     public function getCautionAndRiskyUserIds(int $limit = 1000): array {
         global $wpdb;
 
-        /** @var list<object{user_id: int|numeric-string}>|null $rows */
+        // Architecture A: scan member self-pages (page_id > ID_BASE) only —
+        // entity pages can also be caution/risky but are not members.
+        /** @var list<object{page_owner_id: int|numeric-string}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT user_id
-               FROM {$this->table}
-              WHERE reputation_tier IN ('caution', 'risky')
+            "SELECT page_owner_id
+               FROM {$this->scoreTable}
+              WHERE category_id = 0
+                AND page_id > %d
+                AND reputation_tier IN ('caution', 'risky')
               LIMIT %d",
+            \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE,
             $limit
         ));
 
         $ids = [];
         foreach ($rows ?: [] as $row) {
-            $ids[] = (int) $row->user_id;
+            $ids[] = (int) $row->page_owner_id;
         }
         return $ids;
     }
