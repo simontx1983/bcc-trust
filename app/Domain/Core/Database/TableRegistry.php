@@ -118,12 +118,6 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_flags';
     }
 
-    public static function reputation(): string
-    {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_trust_reputation';
-    }
-
     public static function fingerprints(): string
     {
         global $wpdb;
@@ -313,7 +307,6 @@ final class TableRegistry
             'activity'           => self::activity(),
             'activity_archive'   => self::activityArchive(),
             'flags'              => self::flags(),
-            'reputation'         => self::reputation(),
             'fingerprints'       => self::fingerprints(),
             'patterns'           => self::patterns(),
             'user_info'          => self::userInfo(),

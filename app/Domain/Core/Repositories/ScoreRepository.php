@@ -1703,18 +1703,21 @@ class ScoreRepository {
         }
 
         // ── Tier concentration ──────────────────────────────────────────────
-        $reputationTable = \BCC\Trust\Core\Database\TableRegistry::reputation();
-        $tableExists     = \BCC\Trust\Core\Database\TableRegistry::exists($reputationTable);
-
-        if ($tableExists && !empty($voterIds)) {
-            $placeholders = implode(',', array_fill(0, count($voterIds), '%d'));
+        // Architecture A: voters' tiers live on their self-pages
+        // (page_id = ID_BASE + voter_user_id), not the retired reputation table.
+        if (!empty($voterIds)) {
+            $pageIds      = array_map(
+                static fn($u): int => \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId((int) $u),
+                $voterIds
+            );
+            $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
             $tierRows     = $wpdb->get_results(
                 $wpdb->prepare(
                     "SELECT reputation_tier, COUNT(*) as cnt
-                     FROM {$reputationTable}
-                     WHERE user_id IN ({$placeholders})
+                     FROM {$this->table}
+                     WHERE page_id IN ({$placeholders}) AND category_id = 0
                      GROUP BY reputation_tier",
-                    $voterIds
+                    $pageIds
                 )
             );
 

@@ -231,7 +231,8 @@ function bcc_trust_verify_all_tables() {
         'bcc_trust_activity',
         'bcc_trust_activity_archive',
         'bcc_trust_flags',
-        'bcc_trust_reputation',
+        // bcc_trust_reputation retired (Architecture A, Slice 1c) — trust moved
+        // to the self-page row in bcc_trust_page_scores.
         'bcc_trust_device_fingerprints',
         'bcc_trust_patterns',
         'bcc_trust_user_info',

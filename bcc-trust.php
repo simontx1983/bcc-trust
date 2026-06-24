@@ -220,6 +220,9 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-blog-chain-tags.php';
 // out of the schema-version hash glob; self-guards via the
 // bcc_trust_self_pages_seeded option + a per-row pristine check.
 require_once BCC_TRUST_PATH . 'includes/database/seed-self-pages.php';
+// Drops the retired bcc_trust_reputation table after the seed has run
+// (fires on init priority 25 > the seed's 20). Guarded; no-op once done.
+require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-reputation.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**

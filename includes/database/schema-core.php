@@ -342,30 +342,14 @@ function bcc_trust_create_core_tables() {
 
     /*
     ======================================================
-    REPUTATION
+    REPUTATION — RETIRED (Architecture A, Slice 1c)
     ======================================================
+    A member's trust now lives on their self-page row in
+    bcc_trust_page_scores (page_id = ID_BASE + user_id). The
+    bcc_trust_reputation table is no longer created here and is dropped by
+    includes/database/drop-legacy-reputation.php. Do NOT re-add a CREATE
+    here — it would resurrect the retired table on the next dbDelta.
     */
-
-    $reputation_table = \BCC\Trust\Core\Database\TableRegistry::reputation();
-
-    $sql = "CREATE TABLE $reputation_table (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        user_id BIGINT UNSIGNED NOT NULL,
-        reputation_score DECIMAL(5,2) NOT NULL DEFAULT 50.00,
-        reputation_tier VARCHAR(20) NOT NULL DEFAULT 'neutral',
-        contribution_bonus DECIMAL(5,2) NOT NULL DEFAULT 0.00,
-        total_votes_cast INT UNSIGNED NOT NULL DEFAULT 0,
-        total_votes_received INT UNSIGNED NOT NULL DEFAULT 0,
-        flag_count INT UNSIGNED NOT NULL DEFAULT 0,
-        vote_weight DECIMAL(5,2) NOT NULL DEFAULT 1.0,
-        last_calculated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        UNIQUE KEY unique_user (user_id),
-        KEY idx_score (reputation_score),
-        KEY idx_tier (reputation_tier)
-    ) $charset_collate;";
-
-    dbDelta($sql);
 
     /*
     ======================================================
