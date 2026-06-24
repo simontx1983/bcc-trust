@@ -466,6 +466,39 @@ final class PeepSoReactionRepository
         return $out;
     }
 
+    /**
+     * True if $voucherId still has at least one active reaction of
+     * $reactionTypeId on ANY content authored by $authorId. Bounded by
+     * LIMIT 1. Used for ref-counted vouch revocation: a vouch persists
+     * while the voucher has ≥1 vouch-reaction on the author's posts.
+     */
+    public function hasGivenReactionOnAuthorContent(int $voucherId, int $authorId, int $reactionTypeId): bool
+    {
+        if ($voucherId <= 0 || $authorId <= 0 || $reactionTypeId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        $reactions  = self::table();
+        $activities = self::activitiesTable();
+
+        $value = $wpdb->get_var($wpdb->prepare(
+            "SELECT 1
+               FROM {$reactions} r
+               INNER JOIN {$activities} a ON a.act_id = r.reaction_act_id
+               INNER JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+              WHERE r.reaction_user_id = %d
+                AND r.reaction_type    = %d
+                AND p.post_author      = %d
+              LIMIT 1",
+            $voucherId,
+            $reactionTypeId,
+            $authorId
+        ));
+
+        return (bool) $value;
+    }
+
     public function viewerReactionForActId(int $actId, int $viewerId): ?int
     {
         if ($actId <= 0 || $viewerId <= 0) {

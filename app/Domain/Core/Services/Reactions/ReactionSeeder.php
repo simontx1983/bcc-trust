@@ -1,10 +1,11 @@
 <?php
 /**
- * ReactionSeeder — one-time install of the §D5 BCC custom reactions.
+ * ReactionSeeder — one-time install of the BCC custom reactions.
  *
- * Per §D5 plan: "seed three peepso_reaction_user CPT posts at plugin
- * activation, store the resolved numeric reaction_type IDs in BCC
- * options."
+ * Seeds the BCC-owned peepso_reaction_user CPT posts (trust: solid,
+ * vouch; social: fire) at plugin activation and stores the resolved
+ * numeric reaction_type IDs in BCC options. (stand_behind was retired
+ * in Slice 3.)
  *
  * Idempotent: re-running is safe. The seeder checks the persisted
  * id map first; missing kinds get inserted, present kinds are
@@ -56,8 +57,8 @@ final class ReactionSeeder
      * Helper labels (the §N1 plain-English descriptors) live on the
      * frontend; the post_title here is the brand-name (Solid, etc.).
      *
-     * Trust grammar — solid/vouch/stand_behind — is the §D5 contract
-     * and is locked. Social grammar — fire — is the v1.5 single
+     * Trust grammar — solid/vouch (stand_behind retired in Slice 3).
+     * Social grammar — fire — is the v1.5 single
      * BCC-owned addition (PeepSo's defaults cover like/love/haha/wow,
      * but no Fire); ReactionGrammarRegistry resolves the rest of the
      * social set from PeepSo's seeded posts at lookup time.
@@ -78,13 +79,6 @@ final class ReactionSeeder
             'helper'  => 'Back this',
             'icon'    => 'bcc-reaction-vouch.svg',
             'content' => 'Back this — public endorsement of the post.',
-        ],
-        [
-            'kind'    => ReactionTypeRegistry::KIND_STAND_BEHIND,
-            'title'   => 'Stand behind',
-            'helper'  => 'Stake my rep',
-            'icon'    => 'bcc-reaction-stand-behind.svg',
-            'content' => 'Stake my rep — strongest backing, ties to the user\'s reputation.',
         ],
         [
             'kind'    => ReactionTypeRegistry::KIND_FIRE,

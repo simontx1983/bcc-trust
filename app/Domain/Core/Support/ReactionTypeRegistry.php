@@ -8,10 +8,12 @@
  * of {kind: post_id} written by ReactionSeeder.
  *
  * Two interaction grammars seed reactions here:
- *   - §D5 trust grammar — solid / vouch / stand_behind
- *       solid        — agree / "+1"
- *       vouch        — back this
- *       stand_behind — stake my rep
+ *   - trust grammar — solid / vouch
+ *       solid — agree / "+1" (social acknowledgment; drives the
+ *               "solids received/given" member stat)
+ *       vouch — back this; lands a light, permanent post_vouch
+ *               endorsement on the author's self-page (Slice 3)
+ *     (stand_behind was retired in Slice 3 — no users yet, hard-deleted.)
  *   - v1.5 social grammar — fire (single BCC-seeded reaction; the
  *     other social kinds — like/love/haha/wow — are PeepSo defaults
  *     looked up by post_title via ReactionGrammarRegistry, NOT seeded
@@ -42,22 +44,20 @@ final class ReactionTypeRegistry
 
     public const KIND_SOLID        = 'solid';
     public const KIND_VOUCH        = 'vouch';
-    public const KIND_STAND_BEHIND = 'stand_behind';
 
     /** v1.5 social grammar — BCC-seeded; PeepSo has no Fire default. */
     public const KIND_FIRE = 'fire';
 
     /**
-     * Trust-grammar kinds. Stable since V1 §D5; do NOT add to this
-     * list — the trust rail's restrained presentation is part of the
-     * §D5 contract.
+     * Trust-grammar kinds. stand_behind was retired in Slice 3; the
+     * remaining trust rail is solid (social ack) + vouch (light
+     * self-page endorsement).
      *
      * @var list<string>
      */
     public const TRUST_KINDS = [
         self::KIND_SOLID,
         self::KIND_VOUCH,
-        self::KIND_STAND_BEHIND,
     ];
 
     /**
@@ -71,7 +71,6 @@ final class ReactionTypeRegistry
     public const ALL_KINDS = [
         self::KIND_SOLID,
         self::KIND_VOUCH,
-        self::KIND_STAND_BEHIND,
         self::KIND_FIRE,
     ];
 
@@ -103,7 +102,6 @@ final class ReactionTypeRegistry
      */
     public static function solidId(): ?int        { return self::idFor(self::KIND_SOLID); }
     public static function vouchId(): ?int        { return self::idFor(self::KIND_VOUCH); }
-    public static function standBehindId(): ?int  { return self::idFor(self::KIND_STAND_BEHIND); }
     public static function fireId(): ?int         { return self::idFor(self::KIND_FIRE); }
 
     /**
@@ -121,10 +119,9 @@ final class ReactionTypeRegistry
         $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
 
         $map = [
-            self::KIND_SOLID        => null,
-            self::KIND_VOUCH        => null,
-            self::KIND_STAND_BEHIND => null,
-            self::KIND_FIRE         => null,
+            self::KIND_SOLID => null,
+            self::KIND_VOUCH => null,
+            self::KIND_FIRE  => null,
         ];
 
         if (is_array($decoded)) {

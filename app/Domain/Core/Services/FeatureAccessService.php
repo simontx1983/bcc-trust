@@ -98,7 +98,6 @@ final class FeatureAccessService
     private const FEATURE_REQUIREMENTS = [
         'write_review'          => ['min_level' => self::LEVEL_ACTIVE,  'requires_min_tier' => 'neutral'],   // §D2: rep ≥ neutral
         'vouch_reaction'        => ['min_level' => self::LEVEL_ACTIVE],
-        'stand_behind_reaction' => ['min_level' => self::LEVEL_ACTIVE],
         'sign_dispute'          => ['min_level' => self::LEVEL_VETERAN, 'requires_wallet' => true,  'requires_min_tier' => 'neutral'], // §D2
         'open_dispute'          => ['min_level' => self::LEVEL_VETERAN, 'requires_wallet' => true,  'requires_min_tier' => 'neutral'], // §D2
         'see_signal_details'    => ['min_level' => self::LEVEL_VETERAN],

@@ -291,7 +291,10 @@ class EndorsementWeightCalculator {
      * @param object[] $rows  Rows from EndorsementRepository::getActiveWithFraudScoresForPage()
      *                        Each row must expose: base_weight, created_at,
      *                        endorser_user_id, fraud_score_at_endorsement,
-     *                        current_fraud_score.
+     *                        current_fraud_score. Rows may also expose `context`
+     *                        — a 'post_vouch' row is a fixed-weight light vouch
+     *                        (Slice 3) that NEVER vests (vestingFactor forced to
+     *                        1.0); all other factors still apply.
      * @return array{bonus: float, count: int, unique_endorsers: int}
      */
     public static function computePageEndorsementBonus(array $rows): array {
@@ -300,14 +303,23 @@ class EndorsementWeightCalculator {
         foreach ($rows as $r) {
             $baseW      = (float) ($r->base_weight ?? 0);
             $createdAt  = (string) ($r->created_at ?? '');
+            $context    = (string) ($r->context ?? 'general');
             $origFraud  = (int)   ($r->fraud_score_at_endorsement ?? 0);
             $currFraud  = (int)   ($r->current_fraud_score ?? 0);
             $endorserId = (int)   ($r->endorser_user_id ?? 0);
 
-            $ageDays = $createdAt !== ''
-                ? (int) ((time() - strtotime($createdAt)) / DAY_IN_SECONDS)
-                : 0;
-            $vestingFactor = self::resolveVestingStage(max(0, $ageDays))['factor'];
+            // post_vouch rows are permanently light: they skip vesting
+            // graduation entirely (factor pinned at 1.0 so base_weight ×
+            // retro × diversity is the whole story). Every OTHER context
+            // graduates through the 5-stage model as before.
+            if ($context === 'post_vouch') {
+                $vestingFactor = 1.0;
+            } else {
+                $ageDays = $createdAt !== ''
+                    ? (int) ((time() - strtotime($createdAt)) / DAY_IN_SECONDS)
+                    : 0;
+                $vestingFactor = self::resolveVestingStage(max(0, $ageDays))['factor'];
+            }
 
             $retro = FraudDiscountCalculator::retroactiveFactor($currFraud, $origFraud);
 

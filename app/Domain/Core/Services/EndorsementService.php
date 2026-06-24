@@ -467,6 +467,142 @@ class EndorsementService {
         }
     }
 
+    // ======================================================
+    // SLICE 3 — VOUCH (light per-post trust signal)
+    // ======================================================
+
+    /**
+     * Run $fn inside the standard endorsement advisory-lock + transaction
+     * ceremony. Mirrors endorsePage()/revokePageEndorsement() exactly:
+     * acquire user → page → score locks OUTSIDE the TransactionManager::run
+     * closure so RELEASE_LOCK fires AFTER COMMIT, then release in finally in
+     * reverse order. Used ONLY by the two vouch methods — endorsePage/revoke
+     * keep their inline ceremony to limit blast radius.
+     */
+    private function runLockedEndorsementTx(int $userId, int $pageId, callable $fn): void {
+        $userLockKey  = 'bcc_endorse_u_' . $userId;
+        $pageLockKey  = 'bcc_endorse_p_' . $pageId;
+        $scoreLockKey = 'bcc_score_page_' . $pageId;
+
+        if (!$this->endorsementRepo->acquireConcurrencyLock($userLockKey, 5)) {
+            throw new Exception('Endorsement system is busy. Please try again in a moment.');
+        }
+        if (!$this->endorsementRepo->acquireConcurrencyLock($pageLockKey, 5)) {
+            $this->endorsementRepo->releaseConcurrencyLock($userLockKey);
+            throw new Exception('Endorsement system is busy. Please try again in a moment.');
+        }
+        $scoreLockAcquired = false;
+        if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            $scoreLockAcquired = \BCC\Core\DB\AdvisoryLock::acquire($scoreLockKey, 5);
+            if (!$scoreLockAcquired) {
+                $this->endorsementRepo->releaseConcurrencyLock($pageLockKey);
+                $this->endorsementRepo->releaseConcurrencyLock($userLockKey);
+                throw new Exception('Endorsement system is busy. Please try again in a moment.');
+            }
+        }
+
+        try {
+            TransactionManager::run($fn);
+        } finally {
+            // Release AFTER commit (reverse acquisition order) — couples lock
+            // handoff to commit visibility, same invariant as endorsePage.
+            if ($scoreLockAcquired && class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+                \BCC\Core\DB\AdvisoryLock::release($scoreLockKey);
+            }
+            $this->endorsementRepo->releaseConcurrencyLock($pageLockKey);
+            $this->endorsementRepo->releaseConcurrencyLock($userLockKey);
+        }
+    }
+
+    /**
+     * Land a light, permanent `post_vouch` endorsement on the post
+     * author's self-page. Deliberately bypasses endorsePage()'s heavy
+     * gates (5-pages/day cap, coordination windows, 7-day account age,
+     * quest gate) — those would choke a per-post reaction. The vouch's
+     * anti-farm IS: the rank gate + per-author idempotency + self-exclusion.
+     *
+     * @return bool True iff a new post_vouch row was created (idempotent —
+     *              a repeat vouch on the same author returns false).
+     */
+    public function vouchForAuthor(int $voucherId, int $authorId): bool {
+        if ($voucherId <= 0 || $authorId <= 0 || $voucherId === $authorId) {
+            return false;
+        }
+
+        // Rank gate — silent skip. The social reaction still lands in
+        // PeepSo even when the user can't confer trust; we just don't
+        // write the endorsement.
+        $gate = \BCC\Trust\Core\Plugin::instance()->featureAccessService()->canPerform($voucherId, 'vouch_reaction');
+        if (empty($gate['allowed'])) {
+            return false;
+        }
+
+        $pageId = \BCC\Trust\Core\Plugin::instance()->memberSelfPageService()->ensureSelfPage($authorId);
+        if ($pageId <= 0) {
+            return false;
+        }
+
+        /** @var float $weight */
+        $weight = (float) apply_filters('bcc_trust_vouch_weight', BCC_TRUST_VOUCH_WEIGHT);
+
+        $created = false;
+        $this->runLockedEndorsementTx($voucherId, $pageId, function () use ($voucherId, $pageId, $weight, &$created): void {
+            if ($this->endorsementRepo->hasEndorsed($voucherId, $pageId, 'post_vouch')) {
+                return; // already vouched — idempotent.
+            }
+            $this->endorsementRepo->create($voucherId, $pageId, 'post_vouch', $weight, null, 0, $weight);
+            $this->applyEndorsementBonus($pageId, $weight);
+            $created = true;
+        });
+
+        if ($created) {
+            AuditLogger::log('vouch_added', $pageId, [
+                'voucher_id' => $voucherId,
+                'author_id'  => $authorId,
+                'weight'     => $weight,
+            ], 'page', $voucherId);
+        }
+
+        return $created;
+    }
+
+    /**
+     * Lift the light `post_vouch` endorsement a voucher placed on an
+     * author's self-page. No ensureSelfPage on revoke — if no self-page
+     * exists there's nothing to revoke; selfPageId is a pure id computation.
+     *
+     * @return bool True iff an active post_vouch row was removed.
+     */
+    public function revokeVouchForAuthor(int $voucherId, int $authorId): bool {
+        if ($voucherId <= 0 || $authorId <= 0 || $voucherId === $authorId) {
+            return false;
+        }
+
+        $pageId = \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($authorId);
+        if ($pageId <= 0) {
+            return false;
+        }
+
+        $removed = false;
+        $this->runLockedEndorsementTx($voucherId, $pageId, function () use ($voucherId, $pageId, &$removed): void {
+            if (!$this->endorsementRepo->hasEndorsed($voucherId, $pageId, 'post_vouch')) {
+                return; // nothing to revoke.
+            }
+            $this->endorsementRepo->delete($voucherId, $pageId, 'post_vouch');
+            $this->removeEndorsementBonus($pageId, 0.0);
+            $removed = true;
+        });
+
+        if ($removed) {
+            AuditLogger::log('vouch_removed', $pageId, [
+                'voucher_id' => $voucherId,
+                'author_id'  => $authorId,
+            ], 'page', $voucherId);
+        }
+
+        return $removed;
+    }
+
     /**
      * Remove endorsement from a page
      *

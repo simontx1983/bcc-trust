@@ -17,7 +17,7 @@
  *     see numeric IDs and never compute them.
  *
  *   - `reaction` accepts any kind from `ReactionGrammarMap::allKnownKinds()`
- *     across grammars: trust ('solid' | 'vouch' | 'stand_behind') and
+ *     across grammars: trust ('solid' | 'vouch') and
  *     social ('like' | 'love' | 'haha' | 'wow' | 'fire'). The kind →
  *     reaction_type post-ID mapping lives in ReactionGrammarRegistry,
  *     which composes BCC-seeded IDs (ReactionTypeRegistry) with
@@ -207,14 +207,25 @@ final class ReactionsEndpoint
         $module  = PeepSoActivityRepository::getModuleIdByActId($actId) ?? '';
         $grammar = ReactionGrammarMap::grammarForModule($module);
 
+        // Capture the viewer's CURRENT reaction kind BEFORE deletion so
+        // subscribers (Slice 3 vouch revoke) can branch on what was
+        // removed. The hook fires after the row is already gone.
+        $vouchTypeId = \BCC\Trust\Core\Support\ReactionTypeRegistry::vouchId();
+        $priorTypeId = Plugin::instance()->peepSoReactionRepository()->viewerReactionForActId($actId, $userId);
+        $removedKind = ($vouchTypeId !== null && $priorTypeId === $vouchTypeId)
+            ? \BCC\Trust\Core\Support\ReactionTypeRegistry::KIND_VOUCH
+            : '';
+
         if (!PeepSoReactionWriter::removeReaction($actId)) {
             return ApiResponse::error('bcc_internal_error', 'Failed to remove reaction.', 500);
         }
 
         // Symmetric counterpart to bcc_reaction_added. Subscribers can
         // tear down their own state (e.g. retract a notification that
-        // was sent moments ago).
-        do_action('bcc_reaction_removed', $userId, $actId);
+        // was sent moments ago, or lift a post_vouch endorsement). The
+        // 3rd arg ($removedKind) is backward-compatible — existing
+        // 2-arg subscribers are unaffected.
+        do_action('bcc_reaction_removed', $userId, $actId, $removedKind);
 
         return self::buildStateResponse($actId, $userId, $grammar);
     }
