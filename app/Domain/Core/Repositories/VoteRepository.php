@@ -742,7 +742,11 @@ class VoteRepository {
     public function getAllForPage( int $pageId, int $limit = 500, int $offset = 0 ): array {
         global $wpdb;
 
-        $reputationTable = \BCC\Trust\Core\Database\TableRegistry::reputation();
+        // Architecture A: the voter's tier lives on their self-page score row
+        // (page_id = ID_BASE + voter_user_id, category_id = 0), not the retired
+        // bcc_trust_reputation table.
+        $scoreTable = \BCC\Trust\Core\Database\TableRegistry::scores();
+        $idBase     = \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE;
 
         return $wpdb->get_results(
             $wpdb->prepare(
@@ -759,7 +763,7 @@ class VoteRepository {
                  FROM {$this->table} v
                  LEFT JOIN {$wpdb->users} u  ON v.voter_user_id = u.ID
                  LEFT JOIN " . \BCC\Trust\Core\Database\TableRegistry::userInfo() . " ui ON v.voter_user_id = ui.user_id
-                 LEFT JOIN {$reputationTable} r ON v.voter_user_id = r.user_id
+                 LEFT JOIN {$scoreTable} r ON r.page_id = ({$idBase} + v.voter_user_id) AND r.category_id = 0
                  WHERE v.page_id = %d
                    AND v.status  = 1
                  ORDER BY v.created_at DESC
