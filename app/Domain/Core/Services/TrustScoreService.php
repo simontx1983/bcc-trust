@@ -27,9 +27,14 @@ if (!defined('ABSPATH')) {
  *         BCC_TRUST_NEUTRAL_SCORE
  *           + (positive_score - negative_score) * 2
  *           + endorsement_bonus
- *           + onchain_bonus,
+ *           + onchain_bonus
+ *           + contribution_bonus,
  *         0, 100
  *     )
+ *
+ * `contribution_bonus` is 0 for entity pages; it carries the "Trust
+ * Recovery Through Contribution" term on member self-pages (Architecture A —
+ * a person is a page; their tier is this formula on their self-page).
  *
  * Two read paths exist for callers who want the trust score for a page:
  *
@@ -79,10 +84,15 @@ final class TrustScoreService
         float $positiveScore,
         float $negativeScore,
         float $endorsementBonus,
-        float $onchainBonus
+        float $onchainBonus,
+        float $contributionBonus = 0.0,
+        float $penaltyAdjustment = 0.0
     ): float {
         $base  = (float) self::neutral() + ($positiveScore - $negativeScore) * 2.0;
-        $bonus = $endorsementBonus + $onchainBonus;
+        // penalty_adjustment is stored NEGATIVE (dispute/admin penalties
+        // subtract); it's an additive term like the bonuses, clobber-safe
+        // against vote recalcs because it lives in its own column.
+        $bonus = $endorsementBonus + $onchainBonus + $contributionBonus + $penaltyAdjustment;
         $total = $base + $bonus;
         return max((float) self::MIN, min((float) self::MAX, $total));
     }
@@ -99,7 +109,33 @@ final class TrustScoreService
     {
         return 'LEAST(' . self::MAX . ', GREATEST(' . self::MIN . ', '
              . self::neutral()
-             . ' + (positive_score - negative_score) * 2 + endorsement_bonus + onchain_bonus))';
+             . ' + (positive_score - negative_score) * 2 + endorsement_bonus + onchain_bonus + contribution_bonus + penalty_adjustment))';
+    }
+
+    /**
+     * The canonical SQL `CASE` that maps a score expression to a
+     * reputation_tier, mirroring ReputationRepository::calculateTier() /
+     * VoteService::determineTier() — single source of truth for the tier
+     * thresholds in SQL. Used by score-row writes that recompute total_score
+     * inline (endorsement/contribution bonus applies) so reputation_tier never
+     * goes stale relative to total_score.
+     *
+     * Pass the same expression you pass for total_score (e.g. formulaSql()).
+     * The caller wraps it as `reputation_tier = <tierSql>` in the SET clause.
+     */
+    public static function tierSql(string $scoreExpr): string
+    {
+        $elite   = defined('BCC_TRUST_TIER_ELITE')   ? (int) BCC_TRUST_TIER_ELITE   : 80;
+        $trusted = defined('BCC_TRUST_TIER_TRUSTED') ? (int) BCC_TRUST_TIER_TRUSTED : 65;
+        $neutral = defined('BCC_TRUST_TIER_NEUTRAL') ? (int) BCC_TRUST_TIER_NEUTRAL : 45;
+        $caution = defined('BCC_TRUST_TIER_CAUTION') ? (int) BCC_TRUST_TIER_CAUTION : 30;
+
+        return 'CASE'
+             . " WHEN ({$scoreExpr}) >= {$elite} THEN 'elite'"
+             . " WHEN ({$scoreExpr}) >= {$trusted} THEN 'trusted'"
+             . " WHEN ({$scoreExpr}) >= {$neutral} THEN 'neutral'"
+             . " WHEN ({$scoreExpr}) >= {$caution} THEN 'caution'"
+             . " ELSE 'risky' END";
     }
 
     /**

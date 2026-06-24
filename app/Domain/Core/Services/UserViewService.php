@@ -21,7 +21,9 @@
  *                                    presence (returns 0 pre-seeder)
  *   - progression.next_rank_thresholds       → resolveProgression() derives
  *                                              from RankCatalog + trust_score
- *   - progression.trust_score_recent_changes → ReputationEventRepository::getRecentForUser
+ *   - progression.trust_score_recent_changes → ScoreEventRepository::getRecentForPage
+ *                                              (the member self-page's live
+ *                                              bcc_trust_score_events ledger)
  *
  * Intentional V1 design (NOT a stub):
  *   - counts.watching_size = followers_count proxy. §C2 single-graph rule:
@@ -46,8 +48,8 @@ use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
-use BCC\Trust\Core\Repositories\ReputationEventRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Repositories\ScoreEventRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Repositories\XRepository;
@@ -71,7 +73,7 @@ final class UserViewService
     private FeatureAccessService $featureAccess;
     private FlagsRepository $flagsRepo;
     private LivingService $livingService;
-    private ReputationEventRepository $reputationEventRepo;
+    private ScoreEventRepository $scoreEventRepo;
     private PeepSoReactionRepository $reactionRepo;
     private DisputeParticipationRepository $participationRepo;
     private AttestationService $attestationService;
@@ -93,7 +95,7 @@ final class UserViewService
         FeatureAccessService $featureAccess,
         FlagsRepository $flagsRepo,
         LivingService $livingService,
-        ReputationEventRepository $reputationEventRepo,
+        ScoreEventRepository $scoreEventRepo,
         PeepSoReactionRepository $reactionRepo,
         DisputeParticipationRepository $participationRepo,
         AttestationService $attestationService
@@ -104,7 +106,7 @@ final class UserViewService
         $this->featureAccess       = $featureAccess;
         $this->flagsRepo           = $flagsRepo;
         $this->livingService       = $livingService;
-        $this->reputationEventRepo = $reputationEventRepo;
+        $this->scoreEventRepo      = $scoreEventRepo;
         $this->reactionRepo        = $reactionRepo;
         $this->participationRepo   = $participationRepo;
         $this->attestationService  = $attestationService;
@@ -1234,16 +1236,21 @@ final class UserViewService
     }
 
     /**
-     * Last few reputation-change events for a user, shaped per §N11.
-     * Sourced from bcc_reputation_events written by
-     * ReputationCalculatorService::recalculateUserReputation when the
-     * recalc actually shifted the score (above EVENT_NOISE_FLOOR).
+     * Last few score-change events for a member, shaped per §N11.
+     * Sourced from the member's self-page row in the LIVE
+     * bcc_trust_score_events ledger (written by ScoreMutationLogger on
+     * every self-page score mutation — vote, endorsement, contribution
+     * bonus, moderation). Read via getRecentForPage so the synthetic
+     * self-page id (no wp_posts row) is not dropped by an inner join.
      *
      * @return list<array{delta: int, reason: string, at: string}>
      */
     private function resolveTrustScoreRecentChanges(int $userId): array
     {
-        $rows = $this->reputationEventRepo->getRecentForUser($userId, 5);
+        $rows = $this->scoreEventRepo->getRecentForPage(
+            MemberSelfPageService::selfPageId($userId),
+            5
+        );
         $items = [];
         foreach ($rows as $row) {
             $items[] = [

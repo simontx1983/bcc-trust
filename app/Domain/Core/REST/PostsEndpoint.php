@@ -102,6 +102,20 @@ final class PostsEndpoint
                         'type'              => 'integer',
                         'sanitize_callback' => 'absint',
                     ],
+                    // Person-review target (Slice 2). When target_kind is
+                    // 'user_profile' the handler resolves target_user_id to
+                    // the member's self-page id; otherwise target_page_id
+                    // (entity page) is used. Default omits both → entity path.
+                    'target_kind' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_key',
+                    ],
+                    'target_user_id' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
+                    ],
                     'grade' => [
                         'required'          => false,
                         'type'              => 'string',
@@ -456,9 +470,32 @@ final class PostsEndpoint
             // Reviews are page-scoped, not wall-scoped — group_id is
             // ignored here on purpose. Surfacing it would create a
             // semantic conflict with target_page_id.
-            $targetPageId = (int) $request->get_param('target_page_id');
-            $grade        = (string) ($request->get_param('grade') ?? '');
-            $result       = $service->createReview($viewerId, $targetPageId, $grade, $content);
+            //
+            // A review can target an entity page (target_page_id) OR a
+            // member (target_kind=user_profile + target_user_id). For a
+            // member we resolve their self-page id server-side (Slice 2,
+            // Architecture A) — the self-page scheme stays a backend
+            // detail and the rest of createReview's security pipeline is
+            // identical. ensureSelfPage is lazy + idempotent.
+            $grade = (string) ($request->get_param('grade') ?? '');
+            if ((string) $request->get_param('target_kind') === 'user_profile') {
+                $targetUserId = (int) $request->get_param('target_user_id');
+                // Reject a missing/unknown member BEFORE provisioning a
+                // self-page, so a bogus target_user_id can't seed neutral
+                // score rows for non-existent users (the eligibility gate
+                // would refuse the vote anyway, but don't write first).
+                if ($targetUserId <= 0 || get_userdata($targetUserId) === false) {
+                    $result = ['error' => 'bcc_invalid_request', 'message' => 'A valid member is required.'];
+                } else {
+                    $targetPageId = Plugin::instance()->memberSelfPageService()->ensureSelfPage($targetUserId);
+                    $result = $targetPageId > 0
+                        ? $service->createReview($viewerId, $targetPageId, $grade, $content)
+                        : ['error' => 'bcc_unavailable', 'message' => 'This member cannot be reviewed yet.'];
+                }
+            } else {
+                $targetPageId = (int) $request->get_param('target_page_id');
+                $result       = $service->createReview($viewerId, $targetPageId, $grade, $content);
+            }
         } elseif ($kind === 'blog') {
             // §D6 — `content` carries the full_text; `excerpt` is the
             // Floor-context teaser. Service enforces length bounds.

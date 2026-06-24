@@ -58,7 +58,9 @@ class VoteJobDispatcher {
         $tasks = [
             VoteFraudAnalyzer::HOOK,
             'bcc_trust_async_trust_graph_update',
-            'bcc_trust_async_reputation_recalculate',
+            // bcc_trust_async_reputation_recalculate retired (Architecture A):
+            // votes on an entity page no longer recompute the owner's personal
+            // tier, so the owner-reputation recalc listener was removed.
             'bcc_trust_async_stats_refresh',
         ];
 

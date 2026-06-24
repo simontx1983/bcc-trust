@@ -5,10 +5,11 @@
  *
  * For each recovery-eligible user it:
  *   1. computes the capped contribution+consistency bonus (ContributionScoreService),
- *   2. persists it to `bcc_trust_reputation.contribution_bonus` (the INPUT),
- *   3. re-derives reputation_score + tier via recalculateUserReputation
- *      (which blends the bonus under the Rule-2 ceiling — the OUTPUT),
- *   4. audit-logs a real adjustment.
+ *   2. writes it to the member's self-page `contribution_bonus` column
+ *      (Architecture A) via ScoreRepository::applyContributionBonus, which
+ *      recomputes the self-page total_score + reputation_tier inline under
+ *      the canonical formula — so no separate reputation recalc is needed,
+ *   3. audit-logs a real adjustment.
  *
  * Scope (MVP): caution + risky users — the population that actually needs
  * recovery, which also bounds the batch naturally. Reinforcement for
@@ -39,8 +40,7 @@ final class ContributionRecoveryEvaluator
 
     public function __construct(
         private readonly ContributionScoreService $contributionScore,
-        private readonly ReputationRepository $reputationRepo,
-        private readonly ReputationCalculatorService $reputationCalc
+        private readonly ReputationRepository $reputationRepo
     ) {
     }
 
@@ -66,14 +66,31 @@ final class ContributionRecoveryEvaluator
 
             try {
                 $components = $this->contributionScore->computeBonus($userId);
-                $newBonus   = round($components['contribution'] + $components['consistency'], 2);
+                $rawBonus   = round($components['contribution'] + $components['consistency'], 2);
                 $oldBonus   = $this->reputationRepo->getContributionBonus($userId);
 
-                // Persist the input, then re-derive reputation_score + tier
-                // (the blend applies the ceiling). Always re-derive so a
-                // genuine-score change since the last run is reflected too.
-                $this->reputationRepo->update($userId, ['contribution_bonus' => $newBonus]);
-                $this->reputationCalc->recalculateUserReputation($userId, 'contribution_recovery');
+                // Rule R2 — contribution alone can lift a member toward Neutral
+                // but never into Trusted. The self-page formula adds
+                // contribution_bonus RAW, so the ceiling must be applied here
+                // (the legacy recalc applied it via blendContribution at blend
+                // time). Cap the bonus so genuine + bonus can't exceed
+                // BCC_CONTRIB_CEILING while the genuine (non-contribution) score
+                // is below Trusted. blendContribution is the single source of
+                // the ceiling rule — we derive the writable bonus back out of it.
+                $genuine        = $this->reputationRepo->getScore($userId) - $oldBonus;
+                $effectiveTotal = ReputationCalculatorService::blendContribution($genuine, $rawBonus);
+                $newBonus       = round(max(0.0, $effectiveTotal - $genuine), 2);
+
+                // Write the (ceiling'd) bonus directly onto the member's
+                // self-page (Architecture A). applyContributionBonus SETs
+                // contribution_bonus and recomputes total_score +
+                // reputation_tier inline via the canonical formula.
+                $pageId = \BCC\Trust\Core\Plugin::instance()
+                    ->memberSelfPageService()
+                    ->ensureSelfPage($userId);
+                \BCC\Trust\Core\Plugin::instance()
+                    ->scoreRepository()
+                    ->applyContributionBonus($pageId, $newBonus);
 
                 if (abs($newBonus - $oldBonus) >= self::CHANGE_FLOOR) {
                     $adjusted++;
@@ -83,6 +100,7 @@ final class ContributionRecoveryEvaluator
                         [
                             'previous_bonus' => $oldBonus,
                             'new_bonus'      => $newBonus,
+                            'raw_bonus'      => $rawBonus,
                             'contribution'   => round($components['contribution'], 2),
                             'consistency'    => round($components['consistency'], 2),
                         ],

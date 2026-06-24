@@ -212,21 +212,11 @@ final class Plugin
         );
     }
 
-    private ?Repositories\ReputationEventRepository $reputationEventRepository = null;
-    public function reputationEventRepository(): Repositories\ReputationEventRepository
-    {
-        return $this->reputationEventRepository ??= new Repositories\ReputationEventRepository();
-    }
-
-    private ?Services\ReputationCalculatorService $reputationCalculatorService = null;
-    public function reputationCalculatorService(): Services\ReputationCalculatorService
-    {
-        return $this->reputationCalculatorService ??= new Services\ReputationCalculatorService(
-            $this->reputationRepository(),
-            $this->userInfoRepository(),
-            $this->reputationEventRepository()
-        );
-    }
+    // ReputationCalculatorService is now a static-only helper
+    // (ReputationCalculatorService::blendContribution, called by
+    // ContributionRecoveryEvaluator). The instance accessor + its
+    // reputation/userInfo deps were removed in the reputation cutover —
+    // calculateRecommendedVoteWeight had zero callers.
 
     /** Trust Recovery Through Contribution — per-user bonus computation. */
     private ?Services\ContributionScoreService $contributionScoreService = null;
@@ -247,8 +237,7 @@ final class Plugin
     {
         return $this->contributionRecoveryEvaluator ??= new Services\ContributionRecoveryEvaluator(
             $this->contributionScoreService(),
-            $this->reputationRepository(),
-            $this->reputationCalculatorService()
+            $this->reputationRepository()
         );
     }
 
@@ -634,7 +623,7 @@ final class Plugin
             $this->featureAccessService(),
             $this->flagsRepository(),
             $this->livingService(),
-            $this->reputationEventRepository(),
+            $this->scoreEventRepository(),
             $this->peepSoReactionRepository(),
             $this->disputeParticipationRepository(),
             $this->attestationService()
@@ -1030,6 +1019,15 @@ final class Plugin
     public function pageOwnerResolver(): Services\PageOwnerResolver
     {
         return $this->pageOwnerResolver ??= new Services\PageOwnerResolver();
+    }
+
+    /** People-as-first-class-trust-subjects keystone — member self-pages. */
+    private ?Services\MemberSelfPageService $memberSelfPageService = null;
+    public function memberSelfPageService(): Services\MemberSelfPageService
+    {
+        return $this->memberSelfPageService ??= new Services\MemberSelfPageService(
+            $this->scoreRepository()
+        );
     }
 
     private ?Integration\PeepSoIntegration $peepSoIntegration = null;
@@ -1570,19 +1568,12 @@ final class Plugin
             }
         });
 
-        // Reputation tier recalculation for page owner
-        add_action('bcc_trust_async_reputation_recalculate', function (int $voteId) {
-            $vote = $this->voteRepository()->getById($voteId);
-            if (!$vote || (int) $vote->status !== 1) return;
-            $ownerId = (int) Services\PeepSoPageResolver::getOwnerId((int) $vote->page_id);
-            if ($ownerId) {
-                try {
-                    $this->reputationCalculatorService()->recalculateUserReputation($ownerId, 'vote_recalc');
-                } catch (\Throwable $e) {
-                    \BCC\Core\Log\Logger::error('[bcc-trust] ReputationRecalc failed', ['user_id' => $ownerId, 'error' => $e->getMessage()]);
-                }
-            }
-        });
+        // Architecture A: votes on an ENTITY page no longer recompute the
+        // page owner's PERSONAL trust tier (deliberate decoupling — a member's
+        // tier is their self-page total_score, driven by reviews/endorsements
+        // ON the person, not by reviews of pages they happen to own). The
+        // legacy owner-reputation recalc listener was removed here; the
+        // entity-page score itself is updated by the vote write path.
 
         // Voter stats refresh (votes_cast counter)
         add_action('bcc_trust_async_stats_refresh', function (int $voteId) {

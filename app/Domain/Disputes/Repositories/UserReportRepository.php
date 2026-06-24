@@ -39,6 +39,29 @@ class UserReportRepository
     }
 
     /**
+     * Did $reporterId file a report against $reportedId at or after
+     * $sinceMysql? Any status counts — a report that was later
+     * withdrawn or resolved still establishes the relationship that
+     * makes a subsequent down-review retaliatory. Used by
+     * VoteEligibilityChecker's retaliation guard on direct person-
+     * reviews. Bounded by LIMIT 1.
+     */
+    public static function existsRecentReportBetween(int $reporterId, int $reportedId, string $sinceMysql): bool
+    {
+        global $wpdb;
+        $table = self::user_reports_table();
+
+        $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$table}
+             WHERE reporter_id = %d AND reported_id = %d AND created_at >= %s
+             LIMIT 1",
+            $reporterId, $reportedId, $sinceMysql
+        ));
+
+        return (bool) $existing;
+    }
+
+    /**
      * Check whether an active (open) report already exists from reporter to reported user.
      */
     public static function hasActiveReport(int $reporterId, int $reportedId): bool

@@ -387,21 +387,24 @@ class AdminDashboardRepository
     {
         global $wpdb;
 
-        $userInfoTable   = TableRegistry::userInfo();
-        $reputationTable = TableRegistry::reputation();
+        $userInfoTable = TableRegistry::userInfo();
+        // Architecture A: tier/score from the member self-page; vote_weight is
+        // vestigial (admin display only) so emit the default literal.
+        $scoreTable = TableRegistry::scores();
+        $idBase     = \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE;
 
         $limit = BCC_TRUST_ADMIN_USERS_LIMIT;
 
         $users = $wpdb->get_results($wpdb->prepare(
             "SELECT ui.id, ui.user_id, ui.user_login, ui.user_email, ui.display_name, ui.registered, ui.usr_last_activity, ui.usr_views, ui.usr_likes, ui.usr_role, ui.fraud_score, ui.peak_fraud_score, ui.trust_rank, ui.risk_level, ui.is_suspended, ui.is_verified, ui.votes_cast, ui.endorsements_given, ui.automation_score, ui.behavior_score, ui.device_fraud_probability, ui.signals_updated_at, ui.pages_owned, ui.groups_owned, ui.posts_created, ui.comments_made, ui.last_login, ui.last_ip_address, ui.device_fingerprint, ui.fraud_triggers, ui.page_ids_owned, ui.created_at, ui.updated_at,
-                    r.reputation_score,
+                    r.total_score AS reputation_score,
                     r.reputation_tier as user_tier,
-                    r.vote_weight,
+                    1.00 AS vote_weight,
                     u.display_name,
                     u.user_email,
                     u.user_registered
              FROM {$userInfoTable} ui
-             LEFT JOIN {$reputationTable} r ON ui.user_id = r.user_id
+             LEFT JOIN {$scoreTable} r ON r.page_id = ({$idBase} + ui.user_id) AND r.category_id = 0
              LEFT JOIN {$wpdb->users} u ON ui.user_id = u.ID
              ORDER BY ui.fraud_score DESC
              LIMIT %d",
@@ -1661,7 +1664,7 @@ class AdminDashboardRepository
              FROM {$votesTable} v
              LEFT JOIN {$wpdb->users} u ON v.voter_user_id = u.ID
              LEFT JOIN {$userInfo} ui ON v.voter_user_id = ui.user_id
-             LEFT JOIN " . TableRegistry::reputation() . " r ON v.voter_user_id = r.user_id
+             LEFT JOIN " . TableRegistry::scores() . " r ON r.page_id = (" . \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE . " + v.voter_user_id) AND r.category_id = 0
              WHERE {$where}
              ORDER BY {$orderBy}
              LIMIT %d",

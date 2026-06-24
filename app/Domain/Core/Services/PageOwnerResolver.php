@@ -41,6 +41,21 @@ final class PageOwnerResolver implements PageOwnerResolverInterface
             return;
         }
 
+        // Member self-pages resolve with zero DB; split them out before the
+        // PeepSo batch so only real page ids hit the table-variant probes.
+        $realPageIds = [];
+        foreach ($pageIds as $id) {
+            if (MemberSelfPageService::isSelfPage($id)) {
+                self::$ownerCache[$id] = MemberSelfPageService::ownerOfSelfPage($id);
+            } else {
+                $realPageIds[] = $id;
+            }
+        }
+        if (empty($realPageIds)) {
+            return;
+        }
+        $pageIds = $realPageIds;
+
         // Batch-resolve via PeepSo tables (repository handles table variants).
         $resolved = \BCC\Trust\Core\Repositories\PeepSoQueryRepository::batchGetPageOwners($pageIds);
         foreach ($resolved as $pid => $uid) {
@@ -67,6 +82,11 @@ final class PageOwnerResolver implements PageOwnerResolverInterface
 
     public function getPageOwner(int $pageId): int
     {
+        // Member self-pages resolve with zero DB: owner = page_id - ID_BASE.
+        if (MemberSelfPageService::isSelfPage($pageId)) {
+            return MemberSelfPageService::ownerOfSelfPage($pageId);
+        }
+
         if (isset(self::$ownerCache[$pageId])) {
             return self::$ownerCache[$pageId];
         }

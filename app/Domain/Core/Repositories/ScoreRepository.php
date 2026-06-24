@@ -52,7 +52,7 @@ if (!defined('ABSPATH')) {
 class ScoreRepository {
 
     /** Explicit column list for bcc_trust_scores table. */
-    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, endorsement_bonus, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
+    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, endorsement_bonus, contribution_bonus, penalty_adjustment, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
 
     private string $table;
 
@@ -269,6 +269,9 @@ class ScoreRepository {
         if ($result === false) {
             throw new Exception('Failed to save page score to database');
         }
+
+        // Self-page tier change → refresh the user_info denorm (RateLimiter).
+        $this->mirrorSelfPageTierToUserInfo($score->getPageId());
     }
 
     /**
@@ -319,6 +322,9 @@ class ScoreRepository {
                 'Failed to update recalculated score for page ' . $pageId
             );
         }
+
+        // Self-page tier change (cron recompute) → refresh user_info denorm.
+        $this->mirrorSelfPageTierToUserInfo((int) $pageId);
     }
 
     /**
@@ -445,6 +451,11 @@ class ScoreRepository {
         // are unavailable inside VALUES on a new row.
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        // Recompute reputation_tier inline on the delta path so it never lags
+        // total_score (the cron recalc would otherwise be the only fixer). The
+        // self-page facade reads reputation_tier directly, so it must track the
+        // score immediately — same rule Stage 1 applied to the bonus writers.
+        $tierSql = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
         $result = $wpdb->query(
             $wpdb->prepare(
                 "INSERT INTO {$this->table}
@@ -464,6 +475,7 @@ class ScoreRepository {
                      positive_score     = positive_score  + VALUES(positive_score),
                      negative_score     = negative_score  + VALUES(negative_score),
                      total_score        = {$totalScoreSql},
+                     reputation_tier    = {$tierSql},
                      vote_count         = vote_count + 1,
                      unique_voters      = unique_voters + VALUES(unique_voters),
                      last_vote_at       = VALUES(last_vote_at),
@@ -484,6 +496,10 @@ class ScoreRepository {
         if ($result === false) {
             throw new Exception('Failed to upsert vote delta for page ' . $pageId);
         }
+
+        // Keep the user_info.reputation_tier denorm fresh for self-pages
+        // (RateLimiter reads it every request); no-op for entity pages.
+        $this->mirrorSelfPageTierToUserInfo($pageId);
     }
 
     /**
@@ -522,20 +538,21 @@ class ScoreRepository {
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         // MySQL evaluates multi-assignment SET left-to-right: by the time
         // total_score is evaluated, positive_score / negative_score already
-        // hold the NEW post-GREATEST values. Referencing `positive_score` and
-        // `negative_score` directly is therefore correct and avoids
-        // double-applying the delta (previous bug: re-added %f inside the
-        // total_score expression, drifting total_score by 2*delta per flip).
+        // hold the NEW post-GREATEST values, and reputation_tier (last) reads
+        // the new total_score. Use the canonical formulaSql()/tierSql() rather
+        // than a hand-inlined subset — the previous literal omitted
+        // contribution_bonus + penalty_adjustment (harmless on entity pages
+        // where both are 0, but wrong on member self-pages that carry them).
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
         $result = $wpdb->query(
             $wpdb->prepare(
                 "UPDATE {$this->table}
                  SET
                    positive_score     = GREATEST(0, positive_score + %f),
                    negative_score     = GREATEST(0, negative_score + %f),
-                   total_score        = LEAST(100, GREATEST(0,
-                                           50 + (positive_score - negative_score) * 2
-                                           + endorsement_bonus + onchain_bonus
-                                       )),
+                   total_score        = {$totalScoreSql},
+                   reputation_tier    = {$tierSql},
                    last_calculated_at = %s
                  WHERE page_id = %d
                    AND category_id = %d",
@@ -550,6 +567,10 @@ class ScoreRepository {
         if ($result === false) {
             throw new Exception('Failed to reverse-and-reapply vote delta for page ' . $pageId);
         }
+
+        // Keep the user_info.reputation_tier denorm fresh for self-pages
+        // (RateLimiter reads it every request); no-op for entity pages.
+        $this->mirrorSelfPageTierToUserInfo($pageId);
     }
 
     /**
@@ -885,11 +906,11 @@ class ScoreRepository {
                 (page_id, category_id, page_owner_id, total_score,
                  positive_score, negative_score, vote_count, unique_voters,
                  confidence_score, reputation_tier, endorsement_count,
-                 endorsement_bonus, onchain_bonus, last_calculated_at)
+                 endorsement_bonus, onchain_bonus, contribution_bonus, penalty_adjustment, last_calculated_at)
              VALUES (%d, 0, %d, %f,
                      0.0, 0.0, 0, 0,
                      0.0, 'neutral', 0,
-                     0.0, 0.0, %s)",
+                     0.0, 0.0, 0.0, 0.0, %s)",
             $pageId,
             $ownerId,
             $neutralScore,
@@ -1056,6 +1077,7 @@ class ScoreRepository {
         global $wpdb;
 
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
 
         // Lock score rows to serialise with concurrent recalculations
         // and other delta writes (applyVoteDelta, applyBonus).
@@ -1082,6 +1104,7 @@ class ScoreRepository {
              SET endorsement_count  = %d,
                  endorsement_bonus  = %f,
                  total_score        = {$totalScoreSql},
+                 reputation_tier    = {$tierSql},
                  last_calculated_at = %s
              WHERE page_id = %d",
             $count,
@@ -1095,6 +1118,197 @@ class ScoreRepository {
                 'Failed to derive endorsement bonus for page ' . $pageId . ': ' . $wpdb->last_error
             );
         }
+
+        $this->mirrorSelfPageTierToUserInfo($pageId);
+    }
+
+    /**
+     * Mirror a member self-page's reputation_tier onto the denormalised
+     * `bcc_trust_user_info.reputation_tier` column (Architecture A).
+     *
+     * RateLimiter reads this denorm on EVERY request, so it must stay fresh.
+     * Under the legacy model the four ReputationRepository writers kept it in
+     * sync via mirrorTierToUserInfo(); those writers are retired, so the
+     * self-page write paths now own the mirror. Called at the END of each
+     * ScoreRepository method that changes a self-page's reputation_tier.
+     *
+     * No-op for entity pages (only self-page ids map to a member user_id).
+     * Bounded by the single page_id → single owner user_id.
+     */
+    private function mirrorSelfPageTierToUserInfo(int $pageId): void {
+        if (!\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageId)) {
+            return;
+        }
+
+        $userId = \BCC\Trust\Core\Services\MemberSelfPageService::ownerOfSelfPage($pageId);
+        if ($userId <= 0) {
+            return;
+        }
+
+        global $wpdb;
+        $userInfoTable = \BCC\Trust\Core\Database\TableRegistry::userInfo();
+
+        // Single UPDATE…JOIN: copy the self-page's freshly-written tier onto
+        // the member's user_info denorm. category_id = 0 selects the canonical
+        // self-page row.
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$userInfoTable} ui
+             INNER JOIN {$this->table} s
+                     ON s.page_id = %d AND s.category_id = 0
+             SET ui.reputation_tier = s.reputation_tier
+             WHERE ui.user_id = %d",
+            $pageId,
+            $userId
+        ));
+    }
+
+    /**
+     * Write a member self-page's `contribution_bonus` (the "Trust Recovery
+     * Through Contribution" term, Architecture A) and recompute total_score
+     * via the canonical formula. Unlike endorsement_bonus this is an absolute
+     * value computed upstream (ContributionRecoveryEvaluator) and clamped
+     * before it reaches here. Locks the score row FOR UPDATE to serialise with
+     * concurrent vote/endorsement deltas; safe inside an existing transaction.
+     *
+     * @throws Exception on database failure
+     */
+    public function applyContributionBonus(int $pageId, float $bonus): void {
+        global $wpdb;
+
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $now           = current_time('mysql');
+
+        $wpdb->get_results($wpdb->prepare(
+            "SELECT page_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
+            $pageId
+        ));
+
+        // contribution_bonus is SET before total_score/reputation_tier so the
+        // formula + tier CASE read the NEW value (MySQL evaluates SET clauses
+        // left-to-right) — same pattern as deriveAndWriteEndorsementBonus.
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET contribution_bonus = %f,
+                 total_score         = {$totalScoreSql},
+                 reputation_tier     = {$tierSql},
+                 last_calculated_at  = %s
+             WHERE page_id = %d",
+            $bonus,
+            $now,
+            $pageId
+        ));
+
+        if ($result === false) {
+            throw new Exception(
+                'Failed to apply contribution bonus for page ' . $pageId . ': ' . $wpdb->last_error
+            );
+        }
+
+        $this->mirrorSelfPageTierToUserInfo($pageId);
+    }
+
+    /**
+     * Apply a dispute/admin penalty to a member self-page (Architecture A).
+     * `$delta` is the score change (negative for a penalty, e.g. -5) and
+     * ACCUMULATES into `penalty_adjustment` — the clobber-safe home for
+     * non-vote signals, so Slice-2 vote recalcs (which rewrite positive/
+     * negative_score) never wipe it. total_score + reputation_tier are
+     * recomputed inline via the canonical formula. Replaces the legacy
+     * ReputationRepository::adjustScore path. Locks the row FOR UPDATE.
+     *
+     * @throws Exception on database failure
+     */
+    public function applyPenalty(int $pageId, float $delta): void {
+        global $wpdb;
+
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $now           = current_time('mysql');
+
+        $wpdb->get_results($wpdb->prepare(
+            "SELECT page_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
+            $pageId
+        ));
+
+        // penalty_adjustment accumulates (+= delta) and is SET before
+        // total_score/reputation_tier so the formula + tier CASE read the
+        // NEW value (MySQL evaluates SET clauses left-to-right).
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET penalty_adjustment = penalty_adjustment + %f,
+                 total_score         = {$totalScoreSql},
+                 reputation_tier     = {$tierSql},
+                 last_calculated_at  = %s
+             WHERE page_id = %d",
+            $delta,
+            $now,
+            $pageId
+        ));
+
+        if ($result === false) {
+            throw new Exception(
+                'Failed to apply penalty for page ' . $pageId . ': ' . $wpdb->last_error
+            );
+        }
+
+        $this->mirrorSelfPageTierToUserInfo($pageId);
+    }
+
+    /**
+     * One-time cutover seed (Architecture A): relocate a member's legacy
+     * `bcc_trust_reputation.reputation_score` onto their self-page so the
+     * tier is preserved when reads cut over. Ensures the self-page exists,
+     * then sets positive/negative_score so the canonical formula reproduces
+     * the old score (`pos=(R-50)/2` or `neg=(50-R)/2`), recomputing
+     * total_score + reputation_tier inline.
+     *
+     * Idempotent + safe: only seeds a PRISTINE self-page (no votes, no
+     * bonuses) — never clobbers a self-page that has already accrued real
+     * reviews/endorsements. Returns true if it seeded, false if skipped.
+     */
+    public function seedSelfPageFromReputation(int $userId, float $reputationScore): bool {
+        $pageId = \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($userId);
+        if ($pageId <= 0) {
+            return false;
+        }
+        $this->createIfNotExists($pageId, $userId);
+
+        $delta    = $reputationScore - (float) BCC_TRUST_NEUTRAL_SCORE;
+        $positive = $delta >= 0 ? $delta / 2.0 : 0.0;
+        $negative = $delta < 0 ? (-$delta) / 2.0 : 0.0;
+
+        global $wpdb;
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $now           = current_time('mysql');
+
+        // positive/negative are SET before total_score/reputation_tier so the
+        // formula + tier CASE read the NEW values (MySQL left-to-right SET).
+        // The pristine guard makes this a no-op on an already-active self-page.
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET positive_score    = %f,
+                 negative_score    = %f,
+                 total_score       = {$totalScoreSql},
+                 reputation_tier   = {$tierSql},
+                 last_calculated_at = %s
+             WHERE page_id = %d
+               AND vote_count = 0 AND positive_score = 0 AND negative_score = 0
+               AND endorsement_bonus = 0 AND contribution_bonus = 0 AND penalty_adjustment = 0",
+            $positive,
+            $negative,
+            $now,
+            $pageId
+        ));
+
+        $seeded = is_int($result) && $result > 0;
+        if ($seeded) {
+            // Only mirror when the pristine-guard actually wrote a new tier.
+            $this->mirrorSelfPageTierToUserInfo($pageId);
+        }
+
+        return $seeded;
     }
 
     /**
@@ -1176,6 +1390,37 @@ class ScoreRepository {
 
         if ($result === false) {
             throw new RepositoryException('ScoreRepository::delete failed for page ' . $pageId . ': ' . $wpdb->last_error);
+        }
+
+        $this->invalidateCache($pageId);
+    }
+
+    /**
+     * Delete a member's self-page score row (Architecture A) on user deletion.
+     *
+     * Scoped to the synthetic self-page row (page_id + category_id = 0) rather
+     * than the generic delete(page_id) so it can never touch an entity page.
+     * No-op for a non-self-page id (defence-in-depth — onUserDelete always
+     * passes MemberSelfPageService::selfPageId()). Bounded by the single
+     * page_id + category_id composite key.
+     *
+     * @throws RepositoryException on database failure
+     */
+    public function deleteSelfPage(int $pageId): void {
+        global $wpdb;
+
+        if (!\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageId)) {
+            return;
+        }
+
+        $result = $wpdb->delete(
+            $this->table,
+            ['page_id' => $pageId, 'category_id' => 0],
+            ['%d', '%d']
+        );
+
+        if ($result === false) {
+            throw new RepositoryException('ScoreRepository::deleteSelfPage failed for page ' . $pageId . ': ' . $wpdb->last_error);
         }
 
         $this->invalidateCache($pageId);
@@ -1458,18 +1703,21 @@ class ScoreRepository {
         }
 
         // ── Tier concentration ──────────────────────────────────────────────
-        $reputationTable = \BCC\Trust\Core\Database\TableRegistry::reputation();
-        $tableExists     = \BCC\Trust\Core\Database\TableRegistry::exists($reputationTable);
-
-        if ($tableExists && !empty($voterIds)) {
-            $placeholders = implode(',', array_fill(0, count($voterIds), '%d'));
+        // Architecture A: voters' tiers live on their self-pages
+        // (page_id = ID_BASE + voter_user_id), not the retired reputation table.
+        if (!empty($voterIds)) {
+            $pageIds      = array_map(
+                static fn($u): int => \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId((int) $u),
+                $voterIds
+            );
+            $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
             $tierRows     = $wpdb->get_results(
                 $wpdb->prepare(
                     "SELECT reputation_tier, COUNT(*) as cnt
-                     FROM {$reputationTable}
-                     WHERE user_id IN ({$placeholders})
+                     FROM {$this->table}
+                     WHERE page_id IN ({$placeholders}) AND category_id = 0
                      GROUP BY reputation_tier",
-                    $voterIds
+                    $pageIds
                 )
             );
 

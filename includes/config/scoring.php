@@ -15,6 +15,16 @@ if (!defined('ABSPATH')) exit;
 define('BCC_TRUST_NEUTRAL_SCORE', 50);
 
 // ======================================================
+// RETALIATION GUARD (direct person-reviews)
+// ======================================================
+// A down-review on a member's self-page is refused when that member
+// filed a user-report against the voter within this window. Closes the
+// "you reported me, so I'll down-rate you" retaliation path on the new
+// direct-person-review capability (Slice 2). Entity-page votes are
+// unaffected — only self-pages carry a reporter/voter relationship.
+define('BCC_TRUST_RETALIATION_WINDOW_DAYS', 14);
+
+// ======================================================
 // SCORE VELOCITY CAP
 // ======================================================
 define('BCC_TRUST_MAX_SCORE_CHANGE_PER_DAY', 8);

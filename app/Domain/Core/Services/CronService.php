@@ -82,10 +82,8 @@ class CronService
         // had no cleanup and grew unbounded under the daily recalc loop.
         // Each repo method is batched + capped + fail-loud and runs under
         // the bcc_cron_cleanup_lock already held above. Horizons in
-        // includes/config/limits.php (reputation 180d, score 90d,
-        // resolved reports 90d). content_reports cleanup never touches
-        // pending rows.
-        Plugin::instance()->reputationEventRepository()->cleanupOld();
+        // includes/config/limits.php (score 90d, resolved reports 90d).
+        // content_reports cleanup never touches pending rows.
         Plugin::instance()->scoreEventRepository()->cleanupOld();
         Plugin::instance()->contentReportRepository()->cleanupResolved();
         } finally {

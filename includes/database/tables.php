@@ -30,7 +30,6 @@ require_once __DIR__ . '/schema-pull-meta.php';
 require_once __DIR__ . '/schema-page-follows.php';
 require_once __DIR__ . '/schema-user-ranks.php';
 require_once __DIR__ . '/schema-pull-batches.php';
-require_once __DIR__ . '/schema-reputation-events.php';
 require_once __DIR__ . '/schema-content-reports.php';
 require_once __DIR__ . '/schema-hidden-activities.php';
 require_once __DIR__ . '/schema-dispute-participations.php';
@@ -140,10 +139,6 @@ function bcc_trust_create_tables() {
         bcc_trust_create_pull_batches_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Pull batches table created', []);
     }
-    if (function_exists('bcc_trust_create_reputation_events_table')) {
-        bcc_trust_create_reputation_events_table();
-        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Reputation events table created', []);
-    }
     if (function_exists('bcc_trust_create_content_reports_table')) {
         bcc_trust_create_content_reports_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Content reports table created', []);
@@ -231,7 +226,8 @@ function bcc_trust_verify_all_tables() {
         'bcc_trust_activity',
         'bcc_trust_activity_archive',
         'bcc_trust_flags',
-        'bcc_trust_reputation',
+        // bcc_trust_reputation retired (Architecture A, Slice 1c) — trust moved
+        // to the self-page row in bcc_trust_page_scores.
         'bcc_trust_device_fingerprints',
         'bcc_trust_patterns',
         'bcc_trust_user_info',
@@ -246,7 +242,6 @@ function bcc_trust_verify_all_tables() {
         'bcc_pull_meta',
         'bcc_user_ranks',
         'bcc_pull_batches',
-        'bcc_reputation_events',
         'bcc_content_reports',
         'bcc_hidden_activities',
         'bcc_dispute_participations',

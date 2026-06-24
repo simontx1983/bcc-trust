@@ -241,11 +241,20 @@ final class DisputeAdjudicator implements DisputeAdjudicationInterface
                 }
 
                 if ($applyPenalty) {
-                    $reputationRepo = \BCC\Trust\Core\Plugin::instance()->reputationRepository();
-                    $userInfoRepo   = \BCC\Trust\Core\Plugin::instance()->userInfoRepository();
+                    $userInfoRepo = \BCC\Trust\Core\Plugin::instance()->userInfoRepository();
 
-                    // Reputation penalty (-5 points).
-                    $reputationRepo->adjustScore($reporterId, -5, 'dispute_rejected');
+                    // Reputation penalty (-5 points) on the reporter's
+                    // self-page (Architecture A). ensureSelfPage is idempotent
+                    // and applyPenalty accumulates penalty_adjustment +
+                    // recomputes total_score + reputation_tier inline. Both run
+                    // inside the enclosing TransactionManager::run() so the
+                    // penalty commits atomically with the idempotency claim.
+                    $pageId = \BCC\Trust\Core\Plugin::instance()
+                        ->memberSelfPageService()
+                        ->ensureSelfPage($reporterId);
+                    \BCC\Trust\Core\Plugin::instance()
+                        ->scoreRepository()
+                        ->applyPenalty($pageId, -5);
 
                     // Fraud score increment (+5, capped at 100). Delegates to
                     // UserInfoRepository::incrementFraudScore() which issues a

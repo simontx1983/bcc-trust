@@ -216,6 +216,17 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-spam-contracts.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-helius-seen-signatures.php';
 // V1.5 §D6 — crypto-blog composer chain-tag join + bcc_onchain_chains.color
 require_once BCC_TRUST_PATH . 'includes/database/schema-blog-chain-tags.php';
+// One-time cutover seed (Slice 1c) — NOT a schema-*.php file, so it stays
+// out of the schema-version hash glob; self-guards via the
+// bcc_trust_self_pages_seeded option + a per-row pristine check.
+require_once BCC_TRUST_PATH . 'includes/database/seed-self-pages.php';
+// Drops the retired bcc_trust_reputation table after the seed has run
+// (fires on init priority 25 > the seed's 20). Guarded; no-op once done.
+require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-reputation.php';
+// Drops the orphaned bcc_reputation_events ledger (lost its only writer in
+// the reputation cutover; recent changes now read bcc_trust_score_events).
+// Guarded by bcc_reputation_events_dropped; no-op once done.
+require_once BCC_TRUST_PATH . 'includes/database/drop-reputation-events.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**
@@ -954,11 +965,16 @@ add_action('bcc.trust.recalculate_score', function (int $pageId) {
 // Admin report penalty — fired by the disputes admin panel.
 add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points, string $reason): void {
     try {
-        \BCC\Trust\Core\Plugin::instance()->reputationRepository()->adjustScore(
-            $userId,
-            -1 * abs($points),
-            'admin_report_penalty'
-        );
+        // Architecture A: the penalty lands on the member's self-page.
+        // applyPenalty accumulates penalty_adjustment (a negative delta) and
+        // recomputes total_score + reputation_tier inline. Magnitude semantics
+        // preserved: always a negative score change of abs($points).
+        $pageId = \BCC\Trust\Core\Plugin::instance()
+            ->memberSelfPageService()
+            ->ensureSelfPage($userId);
+        \BCC\Trust\Core\Plugin::instance()
+            ->scoreRepository()
+            ->applyPenalty($pageId, (float) (-1 * abs($points)));
     } catch (\Throwable $e) {
         \BCC\Core\Log\Logger::error('[bcc-trust] admin_report_penalty_failed', [
             'user_id' => $userId,
