@@ -216,6 +216,10 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-spam-contracts.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-helius-seen-signatures.php';
 // V1.5 §D6 — crypto-blog composer chain-tag join + bcc_onchain_chains.color
 require_once BCC_TRUST_PATH . 'includes/database/schema-blog-chain-tags.php';
+// One-time cutover seed (Slice 1c) — NOT a schema-*.php file, so it stays
+// out of the schema-version hash glob; self-guards via the
+// bcc_trust_self_pages_seeded option + a per-row pristine check.
+require_once BCC_TRUST_PATH . 'includes/database/seed-self-pages.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**

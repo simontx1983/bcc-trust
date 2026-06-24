@@ -1189,6 +1189,56 @@ class ScoreRepository {
     }
 
     /**
+     * One-time cutover seed (Architecture A): relocate a member's legacy
+     * `bcc_trust_reputation.reputation_score` onto their self-page so the
+     * tier is preserved when reads cut over. Ensures the self-page exists,
+     * then sets positive/negative_score so the canonical formula reproduces
+     * the old score (`pos=(R-50)/2` or `neg=(50-R)/2`), recomputing
+     * total_score + reputation_tier inline.
+     *
+     * Idempotent + safe: only seeds a PRISTINE self-page (no votes, no
+     * bonuses) — never clobbers a self-page that has already accrued real
+     * reviews/endorsements. Returns true if it seeded, false if skipped.
+     */
+    public function seedSelfPageFromReputation(int $userId, float $reputationScore): bool {
+        $pageId = \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($userId);
+        if ($pageId <= 0) {
+            return false;
+        }
+        $this->createIfNotExists($pageId, $userId);
+
+        $delta    = $reputationScore - (float) BCC_TRUST_NEUTRAL_SCORE;
+        $positive = $delta >= 0 ? $delta / 2.0 : 0.0;
+        $negative = $delta < 0 ? (-$delta) / 2.0 : 0.0;
+
+        global $wpdb;
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $now           = current_time('mysql');
+
+        // positive/negative are SET before total_score/reputation_tier so the
+        // formula + tier CASE read the NEW values (MySQL left-to-right SET).
+        // The pristine guard makes this a no-op on an already-active self-page.
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET positive_score    = %f,
+                 negative_score    = %f,
+                 total_score       = {$totalScoreSql},
+                 reputation_tier   = {$tierSql},
+                 last_calculated_at = %s
+             WHERE page_id = %d
+               AND vote_count = 0 AND positive_score = 0 AND negative_score = 0
+               AND endorsement_bonus = 0 AND contribution_bonus = 0 AND penalty_adjustment = 0",
+            $positive,
+            $negative,
+            $now,
+            $pageId
+        ));
+
+        return is_int($result) && $result > 0;
+    }
+
+    /**
      * Increment endorsement count atomically.
      */
     public function incrementEndorsementCount(int $pageId): void {
