@@ -1,0 +1,2259 @@
+{
+  "activity_breakdown": [
+    {
+      "count": 0,
+      "delta_label": null,
+      "description": "Cards added to the watchlist.",
+      "key": "pulls",
+      "label": "Pulls",
+      "tone": "verified"
+    },
+    {
+      "count": 0,
+      "delta_label": null,
+      "description": "Long-form reviews on pages.",
+      "key": "reviews",
+      "label": "Reviews",
+      "tone": "ink"
+    },
+    {
+      "count": 0,
+      "delta_label": null,
+      "description": "Solids, vouches, stand-behinds.",
+      "key": "reactions",
+      "label": "Reactions",
+      "tone": "safety"
+    },
+    {
+      "count": 0,
+      "delta_label": null,
+      "description": "Disputes signed.",
+      "key": "disputes",
+      "label": "Disputes",
+      "tone": "weld"
+    },
+    {
+      "count": 0,
+      "delta_label": null,
+      "description": "Status posts on the Floor.",
+      "key": "posts",
+      "label": "Posts",
+      "tone": "ink"
+    }
+  ],
+  "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1781205563",
+  "bio": "",
+  "bio_block": {
+    "is_editable": false,
+    "paragraphs": [
+      ""
+    ],
+    "signature_line": "Signed, phillipcosmos"
+  },
+  "card": {
+    "actions": {
+      "pull": {
+        "body": {
+          "target_id": 137,
+          "target_kind": "member"
+        },
+        "href": "/wp-json/bcc/v1/me/watching/watch",
+        "idempotent": true,
+        "method": "POST",
+        "requires_auth": true
+      }
+    },
+    "bio": "",
+    "card_kind": "member",
+    "card_tier": "uncommon",
+    "chains": null,
+    "claim_target": null,
+    "community_dossier": null,
+    "crest": {
+      "background_kind": "tier",
+      "background_value": "uncommon",
+      "image_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1781205563",
+      "initials": "P",
+      "monogram_color": "#3e3a0f"
+    },
+    "current_rank_label": "Apprentice",
+    "endorse_unlock_hint": null,
+    "flags": [],
+    "foreman_insignia": false,
+    "handle": "phillipcosmos",
+    "id": 137,
+    "is_claimed": true,
+    "is_in_good_standing": true,
+    "links": {
+      "review": "/u/phillipcosmos?compose=review",
+      "self": "/u/phillipcosmos"
+    },
+    "member_dossier": {
+      "engagement": {
+        "disputes_signed": 0,
+        "endorsements_received": 0,
+        "reviews_written": 0,
+        "solids_received": 0
+      },
+      "owned_pages_by_type": {
+        "dao": 0,
+        "nft": 0,
+        "project": 0,
+        "validator": 0
+      },
+      "primary_local": null,
+      "verifications": {
+        "github_username": null,
+        "github_verified": false,
+        "wallets_verified": 1,
+        "x_username": null,
+        "x_verified": false
+      }
+    },
+    "name": "phillipcosmos",
+    "permissions": {
+      "can_dispute": {
+        "allowed": false,
+        "reason_code": "signin_required",
+        "unlock_hint": "Sign in to interact"
+      },
+      "can_edit_bio": {
+        "allowed": false,
+        "reason_code": "signin_required",
+        "unlock_hint": "Sign in to interact"
+      },
+      "can_edit_image": {
+        "allowed": false,
+        "reason_code": "not_applicable",
+        "unlock_hint": null
+      },
+      "can_endorse": {
+        "allowed": false,
+        "reason_code": "not_applicable",
+        "unlock_hint": null
+      },
+      "can_open_dispute": {
+        "allowed": false,
+        "reason_code": "not_applicable",
+        "unlock_hint": null
+      },
+      "can_post_as_entity": {
+        "allowed": false,
+        "reason_code": "not_applicable",
+        "unlock_hint": null
+      },
+      "can_pull": {
+        "allowed": false,
+        "reason_code": "signin_required",
+        "unlock_hint": "Sign in to interact"
+      },
+      "can_report": {
+        "allowed": false,
+        "reason_code": null,
+        "unlock_hint": "Sign in to report."
+      },
+      "can_review": {
+        "allowed": false,
+        "reason_code": "signin_required",
+        "unlock_hint": "Sign in to interact"
+      },
+      "can_stand_behind": {
+        "allowed": false,
+        "reason_code": null,
+        "unlock_hint": "Sign in to stand behind operators."
+      },
+      "can_vouch": {
+        "allowed": false,
+        "reason_code": null,
+        "unlock_hint": "Sign in to vouch for operators."
+      }
+    },
+    "rank_label": "Apprentice",
+    "reputation_tier": "neutral",
+    "reputation_tier_label": "Neutral",
+    "social_proof": null,
+    "stats": [
+      {
+        "format": "score",
+        "key": "trust",
+        "label": "Trust",
+        "raw": 50,
+        "value": "50"
+      },
+      {
+        "format": "count",
+        "key": "reviews_written",
+        "label": "Reviews",
+        "raw": 0,
+        "value": "0"
+      },
+      {
+        "format": "count",
+        "key": "watchers",
+        "label": "Watchers",
+        "raw": 1,
+        "value": "1"
+      }
+    ],
+    "tier_label": "Uncommon",
+    "trust_score": 50,
+    "viewer_attestation": null,
+    "viewer_has_endorsed": false
+  },
+  "card_tier": "uncommon",
+  "counts": {
+    "binder_size": 4,
+    "blog_posts_written": 0,
+    "disputes_signed": 0,
+    "followers": 1,
+    "following": 4,
+    "reviews_written": 0,
+    "solids_given": 0,
+    "solids_received": 0,
+    "watching_size": 4
+  },
+  "cover_photo_position": {
+    "x": 50,
+    "y": 50
+  },
+  "cover_photo_url": null,
+  "current_rank_label": "Apprentice",
+  "display_name": "phillipcosmos",
+  "disputes": [],
+  "flags": [],
+  "foreman_insignia": false,
+  "handle": "phillipcosmos",
+  "id": 137,
+  "identity_meta": [
+    {
+      "label": "Joined",
+      "value": "Jun 2026"
+    },
+    {
+      "label": "Wallets",
+      "value": "1 linked"
+    },
+    {
+      "label": "Rank",
+      "value": "Apprentice"
+    }
+  ],
+  "is_in_good_standing": true,
+  "is_self": false,
+  "joined_at": "2026-06-08T13:08:08Z",
+  "links": {
+    "activity": "/u/phillipcosmos/activity",
+    "binder": "/u/phillipcosmos/binder",
+    "blog": "/u/phillipcosmos/blog",
+    "disputes": "/u/phillipcosmos/disputes",
+    "network": "/u/phillipcosmos/network",
+    "reviews": "/u/phillipcosmos/reviews",
+    "self": "/u/phillipcosmos",
+    "watching": "/u/phillipcosmos/watching"
+  },
+  "live_shift": [],
+  "locals": [],
+  "permissions": {
+    "can_block": {
+      "allowed": false,
+      "unlock_hint": null
+    },
+    "can_dispute": {
+      "allowed": false,
+      "unlock_hint": "Sign in to file a dispute."
+    },
+    "can_edit_profile": {
+      "allowed": false,
+      "unlock_hint": null
+    },
+    "can_follow": {
+      "allowed": false,
+      "unlock_hint": null
+    },
+    "can_message": {
+      "allowed": false,
+      "unlock_hint": null
+    },
+    "can_report": {
+      "allowed": false,
+      "unlock_hint": "Sign in to report."
+    },
+    "can_stand_behind": {
+      "allowed": false,
+      "unlock_hint": "Sign in to stand behind operators."
+    },
+    "can_vouch": {
+      "allowed": false,
+      "unlock_hint": "Sign in to vouch for operators."
+    }
+  },
+  "primary_local": null,
+  "privacy": {
+    "binder_hidden": false,
+    "delegations_hidden": false,
+    "disputes_hidden": false,
+    "email_hidden": false,
+    "follower_count_hidden": false,
+    "real_name_hidden": false,
+    "reviews_hidden": false,
+    "watching_hidden": false
+  },
+  "rank": "apprentice",
+  "rank_label": "Apprentice",
+  "reputation_tier": "neutral",
+  "reputation_tier_label": "Neutral",
+  "reviews": [],
+  "shift_log": {
+    "days": [
+      {
+        "date": "2025-06-27",
+        "level": 0,
+        "tooltip": "Jun 27 \u00b7 no activity"
+      },
+      {
+        "date": "2025-06-28",
+        "level": 0,
+        "tooltip": "Jun 28 \u00b7 no activity"
+      },
+      {
+        "date": "2025-06-29",
+        "level": 0,
+        "tooltip": "Jun 29 \u00b7 no activity"
+      },
+      {
+        "date": "2025-06-30",
+        "level": 0,
+        "tooltip": "Jun 30 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-01",
+        "level": 0,
+        "tooltip": "Jul 1 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-02",
+        "level": 0,
+        "tooltip": "Jul 2 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-03",
+        "level": 0,
+        "tooltip": "Jul 3 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-04",
+        "level": 0,
+        "tooltip": "Jul 4 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-05",
+        "level": 0,
+        "tooltip": "Jul 5 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-06",
+        "level": 0,
+        "tooltip": "Jul 6 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-07",
+        "level": 0,
+        "tooltip": "Jul 7 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-08",
+        "level": 0,
+        "tooltip": "Jul 8 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-09",
+        "level": 0,
+        "tooltip": "Jul 9 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-10",
+        "level": 0,
+        "tooltip": "Jul 10 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-11",
+        "level": 0,
+        "tooltip": "Jul 11 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-12",
+        "level": 0,
+        "tooltip": "Jul 12 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-13",
+        "level": 0,
+        "tooltip": "Jul 13 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-14",
+        "level": 0,
+        "tooltip": "Jul 14 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-15",
+        "level": 0,
+        "tooltip": "Jul 15 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-16",
+        "level": 0,
+        "tooltip": "Jul 16 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-17",
+        "level": 0,
+        "tooltip": "Jul 17 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-18",
+        "level": 0,
+        "tooltip": "Jul 18 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-19",
+        "level": 0,
+        "tooltip": "Jul 19 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-20",
+        "level": 0,
+        "tooltip": "Jul 20 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-21",
+        "level": 0,
+        "tooltip": "Jul 21 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-22",
+        "level": 0,
+        "tooltip": "Jul 22 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-23",
+        "level": 0,
+        "tooltip": "Jul 23 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-24",
+        "level": 0,
+        "tooltip": "Jul 24 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-25",
+        "level": 0,
+        "tooltip": "Jul 25 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-26",
+        "level": 0,
+        "tooltip": "Jul 26 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-27",
+        "level": 0,
+        "tooltip": "Jul 27 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-28",
+        "level": 0,
+        "tooltip": "Jul 28 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-29",
+        "level": 0,
+        "tooltip": "Jul 29 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-30",
+        "level": 0,
+        "tooltip": "Jul 30 \u00b7 no activity"
+      },
+      {
+        "date": "2025-07-31",
+        "level": 0,
+        "tooltip": "Jul 31 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-01",
+        "level": 0,
+        "tooltip": "Aug 1 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-02",
+        "level": 0,
+        "tooltip": "Aug 2 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-03",
+        "level": 0,
+        "tooltip": "Aug 3 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-04",
+        "level": 0,
+        "tooltip": "Aug 4 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-05",
+        "level": 0,
+        "tooltip": "Aug 5 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-06",
+        "level": 0,
+        "tooltip": "Aug 6 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-07",
+        "level": 0,
+        "tooltip": "Aug 7 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-08",
+        "level": 0,
+        "tooltip": "Aug 8 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-09",
+        "level": 0,
+        "tooltip": "Aug 9 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-10",
+        "level": 0,
+        "tooltip": "Aug 10 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-11",
+        "level": 0,
+        "tooltip": "Aug 11 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-12",
+        "level": 0,
+        "tooltip": "Aug 12 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-13",
+        "level": 0,
+        "tooltip": "Aug 13 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-14",
+        "level": 0,
+        "tooltip": "Aug 14 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-15",
+        "level": 0,
+        "tooltip": "Aug 15 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-16",
+        "level": 0,
+        "tooltip": "Aug 16 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-17",
+        "level": 0,
+        "tooltip": "Aug 17 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-18",
+        "level": 0,
+        "tooltip": "Aug 18 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-19",
+        "level": 0,
+        "tooltip": "Aug 19 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-20",
+        "level": 0,
+        "tooltip": "Aug 20 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-21",
+        "level": 0,
+        "tooltip": "Aug 21 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-22",
+        "level": 0,
+        "tooltip": "Aug 22 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-23",
+        "level": 0,
+        "tooltip": "Aug 23 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-24",
+        "level": 0,
+        "tooltip": "Aug 24 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-25",
+        "level": 0,
+        "tooltip": "Aug 25 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-26",
+        "level": 0,
+        "tooltip": "Aug 26 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-27",
+        "level": 0,
+        "tooltip": "Aug 27 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-28",
+        "level": 0,
+        "tooltip": "Aug 28 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-29",
+        "level": 0,
+        "tooltip": "Aug 29 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-30",
+        "level": 0,
+        "tooltip": "Aug 30 \u00b7 no activity"
+      },
+      {
+        "date": "2025-08-31",
+        "level": 0,
+        "tooltip": "Aug 31 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-01",
+        "level": 0,
+        "tooltip": "Sep 1 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-02",
+        "level": 0,
+        "tooltip": "Sep 2 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-03",
+        "level": 0,
+        "tooltip": "Sep 3 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-04",
+        "level": 0,
+        "tooltip": "Sep 4 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-05",
+        "level": 0,
+        "tooltip": "Sep 5 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-06",
+        "level": 0,
+        "tooltip": "Sep 6 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-07",
+        "level": 0,
+        "tooltip": "Sep 7 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-08",
+        "level": 0,
+        "tooltip": "Sep 8 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-09",
+        "level": 0,
+        "tooltip": "Sep 9 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-10",
+        "level": 0,
+        "tooltip": "Sep 10 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-11",
+        "level": 0,
+        "tooltip": "Sep 11 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-12",
+        "level": 0,
+        "tooltip": "Sep 12 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-13",
+        "level": 0,
+        "tooltip": "Sep 13 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-14",
+        "level": 0,
+        "tooltip": "Sep 14 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-15",
+        "level": 0,
+        "tooltip": "Sep 15 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-16",
+        "level": 0,
+        "tooltip": "Sep 16 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-17",
+        "level": 0,
+        "tooltip": "Sep 17 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-18",
+        "level": 0,
+        "tooltip": "Sep 18 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-19",
+        "level": 0,
+        "tooltip": "Sep 19 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-20",
+        "level": 0,
+        "tooltip": "Sep 20 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-21",
+        "level": 0,
+        "tooltip": "Sep 21 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-22",
+        "level": 0,
+        "tooltip": "Sep 22 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-23",
+        "level": 0,
+        "tooltip": "Sep 23 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-24",
+        "level": 0,
+        "tooltip": "Sep 24 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-25",
+        "level": 0,
+        "tooltip": "Sep 25 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-26",
+        "level": 0,
+        "tooltip": "Sep 26 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-27",
+        "level": 0,
+        "tooltip": "Sep 27 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-28",
+        "level": 0,
+        "tooltip": "Sep 28 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-29",
+        "level": 0,
+        "tooltip": "Sep 29 \u00b7 no activity"
+      },
+      {
+        "date": "2025-09-30",
+        "level": 0,
+        "tooltip": "Sep 30 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-01",
+        "level": 0,
+        "tooltip": "Oct 1 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-02",
+        "level": 0,
+        "tooltip": "Oct 2 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-03",
+        "level": 0,
+        "tooltip": "Oct 3 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-04",
+        "level": 0,
+        "tooltip": "Oct 4 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-05",
+        "level": 0,
+        "tooltip": "Oct 5 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-06",
+        "level": 0,
+        "tooltip": "Oct 6 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-07",
+        "level": 0,
+        "tooltip": "Oct 7 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-08",
+        "level": 0,
+        "tooltip": "Oct 8 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-09",
+        "level": 0,
+        "tooltip": "Oct 9 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-10",
+        "level": 0,
+        "tooltip": "Oct 10 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-11",
+        "level": 0,
+        "tooltip": "Oct 11 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-12",
+        "level": 0,
+        "tooltip": "Oct 12 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-13",
+        "level": 0,
+        "tooltip": "Oct 13 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-14",
+        "level": 0,
+        "tooltip": "Oct 14 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-15",
+        "level": 0,
+        "tooltip": "Oct 15 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-16",
+        "level": 0,
+        "tooltip": "Oct 16 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-17",
+        "level": 0,
+        "tooltip": "Oct 17 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-18",
+        "level": 0,
+        "tooltip": "Oct 18 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-19",
+        "level": 0,
+        "tooltip": "Oct 19 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-20",
+        "level": 0,
+        "tooltip": "Oct 20 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-21",
+        "level": 0,
+        "tooltip": "Oct 21 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-22",
+        "level": 0,
+        "tooltip": "Oct 22 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-23",
+        "level": 0,
+        "tooltip": "Oct 23 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-24",
+        "level": 0,
+        "tooltip": "Oct 24 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-25",
+        "level": 0,
+        "tooltip": "Oct 25 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-26",
+        "level": 0,
+        "tooltip": "Oct 26 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-27",
+        "level": 0,
+        "tooltip": "Oct 27 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-28",
+        "level": 0,
+        "tooltip": "Oct 28 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-29",
+        "level": 0,
+        "tooltip": "Oct 29 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-30",
+        "level": 0,
+        "tooltip": "Oct 30 \u00b7 no activity"
+      },
+      {
+        "date": "2025-10-31",
+        "level": 0,
+        "tooltip": "Oct 31 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-01",
+        "level": 0,
+        "tooltip": "Nov 1 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-02",
+        "level": 0,
+        "tooltip": "Nov 2 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-03",
+        "level": 0,
+        "tooltip": "Nov 3 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-04",
+        "level": 0,
+        "tooltip": "Nov 4 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-05",
+        "level": 0,
+        "tooltip": "Nov 5 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-06",
+        "level": 0,
+        "tooltip": "Nov 6 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-07",
+        "level": 0,
+        "tooltip": "Nov 7 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-08",
+        "level": 0,
+        "tooltip": "Nov 8 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-09",
+        "level": 0,
+        "tooltip": "Nov 9 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-10",
+        "level": 0,
+        "tooltip": "Nov 10 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-11",
+        "level": 0,
+        "tooltip": "Nov 11 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-12",
+        "level": 0,
+        "tooltip": "Nov 12 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-13",
+        "level": 0,
+        "tooltip": "Nov 13 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-14",
+        "level": 0,
+        "tooltip": "Nov 14 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-15",
+        "level": 0,
+        "tooltip": "Nov 15 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-16",
+        "level": 0,
+        "tooltip": "Nov 16 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-17",
+        "level": 0,
+        "tooltip": "Nov 17 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-18",
+        "level": 0,
+        "tooltip": "Nov 18 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-19",
+        "level": 0,
+        "tooltip": "Nov 19 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-20",
+        "level": 0,
+        "tooltip": "Nov 20 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-21",
+        "level": 0,
+        "tooltip": "Nov 21 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-22",
+        "level": 0,
+        "tooltip": "Nov 22 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-23",
+        "level": 0,
+        "tooltip": "Nov 23 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-24",
+        "level": 0,
+        "tooltip": "Nov 24 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-25",
+        "level": 0,
+        "tooltip": "Nov 25 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-26",
+        "level": 0,
+        "tooltip": "Nov 26 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-27",
+        "level": 0,
+        "tooltip": "Nov 27 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-28",
+        "level": 0,
+        "tooltip": "Nov 28 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-29",
+        "level": 0,
+        "tooltip": "Nov 29 \u00b7 no activity"
+      },
+      {
+        "date": "2025-11-30",
+        "level": 0,
+        "tooltip": "Nov 30 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-01",
+        "level": 0,
+        "tooltip": "Dec 1 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-02",
+        "level": 0,
+        "tooltip": "Dec 2 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-03",
+        "level": 0,
+        "tooltip": "Dec 3 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-04",
+        "level": 0,
+        "tooltip": "Dec 4 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-05",
+        "level": 0,
+        "tooltip": "Dec 5 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-06",
+        "level": 0,
+        "tooltip": "Dec 6 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-07",
+        "level": 0,
+        "tooltip": "Dec 7 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-08",
+        "level": 0,
+        "tooltip": "Dec 8 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-09",
+        "level": 0,
+        "tooltip": "Dec 9 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-10",
+        "level": 0,
+        "tooltip": "Dec 10 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-11",
+        "level": 0,
+        "tooltip": "Dec 11 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-12",
+        "level": 0,
+        "tooltip": "Dec 12 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-13",
+        "level": 0,
+        "tooltip": "Dec 13 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-14",
+        "level": 0,
+        "tooltip": "Dec 14 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-15",
+        "level": 0,
+        "tooltip": "Dec 15 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-16",
+        "level": 0,
+        "tooltip": "Dec 16 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-17",
+        "level": 0,
+        "tooltip": "Dec 17 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-18",
+        "level": 0,
+        "tooltip": "Dec 18 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-19",
+        "level": 0,
+        "tooltip": "Dec 19 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-20",
+        "level": 0,
+        "tooltip": "Dec 20 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-21",
+        "level": 0,
+        "tooltip": "Dec 21 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-22",
+        "level": 0,
+        "tooltip": "Dec 22 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-23",
+        "level": 0,
+        "tooltip": "Dec 23 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-24",
+        "level": 0,
+        "tooltip": "Dec 24 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-25",
+        "level": 0,
+        "tooltip": "Dec 25 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-26",
+        "level": 0,
+        "tooltip": "Dec 26 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-27",
+        "level": 0,
+        "tooltip": "Dec 27 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-28",
+        "level": 0,
+        "tooltip": "Dec 28 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-29",
+        "level": 0,
+        "tooltip": "Dec 29 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-30",
+        "level": 0,
+        "tooltip": "Dec 30 \u00b7 no activity"
+      },
+      {
+        "date": "2025-12-31",
+        "level": 0,
+        "tooltip": "Dec 31 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-01",
+        "level": 0,
+        "tooltip": "Jan 1 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-02",
+        "level": 0,
+        "tooltip": "Jan 2 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-03",
+        "level": 0,
+        "tooltip": "Jan 3 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-04",
+        "level": 0,
+        "tooltip": "Jan 4 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-05",
+        "level": 0,
+        "tooltip": "Jan 5 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-06",
+        "level": 0,
+        "tooltip": "Jan 6 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-07",
+        "level": 0,
+        "tooltip": "Jan 7 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-08",
+        "level": 0,
+        "tooltip": "Jan 8 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-09",
+        "level": 0,
+        "tooltip": "Jan 9 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-10",
+        "level": 0,
+        "tooltip": "Jan 10 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-11",
+        "level": 0,
+        "tooltip": "Jan 11 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-12",
+        "level": 0,
+        "tooltip": "Jan 12 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-13",
+        "level": 0,
+        "tooltip": "Jan 13 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-14",
+        "level": 0,
+        "tooltip": "Jan 14 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-15",
+        "level": 0,
+        "tooltip": "Jan 15 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-16",
+        "level": 0,
+        "tooltip": "Jan 16 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-17",
+        "level": 0,
+        "tooltip": "Jan 17 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-18",
+        "level": 0,
+        "tooltip": "Jan 18 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-19",
+        "level": 0,
+        "tooltip": "Jan 19 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-20",
+        "level": 0,
+        "tooltip": "Jan 20 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-21",
+        "level": 0,
+        "tooltip": "Jan 21 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-22",
+        "level": 0,
+        "tooltip": "Jan 22 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-23",
+        "level": 0,
+        "tooltip": "Jan 23 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-24",
+        "level": 0,
+        "tooltip": "Jan 24 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-25",
+        "level": 0,
+        "tooltip": "Jan 25 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-26",
+        "level": 0,
+        "tooltip": "Jan 26 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-27",
+        "level": 0,
+        "tooltip": "Jan 27 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-28",
+        "level": 0,
+        "tooltip": "Jan 28 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-29",
+        "level": 0,
+        "tooltip": "Jan 29 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-30",
+        "level": 0,
+        "tooltip": "Jan 30 \u00b7 no activity"
+      },
+      {
+        "date": "2026-01-31",
+        "level": 0,
+        "tooltip": "Jan 31 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-01",
+        "level": 0,
+        "tooltip": "Feb 1 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-02",
+        "level": 0,
+        "tooltip": "Feb 2 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-03",
+        "level": 0,
+        "tooltip": "Feb 3 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-04",
+        "level": 0,
+        "tooltip": "Feb 4 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-05",
+        "level": 0,
+        "tooltip": "Feb 5 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-06",
+        "level": 0,
+        "tooltip": "Feb 6 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-07",
+        "level": 0,
+        "tooltip": "Feb 7 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-08",
+        "level": 0,
+        "tooltip": "Feb 8 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-09",
+        "level": 0,
+        "tooltip": "Feb 9 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-10",
+        "level": 0,
+        "tooltip": "Feb 10 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-11",
+        "level": 0,
+        "tooltip": "Feb 11 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-12",
+        "level": 0,
+        "tooltip": "Feb 12 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-13",
+        "level": 0,
+        "tooltip": "Feb 13 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-14",
+        "level": 0,
+        "tooltip": "Feb 14 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-15",
+        "level": 0,
+        "tooltip": "Feb 15 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-16",
+        "level": 0,
+        "tooltip": "Feb 16 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-17",
+        "level": 0,
+        "tooltip": "Feb 17 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-18",
+        "level": 0,
+        "tooltip": "Feb 18 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-19",
+        "level": 0,
+        "tooltip": "Feb 19 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-20",
+        "level": 0,
+        "tooltip": "Feb 20 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-21",
+        "level": 0,
+        "tooltip": "Feb 21 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-22",
+        "level": 0,
+        "tooltip": "Feb 22 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-23",
+        "level": 0,
+        "tooltip": "Feb 23 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-24",
+        "level": 0,
+        "tooltip": "Feb 24 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-25",
+        "level": 0,
+        "tooltip": "Feb 25 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-26",
+        "level": 0,
+        "tooltip": "Feb 26 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-27",
+        "level": 0,
+        "tooltip": "Feb 27 \u00b7 no activity"
+      },
+      {
+        "date": "2026-02-28",
+        "level": 0,
+        "tooltip": "Feb 28 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-01",
+        "level": 0,
+        "tooltip": "Mar 1 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-02",
+        "level": 0,
+        "tooltip": "Mar 2 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-03",
+        "level": 0,
+        "tooltip": "Mar 3 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-04",
+        "level": 0,
+        "tooltip": "Mar 4 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-05",
+        "level": 0,
+        "tooltip": "Mar 5 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-06",
+        "level": 0,
+        "tooltip": "Mar 6 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-07",
+        "level": 0,
+        "tooltip": "Mar 7 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-08",
+        "level": 0,
+        "tooltip": "Mar 8 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-09",
+        "level": 0,
+        "tooltip": "Mar 9 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-10",
+        "level": 0,
+        "tooltip": "Mar 10 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-11",
+        "level": 0,
+        "tooltip": "Mar 11 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-12",
+        "level": 0,
+        "tooltip": "Mar 12 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-13",
+        "level": 0,
+        "tooltip": "Mar 13 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-14",
+        "level": 0,
+        "tooltip": "Mar 14 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-15",
+        "level": 0,
+        "tooltip": "Mar 15 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-16",
+        "level": 0,
+        "tooltip": "Mar 16 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-17",
+        "level": 0,
+        "tooltip": "Mar 17 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-18",
+        "level": 0,
+        "tooltip": "Mar 18 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-19",
+        "level": 0,
+        "tooltip": "Mar 19 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-20",
+        "level": 0,
+        "tooltip": "Mar 20 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-21",
+        "level": 0,
+        "tooltip": "Mar 21 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-22",
+        "level": 0,
+        "tooltip": "Mar 22 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-23",
+        "level": 0,
+        "tooltip": "Mar 23 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-24",
+        "level": 0,
+        "tooltip": "Mar 24 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-25",
+        "level": 0,
+        "tooltip": "Mar 25 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-26",
+        "level": 0,
+        "tooltip": "Mar 26 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-27",
+        "level": 0,
+        "tooltip": "Mar 27 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-28",
+        "level": 0,
+        "tooltip": "Mar 28 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-29",
+        "level": 0,
+        "tooltip": "Mar 29 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-30",
+        "level": 0,
+        "tooltip": "Mar 30 \u00b7 no activity"
+      },
+      {
+        "date": "2026-03-31",
+        "level": 0,
+        "tooltip": "Mar 31 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-01",
+        "level": 0,
+        "tooltip": "Apr 1 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-02",
+        "level": 0,
+        "tooltip": "Apr 2 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-03",
+        "level": 0,
+        "tooltip": "Apr 3 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-04",
+        "level": 0,
+        "tooltip": "Apr 4 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-05",
+        "level": 0,
+        "tooltip": "Apr 5 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-06",
+        "level": 0,
+        "tooltip": "Apr 6 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-07",
+        "level": 0,
+        "tooltip": "Apr 7 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-08",
+        "level": 0,
+        "tooltip": "Apr 8 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-09",
+        "level": 0,
+        "tooltip": "Apr 9 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-10",
+        "level": 0,
+        "tooltip": "Apr 10 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-11",
+        "level": 0,
+        "tooltip": "Apr 11 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-12",
+        "level": 0,
+        "tooltip": "Apr 12 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-13",
+        "level": 0,
+        "tooltip": "Apr 13 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-14",
+        "level": 0,
+        "tooltip": "Apr 14 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-15",
+        "level": 0,
+        "tooltip": "Apr 15 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-16",
+        "level": 0,
+        "tooltip": "Apr 16 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-17",
+        "level": 0,
+        "tooltip": "Apr 17 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-18",
+        "level": 0,
+        "tooltip": "Apr 18 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-19",
+        "level": 0,
+        "tooltip": "Apr 19 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-20",
+        "level": 0,
+        "tooltip": "Apr 20 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-21",
+        "level": 0,
+        "tooltip": "Apr 21 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-22",
+        "level": 0,
+        "tooltip": "Apr 22 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-23",
+        "level": 0,
+        "tooltip": "Apr 23 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-24",
+        "level": 0,
+        "tooltip": "Apr 24 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-25",
+        "level": 0,
+        "tooltip": "Apr 25 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-26",
+        "level": 0,
+        "tooltip": "Apr 26 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-27",
+        "level": 0,
+        "tooltip": "Apr 27 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-28",
+        "level": 0,
+        "tooltip": "Apr 28 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-29",
+        "level": 0,
+        "tooltip": "Apr 29 \u00b7 no activity"
+      },
+      {
+        "date": "2026-04-30",
+        "level": 0,
+        "tooltip": "Apr 30 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-01",
+        "level": 0,
+        "tooltip": "May 1 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-02",
+        "level": 0,
+        "tooltip": "May 2 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-03",
+        "level": 0,
+        "tooltip": "May 3 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-04",
+        "level": 0,
+        "tooltip": "May 4 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-05",
+        "level": 0,
+        "tooltip": "May 5 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-06",
+        "level": 0,
+        "tooltip": "May 6 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-07",
+        "level": 0,
+        "tooltip": "May 7 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-08",
+        "level": 0,
+        "tooltip": "May 8 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-09",
+        "level": 0,
+        "tooltip": "May 9 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-10",
+        "level": 0,
+        "tooltip": "May 10 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-11",
+        "level": 0,
+        "tooltip": "May 11 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-12",
+        "level": 0,
+        "tooltip": "May 12 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-13",
+        "level": 0,
+        "tooltip": "May 13 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-14",
+        "level": 0,
+        "tooltip": "May 14 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-15",
+        "level": 0,
+        "tooltip": "May 15 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-16",
+        "level": 0,
+        "tooltip": "May 16 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-17",
+        "level": 0,
+        "tooltip": "May 17 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-18",
+        "level": 0,
+        "tooltip": "May 18 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-19",
+        "level": 0,
+        "tooltip": "May 19 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-20",
+        "level": 0,
+        "tooltip": "May 20 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-21",
+        "level": 0,
+        "tooltip": "May 21 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-22",
+        "level": 0,
+        "tooltip": "May 22 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-23",
+        "level": 0,
+        "tooltip": "May 23 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-24",
+        "level": 0,
+        "tooltip": "May 24 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-25",
+        "level": 0,
+        "tooltip": "May 25 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-26",
+        "level": 0,
+        "tooltip": "May 26 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-27",
+        "level": 0,
+        "tooltip": "May 27 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-28",
+        "level": 0,
+        "tooltip": "May 28 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-29",
+        "level": 0,
+        "tooltip": "May 29 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-30",
+        "level": 0,
+        "tooltip": "May 30 \u00b7 no activity"
+      },
+      {
+        "date": "2026-05-31",
+        "level": 0,
+        "tooltip": "May 31 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-01",
+        "level": 0,
+        "tooltip": "Jun 1 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-02",
+        "level": 0,
+        "tooltip": "Jun 2 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-03",
+        "level": 0,
+        "tooltip": "Jun 3 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-04",
+        "level": 0,
+        "tooltip": "Jun 4 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-05",
+        "level": 0,
+        "tooltip": "Jun 5 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-06",
+        "level": 0,
+        "tooltip": "Jun 6 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-07",
+        "level": 0,
+        "tooltip": "Jun 7 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-08",
+        "level": 0,
+        "tooltip": "Jun 8 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-09",
+        "level": 0,
+        "tooltip": "Jun 9 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-10",
+        "level": 0,
+        "tooltip": "Jun 10 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-11",
+        "level": 0,
+        "tooltip": "Jun 11 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-12",
+        "level": 0,
+        "tooltip": "Jun 12 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-13",
+        "level": 0,
+        "tooltip": "Jun 13 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-14",
+        "level": 0,
+        "tooltip": "Jun 14 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-15",
+        "level": 0,
+        "tooltip": "Jun 15 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-16",
+        "level": 0,
+        "tooltip": "Jun 16 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-17",
+        "level": 0,
+        "tooltip": "Jun 17 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-18",
+        "level": 0,
+        "tooltip": "Jun 18 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-19",
+        "level": 0,
+        "tooltip": "Jun 19 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-20",
+        "level": 0,
+        "tooltip": "Jun 20 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-21",
+        "level": 0,
+        "tooltip": "Jun 21 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-22",
+        "level": 0,
+        "tooltip": "Jun 22 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-23",
+        "level": 0,
+        "tooltip": "Jun 23 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-24",
+        "level": 0,
+        "tooltip": "Jun 24 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-25",
+        "level": 0,
+        "tooltip": "Jun 25 \u00b7 no activity"
+      }
+    ],
+    "month_ticks": [
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May"
+    ],
+    "summary": "0 actions over the last 52 weeks"
+  },
+  "standing": {
+    "facts": [
+      "Reputation: Neutral",
+      "Rank: Apprentice",
+      "No active moderation flags"
+    ],
+    "is_in_good_standing": true,
+    "since_label": "Since 2026"
+  },
+  "stats": [
+    {
+      "delta": null,
+      "delta_tone": null,
+      "key": "trust",
+      "label": "Trust",
+      "platform": "BCC",
+      "value": "50"
+    },
+    {
+      "delta": null,
+      "delta_tone": null,
+      "key": "pulled_by",
+      "label": "Pulled by",
+      "platform": "PEEPSO",
+      "value": "1"
+    },
+    {
+      "delta": null,
+      "delta_tone": null,
+      "key": "reviews",
+      "label": "Reviews",
+      "platform": "BCC",
+      "value": "0"
+    },
+    {
+      "delta": null,
+      "delta_tone": null,
+      "key": "solids",
+      "label": "Solids",
+      "platform": "PEEPSO",
+      "value": "0"
+    },
+    {
+      "delta": null,
+      "delta_tone": null,
+      "key": "disputes",
+      "label": "Disputes",
+      "platform": "BCC",
+      "value": "0"
+    },
+    {
+      "delta": null,
+      "delta_tone": null,
+      "key": "watching",
+      "label": "Watching",
+      "platform": "BCC",
+      "value": "4"
+    }
+  ],
+  "tabs": [
+    {
+      "count": 4,
+      "hidden": false,
+      "key": "watching",
+      "label": "Watching"
+    },
+    {
+      "count": 0,
+      "hidden": false,
+      "key": "reviews",
+      "label": "Reviews"
+    },
+    {
+      "count": 0,
+      "hidden": false,
+      "key": "activity",
+      "label": "Activity"
+    },
+    {
+      "count": 0,
+      "hidden": false,
+      "key": "disputes",
+      "label": "Disputes"
+    },
+    {
+      "count": 4,
+      "hidden": false,
+      "key": "network",
+      "label": "Network"
+    }
+  ],
+  "tier_label": "Uncommon",
+  "trust_score": 50,
+  "user_id": 137,
+  "verifications": {
+    "github_username": null,
+    "github_verified": false,
+    "profile_completeness": 100,
+    "wallets_verified": 1,
+    "x_username": null,
+    "x_verified": false
+  },
+  "viewer_attestation": null,
+  "viewer_blocking": false,
+  "wallets": [
+    {
+      "address_short": "cosmos12\u20267a8e",
+      "chain_name": "Cosmos Hub",
+      "chain_slug": "cosmos",
+      "id": 15,
+      "is_primary": true,
+      "verified_at": "2026-06-08T13:08:08Z"
+    }
+  ]
+}
