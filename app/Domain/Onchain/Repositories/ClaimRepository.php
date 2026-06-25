@@ -10,6 +10,7 @@
 namespace BCC\Trust\Onchain\Repositories;
 
 use BCC\Core\DB\AdvisoryLock;
+use BCC\Trust\Onchain\ValueObjects\ClaimStatus;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -135,11 +136,14 @@ class ClaimRepository {
      *
      * @return array{id: int, inserted: bool}|false Claim data or false on failure.
      */
-    public static function upsert(int $userId, string $entityType, int $entityId, string $walletAddress, int $chainId, string $claimRole, string $status = 'verified'): array|false {
+    public static function upsert(int $userId, string $entityType, int $entityId, string $walletAddress, int $chainId, string $claimRole, string $status = ClaimStatus::VERIFIED): array|false {
         global $wpdb;
         $table = self::table();
 
-        $verifiedAt = ($status === 'verified') ? current_time('mysql', true) : null;
+        // Validate at the persistence boundary — an invalid claim status must
+        // fail loud, not silently persist (Phase 9).
+        $status     = ClaimStatus::assert($status);
+        $verifiedAt = ($status === ClaimStatus::VERIFIED) ? current_time('mysql', true) : null;
 
         $wpdb->query($wpdb->prepare(
             "INSERT INTO {$table} (user_id, entity_type, entity_id, wallet_address, chain_id, claim_role, status, verified_at, created_at)
