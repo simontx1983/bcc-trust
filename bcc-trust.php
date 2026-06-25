@@ -417,7 +417,7 @@ add_action('bcc_trust_daily_contribution_recovery', function () {
 // group for any verified collection that doesn't have one yet.
 // Idempotent — re-running creates no duplicates.
 add_action('bcc_gated_group_provision', function () {
-    $result = \BCC\Trust\Core\Plugin::instance()
+    $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->gatedGroupProvisioningService()
         ->provisionAll();
 
@@ -755,7 +755,7 @@ add_action('bcc_gated_group_reconcile_sweep', function () {
     $nextCursor  = count($userIds) < $batchSize ? 0 : $maxReturned;
     update_option($cursorOption, $nextCursor, false);
 
-    $service     = \BCC\Trust\Core\Plugin::instance()->nftGroupGateService();
+    $service     = \BCC\Trust\Onchain\OnchainPlugin::instance()->nftGroupGateService();
     $totalJoined = 0;
     $usersTouched = 0;
 
@@ -785,7 +785,7 @@ add_action('bcc_gated_group_reconcile_sweep', function () {
 // unbounded RPC and every member is eventually covered.
 add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, function () {
     try {
-        $stats = \BCC\Trust\Core\Plugin::instance()
+        $stats = \BCC\Trust\Onchain\OnchainPlugin::instance()
             ->nftGroupRevokeService()
             ->sweep();
         if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0) {
@@ -846,7 +846,7 @@ add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     if ($config === null) {
         return; // Not a holder group.
     }
-    \BCC\Trust\Core\Plugin::instance()
+    \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->nftGroupGateService()
         ->recordPermanentOptOut($userId, $groupId);
 }, 10, 2);

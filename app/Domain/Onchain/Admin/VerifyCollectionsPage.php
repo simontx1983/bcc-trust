@@ -17,7 +17,7 @@
 namespace BCC\Trust\Onchain\Admin;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
-use BCC\Trust\Core\Plugin;
+use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -135,7 +135,7 @@ final class VerifyCollectionsPage
             wp_send_json_error(['message' => 'Invalid collection id.']);
         }
 
-        $result = Plugin::instance()->gatedGroupProvisioningService()->provisionOne($collectionId);
+        $result = OnchainPlugin::instance()->gatedGroupProvisioningService()->provisionOne($collectionId);
 
         if ($result['status'] === 'error' || $result['status'] === 'skipped') {
             wp_send_json_error(['message' => $result['message']]);
@@ -1184,7 +1184,7 @@ final class VerifyCollectionsPage
         // Persist any pending changes first so the operator sees consistent state.
         $saveNotices = self::handleSave();
 
-        $result = Plugin::instance()->gatedGroupProvisioningService()->provisionAll();
+        $result = OnchainPlugin::instance()->gatedGroupProvisioningService()->provisionAll();
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections provision (manual)', [
             'action'   => 'gated_group_provision_manual',

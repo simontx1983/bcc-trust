@@ -32,6 +32,7 @@ namespace BCC\Trust\Onchain\REST;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\ValueObjects\GroupVerification;
@@ -164,7 +165,7 @@ final class HolderGroupsEndpoint
         }
         $balances = HoldingsService::ownsAnyMany($userId, $pairs);
 
-        $gateService = Plugin::instance()->nftGroupGateService();
+        $gateService = OnchainPlugin::instance()->nftGroupGateService();
 
         $joined    = [];
         $eligible  = [];
@@ -244,7 +245,7 @@ final class HolderGroupsEndpoint
         }
 
         $groupId = (int) $request->get_param('id');
-        $result  = Plugin::instance()->nftGroupGateService()->joinIfEligible($userId, $groupId);
+        $result  = OnchainPlugin::instance()->nftGroupGateService()->joinIfEligible($userId, $groupId);
 
         if ($result->success) {
             // §CRIT-05 accountability surface — holder-group joins are the
@@ -312,7 +313,7 @@ final class HolderGroupsEndpoint
             );
         }
 
-        Plugin::instance()->nftGroupGateService()->recordOptOut($userId, $groupId);
+        OnchainPlugin::instance()->nftGroupGateService()->recordOptOut($userId, $groupId);
 
         // §CRIT-05 — mirror of holder_group_join; records the 90-day opt-out
         // that prevents the reconcile sweep from re-adding the user.
@@ -339,7 +340,7 @@ final class HolderGroupsEndpoint
         }
 
         $response = ApiResponse::ok([
-            'auto_join' => Plugin::instance()->nftGroupGateService()->autoJoinEnabled($userId),
+            'auto_join' => OnchainPlugin::instance()->nftGroupGateService()->autoJoinEnabled($userId),
         ]);
         $response->header('Cache-Control', 'private, no-store');
         return $response;
@@ -372,7 +373,7 @@ final class HolderGroupsEndpoint
             );
         }
 
-        $service = Plugin::instance()->nftGroupGateService();
+        $service = OnchainPlugin::instance()->nftGroupGateService();
         $enabled = filter_var($autoJoinRaw, FILTER_VALIDATE_BOOLEAN);
         $service->setAutoJoinEnabled($userId, $enabled);
 

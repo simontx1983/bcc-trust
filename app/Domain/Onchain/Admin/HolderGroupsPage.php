@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Admin;
 
-use BCC\Trust\Core\Plugin;
+use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Services\NftGroupGateService;
 
 if (!defined('ABSPATH')) {
@@ -91,7 +91,7 @@ final class HolderGroupsPage
             'order'      => 'ASC',
         ]);
 
-        $service       = Plugin::instance()->nftGroupGateService();
+        $service       = OnchainPlugin::instance()->nftGroupGateService();
         $totalJoined   = 0;
         $usersTouched  = 0;
         $usersConsidered = count($userIds);
@@ -149,7 +149,7 @@ final class HolderGroupsPage
             exit;
         }
 
-        $service = Plugin::instance()->nftGroupGateService();
+        $service = OnchainPlugin::instance()->nftGroupGateService();
         $optIn   = $service->autoJoinEnabled($userId);
 
         // Service itself returns zeros if opt-in is off, but call it
