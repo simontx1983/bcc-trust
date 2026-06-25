@@ -158,53 +158,17 @@ class TrustRestController {
 
             return self::success($result);
 
-        } catch (Exception $e) {
-            // Map known eligibility exceptions to §1.4.6 / Phase γ stable
-            // codes so the frontend can branch on `err.code` instead of
-            // pattern-matching `err.message`. The canonical UX path for
-            // soft gates is the server-rendered `permissions.can_endorse`
-            // boolean + `unlock_hint` (§1.4.5); the 400/403 responses
-            // below are the race-condition / direct-call fallback.
-            //
-            // Substring matching is fragile but bounded — see
-            // EndorsementService::endorsePage() for the exception sites
-            // (L74, L82, L94, L114, L135, L150, L246-258, L273, L285).
-            $msg = $e->getMessage();
-
-            if (str_contains($msg, 'Authentication required')) {
-                return self::errorWithCode('bcc_unauthorized', $msg, 401);
-            }
-            if (str_contains($msg, 'Invalid page')) {
-                return self::errorWithCode('bcc_invalid_request', $msg, 400);
-            }
-            if (str_contains($msg, 'own page')) {
-                return self::errorWithCode('bcc_endorse_self', $msg, 403);
-            }
-            if (str_contains($msg, 'already endorsed')) {
-                return self::errorWithCode('bcc_conflict', $msg, 409);
-            }
-            if (str_contains($msg, 'flagged for unusual activity')) {
-                return self::errorWithCode('bcc_fraud_locked', $msg, 403);
-            }
-            if (str_contains($msg, 'system is busy')) {
-                // Concurrency-lock contention — retryable. Surface as
-                // rate-limited so the existing client backoff path applies.
-                return self::errorWithCode('bcc_rate_limited', $msg, 429);
-            }
-            if (str_contains($msg, 'onboarding quests') || str_contains($msg, 'unlock endorsements')
-                || str_contains($msg, 'days old')
-            ) {
-                // Soft gate — surface the service message verbatim as the
-                // unlock hint per §1.4.5 (data.unlock_hint companion).
-                return self::errorWithCode(
-                    'bcc_permission_denied',
-                    $msg,
-                    403,
-                    ['unlock_hint' => $msg]
-                );
-            }
-
-            \BCC\Core\Log\Logger::error('[bcc-trust] endorse() unexpected error', ['error' => $msg]);
+        } catch (\BCC\Trust\Core\Exceptions\EndorsementException $e) {
+            // Typed eligibility/throttle failure: the (code, status, data)
+            // triple is carried ON the exception (its named constructors are
+            // the single source of truth for the §1.4 mapping), so a future
+            // copy-edit to a message can no longer reroute the response. The
+            // canonical UX path for soft gates is still the server-rendered
+            // `permissions.can_endorse` boolean + `unlock_hint` (§1.4.5);
+            // these responses are the race-condition / direct-call fallback.
+            return self::errorWithCode($e->errorCode(), $e->getMessage(), $e->httpStatus(), $e->data() ?: null);
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] endorse() unexpected error', ['error' => $e->getMessage()]);
             return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
@@ -232,20 +196,12 @@ class TrustRestController {
 
             return self::success($result);
 
-        } catch (Exception $e) {
-            $msg = $e->getMessage();
-
-            if (str_contains($msg, 'Authentication required')) {
-                return self::errorWithCode('bcc_unauthorized', $msg, 401);
-            }
-            if (str_contains($msg, 'system is busy')) {
-                return self::errorWithCode('bcc_rate_limited', $msg, 429);
-            }
-            if (str_contains($msg, 'not found')) {
-                return self::errorWithCode('bcc_not_found', $msg, 404);
-            }
-
-            \BCC\Core\Log\Logger::error('[bcc-trust] revoke_endorsement() unexpected error', ['error' => $msg]);
+        } catch (\BCC\Trust\Core\Exceptions\EndorsementException $e) {
+            // Typed failure — code/status/data carried on the exception
+            // (see endorse() above for the rationale).
+            return self::errorWithCode($e->errorCode(), $e->getMessage(), $e->httpStatus(), $e->data() ?: null);
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] revoke_endorsement() unexpected error', ['error' => $e->getMessage()]);
             return self::errorWithCode('bcc_internal', 'An unexpected error occurred.', 500);
         }
     }
