@@ -649,8 +649,17 @@ final class Plugin
                 new \BCC\Core\PeepSo\PeepSoGraphService()
             ),
             $this->reputationRepository(),
-            $this->peepSoReactionRepository(),
             $this->hiddenActivityRepository(),
+            $this->groupContextResolver(),
+            $this->feedHydrationPipeline()
+        );
+    }
+
+    private ?Services\Feed\FeedHydrationPipeline $feedHydrationPipeline = null;
+    public function feedHydrationPipeline(): Services\Feed\FeedHydrationPipeline
+    {
+        return $this->feedHydrationPipeline ??= new Services\Feed\FeedHydrationPipeline(
+            $this->peepSoReactionRepository(),
             $this->groupContextResolver(),
             $this->commentRepository(),
             $this->gifRepository(),
