@@ -55,7 +55,6 @@ function bcc_trust_create_user_info_table() {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         UNIQUE KEY user_id (user_id),
-        KEY fraud_score (fraud_score),
         KEY risk_level (risk_level),
         KEY usr_last_activity (usr_last_activity),
         KEY idx_fraud_risk (fraud_score, risk_level),

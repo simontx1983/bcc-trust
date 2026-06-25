@@ -232,6 +232,11 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-reputation-events.php';
 // no-op once done. Runs automatically on a fresh DB; existing dev DBs were
 // pre-marked done at staging so their orphans are preserved.
 require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-orphans.php';
+// Phase 5: trims 3 provably-redundant duplicate indexes on hot tables (dbDelta
+// leftovers; fresh installs never create them). Guarded by
+// bcc_trust_legacy_indexes_trimmed; non-destructive. Dev DBs pre-marked at
+// staging so the local dups are left alone.
+require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-indexes.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**

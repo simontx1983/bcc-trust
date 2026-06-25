@@ -60,7 +60,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_correction (weight_corrected_at, fraud_score_at_vote),
         KEY idx_votes_page_cat_status (page_id, category_id, status),
         KEY idx_vote_lookup (voter_user_id, page_id, category_id, status)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 
@@ -100,7 +100,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_recalculate (recalculate_required, last_calculated_at),
         KEY idx_cat_score (category_id, positive_score, total_score),
         KEY idx_recalc_failures (recalc_failures, recalculate_required)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 
@@ -177,7 +177,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_endorser_history (endorser_user_id, created_at),
         KEY idx_page_endorser (page_id, endorser_user_id, status),
         KEY idx_vesting (vesting_stage, status, created_at)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 
@@ -286,7 +286,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_ip_lookup (ip_address, created_at),
         KEY idx_user_action_date (user_id, action, created_at),
         KEY idx_action_created (action, created_at)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 
@@ -336,7 +336,7 @@ function bcc_trust_create_core_tables() {
         UNIQUE KEY unique_vote_flagger (vote_id, flagger_user_id),
         KEY idx_status (status),
         KEY idx_flagger (flagger_user_id)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 
@@ -379,7 +379,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_user_fingerprint_lastseen (user_id, fingerprint, last_seen),
         KEY idx_automation_risk (automation_score, risk_level),
         KEY idx_ip_fingerprint (ip_address, fingerprint)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 
@@ -405,7 +405,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_expires (expires_at),
         KEY idx_user_type (user_id, pattern_type),
         KEY idx_detected (detected_at)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 
@@ -433,7 +433,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_risk (risk_level),
         KEY idx_expires (expires_at),
         KEY idx_user_recent (user_id, analyzed_at)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 
@@ -461,7 +461,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_status (suspended_at, unsuspended_at),
         KEY idx_expires (expires_at),
         KEY idx_active (unsuspended_at, expires_at)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 
@@ -494,7 +494,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_target_source (target_user_id, source_user_id),
         KEY idx_type_weight (edge_type, weight),
         KEY idx_pagerank (edge_type, source_user_id, target_user_id, weight)
-    ) $charset_collate;";
+    ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
 }
