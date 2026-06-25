@@ -31,6 +31,10 @@ final class HeliusSeenSignaturesRepository
     public const ALARM_THRESHOLD  = 12000;
     public const MAX_AGE_SECONDS  = 3600;
 
+    /** Bounded age-delete: rows per batch + max batches per sweep (Phase 8). */
+    private const CLEANUP_BATCH_SIZE      = 5000;
+    private const CLEANUP_MAX_ITERATIONS  = 20;
+
     /**
      * Sweep-derived row count, persisted so admin reads + the next
      * sweep don't have to re-COUNT(*) the whole table. Updated only
@@ -87,12 +91,25 @@ final class HeliusSeenSignaturesRepository
         global $wpdb;
         $table = self::table();
 
-        // 1. Delete rows older than the age TTL.
+        // 1. Delete rows older than the age TTL — in bounded batches. An
+        //    unbounded `DELETE … WHERE seen_at < cutoff` would, if this 5-min
+        //    cron stalls for hours, accumulate a large backlog and then take
+        //    ONE long table-lock that blocks the indexer's dedup inserts.
+        //    Batched (5000/iter, capped) so each lock is short; a backlog that
+        //    exceeds the per-sweep cap is finished by the next sweep.
         $cutoff = gmdate('Y-m-d H:i:s', time() - $maxAgeSeconds);
-        $deletedAge = (int) $wpdb->query($wpdb->prepare(
-            "DELETE FROM {$table} WHERE seen_at < %s",
-            $cutoff
-        ));
+        $deletedAge = 0;
+        for ($i = 0; $i < self::CLEANUP_MAX_ITERATIONS; $i++) {
+            $n = (int) $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$table} WHERE seen_at < %s LIMIT %d",
+                $cutoff,
+                self::CLEANUP_BATCH_SIZE
+            ));
+            $deletedAge += $n;
+            if ($n < self::CLEANUP_BATCH_SIZE) {
+                break;
+            }
+        }
 
         // 2. Compute remaining without a re-COUNT(*) when the cached
         // size is fresh. Cache miss falls back to a true COUNT(*).

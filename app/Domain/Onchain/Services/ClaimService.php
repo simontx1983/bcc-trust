@@ -61,6 +61,15 @@ class ClaimService {
     private const EXCLUSIVE_ROLES = ['operator', 'creator'];
 
     /**
+     * Max wallets checked per claim match (Phase 8). Each wallet on the
+     * entity's chain costs a synchronous on-chain RPC in matchCollection;
+     * the linked-wallet count is attacker-controllable, so this caps the
+     * per-request fan-out. Generous — real users rarely link >25 wallets
+     * to one chain.
+     */
+    private const MAX_WALLETS_PER_CLAIM_MATCH = 25;
+
+    /**
      * Attempt to claim an on-chain entity.
      *
      * Checks if the user has a connected wallet that matches the entity's
@@ -220,6 +229,16 @@ class ClaimService {
 
         if (empty($chainWallets)) {
             return null;
+        }
+
+        // Bound the synchronous on-chain RPC fan-out (Phase 8): matchCollection
+        // issues one getEthRole/getSolanaRole RPC per wallet, and a user's
+        // linked-wallet count is attacker-controllable. Cap the wallets checked
+        // per claim so a 100-wallet user can't force 100+ synchronous RPC calls
+        // in a single request. A user with more than the cap on this entity's
+        // chain has only their first N checked (rare in practice).
+        if (count($chainWallets) > self::MAX_WALLETS_PER_CLAIM_MATCH) {
+            $chainWallets = array_slice($chainWallets, 0, self::MAX_WALLETS_PER_CLAIM_MATCH);
         }
 
         if ($entityType === 'validator') {
