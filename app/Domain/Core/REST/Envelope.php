@@ -72,6 +72,36 @@ final class Envelope
         $data   = $response->get_data();
         $status = (int) $response->get_status();
 
+        // Phase 6: on a rate-limit 429, advertise backoff guidance — Retry-After
+        // + X-RateLimit-* headers and an optional data.retry_after_seconds
+        // (contract §1.3 / §1.4.4) — sourced from the throttle call that denied
+        // this request, so every throttled endpoint gets it without threading
+        // limit/window through each call site. Runs before the already-enveloped
+        // pass-through because the canonical error shape is enveloped.
+        // bcc-core is a hard dependency and merges before bcc-trust (PR order),
+        // so Throttle::lastDenial() is always present at runtime; class_exists
+        // guards only the bcc-core-absent degradation case.
+        if ($status === 429 && class_exists(\BCC\Core\Security\Throttle::class)) {
+            $denial = \BCC\Core\Security\Throttle::lastDenial();
+            if (is_array($denial)) {
+                $window = max(1, (int) ($denial['window'] ?? 60));
+                $limit  = max(0, (int) ($denial['limit'] ?? 0));
+                $response->header('Retry-After', (string) $window);
+                $response->header('X-RateLimit-Limit', (string) $limit);
+                $response->header('X-RateLimit-Remaining', '0');
+                $response->header('X-RateLimit-Reset', (string) (time() + $window));
+
+                if (is_array($data) && isset($data['error']) && is_array($data['error'])) {
+                    $errData = (isset($data['error']['data']) && is_array($data['error']['data']))
+                        ? $data['error']['data']
+                        : [];
+                    $errData['retry_after_seconds'] = $window;
+                    $data['error']['data'] = $errData;
+                    $response->set_data($data);
+                }
+            }
+        }
+
         // Already enveloped — pass through.
         if (self::isAlreadyEnveloped($data)) {
             return $response;
