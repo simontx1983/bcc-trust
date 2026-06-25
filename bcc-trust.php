@@ -475,6 +475,13 @@ add_filter(
     [\BCC\Trust\Core\Services\CronHealthSnapshot::class, 'contribute']
 );
 
+// Phase 4 (ops-visibility): retention-table overgrown alarm — generalises the
+// Helius dedup overgrown gauge to the cleanup-pruned tables.
+add_filter(
+    'bcc_system_health',
+    [\BCC\Trust\Core\Services\RetentionHealthSnapshot::class, 'contribute']
+);
+
 // Operator OS v1 Phase 3: contribute the Read Model panel to
 // bcc-core's DeveloperPage. Renders coverage / drift / dirty-queue
 // state from ReadModelHealthRepository — no new domain logic.
