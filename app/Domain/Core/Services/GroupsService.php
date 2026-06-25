@@ -48,7 +48,6 @@ use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 
@@ -194,7 +193,7 @@ final class GroupsService
         // Chain-tag resolution: reads from either `_bcc_gate_chain_id`
         // (NFT) or `_bcc_chain_tag` (plain). Locals + legacy untagged
         // groups return null — the FE renders no chip in that case.
-        $chainMap = ChainRepository::resolveSlugsForGroups([$groupId]);
+        $chainMap = \BCC\Core\ServiceLocator::resolveChainRead()->resolveSlugsForGroups([$groupId]);
         $chainTag = $chainMap[$groupId] ?? null;
 
         $description  = self::truncateDescription((string) $row->post_content);

@@ -173,7 +173,7 @@ final class GroupsDiscoveryEndpoint
         //     → bcc_onchain_chains.
         //   - trust gate min: warm WP's post-meta cache once for the
         //     candidate set, then read per-group from L1.
-        $chainSlugByGroup = ChainRepository::resolveSlugsForGroups($orderedIds);
+        $chainSlugByGroup = \BCC\Core\ServiceLocator::resolveChainRead()->resolveSlugsForGroups($orderedIds);
         update_meta_cache('post', $orderedIds);
         $trustMinByGroup = [];
         foreach ($orderedIds as $gid) {

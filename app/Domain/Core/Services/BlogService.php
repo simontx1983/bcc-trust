@@ -27,7 +27,6 @@ use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -358,7 +357,7 @@ final class BlogService
         /** @var list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}> $chainRows */
         $chainRows = [];
         foreach ($chainIds as $cid) {
-            $chain = ChainRepository::getById($cid);
+            $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById($cid);
             if ($chain === null) {
                 // Chain was deactivated / deleted after the blog was
                 // tagged — silently drop from the hydrated body rather

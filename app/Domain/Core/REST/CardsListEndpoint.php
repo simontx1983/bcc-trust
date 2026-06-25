@@ -58,7 +58,6 @@ use BCC\Trust\Core\Services\PageDiscoveryService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\PageCardPrefetcher;
 use BCC\Trust\Core\Support\PageTypeMap;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -261,7 +260,7 @@ final class CardsListEndpoint
         //    so we never silently return empty results from a typo.
         $chainSlug = (string) $request->get_param('chain');
         if ($chainSlug !== '') {
-            if (ChainRepository::getBySlug($chainSlug) === null) {
+            if (\BCC\Core\ServiceLocator::resolveChainRead()->getBySlug($chainSlug) === null) {
                 return ApiResponse::error(
                     'bcc_invalid_request',
                     'chain must be a known chain slug.',

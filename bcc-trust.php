@@ -952,6 +952,13 @@ add_filter('bcc.resolve.onchain_data_read', function ($service = null) {
     return new \BCC\Trust\Onchain\Services\OnchainDataReadService();
 });
 
+add_filter('bcc.resolve.chain_read', function ($service = null) {
+    if ($service instanceof \BCC\Core\Contracts\ChainReadInterface) {
+        return $service;
+    }
+    return new \BCC\Trust\Onchain\Services\ChainReadService();
+});
+
 /*
 |--------------------------------------------------------------------------
 | PRE-WARM SERVICELOCATOR CACHE (before ServiceLocator::freeze)
@@ -968,6 +975,7 @@ add_filter('bcc.resolve.onchain_data_read', function ($service = null) {
 \BCC\Core\ServiceLocator::resolveWalletLinkWrite();
 \BCC\Core\ServiceLocator::resolveWalletSignalWrite();
 \BCC\Core\ServiceLocator::resolveOnchainDataRead();
+\BCC\Core\ServiceLocator::resolveChainRead();
 \BCC\Core\ServiceLocator::resolveRecalcQueueRead();
 
 /*

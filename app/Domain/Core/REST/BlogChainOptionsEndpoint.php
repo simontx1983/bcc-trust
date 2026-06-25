@@ -10,9 +10,10 @@
  * any blog post), and gating it behind auth would force every fresh
  * session to wait for /me before painting the picker.
  *
- * Backed by {@see ChainRepository::getActive()}, which serves from
- * the object cache + transient (5-min TTL) — repeated requests
- * within the TTL window are zero-DB.
+ * Backed by ChainReadInterface::getActive() (resolved via
+ * ServiceLocator::resolveChainRead()), which serves from the object
+ * cache + transient (5-min TTL) — repeated requests within the TTL
+ * window are zero-DB.
  *
  * Response shape:
  *   { data: { items: [{id, slug, name, color, icon_url}, …] } }
@@ -35,7 +36,6 @@
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Support\ApiResponse;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -74,7 +74,7 @@ final class BlogChainOptionsEndpoint
 
         /** @var list<array{id: int, slug: string, name: string, color: string|null, icon_url: string|null}> $items */
         $items = [];
-        foreach (ChainRepository::getActive() as $chain) {
+        foreach (\BCC\Core\ServiceLocator::resolveChainRead()->getActive() as $chain) {
             $items[] = [
                 'id'       => (int) $chain->id,
                 'slug'     => (string) $chain->slug,

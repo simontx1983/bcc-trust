@@ -56,7 +56,6 @@ use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FrontendRedirect;
 use BCC\Trust\Core\Support\JwtToken;
 use BCC\Trust\Core\Support\WalletAddressValidator;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -669,12 +668,12 @@ final class AuthEndpoint
             return ApiResponse::error('bcc_invalid_request', 'chain_slug and wallet_address are required.', 400);
         }
 
-        $chainId = ChainRepository::resolveId($chainSlug);
+        $chainId = \BCC\Core\ServiceLocator::resolveChainRead()->resolveId($chainSlug);
         if ($chainId === null) {
             return ApiResponse::error('bcc_invalid_request', 'Unsupported chain.', 400);
         }
 
-        $chain = ChainRepository::getById($chainId);
+        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById($chainId);
         if ($chain === null) {
             return ApiResponse::error('bcc_invalid_request', 'Chain not found.', 400);
         }
@@ -737,7 +736,7 @@ final class AuthEndpoint
             );
         }
 
-        $chain = ChainRepository::getById((int) ($challenge['chain_id'] ?? 0));
+        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById((int) ($challenge['chain_id'] ?? 0));
         if ($chain === null) {
             return ApiResponse::error('bcc_invalid_request', 'Chain not found.', 400);
         }
@@ -1656,12 +1655,12 @@ final class AuthEndpoint
             return ApiResponse::error('bcc_invalid_request', 'chain_slug and wallet_address are required.', 400);
         }
 
-        $chainId = ChainRepository::resolveId($chainSlug);
+        $chainId = \BCC\Core\ServiceLocator::resolveChainRead()->resolveId($chainSlug);
         if ($chainId === null) {
             return ApiResponse::error('bcc_invalid_request', 'Unsupported chain.', 400);
         }
 
-        $chain = ChainRepository::getById($chainId);
+        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById($chainId);
         if ($chain === null) {
             return ApiResponse::error('bcc_invalid_request', 'Chain not found.', 400);
         }
@@ -1719,7 +1718,7 @@ final class AuthEndpoint
             );
         }
 
-        $chain = ChainRepository::getById((int) ($challenge['chain_id'] ?? 0));
+        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById((int) ($challenge['chain_id'] ?? 0));
         if ($chain === null) {
             return ApiResponse::error('bcc_invalid_request', 'Chain not found.', 400);
         }
@@ -1855,7 +1854,7 @@ final class AuthEndpoint
             );
         }
 
-        $chain = ChainRepository::getById((int) ($challengePeek['chain_id'] ?? 0));
+        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById((int) ($challengePeek['chain_id'] ?? 0));
         if ($chain === null) {
             return ApiResponse::error('bcc_invalid_request', 'Chain not found.', 400);
         }

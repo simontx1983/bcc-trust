@@ -367,7 +367,7 @@ final class MyGroupsEndpoint
                 400
             );
         }
-        $chain = \BCC\Trust\Onchain\Repositories\ChainRepository::getBySlug($chainSlug);
+        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getBySlug($chainSlug);
         if ($chain === null) {
             return ApiResponse::error(
                 'bcc_invalid_request',
