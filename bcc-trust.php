@@ -227,6 +227,11 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-reputation.php';
 // the reputation cutover; recent changes now read bcc_trust_score_events).
 // Guarded by bcc_reputation_events_dropped; no-op once done.
 require_once BCC_TRUST_PATH . 'includes/database/drop-reputation-events.php';
+// Phase 5: drops the 17 verified legacy orphan tables (FK-aware — drops
+// fk_endorsement_type first). Guarded by bcc_trust_legacy_orphans_dropped;
+// no-op once done. Runs automatically on a fresh DB; existing dev DBs were
+// pre-marked done at staging so their orphans are preserved.
+require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-orphans.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**
