@@ -1,0 +1,35 @@
+# Golden-master characterization manifest (Phase 10 net).
+#
+# One line per read endpoint we pin byte-for-byte as a behaviour-preserving
+# refactor net. Format:  <name><TAB or spaces><path-under /wp-json/bcc/v1>
+# Fixture lives at  tests/golden/<name>.json  (the response's `data` only —
+# the `_meta` envelope carries the per-request request_id and is excluded).
+#
+# Anon viewer, captured against the seeded Local DB. Every entry below was
+# proven self-stable (two back-to-back fetches byte-identical) at capture time;
+# verify-golden.sh re-proves the match against live on each run.
+#
+# COVERAGE MAP (why each entry earns its place — what Phase-11 split it gates):
+#   profile-phillipcosmos  /users/:handle  — UserViewService/MemberProfileComposer/
+#                          CardViewService god-services (the Phase-7 dedup net).
+#   feed-hot   /feed/hot   — FeedRankingService::getHotFeed runs the SAME 8-step
+#                          hydrate* chain all 5 feed methods share → anchors the
+#                          Phase-11 FeedHydrationPipeline extraction.
+#   cards      /cards      — CardsListEndpoint surfaces validator/chain-bearing
+#                          cards via the Core→Onchain static reads → anchors the
+#                          Phase-11 ChainReadInterface boundary.
+#   ranks      /ranks      — leaderboard read model (RanksEndpoint).
+#   locals     /locals     — locals/group read surface (LocalsEndpoint).
+#
+# SCOPE NOTE (no silent cap): the per-viewer feed variants (authed /feed, /feed/tag
+# with content, /feed group/author) are NOT pinned here — anon returns them empty,
+# and pinning them needs a stable test JWT + seeded per-viewer state. /feed/hot
+# already exercises the shared hydration chain those variants extract, so the
+# FeedHydrationPipeline split is covered. Add an authed-viewer fixture set if a
+# Phase-11 change touches a feed SOURCE query (not just the shared chain).
+
+profile-phillipcosmos	/users/phillipcosmos
+feed-hot	/feed/hot
+cards	/cards
+ranks	/ranks
+locals	/locals
