@@ -45,7 +45,18 @@ final class MemberSelfPageService
     ) {
     }
 
-    /** Deterministic self-page id for a member (0 for invalid users). */
+    /**
+     * Deterministic self-page id for a member (0 for invalid users).
+     *
+     * This is the SINGLE canonical `user_id → score-row page_id` bridge.
+     * Notably it is also the translation an attestation with
+     * `target_kind = 'user_profile'` must use: that attestation's `target_id`
+     * is a raw user id, and the trust-score row it affects is
+     * `selfPageId(target_id)`, never `target_id` itself. Anything wiring
+     * attestations into the self-page score (the deferred §J "Slice E"
+     * synthesis) routes through here — see
+     * {@see AttestationRepository::TARGET_KINDS} for the invariant.
+     */
     public static function selfPageId(int $userId): int
     {
         return $userId > 0 ? self::ID_BASE + $userId : 0;

@@ -53,4 +53,32 @@ final class MemberSelfPageTest extends TestCase
         // disjoint by construction.
         self::assertGreaterThan(MemberSelfPageService::ID_BASE, MemberSelfPageService::selfPageId(1));
     }
+
+    /**
+     * Locks the attestation→self-page bridge invariant (domain-audit F3).
+     *
+     * An attestation with target_kind='user_profile' stores target_id = a RAW
+     * user id. The trust-score row that attestation must affect is
+     * selfPageId(target_id) — NOT target_id. If a future §J "Slice E" synthesis
+     * ever uses target_id directly as a page_id it would score the wrong row
+     * (or nothing); this test makes that mistake a red build. The numbers here
+     * mirror what AttestationRepository::TARGET_KINDS / PAGE_TARGET_KINDS encode:
+     * user_profile target_id is a user id, card kinds carry a page id directly.
+     */
+    public function testUserProfileAttestationTargetResolvesToSelfPage(): void
+    {
+        foreach ([1, 42, 2105, 1_000_000] as $attestationTargetId) {
+            $scorePageId = MemberSelfPageService::selfPageId($attestationTargetId);
+
+            // The bug this guards: using the raw target_id as the score page id.
+            self::assertNotSame(
+                $attestationTargetId,
+                $scorePageId,
+                "user_profile attestation target_id $attestationTargetId must NOT be used as a score page_id directly"
+            );
+            self::assertSame(MemberSelfPageService::ID_BASE + $attestationTargetId, $scorePageId);
+            // …and the score row round-trips back to the attested member.
+            self::assertSame($attestationTargetId, MemberSelfPageService::ownerOfSelfPage($scorePageId));
+        }
+    }
 }
