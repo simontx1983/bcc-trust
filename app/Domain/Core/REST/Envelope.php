@@ -62,6 +62,13 @@ final class Envelope
             return $response;
         }
 
+        // Phase 4c: surface the request-correlation id as a response header on
+        // EVERY BCC response — success, error, and already-enveloped — so a
+        // client/proxy can log it even on an error shape that carries no _meta.
+        if (class_exists(\BCC\Core\Http\RequestContext::class)) {
+            $response->header('X-Request-Id', \BCC\Core\Http\RequestContext::requestId());
+        }
+
         $data   = $response->get_data();
         $status = (int) $response->get_status();
 
@@ -87,7 +94,7 @@ final class Envelope
         // Success path: wrap.
         $response->set_data([
             'data'  => $data,
-            '_meta' => self::buildMeta($request),
+            '_meta' => self::buildMeta(),
         ]);
 
         return $response;
@@ -174,19 +181,24 @@ final class Envelope
     /**
      * @return array<string, mixed>
      */
-    private static function buildMeta(\WP_REST_Request $request): array
+    private static function buildMeta(): array
     {
-        $requestId = $request->get_header('X-BCC-Request-Id');
-        if (!is_string($requestId) || $requestId === '') {
-            try {
-                $requestId = bin2hex(random_bytes(8));
-            } catch (\Throwable $e) {
-                $requestId = (string) hexdec(uniqid());
-            }
+        // The correlation id was bound at the REST boundary by bcc-core's
+        // rest_pre_dispatch (from a client X-BCC-Request-Id or minted), so
+        // _meta.request_id matches the X-Request-Id header and the server logs.
+        // The `request_id` key is contract-stable — only its source changed.
+        if (class_exists(\BCC\Core\Http\RequestContext::class)) {
+            return ['request_id' => \BCC\Core\Http\RequestContext::requestId()];
         }
 
-        return [
-            'request_id' => $requestId,
-        ];
+        // Defensive fallback only (bcc-core is a hard dependency, so this is
+        // unreachable in practice) — keep the contract field populated.
+        try {
+            $requestId = bin2hex(random_bytes(8));
+        } catch (\Throwable $e) {
+            $requestId = (string) hexdec(uniqid());
+        }
+
+        return ['request_id' => $requestId];
     }
 }
