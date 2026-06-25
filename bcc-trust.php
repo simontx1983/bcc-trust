@@ -447,6 +447,34 @@ add_filter(
     [\BCC\Trust\Onchain\Services\NftIndexerHealthSnapshot::class, 'contribute']
 );
 
+// Phase 4 (ops-visibility): uniform per-cron SUCCESS heartbeat. For every
+// expected recurring hook, record `<hook>_last_success` once its handler(s)
+// finish — registered at PHP_INT_MAX so a throwing handler halts do_action
+// BEFORE this runs, leaving the heartbeat stale (the signal a stalled cron
+// must produce). Read back by CronHealthSnapshot into /system/health.
+// Registered on `init` so every plugin's bcc_expected_cron_hooks contribution
+// is present, and before wp-cron executes due callbacks (wp_loaded+).
+add_action('init', static function (): void {
+    $hooks = (array) apply_filters('bcc_expected_cron_hooks', []);
+    foreach (array_keys($hooks) as $hook) {
+        $hookName = (string) $hook;
+        add_action($hookName, static function () use ($hookName): void {
+            update_option(
+                $hookName . \BCC\Trust\Core\Services\CronHealthSnapshot::HEARTBEAT_SUFFIX,
+                time(),
+                false
+            );
+        }, PHP_INT_MAX);
+    }
+}, 5);
+
+// Phase 4 (ops-visibility): project per-cron last-success freshness into the
+// bcc-core /system/health surface (same canonical seam as the indexer above).
+add_filter(
+    'bcc_system_health',
+    [\BCC\Trust\Core\Services\CronHealthSnapshot::class, 'contribute']
+);
+
 // Operator OS v1 Phase 3: contribute the Read Model panel to
 // bcc-core's DeveloperPage. Renders coverage / drift / dirty-queue
 // state from ReadModelHealthRepository — no new domain logic.
