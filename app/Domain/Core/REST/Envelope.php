@@ -102,6 +102,31 @@ final class Envelope
             }
         }
 
+        // Phase 6: ETag / If-None-Match for cacheable reads (cards, feed, …).
+        // Any GET 200 that opted into caching (Cache-Control max-age>0) gets a
+        // content-hash ETag; a matching If-None-Match short-circuits to 304 with
+        // no body (saves the payload transfer on an unchanged refetch). The ETag
+        // IS a hash of the `data` payload, so it can NEVER serve stale content;
+        // `_meta` is excluded (version/reaction_types are stable and the request
+        // id lives in the X-Request-Id header, which would otherwise vary the tag).
+        if (
+            $status === 200
+            && $request->get_method() === 'GET'
+            && is_array($data)
+            && array_key_exists('data', $data)
+            && self::isEtagEligible($response)
+        ) {
+            $etag = '"' . md5((string) wp_json_encode($data['data'])) . '"';
+            $response->header('ETag', $etag);
+
+            $ifNoneMatch = $request->get_header('If-None-Match');
+            if (is_string($ifNoneMatch) && trim($ifNoneMatch) === $etag) {
+                $response->set_status(304);
+                $response->set_data(null);
+                return $response;
+            }
+        }
+
         // Already enveloped — pass through.
         if (self::isAlreadyEnveloped($data)) {
             return $response;
@@ -138,6 +163,25 @@ final class Envelope
             }
         }
         return false;
+    }
+
+    /**
+     * Whether a response opted into caching (Cache-Control max-age>0, and not
+     * no-store/no-cache) and is therefore eligible for a content-hash ETag.
+     */
+    private static function isEtagEligible(\WP_REST_Response $response): bool
+    {
+        $cc = '';
+        foreach ($response->get_headers() as $name => $value) {
+            if (strtolower((string) $name) === 'cache-control') {
+                $cc = strtolower(is_array($value) ? implode(',', $value) : (string) $value);
+                break;
+            }
+        }
+        if ($cc === '' || strpos($cc, 'no-store') !== false || strpos($cc, 'no-cache') !== false) {
+            return false;
+        }
+        return preg_match('/max-age=[1-9][0-9]*/', $cc) === 1;
     }
 
     /**
