@@ -257,7 +257,30 @@ final class AttestationService
      *   can_report: array{allowed: bool, unlock_hint: string|null}
      * }
      */
-    public function getViewerActionPermissions(
+    public function getViewerActionPermissions(int $viewerUserId, int $targetOwnerUserId): array
+    {
+        // Per-request memo: this (viewer,target) resolution is queried up to 3×
+        // while composing one /users/:handle response (resolvePermissions, the
+        // profile composer's direct call, and the member-card summary path).
+        // Stable within a request, so cache it (Phase 7 dedup).
+        $key = $viewerUserId . ':' . $targetOwnerUserId;
+        return $this->viewerActionPermsCache[$key]
+            ??= $this->computeViewerActionPermissions($viewerUserId, $targetOwnerUserId);
+    }
+
+    /**
+     * @var array<string, array{can_vouch: array{allowed: bool, unlock_hint: string|null}, can_stand_behind: array{allowed: bool, unlock_hint: string|null}, can_report: array{allowed: bool, unlock_hint: string|null}}>
+     */
+    private array $viewerActionPermsCache = [];
+
+    /**
+     * @return array{
+     *   can_vouch: array{allowed: bool, unlock_hint: string|null},
+     *   can_stand_behind: array{allowed: bool, unlock_hint: string|null},
+     *   can_report: array{allowed: bool, unlock_hint: string|null}
+     * }
+     */
+    private function computeViewerActionPermissions(
         int $viewerUserId,
         int $targetOwnerUserId
     ): array {
