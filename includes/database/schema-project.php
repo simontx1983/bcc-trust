@@ -43,6 +43,7 @@ function bcc_trust_create_page_tables() {
         negative_score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
         onchain_bonus DECIMAL(5,2) NOT NULL DEFAULT 0.00,
         endorsement_bonus DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        attestation_bonus DECIMAL(10,2) NOT NULL DEFAULT 0.00,
         vote_count INT UNSIGNED NOT NULL DEFAULT 0,
         unique_voters INT UNSIGNED NOT NULL DEFAULT 0,
         endorsement_count INT UNSIGNED NOT NULL DEFAULT 0,

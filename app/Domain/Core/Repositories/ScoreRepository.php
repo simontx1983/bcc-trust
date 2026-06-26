@@ -1209,6 +1209,55 @@ class ScoreRepository {
     }
 
     /**
+     * Write a page's `attestation_bonus` (the Trust Attestation Layer synthesis
+     * term — vouch/stand_behind folded into the score, Slice E) and recompute
+     * total_score via the canonical formula. Like contribution_bonus this is an
+     * absolute value computed upstream (AttestationScoreSynthesis — decay + the
+     * §J.4 elite-source cap / diversity multiplier / velocity cap / ceiling) and
+     * already bounded before it reaches here. Locks the score row FOR UPDATE to
+     * serialise with concurrent vote/endorsement deltas; safe inside an existing
+     * transaction. For a member self-page the caller MUST pass
+     * MemberSelfPageService::selfPageId($userId), never the raw user id.
+     *
+     * @throws Exception on database failure
+     */
+    public function applyAttestationBonus(int $pageId, float $bonus): void {
+        global $wpdb;
+
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $now           = current_time('mysql');
+
+        $wpdb->get_results($wpdb->prepare(
+            "SELECT page_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
+            $pageId
+        ));
+
+        // attestation_bonus is SET before total_score/reputation_tier so the
+        // formula + tier CASE read the NEW value (MySQL evaluates SET clauses
+        // left-to-right) — same pattern as applyContributionBonus.
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET attestation_bonus = %f,
+                 total_score        = {$totalScoreSql},
+                 reputation_tier    = {$tierSql},
+                 last_calculated_at = %s
+             WHERE page_id = %d",
+            $bonus,
+            $now,
+            $pageId
+        ));
+
+        if ($result === false) {
+            throw new Exception(
+                'Failed to apply attestation bonus for page ' . $pageId . ': ' . $wpdb->last_error
+            );
+        }
+
+        $this->mirrorSelfPageTierToUserInfo($pageId);
+    }
+
+    /**
      * Apply a dispute/admin penalty to a member self-page (Architecture A).
      * `$delta` is the score change (negative for a penalty, e.g. -5) and
      * ACCUMULATES into `penalty_adjustment` — the clobber-safe home for
