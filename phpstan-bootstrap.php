@@ -54,6 +54,7 @@ $configs = [
     'scoring.php',
     'contribution.php',
     'trust-weights.php',
+    'attestation.php',
     'fraud-detection.php',
     'limits.php',
     'behavioral.php',

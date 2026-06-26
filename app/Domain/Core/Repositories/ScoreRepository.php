@@ -52,7 +52,7 @@ if (!defined('ABSPATH')) {
 class ScoreRepository {
 
     /** Explicit column list for bcc_trust_scores table. */
-    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, endorsement_bonus, contribution_bonus, penalty_adjustment, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
+    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, endorsement_bonus, contribution_bonus, penalty_adjustment, attestation_bonus, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
 
     private string $table;
 
@@ -1026,103 +1026,6 @@ class ScoreRepository {
     }
 
     /**
-     * Apply endorsement bonus: derive absolute value from endorsement rows.
-     *
-     * IMPORTANT: Must be called from inside a TransactionManager::run()
-     * closure (the endorsement service's transaction). The endorsement row
-     * INSERT is visible to us (same transaction), so SUM(weight) already
-     * includes the new endorsement.
-     *
-     * Previous implementation used additive `endorsement_bonus += weight`.
-     * This raced with the cron recalculation path which writes an absolute
-     * value derived from the same endorsement rows: if the cron's SUM
-     * included the new row and then the additive write fired after the
-     * cron committed, the bonus was double-counted until the next recalc.
-     *
-     * Now both live and cron paths derive from the same source of truth
-     * (SUM of active endorsement weights), making them idempotent and
-     * immune to ordering races.
-     *
-     * @throws Exception on database failure
-     */
-    public function applyEndorsementBonus(int $pageId, float $weight): void {
-        $this->deriveAndWriteEndorsementBonus($pageId);
-    }
-
-    /**
-     * Remove endorsement bonus: derive absolute value from endorsement rows.
-     *
-     * Same absolute-derivation approach as applyEndorsementBonus(). The
-     * endorsement row's status has already been set to 0 (soft-deleted)
-     * within the same transaction, so SUM(weight) excludes it.
-     *
-     * @throws Exception on database failure
-     */
-    public function removeEndorsementBonus(int $pageId, float $weight): void {
-        $this->deriveAndWriteEndorsementBonus($pageId);
-    }
-
-    /**
-     * Derive endorsement_bonus + endorsement_count from endorsement rows
-     * and write to all score rows for a page. Locks score rows FOR UPDATE
-     * to serialise with concurrent recalculations and other delta writes.
-     *
-     * Safe to call from inside an existing transaction (no nested START
-     * TRANSACTION). The caller's TransactionManager::run() owns the
-     * transaction boundary.
-     *
-     * @throws Exception on database failure
-     */
-    private function deriveAndWriteEndorsementBonus(int $pageId): void {
-        global $wpdb;
-
-        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
-
-        // Lock score rows to serialise with concurrent recalculations
-        // and other delta writes (applyVoteDelta, applyBonus).
-        $wpdb->get_results($wpdb->prepare(
-            "SELECT page_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
-            $pageId
-        ));
-
-        // SINGLE SOURCE OF TRUTH — DO NOT DIVERGE.
-        // Use the shared dynamic formula (base_weight × vesting(current age) ×
-        // retroactive_factor) × page_diversity. Stored `weight` is NEVER read
-        // — it is frozen at creation time and would oscillate against the
-        // cron recalc path, which uses this exact same helper.
-        $endorsementRepo = \BCC\Trust\Core\Plugin::instance()->endorsementRepository();
-        $rows = $endorsementRepo->getActiveWithFraudScoresForPage($pageId);
-        $derived = \BCC\Trust\Core\Services\EndorsementWeightCalculator::computePageEndorsementBonus($rows);
-
-        $bonus = (float) $derived['bonus'];
-        $count = (int)   $derived['count'];
-        $now   = current_time('mysql');
-
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table}
-             SET endorsement_count  = %d,
-                 endorsement_bonus  = %f,
-                 total_score        = {$totalScoreSql},
-                 reputation_tier    = {$tierSql},
-                 last_calculated_at = %s
-             WHERE page_id = %d",
-            $count,
-            $bonus,
-            $now,
-            $pageId
-        ));
-
-        if ($result === false) {
-            throw new Exception(
-                'Failed to derive endorsement bonus for page ' . $pageId . ': ' . $wpdb->last_error
-            );
-        }
-
-        $this->mirrorSelfPageTierToUserInfo($pageId);
-    }
-
-    /**
      * Mirror a member self-page's reputation_tier onto the denormalised
      * `bcc_trust_user_info.reputation_tier` column (Architecture A).
      *
@@ -1202,6 +1105,55 @@ class ScoreRepository {
         if ($result === false) {
             throw new Exception(
                 'Failed to apply contribution bonus for page ' . $pageId . ': ' . $wpdb->last_error
+            );
+        }
+
+        $this->mirrorSelfPageTierToUserInfo($pageId);
+    }
+
+    /**
+     * Write a page's `attestation_bonus` (the Trust Attestation Layer synthesis
+     * term — vouch/stand_behind folded into the score, Slice E) and recompute
+     * total_score via the canonical formula. Like contribution_bonus this is an
+     * absolute value computed upstream (AttestationScoreSynthesis — decay + the
+     * §J.4 elite-source cap / diversity multiplier / velocity cap / ceiling) and
+     * already bounded before it reaches here. Locks the score row FOR UPDATE to
+     * serialise with concurrent vote/endorsement deltas; safe inside an existing
+     * transaction. For a member self-page the caller MUST pass
+     * MemberSelfPageService::selfPageId($userId), never the raw user id.
+     *
+     * @throws Exception on database failure
+     */
+    public function applyAttestationBonus(int $pageId, float $bonus): void {
+        global $wpdb;
+
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $now           = current_time('mysql');
+
+        $wpdb->get_results($wpdb->prepare(
+            "SELECT page_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
+            $pageId
+        ));
+
+        // attestation_bonus is SET before total_score/reputation_tier so the
+        // formula + tier CASE read the NEW value (MySQL evaluates SET clauses
+        // left-to-right) — same pattern as applyContributionBonus.
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET attestation_bonus = %f,
+                 total_score        = {$totalScoreSql},
+                 reputation_tier    = {$tierSql},
+                 last_calculated_at = %s
+             WHERE page_id = %d",
+            $bonus,
+            $now,
+            $pageId
+        ));
+
+        if ($result === false) {
+            throw new Exception(
+                'Failed to apply attestation bonus for page ' . $pageId . ': ' . $wpdb->last_error
             );
         }
 
@@ -2401,6 +2353,44 @@ class ScoreRepository {
             return true;
         }
         return false;
+    }
+
+    /**
+     * One-time Slice E retirement: zero endorsement_bonus on every score
+     * row that still carries it, and recompute total_score +
+     * reputation_tier under the new canonical formula (which no longer
+     * sums endorsement_bonus). Returns the number of rows changed.
+     *
+     * §1 — the retirement UPDATE lives in the repository (no $wpdb in
+     * the bootstrap task). No double-count risk: the formula already
+     * excludes endorsement_bonus, so zeroing the column + recomputing
+     * under formulaSql() is the clean cutover. Bounded by the natural
+     * WHERE endorsement_bonus <> 0 predicate — only rows that actually
+     * carried a bonus are touched.
+     */
+    public function retireEndorsementBonus(): int
+    {
+        global $wpdb;
+
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $now           = current_time('mysql');
+
+        // endorsement_bonus is SET to 0 in the same statement that
+        // recomputes total_score; because formulaSql() no longer
+        // references endorsement_bonus, the recompute reflects the
+        // retired term regardless of SET ordering.
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET endorsement_bonus  = 0,
+                 total_score        = {$totalScoreSql},
+                 reputation_tier    = {$tierSql},
+                 last_calculated_at = %s
+             WHERE endorsement_bonus <> 0",
+            $now
+        ));
+
+        return is_int($result) ? $result : 0;
     }
 
     /**

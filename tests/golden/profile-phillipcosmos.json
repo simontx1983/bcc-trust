@@ -306,11 +306,6 @@
   "shift_log": {
     "days": [
       {
-        "date": "2025-06-27",
-        "level": 0,
-        "tooltip": "Jun 27 \u00b7 no activity"
-      },
-      {
         "date": "2025-06-28",
         "level": 0,
         "tooltip": "Jun 28 \u00b7 no activity"
@@ -2124,6 +2119,11 @@
         "date": "2026-06-25",
         "level": 0,
         "tooltip": "Jun 25 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-26",
+        "level": 0,
+        "tooltip": "Jun 26 \u00b7 no activity"
       }
     ],
     "month_ticks": [

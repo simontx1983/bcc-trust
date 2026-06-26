@@ -71,6 +71,107 @@ function bcc_trust_create_trust_attestations_table(): void {
         bcc_trust_migrate_legacy_endorsements_to_attestations();
         update_option('bcc_trust_attestation_legacy_endorsement_migrated', time(), false);
     }
+
+    // Slice E cutover: migrate self-page `post_vouch` endorsements into
+    // user_profile vouch attestations so the legacy reaction backing is
+    // preserved under the new attestation_bonus term. Idempotent — own
+    // option gate + INSERT IGNORE on the attestations unique key.
+    if (!get_option('bcc_trust_attestation_postvouch_migrated')) {
+        bcc_trust_migrate_postvouch_endorsements_to_attestations();
+        update_option('bcc_trust_attestation_postvouch_migrated', time(), false);
+    }
+
+    // Slice E: backfill attestation_order_in_target for ALL rows. The two
+    // migrations above leave order=0; order is NOT score-relevant (the
+    // synthesis ignores it), so a one-time ROW_NUMBER() backfill is safe.
+    if (!get_option('bcc_trust_attestation_order_backfilled')) {
+        bcc_trust_backfill_attestation_order();
+        update_option('bcc_trust_attestation_order_backfilled', time(), false);
+    }
+}
+
+/**
+ * Migrate legacy self-page `post_vouch` endorsements into user_profile
+ * vouch attestations (Slice E cutover).
+ *
+ * post_vouch endorsements land on a member's self-page (page_id =
+ * ID_BASE + user_id, ID_BASE = 1_000_000_000). They materialize as
+ * kind=vouch attestations with target_kind='user_profile' and
+ * target_id = the RAW author user id (page_id - ID_BASE) — the same
+ * raw-author-id invariant the live castLightVouch path writes, so the
+ * score subscriber folds both uniformly.
+ *
+ * Idempotency + safety:
+ *   - INSERT IGNORE + the attestations unique key (attestor, target_kind,
+ *     target_id, kind, revoked_at) make re-runs non-duplicating, and make
+ *     it non-colliding with native casts on the same (voucher, author).
+ *   - The JOIN to wp_users guards live-user only (a deleted author's
+ *     self-page leg is skipped).
+ *   - revoked_at mirrors endorsement status: status=1 (active) → NULL,
+ *     otherwise the created_at (revoked).
+ *
+ * attestation_order_in_target is left at 0 here; the order backfill
+ * (bcc_trust_backfill_attestation_order) repairs it for all rows.
+ */
+function bcc_trust_migrate_postvouch_endorsements_to_attestations(): void {
+    global $wpdb;
+
+    $endorsements_table = \BCC\Trust\Core\Database\TableRegistry::endorsements();
+    $attestations_table = \BCC\Trust\Core\Database\TableRegistry::trustAttestations();
+
+    $sql = "INSERT IGNORE INTO {$attestations_table} (
+        attestor_user_id, target_kind, target_id, kind,
+        weight_at_time, attestation_order_in_target,
+        created_at, reaffirmed_at, revoked_at
+    )
+    SELECT
+        e.endorser_user_id,
+        'user_profile' AS target_kind,
+        (e.page_id - 1000000000) AS target_id,
+        'vouch' AS kind,
+        e.weight AS weight_at_time,
+        0 AS attestation_order_in_target,
+        e.created_at,
+        NULL AS reaffirmed_at,
+        CASE WHEN e.status = 1 THEN NULL ELSE e.created_at END AS revoked_at
+    FROM {$endorsements_table} e
+    JOIN {$wpdb->users} u ON u.ID = (e.page_id - 1000000000)
+    WHERE e.context = 'post_vouch'
+      AND e.page_id > 1000000000";
+
+    $wpdb->query($sql);
+}
+
+/**
+ * Backfill attestation_order_in_target for ALL attestation rows
+ * (Slice E). The legacy + post_vouch migrations insert order=0; this
+ * one-time pass assigns a deterministic per-target ordinal via
+ * ROW_NUMBER() OVER (PARTITION BY target_kind, target_id ORDER BY
+ * created_at, id) (MySQL 8).
+ *
+ * Order is NOT score-relevant — AttestationScoreSynthesis ignores it —
+ * so rewriting every row is safe; it only fixes the migrations'
+ * placeholder 0. Native casts already set a correct order via
+ * nextOrderInTarget; re-deriving them from (created_at, id) preserves
+ * their relative ordering.
+ */
+function bcc_trust_backfill_attestation_order(): void {
+    global $wpdb;
+
+    $attestations_table = \BCC\Trust\Core\Database\TableRegistry::trustAttestations();
+
+    $sql = "UPDATE {$attestations_table} a
+        JOIN (
+            SELECT id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY target_kind, target_id
+                       ORDER BY created_at, id
+                   ) AS rn
+            FROM {$attestations_table}
+        ) r ON r.id = a.id
+        SET a.attestation_order_in_target = r.rn";
+
+    $wpdb->query($sql);
 }
 
 /**

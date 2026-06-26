@@ -602,6 +602,7 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
         'bcc_trust_weekly_digest'         => ['interval' => 'bcc_weekly',           'description' => 'weekly digest mailer'],
         'bcc_trust_deferred_rm_sync'      => ['interval' => 'bcc_thirty_seconds',   'description' => 'read-model deferred-rebuild for staleness recovery'],
         'bcc_trust_divergence_state_sweep'=> ['interval' => 'daily',                'description' => 'divergence-state classification + §J.7 notifications'],
+        'bcc_trust_daily_attestation_decay'=> ['interval' => 'daily',               'description' => 'attestation_bonus decay recompute sweep (Slice E)'],
         // Onchain domain
         'bcc_onchain_daily_refresh'       => ['interval' => 'daily',                'description' => 'onchain holdings refresh sweep'],
         'bcc_onchain_retry_bonus'         => ['interval' => 'hourly',               'description' => 'onchain bonus-application retry'],
@@ -684,6 +685,14 @@ add_action('plugins_loaded', static function (): void {
         wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_divergence_state_sweep');
     }
 
+    // Slice E — daily attestation decay recompute self-heal. Decay is
+    // time-dependent, so a target's attestation_bonus drifts even with no new
+    // events; this re-synthesizes every active target. Offset 3h so it trails
+    // the divergence sweep. Same anti-drift triple-redundancy idiom.
+    if (!wp_next_scheduled('bcc_trust_daily_attestation_decay')) {
+        wp_schedule_event(time() + 3 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_daily_attestation_decay');
+    }
+
     // Holder-group revoke (re-verification) sweep self-heal. This hook is
     // NEW — sites updated without a reactivation would otherwise never
     // schedule it (the exact silent-drift failure mode documented above
@@ -720,6 +729,55 @@ add_action('bcc_trust_divergence_state_sweep', static function (): void {
         // Belt-and-suspenders — sweep() itself swallows errors, but
         // a constructor/DI failure could escape. Log + drop.
         \BCC\Core\Log\Logger::warning('[bcc-trust] Divergence-state sweep callback failed', [
+            'error' => $e->getMessage(),
+        ]);
+    }
+});
+
+// Slice E — daily attestation_bonus decay recompute. Decay is time-dependent,
+// so a target's score drifts even with no new attestation events; this sweep
+// re-synthesizes every target that holds an active attestation. Paginated +
+// per-target isolated (a single failure → an `attestation_synthesis`
+// DegradationMetric, never aborts the sweep). The work-list (a GROUP BY over
+// active rows) is stable during the run because recomputeFor() touches only the
+// score table, never the attestation table — so OFFSET paging is safe.
+add_action('bcc_trust_daily_attestation_decay', static function (): void {
+    try {
+        $plugin     = \BCC\Trust\Core\Plugin::instance();
+        $repo       = $plugin->attestationRepository();
+        $synthesis  = $plugin->attestationScoreSynthesis();
+        $offset     = 0;
+        $batch      = 500;
+        $maxBatches = 200; // safety bound — up to 100k targets per run
+        $processed  = 0;
+        $failed     = 0;
+
+        for ($i = 0; $i < $maxBatches; $i++) {
+            $targets = $repo->listTargetsWithActiveAttestations($offset, $batch);
+            if ($targets === []) {
+                break;
+            }
+            foreach ($targets as $t) {
+                try {
+                    $synthesis->recomputeFor($t->target_kind, (int) $t->target_id);
+                    $processed++;
+                } catch (\Throwable $e) {
+                    $failed++;
+                    \BCC\Core\Observability\DegradationMetrics::record('attestation_synthesis', 'decay_recompute_failed');
+                }
+            }
+            if (count($targets) < $batch) {
+                break;
+            }
+            $offset += $batch;
+        }
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Attestation decay sweep complete', [
+            'processed' => $processed,
+            'failed'    => $failed,
+        ]);
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::warning('[bcc-trust] Attestation decay sweep callback failed', [
             'error' => $e->getMessage(),
         ]);
     }
@@ -1363,6 +1421,79 @@ add_action('init', function () {
 
 /*
 |--------------------------------------------------------------------------
+| Slice E cutover — one-time endorsement_bonus retirement
+|--------------------------------------------------------------------------
+|
+| The vouch reaction now feeds attestation_bonus (via the attestation
+| layer) instead of the legacy endorsement_bonus term, which has been
+| removed from the canonical formula (TrustScoreService). This one-time,
+| option-gated task:
+|   (a) zeros endorsement_bonus on every score row that still carries it
+|       and recomputes total_score + reputation_tier under the new
+|       formula (ScoreRepository::retireEndorsementBonus — §1, the
+|       $wpdb lives in the repo);
+|   (b) recomputes attestation_bonus for every target that holds an
+|       active attestation, so any migrated post_vouch backing folds in
+|       immediately. Mirrors the daily decay cron handler: paginated,
+|       per-target try/catch, fire-and-forget.
+|
+| No double-count: the formula already excludes endorsement_bonus, so
+| attestation_bonus is the only backing term after this runs. Hooked at
+| priority 20 (Plugin is wired by then). Self-disables via its option.
+*/
+add_action('init', static function (): void {
+    if (get_option('bcc_trust_endorsement_bonus_retired')) {
+        return;
+    }
+
+    try {
+        $plugin = \BCC\Trust\Core\Plugin::instance();
+
+        // (a) Zero the retired column + recompute total under the new formula.
+        $plugin->scoreRepository()->retireEndorsementBonus();
+
+        // (b) Re-synthesize attestation_bonus for all active-attestation
+        // targets so migrated post_vouch backing folds in now. Mirrors
+        // bcc_trust_daily_attestation_decay's paginated per-target loop.
+        $repo      = $plugin->attestationRepository();
+        $synthesis = $plugin->attestationScoreSynthesis();
+        $offset     = 0;
+        $batch      = 500;
+        $maxBatches = 200; // safety bound — up to 100k targets.
+
+        for ($i = 0; $i < $maxBatches; $i++) {
+            $targets = $repo->listTargetsWithActiveAttestations($offset, $batch);
+            if ($targets === []) {
+                break;
+            }
+            foreach ($targets as $t) {
+                try {
+                    $synthesis->recomputeFor($t->target_kind, (int) $t->target_id);
+                } catch (\Throwable $e) {
+                    \BCC\Core\Observability\DegradationMetrics::record(
+                        'attestation_synthesis',
+                        'endorsement_retire_recompute_failed'
+                    );
+                }
+            }
+            if (count($targets) < $batch) {
+                break;
+            }
+            $offset += $batch;
+        }
+
+        update_option('bcc_trust_endorsement_bonus_retired', time(), false);
+    } catch (\Throwable $e) {
+        // Leave the option unset so the task retries next request rather
+        // than half-completing. Log + drop.
+        \BCC\Core\Log\Logger::warning('[bcc-trust] endorsement_bonus retirement task failed', [
+            'error' => $e->getMessage(),
+        ]);
+    }
+}, 20);
+
+/*
+|--------------------------------------------------------------------------
 | V2 Phase 1 — Web push subscribers + flush worker
 |--------------------------------------------------------------------------
 |
@@ -1636,6 +1767,12 @@ function bcc_trust_activate() {
         wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_divergence_state_sweep');
     }
 
+    // Slice E — daily attestation_bonus decay recompute. Self-heal mirror at
+    // plugins_loaded; DO NOT remove the activation-side schedule as "redundant."
+    if (!wp_next_scheduled('bcc_trust_daily_attestation_decay')) {
+        wp_schedule_event(time() + 3 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_daily_attestation_decay');
+    }
+
     // V2 Phase 1 NFT cron schedules (activation fast path).
     //
     // ┌─ DO NOT REMOVE AS "REDUNDANT" ────────────────────────────────┐
@@ -1733,6 +1870,7 @@ function bcc_trust_deactivate() {
         'bcc_trust_initial_read_model_sync',
         'bcc_trust_daily_maintenance',
         'bcc_trust_deferred_rm_sync',
+        'bcc_trust_daily_attestation_decay', // Slice E
         'bcc_trust_weekly_slow_ring_scan', // scale-hardening Phase 3
         // Onchain cron events.
         'bcc_onchain_daily_refresh',

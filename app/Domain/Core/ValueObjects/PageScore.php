@@ -33,6 +33,7 @@ class PageScore {
     private float $onchainBonus;
     private float $contributionBonus;
     private float $penaltyAdjustment;
+    private float $attestationBonus;
     private ?DateTimeImmutable $lastVoteAt;
     private DateTimeImmutable $lastCalculatedAt;
     /** @var array<string, mixed>|null */
@@ -84,7 +85,8 @@ class PageScore {
         float $endorsementBonus,
         float $onchainBonus,
         float $contributionBonus = 0.0,
-        float $penaltyAdjustment = 0.0
+        float $penaltyAdjustment = 0.0,
+        float $attestationBonus = 0.0
     ): float {
         return \BCC\Trust\Core\Services\TrustScoreService::compute(
             $positive,
@@ -92,7 +94,8 @@ class PageScore {
             $endorsementBonus,
             $onchainBonus,
             $contributionBonus,
-            $penaltyAdjustment
+            $penaltyAdjustment,
+            $attestationBonus
         );
     }
 
@@ -119,7 +122,8 @@ class PageScore {
         float $endorsementBonus = 0.0,
         float $onchainBonus = 0.0,
         float $contributionBonus = 0.0,
-        float $penaltyAdjustment = 0.0
+        float $penaltyAdjustment = 0.0,
+        float $attestationBonus = 0.0
     ) {
         // Set pageId first (needed by validateCounts logging)
         $this->pageId = $pageId;
@@ -127,7 +131,7 @@ class PageScore {
         // Validate all inputs
         $this->validatePageId($pageId);
         $this->validateOwnerId($pageOwnerId);
-        $this->validateScores($totalScore, $positiveScore, $negativeScore, $voteCount, $endorsementBonus, $onchainBonus, $contributionBonus, $penaltyAdjustment);
+        $this->validateScores($totalScore, $positiveScore, $negativeScore, $voteCount, $endorsementBonus, $onchainBonus, $contributionBonus, $penaltyAdjustment, $attestationBonus);
         $this->validateCounts($voteCount, $uniqueVoters);
         $this->validateConfidence($confidenceScore);
         $this->validateTier($reputationTier);
@@ -145,6 +149,7 @@ class PageScore {
         $this->onchainBonus = $onchainBonus;
         $this->contributionBonus = $contributionBonus;
         $this->penaltyAdjustment = $penaltyAdjustment;
+        $this->attestationBonus = $attestationBonus;
         $this->lastVoteAt = $lastVoteAt;
         $this->lastCalculatedAt = $lastCalculatedAt ?? new DateTimeImmutable();
         $this->fraudMetadata = $fraudMetadata;
@@ -172,7 +177,7 @@ class PageScore {
         }
     }
     
-    private function validateScores(float $total, float $positive, float $negative, int $voteCount, float $endorsementBonus = 0.0, float $onchainBonus = 0.0, float $contributionBonus = 0.0, float $penaltyAdjustment = 0.0): void {
+    private function validateScores(float $total, float $positive, float $negative, int $voteCount, float $endorsementBonus = 0.0, float $onchainBonus = 0.0, float $contributionBonus = 0.0, float $penaltyAdjustment = 0.0, float $attestationBonus = 0.0): void {
         if ($total < 0 || $total > 100) {
             throw new InvalidArgumentException(
                 sprintf('Total score must be between 0 and 100, got: %f', $total)
@@ -193,8 +198,8 @@ class PageScore {
 
         // Only validate the mathematical relationship if there are inputs.
         // penalty_adjustment is negative, so test `!= 0` (not `> 0`).
-        if ($voteCount > 0 || $positive > 0 || $negative > 0 || $endorsementBonus > 0 || $onchainBonus > 0 || $contributionBonus > 0 || $penaltyAdjustment != 0.0) {
-            $expectedTotal = self::computeExpectedTotal($positive, $negative, $endorsementBonus, $onchainBonus, $contributionBonus, $penaltyAdjustment);
+        if ($voteCount > 0 || $positive > 0 || $negative > 0 || $endorsementBonus > 0 || $onchainBonus > 0 || $contributionBonus > 0 || $penaltyAdjustment != 0.0 || $attestationBonus > 0) {
+            $expectedTotal = self::computeExpectedTotal($positive, $negative, $endorsementBonus, $onchainBonus, $contributionBonus, $penaltyAdjustment, $attestationBonus);
             $difference    = abs($total - $expectedTotal);
 
             if ($difference > self::SCORE_TOLERANCE) {
@@ -327,6 +332,10 @@ class PageScore {
         return $this->penaltyAdjustment;
     }
 
+    public function getAttestationBonus(): float {
+        return $this->attestationBonus;
+    }
+
     public function getLastVoteAt(): ?DateTimeImmutable {
         return $this->lastVoteAt;
     }
@@ -457,7 +466,8 @@ class PageScore {
      *   endorsement_bonus?: float|numeric-string|null,
      *   onchain_bonus?: float|numeric-string|null,
      *   contribution_bonus?: float|numeric-string|null,
-     *   penalty_adjustment?: float|numeric-string|null
+     *   penalty_adjustment?: float|numeric-string|null,
+     *   attestation_bonus?: float|numeric-string|null
      * } $row
      */
     public static function fromDatabaseRow(object $row): self {
@@ -478,7 +488,8 @@ class PageScore {
             (float) ($row->endorsement_bonus ?? 0.0),
             (float) ($row->onchain_bonus ?? 0.0),
             (float) ($row->contribution_bonus ?? 0.0),
-            (float) ($row->penalty_adjustment ?? 0.0)
+            (float) ($row->penalty_adjustment ?? 0.0),
+            (float) ($row->attestation_bonus ?? 0.0)
         );
     }
     
