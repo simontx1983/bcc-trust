@@ -30,6 +30,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\GifRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
+use BCC\Trust\Core\Services\AttestationService;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
 use BCC\Trust\Core\Services\BlogService;
 use BCC\Trust\Core\Services\CommentService;
@@ -52,6 +53,7 @@ final class FeedHydrationPipeline
         private readonly GifRepository $gifRepo,
         private readonly MentionOverlayService $mentionOverlay,
         private readonly AuthorBadgeResolver $authorBadgeResolver,
+        private readonly AttestationService $attestationService,
         private readonly BlogService $blogService,
         private readonly PullBatchBodyHydrator $pullBatchBodyHydrator,
         private readonly ReviewBodyHydrator $reviewBodyHydrator,
@@ -79,6 +81,7 @@ final class FeedHydrationPipeline
         $items = $this->hydrateReactions($items, $viewerId);
         $items = $this->hydrateAuthorBadges($items);
         $items = $this->hydrateAuthorRanks($items);
+        $items = $this->hydrateAuthorVouch($items, $viewerId);
         $items = $this->hydrateSocialProofReactors($items);
         $items = self::hydrateViewerPermissions($items, $viewerId);
         $items = $this->hydrateGroupContexts($items);
@@ -570,6 +573,59 @@ final class FeedHydrationPipeline
                 $author['card_tier']             = $badge['card_tier'];
                 $author['tier_label']            = $badge['tier_label'];
                 $author['rank_label']            = $badge['rank_label'];
+                $item['author'] = $author;
+            }
+            $hydrated[] = $item;
+        }
+        return $hydrated;
+    }
+
+    /**
+     * Overlay the viewer's per-author vouch state + can-vouch permission onto
+     * each item's `author` block — the data behind the feed-byline Vouch
+     * toggle (vouch is author credibility, not a post reaction).
+     *
+     * Batched in one bounded IN-list read across the page's distinct authors
+     * (§4 no-N+1), via AttestationService::getViewerVouchStateForAuthors.
+     * Anon viewers get an empty state map → the fields are simply not emitted,
+     * keeping the anon payload byte-identical to the pre-vouch shape.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private function hydrateAuthorVouch(array $items, int $viewerId): array
+    {
+        if ($items === [] || $viewerId <= 0) {
+            return $items;
+        }
+
+        $authorIds = [];
+        foreach ($items as $item) {
+            $author = is_array($item['author'] ?? null) ? $item['author'] : [];
+            $uid    = is_int($author['id'] ?? null) ? $author['id'] : 0;
+            if ($uid > 0) {
+                $authorIds[$uid] = true;
+            }
+        }
+        if ($authorIds === []) {
+            return $items;
+        }
+
+        $vouchState = $this->attestationService->getViewerVouchStateForAuthors(
+            $viewerId,
+            array_keys($authorIds)
+        );
+        if ($vouchState === []) {
+            return $items;
+        }
+
+        $hydrated = [];
+        foreach ($items as $item) {
+            $author = is_array($item['author'] ?? null) ? $item['author'] : [];
+            $uid    = is_int($author['id'] ?? null) ? $author['id'] : 0;
+            if ($uid > 0 && isset($vouchState[$uid])) {
+                $author['viewer_attestation'] = $vouchState[$uid]['viewer_attestation'];
+                $author['can_vouch']          = $vouchState[$uid]['can_vouch'];
                 $item['author'] = $author;
             }
             $hydrated[] = $item;
