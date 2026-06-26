@@ -22,6 +22,7 @@ namespace BCC\Trust\Core\REST\Auth;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Core\Security\IpResolver;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\HandleService;
@@ -396,8 +397,11 @@ final class PasswordAuthController
                 $path  = '/reset-password?key=' . rawurlencode($key) . '&login=' . rawurlencode($login);
                 $resetUrl = FrontendRedirect::defaultReturn($path);
 
-                $parts     = explode(',', (string) ($_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? ''));
-                $requestIp = sanitize_text_field(trim($parts[0] ?? ''));
+                // Resolve the request IP through the canonical spoof-proof
+                // resolver (audit F3) — it honours CF-Connecting-IP only from
+                // verified Cloudflare ranges and otherwise ignores the
+                // forgeable X-Forwarded-For header. Mirrors AccountSecurityMailer.
+                $requestIp = IpResolver::getClientIp();
                 AuthMailer::sendPasswordResetEmail($userId, $email, $resetUrl, $requestIp);
 
                 AuditLogger::log('password_reset_requested', $userId, [
