@@ -2453,6 +2453,44 @@ class ScoreRepository {
     }
 
     /**
+     * One-time Slice E retirement: zero endorsement_bonus on every score
+     * row that still carries it, and recompute total_score +
+     * reputation_tier under the new canonical formula (which no longer
+     * sums endorsement_bonus). Returns the number of rows changed.
+     *
+     * §1 — the retirement UPDATE lives in the repository (no $wpdb in
+     * the bootstrap task). No double-count risk: the formula already
+     * excludes endorsement_bonus, so zeroing the column + recomputing
+     * under formulaSql() is the clean cutover. Bounded by the natural
+     * WHERE endorsement_bonus <> 0 predicate — only rows that actually
+     * carried a bonus are touched.
+     */
+    public function retireEndorsementBonus(): int
+    {
+        global $wpdb;
+
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $now           = current_time('mysql');
+
+        // endorsement_bonus is SET to 0 in the same statement that
+        // recomputes total_score; because formulaSql() no longer
+        // references endorsement_bonus, the recompute reflects the
+        // retired term regardless of SET ordering.
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET endorsement_bonus  = 0,
+                 total_score        = {$totalScoreSql},
+                 reputation_tier    = {$tierSql},
+                 last_calculated_at = %s
+             WHERE endorsement_bonus <> 0",
+            $now
+        ));
+
+        return is_int($result) ? $result : 0;
+    }
+
+    /**
      * Clear the recalculation flag for a page (quarantine).
      */
     public function clearRecalcFlag(int $pageId): void

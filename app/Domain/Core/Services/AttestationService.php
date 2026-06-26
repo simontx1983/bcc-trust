@@ -867,6 +867,185 @@ final class AttestationService
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // Light vouch reaction path (Slice E cutover) — §J.11
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Cast a LIGHT vouch attestation from the PeepSo vouch REACTION.
+     *
+     * Slice E cutover successor to EndorsementService::vouchForAuthor:
+     * the reaction now writes a kind=vouch attestation (instead of a
+     * legacy post_vouch endorsement) so the Phase-3 score subscriber
+     * folds it into attestation_bonus. Mirrors vouchForAuthor's posture
+     * EXACTLY — light, rank-gated SILENT-SKIP (no throw), weight 0.1,
+     * idempotent, and a fire-and-forget bool return. The reaction still
+     * lands in PeepSo even when this returns false; we just don't write
+     * the attestation.
+     *
+     * Deliberately bypasses cast()'s heavy path (tier exception,
+     * advisory locks, slot model, weight composition). The vouch is the
+     * abundant signal — its anti-farm is the rank gate + per-author
+     * idempotency + self-exclusion, identical to the legacy method.
+     *
+     * Locked invariant: target_id is the RAW author user id (not the
+     * selfPageId). The score subscriber translates user_profile → self-
+     * page id when it folds the synthesis; pre-translating here would
+     * double-shift the id.
+     *
+     * @return bool True iff a new vouch attestation row was created
+     *              (idempotent — a repeat vouch on the same author
+     *              returns false).
+     */
+    public function castLightVouch(int $voucherId, int $authorId): bool
+    {
+        if ($voucherId <= 0 || $authorId <= 0 || $voucherId === $authorId) {
+            return false;
+        }
+
+        // Rank gate — SILENT skip (no throw), exactly like vouchForAuthor.
+        // The social reaction still lands in PeepSo even when the user
+        // can't confer trust; we just don't write the attestation.
+        $gate = \BCC\Trust\Core\Plugin::instance()
+            ->featureAccessService()
+            ->canPerform($voucherId, 'vouch_reaction');
+        if (empty($gate['allowed'])) {
+            return false;
+        }
+
+        /** @var float $weight */
+        $weight = (float) apply_filters('bcc_trust_vouch_weight', BCC_TRUST_VOUCH_WEIGHT);
+
+        $insertedId = 0;
+        TransactionManager::run(function () use ($voucherId, $authorId, $weight, &$insertedId): void {
+            // Idempotency: one active vouch attestation per (voucher,
+            // user_profile, author). forUpdate=true serialises against a
+            // concurrent cast under the transaction's row lock.
+            $existing = $this->repo->findActiveOneByAttestorTargetKind(
+                $voucherId,
+                'user_profile',
+                $authorId,
+                'vouch',
+                true
+            );
+            if ($existing !== null) {
+                return; // already vouches — idempotent.
+            }
+
+            $orderInTarget = $this->repo->nextOrderInTarget('user_profile', $authorId);
+            $insertedId = $this->repo->insert(
+                $voucherId,
+                'user_profile',
+                $authorId,
+                'vouch',
+                $weight,
+                null,
+                $orderInTarget
+            );
+        });
+
+        if ($insertedId <= 0) {
+            return false;
+        }
+
+        // AFTER commit — same 6-arg signature the notification + score
+        // subscribers consume. target_owner === authorId (the vouch is
+        // ON the author's own profile).
+        do_action(
+            'bcc_attestation_created',
+            $voucherId,
+            $insertedId,
+            'user_profile',
+            $authorId,
+            'vouch',
+            $authorId
+        );
+
+        AuditLogger::log(
+            'vouch_added',
+            $insertedId,
+            [
+                'voucher_id'  => $voucherId,
+                'author_id'   => $authorId,
+                'weight'      => $weight,
+                'target_kind' => 'user_profile',
+            ],
+            'attestation',
+            $voucherId
+        );
+
+        return true;
+    }
+
+    /**
+     * Lift the LIGHT vouch attestation a voucher placed on an author's
+     * profile. Slice E successor to revokeVouchForAuthor.
+     *
+     * Soft-revokes the active (voucher, user_profile, author) vouch row
+     * and fires bcc_attestation_revoked so the score subscriber re-folds
+     * the synthesis. The ref-count "still vouches on other content"
+     * check STAYS in the Plugin.php reaction subscriber (chunk 2) — this
+     * method just revokes the row when called. Fire-and-forget: never
+     * throws on the light path, returns bool.
+     *
+     * @return bool True iff an active vouch attestation was revoked.
+     */
+    public function revokeLightVouch(int $voucherId, int $authorId): bool
+    {
+        if ($voucherId <= 0 || $authorId <= 0 || $voucherId === $authorId) {
+            return false;
+        }
+
+        $revokedId = 0;
+        TransactionManager::run(function () use ($voucherId, $authorId, &$revokedId): void {
+            $existing = $this->repo->findActiveOneByAttestorTargetKind(
+                $voucherId,
+                'user_profile',
+                $authorId,
+                'vouch',
+                true
+            );
+            if ($existing === null) {
+                return; // nothing to revoke.
+            }
+            $id = isset($existing->id) ? (int) $existing->id : 0;
+            if ($id <= 0) {
+                return;
+            }
+            if ($this->repo->softRevoke($id, $voucherId)) {
+                $revokedId = $id;
+            }
+        });
+
+        if ($revokedId <= 0) {
+            return false;
+        }
+
+        do_action(
+            'bcc_attestation_revoked',
+            $voucherId,
+            $revokedId,
+            'user_profile',
+            $authorId,
+            'vouch',
+            $authorId
+        );
+
+        AuditLogger::log(
+            'vouch_removed',
+            $revokedId,
+            [
+                'voucher_id'  => $voucherId,
+                'author_id'   => $authorId,
+                'target_kind' => 'user_profile',
+            ],
+            'attestation',
+            $voucherId
+        );
+
+        return true;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Slot enforcement (private) — §J.1 bandwidth model
     // ──────────────────────────────────────────────────────────────────
 

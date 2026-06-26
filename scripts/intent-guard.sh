@@ -203,9 +203,12 @@ check_read_model() {
 # ═════════════════════════════════════════════════════════════════════════════
 # The real invariant: for every sampled page,
 #   stored trust_score ≈ clamp(0..100, NEUTRAL + (positive - negative)*2
-#                                     + endorsement_bonus + onchain_bonus
+#                                     + onchain_bonus
 #                                     + contribution_bonus + penalty_adjustment
 #                                     + attestation_bonus)
+# (endorsement_bonus is RETIRED post Slice E cutover — compute() ignores the
+#  arg, so the wp-eval block below still passes it harmlessly and the guard
+#  stays correct; the arg is NOT removed to avoid arg-position drift.)
 # within ±SCORE_TOLERANCE. This is the same formula the scorer uses; drift
 # here means the read model is lying to the UI.
 # ═════════════════════════════════════════════════════════════════════════════
