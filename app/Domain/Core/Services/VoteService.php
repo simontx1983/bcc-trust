@@ -1392,9 +1392,17 @@ class VoteService {
         // Fetch endorsement rows (source of truth for endorsement_bonus).
         $endorsementRows = $this->endorsementRepo->getActiveWithFraudScoresForPage($pageId);
 
-        // Preserve fields that recalculation does not recompute.
+        // Preserve fields that recalculation does not recompute. penalty_adjustment
+        // and attestation_bonus (Slice E) are written by their own dedicated paths
+        // (applyPenalty / applyAttestationBonus) and MUST be carried through here —
+        // otherwise this vote recompute would write a total_score missing those
+        // terms, silently clobbering a member's dispute penalty or attestation
+        // backing on the next vote (they live in their own columns but total_score
+        // is computed in PHP here, so the components must be threaded in).
         $onchainBonus      = $existing ? $existing->getOnchainBonus() : 0.0;
         $contributionBonus = $existing ? $existing->getContributionBonus() : 0.0;
+        $penaltyAdjustment = $existing ? $existing->getPenaltyAdjustment() : 0.0;
+        $attestationBonus  = $existing ? $existing->getAttestationBonus() : 0.0;
         $fraudMetadata     = $existing ? $existing->getFraudMetadata() : null;
 
         // SINGLE SOURCE OF TRUTH — DO NOT DIVERGE.
@@ -1403,9 +1411,13 @@ class VoteService {
         // and this cron recalc path use the identical formula. The stored `weight`
         // column is NEVER read — it is frozen at creation time and would oscillate
         // against this dynamic recompute.
+        // endorsement_bonus is RETIRED (Slice E cutover) — kept 0 here so a vote
+        // recalc doesn't re-populate the zeroed column; the formula ignores it and
+        // the vouch backing now lives in attestation_bonus. We still surface the
+        // active endorsement-row count for the endorsement_count display denorm.
         $derived          = EndorsementWeightCalculator::computePageEndorsementBonus($endorsementRows);
-        $endorsementBonus = (float) $derived['bonus'];
-        $endorsementCount = (int)   $derived['count'];
+        $endorsementBonus = 0.0;
+        $endorsementCount = (int) $derived['count'];
 
         // Canonical formula (single source of truth — TrustScoreService):
         // base + endorsement_bonus + onchain_bonus + contribution_bonus.
@@ -1416,7 +1428,9 @@ class VoteService {
             $negative,
             $endorsementBonus,
             $onchainBonus,
-            $contributionBonus
+            $contributionBonus,
+            $penaltyAdjustment,
+            $attestationBonus
         );
 
         $confidenceScore = $this->calculateConfidenceScore($voteCount, $uniqueVoters, $matureUniqueVoters, $positive, $negative);
@@ -1431,7 +1445,9 @@ class VoteService {
             $fraudMetadata,
             $endorsementBonus,
             $onchainBonus,
-            $contributionBonus
+            $contributionBonus,
+            $penaltyAdjustment,
+            $attestationBonus
         );
     }
 

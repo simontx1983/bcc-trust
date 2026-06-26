@@ -1594,19 +1594,6 @@ final class Plugin
             }
         }, 10, 2);
 
-        // ── Post-endorsement pipeline ───────────────────────────────────
-
-        // Endorsement fraud re-analysis
-        add_action(
-            \BCC\Trust\Core\Services\EndorsementFraudAnalyzer::HOOK,
-            function (int $endorserUserId, int $pageId) {
-                (new \BCC\Trust\Core\Services\EndorsementFraudAnalyzer(
-                    $this->endorsementRepository()
-                ))->run($endorserUserId, $pageId);
-            },
-            10, 2
-        );
-
         // ── Fraud threshold-crossing async fan-out ─────────────────────
         //
         // `UserInfoRepository::updateFraudScore()` and `incrementFraudScore()`
