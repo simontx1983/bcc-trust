@@ -235,11 +235,12 @@ final class Plugin
     private ?EndorsementService $endorsementService = null;
     public function endorsementService(): EndorsementService
     {
+        // Slice E cutover: the write surface (endorsePage / vouch / bonus
+        // application) is retired. Only the read / eligibility / hydration
+        // / vesting reads remain, so the service now depends solely on
+        // UserInfoRepository (the fraud-gate read in evaluateViewerEndorseGates).
         return $this->endorsementService ??= new EndorsementService(
-            $this->endorsementRepository(),
-            $this->scoreRepository(),
-            $this->userInfoRepository(),
-            $this->verificationRepository()
+            $this->userInfoRepository()
         );
     }
 
@@ -2082,9 +2083,11 @@ final class Plugin
             $this->notificationDispatcher()->onReactionAdded($actorId, $actId, $kind);
         }, 30, 3);
 
-        // Slice 3 — Vouch. The 'vouch' trust reaction lands a light, permanent
-        // post_vouch endorsement on the post author's self-page (Architecture A).
-        // Priority 35 so it runs after the notification dispatcher (30).
+        // Slice E cutover — Vouch. The 'vouch' trust reaction lands a light
+        // kind=vouch ATTESTATION on the post author's user_profile (the
+        // attestation layer is the single backing for the score now that
+        // endorsement_bonus is retired from the formula). Priority 35 so it
+        // runs after the notification dispatcher (30).
         add_action('bcc_reaction_added', function (int $actorId, int $actId, string $kind): void {
             if ($kind !== \BCC\Trust\Core\Support\ReactionTypeRegistry::KIND_VOUCH) {
                 return;
@@ -2092,7 +2095,7 @@ final class Plugin
             try {
                 $authorId = \BCC\Core\Repositories\PeepSoActivityRepository::getAuthorId($actId);
                 if ($authorId > 0) {
-                    $this->endorsementService()->vouchForAuthor($actorId, $authorId);
+                    $this->attestationService()->castLightVouch($actorId, $authorId);
                 }
             } catch (\Throwable $e) {
                 \BCC\Core\Log\Logger::warning('[bcc-trust] vouch add failed', ['actor' => $actorId, 'act' => $actId, 'error' => $e->getMessage()]);
@@ -2114,7 +2117,7 @@ final class Plugin
                 $stillVouches = $vouchTypeId !== null
                     && $this->peepSoReactionRepository()->hasGivenReactionOnAuthorContent($actorId, $authorId, $vouchTypeId);
                 if (!$stillVouches) {
-                    $this->endorsementService()->revokeVouchForAuthor($actorId, $authorId);
+                    $this->attestationService()->revokeLightVouch($actorId, $authorId);
                 }
             } catch (\Throwable $e) {
                 \BCC\Core\Log\Logger::warning('[bcc-trust] vouch revoke failed', ['actor' => $actorId, 'act' => $actId, 'error' => $e->getMessage()]);

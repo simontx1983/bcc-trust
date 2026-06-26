@@ -56,6 +56,7 @@ use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Core\Support\CacheManager;
+use BCC\Trust\Core\Support\PageTypeMap;
 use DateTimeImmutable;
 use DateTimeZone;
 use Throwable;
@@ -1043,6 +1044,77 @@ final class AttestationService
         );
 
         return true;
+    }
+
+    /**
+     * Revoke the attestor's active attestation of a given kind on a
+     * target, resolved by (attestor, target_kind, target_id, kind)
+     * rather than by attestation id. Convenience for callers that hold
+     * the target identity but not the row id (e.g. the legacy /revoke-
+     * endorsement REST surface, which only carries page_id).
+     *
+     * Resolves the active row, then routes through the full revoke() so
+     * the soft-delete, audit row, cache invalidation, and
+     * bcc_attestation_revoked event (which re-folds the entity score)
+     * all fire identically to an id-addressed revoke. Returns false when
+     * there is no active row to revoke (idempotent no-op).
+     *
+     * @return bool True iff an active attestation was revoked.
+     */
+    public function revokeByTarget(
+        int $attestorUserId,
+        string $targetKind,
+        int $targetId,
+        string $kind
+    ): bool {
+        if ($attestorUserId <= 0 || $targetId <= 0) {
+            return false;
+        }
+        $existing = $this->repo->findActiveOneByAttestorTargetKind(
+            $attestorUserId,
+            $targetKind,
+            $targetId,
+            $kind,
+            false
+        );
+        if ($existing === null) {
+            return false;
+        }
+        $id = isset($existing->id) ? (int) $existing->id : 0;
+        if ($id <= 0) {
+            return false;
+        }
+        $this->revoke($attestorUserId, $id);
+        return true;
+    }
+
+    /**
+     * Resolve the §J.1 entity-card target_kind for a peepso-page id by
+     * reading its `_bcc_page_type` meta and mapping through the canonical
+     * PageTypeMap (single source of truth shared with CardViewService /
+     * WatchingService). Returns one of validator_card / project_card /
+     * creator_card, or null when the page isn't an entity card kind
+     * (member self-pages and unrecognized types fall through to null).
+     *
+     * Entity endorse/vouch only ever targets entity cards — the REST
+     * /endorse handler uses this to reject non-entity page ids.
+     */
+    public static function targetKindForPage(int $pageId): ?string
+    {
+        if ($pageId <= 0) {
+            return null;
+        }
+        $pageType = (string) get_post_meta($pageId, '_bcc_page_type', true);
+        $cardKind = PageTypeMap::kindForPageType($pageType);
+        if ($cardKind === null) {
+            return null;
+        }
+        return match ($cardKind) {
+            'validator' => 'validator_card',
+            'project'   => 'project_card',
+            'creator'   => 'creator_card',
+            default     => null,
+        };
     }
 
     // ──────────────────────────────────────────────────────────────────
