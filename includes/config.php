@@ -13,6 +13,7 @@ if (!defined('ABSPATH')) exit;
 $config_dir = __DIR__ . '/config/';
 
 require_once $config_dir . 'trust-weights.php';
+require_once $config_dir . 'attestation.php';
 require_once $config_dir . 'fraud-detection.php';
 require_once $config_dir . 'scoring.php';
 require_once $config_dir . 'contribution.php';

@@ -1150,6 +1150,110 @@ final class AttestationRepository
         return $result;
     }
 
+    /** Safety valve on synthesis row load — a single target's active set is
+     *  realistically dozens; this only bounds a pathological/attack case. */
+    private const SYNTHESIS_MAX_ROWS = 5000;
+
+    /**
+     * Active attestation rows feeding the score synthesis for one target
+     * (Slice E). Narrow projection — only what AttestationScoreSynthesis needs:
+     * the immutable cast-time weight + the decay baseline inputs + the attestor
+     * (for the elite-source cap + diversity count). Both kinds (vouch +
+     * stand_behind) contribute; revoked rows are excluded.
+     *
+     * @return list<object{attestor_user_id: int, weight_at_time: float, created_at: string, reaffirmed_at: ?string}>
+     */
+    public function listActiveForSynthesis(string $targetKind, int $targetId): array
+    {
+        if (!in_array($targetKind, self::TARGET_KINDS, true) || $targetId <= 0) {
+            return [];
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT attestor_user_id, weight_at_time, created_at, reaffirmed_at"
+            . " FROM `{$table}`"
+            . ' WHERE target_kind = %s AND target_id = %d AND revoked_at IS NULL'
+            . ' ORDER BY id ASC'
+            . ' LIMIT %d';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $targetKind, $targetId, self::SYNTHESIS_MAX_ROWS);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row)) {
+                continue;
+            }
+            $out[] = (object) [
+                'attestor_user_id' => (int) ($row->attestor_user_id ?? 0),
+                'weight_at_time'   => (float) ($row->weight_at_time ?? 0),
+                'created_at'       => (string) ($row->created_at ?? ''),
+                'reaffirmed_at'    => isset($row->reaffirmed_at) ? (string) $row->reaffirmed_at : null,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Distinct (target_kind, target_id) pairs that currently hold at least one
+     * active attestation — the daily decay-recompute sweep work-list (Slice E).
+     * Decay is time-dependent, so a target's score drifts even with no new
+     * events; the cron re-synthesizes every active target. OFFSET-paginated
+     * (daily batch, not a hot path); deterministic order for stable paging.
+     *
+     * @return list<object{target_kind: string, target_id: int}>
+     */
+    public function listTargetsWithActiveAttestations(int $offset, int $limit): array
+    {
+        $offset = max(0, $offset);
+        $limit  = max(1, min(5000, $limit));
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT target_kind, target_id"
+            . " FROM `{$table}`"
+            . ' WHERE revoked_at IS NULL'
+            . ' GROUP BY target_kind, target_id'
+            . ' ORDER BY target_kind ASC, target_id ASC'
+            . ' LIMIT %d OFFSET %d';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $limit, $offset);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->target_kind, $row->target_id)) {
+                continue;
+            }
+            $out[] = (object) [
+                'target_kind' => (string) $row->target_kind,
+                'target_id'   => (int) $row->target_id,
+            ];
+        }
+        return $out;
+    }
+
     /**
      * List active stand_behind attestations cast BY this operator.
      * Drives the §J.2 `slot_holders[]` picker payload returned when
