@@ -86,13 +86,16 @@ final class TrustScoreService
         float $endorsementBonus,
         float $onchainBonus,
         float $contributionBonus = 0.0,
-        float $penaltyAdjustment = 0.0
+        float $penaltyAdjustment = 0.0,
+        float $attestationBonus = 0.0
     ): float {
         $base  = (float) self::neutral() + ($positiveScore - $negativeScore) * 2.0;
         // penalty_adjustment is stored NEGATIVE (dispute/admin penalties
         // subtract); it's an additive term like the bonuses, clobber-safe
         // against vote recalcs because it lives in its own column.
-        $bonus = $endorsementBonus + $onchainBonus + $contributionBonus + $penaltyAdjustment;
+        // attestation_bonus (Slice E) is the trust-attestation synthesis term —
+        // bounded upstream by AttestationScoreSynthesis (decay + caps + ceiling).
+        $bonus = $endorsementBonus + $onchainBonus + $contributionBonus + $penaltyAdjustment + $attestationBonus;
         $total = $base + $bonus;
         return max((float) self::MIN, min((float) self::MAX, $total));
     }
@@ -109,7 +112,7 @@ final class TrustScoreService
     {
         return 'LEAST(' . self::MAX . ', GREATEST(' . self::MIN . ', '
              . self::neutral()
-             . ' + (positive_score - negative_score) * 2 + endorsement_bonus + onchain_bonus + contribution_bonus + penalty_adjustment))';
+             . ' + (positive_score - negative_score) * 2 + endorsement_bonus + onchain_bonus + contribution_bonus + penalty_adjustment + attestation_bonus))';
     }
 
     /**

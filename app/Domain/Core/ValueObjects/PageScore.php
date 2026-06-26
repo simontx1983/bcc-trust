@@ -84,7 +84,8 @@ class PageScore {
         float $endorsementBonus,
         float $onchainBonus,
         float $contributionBonus = 0.0,
-        float $penaltyAdjustment = 0.0
+        float $penaltyAdjustment = 0.0,
+        float $attestationBonus = 0.0
     ): float {
         return \BCC\Trust\Core\Services\TrustScoreService::compute(
             $positive,
@@ -92,7 +93,8 @@ class PageScore {
             $endorsementBonus,
             $onchainBonus,
             $contributionBonus,
-            $penaltyAdjustment
+            $penaltyAdjustment,
+            $attestationBonus
         );
     }
 

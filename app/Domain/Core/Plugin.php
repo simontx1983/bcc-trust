@@ -354,6 +354,17 @@ final class Plugin
         );
     }
 
+    private ?Services\AttestationScoreSynthesis $attestationScoreSynthesis = null;
+    public function attestationScoreSynthesis(): Services\AttestationScoreSynthesis
+    {
+        return $this->attestationScoreSynthesis ??= new Services\AttestationScoreSynthesis(
+            $this->attestationRepository(),
+            $this->reputationRepository(),
+            $this->scoreRepository(),
+            $this->memberSelfPageService()
+        );
+    }
+
     private ?TrustReadService $trustReadService = null;
     public function trustReadService(): TrustReadService
     {
@@ -2127,6 +2138,35 @@ final class Plugin
         add_action('bcc_trust_endorsement_added', function (int $endorserId, int $pageId, string $context): void {
             $this->notificationDispatcher()->onEndorseAdded($endorserId, $pageId, $context);
         }, 30, 3);
+
+        // Slice E — fold the attestation into the subject's trust score. Runs
+        // at priority 25, BEFORE the notification dispatch (30) so a freshly
+        // recomputed score is visible to the notification + any read that
+        // follows. recomputeFor() resolves the score-row page via the locked
+        // target_id invariant (selfPageId for user_profile, raw id for *_card).
+        // Per-event try/catch → a synthesis failure surfaces as an
+        // `attestation_synthesis` DegradationMetric and NEVER throws into the
+        // event chain (mirrors ContributionRecoveryEvaluator isolation).
+        $bcc_attestation_score_recompute = function (
+            int $attestorId,
+            int $attestationId,
+            string $targetKind,
+            int $targetId
+        ): void {
+            try {
+                $this->attestationScoreSynthesis()->recomputeFor($targetKind, $targetId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Observability\DegradationMetrics::record('attestation_synthesis', 'event_recompute_failed');
+                \BCC\Core\Log\Logger::error('attestation score recompute failed', [
+                    'target_kind' => $targetKind,
+                    'target_id'   => $targetId,
+                    'error'       => $e->getMessage(),
+                ]);
+            }
+        };
+        add_action('bcc_attestation_created', $bcc_attestation_score_recompute, 25, 4);
+        add_action('bcc_attestation_revoked', $bcc_attestation_score_recompute, 25, 4);
+        add_action('bcc_attestation_reaffirmed', $bcc_attestation_score_recompute, 25, 4);
 
         // §I1 V2 Trust Attestation Layer — bell + push dispatch for
         // attestation lifecycle events. Fired by AttestationService::cast

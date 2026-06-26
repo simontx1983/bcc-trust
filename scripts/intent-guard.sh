@@ -203,7 +203,9 @@ check_read_model() {
 # ═════════════════════════════════════════════════════════════════════════════
 # The real invariant: for every sampled page,
 #   stored trust_score ≈ clamp(0..100, NEUTRAL + (positive - negative)*2
-#                                     + endorsement_bonus + onchain_bonus)
+#                                     + endorsement_bonus + onchain_bonus
+#                                     + contribution_bonus + penalty_adjustment
+#                                     + attestation_bonus)
 # within ±SCORE_TOLERANCE. This is the same formula the scorer uses; drift
 # here means the read model is lying to the UI.
 # ═════════════════════════════════════════════════════════════════════════════
@@ -231,6 +233,7 @@ check_trust_scores() {
                 'onchain_bonus'     => (float)\$r->onchain_bonus,
                 'contribution_bonus'=> (float)(\$r->contribution_bonus ?? 0),
                 'penalty_adjustment'=> (float)(\$r->penalty_adjustment ?? 0),
+                'attestation_bonus' => (float)(\$r->attestation_bonus ?? 0),
             ];
         }
         echo wp_json_encode(\$out);
@@ -273,7 +276,8 @@ check_trust_scores() {
                 (float) \$r['endorsement_bonus'],
                 (float) \$r['onchain_bonus'],
                 (float) (\$r['contribution_bonus'] ?? 0),
-                (float) (\$r['penalty_adjustment'] ?? 0)
+                (float) (\$r['penalty_adjustment'] ?? 0),
+                (float) (\$r['attestation_bonus'] ?? 0)
             );
             \$diff = abs(\$r['trust_score'] - \$expected);
             \$out[] = [
