@@ -57,8 +57,9 @@ final class ReactionSeeder
      * Helper labels (the §N1 plain-English descriptors) live on the
      * frontend; the post_title here is the brand-name (Solid, etc.).
      *
-     * Trust grammar — solid/vouch (stand_behind retired in Slice 3).
-     * Social grammar — fire — is the v1.5 single
+     * Trust grammar — solid only (stand_behind retired in Slice 3; vouch
+     * relocated to the first-class per-author byline toggle and is no
+     * longer a post reaction). Social grammar — fire — is the v1.5 single
      * BCC-owned addition (PeepSo's defaults cover like/love/haha/wow,
      * but no Fire); ReactionGrammarRegistry resolves the rest of the
      * social set from PeepSo's seeded posts at lookup time.
@@ -72,13 +73,6 @@ final class ReactionSeeder
             'helper'  => 'Agree',
             'icon'    => 'bcc-reaction-solid.svg',
             'content' => 'Agree — a basic acknowledgment of the post.',
-        ],
-        [
-            'kind'    => ReactionTypeRegistry::KIND_VOUCH,
-            'title'   => 'Vouch',
-            'helper'  => 'Back this',
-            'icon'    => 'bcc-reaction-vouch.svg',
-            'content' => 'Back this — public endorsement of the post.',
         ],
         [
             'kind'    => ReactionTypeRegistry::KIND_FIRE,

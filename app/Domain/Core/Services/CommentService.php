@@ -98,7 +98,8 @@ final class CommentService
     public function __construct(
         private readonly CommentRepository $commentRepo,
         private readonly MentionOverlayService $mentionOverlay,
-        private readonly AuthorBadgeResolver $authorBadgeResolver
+        private readonly AuthorBadgeResolver $authorBadgeResolver,
+        private readonly AttestationService $attestationService
     ) {
     }
 
@@ -165,13 +166,21 @@ final class CommentService
             ? []
             : $this->authorBadgeResolver->resolveForUsers(array_keys($authorIds));
 
+        // Batch the viewer's per-author vouch state + can-vouch permission for
+        // the byline Vouch toggle on commenter names — ONE bounded IN-list read
+        // across the page's distinct authors (anon → empty map, fields omitted).
+        $vouchMap = $authorIds === []
+            ? []
+            : $this->attestationService->getViewerVouchStateForAuthors($viewerId, array_keys($authorIds));
+
         $items     = [];
         $lastTime  = null;
         $lastActId = null;
         foreach ($rows as $row) {
             $aid   = (int) $row->author_id;
             $badge = $badgeMap[$aid] ?? null;
-            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge);
+            $vouch = $vouchMap[$aid] ?? null;
+            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch);
             $lastTime  = (string) $row->posted_at;
             $lastActId = (int) $row->act_id;
         }
@@ -439,9 +448,12 @@ final class CommentService
      *   tier_label: string|null,
      *   rank_label: string,
      * }|null $badge  Pre-resolved badge fields (see AuthorBadgeResolver).
+     * @param array{viewer_attestation: array<string, mixed>, can_vouch: array{allowed: bool, unlock_hint: string|null}}|null $vouch
+     *               Pre-resolved per-author vouch state + can-vouch permission
+     *               (see AttestationService::getViewerVouchStateForAuthors).
      * @return array<string, mixed>
      */
-    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null): array
+    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null): array
     {
         $authorId = (int) $row->author_id;
         $authorHandle = (string) $row->author_login;
@@ -467,6 +479,13 @@ final class CommentService
             // on the wire by emitting empty string (matches the
             // existing rank_label contract on UserViewService::getSummary).
             $author['rank_label']      = $badge['rank_label'];
+        }
+        if ($vouch !== null) {
+            // Per-author vouch state + permission behind the byline Vouch
+            // toggle (vouch is author credibility, not a comment reaction).
+            // Authed-only — anon omits both, keeping the shape stable.
+            $author['viewer_attestation'] = $vouch['viewer_attestation'];
+            $author['can_vouch']          = $vouch['can_vouch'];
         }
 
         return [

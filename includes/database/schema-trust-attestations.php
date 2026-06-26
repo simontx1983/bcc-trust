@@ -98,8 +98,8 @@ function bcc_trust_create_trust_attestations_table(): void {
  * ID_BASE + user_id, ID_BASE = 1_000_000_000). They materialize as
  * kind=vouch attestations with target_kind='user_profile' and
  * target_id = the RAW author user id (page_id - ID_BASE) — the same
- * raw-author-id invariant the live castLightVouch path writes, so the
- * score subscriber folds both uniformly.
+ * raw-author-id invariant the byline Vouch toggle's cast() path writes,
+ * so the score subscriber folds both uniformly.
  *
  * Idempotency + safety:
  *   - INSERT IGNORE + the attestations unique key (attestor, target_kind,

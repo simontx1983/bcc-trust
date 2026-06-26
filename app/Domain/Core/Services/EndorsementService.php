@@ -8,9 +8,10 @@
  * helpers — was retired. endorsement_bonus is dropped from the trust
  * formula and the Trust Attestation Layer (AttestationService) is the
  * single backing the score reads. The REST /endorse + /revoke-endorsement
- * surfaces now route through AttestationService::cast / ::revokeByTarget,
- * and the PeepSo vouch reaction routes through castLightVouch /
- * revokeLightVouch.
+ * surfaces now route through AttestationService::cast / ::revokeByTarget.
+ * Vouch later relocated off the PeepSo reaction entirely onto the
+ * first-class per-author byline Vouch toggle (full-weight cast() via
+ * /me/attestations) — it is no longer a reaction.
  *
  * What remains here is read-only:
  *   - getEndorseEligibility* — the §L5 can_endorse preflight gate the

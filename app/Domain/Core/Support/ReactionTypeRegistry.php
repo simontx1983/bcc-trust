@@ -8,12 +8,13 @@
  * of {kind: post_id} written by ReactionSeeder.
  *
  * Two interaction grammars seed reactions here:
- *   - trust grammar — solid / vouch
+ *   - trust grammar — solid
  *       solid — agree / "+1" (social acknowledgment; drives the
  *               "solids received/given" member stat)
- *       vouch — back this; lands a light, permanent post_vouch
- *               endorsement on the author's self-page (Slice 3)
- *     (stand_behind was retired in Slice 3 — no users yet, hard-deleted.)
+ *     (stand_behind was retired in Slice 3 — no users yet, hard-deleted.
+ *      vouch relocated to the first-class per-author byline Vouch toggle
+ *      — author credibility, not a post reaction — so it is no longer
+ *      seeded here.)
  *   - v1.5 social grammar — fire (single BCC-seeded reaction; the
  *     other social kinds — like/love/haha/wow — are PeepSo defaults
  *     looked up by post_title via ReactionGrammarRegistry, NOT seeded
@@ -43,21 +44,19 @@ final class ReactionTypeRegistry
     public const OPTION_KEY = 'bcc_reaction_ids';
 
     public const KIND_SOLID        = 'solid';
-    public const KIND_VOUCH        = 'vouch';
 
     /** v1.5 social grammar — BCC-seeded; PeepSo has no Fire default. */
     public const KIND_FIRE = 'fire';
 
     /**
-     * Trust-grammar kinds. stand_behind was retired in Slice 3; the
-     * remaining trust rail is solid (social ack) + vouch (light
-     * self-page endorsement).
+     * Trust-grammar kinds. stand_behind was retired in Slice 3; vouch
+     * relocated to the first-class per-author byline toggle (no longer a
+     * reaction). The remaining trust rail is solid (social ack) only.
      *
      * @var list<string>
      */
     public const TRUST_KINDS = [
         self::KIND_SOLID,
-        self::KIND_VOUCH,
     ];
 
     /**
@@ -70,7 +69,6 @@ final class ReactionTypeRegistry
      */
     public const ALL_KINDS = [
         self::KIND_SOLID,
-        self::KIND_VOUCH,
         self::KIND_FIRE,
     ];
 
@@ -101,7 +99,6 @@ final class ReactionTypeRegistry
      * Convenience accessors — the only kinds in V1.
      */
     public static function solidId(): ?int        { return self::idFor(self::KIND_SOLID); }
-    public static function vouchId(): ?int        { return self::idFor(self::KIND_VOUCH); }
     public static function fireId(): ?int         { return self::idFor(self::KIND_FIRE); }
 
     /**
@@ -120,7 +117,6 @@ final class ReactionTypeRegistry
 
         $map = [
             self::KIND_SOLID => null,
-            self::KIND_VOUCH => null,
             self::KIND_FIRE  => null,
         ];
 

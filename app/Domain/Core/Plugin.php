@@ -570,7 +570,8 @@ final class Plugin
         return $this->commentService ??= new Services\CommentService(
             $this->commentRepository(),
             $this->mentionOverlayService(),
-            $this->authorBadgeResolver()
+            $this->authorBadgeResolver(),
+            $this->attestationService()
         );
     }
 
@@ -668,6 +669,7 @@ final class Plugin
             $this->gifRepository(),
             $this->mentionOverlayService(),
             $this->authorBadgeResolver(),
+            $this->attestationService(),
             $this->blogService(),
             $this->pullBatchBodyHydrator(),
             $this->reviewBodyHydrator(),
@@ -2070,46 +2072,10 @@ final class Plugin
             $this->notificationDispatcher()->onReactionAdded($actorId, $actId, $kind);
         }, 30, 3);
 
-        // Slice E cutover — Vouch. The 'vouch' trust reaction lands a light
-        // kind=vouch ATTESTATION on the post author's user_profile (the
-        // attestation layer is the single backing for the score now that
-        // endorsement_bonus is retired from the formula). Priority 35 so it
-        // runs after the notification dispatcher (30).
-        add_action('bcc_reaction_added', function (int $actorId, int $actId, string $kind): void {
-            if ($kind !== \BCC\Trust\Core\Support\ReactionTypeRegistry::KIND_VOUCH) {
-                return;
-            }
-            try {
-                $authorId = \BCC\Core\Repositories\PeepSoActivityRepository::getAuthorId($actId);
-                if ($authorId > 0) {
-                    $this->attestationService()->castLightVouch($actorId, $authorId);
-                }
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::warning('[bcc-trust] vouch add failed', ['actor' => $actorId, 'act' => $actId, 'error' => $e->getMessage()]);
-            }
-        }, 35, 3);
-
-        // Ref-counted revoke: lift the vouch only when the voucher has no
-        // remaining vouch-reaction on ANY of the author's content.
-        add_action('bcc_reaction_removed', function (int $actorId, int $actId, string $kind = ''): void {
-            if ($kind !== \BCC\Trust\Core\Support\ReactionTypeRegistry::KIND_VOUCH) {
-                return;
-            }
-            try {
-                $authorId = \BCC\Core\Repositories\PeepSoActivityRepository::getAuthorId($actId);
-                if ($authorId <= 0) {
-                    return;
-                }
-                $vouchTypeId = \BCC\Trust\Core\Support\ReactionTypeRegistry::vouchId();
-                $stillVouches = $vouchTypeId !== null
-                    && $this->peepSoReactionRepository()->hasGivenReactionOnAuthorContent($actorId, $authorId, $vouchTypeId);
-                if (!$stillVouches) {
-                    $this->attestationService()->revokeLightVouch($actorId, $authorId);
-                }
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::warning('[bcc-trust] vouch revoke failed', ['actor' => $actorId, 'act' => $actId, 'error' => $e->getMessage()]);
-            }
-        }, 35, 3);
+        // Vouch is no longer a post reaction — it relocated to the first-class
+        // per-author byline Vouch toggle (full-weight cast() via
+        // /me/attestations). The old reaction→light-attestation subscribers
+        // were retired here; existing light vouches age out (DecayResolver).
 
         add_action('bcc_review_published', function (int $authorId, int $pageId, int $voteId, string $explanation): void {
             $this->notificationDispatcher()->onReviewPublished($authorId, $pageId, $voteId, $explanation);
