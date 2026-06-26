@@ -12,6 +12,7 @@
 namespace BCC\Trust\Core\Services;
 
 use Exception;
+use BCC\Trust\Core\Exceptions\EndorsementException;
 use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
@@ -71,7 +72,7 @@ class EndorsementService {
      */
     public function endorsePage(int $pageId, string $context = 'general', ?string $reason = null, ?array $fingerprintData = null): array {
         if (!is_user_logged_in()) {
-            throw new Exception('Authentication required');
+            throw EndorsementException::authRequired('Authentication required');
         }
 
         $endorserUserId = get_current_user_id();
@@ -79,7 +80,7 @@ class EndorsementService {
         // Verify page exists
         $page = PeepSoPageResolver::resolve($pageId);
         if (!$page) {
-            throw new Exception('Invalid page.');
+            throw EndorsementException::invalidPage('Invalid page.');
         }
 
         // Get page owner
@@ -91,7 +92,7 @@ class EndorsementService {
         // constant is available for automated-test environments only.
         $testMode = defined('BCC_TRUST_TEST_MODE') && \BCC_TRUST_TEST_MODE;
         if ($pageOwnerId === $endorserUserId && !$testMode) {
-            throw new Exception('You cannot endorse your own page');
+            throw EndorsementException::selfPage('You cannot endorse your own page');
         }
 
         // Fire pre-mutation snapshot hook so ScoreMutationLogger can capture
@@ -111,7 +112,11 @@ class EndorsementService {
             $questService = \BCC\Trust\Core\Plugin::instance()->questProgressService();
             if (!$questService->canEndorse($endorserUserId)) {
                 $progress = $questService->getEndorseProgress($endorserUserId);
-                throw new Exception($progress['missing_reason'] ?? 'Complete your onboarding quests to unlock endorsements.');
+                throw EndorsementException::softGate(
+                    is_string($progress['missing_reason'] ?? null) && $progress['missing_reason'] !== ''
+                        ? (string) $progress['missing_reason']
+                        : 'Complete your onboarding quests to unlock endorsements.'
+                );
             }
         }
 
@@ -132,7 +137,7 @@ class EndorsementService {
                 /** @var int $minAgeDays */
                 $minAgeDays = (int) apply_filters('bcc_trust_endorse_min_account_age_days', 7);
                 if ($accountAgeDays < $minAgeDays) {
-                    throw new Exception(
+                    throw EndorsementException::softGate(
                         sprintf('Your account must be at least %d days old to endorse pages.', $minAgeDays)
                     );
                 }
@@ -147,7 +152,7 @@ class EndorsementService {
         if (!$testMode) {
             $endorserInfo = $this->userInfoRepo->getByUserId($endorserUserId);
             if ($endorserInfo !== null && (int) $endorserInfo->fraud_score >= BCC_TRUST_FRAUD_HIGH) {
-                throw new Exception('Your account has been flagged for unusual activity. Endorsements are temporarily restricted.');
+                throw EndorsementException::fraudLocked('Your account has been flagged for unusual activity. Endorsements are temporarily restricted.');
             }
         }
 
@@ -243,11 +248,11 @@ class EndorsementService {
         $scoreLockKey = 'bcc_score_page_' . $pageId;
 
         if (!$this->endorsementRepo->acquireConcurrencyLock($userLockKey, 5)) {
-            throw new Exception('Endorsement system is busy. Please try again in a moment.');
+            throw EndorsementException::busy('Endorsement system is busy. Please try again in a moment.');
         }
         if (!$this->endorsementRepo->acquireConcurrencyLock($pageLockKey, 5)) {
             $this->endorsementRepo->releaseConcurrencyLock($userLockKey);
-            throw new Exception('Endorsement system is busy. Please try again in a moment.');
+            throw EndorsementException::busy('Endorsement system is busy. Please try again in a moment.');
         }
         $scoreLockAcquired = false;
         if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
@@ -255,7 +260,7 @@ class EndorsementService {
             if (!$scoreLockAcquired) {
                 $this->endorsementRepo->releaseConcurrencyLock($pageLockKey);
                 $this->endorsementRepo->releaseConcurrencyLock($userLockKey);
-                throw new Exception('Endorsement system is busy. Please try again in a moment.');
+                throw EndorsementException::busy('Endorsement system is busy. Please try again in a moment.');
             }
         }
 
@@ -270,7 +275,7 @@ class EndorsementService {
             // serialise concurrent requests, but we check here first to
             // avoid computing the bonus and then discarding it.
             if ($this->hasEndorsedPage($pageId, $endorserUserId, $context)) {
-                throw new Exception('You have already endorsed this page');
+                throw EndorsementException::alreadyEndorsed('You have already endorsed this page');
             }
 
             // ── Defense: Re-check fraud score inside transaction ────────
@@ -282,7 +287,7 @@ class EndorsementService {
             if (!$testModeInTx) {
                 $freshUserInfo = $this->userInfoRepo->getByUserId($endorserUserId);
                 if ($freshUserInfo !== null && (int) $freshUserInfo->fraud_score >= BCC_TRUST_FRAUD_HIGH) {
-                    throw new Exception('Your account has been flagged for unusual activity. Endorsements are temporarily restricted.');
+                    throw EndorsementException::fraudLocked('Your account has been flagged for unusual activity. Endorsements are temporarily restricted.');
                 }
             }
 
@@ -485,11 +490,11 @@ class EndorsementService {
         $scoreLockKey = 'bcc_score_page_' . $pageId;
 
         if (!$this->endorsementRepo->acquireConcurrencyLock($userLockKey, 5)) {
-            throw new Exception('Endorsement system is busy. Please try again in a moment.');
+            throw EndorsementException::busy('Endorsement system is busy. Please try again in a moment.');
         }
         if (!$this->endorsementRepo->acquireConcurrencyLock($pageLockKey, 5)) {
             $this->endorsementRepo->releaseConcurrencyLock($userLockKey);
-            throw new Exception('Endorsement system is busy. Please try again in a moment.');
+            throw EndorsementException::busy('Endorsement system is busy. Please try again in a moment.');
         }
         $scoreLockAcquired = false;
         if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
@@ -497,7 +502,7 @@ class EndorsementService {
             if (!$scoreLockAcquired) {
                 $this->endorsementRepo->releaseConcurrencyLock($pageLockKey);
                 $this->endorsementRepo->releaseConcurrencyLock($userLockKey);
-                throw new Exception('Endorsement system is busy. Please try again in a moment.');
+                throw EndorsementException::busy('Endorsement system is busy. Please try again in a moment.');
             }
         }
 
@@ -610,7 +615,7 @@ class EndorsementService {
      */
     public function revokePageEndorsement(int $pageId, string $context = 'general'): array {
         if (!is_user_logged_in()) {
-            throw new Exception('Authentication required');
+            throw EndorsementException::authRequired('Authentication required');
         }
 
         $endorserUserId = get_current_user_id();
@@ -630,11 +635,11 @@ class EndorsementService {
         $scoreLockKey = 'bcc_score_page_' . $pageId;
 
         if (!$this->endorsementRepo->acquireConcurrencyLock($userLockKey, 5)) {
-            throw new Exception('Endorsement system is busy. Please try again in a moment.');
+            throw EndorsementException::busy('Endorsement system is busy. Please try again in a moment.');
         }
         if (!$this->endorsementRepo->acquireConcurrencyLock($pageLockKey, 5)) {
             $this->endorsementRepo->releaseConcurrencyLock($userLockKey);
-            throw new Exception('Endorsement system is busy. Please try again in a moment.');
+            throw EndorsementException::busy('Endorsement system is busy. Please try again in a moment.');
         }
         $scoreLockAcquired = false;
         if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
@@ -642,7 +647,7 @@ class EndorsementService {
             if (!$scoreLockAcquired) {
                 $this->endorsementRepo->releaseConcurrencyLock($pageLockKey);
                 $this->endorsementRepo->releaseConcurrencyLock($userLockKey);
-                throw new Exception('Endorsement system is busy. Please try again in a moment.');
+                throw EndorsementException::busy('Endorsement system is busy. Please try again in a moment.');
             }
         }
 
@@ -652,7 +657,7 @@ class EndorsementService {
                 $endorsement = $this->endorsementRepo->get($endorserUserId, $pageId, $context);
 
                 if (!$endorsement) {
-                    throw new Exception('Endorsement not found');
+                    throw EndorsementException::notFound('Endorsement not found');
                 }
 
                 // Store weight before deletion (stored weight may have been
@@ -1081,7 +1086,7 @@ class EndorsementService {
         $todayCount = $endorseRepo->countDistinctEndorsersToday($pageId);
 
         if ($todayCount >= 10) {
-            throw new \Exception('This page has reached its daily endorsement limit. Please try again tomorrow.');
+            throw EndorsementException::dailyLimit('This page has reached its daily endorsement limit. Please try again tomorrow.');
         }
     }
 
@@ -1099,7 +1104,7 @@ class EndorsementService {
         $todayPages = $endorseRepo->countDistinctPagesEndorsedToday($endorserUserId);
 
         if ($todayPages >= $maxPagesPerDay) {
-            throw new \Exception(
+            throw EndorsementException::dailyLimit(
                 sprintf('You have reached the daily limit of %d endorsements. Please try again tomorrow.', $maxPagesPerDay)
             );
         }
@@ -1123,7 +1128,7 @@ class EndorsementService {
 
         // +1 for the current endorser (not yet committed)
         if (($recentCount + 1) >= $threshold) {
-            throw new \Exception('This page is receiving endorsements too quickly. Please try again later.');
+            throw EndorsementException::dailyLimit('This page is receiving endorsements too quickly. Please try again later.');
         }
 
         // Extended window check: catch temporal spreading attacks that stay
@@ -1135,7 +1140,7 @@ class EndorsementService {
                 'endorser_id'  => $endorserUserId,
                 'hourly_count' => $hourlyCount,
             ], 'page', $endorserUserId);
-            throw new \Exception(
+            throw EndorsementException::dailyLimit(
                 'This page has reached its hourly endorsement limit. Please try again later.'
             );
         }
@@ -1176,7 +1181,7 @@ class EndorsementService {
                 'owner_id'       => $pageOwnerId,
                 'pages_endorsed' => $crossPageCount,
             ], 'page', $endorserUserId);
-            throw new \Exception(
+            throw EndorsementException::dailyLimit(
                 'You have endorsed multiple pages by this owner recently. Please try again later.'
             );
         }

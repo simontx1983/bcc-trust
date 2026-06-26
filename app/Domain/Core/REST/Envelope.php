@@ -62,8 +62,70 @@ final class Envelope
             return $response;
         }
 
+        // Phase 4c: surface the request-correlation id as a response header on
+        // EVERY BCC response — success, error, and already-enveloped — so a
+        // client/proxy can log it even on an error shape that carries no _meta.
+        if (class_exists(\BCC\Core\Http\RequestContext::class)) {
+            $response->header('X-Request-Id', \BCC\Core\Http\RequestContext::requestId());
+        }
+
         $data   = $response->get_data();
         $status = (int) $response->get_status();
+
+        // Phase 6: on a rate-limit 429, advertise backoff guidance — Retry-After
+        // + X-RateLimit-* headers and an optional data.retry_after_seconds
+        // (contract §1.3 / §1.4.4) — sourced from the throttle call that denied
+        // this request, so every throttled endpoint gets it without threading
+        // limit/window through each call site. Runs before the already-enveloped
+        // pass-through because the canonical error shape is enveloped.
+        // bcc-core is a hard dependency and merges before bcc-trust (PR order),
+        // so Throttle::lastDenial() is always present at runtime; class_exists
+        // guards only the bcc-core-absent degradation case.
+        if ($status === 429 && class_exists(\BCC\Core\Security\Throttle::class)) {
+            $denial = \BCC\Core\Security\Throttle::lastDenial();
+            if (is_array($denial)) {
+                $window = max(1, (int) ($denial['window'] ?? 60));
+                $limit  = max(0, (int) ($denial['limit'] ?? 0));
+                $response->header('Retry-After', (string) $window);
+                $response->header('X-RateLimit-Limit', (string) $limit);
+                $response->header('X-RateLimit-Remaining', '0');
+                $response->header('X-RateLimit-Reset', (string) (time() + $window));
+
+                if (is_array($data) && isset($data['error']) && is_array($data['error'])) {
+                    $errData = (isset($data['error']['data']) && is_array($data['error']['data']))
+                        ? $data['error']['data']
+                        : [];
+                    $errData['retry_after_seconds'] = $window;
+                    $data['error']['data'] = $errData;
+                    $response->set_data($data);
+                }
+            }
+        }
+
+        // Phase 6: ETag / If-None-Match for cacheable reads (cards, feed, …).
+        // Any GET 200 that opted into caching (Cache-Control max-age>0) gets a
+        // content-hash ETag; a matching If-None-Match short-circuits to 304 with
+        // no body (saves the payload transfer on an unchanged refetch). The ETag
+        // IS a hash of the `data` payload, so it can NEVER serve stale content;
+        // `_meta` is excluded (version/reaction_types are stable and the request
+        // id lives in the X-Request-Id header, which would otherwise vary the tag).
+        if (
+            $status === 200
+            && $request->get_method() === 'GET'
+            && is_array($data)
+            && array_key_exists('data', $data)
+            && self::isEtagEligible($response)
+        ) {
+            $etag = '"' . md5((string) wp_json_encode($data['data'])) . '"';
+            $response->header('ETag', $etag);
+
+            $ifNoneMatch = $request->get_header('If-None-Match');
+            if (is_string($ifNoneMatch) && trim($ifNoneMatch) === $etag) {
+                $response->set_status(304);
+                $response->set_data(null);
+                return $response;
+            }
+        }
 
         // Already enveloped — pass through.
         if (self::isAlreadyEnveloped($data)) {
@@ -87,7 +149,7 @@ final class Envelope
         // Success path: wrap.
         $response->set_data([
             'data'  => $data,
-            '_meta' => self::buildMeta($request),
+            '_meta' => self::buildMeta(),
         ]);
 
         return $response;
@@ -101,6 +163,25 @@ final class Envelope
             }
         }
         return false;
+    }
+
+    /**
+     * Whether a response opted into caching (Cache-Control max-age>0, and not
+     * no-store/no-cache) and is therefore eligible for a content-hash ETag.
+     */
+    private static function isEtagEligible(\WP_REST_Response $response): bool
+    {
+        $cc = '';
+        foreach ($response->get_headers() as $name => $value) {
+            if (strtolower((string) $name) === 'cache-control') {
+                $cc = strtolower(is_array($value) ? implode(',', $value) : (string) $value);
+                break;
+            }
+        }
+        if ($cc === '' || strpos($cc, 'no-store') !== false || strpos($cc, 'no-cache') !== false) {
+            return false;
+        }
+        return preg_match('/max-age=[1-9][0-9]*/', $cc) === 1;
     }
 
     /**
@@ -174,19 +255,24 @@ final class Envelope
     /**
      * @return array<string, mixed>
      */
-    private static function buildMeta(\WP_REST_Request $request): array
+    private static function buildMeta(): array
     {
-        $requestId = $request->get_header('X-BCC-Request-Id');
-        if (!is_string($requestId) || $requestId === '') {
-            try {
-                $requestId = bin2hex(random_bytes(8));
-            } catch (\Throwable $e) {
-                $requestId = (string) hexdec(uniqid());
-            }
+        // The correlation id was bound at the REST boundary by bcc-core's
+        // rest_pre_dispatch (from a client X-BCC-Request-Id or minted), so
+        // _meta.request_id matches the X-Request-Id header and the server logs.
+        // The `request_id` key is contract-stable — only its source changed.
+        if (class_exists(\BCC\Core\Http\RequestContext::class)) {
+            return ['request_id' => \BCC\Core\Http\RequestContext::requestId()];
         }
 
-        return [
-            'request_id' => $requestId,
-        ];
+        // Defensive fallback only (bcc-core is a hard dependency, so this is
+        // unreachable in practice) — keep the contract field populated.
+        try {
+            $requestId = bin2hex(random_bytes(8));
+        } catch (\Throwable $e) {
+            $requestId = (string) hexdec(uniqid());
+        }
+
+        return ['request_id' => $requestId];
     }
 }

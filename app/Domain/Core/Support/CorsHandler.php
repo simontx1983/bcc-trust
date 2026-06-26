@@ -217,6 +217,12 @@ final class CorsHandler
         header('Access-Control-Allow-Methods: ' . self::ALLOWED_METHODS);
         header('Access-Control-Allow-Headers: ' . self::ALLOWED_HEADERS);
         header('Access-Control-Allow-Credentials: true');
+        // Phase 4c: let the cross-origin frontend READ the correlation id off
+        // the response (X-Request-Id, emitted by Envelope) so a frontend error
+        // can be tied back to the server logs. Exposed (readable), not allowed
+        // (inbound) — the client does not send it, avoiding a CORS preflight on
+        // otherwise-simple anonymous GETs.
+        header('Access-Control-Expose-Headers: X-Request-Id');
         header('Access-Control-Max-Age: ' . self::PREFLIGHT_MAX_AGE);
         header('Vary: Origin');
     }

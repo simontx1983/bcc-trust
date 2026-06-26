@@ -524,10 +524,15 @@ class TrustGraph {
             return [];
         }
 
-        // 2. Fetch edges for this subgraph only
+        // 2. Fetch edges for this subgraph only (memory-bounded).
         $rawEdges = $this->edgeRepo->getEdgesForUsers( $subgraphUserIds );
 
-        if ( empty( $rawEdges ) ) {
+        // A result at the repo's edge cap means this neighborhood is too dense
+        // for a bounded in-memory incremental pass — defer to the daily batch
+        // cron (same fallback posture as the >500-user bail above) rather than
+        // run PageRank on a silently-truncated subgraph.
+        if ( empty( $rawEdges )
+            || count( $rawEdges ) >= \BCC\Trust\Core\Repositories\EdgeRepository::MAX_SUBGRAPH_EDGES ) {
             return [];
         }
 

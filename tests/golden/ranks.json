@@ -1,0 +1,26 @@
+{
+  "ranks": [
+    {
+      "auto_assigned": true,
+      "description": "New on the floor.",
+      "key": "apprentice",
+      "label": "Apprentice",
+      "order": 1
+    },
+    {
+      "auto_assigned": true,
+      "description": "Earned the basics.",
+      "key": "journeyman",
+      "label": "Journeyman",
+      "order": 2
+    },
+    {
+      "auto_assigned": true,
+      "description": "Master of the trade.",
+      "key": "master",
+      "label": "Master",
+      "order": 3
+    }
+  ],
+  "viewer": null
+}

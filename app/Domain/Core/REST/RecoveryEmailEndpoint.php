@@ -41,7 +41,6 @@ use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Support\ApiResponse;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -122,7 +121,7 @@ final class RecoveryEmailEndpoint
             return ApiResponse::error('bcc_invalid_request', 'wallet_address, chain_slug and signature are required.', 400);
         }
 
-        $chain = ChainRepository::getBySlug($chainSlug);
+        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getBySlug($chainSlug);
         if ($chain === null) {
             return ApiResponse::error('bcc_invalid_request', 'Unknown chain.', 400);
         }

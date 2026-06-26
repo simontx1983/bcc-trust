@@ -34,7 +34,6 @@ use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use BCC\Trust\Core\REST\UsersEndpoint;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\Services\HoldingsService;
 use BCC\Trust\Onchain\ValueObjects\GatedGroupConfig;
@@ -106,7 +105,7 @@ final class UserGroupsEndpoint
         // One JOIN'd SELECT for chain slugs + one warmed meta cache for
         // trust thresholds — keeps the surface consistent without N+1.
         $visibleIds       = array_keys($visibleContexts);
-        $chainSlugByGroup = ChainRepository::resolveSlugsForGroups($visibleIds);
+        $chainSlugByGroup = \BCC\Core\ServiceLocator::resolveChainRead()->resolveSlugsForGroups($visibleIds);
         update_meta_cache('post', $visibleIds);
         $trustMinByGroup = [];
         foreach ($visibleIds as $gid) {
@@ -226,7 +225,7 @@ final class UserGroupsEndpoint
             if (isset($slugByChain[$cfg->chainId])) {
                 continue;
             }
-            $chain = ChainRepository::getById($cfg->chainId);
+            $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById($cfg->chainId);
             if ($chain !== null) {
                 $slugByChain[$cfg->chainId] = (string) $chain->slug;
             }

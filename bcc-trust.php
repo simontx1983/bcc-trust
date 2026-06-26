@@ -227,6 +227,16 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-reputation.php';
 // the reputation cutover; recent changes now read bcc_trust_score_events).
 // Guarded by bcc_reputation_events_dropped; no-op once done.
 require_once BCC_TRUST_PATH . 'includes/database/drop-reputation-events.php';
+// Phase 5: drops the 17 verified legacy orphan tables (FK-aware — drops
+// fk_endorsement_type first). Guarded by bcc_trust_legacy_orphans_dropped;
+// no-op once done. Runs automatically on a fresh DB; existing dev DBs were
+// pre-marked done at staging so their orphans are preserved.
+require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-orphans.php';
+// Phase 5: trims 3 provably-redundant duplicate indexes on hot tables (dbDelta
+// leftovers; fresh installs never create them). Guarded by
+// bcc_trust_legacy_indexes_trimmed; non-destructive. Dev DBs pre-marked at
+// staging so the local dups are left alone.
+require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-indexes.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**
@@ -407,7 +417,7 @@ add_action('bcc_trust_daily_contribution_recovery', function () {
 // group for any verified collection that doesn't have one yet.
 // Idempotent — re-running creates no duplicates.
 add_action('bcc_gated_group_provision', function () {
-    $result = \BCC\Trust\Core\Plugin::instance()
+    $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->gatedGroupProvisioningService()
         ->provisionAll();
 
@@ -445,6 +455,41 @@ add_action(
 add_filter(
     'bcc_system_health',
     [\BCC\Trust\Onchain\Services\NftIndexerHealthSnapshot::class, 'contribute']
+);
+
+// Phase 4 (ops-visibility): uniform per-cron SUCCESS heartbeat. For every
+// expected recurring hook, record `<hook>_last_success` once its handler(s)
+// finish — registered at PHP_INT_MAX so a throwing handler halts do_action
+// BEFORE this runs, leaving the heartbeat stale (the signal a stalled cron
+// must produce). Read back by CronHealthSnapshot into /system/health.
+// Registered on `init` so every plugin's bcc_expected_cron_hooks contribution
+// is present, and before wp-cron executes due callbacks (wp_loaded+).
+add_action('init', static function (): void {
+    $hooks = (array) apply_filters('bcc_expected_cron_hooks', []);
+    foreach (array_keys($hooks) as $hook) {
+        $hookName = (string) $hook;
+        add_action($hookName, static function () use ($hookName): void {
+            update_option(
+                $hookName . \BCC\Trust\Core\Services\CronHealthSnapshot::HEARTBEAT_SUFFIX,
+                time(),
+                false
+            );
+        }, PHP_INT_MAX);
+    }
+}, 5);
+
+// Phase 4 (ops-visibility): project per-cron last-success freshness into the
+// bcc-core /system/health surface (same canonical seam as the indexer above).
+add_filter(
+    'bcc_system_health',
+    [\BCC\Trust\Core\Services\CronHealthSnapshot::class, 'contribute']
+);
+
+// Phase 4 (ops-visibility): retention-table overgrown alarm — generalises the
+// Helius dedup overgrown gauge to the cleanup-pruned tables.
+add_filter(
+    'bcc_system_health',
+    [\BCC\Trust\Core\Services\RetentionHealthSnapshot::class, 'contribute']
 );
 
 // Operator OS v1 Phase 3: contribute the Read Model panel to
@@ -710,7 +755,7 @@ add_action('bcc_gated_group_reconcile_sweep', function () {
     $nextCursor  = count($userIds) < $batchSize ? 0 : $maxReturned;
     update_option($cursorOption, $nextCursor, false);
 
-    $service     = \BCC\Trust\Core\Plugin::instance()->nftGroupGateService();
+    $service     = \BCC\Trust\Onchain\OnchainPlugin::instance()->nftGroupGateService();
     $totalJoined = 0;
     $usersTouched = 0;
 
@@ -740,7 +785,7 @@ add_action('bcc_gated_group_reconcile_sweep', function () {
 // unbounded RPC and every member is eventually covered.
 add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, function () {
     try {
-        $stats = \BCC\Trust\Core\Plugin::instance()
+        $stats = \BCC\Trust\Onchain\OnchainPlugin::instance()
             ->nftGroupRevokeService()
             ->sweep();
         if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0) {
@@ -801,7 +846,7 @@ add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     if ($config === null) {
         return; // Not a holder group.
     }
-    \BCC\Trust\Core\Plugin::instance()
+    \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->nftGroupGateService()
         ->recordPermanentOptOut($userId, $groupId);
 }, 10, 2);
@@ -907,6 +952,13 @@ add_filter('bcc.resolve.onchain_data_read', function ($service = null) {
     return new \BCC\Trust\Onchain\Services\OnchainDataReadService();
 });
 
+add_filter('bcc.resolve.chain_read', function ($service = null) {
+    if ($service instanceof \BCC\Core\Contracts\ChainReadInterface) {
+        return $service;
+    }
+    return new \BCC\Trust\Onchain\Services\ChainReadService();
+});
+
 /*
 |--------------------------------------------------------------------------
 | PRE-WARM SERVICELOCATOR CACHE (before ServiceLocator::freeze)
@@ -923,6 +975,7 @@ add_filter('bcc.resolve.onchain_data_read', function ($service = null) {
 \BCC\Core\ServiceLocator::resolveWalletLinkWrite();
 \BCC\Core\ServiceLocator::resolveWalletSignalWrite();
 \BCC\Core\ServiceLocator::resolveOnchainDataRead();
+\BCC\Core\ServiceLocator::resolveChainRead();
 \BCC\Core\ServiceLocator::resolveRecalcQueueRead();
 
 /*

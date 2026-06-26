@@ -38,7 +38,6 @@ namespace BCC\Trust\Core\REST;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\ValueObjects\BlogCategory;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -561,7 +560,7 @@ final class PostsEndpoint
                     if (!is_string($slug) || $slug === '') {
                         continue;
                     }
-                    $chain = ChainRepository::getBySlug($slug);
+                    $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getBySlug($slug);
                     if ($chain === null) {
                         return ApiResponse::error(
                             'bcc_invalid_request',
@@ -887,7 +886,7 @@ final class PostsEndpoint
                     if (!is_string($slug) || $slug === '') {
                         continue;
                     }
-                    $chain = ChainRepository::getBySlug($slug);
+                    $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getBySlug($slug);
                     if ($chain === null) {
                         return ApiResponse::error(
                             'bcc_invalid_request',

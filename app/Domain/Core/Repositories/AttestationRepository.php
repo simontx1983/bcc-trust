@@ -48,6 +48,19 @@ final class AttestationRepository
      * Enforced in application code (not as a DB enum) per the §J.5.1
      * Phase 1 plan note — allows future extension without ALTER TABLE.
      *
+     * ── INVARIANT: target_id semantics differ by kind ──────────────────
+     * `user_profile`  → target_id is a RAW user id. Its trust-score row is
+     *                   `MemberSelfPageService::selfPageId(target_id)`,
+     *                   NOT `target_id`. The card kinds below carry a
+     *                   peepso-page post id directly (see PAGE_TARGET_KINDS).
+     * Any code that maps a `user_profile` attestation onto a trust-score row
+     * (e.g. the deferred §J "Slice E" synthesis that folds attestations into
+     * the self-page score) MUST translate through
+     * `MemberSelfPageService::selfPageId()` — using `target_id` as a page id
+     * would silently score the wrong row (or nothing). Locked by
+     * MemberSelfPageTest::testUserProfileAttestationTargetResolvesToSelfPage.
+     * ───────────────────────────────────────────────────────────────────
+     *
      * @var list<string>
      */
     public const TARGET_KINDS = [

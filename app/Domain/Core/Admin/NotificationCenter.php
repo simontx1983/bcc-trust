@@ -202,7 +202,7 @@ final class NotificationCenter
             return null;
         }
 
-        $activeChains = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive();
+        $activeChains = \BCC\Core\ServiceLocator::resolveChainRead()->getActive();
         $chainIds     = array_map(static fn($c) => (int) $c->id, $activeChains);
         $chainNames   = [];
         foreach ($activeChains as $c) {

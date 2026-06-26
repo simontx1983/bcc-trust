@@ -56,6 +56,16 @@ class EdgeRepository {
     const TYPE_VOTE        = 'vote';
     const TYPE_ENDORSEMENT = 'endorsement';
 
+    /**
+     * Memory safety cap on the per-call subgraph edge fetch (Phase 8). The
+     * incremental-PageRank caller (TrustGraph::incrementalUpdate) caps the
+     * neighborhood at 500 users, but a dense neighborhood (high avg-degree)
+     * could still load an unbounded edge set into a PHP array. A result that
+     * hits this LIMIT is treated as "too dense for a bounded incremental pass"
+     * and deferred to the daily batch cron — same fallback as the >500-user bail.
+     */
+    public const MAX_SUBGRAPH_EDGES = 100000;
+
     private string $table;
     private string $votesTable;
     private string $scoresTable;
@@ -246,21 +256,27 @@ class EdgeRepository {
      * @return object[]
      * @phpstan-return list<EdgeRow>
      */
-    public function getEdgesForUsers( array $userIds ): array {
+    public function getEdgesForUsers( array $userIds, int $limit = self::MAX_SUBGRAPH_EDGES ): array {
         global $wpdb;
 
         if ( empty( $userIds ) ) {
             return [];
         }
 
+        $limit        = max( 1, min( $limit, self::MAX_SUBGRAPH_EDGES ) );
         $placeholders = implode( ',', array_fill( 0, count( $userIds ), '%d' ) );
 
+        // LIMIT bounds the in-memory subgraph: a dense neighborhood would
+        // otherwise pull an unbounded edge set into this PHP array. A result at
+        // the LIMIT signals "too dense" to the caller, which defers to the daily
+        // batch cron rather than run PageRank on a truncated subgraph.
         return $wpdb->get_results( $wpdb->prepare(
             "SELECT source_user_id, target_user_id, weight, edge_type
                FROM {$this->table}
               WHERE source_user_id IN ({$placeholders})
-                 OR target_user_id IN ({$placeholders})",
-            array_merge( $userIds, $userIds )
+                 OR target_user_id IN ({$placeholders})
+              LIMIT %d",
+            array_merge( $userIds, $userIds, [ $limit ] )
         ) ) ?: [];
     }
 

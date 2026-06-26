@@ -33,7 +33,6 @@ use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
 use BCC\Trust\Core\ValueObjects\BlogCategory;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use Exception;
 
 if (!defined('ABSPATH')) {
@@ -676,7 +675,7 @@ final class PostsService
             // are rejected here — a deactivated chain shouldn't be
             // pickable in the composer at all, but a stale frontend
             // cache could send one and we want a clean error envelope.
-            if (ChainRepository::getById($cid) === null) {
+            if (\BCC\Core\ServiceLocator::resolveChainRead()->getById($cid) === null) {
                 return [
                     'error'   => 'bcc_invalid_request',
                     'message' => 'Unknown chain tag.',
@@ -1060,7 +1059,7 @@ final class PostsService
                 ];
             }
             foreach ($normalized as $cid) {
-                if (ChainRepository::getById($cid) === null) {
+                if (\BCC\Core\ServiceLocator::resolveChainRead()->getById($cid) === null) {
                     return [
                         'error'   => 'bcc_invalid_request',
                         'message' => 'Unknown chain tag.',

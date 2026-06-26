@@ -32,8 +32,6 @@ use BCC\Trust\Core\Services\GroupActivityHeatService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Quest\QuestProgressService;
 use BCC\Trust\Core\Services\VoteService;
-use BCC\Trust\Onchain\Services\GatedGroupProvisioningService;
-use BCC\Trust\Onchain\Services\NftGroupGateService;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -83,13 +81,6 @@ final class Plugin
     public function reputationRepository(): ReputationRepository
     {
         return $this->reputationRepository ??= new ReputationRepository();
-    }
-
-    private ?\BCC\Trust\Disputes\Repositories\DisputeParticipationRepository $disputeParticipationRepository = null;
-    public function disputeParticipationRepository(): \BCC\Trust\Disputes\Repositories\DisputeParticipationRepository
-    {
-        return $this->disputeParticipationRepository
-            ??= new \BCC\Trust\Disputes\Repositories\DisputeParticipationRepository();
     }
 
     private ?UserInfoRepository $userInfoRepository = null;
@@ -625,7 +616,7 @@ final class Plugin
             $this->livingService(),
             $this->scoreEventRepository(),
             $this->peepSoReactionRepository(),
-            $this->disputeParticipationRepository(),
+            \BCC\Trust\Disputes\DisputesPlugin::instance()->disputeParticipationRepository(),
             $this->attestationService()
         );
     }
@@ -649,8 +640,17 @@ final class Plugin
                 new \BCC\Core\PeepSo\PeepSoGraphService()
             ),
             $this->reputationRepository(),
-            $this->peepSoReactionRepository(),
             $this->hiddenActivityRepository(),
+            $this->groupContextResolver(),
+            $this->feedHydrationPipeline()
+        );
+    }
+
+    private ?Services\Feed\FeedHydrationPipeline $feedHydrationPipeline = null;
+    public function feedHydrationPipeline(): Services\Feed\FeedHydrationPipeline
+    {
+        return $this->feedHydrationPipeline ??= new Services\Feed\FeedHydrationPipeline(
+            $this->peepSoReactionRepository(),
             $this->groupContextResolver(),
             $this->commentRepository(),
             $this->gifRepository(),
@@ -1073,24 +1073,6 @@ final class Plugin
     public function groupActivityHeatService(): GroupActivityHeatService
     {
         return $this->groupActivityHeatService ??= new GroupActivityHeatService();
-    }
-
-    private ?NftGroupGateService $nftGroupGateService = null;
-    public function nftGroupGateService(): NftGroupGateService
-    {
-        return $this->nftGroupGateService ??= new NftGroupGateService();
-    }
-
-    private ?\BCC\Trust\Onchain\Services\NftGroupRevokeService $nftGroupRevokeService = null;
-    public function nftGroupRevokeService(): \BCC\Trust\Onchain\Services\NftGroupRevokeService
-    {
-        return $this->nftGroupRevokeService ??= new \BCC\Trust\Onchain\Services\NftGroupRevokeService();
-    }
-
-    private ?GatedGroupProvisioningService $gatedGroupProvisioningService = null;
-    public function gatedGroupProvisioningService(): GatedGroupProvisioningService
-    {
-        return $this->gatedGroupProvisioningService ??= new GatedGroupProvisioningService();
     }
 
     // ── Route registration ──────────────────────────────────────────────

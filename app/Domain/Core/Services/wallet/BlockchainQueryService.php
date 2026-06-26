@@ -477,7 +477,7 @@ class BlockchainQueryService {
      * or unlinked wallets — all return false.
      */
     private static function isEthNftHolderViaIndex(string $wallet, string $contract): bool {
-        $chain = \BCC\Trust\Onchain\Repositories\ChainRepository::getBySlug('ethereum');
+        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getBySlug('ethereum');
         if ($chain === null) {
             return false;
         }

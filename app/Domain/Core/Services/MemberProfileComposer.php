@@ -33,6 +33,7 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Trust\Core\Support\MemberCardPrefetcher;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -183,10 +184,17 @@ final class MemberProfileComposer
             $base['permissions']['can_report']       = $attestationPerms['can_report'];
         }
 
-        // ── Hero card — call CardViewService for the canonical member card.
-        $card = $handle !== ''
-            ? $this->cardViewService->getCard('member', $handle, $viewerId)
-            : null;
+        // ── Hero card — the canonical member card. Mirror the members-list
+        //   path: prime a 1-element MemberCardPrefetcher and feed it to
+        //   getMemberCardForList, so the card's getSummary delegation reuses one
+        //   batched fetch instead of re-running the ~11 single-user dossier
+        //   queries getUser() already issued above. Same card, fewer queries
+        //   (Phase 7 dedup; behavior pinned by the /users/:handle golden master).
+        $card = null;
+        if ($handle !== '') {
+            $cardPrefetch = MemberCardPrefetcher::primeFor([$userId], $viewerId);
+            $card = $this->cardViewService->getMemberCardForList($userId, $viewerId, $cardPrefetch);
+        }
         $base['card'] = $card ?? self::buildPlaceholderCard($userId, $base);
 
         // ── Standing (Good Standing ribbon).
