@@ -198,6 +198,46 @@ final class FeedRankingService
     }
 
     /**
+     * Single-activity permalink (post-detail). Same visibility gates as
+     * `getFeed()` for the act-level/author-level channels (§O4.1
+     * shadow-limit, §K1 mutual block, §K1 Phase C moderation hide) —
+     * computed identically and passed into
+     * `ActivityFeedService::getActivityById()` as a post-fetch check,
+     * since a single-row-by-id lookup has no SQL `NOT IN` list to narrow.
+     *
+     * The group-leak gate (`resolveRestrictedGroupIds`) is deliberately
+     * NOT recomputed here: on the non-group path it's already inert in
+     * `PeepSoActivityRepository::getActivities()` (the per-post
+     * `_bcc_post_visibility` gate supersedes it — see that method's
+     * docblock), and bcc-core's `getActivityById()` enforces that same
+     * gate directly. Mirroring it here would just reproduce dead weight.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function getActivityById(int $actId, int $viewerId): ?array
+    {
+        $excluded = self::mergeExclusions(
+            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
+        );
+        $hidden = $this->hiddenRepo->getAllHiddenIds();
+
+        $item = $this->activityFeed->getActivityById(
+            $actId,
+            $viewerId,
+            $excluded === [] ? null : $excluded,
+            $hidden === []   ? null : $hidden
+        );
+        if ($item === null) {
+            return null;
+        }
+
+        $hydrated = $this->hydrationPipeline->hydrate([$item], $viewerId);
+        return $hydrated[0] ?? null;
+    }
+
+    /**
      * Per-author wall (§3.1 Activity tab on /u/:handle).
      *
      * Same hydration chain as `getFeed()` so the per-user wall and the
