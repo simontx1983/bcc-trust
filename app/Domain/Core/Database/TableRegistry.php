@@ -281,6 +281,17 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_target_divergence_state';
     }
 
+    /**
+     * Stoke accumulator — one row per (act_id, user_id), `stoke_count`
+     * capped server-side at `BCC_STOKE_CAP_PER_USER`. Backs the feed-
+     * ranking `heat_stage` signal; never feeds `bcc_trust_scores`.
+     */
+    public static function stokes(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_stokes';
+    }
+
     // NOTE: bcc_user_locals removed — Locals membership ledger is PeepSo's
     // peepso_group_members; primary-Local pointer is wp_usermeta.bcc_primary_local_group_id.
     // NOTE: bcc_page_claims removed — page claims merged into bcc_onchain_claims
@@ -327,6 +338,8 @@ final class TableRegistry
             'trust_attestations' => self::trustAttestations(),
             // V2 Trust Attestation Layer PR-8b — divergence-state sidecar
             'target_divergence_state' => self::targetDivergenceState(),
+            // Stoke accumulator
+            'stokes'             => self::stokes(),
         ];
     }
 }

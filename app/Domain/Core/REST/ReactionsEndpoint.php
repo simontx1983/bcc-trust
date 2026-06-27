@@ -52,9 +52,10 @@ namespace BCC\Trust\Core\REST;
 use BCC\Core\Feed\ReactionGrammarMap;
 use BCC\Core\PeepSo\PeepSoReactionWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
-use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\GroupInteractionGate;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
+use BCC\Trust\Core\Support\ReactionStateComposer;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -136,7 +137,7 @@ final class ReactionsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Invalid feed_id.', 400);
         }
 
-        $gateError = $this->gateGroupInteraction($userId, $actId);
+        $gateError = GroupInteractionGate::check($userId, $actId);
         if ($gateError !== null) {
             return $gateError;
         }
@@ -197,7 +198,7 @@ final class ReactionsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Invalid feed_id.', 400);
         }
 
-        $gateError = $this->gateGroupInteraction($userId, $actId);
+        $gateError = GroupInteractionGate::check($userId, $actId);
         if ($gateError !== null) {
             return $gateError;
         }
@@ -222,50 +223,6 @@ final class ReactionsEndpoint
     }
 
     /**
-     * §4.7.6 interaction gate. A reaction on a GROUP-scoped post requires
-     * active group membership — even when the post itself is publicly
-     * readable (`public_group` / `public_all`). Non-members may READ those
-     * posts but comments + reactions stay gated behind membership (e.g. NFT
-     * ownership). Mirrors the membership check in
-     * CommentService::gateForParent, reusing the canonical
-     * GroupsService::resolveGroupAccess seam.
-     *
-     * Returns an error response to short-circuit on, or null when the
-     * reaction is allowed (non-group post, or viewer is an active member).
-     */
-    private function gateGroupInteraction(int $userId, int $actId): ?WP_REST_Response
-    {
-        $row = PeepSoActivityRepository::getById($actId);
-        if ($row === null) {
-            // Unknown act — not a group-gate concern; let the writer's
-            // own failure path surface it.
-            return null;
-        }
-        $postId = (int) $row->act_external_id;
-        if ($postId <= 0) {
-            return null;
-        }
-
-        $groupId = (int) get_post_meta($postId, 'peepso_group_id', true);
-        if ($groupId <= 0) {
-            // Not a group-scoped post — no membership gate (PeepSo's own
-            // block-by-author rules still apply in the writer).
-            return null;
-        }
-
-        $access = Plugin::instance()->groupsService()->resolveGroupAccess($userId, $groupId);
-        if ($access === null || $access['isMember'] !== true) {
-            return ApiResponse::error(
-                'bcc_permission_denied',
-                'Join the group to react here.',
-                403
-            );
-        }
-
-        return null;
-    }
-
-    /**
      * Compose the post-mutation response: grammar discriminator +
      * kind→count map + the viewer's current reaction. Same shape as
      * FeedItem.reactions (api-contract-v1.md §2.11) so the frontend
@@ -273,49 +230,12 @@ final class ReactionsEndpoint
      *
      * Caller passes the resolved grammar so we don't re-query the
      * activity row — set/remove already looked it up for the
-     * cross-grammar guard.
+     * cross-grammar guard. Composition itself lives in
+     * ReactionStateComposer (§11 reuse — StokeEndpoint shares it).
      */
     private static function buildStateResponse(int $actId, int $viewerId, string $grammar): WP_REST_Response
     {
-        $repo = Plugin::instance()->peepSoReactionRepository();
-
-        // Build kind → type_id for THIS grammar's kinds only. Includes
-        // both BCC-seeded (trust three + Fire) and PeepSo-default
-        // (Like/Love/Haha/Wow) lookups via ReactionGrammarRegistry.
-        $kindToTypeId = [];
-        foreach (ReactionGrammarMap::kindsFor($grammar) as $kind) {
-            $typeId = ReactionGrammarRegistry::idFor($kind);
-            if ($typeId !== null) {
-                $kindToTypeId[$kind] = $typeId;
-            }
-        }
-        $typeIdToKind = array_flip($kindToTypeId);
-
-        // Zero-fill the contract-required kinds for this grammar; any
-        // kind whose ID isn't resolvable just stays at 0 (degraded but
-        // still contract-correct shape).
-        $counts = ReactionGrammarMap::emptyCountsFor($grammar);
-
-        $rawCounts = $repo->countsByActId($actId);
-        foreach ($rawCounts as $typeId => $count) {
-            if (isset($typeIdToKind[$typeId])) {
-                $counts[$typeIdToKind[$typeId]] = $count;
-            }
-        }
-
-        // Cross-grammar viewer guard: ignore reactions that don't
-        // belong to this post's grammar (only possible via stale
-        // pre-validation rows or a direct DB write).
-        $viewerTypeId   = $repo->viewerReactionForActId($actId, $viewerId);
-        $viewerReaction = $viewerTypeId !== null && isset($typeIdToKind[$viewerTypeId])
-            ? $typeIdToKind[$viewerTypeId]
-            : null;
-
-        $response = ApiResponse::ok([
-            'kind_grammar'    => $grammar,
-            'counts'          => $counts,
-            'viewer_reaction' => $viewerReaction,
-        ]);
+        $response = ApiResponse::ok(ReactionStateComposer::compose($actId, $viewerId, $grammar));
         $response->header('Cache-Control', 'no-store');
         return $response;
     }

@@ -540,6 +540,12 @@ final class Plugin
         return $this->peepSoReactionRepository ??= new Repositories\PeepSoReactionRepository();
     }
 
+    private ?Repositories\StokeRepository $stokeRepository = null;
+    public function stokeRepository(): Repositories\StokeRepository
+    {
+        return $this->stokeRepository ??= new Repositories\StokeRepository();
+    }
+
     private ?Repositories\CommentRepository $commentRepository = null;
     public function commentRepository(): Repositories\CommentRepository
     {
@@ -664,6 +670,7 @@ final class Plugin
     {
         return $this->feedHydrationPipeline ??= new Services\Feed\FeedHydrationPipeline(
             $this->peepSoReactionRepository(),
+            $this->stokeRepository(),
             $this->groupContextResolver(),
             $this->commentRepository(),
             $this->gifRepository(),
@@ -1244,6 +1251,11 @@ final class Plugin
         // (single-graph rule); response shape matches FeedItem.reactions
         // so the frontend can patch its cache without translation.
         \BCC\Trust\Core\REST\ReactionsEndpoint::register();
+
+        // Stoke — POST/DELETE /feed/{id}/stoke. NOT a reaction-kind
+        // write (accumulates, capped, own bcc_trust_stokes table via
+        // StokeRepository); cosmetic for trust, real feed-ranking input.
+        \BCC\Trust\Core\REST\StokeEndpoint::register();
 
         // v1.5 hybrid PeepSo-proxy comments — GET / POST / DELETE under
         // /posts/:feed_id/comments. Reads peepso_activities directly via

@@ -30,6 +30,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\GifRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
+use BCC\Trust\Core\Repositories\StokeRepository;
 use BCC\Trust\Core\Services\AttestationService;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
 use BCC\Trust\Core\Services\BlogService;
@@ -48,6 +49,7 @@ final class FeedHydrationPipeline
 {
     public function __construct(
         private readonly PeepSoReactionRepository $reactionRepo,
+        private readonly StokeRepository $stokeRepo,
         private readonly GroupContextResolver $groupContextResolver,
         private readonly CommentRepository $commentRepo,
         private readonly GifRepository $gifRepo,
@@ -834,8 +836,14 @@ final class FeedHydrationPipeline
      *   reactions: {
      *     kind_grammar: 'trust' | 'social' | 'tribal',
      *     counts: { <kind>: int, ... }      // keys depend on grammar
-     *     viewer_reaction: <kind> | null    // belongs to grammar
+     *     viewer_reaction: <kind> | null,   // belongs to grammar
+     *     heat_stage: int,                  // 1-5, Stoke — additive, not grammar-gated
+     *     viewer_stoke_count: int           // 0-5, additive
      *   }
+     * heat_stage/viewer_stoke_count are Stoke's fields — purely
+     * additive on top of the legacy trio above (the rail stopped
+     * rendering kind_grammar/counts/viewer_reaction, it didn't remove
+     * them from the wire contract).
      *
      * Defensive posture matches LivingService: when reaction kinds
      * can't be resolved (fresh install before ReactionSeeder runs;
@@ -900,6 +908,15 @@ final class FeedHydrationPipeline
             ? $this->reactionRepo->viewerReactionsByActIds($viewerId, $actIds)
             : [];
 
+        // Stoke (additive — see schema-stokes.php for why this is its
+        // own table rather than a peepso_reactions kind). heat_stage is
+        // public; viewer_stoke_count only needs a query for authed
+        // viewers.
+        $heatByAct = $this->stokeRepo->heatByActIds($actIds);
+        $viewerStokesByAct = $viewerId > 0
+            ? $this->stokeRepo->viewerStokesByActIds($viewerId, $actIds)
+            : [];
+
         $hydrated = [];
         foreach ($items as $idx => $item) {
             $actId = $actById[$idx] ?? 0;
@@ -931,9 +948,11 @@ final class FeedHydrationPipeline
             }
 
             $item['reactions'] = [
-                'kind_grammar'    => $grammar,
-                'counts'          => $counts,
-                'viewer_reaction' => $viewerKind,
+                'kind_grammar'        => $grammar,
+                'counts'              => $counts,
+                'viewer_reaction'     => $viewerKind,
+                'heat_stage'          => $heatByAct[$actId] ?? 1,
+                'viewer_stoke_count'  => $viewerStokesByAct[$actId] ?? 0,
             ];
             $hydrated[] = $item;
         }
