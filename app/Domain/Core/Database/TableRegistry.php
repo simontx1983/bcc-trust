@@ -292,6 +292,19 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_stokes';
     }
 
+    /**
+     * Slice 3 — nightly memoization of AttestationOutcomeClassifier output.
+     * One row per attestor (PRIMARY KEY user_id). The cron owns writes;
+     * read paths (/me/reliability, standing) read-cache-first and fall
+     * back to a live compute on cache miss. NOT a source of truth — the
+     * classifier remains canonical; this is a recompute cache.
+     */
+    public static function attestorReliabilityCache(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_attestor_reliability_cache';
+    }
+
     // NOTE: bcc_user_locals removed — Locals membership ledger is PeepSo's
     // peepso_group_members; primary-Local pointer is wp_usermeta.bcc_primary_local_group_id.
     // NOTE: bcc_page_claims removed — page claims merged into bcc_onchain_claims
@@ -340,6 +353,8 @@ final class TableRegistry
             'target_divergence_state' => self::targetDivergenceState(),
             // Stoke accumulator
             'stokes'             => self::stokes(),
+            // Slice 3 — nightly operator-reliability recompute cache
+            'attestor_reliability_cache' => self::attestorReliabilityCache(),
         ];
     }
 }

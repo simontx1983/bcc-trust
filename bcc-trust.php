@@ -406,6 +406,12 @@ add_action('bcc_trust_daily_vesting', function () {
 add_action('bcc_trust_process_recalculations', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->processRecalculations();
 });
+// Slice 3: nightly operator-reliability recompute. Memoizes the expensive
+// AttestationOutcomeClassifier per attestor into bcc_attestor_reliability_cache
+// so the /me/reliability + standing read paths serve cache-first.
+add_action('bcc_attestor_reliability_sweep', function () {
+    \BCC\Trust\Core\Plugin::instance()->cronService()->sweepAttestorReliability();
+});
 add_action('bcc_trust_weekly_digest', function () {
     \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest();
 });
@@ -618,6 +624,7 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
         'bcc_trust_deferred_rm_sync'      => ['interval' => 'bcc_thirty_seconds',   'description' => 'read-model deferred-rebuild for staleness recovery'],
         'bcc_trust_divergence_state_sweep'=> ['interval' => 'daily',                'description' => 'divergence-state classification + §J.7 notifications'],
         'bcc_trust_daily_attestation_decay'=> ['interval' => 'daily',               'description' => 'attestation_bonus decay recompute sweep (Slice E)'],
+        'bcc_attestor_reliability_sweep'  => ['interval' => 'daily',                'description' => 'operator-reliability cache recompute (Slice 3)'],
         // Onchain domain
         'bcc_onchain_daily_refresh'       => ['interval' => 'daily',                'description' => 'onchain holdings refresh sweep'],
         'bcc_onchain_retry_bonus'         => ['interval' => 'hourly',               'description' => 'onchain bonus-application retry'],
@@ -706,6 +713,14 @@ add_action('plugins_loaded', static function (): void {
     // the divergence sweep. Same anti-drift triple-redundancy idiom.
     if (!wp_next_scheduled('bcc_trust_daily_attestation_decay')) {
         wp_schedule_event(time() + 3 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_daily_attestation_decay');
+    }
+
+    // Slice 3 — nightly operator-reliability recompute self-heal. NEW hook;
+    // a site updated without a reactivation would otherwise never schedule it
+    // (the silent-drift failure mode documented above). Offset 4h so it trails
+    // the attestation-decay sweep. Guarded + additive; mirrors scheduleAll().
+    if (!wp_next_scheduled('bcc_attestor_reliability_sweep')) {
+        wp_schedule_event(time() + 4 * HOUR_IN_SECONDS, 'daily', 'bcc_attestor_reliability_sweep');
     }
 
     // Holder-group revoke (re-verification) sweep self-heal. This hook is
@@ -1830,6 +1845,8 @@ function bcc_trust_deactivate() {
         // §C3 watch-batch sweep + legacy hook (release-N drain).
         'bcc_pull_batch_sweep',
         'bcc_watch_batch_sweep',
+        // Slice 3: nightly operator-reliability recompute.
+        'bcc_attestor_reliability_sweep',
     ];
 
     foreach ($cron_hooks as $hook) {

@@ -51,6 +51,7 @@ if (!defined('ABSPATH')) {
 
 use BCC\Core\DB\AdvisoryLock;
 use BCC\Trust\Core\Repositories\AttestationRepository;
+use BCC\Trust\Core\Repositories\AttestorReliabilityCacheRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Security\AuditLogger;
@@ -138,7 +139,8 @@ final class AttestationService
         private readonly CohortOverlapDampener $cohortOverlapDampener,
         private readonly DivergenceStateClassifier $divergenceClassifier,
         private readonly ContestedStateExplainer $contestedStateExplainer,
-        private readonly AttestationOutcomeClassifier $outcomeClassifier
+        private readonly AttestationOutcomeClassifier $outcomeClassifier,
+        private readonly AttestorReliabilityCacheRepository $reliabilityCacheRepo
     ) {
     }
 
@@ -1513,27 +1515,56 @@ final class AttestationService
         $slotsUsed    = $this->repo->countActiveStandBehindByAttestor($userId);
         $totalCasts   = $this->repo->countAllByAttestor($userId);
 
-        // Slice 2 — real Operator Reliability. The outcome classifier walks
-        // the operator's active attestations, classifies each target's fate
-        // since the cast, and returns the numeric reliability ∈ [0,1] + the
-        // track-record outcome breakdown. Self-only per §J.10 q14 — the public
-        // roster keeps emitting 'newly_active' (gated in buildAttestorMiniView).
-        $classification = $this->outcomeClassifier->classifyForAttestor($userId);
-        $reliability    = $classification['reliability'];
-        $countedCasts   = $classification['counted'];
+        // Slice 3 — cache-first read. The nightly bcc_attestor_reliability_sweep
+        // memoizes the expensive outcome-classifier output per operator. Reads
+        // are READ-ONLY: a cache hit serves the headline reliability/standing/
+        // count/trend cheaply; a miss falls through to a live classify so a
+        // never-swept operator's self-mirror is never empty (and we do NOT
+        // write the cache from the read path — the cron owns all writes).
+        $cached = $this->reliabilityCacheRepo->getByUserId($userId);
 
-        // Standing now derives from the LIVE numeric reliability + counted
-        // attestations (Slice 2), via the pure ReliabilityStandingComputer::
-        // fromReliability gate, NOT the tenure proxy. The <minForStanding gate
-        // is the first-call protection. The existing tenure compute() is left
-        // untouched (Slice 3 reconciles its remaining callers).
-        $standing = ReliabilityStandingComputer::fromReliability(
-            $reliability,
-            $countedCasts,
-            (float) apply_filters('bcc_reliability_highly_min', BCC_RELIABILITY_HIGHLY_MIN),
-            (float) apply_filters('bcc_reliability_consistent_min', BCC_RELIABILITY_CONSISTENT_MIN),
-            (int) apply_filters('bcc_reliability_min_for_standing', BCC_RELIABILITY_MIN_FOR_STANDING)
-        );
+        if ($cached !== null) {
+            $reliability  = isset($cached->operator_reliability) ? (float) $cached->operator_reliability : 0.0;
+            $standing     = isset($cached->reliability_standing) ? (string) $cached->reliability_standing : 'newly_active';
+            $cachedCount  = isset($cached->attestation_count) ? (int) $cached->attestation_count : 0;
+            $direction    = isset($cached->trend) ? (string) $cached->trend : 'steady';
+            // The full track_record — total + the four outcome counts — is
+            // persisted by the nightly sweep, so a cache HIT serves a
+            // track_record byte-identical to a cache MISS (live classify).
+            $trackRecord  = [
+                'total_attestations' => $cachedCount,
+                'outcomes' => [
+                    'targets_disputed_and_upheld'           => isset($cached->targets_disputed_and_upheld) ? (int) $cached->targets_disputed_and_upheld : 0,
+                    'targets_disputed_and_dismissed'        => isset($cached->targets_disputed_and_dismissed) ? (int) $cached->targets_disputed_and_dismissed : 0,
+                    'targets_received_further_attestations' => isset($cached->targets_received_further_attestations) ? (int) $cached->targets_received_further_attestations : 0,
+                    'targets_clean_and_active'              => isset($cached->targets_clean_and_active) ? (int) $cached->targets_clean_and_active : 0,
+                ],
+            ];
+        } else {
+            // Cache miss — live compute. The outcome classifier walks the
+            // operator's active attestations, classifies each target's fate
+            // since the cast, and returns the numeric reliability ∈ [0,1] +
+            // the track-record outcome breakdown.
+            $classification = $this->outcomeClassifier->classifyForAttestor($userId);
+            $reliability    = $classification['reliability'];
+            $countedCasts   = $classification['counted'];
+            $trackRecord    = $classification['track_record'];
+
+            // Standing derives from the LIVE numeric reliability + counted
+            // attestations via the pure ReliabilityStandingComputer::
+            // fromReliability gate. The <minForStanding gate is the
+            // first-call protection.
+            $standing = ReliabilityStandingComputer::fromReliability(
+                $reliability,
+                $countedCasts,
+                (float) apply_filters('bcc_reliability_highly_min', BCC_RELIABILITY_HIGHLY_MIN),
+                (float) apply_filters('bcc_reliability_consistent_min', BCC_RELIABILITY_CONSISTENT_MIN),
+                (int) apply_filters('bcc_reliability_min_for_standing', BCC_RELIABILITY_MIN_FOR_STANDING)
+            );
+
+            // No cached trend on a miss — steady until the cron stamps one.
+            $direction = 'steady';
+        }
 
         // §J.5 divergence_state + explainer (PR-8a). Classifier runs
         // against the operator's own user_profile target — disputes
@@ -1556,15 +1587,14 @@ final class AttestationService
                 'slots_recyclable_count'  => 0,
                 'next_slot_unlocks_at'    => null,
             ],
-            'track_record' => $classification['track_record'],
+            'track_record' => $trackRecord,
             'trends' => [
+                // History backfill (30d/90d) is out of scope — kept at the V1
+                // baseline. `direction` is the cached week-over-week trend
+                // (Slice 3), 'steady' on a cache miss.
                 'reliability_30d_ago' => 0.0,
                 'reliability_90d_ago' => 0.0,
-                // Three-state direction per §J.5 contract: softening
-                // / steady / improving. V1 baseline is steady — every
-                // operator sits at 0.0 across the rolling window until
-                // Slice E populates real reliability history.
-                'direction'           => 'steady',
+                'direction'           => $direction,
             ],
             'divergence_state'        => $divergenceState,
             'explainer'               => $explainer,

@@ -47,6 +47,9 @@ require_once __DIR__ . '/schema-target-divergence-state.php';
 // to feed ranking). One row per (act_id, user_id); never touches
 // bcc_trust_scores.
 require_once __DIR__ . '/schema-stokes.php';
+// V2 Trust Attestation Layer Slice 3 — nightly operator-reliability
+// recompute cache (memoizes AttestationOutcomeClassifier per attestor).
+require_once __DIR__ . '/schema-attestor-reliability-cache.php';
 // NOTE: bcc_user_locals removed — Locals membership lives in PeepSo's
 // peepso_group_members (single graph rule); primary-Local pointer in
 // wp_usermeta.bcc_primary_local_group_id.
@@ -183,6 +186,10 @@ function bcc_trust_create_tables() {
         bcc_trust_create_stokes_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Stokes table created', []);
     }
+    if (function_exists('bcc_trust_create_attestor_reliability_cache_table')) {
+        bcc_trust_create_attestor_reliability_cache_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Attestor reliability cache table created', []);
+    }
 
     // §D5 reaction seeding — idempotent insert of the three custom
     // reactions (Solid / Vouch / Stand behind) as peepso_reaction_user
@@ -269,6 +276,8 @@ function bcc_trust_verify_all_tables() {
         'bcc_trust_attestations',
         // Stoke accumulator
         'bcc_trust_stokes',
+        // Slice 3 operator-reliability recompute cache
+        'bcc_attestor_reliability_cache',
     ];
 
     $missing = [];
