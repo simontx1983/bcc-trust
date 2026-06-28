@@ -25,7 +25,7 @@
       "id": "feed_151",
       "links": {
         "author": "/u/phillip-bcc",
-        "self": "/p/feed_151"
+        "self": "/post/151"
       },
       "permissions": {
         "can_report": {
@@ -43,7 +43,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -74,7 +77,7 @@
       "id": "feed_150",
       "links": {
         "author": "/u/smokec9teror",
-        "self": "/p/feed_150"
+        "self": "/post/150"
       },
       "permissions": {
         "can_report": {
@@ -92,7 +95,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -133,7 +139,7 @@
       "id": "feed_149",
       "links": {
         "author": "/u/smokea9suc8u",
-        "self": "/p/feed_149"
+        "self": "/post/149"
       },
       "permissions": {
         "can_report": {
@@ -151,7 +157,10 @@
           "love": 1,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -194,7 +203,7 @@
       "id": "feed_148",
       "links": {
         "author": "/u/smokeb9suc8u",
-        "self": "/p/feed_148"
+        "self": "/post/148"
       },
       "permissions": {
         "can_report": {
@@ -212,7 +221,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -263,7 +275,7 @@
       "id": "feed_143",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_143"
+        "self": "/post/143"
       },
       "permissions": {
         "can_report": {
@@ -281,7 +293,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -340,7 +355,7 @@
       "id": "feed_142",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_142"
+        "self": "/post/142"
       },
       "permissions": {
         "can_report": {
@@ -358,7 +373,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -399,7 +417,7 @@
       "id": "feed_141",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_141"
+        "self": "/post/141"
       },
       "permissions": {
         "can_report": {
@@ -417,7 +435,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -448,7 +469,7 @@
       "id": "feed_140",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_140"
+        "self": "/post/140"
       },
       "permissions": {
         "can_report": {
@@ -466,7 +487,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -497,7 +521,7 @@
       "id": "feed_139",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_139"
+        "self": "/post/139"
       },
       "permissions": {
         "can_report": {
@@ -515,7 +539,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -549,7 +576,7 @@
       "id": "feed_137",
       "links": {
         "author": "/u/1234",
-        "self": "/p/feed_137"
+        "self": "/post/137"
       },
       "permissions": {
         "can_report": {
@@ -567,7 +594,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -601,7 +631,7 @@
       "id": "feed_135",
       "links": {
         "author": "/u/1234",
-        "self": "/p/feed_135"
+        "self": "/post/135"
       },
       "permissions": {
         "can_report": {
@@ -619,7 +649,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -653,7 +686,7 @@
       "id": "feed_124",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_124"
+        "self": "/post/124"
       },
       "permissions": {
         "can_report": {
@@ -671,7 +704,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -705,7 +741,7 @@
       "id": "feed_122",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_122"
+        "self": "/post/122"
       },
       "permissions": {
         "can_report": {
@@ -723,7 +759,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -777,7 +816,7 @@
       "id": "feed_119",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_119"
+        "self": "/post/119"
       },
       "permissions": {
         "can_report": {
@@ -795,7 +834,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -838,7 +880,7 @@
       "id": "feed_118",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_118"
+        "self": "/post/118"
       },
       "permissions": {
         "can_report": {
@@ -856,7 +898,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -890,7 +935,7 @@
       "id": "feed_117",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_117"
+        "self": "/post/117"
       },
       "permissions": {
         "can_report": {
@@ -908,7 +953,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -952,7 +1000,7 @@
       "id": "feed_115",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_115"
+        "self": "/post/115"
       },
       "permissions": {
         "can_report": {
@@ -970,7 +1018,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -1003,7 +1054,7 @@
       "id": "feed_114",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_114"
+        "self": "/post/114"
       },
       "permissions": {
         "can_report": {
@@ -1021,7 +1072,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -1054,7 +1108,7 @@
       "id": "feed_113",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_113"
+        "self": "/post/113"
       },
       "permissions": {
         "can_report": {
@@ -1072,7 +1126,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
@@ -1105,7 +1162,7 @@
       "id": "feed_112",
       "links": {
         "author": "/u/claudeai",
-        "self": "/p/feed_112"
+        "self": "/post/112"
       },
       "permissions": {
         "can_report": {
@@ -1123,7 +1180,10 @@
           "love": 0,
           "wow": 0
         },
+        "heat_stage": 1,
         "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [

@@ -2,7 +2,7 @@
   "items": [
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2105,
             "target_kind": "validator"
@@ -50,10 +50,10 @@
         "commission_rate": 0.2,
         "delegator_count": 942,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "1.00000000",
         "status": "active",
-        "total_stake": "65868193.39854700",
+        "total_stake": "66231126.88222500",
         "uptime_30d": 1,
         "voting_power_rank": 1
       },
@@ -88,11 +88,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -112,6 +107,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -156,7 +156,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2015,
             "target_kind": "validator"
@@ -232,11 +232,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -256,6 +251,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -300,7 +300,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2016,
             "target_kind": "project"
@@ -376,11 +376,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -400,6 +395,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -444,7 +444,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2017,
             "target_kind": "creator"
@@ -520,11 +520,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -544,6 +539,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -555,8 +555,8 @@
           "format": "score",
           "key": "trust",
           "label": "Trust",
-          "raw": 50,
-          "value": "50"
+          "raw": 51,
+          "value": "51"
         },
         {
           "format": "count",
@@ -581,14 +581,14 @@
         }
       ],
       "tier_label": "Uncommon",
-      "trust_score": 50,
+      "trust_score": 51,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
       "viewer_has_reviewed": false
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2106,
             "target_kind": "validator"
@@ -640,10 +640,10 @@
         "commission_rate": 1,
         "delegator_count": 283,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "4506251.00000000",
         "status": "active",
-        "total_stake": "23670469.56831300",
+        "total_stake": "23775032.84352600",
         "uptime_30d": 1,
         "voting_power_rank": 2
       },
@@ -678,11 +678,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -702,6 +697,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -746,7 +746,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2107,
             "target_kind": "validator"
@@ -798,10 +798,10 @@
         "commission_rate": 0.08,
         "delegator_count": 286,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "1.00000000",
         "status": "active",
-        "total_stake": "18538571.50496600",
+        "total_stake": "18604989.73687300",
         "uptime_30d": 1,
         "voting_power_rank": 3
       },
@@ -836,11 +836,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -860,6 +855,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -904,7 +904,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2108,
             "target_kind": "validator"
@@ -956,10 +956,10 @@
         "commission_rate": 0.05,
         "delegator_count": 66568,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "33142.34807100",
         "status": "active",
-        "total_stake": "16063081.68000900",
+        "total_stake": "16072356.17965000",
         "uptime_30d": 0.9998999999999999,
         "voting_power_rank": 4
       },
@@ -994,11 +994,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -1018,6 +1013,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -1062,7 +1062,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2109,
             "target_kind": "validator"
@@ -1114,10 +1114,10 @@
         "commission_rate": 0.1,
         "delegator_count": 2099,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "1.00322600",
         "status": "active",
-        "total_stake": "14207718.93520600",
+        "total_stake": "14422823.62501700",
         "uptime_30d": 1,
         "voting_power_rank": 5
       },
@@ -1152,11 +1152,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -1176,6 +1171,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -1220,7 +1220,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2110,
             "target_kind": "validator"
@@ -1272,10 +1272,10 @@
         "commission_rate": 0.08,
         "delegator_count": 67308,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "277.90000000",
         "status": "active",
-        "total_stake": "12704021.13531000",
+        "total_stake": "12709334.19662200",
         "uptime_30d": 1,
         "voting_power_rank": 6
       },
@@ -1310,11 +1310,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -1334,6 +1329,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -1378,7 +1378,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2111,
             "target_kind": "validator"
@@ -1430,10 +1430,10 @@
         "commission_rate": 0.075,
         "delegator_count": 24585,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "1.00000000",
         "status": "active",
-        "total_stake": "9011092.06780900",
+        "total_stake": "8997907.14384200",
         "uptime_30d": 1,
         "voting_power_rank": 8
       },
@@ -1468,11 +1468,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -1492,6 +1487,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -1536,7 +1536,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2112,
             "target_kind": "validator"
@@ -1588,10 +1588,10 @@
         "commission_rate": 0.15,
         "delegator_count": 6325,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T02:19:14Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "1606597.77142900",
         "status": "active",
-        "total_stake": "8636792.93333700",
+        "total_stake": "8636688.93333700",
         "uptime_30d": 1,
         "voting_power_rank": 9
       },
@@ -1626,11 +1626,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -1650,6 +1645,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -1694,7 +1694,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2113,
             "target_kind": "validator"
@@ -1746,10 +1746,10 @@
         "commission_rate": 0.05,
         "delegator_count": 11467,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T02:19:14Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "2.00000000",
         "status": "active",
-        "total_stake": "8199399.66504400",
+        "total_stake": "8202047.79414300",
         "uptime_30d": 1,
         "voting_power_rank": 10
       },
@@ -1784,11 +1784,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -1808,6 +1803,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -1852,7 +1852,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2114,
             "target_kind": "validator"
@@ -1904,10 +1904,10 @@
         "commission_rate": 0.1,
         "delegator_count": 3254,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "10.00000000",
         "status": "active",
-        "total_stake": "9437571.77715900",
+        "total_stake": "9455603.57878100",
         "uptime_30d": 1,
         "voting_power_rank": 7
       },
@@ -1942,11 +1942,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -1966,6 +1961,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -2010,7 +2010,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2115,
             "target_kind": "validator"
@@ -2062,10 +2062,10 @@
         "commission_rate": 0.05,
         "delegator_count": 78252,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "1.00000000",
         "status": "active",
-        "total_stake": "7508035.77284600",
+        "total_stake": "7460450.13399000",
         "uptime_30d": 1,
         "voting_power_rank": 11
       },
@@ -2100,11 +2100,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -2124,6 +2119,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -2168,7 +2168,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2116,
             "target_kind": "validator"
@@ -2220,10 +2220,10 @@
         "commission_rate": 0.09,
         "delegator_count": 9386,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "17799.75002000",
         "status": "active",
-        "total_stake": "6128666.47354000",
+        "total_stake": "6137797.80034200",
         "uptime_30d": 1,
         "voting_power_rank": 14
       },
@@ -2258,11 +2258,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -2282,6 +2277,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -2326,7 +2326,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2117,
             "target_kind": "validator"
@@ -2378,10 +2378,10 @@
         "commission_rate": 0.05,
         "delegator_count": 74802,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "5001.00011000",
         "status": "active",
-        "total_stake": "6438831.29955000",
+        "total_stake": "6441556.74820900",
         "uptime_30d": 1,
         "voting_power_rank": 13
       },
@@ -2416,11 +2416,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -2440,6 +2435,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -2484,7 +2484,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2118,
             "target_kind": "validator"
@@ -2536,10 +2536,10 @@
         "commission_rate": 0.075,
         "delegator_count": 6429,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "20.00000000",
         "status": "active",
-        "total_stake": "6510542.67195500",
+        "total_stake": "6542096.39829100",
         "uptime_30d": 1,
         "voting_power_rank": 12
       },
@@ -2574,11 +2574,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -2598,6 +2593,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -2642,7 +2642,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2119,
             "target_kind": "validator"
@@ -2694,10 +2694,10 @@
         "commission_rate": 0.05,
         "delegator_count": 846,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T02:19:14Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "2.00000000",
         "status": "active",
-        "total_stake": "5645072.11080700",
+        "total_stake": "5650196.76903000",
         "uptime_30d": 1,
         "voting_power_rank": 15
       },
@@ -2732,11 +2732,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -2756,6 +2751,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -2800,7 +2800,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2120,
             "target_kind": "validator"
@@ -2852,10 +2852,10 @@
         "commission_rate": 0.05,
         "delegator_count": 35347,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T02:19:14Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "82560.41554000",
         "status": "active",
-        "total_stake": "4980090.59110100",
+        "total_stake": "4996815.17942500",
         "uptime_30d": 1,
         "voting_power_rank": 16
       },
@@ -2890,11 +2890,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -2914,6 +2909,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -2958,7 +2958,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2121,
             "target_kind": "validator"
@@ -3010,10 +3010,10 @@
         "commission_rate": 0.05,
         "delegator_count": 14058,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T02:19:14Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "12090.72496100",
         "status": "active",
-        "total_stake": "4530855.93900700",
+        "total_stake": "4524916.25905400",
         "uptime_30d": 1,
         "voting_power_rank": 17
       },
@@ -3048,11 +3048,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -3072,6 +3067,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -3116,7 +3116,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2122,
             "target_kind": "validator"
@@ -3168,10 +3168,10 @@
         "commission_rate": 0.05,
         "delegator_count": 40470,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "2.00000000",
         "status": "active",
-        "total_stake": "4063278.05995700",
+        "total_stake": "4065220.70873900",
         "uptime_30d": 1,
         "voting_power_rank": 18
       },
@@ -3206,11 +3206,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -3230,6 +3225,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -3274,7 +3274,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2123,
             "target_kind": "validator"
@@ -3326,10 +3326,10 @@
         "commission_rate": 0.08,
         "delegator_count": 4489,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T02:19:14Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "4963.82562200",
         "status": "active",
-        "total_stake": "3727782.54459400",
+        "total_stake": "3628049.56072300",
         "uptime_30d": 0.9993000000000001,
         "voting_power_rank": 19
       },
@@ -3364,11 +3364,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -3388,6 +3383,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -3432,7 +3432,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2124,
             "target_kind": "validator"
@@ -3484,10 +3484,10 @@
         "commission_rate": 0.05,
         "delegator_count": 16246,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "10001.00000000",
         "status": "active",
-        "total_stake": "3483891.72382600",
+        "total_stake": "3483530.71863100",
         "uptime_30d": 0.9934000000000001,
         "voting_power_rank": 21
       },
@@ -3522,11 +3522,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -3546,6 +3541,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
@@ -3590,7 +3590,7 @@
     },
     {
       "actions": {
-        "pull": {
+        "watch": {
           "body": {
             "target_id": 2125,
             "target_kind": "validator"
@@ -3642,10 +3642,10 @@
         "commission_rate": 0.05,
         "delegator_count": 14649,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-26T04:35:09Z",
+        "last_fetched_at": "2026-06-28T15:30:28Z",
         "self_stake": "1647.00000000",
         "status": "active",
-        "total_stake": "3545541.39225100",
+        "total_stake": "3545050.72234700",
         "uptime_30d": 1,
         "voting_power_rank": 20
       },
@@ -3680,11 +3680,6 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
-        "can_pull": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_report": {
           "allowed": false,
           "reason_code": null,
@@ -3704,6 +3699,11 @@
           "allowed": false,
           "reason_code": null,
           "unlock_hint": "Sign in to vouch for operators."
+        },
+        "can_watch": {
+          "allowed": false,
+          "reason_code": "signin_required",
+          "unlock_hint": "Sign in to interact"
         }
       },
       "rank_label": null,
