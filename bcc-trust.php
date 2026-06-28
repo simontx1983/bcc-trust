@@ -247,6 +247,11 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-indexes.php';
 // by bcc_trust_endorsement_bonus_dropped + per-table column-existence; no-op once
 // done / on fresh installs.
 require_once BCC_TRUST_PATH . 'includes/database/drop-endorsement-bonus.php';
+// §1 remediation: covering indexes on PeepSo's reaction/activity tables that
+// BCC's aggregation queries depend on. Moved out of ReactionSeeder (DDL
+// belongs in includes/database/). Idempotent, per-index existence-checked,
+// guarded by bcc_peepso_reaction_indexes_v1; runs on init priority 28.
+require_once BCC_TRUST_PATH . 'includes/database/peepso-reaction-indexes.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**

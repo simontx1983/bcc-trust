@@ -250,6 +250,44 @@ class VoteRepository {
     }
 
     /**
+     * Lock the vote row FOR UPDATE and report whether it is still active.
+     *
+     * IMPORTANT: uses SELECT … FOR UPDATE and therefore MUST be called from
+     * inside the caller's open TransactionManager::run() closure on the
+     * shared $wpdb connection; the row lock is released on that
+     * transaction's COMMIT/ROLLBACK. Prevents the trust engine from
+     * soft-deleting the vote between dispute-create validation and the
+     * dispute INSERT.
+     *
+     * Bounded by the id primary key (LIMIT 1). LIMIT MUST precede FOR UPDATE
+     * in MySQL — the reversed order is a syntax error that $wpdb swallows
+     * (get_var → null), which made every dispute creation fail as
+     * "vote_no_longer_active".
+     */
+    public function lockActiveForDispute(int $voteId): bool
+    {
+        // Runtime guard: SELECT … FOR UPDATE below requires an active transaction.
+        if (!TransactionManager::isInRunTransaction()) {
+            throw new Exception(
+                'VoteRepository::lockActiveForDispute() must be called inside TransactionManager::run(). '
+                . 'SELECT … FOR UPDATE without a transaction will not lock correctly.'
+            );
+        }
+
+        if ($voteId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        $locked = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$this->table} WHERE id = %d AND status = 1 LIMIT 1 FOR UPDATE",
+            $voteId
+        ));
+
+        return $locked !== null;
+    }
+
+    /**
      * Bulk-fetch vote rows by primary key. Used by FeedRankingService
      * to hydrate review post bodies for an entire feed page in one
      * round trip (vs N+1).

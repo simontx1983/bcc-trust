@@ -324,30 +324,11 @@ final class NotificationPrefs
      */
     public static function findEmailDigestOptIns(int $limit = 5000): array
     {
-        global $wpdb;
         $key = self::META_PREFIX . 'email_digest';
 
-        /** @var list<numeric-string>|null $rows */
-        $rows = $wpdb->get_col($wpdb->prepare(
-            "SELECT user_id FROM {$wpdb->usermeta}
-              WHERE meta_key = %s AND meta_value = %s
-              LIMIT %d",
-            $key,
-            '1',
-            $limit
-        ));
-
-        if (!is_array($rows)) {
-            return [];
-        }
-        $out = [];
-        foreach ($rows as $value) {
-            $userId = (int) $value;
-            if ($userId > 0) {
-                $out[] = $userId;
-            }
-        }
-        return $out;
+        return \BCC\Trust\Core\Plugin::instance()
+            ->notificationRepository()
+            ->findUserIdsByMetaFlag($key, $limit);
     }
 
     /**

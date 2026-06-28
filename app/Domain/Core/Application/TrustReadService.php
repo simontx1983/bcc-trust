@@ -266,22 +266,6 @@ final class TrustReadService implements TrustReadServiceInterface
      */
     public function lockActiveVoteForDispute(int $voteId): bool
     {
-        global $wpdb;
-
-        if ($voteId <= 0) {
-            return false;
-        }
-
-        $table = \BCC\Trust\Core\Database\TableRegistry::votes();
-
-        // LIMIT must precede FOR UPDATE in MySQL — the reversed order is a
-        // syntax error that $wpdb swallows (get_var → null), which made
-        // every dispute creation fail as "vote_no_longer_active".
-        $locked = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$table} WHERE id = %d AND status = 1 LIMIT 1 FOR UPDATE",
-            $voteId
-        ));
-
-        return $locked !== null;
+        return $this->voteRepository->lockActiveForDispute($voteId);
     }
 }

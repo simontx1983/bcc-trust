@@ -215,4 +215,45 @@ final class NotificationRepository
         );
         return is_array($rows) ? $rows : [];
     }
+
+    /**
+     * Enumerate wp_user IDs whose usermeta flag $metaKey is set to '1'.
+     *
+     * Used by the weekly digest cron to list opt-in recipients without
+     * scanning the full users table. Bounded by an explicit LIMIT. The
+     * caller passes the already-resolved meta key string so this repository
+     * does not depend back on the NotificationPrefs Support class.
+     *
+     * @return list<int>
+     */
+    public function findUserIdsByMetaFlag(string $metaKey, int $limit): array
+    {
+        if ($metaKey === '' || $limit <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+
+        /** @var list<numeric-string>|null $rows */
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT user_id FROM {$wpdb->usermeta}
+              WHERE meta_key = %s AND meta_value = %s
+              LIMIT %d",
+            $metaKey,
+            '1',
+            $limit
+        ));
+
+        if (!is_array($rows)) {
+            return [];
+        }
+        $out = [];
+        foreach ($rows as $value) {
+            $userId = (int) $value;
+            if ($userId > 0) {
+                $out[] = $userId;
+            }
+        }
+        return $out;
+    }
 }

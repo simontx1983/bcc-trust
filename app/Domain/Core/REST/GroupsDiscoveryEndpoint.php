@@ -34,6 +34,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\PageDiscoveryRepository;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -421,42 +422,24 @@ final class GroupsDiscoveryEndpoint
             return [];
         }
 
-        global $wpdb;
-        $chains = \BCC\Trust\Onchain\Repositories\ChainRepository::table();
-
-        $groupIds = array_keys($contexts);
-        $ph       = implode(',', array_fill(0, count($groupIds), '%d'));
-
-        // Subquery: postmeta value is a stringified chain_id, joined to
-        // chains.id. Caller passes a slug, we resolve to id once.
-        $chainId = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$chains} WHERE slug = %s LIMIT 1",
-            $chainSlug
-        ));
-        if ($chainId <= 0) {
+        // Caller passes a slug; resolve to a chain id once (cached in
+        // ChainRepository). Any-state lookup preserves the pre-refactor
+        // behavior of gating on deactivated chains too (the old inline query
+        // had no is_active filter).
+        $chainId = ChainRepository::resolveIdAnyState($chainSlug);
+        if ($chainId === null || $chainId <= 0) {
             return [];
         }
 
-        $params   = $groupIds;
-        $params[] = $chainId;
-
-        /** @var list<object{post_id: numeric-string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT post_id
-               FROM {$wpdb->postmeta}
-              WHERE meta_key IN ('_bcc_gate_chain_id', '_bcc_chain_tag')
-                AND post_id IN ({$ph})
-                AND CAST(meta_value AS UNSIGNED) = %d",
-            ...$params
-        ));
+        $groupIds   = array_map('intval', array_keys($contexts));
+        $gatedIds   = PageDiscoveryRepository::findPostIdsGatedByChain($groupIds, $chainId);
+        if ($gatedIds === []) {
+            return [];
+        }
 
         $allowed = [];
-        foreach ($rows ?: [] as $row) {
-            $allowed[(int) $row->post_id] = true;
-        }
-
-        if ($allowed === []) {
-            return [];
+        foreach ($gatedIds as $postId) {
+            $allowed[$postId] = true;
         }
 
         $out = [];
