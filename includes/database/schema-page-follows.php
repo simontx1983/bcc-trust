@@ -16,7 +16,7 @@
  * materializes a real PeepSo follow (user→user, viewer→operator),
  * and deletes the row here. So `bcc_page_follows` is the pre-claim
  * holding pen; the canonical post-claim store is still
- * `peepso_user_friendships` + `bcc_pull_meta`.
+ * `peepso_user_friendships` + `bcc_watch_meta`.
  *
  * Why a separate table rather than a `placeholder_post_author=1`
  * trick on `wp_posts`: a shared system user as followee would mean
@@ -50,7 +50,7 @@ function bcc_trust_create_page_follows_table(): void {
         user_id BIGINT UNSIGNED NOT NULL,
         page_id BIGINT UNSIGNED NOT NULL,
         card_kind VARCHAR(32) NOT NULL,
-        tier_at_pull VARCHAR(20) DEFAULT NULL,
+        tier_at_watch VARCHAR(20) DEFAULT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         UNIQUE KEY uq_user_page (user_id, page_id),

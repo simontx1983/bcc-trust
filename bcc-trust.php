@@ -197,6 +197,11 @@ if (get_option('bcc_trust_inert_since')) {
 
 require_once BCC_TRUST_PATH . 'includes/config.php';
 require_once BCC_TRUST_PATH . 'includes/database/tables.php';
+// Data-preserving pull→watch physical table/column rename. Defines
+// bcc_trust_rename_pull_to_watch(), called at the top of
+// bcc_trust_create_tables() (before dbDelta). Idempotent; no-op on fresh
+// installs and after it has run once.
+require_once BCC_TRUST_PATH . 'includes/database/rename-pull-to-watch.php';
 
 // Onchain schema definitions — table-creation functions used by the
 // activation hook and by the content-hash-gated dbDelta re-run below.

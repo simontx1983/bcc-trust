@@ -6,22 +6,22 @@
  *   - Watches accumulate into a single batch while the user keeps
  *     watching cards.
  *   - The batch closes after exactly 10 minutes of watch inactivity.
- *   - At close, server emits exactly ONE pull_batch feed item.
+ *   - At close, server emits exactly ONE watch_batch feed item.
  *   - Once emitted, the batch is frozen — subsequent unwatches don't
  *     retroactively edit, recount, or remove the feed post.
  *   - Maximum 3 cards shown in post body + "+N more".
  *
  * Storage: no new table. The user's open batch is the set of
- * bcc_pull_meta rows where batch_id IS NULL belonging to that user
+ * bcc_watch_meta rows where batch_id IS NULL belonging to that user
  * (via JOIN to peepso_user_followers per the §C2 single-graph rule).
  *
  * Trigger: 1-minute recurring WP-Cron sweep. Each tick:
- *   1. Find users whose open batches' most-recent pulled_at is
+ *   1. Find users whose open batches' most-recent watched_at is
  *      ≤ now-10min — these are the batches due to close.
  *   2. For each user, generate a fresh batch_id and stamp every
- *      open pull_meta row with it (single UPDATE query, idempotent
+ *      open watch_meta row with it (single UPDATE query, idempotent
  *      via `WHERE batch_id IS NULL`).
- *   3. Emit `bcc_pull_batch_emitted` event with batch metadata.
+ *   3. Emit `bcc_watch_batch_emitted` event with batch metadata.
  *
  * Why a recurring sweep (not one-shot scheduling per watch): WP-Cron's
  * `wp_schedule_single_event` dedups identical hook+args pairs scheduled
@@ -36,21 +36,20 @@
  * MUST NOT re-write the feed item on subsequent unwatch events; the
  * §C3 frozen-history rule lives there, not here.
  *
- * Cron hook rename (release N): SWEEP_HOOK changed from
- * `bcc_pull_batch_sweep` to `bcc_watch_batch_sweep`. Plugin.php's
- * plugins_loaded handler unschedules the legacy hook on every load
- * to drain stale events from sites that upgrade mid-flight (mitigates
- * the cron-drift incident class).
+ * Cron hook self-heal: Plugin.php's plugins_loaded handler unschedules
+ * the pre-rename `bcc_pull_batch_sweep` hook on every load to drain
+ * stale events from sites that upgrade mid-flight (mitigates the
+ * cron-drift incident class).
  *
  * @package BCC\Trust\Core\Services
- * @since V1 (2026-04; renamed from PullBatchAggregator 2026-05-13)
+ * @since V1 (2026-04)
  */
 
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Repositories\WatchingRepository;
-use BCC\Trust\Core\Repositories\PullMetaRepository;
+use BCC\Trust\Core\Repositories\WatchMetaRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -85,9 +84,9 @@ final class WatchBatchAggregator
 
     /**
      * Default cap on users processed per sweep tick. Override via the
-     * `bcc_pull_batch_sweep_limit` filter for high-volume installs:
+     * `bcc_watch_batch_sweep_limit` filter for high-volume installs:
      *
-     *   add_filter('bcc_pull_batch_sweep_limit', fn() => 500);
+     *   add_filter('bcc_watch_batch_sweep_limit', fn() => 500);
      *
      * Hard-clamped to [1, 500] regardless of filter return.
      */
@@ -95,7 +94,7 @@ final class WatchBatchAggregator
 
     public function __construct(
         private readonly WatchingRepository $watchingRepo,
-        private readonly PullMetaRepository $pullMetaRepo
+        private readonly WatchMetaRepository $watchMetaRepo
     ) {
     }
 
@@ -144,34 +143,34 @@ final class WatchBatchAggregator
             return;
         }
 
-        $openRows = $this->watchingRepo->findOpenPullMetaForUser($userId);
+        $openRows = $this->watchingRepo->findOpenWatchMetaForUser($userId);
         if ($openRows === []) {
             return;
         }
 
         // Re-confirm the inactivity window in this worker — between
-        // the sweep query and now, the user may have pulled again.
-        $latestPullEpoch = 0;
-        $earliestPullMysql = '';
-        $latestPullMysql   = '';
+        // the sweep query and now, the user may have watched again.
+        $latestWatchEpoch = 0;
+        $earliestWatchMysql = '';
+        $latestWatchMysql   = '';
         foreach ($openRows as $row) {
-            $ts = strtotime($row->pulled_at . ' UTC');
+            $ts = strtotime($row->watched_at . ' UTC');
             if ($ts === false) {
                 continue;
             }
-            if ($ts > $latestPullEpoch) {
-                $latestPullEpoch = $ts;
-                $latestPullMysql = $row->pulled_at;
+            if ($ts > $latestWatchEpoch) {
+                $latestWatchEpoch = $ts;
+                $latestWatchMysql = $row->watched_at;
             }
-            if ($earliestPullMysql === '' || $row->pulled_at < $earliestPullMysql) {
-                $earliestPullMysql = $row->pulled_at;
+            if ($earliestWatchMysql === '' || $row->watched_at < $earliestWatchMysql) {
+                $earliestWatchMysql = $row->watched_at;
             }
         }
-        if ($latestPullEpoch === 0) {
-            return; // defensive — shouldn't happen with NOT NULL pulled_at
+        if ($latestWatchEpoch === 0) {
+            return; // defensive — shouldn't happen with NOT NULL watched_at
         }
-        if (time() - $latestPullEpoch < self::INACTIVITY_WINDOW_SECONDS) {
-            // A pull arrived after the sweep query; defer to the next
+        if (time() - $latestWatchEpoch < self::INACTIVITY_WINDOW_SECONDS) {
+            // A watch arrived after the sweep query; defer to the next
             // tick after this batch quiets again.
             return;
         }
@@ -182,10 +181,10 @@ final class WatchBatchAggregator
         }
 
         // Deterministic batch_id: hash of (userId, sorted follow_ids,
-        // pulled_at range). Same inputs always yield the same id;
+        // watched_at range). Same inputs always yield the same id;
         // useful for debugging, replay, and reconciliation.
-        $batchId = self::generateBatchId($userId, $followIds, $earliestPullMysql, $latestPullMysql);
-        $stamped = $this->pullMetaRepo->stampBatch($followIds, $batchId);
+        $batchId = self::generateBatchId($userId, $followIds, $earliestWatchMysql, $latestWatchMysql);
+        $stamped = $this->watchMetaRepo->stampBatch($followIds, $batchId);
 
         if ($stamped === 0) {
             // Race lost: another worker already stamped these rows
@@ -220,18 +219,18 @@ final class WatchBatchAggregator
         ]);
 
         /**
-         * Fires when a §C3 pull batch closes. Subscribers (activity-
+         * Fires when a §C3 watch batch closes. Subscribers (activity-
          * stream writer per §A3, notification dispatcher, feed surfaces)
          * react asynchronously — this service does NOT write the feed
          * item directly.
          *
-         * @param int    $userId    The pulling user.
-         * @param string $batchId   Deterministic identifier; also stamped on every pull_meta row in the batch.
+         * @param int    $userId    The watching user.
+         * @param string $batchId   Deterministic identifier; also stamped on every watch_meta row in the batch.
          * @param int    $cardCount Total cards in the batch.
          * @param list<array{follow_id: int, card_handle: string}> $topCards  First TOP_CARDS_DISPLAY items, enriched with handle so subscribers can render without re-fetching.
          * @param int    $moreCount cardCount - count(topCards), for the "+N more" affordance.
          */
-        do_action('bcc_pull_batch_emitted', $userId, $batchId, $cardCount, $topCards, $moreCount);
+        do_action('bcc_watch_batch_emitted', $userId, $batchId, $cardCount, $topCards, $moreCount);
     }
 
     /**
@@ -242,7 +241,7 @@ final class WatchBatchAggregator
     private static function resolveSweepLimit(): int
     {
         /** @var int|mixed $filtered */
-        $filtered = apply_filters('bcc_pull_batch_sweep_limit', self::SWEEP_USER_LIMIT_DEFAULT);
+        $filtered = apply_filters('bcc_watch_batch_sweep_limit', self::SWEEP_USER_LIMIT_DEFAULT);
         $limit = is_int($filtered) ? $filtered : self::SWEEP_USER_LIMIT_DEFAULT;
         return max(1, min(500, $limit));
     }
@@ -251,7 +250,10 @@ final class WatchBatchAggregator
      * Deterministic batch_id from the batch's content.
      *
      * Format: pb-{userId}-{first8charsOfSha256(payload)}
-     * Payload: userId | sorted follow_ids | earliest pulled_at | latest pulled_at
+     * (the `pb-` prefix is a stored, deterministic identifier token —
+     * NOT user-facing vocabulary — kept stable so existing batch_ids
+     * resolve.)
+     * Payload: userId | sorted follow_ids | earliest watched_at | latest watched_at
      *
      * Properties:
      *   - Same inputs ⇒ same id (idempotent under retries)
@@ -264,8 +266,8 @@ final class WatchBatchAggregator
     private static function generateBatchId(
         int $userId,
         array $followIds,
-        string $earliestPulledAt,
-        string $latestPulledAt
+        string $earliestWatchedAt,
+        string $latestWatchedAt
     ): string {
         $sortedIds = $followIds;
         sort($sortedIds, SORT_NUMERIC);
@@ -274,8 +276,8 @@ final class WatchBatchAggregator
             '%d|%s|%s|%s',
             $userId,
             implode(',', $sortedIds),
-            $earliestPulledAt,
-            $latestPulledAt
+            $earliestWatchedAt,
+            $latestWatchedAt
         );
 
         $hash = substr(hash('sha256', $payload), 0, 8);

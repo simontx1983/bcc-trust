@@ -5,7 +5,7 @@
  * the pre-2026-05-15 string-coercion writer bug.
  *
  * Context: the column is SMALLINT but the legacy writer wrote module
- * names like `'blog'`, `'review'`, `'pull_batch'`, `'page_claim'`,
+ * names like `'blog'`, `'review'`, `'watch_batch'`, `'page_claim'`,
  * `'dispute'` as strings. MySQL coerced them to `0`, which
  * `FeedItemNormalizer::MODULE_TO_KIND` doesn't know how to read —
  * every affected row fell through to `post_kind: 'status'`. The

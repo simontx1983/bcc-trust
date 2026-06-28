@@ -34,7 +34,7 @@
  * ─────────────────────────────────────────────────────────────────
  *
  * @package BCC\Trust\Core\REST
- * @since V1 (2026-04, Watching Phase 1; renamed from BinderEndpoint 2026-05-13)
+ * @since V1 (2026-04, Watching Phase 1)
  */
 
 namespace BCC\Trust\Core\REST;
@@ -57,18 +57,18 @@ final class WatchingEndpoint
 
     // Watch / unwatch rate limits migrated 2026-05-13 from hardcoded
     // class constants (Throttle::allow primitive) to the bcc-trust
-    // RateLimiter buckets `pull` and `unpull` (bucket names kept stable
-    // for storage compatibility — see includes/config/limits.php).
-    // The new path inherits trust-tier multipliers + per-IP+per-user
-    // dual-bucket sliding window, so legitimate batch curation by
-    // Trusted/Elite operators isn't punished and subnet-coordinated
-    // farming can't multiply via sock-puppets.
+    // RateLimiter buckets `watch` and `unwatch` (see
+    // includes/config/limits.php). The path inherits trust-tier
+    // multipliers + per-IP+per-user dual-bucket sliding window, so
+    // legitimate batch curation by Trusted/Elite operators isn't
+    // punished and subnet-coordinated farming can't multiply via
+    // sock-puppets.
 
     public static function register(): void
     {
         $instance = new self();
 
-        // ── Canonical /me/watching/* family (release N+) ─────────────
+        // ── Canonical /me/watching/* family ──────────────────────────
 
         register_rest_route(
             self::ROUTE_NAMESPACE,
@@ -247,7 +247,7 @@ final class WatchingEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        if (!\BCC\Trust\Core\Security\RateLimiter::allow('pull')) {
+        if (!\BCC\Trust\Core\Security\RateLimiter::allow('watch')) {
             return ApiResponse::error('bcc_rate_limited', 'Too many watches. Please wait.', 429);
         }
 
@@ -282,7 +282,7 @@ final class WatchingEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        if (!\BCC\Trust\Core\Security\RateLimiter::allow('unpull')) {
+        if (!\BCC\Trust\Core\Security\RateLimiter::allow('unwatch')) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
         }
 

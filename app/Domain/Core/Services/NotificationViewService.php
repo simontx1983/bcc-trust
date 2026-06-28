@@ -13,7 +13,7 @@
  *                       that was reacted to)
  *   - REVIEW         → `/v/<page_handle>` etc. via PageTypeMap +
  *                       page_id (the reviewed page)
- *   - CARD_PULLED    → `/u/<actor_handle>` (the puller's profile)
+ *   - CARD_WATCHED   → `/u/<actor_handle>` (the watcher's profile)
  *   - RANK_UP        → `/u/<recipient_handle>` (your own profile —
  *                       progression strip lives there)
  *   - MENTION        → `/?focus=<act_id>` (jump to the floor focused
@@ -204,7 +204,7 @@ final class NotificationViewService
         return match ($type) {
             NotificationType::REACTION    => $actId > 0 ? '/?focus=' . $actId : '/',
             NotificationType::REVIEW      => self::resolvePageLink($externalId),
-            NotificationType::CARD_PULLED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
+            NotificationType::CARD_WATCHED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             NotificationType::RANK_UP     => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             // Welcome notification routes to the floor — the user is
             // probably already there when they see it (it fires within

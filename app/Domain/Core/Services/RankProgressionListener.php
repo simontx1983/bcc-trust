@@ -24,7 +24,7 @@
  *     `bcc_trust_async_reputation_recalculate` jobs, neither of
  *     which fire a clean tier-changed signal.
  *   - Activity events (`bcc_post_created`, `bcc_review_published`,
- *     `bcc_card_pulled`, `bcc_trust_vote_cast`) cover every plausible
+ *     `bcc_card_watched`, `bcc_trust_vote_cast`) cover every plausible
  *     trigger for tier movement. Subscribing on the activity side
  *     accepts eventual consistency: a promotion that lands on the
  *     async recompute is detected on the user's next activity event.

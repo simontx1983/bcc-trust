@@ -52,7 +52,7 @@
   },
   "card": {
     "actions": {
-      "pull": {
+      "watch": {
         "body": {
           "target_id": 137,
           "target_kind": "member"
@@ -142,11 +142,6 @@
         "reason_code": "not_applicable",
         "unlock_hint": null
       },
-      "can_pull": {
-        "allowed": false,
-        "reason_code": "signin_required",
-        "unlock_hint": "Sign in to interact"
-      },
       "can_report": {
         "allowed": false,
         "reason_code": null,
@@ -166,6 +161,11 @@
         "allowed": false,
         "reason_code": null,
         "unlock_hint": "Sign in to vouch for operators."
+      },
+      "can_watch": {
+        "allowed": false,
+        "reason_code": "signin_required",
+        "unlock_hint": "Sign in to interact"
       }
     },
     "rank_label": "Apprentice",
@@ -202,7 +202,6 @@
   },
   "card_tier": "uncommon",
   "counts": {
-    "binder_size": 4,
     "blog_posts_written": 0,
     "disputes_signed": 0,
     "followers": 1,
@@ -243,7 +242,6 @@
   "joined_at": "2026-06-08T13:08:08Z",
   "links": {
     "activity": "/u/phillipcosmos/activity",
-    "binder": "/u/phillipcosmos/binder",
     "blog": "/u/phillipcosmos/blog",
     "disputes": "/u/phillipcosmos/disputes",
     "network": "/u/phillipcosmos/network",
@@ -289,7 +287,6 @@
   },
   "primary_local": null,
   "privacy": {
-    "binder_hidden": false,
     "delegations_hidden": false,
     "disputes_hidden": false,
     "email_hidden": false,
@@ -305,16 +302,6 @@
   "reviews": [],
   "shift_log": {
     "days": [
-      {
-        "date": "2025-06-28",
-        "level": 0,
-        "tooltip": "Jun 28 \u00b7 no activity"
-      },
-      {
-        "date": "2025-06-29",
-        "level": 0,
-        "tooltip": "Jun 29 \u00b7 no activity"
-      },
       {
         "date": "2025-06-30",
         "level": 0,
@@ -2124,6 +2111,16 @@
         "date": "2026-06-26",
         "level": 0,
         "tooltip": "Jun 26 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-27",
+        "level": 0,
+        "tooltip": "Jun 27 \u00b7 no activity"
+      },
+      {
+        "date": "2026-06-28",
+        "level": 0,
+        "tooltip": "Jun 28 \u00b7 no activity"
       }
     ],
     "month_ticks": [
@@ -2164,7 +2161,7 @@
       "delta": null,
       "delta_tone": null,
       "key": "pulled_by",
-      "label": "Pulled by",
+      "label": "Watched by",
       "platform": "PEEPSO",
       "value": "1"
     },

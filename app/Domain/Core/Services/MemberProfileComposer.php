@@ -50,14 +50,12 @@ final class MemberProfileComposer
      */
     private const STAT_DEFINITIONS = [
         ['key' => 'trust',       'label' => 'Trust',       'platform' => 'BCC'],
-        ['key' => 'pulled_by',   'label' => 'Pulled by',   'platform' => 'PEEPSO'],
+        ['key' => 'pulled_by',   'label' => 'Watched by',  'platform' => 'PEEPSO'],
         ['key' => 'reviews',     'label' => 'Reviews',     'platform' => 'BCC'],
         ['key' => 'solids',      'label' => 'Solids',      'platform' => 'PEEPSO'],
         ['key' => 'disputes',    'label' => 'Disputes',    'platform' => 'BCC'],
-        // Single source of truth — vocabulary unified on "Watching"
-        // 2026-05-13. Frontend reads `key` only; legacy 'binder' key
-        // is not emitted (release N additive-deprecation only doubles
-        // wire fields the FE reads by name, not by key lookup).
+        // Single source of truth — vocabulary unified on "Watching".
+        // Frontend reads `key` only.
         ['key' => 'watching',    'label' => 'Watching',    'platform' => 'BCC'],
     ];
 
@@ -72,7 +70,7 @@ final class MemberProfileComposer
     private const MODULE_TO_BREAKDOWN_KEY = [
         'status'      => 'posts',
         'review'      => 'reviews',
-        'pull_batch'  => 'pulls',
+        'watch_batch' => 'pulls',
         'page_claim'  => 'posts',
         // Disputes get their own count from FlagsRepository (signed-by-user
         // semantics differ from peepso_activities rows).
@@ -109,7 +107,7 @@ final class MemberProfileComposer
     private const MODULE_TO_LIVE_VERB = [
         'status'     => 'Posted on the Floor',
         'review'     => 'Wrote a review',
-        'pull_batch' => 'Pulled cards',
+        'watch_batch' => 'Watched cards',
         'page_claim' => 'Claimed a page',
     ];
 
@@ -431,7 +429,7 @@ final class MemberProfileComposer
             'permissions'         => [
                 'can_review'         => ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'card_unavailable'],
                 'can_dispute'        => ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'card_unavailable'],
-                'can_pull'           => ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'card_unavailable'],
+                'can_watch'          => ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'card_unavailable'],
                 'can_endorse'        => ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'card_unavailable'],
                 'can_post_as_entity' => false,
                 'can_edit_bio'       => false,
@@ -586,16 +584,13 @@ final class MemberProfileComposer
         $counts = isset($base['counts']) && is_array($base['counts']) ? $base['counts'] : [];
         $trustScore = isset($base['trust_score']) ? (int) $base['trust_score'] : 0;
 
-        // Read `watching_size` (canonical) with `binder_size` fallback —
-        // UserViewService doubles both during release N, but keep the
-        // fallback so we don't trip if a consumer trims fields.
         $values = [
             'trust'     => (string) $trustScore,
             'pulled_by' => self::numberOrDash($counts['followers'] ?? null),
             'reviews'   => self::numberOrDash($counts['reviews_written'] ?? null),
             'solids'    => self::numberOrDash($counts['solids_received'] ?? null),
             'disputes'  => self::numberOrDash($counts['disputes_signed'] ?? null),
-            'watching'  => self::numberOrDash($counts['watching_size'] ?? $counts['binder_size'] ?? null),
+            'watching'  => self::numberOrDash($counts['watching_size'] ?? null),
         ];
 
         $stats = [];
@@ -862,14 +857,12 @@ final class MemberProfileComposer
             return isset($privacy[$key]) && $privacy[$key] === true;
         };
 
-        // Vocabulary unified on "Watching" 2026-05-13 — single source of
-        // truth (frontend reads `key`). Privacy reads `watching_hidden`
-        // with `binder_hidden` fallback to honour the release-N field
-        // doubling in PrivacySettings::readProfile.
-        $watchHidden = $hideFor('watching_hidden') || $hideFor('binder_hidden');
+        // Vocabulary unified on "Watching" — single source of truth
+        // (frontend reads `key`). Privacy reads `watching_hidden`.
+        $watchHidden = $hideFor('watching_hidden');
 
         return [
-            ['key' => 'watching', 'label' => 'Watching', 'count' => (int) ($counts['watching_size'] ?? $counts['binder_size'] ?? 0), 'hidden' => $watchHidden],
+            ['key' => 'watching', 'label' => 'Watching', 'count' => (int) ($counts['watching_size'] ?? 0), 'hidden' => $watchHidden],
             ['key' => 'reviews',  'label' => 'Reviews',  'count' => (int) ($counts['reviews_written'] ?? 0),  'hidden' => $hideFor('reviews_hidden')],
             ['key' => 'activity', 'label' => 'Activity', 'count' => 0,                                         'hidden' => false],
             ['key' => 'disputes', 'label' => 'Disputes', 'count' => (int) ($counts['disputes_signed'] ?? 0),  'hidden' => $hideFor('disputes_hidden')],

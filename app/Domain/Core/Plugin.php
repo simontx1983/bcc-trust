@@ -145,10 +145,10 @@ final class Plugin
 
     // ── V1 frontend support repositories ────────────────────────────────
 
-    private ?Repositories\PullMetaRepository $pullMetaRepository = null;
-    public function pullMetaRepository(): Repositories\PullMetaRepository
+    private ?Repositories\WatchMetaRepository $watchMetaRepository = null;
+    public function watchMetaRepository(): Repositories\WatchMetaRepository
     {
-        return $this->pullMetaRepository ??= new Repositories\PullMetaRepository();
+        return $this->watchMetaRepository ??= new Repositories\WatchMetaRepository();
     }
 
     private ?Repositories\UserRankRepository $userRankRepository = null;
@@ -678,7 +678,7 @@ final class Plugin
             $this->authorBadgeResolver(),
             $this->attestationService(),
             $this->blogService(),
-            $this->pullBatchBodyHydrator(),
+            $this->watchBatchBodyHydrator(),
             $this->reviewBodyHydrator(),
             $this->photoBodyHydrator(),
             $this->gifBodyHydrator(),
@@ -686,12 +686,12 @@ final class Plugin
         );
     }
 
-    private ?Services\Feed\PullBatchBodyHydrator $pullBatchBodyHydrator = null;
-    public function pullBatchBodyHydrator(): Services\Feed\PullBatchBodyHydrator
+    private ?Services\Feed\WatchBatchBodyHydrator $watchBatchBodyHydrator = null;
+    public function watchBatchBodyHydrator(): Services\Feed\WatchBatchBodyHydrator
     {
-        return $this->pullBatchBodyHydrator ??= new Services\Feed\PullBatchBodyHydrator(
-            $this->pullBatchRepository(),
-            $this->pullMetaRepository(),
+        return $this->watchBatchBodyHydrator ??= new Services\Feed\WatchBatchBodyHydrator(
+            $this->watchBatchRepository(),
+            $this->watchMetaRepository(),
             $this->watchingRepository()
         );
     }
@@ -753,7 +753,7 @@ final class Plugin
     {
         return $this->watchingService ??= new Services\WatchingService(
             $this->watchingRepository(),
-            $this->pullMetaRepository(),
+            $this->watchMetaRepository(),
             $this->reputationRepository(),
             $this->pageFollowRepository()
         );
@@ -906,14 +906,14 @@ final class Plugin
     {
         return $this->watchBatchAggregator ??= new Services\WatchBatchAggregator(
             $this->watchingRepository(),
-            $this->pullMetaRepository()
+            $this->watchMetaRepository()
         );
     }
 
-    private ?Repositories\PullBatchRepository $pullBatchRepository = null;
-    public function pullBatchRepository(): Repositories\PullBatchRepository
+    private ?Repositories\WatchBatchRepository $watchBatchRepository = null;
+    public function watchBatchRepository(): Repositories\WatchBatchRepository
     {
-        return $this->pullBatchRepository ??= new Repositories\PullBatchRepository();
+        return $this->watchBatchRepository ??= new Repositories\WatchBatchRepository();
     }
 
     private ?Repositories\PeepSoActivityWriter $peepSoActivityWriter = null;
@@ -926,7 +926,7 @@ final class Plugin
     public function activityStreamWriter(): Services\Feed\ActivityStreamWriter
     {
         return $this->activityStreamWriter ??= new Services\Feed\ActivityStreamWriter(
-            $this->pullBatchRepository(),
+            $this->watchBatchRepository(),
             $this->peepSoActivityWriter()
         );
     }
@@ -1230,9 +1230,7 @@ final class Plugin
         \BCC\Trust\Core\REST\PagesEndpoint::register();
 
         // V1 contract: watchlist (§C2 — projection of PeepSo follows +
-        // bcc_pull_meta sidecar). Registers BOTH the canonical
-        // /me/watching/* family AND the deprecated /me/binder/* alias
-        // family (release N additive-deprecation per api-contract §1.1.1).
+        // bcc_watch_meta sidecar). Registers the /me/watching/* family.
         \BCC\Trust\Core\REST\WatchingEndpoint::register();
 
         // V1 contract: highlights strip (§O2 / §O2.1) — three slots,
@@ -1698,8 +1696,9 @@ final class Plugin
         });
 
         // Self-heal: unschedule the legacy hook on every load (idempotent
-        // no-op once drained). Removed in release N+1 alongside the
-        // /me/binder/* routes and bcc_card_pulled event.
+        // no-op once drained). The literal `bcc_pull_batch_sweep` string
+        // MUST stay — it names the pre-rename hook so stale cron events
+        // on mid-upgrade sites get cleared.
         wp_clear_scheduled_hook('bcc_pull_batch_sweep');
 
         if (!wp_next_scheduled(Services\WatchBatchAggregator::SWEEP_HOOK)) {
@@ -1726,20 +1725,19 @@ final class Plugin
         // the feed surfaces (/feed, /feed/hot) include BCC content
         // alongside PeepSo-native posts. Single-source-of-truth per §A4
         // — no other code path should INSERT into peepso_activities for
-        // BCC-owned modules (pull_batch, page_claim).
+        // BCC-owned modules (watch_batch, page_claim).
         //
-        // bcc_card_watched / bcc_card_unpulled (and the legacy
-        // bcc_card_pulled) are intentionally NOT subscribed: watches
-        // are silent until the §C3 batch closes, and unwatches don't
+        // bcc_card_watched is intentionally NOT subscribed: watches are
+        // silent until the §C3 batch closes, and unwatches don't
         // retroactively edit emitted batch items.
 
-        add_action('bcc_pull_batch_emitted', function (int $userId, string $batchId, int $cardCount, array $topCards, int $moreCount): void {
+        add_action('bcc_watch_batch_emitted', function (int $userId, string $batchId, int $cardCount, array $topCards, int $moreCount): void {
             try {
-                $this->activityStreamWriter()->handlePullBatchEmitted(
+                $this->activityStreamWriter()->handleWatchBatchEmitted(
                     $userId, $batchId, $cardCount, $topCards, $moreCount
                 );
             } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream pull_batch failed', [
+                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream watch_batch failed', [
                     'user_id'  => $userId,
                     'batch_id' => $batchId,
                     'error'    => $e->getMessage(),
@@ -1861,11 +1859,8 @@ final class Plugin
             }
         }, 20, 1);
 
-        // Subscribed to the canonical `bcc_card_watched` event (release N+).
-        // WatchingService emits BOTH bcc_card_pulled (legacy, for external
-        // consumers) AND bcc_card_watched (new); internal subscribers
-        // attach to the new one only, so we don't double-process when
-        // both fire on the same watch.
+        // Subscribed to the canonical `bcc_card_watched` event —
+        // WatchingService's single watch event.
         add_action('bcc_card_watched', function (int $viewerId): void {
             try {
                 $this->rankProgressionListener()->onActivityEvent($viewerId);
@@ -1943,7 +1938,7 @@ final class Plugin
         // listener.
         add_action('bcc_card_watched', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
             try {
-                $this->firstActionListener()->onCardPulled($viewerId, $followId, $targetKind, $targetId);
+                $this->firstActionListener()->onCardWatched($viewerId, $followId, $targetKind, $targetId);
             } catch (\Throwable $e) {
                 \BCC\Core\Log\Logger::error('[bcc-trust] first_action card_watched failed', [
                     'viewer_id'   => $viewerId,
@@ -2094,7 +2089,7 @@ final class Plugin
         }, 30, 4);
 
         add_action('bcc_card_watched', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
-            $this->notificationDispatcher()->onCardPulled($viewerId, $followId, $targetKind, $targetId);
+            $this->notificationDispatcher()->onCardWatched($viewerId, $followId, $targetKind, $targetId);
         }, 30, 4);
 
         add_action('bcc_rank_awarded', function (int $userId, string $newRank, string $oldRank): void {

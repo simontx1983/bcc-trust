@@ -1,9 +1,9 @@
 <?php
 /**
- * Pull Batch Repository — owns the bcc_pull_batches summary table.
+ * Watch Batch Repository — owns the bcc_watch_batches summary table.
  *
- * Each row is a §C3 frozen-history snapshot of an emitted pull batch.
- * Created by ActivityStreamWriter when bcc_pull_batch_emitted fires;
+ * Each row is a §C3 frozen-history snapshot of an emitted watch batch.
+ * Created by ActivityStreamWriter when bcc_watch_batch_emitted fires;
  * referenced by peepso_activities.act_external_id so feed renderers
  * have a typed FK back to the batch summary.
  *
@@ -24,7 +24,7 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * @phpstan-type PullBatchRow object{
+ * @phpstan-type WatchBatchRow object{
  *     id: int|numeric-string,
  *     user_id: int|numeric-string,
  *     batch_id: string,
@@ -33,16 +33,16 @@ if (!defined('ABSPATH')) {
  *     emitted_at: string
  * }
  */
-final class PullBatchRepository
+final class WatchBatchRepository
 {
-    /** Explicit column list — must match schema-pull-batches.php. */
+    /** Explicit column list — must match schema-watch-batches.php. */
     private const COLUMNS = 'id, user_id, batch_id, card_count, more_count, emitted_at';
 
     private string $table;
 
     public function __construct()
     {
-        $this->table = TableRegistry::pullBatches();
+        $this->table = TableRegistry::watchBatches();
     }
 
     /**
@@ -105,7 +105,7 @@ final class PullBatchRepository
      * 100 is a safety margin.
      *
      * @param list<int> $ids
-     * @return array<int, PullBatchRow>
+     * @return array<int, WatchBatchRow>
      */
     public function findManyByIds(array $ids): array
     {
@@ -116,7 +116,7 @@ final class PullBatchRepository
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($ids), '%d'));
 
-        /** @var list<PullBatchRow>|null $rows */
+        /** @var list<WatchBatchRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table}
               WHERE id IN ({$placeholders})
@@ -136,7 +136,7 @@ final class PullBatchRepository
      * peepso_activities.act_external_id pointer). Used by future
      * feed-renderer hydration paths.
      *
-     * @phpstan-return PullBatchRow|null
+     * @phpstan-return WatchBatchRow|null
      */
     public function findById(int $id): ?object
     {
@@ -145,7 +145,7 @@ final class PullBatchRepository
         }
 
         global $wpdb;
-        /** @var PullBatchRow|null $row */
+        /** @var WatchBatchRow|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table} WHERE id = %d LIMIT 1",
             $id

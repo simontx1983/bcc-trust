@@ -83,7 +83,7 @@ final class FeedColdStartService
         'review'     => 'REVIEWED a card',
         'dispute'    => 'SIGNED a dispute',
         'signal'     => 'WATCHED a card',
-        'pull_batch' => 'WATCHED cards',
+        'watch_batch' => 'WATCHED cards',
         'page_claim' => 'VOUCHED for a page',
         'project'    => 'DROPPED a release',
         'nft'        => 'RELEASED a piece',

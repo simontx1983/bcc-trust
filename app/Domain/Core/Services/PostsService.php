@@ -305,7 +305,7 @@ final class PostsService
 
         // §A3 event bus — single emission per state change. Subscribers
         // run async via Action Scheduler (cf. Plugin.php's existing
-        // bcc_pull_batch_emitted / bcc_page_claimed wiring) so the
+        // bcc_watch_batch_emitted / bcc_page_claimed wiring) so the
         // originating request returns immediately.
         do_action('bcc_post_created', $authorId, $postId, $actId);
 

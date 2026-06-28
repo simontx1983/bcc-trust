@@ -58,11 +58,9 @@ class RateLimiter {
                 // Watch-graph watches/unwatches — anti-watch-farming.
                 // Tier multipliers in getAdjustedLimit() automatically
                 // grant Trusted/Elite operators higher caps for
-                // legitimate batch curation. Bucket names `pull` /
-                // `unpull` kept stable through release N for storage
-                // compatibility with in-flight rate-limit counters.
-                'pull'    => ['limit' => BCC_TRUST_RATE_LIMIT_PULL,    'window' => BCC_TRUST_RATE_WINDOW_PULL],
-                'unpull'  => ['limit' => BCC_TRUST_RATE_LIMIT_UNPULL,  'window' => BCC_TRUST_RATE_WINDOW_UNPULL],
+                // legitimate batch curation.
+                'watch'   => ['limit' => BCC_TRUST_RATE_LIMIT_WATCH,   'window' => BCC_TRUST_RATE_WINDOW_WATCH],
+                'unwatch' => ['limit' => BCC_TRUST_RATE_LIMIT_UNWATCH, 'window' => BCC_TRUST_RATE_WINDOW_UNWATCH],
             ];
         }
         return self::$limits;

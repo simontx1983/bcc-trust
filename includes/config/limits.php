@@ -80,14 +80,11 @@ define('BCC_TRUST_RATE_WINDOW_BLOG_COVER_UPLOAD', 60);
 // user — well above any legitimate use, well below a scripted attack
 // generating mass first_watcher events on the recipient side.
 //
-// Bucket names `pull` / `unpull` kept stable through release N for
-// storage compatibility with in-flight rate-limit counters; the
-// vocabulary inside the comments is the canonical one.
-define('BCC_TRUST_RATE_LIMIT_PULL', 30);
-define('BCC_TRUST_RATE_WINDOW_PULL', 60);
+define('BCC_TRUST_RATE_LIMIT_WATCH', 30);
+define('BCC_TRUST_RATE_WINDOW_WATCH', 60);
 
-define('BCC_TRUST_RATE_LIMIT_UNPULL', 30);
-define('BCC_TRUST_RATE_WINDOW_UNPULL', 60);
+define('BCC_TRUST_RATE_LIMIT_UNWATCH', 30);
+define('BCC_TRUST_RATE_WINDOW_UNWATCH', 60);
 
 // ======================================================
 // NOTIFICATIONS (§I1)

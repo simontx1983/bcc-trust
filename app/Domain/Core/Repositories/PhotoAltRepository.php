@@ -11,9 +11,9 @@
  * against `peepso_photos` belong in a Service that composes this
  * Repository with PhotoRepository — never inline here.
  *
- * Pattern: mirrors PullMetaRepository — same "third-party-row-id PK,
+ * Pattern: mirrors WatchMetaRepository — same "third-party-row-id PK,
  * BCC-owned sidecar columns" shape. New invocations of this pattern
- * should follow PullMetaRepository's interface conventions:
+ * should follow WatchMetaRepository's interface conventions:
  *   - PK == third-party row id (no autoincrement)
  *   - Bulk read keyed by the parent's id list, bounded IN-clause
  *   - Idempotent upsert helper
@@ -71,7 +71,7 @@ final class PhotoAltRepository
      * alts to a feed page in a single round-trip.
      *
      * The IN clause is hard-bounded at 500 placeholders to match the
-     * canonical PullMetaRepository::findManyByFollowIds shape — feed
+     * canonical WatchMetaRepository::findManyByFollowIds shape — feed
      * pages cap at 20–50 items in practice, so 500 leaves abundant
      * headroom while keeping the query plan stable.
      *

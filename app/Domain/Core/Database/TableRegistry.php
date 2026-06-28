@@ -198,10 +198,10 @@ final class TableRegistry
 
     // V1 frontend support tables (per docs/api-contract-v1.md §6.5)
 
-    public static function pullMeta(): string
+    public static function watchMeta(): string
     {
         global $wpdb;
-        return $wpdb->prefix . 'bcc_pull_meta';
+        return $wpdb->prefix . 'bcc_watch_meta';
     }
 
     public static function pageFollows(): string
@@ -216,10 +216,10 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_user_ranks';
     }
 
-    public static function pullBatches(): string
+    public static function watchBatches(): string
     {
         global $wpdb;
-        return $wpdb->prefix . 'bcc_pull_batches';
+        return $wpdb->prefix . 'bcc_watch_batches';
     }
 
     public static function contentReports(): string
@@ -324,9 +324,9 @@ final class TableRegistry
             'score_velocity'     => self::scoreVelocity(),
             'dirty_queue'        => self::dirtyQueue(),
             // V1 frontend support tables
-            'pull_meta'          => self::pullMeta(),
+            'watch_meta'         => self::watchMeta(),
             'user_ranks'         => self::userRanks(),
-            'pull_batches'       => self::pullBatches(),
+            'watch_batches'      => self::watchBatches(),
             'content_reports'    => self::contentReports(),
             'hidden_activities'  => self::hiddenActivities(),
             'dispute_participations' => self::disputeParticipations(),

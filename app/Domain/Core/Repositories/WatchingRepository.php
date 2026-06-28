@@ -1,33 +1,27 @@
 <?php
 /**
  * Watching Repository — read-only projection of PeepSo follows
- * enriched with bcc_pull_meta sidecar metadata.
+ * enriched with bcc_watch_meta sidecar metadata.
  *
  * Per §C2: the watchlist is a UI-layer projection of PeepSo follows,
  * NOT a separate relationship graph. This repository owns the
  * cross-table read that JOINs:
  *   - {prefix}peepso_user_followers (PeepSo, source of truth for follows)
- *   - {prefix}bcc_pull_meta         (BCC sidecar metadata; LEFT JOIN)
- *                                    NOTE: physical table name kept as
- *                                    `bcc_pull_meta` per release-N
- *                                    additive-deprecation runway. The
- *                                    logical concept is "watch metadata".
- *                                    Physical rename deferred to release
- *                                    N+2 (see docs/database-schema.md).
+ *   - {prefix}bcc_watch_meta        (BCC sidecar metadata; LEFT JOIN)
  *   - {prefix}users                 (handle / user_login fallback)
  *   - {prefix}usermeta              (bcc_handle resolution)
  *
- * Why a dedicated repository (not on PullMetaRepository): PullMeta's
- * scope is the bcc_pull_meta table only. The watch read crosses
+ * Why a dedicated repository (not on WatchMetaRepository): WatchMeta's
+ * scope is the bcc_watch_meta table only. The watch read crosses
  * three other tables; putting it elsewhere would either violate
- * PullMeta's documented scope or scatter $wpdb across services
+ * WatchMeta's documented scope or scatter $wpdb across services
  * (forbidden by §L6 "Repository-only DB access").
  *
  * Read-only. No writes — watch/unwatch are mutations and route through
- * PullMetaRepository directly.
+ * WatchMetaRepository directly.
  *
  * @package BCC\Trust\Core\Repositories
- * @since V1 (2026-04, Watching Phase 1; renamed from BinderRepository 2026-05-13)
+ * @since V1 (2026-04, Watching Phase 1)
  */
 
 namespace BCC\Trust\Core\Repositories;
@@ -44,9 +38,9 @@ if (!defined('ABSPATH')) {
  *     card_user_id: int|numeric-string,
  *     user_login: string,
  *     card_handle: string|null,
- *     tier_at_pull: string|null,
+ *     tier_at_watch: string|null,
  *     batch_id: string|null,
- *     pulled_at: string|null
+ *     watched_at: string|null
  * }
  */
 final class WatchingRepository
@@ -67,7 +61,7 @@ final class WatchingRepository
 
     /**
      * The watchlist for a viewer — paginated, most-recent-watch first
-     * (follow ordinal break-tie when pull_meta absent).
+     * (follow ordinal break-tie when watch_meta absent).
      *
      * @return list<WatchingItemRow>
      */
@@ -80,10 +74,10 @@ final class WatchingRepository
         $offset = max(0, $offset);
 
         global $wpdb;
-        $follows  = $wpdb->prefix . 'peepso_user_followers';
-        $pullMeta = TableRegistry::pullMeta();
-        $users    = $wpdb->users;
-        $usermeta = $wpdb->usermeta;
+        $follows   = $wpdb->prefix . 'peepso_user_followers';
+        $watchMeta = TableRegistry::watchMeta();
+        $users     = $wpdb->users;
+        $usermeta  = $wpdb->usermeta;
 
         $sql = $wpdb->prepare(
             "SELECT
@@ -91,20 +85,20 @@ final class WatchingRepository
                 uf.uf_passive_user_id AS card_user_id,
                 u.user_login          AS user_login,
                 handle.meta_value     AS card_handle,
-                pm.tier_at_pull       AS tier_at_pull,
+                pm.tier_at_watch      AS tier_at_watch,
                 pm.batch_id           AS batch_id,
-                pm.pulled_at          AS pulled_at
+                pm.watched_at         AS watched_at
             FROM {$follows} uf
             INNER JOIN {$users} u
                 ON u.ID = uf.uf_passive_user_id
-            LEFT JOIN {$pullMeta} pm
+            LEFT JOIN {$watchMeta} pm
                 ON pm.follow_id = uf.uf_id
             LEFT JOIN {$usermeta} handle
                 ON handle.user_id = uf.uf_passive_user_id
                AND handle.meta_key = 'bcc_handle'
             WHERE uf.uf_active_user_id = %d
               AND " . self::ACTIVE_FOLLOW . "
-            ORDER BY pm.pulled_at DESC, uf.uf_id DESC
+            ORDER BY pm.watched_at DESC, uf.uf_id DESC
             LIMIT %d OFFSET %d",
             $userId,
             $limit,
@@ -113,12 +107,12 @@ final class WatchingRepository
         // ────────────────────────────────────────────────────────────
         //  Sort tiebreaker (LOCKED — never remove uf.uf_id DESC):
         //  prevents pagination jitter when multiple items share a
-        //  pulled_at value. Two cases that hit this in practice:
-        //    1. Legacy follows (no bcc_pull_meta row) — pm.pulled_at
+        //  watched_at value. Two cases that hit this in practice:
+        //    1. Legacy follows (no bcc_watch_meta row) — pm.watched_at
         //       is NULL for all of them, so they collide on the primary
         //       sort key.
         //    2. Phase 3 batches — every member of a batch shares the
-        //       batch's pulled_at boundary timestamp.
+        //       batch's watched_at boundary timestamp.
         //  Without the uf_id tiebreaker, MySQL is free to return
         //  these rows in different orders across requests, breaking
         //  offset pagination (some items shown twice, others missed).
@@ -151,10 +145,10 @@ final class WatchingRepository
         }
 
         global $wpdb;
-        $follows  = $wpdb->prefix . 'peepso_user_followers';
-        $pullMeta = TableRegistry::pullMeta();
-        $users    = $wpdb->users;
-        $usermeta = $wpdb->usermeta;
+        $follows   = $wpdb->prefix . 'peepso_user_followers';
+        $watchMeta = TableRegistry::watchMeta();
+        $users     = $wpdb->users;
+        $usermeta  = $wpdb->usermeta;
 
         $sql = $wpdb->prepare(
             "SELECT
@@ -162,13 +156,13 @@ final class WatchingRepository
                 uf.uf_passive_user_id AS card_user_id,
                 u.user_login          AS user_login,
                 handle.meta_value     AS card_handle,
-                pm.tier_at_pull       AS tier_at_pull,
+                pm.tier_at_watch      AS tier_at_watch,
                 pm.batch_id           AS batch_id,
-                pm.pulled_at          AS pulled_at
+                pm.watched_at         AS watched_at
             FROM {$follows} uf
             INNER JOIN {$users} u
                 ON u.ID = uf.uf_passive_user_id
-            LEFT JOIN {$pullMeta} pm
+            LEFT JOIN {$watchMeta} pm
                 ON pm.follow_id = uf.uf_id
             LEFT JOIN {$usermeta} handle
                 ON handle.user_id = uf.uf_passive_user_id
@@ -189,8 +183,7 @@ final class WatchingRepository
     /**
      * Look up the passive_user_id (followee) for a follow row owned
      * by $userId. Used by the unwatch handler to get the followee
-     * before deletion (so the bcc_card_unwatched / bcc_card_unpulled
-     * events can carry it).
+     * before the PeepSo unfollow call.
      *
      * Returns 0 when the row doesn't exist or isn't owned by $userId.
      */
@@ -213,34 +206,34 @@ final class WatchingRepository
     }
 
     /**
-     * Open pull_meta rows for a user (batch_id IS NULL). Used by the
+     * Open watch_meta rows for a user (batch_id IS NULL). Used by the
      * §C3 batch aggregator to find members of the user's currently-open
-     * batch + their pulled_at timestamps.
+     * batch + their watched_at timestamps.
      *
      * Joins peepso_user_followers to scope by uf_active_user_id (the
-     * pull_meta table doesn't carry user_id directly per §C2 — it's
+     * watch_meta table doesn't carry user_id directly per §C2 — it's
      * sidecar metadata keyed by the PeepSo follow's uf_id).
      *
-     * @return list<object{follow_id: int|numeric-string, pulled_at: string}>
+     * @return list<object{follow_id: int|numeric-string, watched_at: string}>
      */
-    public function findOpenPullMetaForUser(int $userId): array
+    public function findOpenWatchMetaForUser(int $userId): array
     {
         if ($userId <= 0) {
             return [];
         }
 
         global $wpdb;
-        $follows  = $wpdb->prefix . 'peepso_user_followers';
-        $pullMeta = TableRegistry::pullMeta();
+        $follows   = $wpdb->prefix . 'peepso_user_followers';
+        $watchMeta = TableRegistry::watchMeta();
 
-        /** @var list<object{follow_id: int|numeric-string, pulled_at: string}>|null $rows */
+        /** @var list<object{follow_id: int|numeric-string, watched_at: string}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT pm.follow_id, pm.pulled_at
-               FROM {$pullMeta} pm
+            "SELECT pm.follow_id, pm.watched_at
+               FROM {$watchMeta} pm
                INNER JOIN {$follows} uf ON uf.uf_id = pm.follow_id
               WHERE uf.uf_active_user_id = %d
                 AND pm.batch_id IS NULL
-              ORDER BY pm.pulled_at ASC, pm.follow_id ASC
+              ORDER BY pm.watched_at ASC, pm.follow_id ASC
               LIMIT 500",
             $userId
         ));
@@ -248,7 +241,7 @@ final class WatchingRepository
     }
 
     /**
-     * User IDs with open batches whose most-recent pulled_at is at or
+     * User IDs with open batches whose most-recent watched_at is at or
      * before the cutoff — i.e., batches that have been quiet long
      * enough to close (per §C3 10-minute inactivity window).
      *
@@ -263,17 +256,17 @@ final class WatchingRepository
         $limit = max(1, min(500, $limit));
 
         global $wpdb;
-        $follows  = $wpdb->prefix . 'peepso_user_followers';
-        $pullMeta = TableRegistry::pullMeta();
+        $follows   = $wpdb->prefix . 'peepso_user_followers';
+        $watchMeta = TableRegistry::watchMeta();
 
         /** @var list<object{user_id: int|numeric-string}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT uf.uf_active_user_id AS user_id
-               FROM {$pullMeta} pm
+               FROM {$watchMeta} pm
                INNER JOIN {$follows} uf ON uf.uf_id = pm.follow_id
               WHERE pm.batch_id IS NULL
               GROUP BY uf.uf_active_user_id
-             HAVING MAX(pm.pulled_at) <= %s
+             HAVING MAX(pm.watched_at) <= %s
               LIMIT %d",
             $cutoffMysqlDatetime,
             $limit
@@ -368,7 +361,7 @@ final class WatchingRepository
     /**
      * Bulk-resolve follow_id → card_handle for a small set of
      * follow_ids. Used by the §C3 batch aggregator to enrich the
-     * top-3 cards in the bcc_pull_batch_emitted event payload so
+     * top-3 cards in the bcc_watch_batch_emitted event payload so
      * subscribers (feed writer, notification dispatcher) don't
      * re-fetch handles for content the aggregator already touched.
      *
@@ -423,9 +416,9 @@ final class WatchingRepository
     /**
      * Tier-distribution rollup for the §N9 watchlist identity-snapshot.
      *
-     * GROUP BY tier_at_pull on the active-follows table left-joined to
-     * bcc_pull_meta. Returns counts keyed by tier_at_pull value.
-     * Legacy follows (no pull_meta row) surface under the 'unknown'
+     * GROUP BY tier_at_watch on the active-follows table left-joined to
+     * bcc_watch_meta. Returns counts keyed by tier_at_watch value.
+     * Legacy follows (no watch_meta row) surface under the 'unknown'
      * key so the caller can render them honestly without inflating
      * any specific tier bucket.
      *
@@ -434,7 +427,7 @@ final class WatchingRepository
      * future values), no LIMIT needed but the result set is
      * inherently small.
      *
-     * @return array<string, int> tier_at_pull => count, plus 'unknown' for null
+     * @return array<string, int> tier_at_watch => count, plus 'unknown' for null
      */
     public function countByTierForUser(int $userId): array
     {
@@ -443,26 +436,26 @@ final class WatchingRepository
         }
 
         global $wpdb;
-        $follows  = $wpdb->prefix . 'peepso_user_followers';
-        $pullMeta = TableRegistry::pullMeta();
+        $follows   = $wpdb->prefix . 'peepso_user_followers';
+        $watchMeta = TableRegistry::watchMeta();
 
-        /** @var list<object{tier_at_pull: string|null, n: numeric-string}>|null $rows */
+        /** @var list<object{tier_at_watch: string|null, n: numeric-string}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT pm.tier_at_pull AS tier_at_pull,
-                    COUNT(*)        AS n
+            "SELECT pm.tier_at_watch AS tier_at_watch,
+                    COUNT(*)         AS n
                FROM {$follows} uf
-               LEFT JOIN {$pullMeta} pm
+               LEFT JOIN {$watchMeta} pm
                  ON pm.follow_id = uf.uf_id
               WHERE uf.uf_active_user_id = %d
                 AND " . self::ACTIVE_FOLLOW . "
-              GROUP BY pm.tier_at_pull",
+              GROUP BY pm.tier_at_watch",
             $userId
         ));
 
         $out = [];
         foreach ($rows ?: [] as $row) {
-            $key = $row->tier_at_pull !== null && $row->tier_at_pull !== ''
-                ? $row->tier_at_pull
+            $key = $row->tier_at_watch !== null && $row->tier_at_watch !== ''
+                ? $row->tier_at_watch
                 : 'unknown';
             $out[$key] = (int) $row->n;
         }

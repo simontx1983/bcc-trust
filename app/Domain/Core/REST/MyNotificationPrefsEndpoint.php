@@ -12,7 +12,7 @@
  *     "bell": {
  *       "bcc_reaction":    bool,
  *       "bcc_review":      bool,
- *       "bcc_card_pulled": bool,
+ *       "bcc_card_watched": bool,
  *       "bcc_rank_up":     bool,
  *       "bcc_endorse":     bool
  *     },

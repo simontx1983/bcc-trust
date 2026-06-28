@@ -4,7 +4,7 @@
  *
  * The cross-plugin write is necessary by design: the §A3 plan says
  * "Activity-stream writer translates events into peepso_activities
- * rows" — BCC owns the act rows for its own modules (pull_batch,
+ * rows" — BCC owns the act rows for its own modules (watch_batch,
  * page_claim, …). PeepSo's own modules continue writing through their
  * own paths; we only insert rows for BCC-owned act_module_id values.
  *
@@ -56,7 +56,7 @@ final class PeepSoActivityWriter
      * @var array<string, int>
      */
     private const MODULE_ID_BY_NAME = [
-        'pull_batch' => 200,
+        'watch_batch' => 200,
         'page_claim' => 201,
         'review'     => 202,
         'dispute'    => 203,
@@ -125,7 +125,7 @@ final class PeepSoActivityWriter
      *
      * Bounded LIMIT 1; matches by the literal moduleId string we wrote
      * on insert (BCC-owned modules use string keys: 'blog', 'review',
-     * 'page_claim', 'pull_batch').
+     * 'page_claim', 'watch_batch').
      *
      * Returns 0 when no row matches.
      */

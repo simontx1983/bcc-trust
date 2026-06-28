@@ -153,7 +153,7 @@ final class FirstActionListener
     }
 
     /**
-     * `bcc_card_pulled` handler — fires on the RECIPIENT (the owner of
+     * `bcc_card_watched` handler — fires on the RECIPIENT (the owner of
      * the watched page, or the user-being-followed in user→user follows).
      *
      * Hook signature:
@@ -164,7 +164,7 @@ final class FirstActionListener
      *   - targetKind === 'page'  → recipient is the page-owner of $targetId
      *
      * Self-follow guard: when the viewer IS the recipient (a user
-     * pulled their own card during testing, or a corrupt event), the
+     * watched their own card during testing, or a corrupt event), the
      * listener no-ops. First-watcher requires a second human.
      *
      * This is the load-bearing social-gravity celebration. Pre-cleanup
@@ -173,9 +173,9 @@ final class FirstActionListener
      * first-time stash converts a passive notification into a recorded
      * moment the recipient sees on their next session.
      */
-    public function onCardPulled(int $viewerId, int $followId, string $targetKind, int $targetId): void
+    public function onCardWatched(int $viewerId, int $followId, string $targetKind, int $targetId): void
     {
-        $recipientId = $this->resolvePullRecipient($targetKind, $targetId);
+        $recipientId = $this->resolveWatchRecipient($targetKind, $targetId);
         if ($recipientId <= 0 || $recipientId === $viewerId) {
             return;
         }
@@ -186,7 +186,7 @@ final class FirstActionListener
             self::KIND_FIRST_WATCHER,
             'First watcher on your card.',
             self::ICON_FIRST_WATCHER,
-            'card_pulled'
+            'card_watched'
         );
     }
 
@@ -230,7 +230,7 @@ final class FirstActionListener
 
     /**
      * Resolve the user id that should receive the first_watcher
-     * celebration given a `bcc_card_pulled` hook payload. Encapsulates
+     * celebration given a `bcc_card_watched` hook payload. Encapsulates
      * the two watch target shapes so the hook handler stays
      * single-line at the call site.
      *
@@ -243,7 +243,7 @@ final class FirstActionListener
      * listener forward-compatible if a future target kind (group,
      * collection) is added: it no-ops cleanly until a resolver lands.
      */
-    private function resolvePullRecipient(string $targetKind, int $targetId): int
+    private function resolveWatchRecipient(string $targetKind, int $targetId): int
     {
         if ($targetId <= 0) {
             return 0;

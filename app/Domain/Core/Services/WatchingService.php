@@ -15,9 +15,9 @@
  *     (e.g., 'dao' page_type).
  *
  * Stubs still in place:
- *   - card_tier_at_pull → null when no bcc_pull_meta row exists yet
- *   - batch_id          → always null in V1.0 (Phase 3 batching is V2)
- *   - pulled_at         → null when no bcc_pull_meta row exists yet
+ *   - card_tier_at_watch → null when no bcc_watch_meta row exists yet
+ *   - batch_id           → always null in V1.0 (Phase 3 batching is V2)
+ *   - watched_at         → null when no bcc_watch_meta row exists yet
  *
  * Previously stubbed, now wired (kept for changelog clarity):
  *   - card_kind         → resolved via WatchingRepository::findPageInfoByUserIds
@@ -25,13 +25,8 @@
  * Pagination: offset envelope per §1.5 (watchlist is a directory, not
  * a time-ordered feed).
  *
- * Vocabulary note (release N): this service is canonical "Watching";
- * the legacy "Binder" route family in WatchingEndpoint delegates to
- * the same handlers per the additive-deprecation runway (api-contract
- * §1.1.1).
- *
  * @package BCC\Trust\Core\Services
- * @since V1 (2026-04, Watching Phase 1; renamed from BinderService 2026-05-13)
+ * @since V1 (2026-04, Watching Phase 1)
  */
 
 namespace BCC\Trust\Core\Services;
@@ -39,7 +34,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\PeepSo\PeepSoFollowWriter;
 use BCC\Trust\Core\Repositories\WatchingRepository;
 use BCC\Trust\Core\Repositories\PageFollowRepository;
-use BCC\Trust\Core\Repositories\PullMetaRepository;
+use BCC\Trust\Core\Repositories\WatchMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\PageTypeMap;
@@ -73,7 +68,7 @@ final class WatchingService
 
     public function __construct(
         private readonly WatchingRepository $watchingRepo,
-        private readonly PullMetaRepository $pullMetaRepo,
+        private readonly WatchMetaRepository $watchMetaRepo,
         private readonly ReputationRepository $reputationRepo,
         private readonly PageFollowRepository $pageFollowRepo
     ) {
@@ -89,10 +84,10 @@ final class WatchingService
      *     is_resolved: bool,
      *     card_id: int,
      *     card_handle: string,
-     *     card_tier_at_pull: string|null,
-     *     tier_label_at_pull: string|null,
+     *     card_tier_at_watch: string|null,
+     *     tier_label_at_watch: string|null,
      *     batch_id: string|null,
-     *     pulled_at: string|null,
+     *     watched_at: string|null,
      *     is_legacy: bool,
      *     links: array{card: string},
      *     actions: array{view: array{method: string, href: string}}
@@ -208,10 +203,10 @@ final class WatchingService
      *   card_handle: string,
      *   card_slug: string|null,
      *   page_id: int|null,
-     *   card_tier_at_pull: string|null,
-     *   tier_label_at_pull: string|null,
+     *   card_tier_at_watch: string|null,
+     *   tier_label_at_watch: string|null,
      *   batch_id: string|null,
-     *   pulled_at: string|null,
+     *   watched_at: string|null,
      *   is_legacy: bool,
      *   links: array{card: string},
      *   actions: array{view: array{method: string, href: string, idempotent: bool, requires_auth: bool}}
@@ -225,8 +220,8 @@ final class WatchingService
             ? $row->card_handle
             : $row->user_login;
 
-        $pulledAt = $row->pulled_at !== null && $row->pulled_at !== ''
-            ? self::toIso8601($row->pulled_at)
+        $watchedAt = $row->watched_at !== null && $row->watched_at !== ''
+            ? self::toIso8601($row->watched_at)
             : null;
 
         // ────────────────────────────────────────────────────────────
@@ -262,16 +257,16 @@ final class WatchingService
         // ────────────────────────────────────────────────────────────
         //  is_legacy contract (LOCKED — do not violate in UI/feed):
         //
-        //    true  → no bcc_pull_meta sidecar row exists for this
-        //            follow. The follow pre-dates the V1 pull pipeline
+        //    true  → no bcc_watch_meta sidecar row exists for this
+        //            follow. The follow pre-dates the V1 watch pipeline
         //            OR was created via PeepSo's native UI. There is
-        //            no real pulled_at timestamp.
+        //            no real watched_at timestamp.
         //
-        //  Legacy items MUST NOT be surfaced as "recent pulls" in any
-        //  UI or feed. They are historical follows with no real pull
+        //  Legacy items MUST NOT be surfaced as "recent watches" in any
+        //  UI or feed. They are historical follows with no real watch
         //  moment; treating them as recent activity falsifies history.
         // ────────────────────────────────────────────────────────────
-        $isLegacy = $pulledAt === null;
+        $isLegacy = $watchedAt === null;
 
         // Identifier rule (locked per watching Phase-1 correction):
         // member uses bcc_handle, page kinds use post_name (slug).
@@ -303,34 +298,33 @@ final class WatchingService
         //  the frontend uses card_id as a stable React key anchored
         //  to the underlying follow relationship, not the page.
         // ────────────────────────────────────────────────────────────
-        // bcc_pull_meta.tier_at_pull stores card_tier values
+        // bcc_watch_meta.tier_at_watch stores card_tier values
         // (legendary/rare/uncommon/common/null) per resolveCardTierForUser
-        // — never reputation_tier. Renamed at the API boundary so the
-        // field name reflects what's in it; tier_label_at_pull is the
+        // — never reputation_tier. Emitted under the canonical
+        // card_tier_at_watch field name; tier_label_at_watch is the
         // pre-rendered display string per §A2.
-        $cardTierAtPull = $row->tier_at_pull;
-        $tierLabelAtPull = ReputationTierMap::toCardTierLabel($cardTierAtPull);
+        $cardTierAtWatch = $row->tier_at_watch;
+        $tierLabelAtWatch = ReputationTierMap::toCardTierLabel($cardTierAtWatch);
 
         return [
-            'follow_id'          => (int) $row->follow_id,
+            'follow_id'           => (int) $row->follow_id,
             // follow_source discriminates rows that came from the
             // PeepSo user→user graph ('peepso') vs. our page-scoped
             // pre-claim follow store ('page'). The frontend echoes
-            // it back on DELETE /me/watching/{id} (or the legacy
-            // /me/binder/{id}) so the server routes
-            // the unpull to the right table without an ID collision.
-            'follow_source'      => 'peepso',
-            'card_kind'          => $cardKind,
-            'is_resolved'        => $isResolved,
-            'card_id'            => (int) $row->card_user_id,
-            'card_handle'        => $handle,
-            'card_slug'          => $slug,
-            'page_id'            => $pageInfo !== null ? (int) $pageInfo->page_id : null,
-            'card_tier_at_pull'  => $cardTierAtPull,
-            'tier_label_at_pull' => $tierLabelAtPull,
-            'batch_id'           => $row->batch_id,
-            'pulled_at'          => $pulledAt,
-            'is_legacy'          => $isLegacy,
+            // it back on DELETE /me/watching/{id} so the server routes
+            // the unwatch to the right table without an ID collision.
+            'follow_source'       => 'peepso',
+            'card_kind'           => $cardKind,
+            'is_resolved'         => $isResolved,
+            'card_id'             => (int) $row->card_user_id,
+            'card_handle'         => $handle,
+            'card_slug'           => $slug,
+            'page_id'             => $pageInfo !== null ? (int) $pageInfo->page_id : null,
+            'card_tier_at_watch'  => $cardTierAtWatch,
+            'tier_label_at_watch' => $tierLabelAtWatch,
+            'batch_id'            => $row->batch_id,
+            'watched_at'          => $watchedAt,
+            'is_legacy'           => $isLegacy,
             'links' => [
                 'card' => $cardLink,
             ],
@@ -360,7 +354,7 @@ final class WatchingService
      *     user_id: numeric-string,
      *     page_id: numeric-string,
      *     card_kind: string,
-     *     tier_at_pull: string|null,
+     *     tier_at_watch: string|null,
      *     created_at: string
      * } $row
      * @return array{
@@ -371,10 +365,10 @@ final class WatchingService
      *   card_handle: string,
      *   card_slug: string|null,
      *   page_id: int|null,
-     *   card_tier_at_pull: string|null,
-     *   tier_label_at_pull: string|null,
+     *   card_tier_at_watch: string|null,
+     *   tier_label_at_watch: string|null,
      *   batch_id: string|null,
-     *   pulled_at: string|null,
+     *   watched_at: string|null,
      *   is_legacy: bool,
      *   links: array{card: string},
      *   actions: array{view: array{method: string, href: string, idempotent: bool, requires_auth: bool}}
@@ -390,8 +384,8 @@ final class WatchingService
         $cardLink   = CardUrlMap::frontendUrl($cardKind, $identifier);
         $cardApiUrl = CardUrlMap::cardApiUrl($cardKind, $identifier);
 
-        $tierAtPull = $row->tier_at_pull;
-        $tierLabel  = ReputationTierMap::toCardTierLabel($tierAtPull);
+        $tierAtWatch = $row->tier_at_watch;
+        $tierLabel   = ReputationTierMap::toCardTierLabel($tierAtWatch);
 
         $createdAt = self::toIso8601($row->created_at);
 
@@ -399,24 +393,24 @@ final class WatchingService
             // The id here is the bcc_page_follows row id — disambiguated
             // from peepso follow IDs by the follow_source field below.
             // Server uses both (id + source) to route DELETE.
-            'follow_id'          => (int) $row->id,
-            'follow_source'      => 'page',
-            'card_kind'          => $cardKind,
-            'is_resolved'        => true,
+            'follow_id'           => (int) $row->id,
+            'follow_source'       => 'page',
+            'card_kind'           => $cardKind,
+            'is_resolved'         => true,
             // For page-follows, card_id is the page's wp_post ID so the
             // frontend's "{kind}-{id}" lookup against the cards-list
             // response (where Card.id is the wp_post ID) matches the
             // same key. Members never go through this code path.
-            'card_id'            => $pageId,
-            'card_handle'        => $slug ?? (string) $pageId,
-            'card_slug'          => $slug,
-            'page_id'            => $pageId,
-            'card_tier_at_pull'  => $tierAtPull,
-            'tier_label_at_pull' => $tierLabel,
-            'batch_id'           => null,
-            'pulled_at'          => $createdAt !== '' ? $createdAt : null,
-            // Page-follows are always a real pull moment — never legacy
-            // (legacy means "PeepSo follow with no BCC pull record").
+            'card_id'             => $pageId,
+            'card_handle'         => $slug ?? (string) $pageId,
+            'card_slug'           => $slug,
+            'page_id'             => $pageId,
+            'card_tier_at_watch'  => $tierAtWatch,
+            'tier_label_at_watch' => $tierLabel,
+            'batch_id'            => null,
+            'watched_at'          => $createdAt !== '' ? $createdAt : null,
+            // Page-follows are always a real watch moment — never legacy
+            // (legacy means "PeepSo follow with no BCC watch record").
             'is_legacy'          => false,
             'links' => [
                 'card' => $cardLink,
@@ -435,8 +429,8 @@ final class WatchingService
     /**
      * Record a follow on a system-minted placeholder page (post_author=0)
      * via the BCC page-follows table. Idempotent — calling watch twice
-     * on the same placeholder returns status='already_pulled' the second
-     * time and does NOT re-fire `bcc_card_pulled` / `bcc_card_watched`.
+     * on the same placeholder returns status='already_watching' the second
+     * time and does NOT re-fire `bcc_card_watched`.
      *
      * Validates the target shape (peepso-page, publish, author=0)
      * before writing — anything else still surfaces as
@@ -444,7 +438,7 @@ final class WatchingService
      * member/post/comment rows via the wrong path.
      *
      * @return array{
-     *   status: 'pulled'|'already_pulled',
+     *   status: 'watched'|'already_watching',
      *   item: array<string, mixed>
      * }|array{error: string, message: string}
      */
@@ -466,25 +460,18 @@ final class WatchingService
             return ['error' => 'bcc_not_found', 'message' => 'Target not found.'];
         }
 
-        // tier_at_pull for placeholders: read from the page's read-model
+        // tier_at_watch for placeholders: read from the page's read-model
         // row when present; null otherwise. Matches the existing
         // resolveCardTierForUser pattern but page-scoped.
-        $tierAtPull = self::resolveCardTierForPage($targetId);
+        $tierAtWatch = self::resolveCardTierForPage($targetId);
 
-        $result = $this->pageFollowRepo->insertOrFind($viewerId, $targetId, $targetKind, $tierAtPull);
+        $result = $this->pageFollowRepo->insertOrFind($viewerId, $targetId, $targetKind, $tierAtWatch);
         if ($result['id'] === 0) {
             return ['error' => 'bcc_internal_error', 'message' => 'Failed to record follow.'];
         }
 
         if ($result['inserted']) {
-            // Dual-emit during release N (additive-deprecation runway):
-            //   - bcc_card_pulled  (legacy event, kept for back-compat;
-            //     dropped in release N+1)
-            //   - bcc_card_watched (new canonical event)
-            // Subscribers MUST attach to exactly ONE of the two to avoid
-            // double-processing. The Plugin.php registrations still bind
-            // to bcc_card_pulled during release N.
-            do_action('bcc_card_pulled',  $viewerId, $result['id'], $targetKind, $targetId);
+            // Canonical watch event — subscribers attach here.
             do_action('bcc_card_watched', $viewerId, $result['id'], $targetKind, $targetId);
         }
 
@@ -494,14 +481,14 @@ final class WatchingService
         }
 
         return [
-            'status' => $result['inserted'] ? 'pulled' : 'already_pulled',
+            'status' => $result['inserted'] ? 'watched' : 'already_watching',
             'item'   => self::buildItemFromPageFollow($row, $post),
         ];
     }
 
     /**
      * Map a placeholder page's current read-model tier to a card_tier
-     * for tier_at_pull. Returns null when the read-model row hasn't
+     * for tier_at_watch. Returns null when the read-model row hasn't
      * projected yet — same null semantics buildItem already handles.
      */
     private static function resolveCardTierForPage(int $pageId): ?string
@@ -553,28 +540,23 @@ final class WatchingService
     // PeepSoFollowWriter. NO batching here (the §C3 10-minute
     // rolling-window aggregator owns that, see WatchBatchAggregator).
     //
-    // Vocabulary note (release N): public methods named watch/unwatch
-    // for canonical clarity. Legacy callers can continue to invoke
-    // pull/unpull via the deprecated WatchingEndpoint route family,
-    // which delegates to these methods.
     // ──────────────────────────────────────────────────────────────────
 
     /**
      * Watch a card (add it to the viewer's watchlist).
      *
      * Per §C2: watching = creating a peepso_user_followers row +
-     * writing a bcc_pull_meta sidecar. The follow itself is the
-     * source of truth; bcc_pull_meta carries the BCC-specific extras
-     * (tier_at_pull, batch_id, visibility).
+     * writing a bcc_watch_meta sidecar. The follow itself is the
+     * source of truth; bcc_watch_meta carries the BCC-specific extras
+     * (tier_at_watch, batch_id, visibility).
      *
      * Idempotent: if the viewer is already following the resolved
-     * target, returns the existing item with status='already_pulled'
-     * and does NOT re-fire the bcc_card_pulled / bcc_card_watched
-     * events or rewrite tier_at_pull (preserves historical record of
-     * the original watch).
+     * target, returns the existing item with status='already_watching'
+     * and does NOT re-fire the bcc_card_watched event or rewrite
+     * tier_at_watch (preserves historical record of the original watch).
      *
      * @return array{
-     *   status: 'pulled'|'already_pulled',
+     *   status: 'watched'|'already_watching',
      *   item: array<string, mixed>
      * }|array{error: string, message: string}
      */
@@ -606,23 +588,17 @@ final class WatchingService
             return ['error' => 'bcc_internal_error', 'message' => 'Failed to record follow.'];
         }
 
-        $existingMeta = $this->pullMetaRepo->find($followId);
-        $alreadyPulled = $existingMeta !== null;
+        $existingMeta = $this->watchMetaRepo->find($followId);
+        $alreadyWatching = $existingMeta !== null;
 
-        if (!$alreadyPulled) {
+        if (!$alreadyWatching) {
             // First-time watch: write the sidecar with the followee's
-            // current card_tier preserved. tier_at_pull is the
+            // current card_tier preserved. tier_at_watch is the
             // *card_tier* (legendary/rare/...) per the schema docblock,
             // not the reputation_tier — map at write time.
             $cardTier = self::resolveCardTierForUser($followeeId);
-            $this->pullMetaRepo->insert($followId, $cardTier, null /* batch_id — owned by WatchBatchAggregator */);
-            // Dual-emit during release N (additive-deprecation runway):
-            //   - bcc_card_pulled  (legacy, dropped in release N+1)
-            //   - bcc_card_watched (new canonical)
-            // Subscribers MUST attach to exactly ONE of the two to
-            // avoid double-processing. Plugin.php registrations still
-            // bind to bcc_card_pulled during release N.
-            do_action('bcc_card_pulled',  $viewerId, $followId, $targetKind, $targetId);
+            $this->watchMetaRepo->insert($followId, $cardTier, null /* batch_id — owned by WatchBatchAggregator */);
+            // Canonical watch event — subscribers attach here.
             do_action('bcc_card_watched', $viewerId, $followId, $targetKind, $targetId);
         }
 
@@ -642,7 +618,7 @@ final class WatchingService
         $userPage = $pageInfo[(int) $row->card_user_id] ?? null;
 
         return [
-            'status' => $alreadyPulled ? 'already_pulled' : 'pulled',
+            'status' => $alreadyWatching ? 'already_watching' : 'watched',
             'item'   => self::buildItem($row, $userPage),
         ];
     }
@@ -651,13 +627,13 @@ final class WatchingService
      * Unwatch (remove a card from the viewer's watchlist).
      *
      * Sets uf_follow=0 on the existing PeepSo row (preserves uf_id
-     * for audit) and DELETEs the bcc_pull_meta sidecar (per §C2 cascade).
+     * for audit) and DELETEs the bcc_watch_meta sidecar (per §C2 cascade).
      *
      * Returns success only when the viewer actually owned the follow
      * — cross-user unwatch attempts get 'bcc_not_found' to avoid
      * leaking ownership info.
      *
-     * @return array{status: 'unpulled', follow_id: int}|array{error: string, message: string}
+     * @return array{status: 'unwatched', follow_id: int}|array{error: string, message: string}
      */
     public function unwatch(int $viewerId, int $followId, string $source = 'peepso'): array
     {
@@ -679,8 +655,7 @@ final class WatchingService
                 return ['error' => 'bcc_internal_error', 'message' => 'Failed to remove follow.'];
             }
 
-            do_action('bcc_card_unpulled', $viewerId, $followId, 0);
-            return ['status' => 'unpulled', 'follow_id' => $followId];
+            return ['status' => 'unwatched', 'follow_id' => $followId];
         }
 
         // Default path — PeepSo user→user unfollow.
@@ -694,12 +669,10 @@ final class WatchingService
             return ['error' => 'bcc_internal_error', 'message' => 'Failed to remove follow.'];
         }
 
-        // §C2 cascade: bcc_pull_meta does not outlive its follow.
-        $this->pullMetaRepo->delete($followId);
+        // §C2 cascade: bcc_watch_meta does not outlive its follow.
+        $this->watchMetaRepo->delete($followId);
 
-        do_action('bcc_card_unpulled', $viewerId, $followId, $followeeId);
-
-        return ['status' => 'unpulled', 'follow_id' => $followId];
+        return ['status' => 'unwatched', 'follow_id' => $followId];
     }
 
     /**

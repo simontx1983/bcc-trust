@@ -36,14 +36,14 @@ if (!defined('ABSPATH')) {
  *     user_id: numeric-string,
  *     page_id: numeric-string,
  *     card_kind: string,
- *     tier_at_pull: string|null,
+ *     tier_at_watch: string|null,
  *     created_at: string
  * }
  */
 final class PageFollowRepository
 {
     /** Explicit column list — must match schema-page-follows.php. */
-    private const COLUMNS = 'id, user_id, page_id, card_kind, tier_at_pull, created_at';
+    private const COLUMNS = 'id, user_id, page_id, card_kind, tier_at_watch, created_at';
 
     private string $table;
 
@@ -62,7 +62,7 @@ final class PageFollowRepository
      * 1 = inserted, 2 = duplicate.
      */
     /** @return array{id: int, inserted: bool} */
-    public function insertOrFind(int $userId, int $pageId, string $cardKind, ?string $tierAtPull): array
+    public function insertOrFind(int $userId, int $pageId, string $cardKind, ?string $tierAtWatch): array
     {
         if ($userId <= 0 || $pageId <= 0 || $cardKind === '') {
             return ['id' => 0, 'inserted' => false];
@@ -75,13 +75,13 @@ final class PageFollowRepository
         // atomic upsert. Same idiom WalletRepository uses.
         $result = $wpdb->query($wpdb->prepare(
             "INSERT INTO {$this->table}
-                (user_id, page_id, card_kind, tier_at_pull)
+                (user_id, page_id, card_kind, tier_at_watch)
              VALUES (%d, %d, %s, %s)
              ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)",
             $userId,
             $pageId,
             $cardKind,
-            $tierAtPull
+            $tierAtWatch
         ));
 
         if ($result === false) {
@@ -96,7 +96,7 @@ final class PageFollowRepository
     }
 
     /**
-     * Find a page-follow row by id. Used during unpull to verify the
+     * Find a page-follow row by id. Used during unwatch to verify the
      * row belongs to the viewer before deleting.
      *
      * @phpstan-return PageFollowRow|null
@@ -117,7 +117,7 @@ final class PageFollowRepository
     }
 
     /**
-     * Resolve a (user_id, page_id) → row. Used by `WatchingService::pull`
+     * Resolve a (user_id, page_id) → row. Used by `WatchingService::watch`
      * for the idempotency check.
      *
      * @phpstan-return PageFollowRow|null
@@ -189,8 +189,8 @@ final class PageFollowRepository
 
     /**
      * Every page-follow row for a single page. Called by the
-     * onPageClaimed migration: we need each (user_id, tier_at_pull)
-     * to materialize the corresponding PeepSo follow + pull_meta row.
+     * onPageClaimed migration: we need each (user_id, tier_at_watch)
+     * to materialize the corresponding PeepSo follow + watch_meta row.
      * Bounded at 5000 — extremely defensive, since a single placeholder
      * is unlikely to accrue more than a few dozen pre-claim followers.
      *

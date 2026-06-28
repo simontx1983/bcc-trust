@@ -26,10 +26,10 @@ require_once __DIR__ . '/schema-page-flags.php';
 require_once __DIR__ . '/schema-score-events.php';
 
 // V1 frontend support tables (per docs/api-contract-v1.md §6.5)
-require_once __DIR__ . '/schema-pull-meta.php';
+require_once __DIR__ . '/schema-watch-meta.php';
 require_once __DIR__ . '/schema-page-follows.php';
 require_once __DIR__ . '/schema-user-ranks.php';
-require_once __DIR__ . '/schema-pull-batches.php';
+require_once __DIR__ . '/schema-watch-batches.php';
 require_once __DIR__ . '/schema-content-reports.php';
 require_once __DIR__ . '/schema-hidden-activities.php';
 require_once __DIR__ . '/schema-dispute-participations.php';
@@ -62,6 +62,14 @@ function bcc_trust_create_tables() {
     global $wpdb;
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+
+    // Data-preserving pull→watch physical rename — MUST run before the
+    // dbDelta sweeps below so they see the already-renamed shape instead of
+    // creating empty bcc_watch_* tables alongside the populated legacy ones.
+    // Idempotent (guarded on the old names) — a clean no-op on fresh installs.
+    if (function_exists('bcc_trust_rename_pull_to_watch')) {
+        bcc_trust_rename_pull_to_watch();
+    }
 
     \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'BCC Trust: Starting database installation', []);
 
@@ -126,10 +134,10 @@ function bcc_trust_create_tables() {
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Score events table created', []);
     }
 
-    // V1 frontend support tables (pull meta, ranks)
-    if (function_exists('bcc_trust_create_pull_meta_table')) {
-        bcc_trust_create_pull_meta_table();
-        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Pull meta table created', []);
+    // V1 frontend support tables (watch meta, ranks)
+    if (function_exists('bcc_trust_create_watch_meta_table')) {
+        bcc_trust_create_watch_meta_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Watch meta table created', []);
     }
     if (function_exists('bcc_trust_create_page_follows_table')) {
         bcc_trust_create_page_follows_table();
@@ -139,9 +147,9 @@ function bcc_trust_create_tables() {
         bcc_trust_create_user_ranks_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: User ranks table created', []);
     }
-    if (function_exists('bcc_trust_create_pull_batches_table')) {
-        bcc_trust_create_pull_batches_table();
-        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Pull batches table created', []);
+    if (function_exists('bcc_trust_create_watch_batches_table')) {
+        bcc_trust_create_watch_batches_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Watch batches table created', []);
     }
     if (function_exists('bcc_trust_create_content_reports_table')) {
         bcc_trust_create_content_reports_table();
@@ -247,9 +255,9 @@ function bcc_trust_verify_all_tables() {
         'bcc_trust_page_flags',
         'bcc_trust_score_events',
         // V1 frontend support tables
-        'bcc_pull_meta',
+        'bcc_watch_meta',
         'bcc_user_ranks',
-        'bcc_pull_batches',
+        'bcc_watch_batches',
         'bcc_content_reports',
         'bcc_hidden_activities',
         'bcc_dispute_participations',

@@ -24,7 +24,7 @@
  * V1 coverage (§I2 launch checklist):
  *   - bcc_reaction_added         → notify post author
  *   - bcc_review_published       → notify page owner
- *   - bcc_card_pulled            → notify followee user
+ *   - bcc_card_watched           → notify followee user
  *   - bcc_rank_awarded           → notify the user (self-notification
  *                                   — gives an audit trail beyond the
  *                                   §O1.2 Heavy toast)
@@ -207,7 +207,7 @@ final class NotificationDispatcher
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // bcc_card_pulled — someone followed (pulled) you
+    // bcc_card_watched — someone watched (followed) you
     // ──────────────────────────────────────────────────────────────────
 
     /**
@@ -223,7 +223,7 @@ final class NotificationDispatcher
      *
      * @param string $targetKind 'validator'|'project'|'creator'|'member'
      */
-    public function onCardPulled(int $viewerId, int $followId, string $targetKind, int $targetId): void
+    public function onCardWatched(int $viewerId, int $followId, string $targetKind, int $targetId): void
     {
         unset($followId, $targetKind);
         if ($viewerId <= 0 || $targetId <= 0 || $viewerId === $targetId) {
@@ -231,13 +231,13 @@ final class NotificationDispatcher
         }
         try {
             $actorHandle = self::resolveHandle($viewerId);
-            $message     = sprintf('@%s pulled your card.', $actorHandle);
+            $message     = sprintf('@%s watched your card.', $actorHandle);
 
             $this->dispatch(
                 $viewerId,
                 $targetId,
                 $message,
-                NotificationType::CARD_PULLED,
+                NotificationType::CARD_WATCHED,
                 $viewerId, // external_id → actor profile (where the followee likely wants to land)
                 0
             );

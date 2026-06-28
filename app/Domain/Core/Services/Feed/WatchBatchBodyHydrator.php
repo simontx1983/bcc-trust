@@ -1,9 +1,9 @@
 <?php
 /**
- * Pull-batch body hydration for the §F3 feed brain.
+ * Watch-batch body hydration for the §F3 feed brain.
  *
  * Extracted verbatim from FeedRankingService (Phase 3.2 split): the
- * per-kind `pull_batch` body loader. FeedRankingService remains the
+ * per-kind `watch_batch` body loader. FeedRankingService remains the
  * orchestrator — it buckets feed items by post_kind and delegates the
  * sidecar reads here.
  *
@@ -12,55 +12,55 @@
 
 namespace BCC\Trust\Core\Services\Feed;
 
-use BCC\Trust\Core\Repositories\PullBatchRepository;
-use BCC\Trust\Core\Repositories\PullMetaRepository;
+use BCC\Trust\Core\Repositories\WatchBatchRepository;
+use BCC\Trust\Core\Repositories\WatchMetaRepository;
 use BCC\Trust\Core\Repositories\WatchingRepository;
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-final class PullBatchBodyHydrator
+final class WatchBatchBodyHydrator
 {
-    /** §C3 cap for pull_batch top_cards display. */
+    /** §C3 cap for watch_batch top_cards display. */
     private const TOP_CARDS_DISPLAY = 3;
 
     public function __construct(
-        private readonly PullBatchRepository $pullBatchRepo,
-        private readonly PullMetaRepository $pullMetaRepo,
+        private readonly WatchBatchRepository $watchBatchRepo,
+        private readonly WatchMetaRepository $watchMetaRepo,
         private readonly WatchingRepository $watchingRepo
     ) {
     }
 
     /**
-     * Bulk-load pull_batch bodies: snapshot + top 3 card handles per
-     * batch. Returns map keyed by bcc_pull_batches.id.
+     * Bulk-load watch_batch bodies: snapshot + top 3 card handles per
+     * batch. Returns map keyed by bcc_watch_batches.id.
      *
      * Frozen-history rule (§C3): card_count and more_count come from
-     * the bcc_pull_batches snapshot taken at emit time, NOT a live
-     * COUNT(*) on bcc_pull_meta — subsequent unpulls don't shift the
+     * the bcc_watch_batches snapshot taken at emit time, NOT a live
+     * COUNT(*) on bcc_watch_meta — subsequent unwatches don't shift the
      * displayed numbers.
      *
      * @param list<int> $batchRowIds
      * @return array<int, array<string, mixed>>
      */
-    public function loadPullBatchBodies(array $batchRowIds): array
+    public function loadWatchBatchBodies(array $batchRowIds): array
     {
         if ($batchRowIds === []) {
             return [];
         }
 
-        $batches = $this->pullBatchRepo->findManyByIds($batchRowIds);
+        $batches = $this->watchBatchRepo->findManyByIds($batchRowIds);
         if ($batches === []) {
             return [];
         }
 
-        // Pull all member rows for these batches in one query.
+        // Load all member rows for these batches in one query.
         $batchIds = [];
         foreach ($batches as $batch) {
             $batchIds[] = (string) $batch->batch_id;
         }
-        $membersByBatchId = $this->pullMetaRepo->findManyByBatchIds($batchIds);
+        $membersByBatchId = $this->watchMetaRepo->findManyByBatchIds($batchIds);
 
         // Collect top-3 follow_ids per batch + dedupe across batches
         // for one bulk handle lookup.
@@ -78,7 +78,7 @@ final class PullBatchBodyHydrator
         }
         $handleMap = $this->watchingRepo->findHandlesForFollowIds(array_keys($allFollowIds));
 
-        // Compose bodies indexed by bcc_pull_batches.id (matches
+        // Compose bodies indexed by bcc_watch_batches.id (matches
         // act_external_id at the call site).
         $bodies = [];
         foreach ($batches as $internalId => $batch) {

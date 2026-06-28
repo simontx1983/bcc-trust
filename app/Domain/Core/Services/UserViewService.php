@@ -30,8 +30,6 @@
  *     watchlist IS the follow set; page-resolution lights every follow as
  *     a renderable card, so a "filter to BCC kinds" would remove valid
  *     watch entries. Field stays equal to following count by design.
- *     Release N also emits `counts.binder_size` as a deprecated alias
- *     (identical value) for back-compat — removed in release N+1.
  *
  * @package BCC\Trust\Core\Services
  * @since V1 (2026-04)
@@ -937,7 +935,6 @@ final class UserViewService
      *
      * @param array{following: int, followers: int} $followCounts
      * @param array{
-     *   binder_hidden: bool,
      *   watching_hidden: bool,
      *   reviews_hidden: bool,
      *   disputes_hidden: bool,
@@ -949,7 +946,6 @@ final class UserViewService
      * @return array{
      *   followers: int,
      *   following: int,
-     *   binder_size: int,
      *   watching_size: int,
      *   reviews_written: int,
      *   disputes_signed: int,
@@ -971,22 +967,13 @@ final class UserViewService
         // "filter to BCC card kinds" — page-resolution makes every
         // follow renderable as a card, so any filter would remove
         // valid watch entries.
-        //
-        // Field doubling during release N (additive-deprecation per
-        // api-contract §1.1.1): emit BOTH `binder_size` (legacy,
-        // dropped in N+1) AND `watching_size` (canonical) with the
-        // same value. Privacy mirroring below collapses both together.
         $watchingSize = $followCounts['following'];
 
         if (!$isSelf) {
             if ($privacy['follower_count_hidden']) {
                 $followCounts['followers'] = 0;
             }
-            // EITHER legacy `binder_hidden` OR canonical `watching_hidden`
-            // collapses the count — frontend may toggle either during
-            // release N. PrivacyService::readProfile mirrors values so
-            // both keys carry the same boolean after the lazy migration.
-            if ($privacy['binder_hidden'] || $privacy['watching_hidden']) {
+            if ($privacy['watching_hidden']) {
                 $watchingSize = 0;
                 $followCounts['following'] = 0;
             }
@@ -1001,9 +988,6 @@ final class UserViewService
         return [
             'followers'         => $followCounts['followers'],
             'following'         => $followCounts['following'],
-            // Doubled fields during release N. Identical value;
-            // `binder_size` removed in release N+1.
-            'binder_size'       => $watchingSize,
             'watching_size'     => $watchingSize,
             'reviews_written'   => $reviewsWritten,
             'disputes_signed'   => $disputesSigned,
@@ -1053,12 +1037,7 @@ final class UserViewService
      * PrivacySettings. Always returns a complete array; missing meta
      * defaults to false (V1 baseline: everything public per §K2).
      *
-     * `binder_hidden` and `watching_hidden` are field-doubled during
-     * release N: both keys carry the same boolean value after the
-     * read-side lazy migration. `binder_hidden` removed in release N+1.
-     *
      * @return array{
-     *   binder_hidden: bool,
      *   watching_hidden: bool,
      *   reviews_hidden: bool,
      *   disputes_hidden: bool,
@@ -1277,9 +1256,6 @@ final class UserViewService
         $base = '/u/' . $handle;
         return [
             'self'     => $base,
-            // Field-doubled during release N (additive-deprecation per
-            // api-contract §1.1.1). `binder` removed in release N+1.
-            'binder'   => $base . '/binder',
             'watching' => $base . '/watching',
             'reviews'  => $base . '/reviews',
             'activity' => $base . '/activity',

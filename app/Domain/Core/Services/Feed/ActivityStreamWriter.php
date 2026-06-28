@@ -5,12 +5,12 @@
  *
  * Subscribed events (registered in Plugin::registerAsyncJobs):
  *
- *   bcc_pull_batch_emitted  → inserts a 'pull_batch' activity row
- *                             (pointing at a fresh bcc_pull_batches
+ *   bcc_watch_batch_emitted → inserts a 'watch_batch' activity row
+ *                             (pointing at a fresh bcc_watch_batches
  *                             snapshot for the at-emit-time card_count
  *                             and more_count). Frozen-history per §C3:
  *                             this row is never updated; subsequent
- *                             unpulls do not retroactively edit it.
+ *                             unwatches do not retroactively edit it.
  *
  *   bcc_page_claimed        → inserts a 'page_claim' activity row
  *                             (pointing at the bcc_onchain_claims.id
@@ -34,30 +34,24 @@
  *
  * Intentionally NOT subscribed:
  *
- *   bcc_card_pulled         — pulls are silent until §C3 batch closes.
- *                             Writing per-pull rows would create the
+ *   bcc_card_watched        — watches are silent until §C3 batch closes.
+ *                             Writing per-watch rows would create the
  *                             wrong feed shape (one item per card
  *                             instead of one per batch).
- *
- *   bcc_card_unpulled       — §C3 frozen-history rule: emitted batch
- *                             items never react to subsequent unpulls.
- *                             The bcc_pull_meta row is already deleted
- *                             in the unpull service; the activity row
- *                             stays as historical truth.
  *
  * Single source of truth per §A4: this subscriber is the ONLY code
  * path that inserts BCC-owned peepso_activities rows. All read-side
  * feed surfaces continue to use ActivityFeedService → FeedRankingService.
  *
  * @package BCC\Trust\Core\Services\Feed
- * @since V1 (2026-04, Binder Phase 4)
+ * @since V1 (2026-04, Watch Phase 4)
  */
 
 namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Repositories\PeepSoActivityWriter;
-use BCC\Trust\Core\Repositories\PullBatchRepository;
+use BCC\Trust\Core\Repositories\WatchBatchRepository;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 
 if (!defined('ABSPATH')) {
@@ -72,7 +66,7 @@ final class ActivityStreamWriter
     private const META_SIDECAR = '_bcc_activity_sidecar_id';
 
     public function __construct(
-        private readonly PullBatchRepository $pullBatchRepo,
+        private readonly WatchBatchRepository $watchBatchRepo,
         private readonly PeepSoActivityWriter $activityWriter
     ) {
     }
@@ -84,7 +78,7 @@ final class ActivityStreamWriter
      *
      * Why this exists: PeepSo's peepso_activities table doesn't store
      * the actor/time/status — those are derived from wp_posts via
-     * `act_external_id`. BCC modules (review/pull_batch/page_claim/
+     * `act_external_id`. BCC modules (review/watch_batch/page_claim/
      * blog) traditionally pointed `act_external_id` at sidecar tables,
      * which broke the JOIN. This helper plants a thin wp_post for
      * each event and stashes the sidecar id in post_meta so
@@ -115,10 +109,10 @@ final class ActivityStreamWriter
     }
 
     /**
-     * Subscriber for bcc_pull_batch_emitted.
+     * Subscriber for bcc_watch_batch_emitted.
      *
      * Two writes (best-effort sequencing — no transaction):
-     *   1. INSERT bcc_pull_batches snapshot → returns batch row id
+     *   1. INSERT bcc_watch_batches snapshot → returns batch row id
      *   2. INSERT peepso_activities row → act_external_id = batch row id
      *
      * Idempotency: the batch_id has a UNIQUE KEY, so step 1 is a no-op
@@ -136,7 +130,7 @@ final class ActivityStreamWriter
      *
      * @param array<int, mixed> $topCards
      */
-    public function handlePullBatchEmitted(
+    public function handleWatchBatchEmitted(
         int $userId,
         string $batchId,
         int $cardCount,
@@ -144,57 +138,57 @@ final class ActivityStreamWriter
         int $moreCount
     ): void {
         unset($topCards); // Phase 4 stores only the summary; top_cards
-                          // are already in bcc_pull_meta and joinable
+                          // are already in bcc_watch_meta and joinable
                           // by batch_id when feed renderers need them.
 
         if ($userId <= 0 || $batchId === '') {
             return;
         }
 
-        $batchRowId = $this->pullBatchRepo->record($userId, $batchId, $cardCount, $moreCount);
+        $batchRowId = $this->watchBatchRepo->record($userId, $batchId, $cardCount, $moreCount);
         if ($batchRowId === 0) {
-            Logger::error('[ActivityStreamWriter] failed to record pull-batch snapshot', [
+            Logger::error('[ActivityStreamWriter] failed to record watch-batch snapshot', [
                 'user_id'  => $userId,
                 'batch_id' => $batchId,
             ]);
             return;
         }
 
-        $wpPostId = $this->createBackingPost($userId, 'pull_batch', $batchRowId);
+        $wpPostId = $this->createBackingPost($userId, 'watch_batch', $batchRowId);
         if ($wpPostId === 0) {
-            Logger::error('[ActivityStreamWriter] failed to create wp_post for pull_batch', [
+            Logger::error('[ActivityStreamWriter] failed to create wp_post for watch_batch', [
                 'user_id'  => $userId,
                 'batch_id' => $batchId,
             ]);
             return;
         }
 
-        // Pull-batch activities live on the actor's wall (act_owner_id
+        // Watch-batch activities live on the actor's wall (act_owner_id
         // = actor) so they surface in the feed of users following the
         // actor. act_external_id points at the wp_post we just created;
         // the sidecar batch row id is in post_meta for body hydration.
         $actId = $this->activityWriter->insert(
             $userId,           // actor
             $userId,           // owner (self-wall)
-            'pull_batch',
+            'watch_batch',
             $wpPostId
         );
 
         if ($actId === 0) {
-            Logger::error('[ActivityStreamWriter] failed to insert pull_batch activity', [
-                'user_id'           => $userId,
-                'batch_id'          => $batchId,
-                'pull_batch_row_id' => $batchRowId,
+            Logger::error('[ActivityStreamWriter] failed to insert watch_batch activity', [
+                'user_id'            => $userId,
+                'batch_id'           => $batchId,
+                'watch_batch_row_id' => $batchRowId,
             ]);
             return;
         }
 
-        Logger::info('[ActivityStreamWriter] pull_batch activity written', [
-            'user_id'           => $userId,
-            'batch_id'          => $batchId,
-            'pull_batch_row_id' => $batchRowId,
-            'act_id'            => $actId,
-            'card_count'        => $cardCount,
+        Logger::info('[ActivityStreamWriter] watch_batch activity written', [
+            'user_id'            => $userId,
+            'batch_id'           => $batchId,
+            'watch_batch_row_id' => $batchRowId,
+            'act_id'             => $actId,
+            'card_count'         => $cardCount,
         ]);
     }
 
@@ -281,7 +275,7 @@ final class ActivityStreamWriter
      * `act_module_id='review'` → `post_kind='review'`).
      *
      * The review's wall is the AUTHOR's wall (act_owner_id =
-     * act_user_id), matching how pulls and claims surface — viewers
+     * act_user_id), matching how watches and claims surface — viewers
      * who follow the reviewer see it, viewers who follow the target
      * page do NOT (page-wall surfacing is a Phase 5+ concept).
      */

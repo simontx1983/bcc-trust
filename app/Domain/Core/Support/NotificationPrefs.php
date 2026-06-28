@@ -45,7 +45,7 @@ final class NotificationPrefs
     public const BELL_TYPES = [
         NotificationType::REACTION,
         NotificationType::REVIEW,
-        NotificationType::CARD_PULLED,
+        NotificationType::CARD_WATCHED,
         NotificationType::RANK_UP,
         NotificationType::ENDORSE,
         NotificationType::WELCOME,
@@ -99,7 +99,7 @@ final class NotificationPrefs
         'email_digest'                                       => false,
         'bell_bcc_reaction'                                  => true,
         'bell_bcc_review'                                    => true,
-        'bell_bcc_card_pulled'                               => true,
+        'bell_bcc_card_watched'                              => true,
         'bell_bcc_rank_up'                                   => true,
         'bell_bcc_endorse'                                   => true,
         'bell_bcc_welcome'                                   => true,
