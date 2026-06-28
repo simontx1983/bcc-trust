@@ -135,10 +135,10 @@ final class AttestationService
         private readonly WalletAgeWeighter $walletAgeWeighter,
         private readonly ReciprocityPenaltyResolver $reciprocityResolver,
         private readonly DormancyDetector $dormancyDetector,
-        private readonly ReliabilityStandingComputer $reliabilityComputer,
         private readonly CohortOverlapDampener $cohortOverlapDampener,
         private readonly DivergenceStateClassifier $divergenceClassifier,
-        private readonly ContestedStateExplainer $contestedStateExplainer
+        private readonly ContestedStateExplainer $contestedStateExplainer,
+        private readonly AttestationOutcomeClassifier $outcomeClassifier
     ) {
     }
 
@@ -1513,11 +1513,27 @@ final class AttestationService
         $slotsUsed    = $this->repo->countActiveStandBehindByAttestor($userId);
         $totalCasts   = $this->repo->countAllByAttestor($userId);
 
-        // Reliability standing: PR-6 activates the real computer.
-        // Self-only per §J.10 q14 — the public roster keeps emitting
-        // 'newly_active' regardless of what the computer returns,
-        // gated upstream in buildAttestorMiniView.
-        $standing = $this->reliabilityComputer->compute($userId);
+        // Slice 2 — real Operator Reliability. The outcome classifier walks
+        // the operator's active attestations, classifies each target's fate
+        // since the cast, and returns the numeric reliability ∈ [0,1] + the
+        // track-record outcome breakdown. Self-only per §J.10 q14 — the public
+        // roster keeps emitting 'newly_active' (gated in buildAttestorMiniView).
+        $classification = $this->outcomeClassifier->classifyForAttestor($userId);
+        $reliability    = $classification['reliability'];
+        $countedCasts   = $classification['counted'];
+
+        // Standing now derives from the LIVE numeric reliability + counted
+        // attestations (Slice 2), via the pure ReliabilityStandingComputer::
+        // fromReliability gate, NOT the tenure proxy. The <minForStanding gate
+        // is the first-call protection. The existing tenure compute() is left
+        // untouched (Slice 3 reconciles its remaining callers).
+        $standing = ReliabilityStandingComputer::fromReliability(
+            $reliability,
+            $countedCasts,
+            (float) apply_filters('bcc_reliability_highly_min', BCC_RELIABILITY_HIGHLY_MIN),
+            (float) apply_filters('bcc_reliability_consistent_min', BCC_RELIABILITY_CONSISTENT_MIN),
+            (int) apply_filters('bcc_reliability_min_for_standing', BCC_RELIABILITY_MIN_FOR_STANDING)
+        );
 
         // §J.5 divergence_state + explainer (PR-8a). Classifier runs
         // against the operator's own user_profile target — disputes
@@ -1528,10 +1544,10 @@ final class AttestationService
         $explainer       = $this->contestedStateExplainer->explain($divergenceState);
 
         return [
-            // Numeric stays 0.0 until Slice E.4+ ships the outcome
-            // classifier. The categorical standing above is the V1
-            // signal operators see on /me/reliability.
-            'operator_reliability'   => 0.0,
+            // Slice 2 — real numeric reliability from the outcome classifier.
+            // Self-only per §J.3.2 asymmetric display: this surface IS the
+            // asymmetry; the number never appears in third-party responses.
+            'operator_reliability'   => $reliability,
             'reliability_standing'   => $standing,
             'since_attestation_count' => $totalCasts,
             'stand_behind_allocation' => [
@@ -1540,15 +1556,7 @@ final class AttestationService
                 'slots_recyclable_count'  => 0,
                 'next_slot_unlocks_at'    => null,
             ],
-            'track_record' => [
-                'total_attestations' => 0,
-                'outcomes' => [
-                    'targets_disputed_and_upheld'           => 0,
-                    'targets_disputed_and_dismissed'        => 0,
-                    'targets_received_further_attestations' => 0,
-                    'targets_clean_and_active'              => 0,
-                ],
-            ],
+            'track_record' => $classification['track_record'],
             'trends' => [
                 'reliability_30d_ago' => 0.0,
                 'reliability_90d_ago' => 0.0,

@@ -570,6 +570,71 @@ class DisputeRepository
     }
 
     /**
+     * Terminal (resolved) disputes for a set of pages, grouped by page_id —
+     * the dispute-outcome input for the §J.3.2.1 Operator Reliability
+     * classifier (Slice 2). Batched (one bounded IN-list query for a whole
+     * attestor's target set) so the classifier never N+1s the disputes table.
+     *
+     * "Terminal" = resolved_at IS NOT NULL. The status carried back is the raw
+     * column value (one of accepted / rejected / dismissed / timeout_no_quorum
+     * — never 'reviewing', whose resolved_at is NULL). The classifier maps
+     * direction itself (the load-bearing `rejected` ⇒ the target's negative
+     * mark was UPHELD ⇒ a NEGATIVE outcome for whoever backed them; accepted /
+     * dismissed / timeout ⇒ the target was VINDICATED).
+     *
+     * Bounded: caller-paginated IN-list + a defensive LIMIT (a page's lifetime
+     * dispute count is realistically single digits — BCC_DISPUTES_MAX_PER_PAGE
+     * per 30-day window).
+     *
+     * @param list<int> $pageIds
+     * @return array<int, list<object{status: string, resolved_at: string}>>
+     *     Keyed by page_id; pages with no terminal disputes are absent.
+     */
+    public static function listResolvedForPages(array $pageIds): array
+    {
+        $ids = [];
+        foreach ($pageIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::disputes_table();
+        $ph    = implode(',', array_fill(0, count($ids), '%d'));
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT page_id, status, resolved_at FROM {$table}
+              WHERE page_id IN ({$ph}) AND resolved_at IS NOT NULL
+              LIMIT 5000",
+            ...array_keys($ids)
+        ));
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->page_id, $row->status, $row->resolved_at)) {
+                continue;
+            }
+            $pageId = (int) $row->page_id;
+            if ($pageId <= 0) {
+                continue;
+            }
+            $out[$pageId][] = (object) [
+                'status'      => (string) $row->status,
+                'resolved_at' => (string) $row->resolved_at,
+            ];
+        }
+        return $out;
+    }
+
+    /**
      * Atomically create a dispute row and its panel assignments.
      *
      * @param array<string, mixed> $disputeData  Dispute column values.
