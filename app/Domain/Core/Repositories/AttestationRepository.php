@@ -1275,6 +1275,54 @@ final class AttestationRepository
     }
 
     /**
+     * Cursor-paged list of DISTINCT attestor user ids drawn from ACTIVE
+     * attestations, for ids strictly greater than $afterUserId, ascending.
+     * The work-list source for the Slice 3 nightly reliability sweep:
+     * the cron pages forward by attestor user_id, recomputing each
+     * operator's reliability cache row.
+     *
+     * Bounded (§4) by $limit; deterministic ASC order so the cursor wraps
+     * cleanly on a short final batch. Revoked-only operators are excluded
+     * (revoked_at IS NULL) — an operator with no active casts has nothing
+     * to recompute.
+     *
+     * @return list<int>
+     */
+    public function listDistinctAttestorIdsAfter(int $afterUserId, int $limit): array
+    {
+        $afterUserId = max(0, $afterUserId);
+        $limit       = max(1, min(5000, $limit));
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT DISTINCT attestor_user_id"
+            . " FROM `{$table}`"
+            . ' WHERE attestor_user_id > %d'
+            . ' AND revoked_at IS NULL'
+            . ' ORDER BY attestor_user_id ASC'
+            . ' LIMIT %d';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $afterUserId, $limit);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_col($prepared);
+
+        $out = [];
+        foreach ($rows as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $out[] = $intId;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Count DISTINCT OTHER attestors who cast an ACTIVE attestation on a
      * target AFTER a given moment — the "further attestations" outcome probe
      * for the §J.3.2.1 reliability classifier (Slice 2).

@@ -256,6 +256,12 @@ final class Plugin
         return $this->attestationRepository ??= new AttestationRepository();
     }
 
+    private ?\BCC\Trust\Core\Repositories\AttestorReliabilityCacheRepository $attestorReliabilityCacheRepository = null;
+    public function attestorReliabilityCacheRepository(): \BCC\Trust\Core\Repositories\AttestorReliabilityCacheRepository
+    {
+        return $this->attestorReliabilityCacheRepository ??= new \BCC\Trust\Core\Repositories\AttestorReliabilityCacheRepository();
+    }
+
     private ?\BCC\Trust\Core\Services\WalletAgeWeighter $walletAgeWeighter = null;
     public function walletAgeWeighter(): \BCC\Trust\Core\Services\WalletAgeWeighter
     {
@@ -282,7 +288,8 @@ final class Plugin
     public function reliabilityStandingComputer(): \BCC\Trust\Core\Services\ReliabilityStandingComputer
     {
         return $this->reliabilityStandingComputer ??= new \BCC\Trust\Core\Services\ReliabilityStandingComputer(
-            $this->attestationRepository()
+            $this->attestationRepository(),
+            $this->attestorReliabilityCacheRepository()
         );
     }
 
@@ -360,7 +367,8 @@ final class Plugin
             $this->cohortOverlapDampener(),
             $this->divergenceClassifier(),
             $this->contestedStateExplainer(),
-            $this->attestationOutcomeClassifier()
+            $this->attestationOutcomeClassifier(),
+            $this->attestorReliabilityCacheRepository()
         );
     }
 

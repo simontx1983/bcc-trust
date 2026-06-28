@@ -116,3 +116,16 @@ define('BCC_RELIABILITY_EARLY_2_5', 1.5);
 define('BCC_RELIABILITY_EARLY_6_20', 1.0);
 define('BCC_RELIABILITY_EARLY_21PLUS', 0.5);
 define('BCC_RELIABILITY_EARLY_PROTECT_FIRST', 5);
+
+// ─────────────────────────────────────────────────────────────────────────
+// Slice 3 — nightly reliability cache trend (week-over-week direction).
+//
+// The bcc_attestor_reliability_sweep cron compares each operator's freshly
+// computed operator_reliability against a baseline that rolls forward every
+// 7 days. The direction is 'steady' when the new value sits within ±EPSILON
+// of the baseline, 'improving' above, 'softening' below (the §J.5 contract
+// enum). The dead-band stops trivial week-to-week noise from flapping the
+// surfaced trend.
+// Filterable: 'bcc_reliability_trend_epsilon'.
+// ─────────────────────────────────────────────────────────────────────────
+define('BCC_RELIABILITY_TREND_EPSILON', 0.02);

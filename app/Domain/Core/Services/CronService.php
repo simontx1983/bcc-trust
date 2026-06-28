@@ -483,6 +483,214 @@ class CronService
         }
     }
 
+    // ── Nightly operator-reliability recompute (daily) ──────────────────
+
+    /**
+     * Recompute the operator-reliability cache (Slice 3).
+     *
+     * The AttestationOutcomeClassifier is expensive per operator, so the
+     * /me/reliability + standing read paths memoize it in
+     * bcc_attestor_reliability_cache. This sweep recomputes every active
+     * attestor's row nightly: it pages forward by attestor user_id
+     * (cursor option), classifies each operator, derives the §J.3.2
+     * standing via ReliabilityStandingComputer::fromReliability, computes
+     * the week-over-week trend, and upserts.
+     *
+     * Bounded + time-budgeted: batch size 200, $deadline = now + 300s.
+     * The cursor persists each batch so a deadline-interrupted run resumes
+     * next tick; a short final batch wraps the cursor to 0. Per-operator
+     * failures are isolated (logged + counted) so one bad row never aborts
+     * the sweep. The advisory lock is released in finally.
+     */
+    public function sweepAttestorReliability(): void
+    {
+        if (!$this->acquireLock('bcc_cron_reliability_sweep_lock', DAY_IN_SECONDS)) {
+            return;
+        }
+
+        $plugin     = Plugin::instance();
+        $attestRepo = $plugin->attestationRepository();
+        $cacheRepo  = $plugin->attestorReliabilityCacheRepository();
+        $classifier = $plugin->attestationOutcomeClassifier();
+
+        $batchSize    = 200;
+        $cursorOption = 'bcc_attestor_reliability_cursor';
+        $cursor       = (int) get_option($cursorOption, 0);
+        $deadline     = time() + 300;
+
+        $highlyMin     = (float) apply_filters('bcc_reliability_highly_min', BCC_RELIABILITY_HIGHLY_MIN);
+        $consistentMin = (float) apply_filters('bcc_reliability_consistent_min', BCC_RELIABILITY_CONSISTENT_MIN);
+        $minForStanding = (int) apply_filters('bcc_reliability_min_for_standing', BCC_RELIABILITY_MIN_FOR_STANDING);
+        $epsilon        = (float) apply_filters('bcc_reliability_trend_epsilon', BCC_RELIABILITY_TREND_EPSILON);
+
+        $processed = 0;
+        $failed    = 0;
+
+        try {
+            do {
+                $userIds = $attestRepo->listDistinctAttestorIdsAfter($cursor, $batchSize);
+                if ($userIds === []) {
+                    // End of cursor — wrap to 0 so the next tick restarts.
+                    if ($cursor > 0) {
+                        update_option($cursorOption, 0, false);
+                    }
+                    break;
+                }
+
+                foreach ($userIds as $userId) {
+                    try {
+                        $this->recomputeAttestorReliabilityRow(
+                            $userId,
+                            $classifier,
+                            $cacheRepo,
+                            $highlyMin,
+                            $consistentMin,
+                            $minForStanding,
+                            $epsilon
+                        );
+                        $processed++;
+                    } catch (\Throwable $e) {
+                        $failed++;
+                        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                            \BCC\Core\Log\Logger::warning(
+                                '[bcc-trust] reliability sweep: per-operator recompute failed',
+                                ['user_id' => $userId, 'error' => $e->getMessage()]
+                            );
+                        }
+                    }
+                }
+
+                // Advance + persist the cursor to the largest id returned so a
+                // mid-run crash resumes instead of reprocessing.
+                $cursor = (int) end($userIds);
+                update_option($cursorOption, $cursor, false);
+
+                if (count($userIds) < $batchSize) {
+                    // Short batch — reached the end; wrap for the next run.
+                    update_option($cursorOption, 0, false);
+                    break;
+                }
+
+                if (time() >= $deadline) {
+                    break; // cursor persisted; resume next tick.
+                }
+            } while (true);
+
+            \BCC\Core\Log\Logger::info('[bcc-trust] Attestor reliability sweep complete', [
+                'processed' => $processed,
+                'failed'    => $failed,
+                'cursor'    => $cursor,
+            ]);
+        } finally {
+            $this->releaseLock('bcc_cron_reliability_sweep_lock');
+        }
+    }
+
+    /**
+     * Recompute + upsert one attestor's reliability cache row.
+     *
+     * Reads the existing cache row to resolve the week-over-week baseline:
+     * when the baseline is unset or ≥ 7 days old, it rolls forward to the
+     * PREVIOUS operator_reliability and re-stamps baseline_at=now. The
+     * trend direction compares the freshly computed reliability against
+     * that baseline within a ±$epsilon dead-band (steady), above
+     * (improving), below (softening) — the §J.5 contract enum.
+     */
+    private function recomputeAttestorReliabilityRow(
+        int $userId,
+        \BCC\Trust\Core\Services\AttestationOutcomeClassifier $classifier,
+        \BCC\Trust\Core\Repositories\AttestorReliabilityCacheRepository $cacheRepo,
+        float $highlyMin,
+        float $consistentMin,
+        int $minForStanding,
+        float $epsilon
+    ): void {
+        $classification = $classifier->classifyForAttestor($userId);
+        $reliability    = $classification['reliability'];
+        $countedCasts   = $classification['counted'];
+        $totalCasts     = (int) ($classification['track_record']['total_attestations'] ?? 0);
+
+        // The outcome breakdown — persisted so a cache HIT serves the same
+        // /me/reliability track_record as a cache MISS (live classify).
+        $rawOutcomes = $classification['track_record']['outcomes'] ?? [];
+        $outcomes = [
+            'targets_disputed_and_upheld'           => (int) ($rawOutcomes['targets_disputed_and_upheld'] ?? 0),
+            'targets_disputed_and_dismissed'        => (int) ($rawOutcomes['targets_disputed_and_dismissed'] ?? 0),
+            'targets_received_further_attestations' => (int) ($rawOutcomes['targets_received_further_attestations'] ?? 0),
+            'targets_clean_and_active'              => (int) ($rawOutcomes['targets_clean_and_active'] ?? 0),
+        ];
+
+        $standing = ReliabilityStandingComputer::fromReliability(
+            $reliability,
+            $countedCasts,
+            $highlyMin,
+            $consistentMin,
+            $minForStanding
+        );
+
+        $now    = gmdate('Y-m-d H:i:s');
+        $nowTs  = time();
+        $sevenDays = 7 * DAY_IN_SECONDS;
+
+        $existing = $cacheRepo->getByUserId($userId);
+
+        $baseline   = $reliability;   // default for a first-ever row
+        $baselineAt = $now;
+
+        if ($existing !== null) {
+            $prevReliability = isset($existing->operator_reliability)
+                ? (float) $existing->operator_reliability
+                : 0.0;
+            $prevBaseline = isset($existing->reliability_baseline)
+                ? (float) $existing->reliability_baseline
+                : $prevReliability;
+            $prevBaselineAtRaw = isset($existing->baseline_at) && is_string($existing->baseline_at) && $existing->baseline_at !== ''
+                ? (string) $existing->baseline_at
+                : null;
+
+            $baselineAge = null;
+            if ($prevBaselineAtRaw !== null) {
+                $parsed = strtotime($prevBaselineAtRaw . ' UTC');
+                if ($parsed !== false) {
+                    $baselineAge = $nowTs - $parsed;
+                }
+            }
+
+            if ($prevBaselineAtRaw === null || $baselineAge === null || $baselineAge >= $sevenDays) {
+                // Roll the baseline forward to the previous reliability and
+                // re-stamp. This makes the trend a week-over-week comparison.
+                $baseline   = $prevReliability;
+                $baselineAt = $now;
+            } else {
+                // Within the current week — keep the standing baseline.
+                $baseline   = $prevBaseline;
+                $baselineAt = $prevBaselineAtRaw;
+            }
+        }
+
+        // Direction enum is the §J.5 / api-contract-v1.md contract value:
+        // "softening" | "steady" | "improving" (NOT "rising").
+        $trend = 'steady';
+        $delta = $reliability - $baseline;
+        if ($delta > $epsilon) {
+            $trend = 'improving';
+        } elseif ($delta < -$epsilon) {
+            $trend = 'softening';
+        }
+
+        $cacheRepo->upsert(
+            $userId,
+            $reliability,
+            $standing,
+            $totalCasts,
+            $trend,
+            $baseline,
+            $baselineAt,
+            $outcomes,
+            $now
+        );
+    }
+
     // ── Process flagged recalculations (every 5 min) ────────────────────
 
     /** Maximum time budget per cron run (seconds). */
@@ -648,6 +856,7 @@ class CronService
             'bcc_trust_weekly_digest'          => 'bcc_weekly',       // §I1 email digest
             'bcc_trust_weekly_slow_ring_scan'  => 'bcc_weekly',       // scale-hardening: slow endorsement-ring detection
             'bcc_trust_daily_contribution_recovery' => 'daily',      // trust recovery through contribution
+            'bcc_attestor_reliability_sweep'   => 'daily',           // Slice 3: nightly operator-reliability recompute
         ];
 
         // Clear retired hooks so they don't fire orphaned actions.

@@ -65,6 +65,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
+use BCC\Trust\Core\Repositories\AttestorReliabilityCacheRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
 if (!defined('ABSPATH')) {
@@ -89,12 +90,19 @@ final class ReliabilityStandingComputer
     public const CONSISTENT_MIN_WALLET_DAYS      = 90;
 
     public function __construct(
-        private readonly AttestationRepository $repo
+        private readonly AttestationRepository $repo,
+        private readonly AttestorReliabilityCacheRepository $reliabilityCacheRepo
     ) {
     }
 
     /**
      * Resolve the reliability-standing badge for an operator.
+     *
+     * Slice 3: cache-first. When the nightly sweep has memoized this
+     * operator's standing (computed from the real outcome-driven numeric
+     * reliability via {@see fromReliability}), serve it directly. On a
+     * cache miss (operator not yet swept) fall back to the V1 tenure +
+     * activity heuristic below so the standing is never empty.
      *
      * @return self::STANDING_*
      */
@@ -102,6 +110,20 @@ final class ReliabilityStandingComputer
     {
         if ($userId <= 0) {
             return self::STANDING_NEWLY_ACTIVE;
+        }
+
+        $cached = $this->reliabilityCacheRepo->getByUserId($userId);
+        if ($cached !== null && isset($cached->reliability_standing)) {
+            $standing = (string) $cached->reliability_standing;
+            // Defensive: only accept a known catalogue value; anything
+            // else falls through to the tenure heuristic.
+            if (in_array($standing, [
+                self::STANDING_HIGHLY_RELIABLE,
+                self::STANDING_CONSISTENT,
+                self::STANDING_NEWLY_ACTIVE,
+            ], true)) {
+                return $standing;
+            }
         }
 
         // Active casts — count vouch + stand_behind that haven't been
