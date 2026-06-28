@@ -14,7 +14,7 @@
  * former attaches to gate comment-count visibility). Do not reorder.
  *
  * Body-hydration responsibility: this pipeline owns the post-process
- * step that fills `body` for BCC-owned modules (pull_batch, page_claim,
+ * step that fills `body` for BCC-owned modules (watch_batch, page_claim,
  * review, photo, gif, blog_excerpt). The per-kind loaders live in the
  * sibling *BodyHydrator classes; this pipeline keeps the
  * bucket-and-dispatch pass plus the mention overlay.
@@ -57,7 +57,7 @@ final class FeedHydrationPipeline
         private readonly AuthorBadgeResolver $authorBadgeResolver,
         private readonly AttestationService $attestationService,
         private readonly BlogService $blogService,
-        private readonly PullBatchBodyHydrator $pullBatchBodyHydrator,
+        private readonly WatchBatchBodyHydrator $watchBatchBodyHydrator,
         private readonly ReviewBodyHydrator $reviewBodyHydrator,
         private readonly PhotoBodyHydrator $photoBodyHydrator,
         private readonly GifBodyHydrator $gifBodyHydrator,
@@ -184,7 +184,7 @@ final class FeedHydrationPipeline
      *
      * Bulk-loads everything in one round-trip per kind — feed pages
      * cap at 50 items, so even worst-case the hydration adds ~3 small
-     * queries (bcc_pull_batches, bcc_pull_meta, bcc_onchain_claims).
+     * queries (bcc_watch_batches, bcc_watch_meta, bcc_onchain_claims).
      *
      * ┌─── post_kind precedence rules (v1.5) ─────────────────────────┐
      * │                                                                │
@@ -263,7 +263,7 @@ final class FeedHydrationPipeline
 
         // Bucket sidecar ids by kind for bulk-loading. Keep the
         // ext→sidecar map so we can stitch bodies back into items.
-        $pullBatchExtToSid = [];
+        $watchBatchExtToSid = [];
         $pageClaimExtToSid = [];
         $reviewExtToSid    = [];
         // Photo posts use the wp_post.ID directly as the lookup key
@@ -301,8 +301,8 @@ final class FeedHydrationPipeline
             if ($sid <= 0) {
                 continue;
             }
-            if ($kind === 'pull_batch') {
-                $pullBatchExtToSid[$extId] = $sid;
+            if ($kind === 'watch_batch') {
+                $watchBatchExtToSid[$extId] = $sid;
             } elseif ($kind === 'page_claim') {
                 $pageClaimExtToSid[$extId] = $sid;
             } elseif ($kind === 'review') {
@@ -310,7 +310,7 @@ final class FeedHydrationPipeline
             }
         }
 
-        $pullBatchBodies = $this->pullBatchBodyHydrator->loadPullBatchBodies(array_values(array_unique($pullBatchExtToSid)));
+        $watchBatchBodies = $this->watchBatchBodyHydrator->loadWatchBatchBodies(array_values(array_unique($watchBatchExtToSid)));
         $pageClaimBodies = $this->pageClaimBodyHydrator->loadPageClaimBodies(array_values(array_unique($pageClaimExtToSid)));
         $reviewBodies    = $this->reviewBodyHydrator->loadReviewBodies(array_values(array_unique($reviewExtToSid)));
         $photoBodies     = $this->photoBodyHydrator->loadPhotoBodies(array_keys($photoExtIds));
@@ -322,8 +322,8 @@ final class FeedHydrationPipeline
             $kind  = is_string($item['post_kind'] ?? null) ? $item['post_kind'] : '';
             $extId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
 
-            if ($kind === 'pull_batch' && isset($pullBatchExtToSid[$extId], $pullBatchBodies[$pullBatchExtToSid[$extId]])) {
-                $item['body'] = $pullBatchBodies[$pullBatchExtToSid[$extId]];
+            if ($kind === 'watch_batch' && isset($watchBatchExtToSid[$extId], $watchBatchBodies[$watchBatchExtToSid[$extId]])) {
+                $item['body'] = $watchBatchBodies[$watchBatchExtToSid[$extId]];
             } elseif ($kind === 'page_claim' && isset($pageClaimExtToSid[$extId], $pageClaimBodies[$pageClaimExtToSid[$extId]])) {
                 $item['body'] = $pageClaimBodies[$pageClaimExtToSid[$extId]];
             } elseif ($kind === 'review' && isset($reviewExtToSid[$extId], $reviewBodies[$reviewExtToSid[$extId]])) {
@@ -358,7 +358,7 @@ final class FeedHydrationPipeline
      * mention tokens get `mentions: []` for shape stability — clients
      * can blindly read `body.mentions` without checking `kind`.
      *
-     * Other post_kinds (review, pull_batch, page_claim, signal,
+     * Other post_kinds (review, watch_batch, page_claim, signal,
      * project_drop, nft_drop, blog_excerpt, dispute_signed) do NOT
      * carry mentions in V1d. Their bodies are unchanged.
      *
@@ -1011,7 +1011,7 @@ final class FeedHydrationPipeline
      *
      * The lookup key is `external_id` — for status posts this is the
      * parent's wp_posts.ID directly; for BCC-owned modules
-     * (review/pull_batch/page_claim/blog) this is the sidecar
+     * (review/watch_batch/page_claim/blog) this is the sidecar
      * `peepso-activity-status` wp_posts.ID created by
      * ActivityStreamWriter. Comments on either kind store the same
      * `act_comment_object_id`, so the same join works.

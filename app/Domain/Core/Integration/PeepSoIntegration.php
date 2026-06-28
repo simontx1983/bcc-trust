@@ -177,7 +177,7 @@ class PeepSoIntegration
         // page into real PeepSo user→user follows on the new operator.
         // Every viewer who pulled the placeholder pre-claim becomes a
         // PeepSo follower of the claimer immediately, with their
-        // tier_at_pull preserved in bcc_pull_meta so the watchlist UI
+        // tier_at_watch preserved in bcc_watch_meta so the watchlist UI
         // surfaces the historically-correct tier ribbon.
         //
         // Best-effort: an individual follow that fails is logged but
@@ -190,14 +190,14 @@ class PeepSoIntegration
     /**
      * Promote every `bcc_page_follows` row for the given page into a
      * real PeepSo follow (viewer → claimer) + the matching
-     * `bcc_pull_meta` sidecar. Idempotent: if the viewer happens to
+     * `bcc_watch_meta` sidecar. Idempotent: if the viewer happens to
      * already follow the claimer in PeepSo (rare), the existing
      * follow_id is reused and we just write the missing meta row.
      */
     private function migratePageFollowersToPeepSo(int $pageId, int $newAuthorId): void
     {
         $pageFollowRepo = Plugin::instance()->pageFollowRepository();
-        $pullMetaRepo   = Plugin::instance()->pullMetaRepository();
+        $watchMetaRepo  = Plugin::instance()->watchMetaRepository();
 
         $rows = $pageFollowRepo->findByPageId($pageId);
         if (empty($rows)) {
@@ -226,11 +226,11 @@ class PeepSoIntegration
                     continue;
                 }
 
-                $existingMeta = $pullMetaRepo->find($followId);
+                $existingMeta = $watchMetaRepo->find($followId);
                 if ($existingMeta === null) {
-                    $pullMetaRepo->insert(
+                    $watchMetaRepo->insert(
                         $followId,
-                        $row->tier_at_pull,
+                        $row->tier_at_watch,
                         null /* batch_id — Phase 3 */
                     );
                 }

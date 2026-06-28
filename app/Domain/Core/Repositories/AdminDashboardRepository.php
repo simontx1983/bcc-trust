@@ -2049,12 +2049,12 @@ class AdminDashboardRepository
     }
 
     /**
-     * Watch-graph activity in the window: total new pulls + top-N
+     * Watch-graph activity in the window: total new watches + top-N
      * recipients (gainers). OPERATOR-ONLY — never user-visible.
      *
-     * Composes on `bcc_pull_meta.pulled_at` (indexed) JOIN
+     * Composes on `bcc_watch_meta.watched_at` (indexed) JOIN
      * peepso_user_followers for recipient resolution. The
-     * peepso_user_followers table has no date column; bcc_pull_meta is
+     * peepso_user_followers table has no date column; bcc_watch_meta is
      * the canonical "deliberate Keep-Tabs action" event log because the
      * watch is what WatchingService records with a timestamp.
      *
@@ -2069,13 +2069,13 @@ class AdminDashboardRepository
     {
         global $wpdb;
 
-        $pullMetaTable = TableRegistry::pullMeta();
+        $watchMetaTable = TableRegistry::watchMeta();
         $followersTable = $wpdb->prefix . 'peepso_user_followers';
 
-        // Total deliberate-pull events in window.
+        // Total deliberate-watch events in window.
         $totalPulls = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$pullMetaTable}
-             WHERE pulled_at > DATE_SUB(NOW(), INTERVAL %d DAY)",
+            "SELECT COUNT(*) FROM {$watchMetaTable}
+             WHERE watched_at > DATE_SUB(NOW(), INTERVAL %d DAY)",
             $days
         ));
 
@@ -2084,9 +2084,9 @@ class AdminDashboardRepository
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT pf.uf_passive_user_id AS recipient_id,
                     COUNT(*) AS gained
-             FROM {$pullMetaTable} pm
+             FROM {$watchMetaTable} pm
              INNER JOIN {$followersTable} pf ON pm.follow_id = pf.uf_id
-             WHERE pm.pulled_at > DATE_SUB(NOW(), INTERVAL %d DAY)
+             WHERE pm.watched_at > DATE_SUB(NOW(), INTERVAL %d DAY)
                AND pf.uf_follow = 1
              GROUP BY pf.uf_passive_user_id
              ORDER BY gained DESC

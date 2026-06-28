@@ -18,7 +18,7 @@
  * V1 type catalogue (per §I2 launch checklist):
  *   - REACTION       — Solid/Vouch/Stand-behind on your post
  *   - REVIEW         — review on a page you own
- *   - CARD_PULLED    — someone pulled (followed) your validator/etc
+ *   - CARD_WATCHED   — someone watched (followed) your validator/etc
  *   - RANK_UP        — you earned a new rank
  *   - ENDORSE        — someone endorsed a page you own (V1.5 follow-up)
  *   - WELCOME        — first-touch system notification on signup
@@ -61,7 +61,7 @@ final class NotificationType
 {
     public const REACTION                         = 'bcc_reaction';
     public const REVIEW                           = 'bcc_review';
-    public const CARD_PULLED                      = 'bcc_card_pulled';
+    public const CARD_WATCHED                     = 'bcc_card_watched';
     public const RANK_UP                          = 'bcc_rank_up';
     public const ENDORSE                          = 'bcc_endorse';
     public const WELCOME                          = 'bcc_welcome';
@@ -104,7 +104,7 @@ final class NotificationType
     public const ALL = [
         self::REACTION,
         self::REVIEW,
-        self::CARD_PULLED,
+        self::CARD_WATCHED,
         self::RANK_UP,
         self::ENDORSE,
         self::WELCOME,

@@ -94,7 +94,7 @@ final class WatchingSummaryService
     }
 
     /**
-     * Project the raw `tier_at_pull` counts onto the fixed slot list,
+     * Project the raw `tier_at_watch` counts onto the fixed slot list,
      * computing per-slot percentages. Empty slots render as zero
      * (count=0, percent=0) so the frontend's bar/donut has every
      * segment present.

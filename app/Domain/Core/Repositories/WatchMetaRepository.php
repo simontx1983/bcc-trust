@@ -1,11 +1,11 @@
 <?php
 /**
- * Pull Meta Repository
+ * Watch Meta Repository
  *
- * CRUD for the bcc_pull_meta table — sidecar metadata for PeepSo
- * follows that represent BCC card pulls (per §C2 of the V1 plan).
+ * CRUD for the bcc_watch_meta table — sidecar metadata for PeepSo
+ * follows that represent BCC card watches (per §C2 of the V1 plan).
  *
- * Scope: this repository owns the bcc_pull_meta table only. Queries
+ * Scope: this repository owns the bcc_watch_meta table only. Queries
  * that JOIN with peepso_follower (e.g., the watchlist list endpoint)
  * belong in a Service that composes this Repository with the PeepSo
  * follow store — never inline here.
@@ -25,39 +25,39 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * @phpstan-type PullMetaRow object{
+ * @phpstan-type WatchMetaRow object{
  *     follow_id: numeric-string,
- *     tier_at_pull: string|null,
+ *     tier_at_watch: string|null,
  *     batch_id: string|null,
  *     visibility: string,
- *     pulled_at: string
+ *     watched_at: string
  * }
  */
-class PullMetaRepository
+class WatchMetaRepository
 {
-    /** Explicit column list — must match schema-pull-meta.php. */
-    private const COLUMNS = 'follow_id, tier_at_pull, batch_id, visibility, pulled_at';
+    /** Explicit column list — must match schema-watch-meta.php. */
+    private const COLUMNS = 'follow_id, tier_at_watch, batch_id, visibility, watched_at';
 
     private string $table;
 
     public function __construct()
     {
-        $this->table = TableRegistry::pullMeta();
+        $this->table = TableRegistry::watchMeta();
     }
 
     /**
-     * Find a single pull-meta row by its parent follow_id.
+     * Find a single watch-meta row by its parent follow_id.
      *
      * Used by the watch endpoint for the §already_watching idempotency
      * check before deciding whether to insert.
      *
-     * @phpstan-return PullMetaRow|null
+     * @phpstan-return WatchMetaRow|null
      */
     public function find(int $followId): ?object
     {
         global $wpdb;
 
-        /** @var PullMetaRow|null */
+        /** @var WatchMetaRow|null */
         return $wpdb->get_row($wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table} WHERE follow_id = %d LIMIT 1",
             $followId
@@ -65,31 +65,31 @@ class PullMetaRepository
     }
 
     /**
-     * Insert a pull-meta row. Returns true on success, false if the row
+     * Insert a watch-meta row. Returns true on success, false if the row
      * already exists (PK collision) or on DB error.
      *
-     * tier_at_pull is the card_tier at the moment of pull (preserves
+     * tier_at_watch is the card_tier at the moment of watch (preserves
      * historical narrative even when the entity's current tier changes).
      * batch_id is null on first insert and assigned later by the
      * BatchAggregatorService when the batch closes (per §C3).
      */
-    public function insert(int $followId, ?string $tierAtPull, ?string $batchId, string $visibility = 'public'): bool
+    public function insert(int $followId, ?string $tierAtWatch, ?string $batchId, string $visibility = 'public'): bool
     {
         global $wpdb;
 
         $result = $wpdb->insert($this->table, [
-            'follow_id'    => $followId,
-            'tier_at_pull' => $tierAtPull,
-            'batch_id'     => $batchId,
-            'visibility'   => $visibility,
-            'pulled_at'    => current_time('mysql', true),
+            'follow_id'     => $followId,
+            'tier_at_watch' => $tierAtWatch,
+            'batch_id'      => $batchId,
+            'visibility'    => $visibility,
+            'watched_at'    => current_time('mysql', true),
         ], ['%d', '%s', '%s', '%s', '%s']);
 
         return $result !== false;
     }
 
     /**
-     * Delete a pull-meta row by follow_id. Called from the PeepSo
+     * Delete a watch-meta row by follow_id. Called from the PeepSo
      * unfollow handler so the meta doesn't outlive its parent follow.
      *
      * Note (§C3): unfollowing does NOT modify any prior batch feed
@@ -107,12 +107,12 @@ class PullMetaRepository
     }
 
     /**
-     * Bulk-fetch pull-meta for a set of follow_ids. Used by the watchlist
+     * Bulk-fetch watch-meta for a set of follow_ids. Used by the watchlist
      * list endpoint after PeepSo returns the user's follows — we then
      * enrich with our metadata in a single query (no N+1).
      *
      * @param int[] $followIds
-     * @phpstan-return array<int, PullMetaRow> follow_id => row
+     * @phpstan-return array<int, WatchMetaRow> follow_id => row
      */
     public function findManyByFollowIds(array $followIds): array
     {
@@ -123,7 +123,7 @@ class PullMetaRepository
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($followIds), '%d'));
 
-        /** @var list<PullMetaRow>|null */
+        /** @var list<WatchMetaRow>|null */
         $rows = $wpdb->get_results($wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table}
              WHERE follow_id IN ({$placeholders})
@@ -141,10 +141,10 @@ class PullMetaRepository
     /**
      * Bulk variant of findByBatchId — fetch members for many batches
      * in one round-trip. Used by the §A3 feed-body hydrator to
-     * compose pull_batch top_cards across a feed page.
+     * compose watch_batch top_cards across a feed page.
      *
      * Rows are returned grouped by batch_id, ordered within each
-     * group by (pulled_at ASC, follow_id ASC) — the same order the
+     * group by (watched_at ASC, follow_id ASC) — the same order the
      * §C3 aggregator used to pick the top 3, so the rendered feed
      * top_cards matches the at-emit-time top_cards exactly.
      *
@@ -152,7 +152,7 @@ class PullMetaRepository
      * ~20 members each.
      *
      * @param list<string> $batchIds
-     * @phpstan-return array<string, list<PullMetaRow>>
+     * @phpstan-return array<string, list<WatchMetaRow>>
      */
     public function findManyByBatchIds(array $batchIds): array
     {
@@ -163,11 +163,11 @@ class PullMetaRepository
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($batchIds), '%s'));
 
-        /** @var list<PullMetaRow>|null $rows */
+        /** @var list<WatchMetaRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table}
               WHERE batch_id IN ({$placeholders})
-              ORDER BY batch_id ASC, pulled_at ASC, follow_id ASC
+              ORDER BY batch_id ASC, watched_at ASC, follow_id ASC
               LIMIT 1000",
             ...$batchIds
         ));
@@ -184,22 +184,22 @@ class PullMetaRepository
     }
 
     /**
-     * Find all pull-meta rows belonging to a single batch. Used by the
-     * BatchAggregatorService when emitting the §C3 pull_batch feed item
+     * Find all watch-meta rows belonging to a single batch. Used by the
+     * BatchAggregatorService when emitting the §C3 watch_batch feed item
      * to compose card_count + top_cards + more_count from the actual
-     * pulls in the batch.
+     * watches in the batch.
      *
-     * @phpstan-return list<PullMetaRow>
+     * @phpstan-return list<WatchMetaRow>
      */
     public function findByBatchId(string $batchId): array
     {
         global $wpdb;
 
-        /** @var list<PullMetaRow>|null */
+        /** @var list<WatchMetaRow>|null */
         $rows = $wpdb->get_results($wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table}
              WHERE batch_id = %s
-             ORDER BY pulled_at ASC
+             ORDER BY watched_at ASC
              LIMIT 500",
             $batchId
         ));

@@ -153,9 +153,7 @@ final class UserFollowsService
 
     /**
      * Single-flag read for `watching_hidden` via the canonical
-     * PrivacySettings reader — handles the legacy `binder_hidden`
-     * lazy migration so a profile written before the rename still
-     * gates the same way.
+     * PrivacySettings reader.
      */
     private function watchingHidden(int $userId): bool
     {

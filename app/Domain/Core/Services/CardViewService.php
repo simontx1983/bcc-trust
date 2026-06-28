@@ -753,7 +753,7 @@ final class CardViewService
             'links'               => ['self' => '/communities/' . $slug],
             // `open` is the only card action — communities are joined
             // via the group detail's own join flow, never watched, so
-            // no `pull`/`watch` action is emitted. Self-describing GET
+            // no `watch` action is emitted. Self-describing GET
             // of the §4.7.5 detail endpoint, mirroring the page-card
             // action grammar.
             'actions'             => [
@@ -780,7 +780,7 @@ final class CardViewService
     {
         $na = self::deny(null, 'not_applicable');
         return [
-            'can_pull'           => $na,
+            'can_watch'          => $na,
             'can_review'         => $na,
             'can_dispute'        => $na,
             'can_open_dispute'   => $na,
@@ -1376,7 +1376,7 @@ final class CardViewService
 
         return array_merge(
             [
-                'can_pull'           => self::allow(),
+                'can_watch'          => self::allow(),
                 'can_review'         => self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
                 'can_dispute'        => self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
                 // §4.4 can_open_dispute — the OWNER vote-dispute entry
@@ -1450,8 +1450,8 @@ final class CardViewService
 
         return array_merge(
             [
-                // "Pull" on a member card = follow that user. Self-follow is meaningless.
-                'can_pull'           => $isSelf ? self::deny(null, 'self_action_blocked') : self::allow(),
+                // "Watch" on a member card = follow that user. Self-follow is meaningless.
+                'can_watch'          => $isSelf ? self::deny(null, 'self_action_blocked') : self::allow(),
                 'can_review'         => $isSelf
                     ? self::deny(null, 'self_action_blocked')
                     : self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
@@ -1481,7 +1481,7 @@ final class CardViewService
     {
         $sign = self::deny('Sign in to interact', 'signin_required');
         return [
-            'can_pull'           => $sign,
+            'can_watch'          => $sign,
             'can_review'         => $sign,
             'can_dispute'        => $sign,
             'can_open_dispute'   => $sign,
@@ -1499,7 +1499,7 @@ final class CardViewService
     {
         $sign = self::deny('Sign in to interact', 'signin_required');
         return [
-            'can_pull'           => $sign,
+            'can_watch'          => $sign,
             'can_review'         => $sign,
             'can_dispute'        => $sign,
             'can_open_dispute'   => self::deny(null, 'not_applicable'),
@@ -1573,7 +1573,7 @@ final class CardViewService
     /**
      * API endpoints for page-cards (validator/project/creator).
      *
-     * Both `pull` and `claim` are emitted self-describing — `body`
+     * Both `watch` and `claim` are emitted self-describing — `body`
      * pre-baked so the frontend dispatches the action with zero
      * mapping logic ("frontend is dumb" rule).
      *
@@ -1583,7 +1583,7 @@ final class CardViewService
      *   - body        — pre-baked request body (when applicable)
      *   - idempotent  — safe to retry on network failure
      *                   (true for our server-side dedup'd POSTs:
-     *                    pull → already_pulled status,
+     *                    watch → already_watching status,
      *                    claim → already_verified status)
      *   - requires_auth — true when the endpoint rejects anonymous calls
      *
@@ -1602,7 +1602,7 @@ final class CardViewService
     private static function buildPageActions(string $kind, int $pageId, ?array $prefetched = null): array
     {
         $actions = [
-            'pull' => [
+            'watch' => [
                 'method'        => 'POST',
                 'href'          => '/wp-json/bcc/v1/me/watching/watch',
                 'body'          => [
@@ -1637,7 +1637,7 @@ final class CardViewService
 
     /**
      * API endpoints for member-cards. Members are not claimable in V1,
-     * so only `pull` is emitted — same self-describing-body shape as
+     * so only `watch` is emitted — same self-describing-body shape as
      * page-cards for cross-kind frontend uniformity.
      *
      * @return array<string, Action>
@@ -1645,7 +1645,7 @@ final class CardViewService
     private static function buildMemberActions(int $userId): array
     {
         return [
-            'pull' => [
+            'watch' => [
                 'method'        => 'POST',
                 'href'          => '/wp-json/bcc/v1/me/watching/watch',
                 'body'          => [
