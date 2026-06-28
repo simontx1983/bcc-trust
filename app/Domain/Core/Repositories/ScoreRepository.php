@@ -739,20 +739,27 @@ class ScoreRepository {
         $now           = current_time('mysql');
         $uniqueDelta   = $decrementUniqueVoter ? 1 : 0;
 
+        // Canonical formula (single owner) — NOT a hand-rolled inline copy.
+        // The previous inline version summed only endorsement_bonus +
+        // onchain_bonus, silently dropping contribution_bonus,
+        // penalty_adjustment, and attestation_bonus on every un-vote (a
+        // score-clobber, same class as the Slice-E VoteService fix), and
+        // never refreshed reputation_tier. formulaSql()/tierSql() both
+        // recompute from the base columns; MySQL SET is left-to-right so
+        // positive_score / negative_score hold their post-GREATEST values
+        // by the time these expressions evaluate.
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        // MySQL SET is left-to-right: positive_score / negative_score hold
-        // the post-GREATEST new values by the time total_score is evaluated.
-        // Reference them directly instead of re-applying the delta.
         $result = $wpdb->query(
             $wpdb->prepare(
                 "UPDATE {$this->table}
                  SET
                    positive_score     = GREATEST(0, positive_score + %f),
                    negative_score     = GREATEST(0, negative_score + %f),
-                   total_score        = LEAST(100, GREATEST(0,
-                                           50 + (positive_score - negative_score) * 2
-                                           + endorsement_bonus + onchain_bonus
-                                       )),
+                   total_score        = {$totalScoreSql},
+                   reputation_tier    = {$tierSql},
                    vote_count         = GREATEST(0, vote_count - 1),
                    unique_voters      = GREATEST(0, unique_voters - %d),
                    last_calculated_at = %s
