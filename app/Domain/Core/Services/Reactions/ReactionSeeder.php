@@ -39,9 +39,13 @@ final class ReactionSeeder
     private const REACTION_CPT = 'peepso_reaction_user';
 
     /**
-     * Versioned one-time-setup flag. When set to '1', `seed()` and
-     * `ensureIndexes()` short-circuit. Bumping the suffix (e.g. v2)
-     * forces re-run after a contract change.
+     * Versioned one-time-setup flag. When set to '1', `seed()`
+     * short-circuits. Bumping the suffix (e.g. v2) forces re-run after a
+     * contract change.
+     *
+     * NOTE: PeepSo reaction/activity index creation moved to
+     * includes/database/peepso-reaction-indexes.php (§1 remediation) and is
+     * guarded by its own option flag, independent of this one.
      *
      * v2 (v1.5): added the social-grammar Fire reaction. Bumping the
      * suffix re-runs the seeder on existing installs; the per-kind
@@ -87,9 +91,12 @@ final class ReactionSeeder
     private const BASE_ORDER = 100;
 
     /**
-     * One-time setup entry point. Runs the CPT seeding + the
-     * peepso_reactions / peepso_activities index creation, then
-     * persists the SETUP_FLAG so subsequent calls short-circuit.
+     * One-time setup entry point. Runs the CPT seeding, then persists the
+     * SETUP_FLAG so subsequent calls short-circuit.
+     *
+     * The peepso_reactions / peepso_activities covering indexes are created
+     * separately by includes/database/peepso-reaction-indexes.php (§1
+     * remediation: DDL belongs in includes/database/, not a service).
      *
      * Safe to call repeatedly: the flag check is the first line.
      *
@@ -110,12 +117,7 @@ final class ReactionSeeder
         }
 
         $map = $this->seedReactions();
-        $this->ensureIndexes();
 
-        // Mark setup complete only after both subtasks succeeded
-        // (best-effort — a failing index creation shouldn't keep us
-        // re-running on every request, but it does mean re-seeding
-        // requires bumping SETUP_FLAG).
         update_option(self::SETUP_FLAG, '1', false);
 
         return $map;
@@ -174,80 +176,5 @@ final class ReactionSeeder
         }
 
         return $map;
-    }
-
-    /**
-     * Ensure the indexes our reaction-aggregation queries depend on.
-     * These live on PeepSo's tables — risky territory, but the indexes
-     * are additive (CREATE INDEX with pre-check) and unblock realistic
-     * read load on `solids_received` and per-time-window queries.
-     *
-     * If PeepSo drops these on upgrade, bumping SETUP_FLAG re-creates them.
-     */
-    private function ensureIndexes(): void
-    {
-        global $wpdb;
-
-        // peepso_reactions covering index for "solids given by user"
-        // — covers WHERE reaction_user_id = ? AND reaction_type = ?
-        self::createIndexIfMissing(
-            $wpdb->prefix . 'peepso_reactions',
-            'idx_bcc_reactions_user_type',
-            'reaction_user_id, reaction_type'
-        );
-
-        // peepso_reactions covering index for "solids received since"
-        // — covers JOIN by reaction_act_id + filter on reaction_type
-        // + reaction_timestamp boundary.
-        self::createIndexIfMissing(
-            $wpdb->prefix . 'peepso_reactions',
-            'idx_bcc_reactions_act_type_time',
-            'reaction_act_id, reaction_type, reaction_timestamp'
-        );
-
-        // peepso_activities — speeds up "received" query's JOIN target
-        // (the act_owner_id filter). PeepSo's default schema has indexes
-        // on act_user_id but not always act_owner_id; covering this
-        // explicitly avoids the table scan when filtering by content owner.
-        self::createIndexIfMissing(
-            $wpdb->prefix . 'peepso_activities',
-            'idx_bcc_activities_owner',
-            'act_owner_id'
-        );
-    }
-
-    private static function createIndexIfMissing(string $table, string $indexName, string $columns): void
-    {
-        global $wpdb;
-
-        // SHOW INDEX FROM is the canonical pre-check. Table name comes
-        // from $wpdb->prefix + a hard-coded suffix — no user input,
-        // safe to interpolate.
-        $existing = $wpdb->get_results($wpdb->prepare(
-            "SHOW INDEX FROM `{$table}` WHERE Key_name = %s",
-            $indexName
-        ));
-
-        if (!empty($existing)) {
-            return;
-        }
-
-        // CREATE INDEX doesn't accept prepared placeholders for the
-        // identifier; columns are hard-coded by caller. No user input.
-        $result = $wpdb->query("CREATE INDEX `{$indexName}` ON `{$table}` ({$columns})");
-
-        if ($result === false) {
-            \BCC\Core\Log\Logger::error('[ReactionSeeder] failed to create index', [
-                'table' => $table,
-                'index' => $indexName,
-                'error' => $wpdb->last_error,
-            ]);
-            return;
-        }
-
-        \BCC\Core\Log\Logger::info('[ReactionSeeder] index created', [
-            'table' => $table,
-            'index' => $indexName,
-        ]);
     }
 }

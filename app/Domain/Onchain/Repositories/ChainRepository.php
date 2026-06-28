@@ -153,6 +153,45 @@ final class ChainRepository
         return $chain ? (int) $chain->id : null;
     }
 
+    /** @var array<string, int|null> Request-scoped memo for the slug fallback. */
+    private static array $idBySlugMemo = [];
+
+    /**
+     * Resolve a chain id by slug INCLUDING deactivated chains.
+     *
+     * resolveId()/getBySlug() only see the active-chains cache. The gated-group
+     * discovery filter must resolve a slug to its id even when the chain has
+     * since been deactivated — parity with the pre-repository inline lookup
+     * (`SELECT id FROM chains WHERE slug = %s`, no is_active filter); otherwise
+     * groups gated on a now-inactive chain silently stop appearing. Mirrors
+     * getById()'s inactive fallback (active set first, then a direct query).
+     */
+    public static function resolveIdAnyState(string $slug): ?int
+    {
+        foreach (self::getActive() as $chain) {
+            if ($chain->slug === $slug) {
+                return (int) $chain->id;
+            }
+        }
+
+        if (array_key_exists($slug, self::$idBySlugMemo)) {
+            return self::$idBySlugMemo[$slug];
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $id = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$table} WHERE slug = %s LIMIT 1",
+            $slug
+        ));
+
+        $resolved = $id !== null ? (int) $id : null;
+        self::$idBySlugMemo[$slug] = $resolved;
+
+        return $resolved;
+    }
+
     /**
      * Map group_id → chain slug for the given peepso-group post IDs.
      *

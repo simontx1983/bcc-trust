@@ -54,12 +54,6 @@ ALL_PLUGINS=(
 # time. Remove an entry the moment its file's $wpdb moves into a Repository —
 # never ADD to this list for new code.
 WPDB_DEBT_ALLOWLIST=(
-    "bcc-trust/app/Domain/Core/Application/TrustReadService.php"      # raw read -> read repository
-    "bcc-trust/app/Domain/Core/REST/GroupsDiscoveryEndpoint.php"     # query in REST handler -> Repository
-    "bcc-trust/app/Domain/Core/Services/Reactions/ReactionSeeder.php" # SHOW/CREATE INDEX DDL -> Infrastructure migration
-    "bcc-trust/app/Domain/Core/Services/WatchingService.php"         # read-model tier lookup -> PageReadModelRepository
-    "bcc-trust/app/Domain/Core/Support/NotificationPrefs.php"        # pref read/write -> Repository
-    "bcc-trust/app/Domain/Onchain/Support/OnchainCircuitBreaker.php" # breaker-state store -> Repository/Infrastructure
 )
 
 if [[ -n "$TARGET" && "$TARGET" != "--json" ]]; then

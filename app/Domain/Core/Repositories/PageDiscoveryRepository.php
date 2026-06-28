@@ -394,4 +394,45 @@ final class PageDiscoveryRepository
 
         return \BCC\Trust\Onchain\Repositories\ClaimRepository::getPrimaryClaimsByPageIds($pageIds);
     }
+
+    /**
+     * Of the given post IDs, return those whose chain meta resolves to
+     * $chainId. Matches EITHER `_bcc_gate_chain_id` (NFT holder groups)
+     * OR `_bcc_chain_tag` (user-created plain groups); meta_value is a
+     * stringified chain id, CAST to UNSIGNED for the comparison.
+     *
+     * Bounded by the caller-supplied IN-list (the candidate group set).
+     * Single bulk SELECT — no N+1.
+     *
+     * @param  list<int> $postIds
+     * @return list<int> The subset of $postIds gated to $chainId.
+     */
+    public static function findPostIdsGatedByChain(array $postIds, int $chainId): array
+    {
+        if ($postIds === [] || $chainId <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+
+        $ph       = implode(',', array_fill(0, count($postIds), '%d'));
+        $params   = $postIds;
+        $params[] = $chainId;
+
+        /** @var list<object{post_id: numeric-string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT post_id
+               FROM {$wpdb->postmeta}
+              WHERE meta_key IN ('_bcc_gate_chain_id', '_bcc_chain_tag')
+                AND post_id IN ({$ph})
+                AND CAST(meta_value AS UNSIGNED) = %d",
+            ...$params
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $out[] = (int) $row->post_id;
+        }
+        return $out;
+    }
 }

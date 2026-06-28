@@ -143,6 +143,28 @@ class PageReadModelRepository
     }
 
     /**
+     * Read just the reputation_tier for a single page.
+     *
+     * Bounded by the page_id primary key. Returns null when the read-model
+     * row hasn't projected yet or the tier column is empty — the same null
+     * semantics WatchingService::buildItem already handles. Reuses the
+     * full-row getByPageId() cache so a tier lookup that follows a row read
+     * (or vice-versa) is served from cache.
+     */
+    public function getReputationTier(int $pageId): ?string
+    {
+        $row = $this->getByPageId($pageId);
+        if ($row === null) {
+            return null;
+        }
+        $tier = $row->reputation_tier;
+        if ($tier === '') {
+            return null;
+        }
+        return $tier;
+    }
+
+    /**
      * Check whether the read model table has been populated.
      *
      * Used by PageDiscoveryService to decide whether to use the read model

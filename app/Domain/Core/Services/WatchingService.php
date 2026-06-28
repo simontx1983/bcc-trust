@@ -463,7 +463,7 @@ final class WatchingService
         // tier_at_watch for placeholders: read from the page's read-model
         // row when present; null otherwise. Matches the existing
         // resolveCardTierForUser pattern but page-scoped.
-        $tierAtWatch = self::resolveCardTierForPage($targetId);
+        $tierAtWatch = $this->resolveCardTierForPage($targetId);
 
         $result = $this->pageFollowRepo->insertOrFind($viewerId, $targetId, $targetKind, $tierAtWatch);
         if ($result['id'] === 0) {
@@ -491,20 +491,16 @@ final class WatchingService
      * for tier_at_watch. Returns null when the read-model row hasn't
      * projected yet — same null semantics buildItem already handles.
      */
-    private static function resolveCardTierForPage(int $pageId): ?string
+    private function resolveCardTierForPage(int $pageId): ?string
     {
-        global $wpdb;
-        $rmTable = \BCC\Trust\Core\Database\TableRegistry::pageReadModel();
-
-        $tier = $wpdb->get_var($wpdb->prepare(
-            "SELECT reputation_tier FROM {$rmTable} WHERE page_id = %d LIMIT 1",
-            $pageId
-        ));
+        $tier = \BCC\Trust\Core\Plugin::instance()
+            ->pageReadModelRepository()
+            ->getReputationTier($pageId);
 
         if ($tier === null || $tier === '') {
             return null;
         }
-        return ReputationTierMap::toCardTier((string) $tier);
+        return ReputationTierMap::toCardTier($tier);
     }
 
     /**
