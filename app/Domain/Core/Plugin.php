@@ -339,6 +339,14 @@ final class Plugin
         );
     }
 
+    private ?\BCC\Trust\Core\Services\AttestationOutcomeClassifier $attestationOutcomeClassifier = null;
+    public function attestationOutcomeClassifier(): \BCC\Trust\Core\Services\AttestationOutcomeClassifier
+    {
+        return $this->attestationOutcomeClassifier ??= new \BCC\Trust\Core\Services\AttestationOutcomeClassifier(
+            $this->attestationRepository()
+        );
+    }
+
     private ?AttestationService $attestationService = null;
     public function attestationService(): AttestationService
     {
@@ -349,10 +357,10 @@ final class Plugin
             $this->walletAgeWeighter(),
             $this->reciprocityResolver(),
             $this->dormancyDetector(),
-            $this->reliabilityStandingComputer(),
             $this->cohortOverlapDampener(),
             $this->divergenceClassifier(),
-            $this->contestedStateExplainer()
+            $this->contestedStateExplainer(),
+            $this->attestationOutcomeClassifier()
         );
     }
 

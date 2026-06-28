@@ -149,4 +149,49 @@ final class ReliabilityStandingComputer
 
         return self::STANDING_NEWLY_ACTIVE;
     }
+
+    /**
+     * Map a LIVE numeric reliability + counted-attestation total to a §J.3.2
+     * standing — the Slice 2 outcome-driven path that displaces the tenure
+     * proxy in {@see compute()}.
+     *
+     * Pure + static so it's unit-testable in isolation (no DB), mirroring the
+     * AttestationScoreSynthesis::computeBonus pattern. AttestationService feeds
+     * it the AttestationOutcomeClassifier output (numeric reliability + counted
+     * attestations) plus the filtered §config thresholds.
+     *
+     * First-call protection: below $minForStanding counted attestations the
+     * operator stays 'newly_active' REGARDLESS of the numeric value — a sample
+     * too small to be statistically meaningful must not mint (or, since the
+     * catalogue is positive-only, withhold by surprise) a higher standing.
+     *
+     * At or above the gate:
+     *   - reliability >  $highlyMin      → highly_reliable
+     *   - reliability >= $consistentMin  → consistent
+     *   - else                           → newly_active
+     *
+     * The positive-only catalogue (§J.3.2) means a low numeric reliability
+     * lands at 'newly_active', never a stigma marker — there is no negative
+     * standing to fall to.
+     *
+     * @return self::STANDING_*
+     */
+    public static function fromReliability(
+        float $reliability,
+        int $countedAttestations,
+        float $highlyMin,
+        float $consistentMin,
+        int $minForStanding
+    ): string {
+        if ($countedAttestations < $minForStanding) {
+            return self::STANDING_NEWLY_ACTIVE;
+        }
+        if ($reliability > $highlyMin) {
+            return self::STANDING_HIGHLY_RELIABLE;
+        }
+        if ($reliability >= $consistentMin) {
+            return self::STANDING_CONSISTENT;
+        }
+        return self::STANDING_NEWLY_ACTIVE;
+    }
 }

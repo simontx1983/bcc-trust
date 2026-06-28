@@ -1206,6 +1206,126 @@ final class AttestationRepository
     }
 
     /**
+     * Active attestations CAST BY one operator, ordered oldest-first — the
+     * input set for the §J.3.2.1 Operator Reliability classifier (Slice 2).
+     *
+     * Narrow projection: only what AttestationOutcomeClassifier needs to
+     * classify each row's outcome and weight it —
+     *   - target_kind / target_id  → resolve the target's score-row page,
+     *   - kind                      → vouch vs stand_behind weighting,
+     *   - attestation_order_in_target → early-read multiplier tier,
+     *   - created_at                → outcome window ("since the cast date").
+     * Both kinds contribute; revoked rows are excluded (a withdrawn judgment
+     * carries no reliability signal).
+     *
+     * ORDER BY created_at ASC (id ASC tiebreak) is load-bearing: the classifier
+     * walks the list to find the operator's OWN first N stand_behind casts for
+     * the §J.1 first-mover protection. A stable chronological order is required
+     * for that determination to be deterministic.
+     *
+     * Bounded by $limit (default 5000 — a single operator's lifetime active
+     * cast count is realistically dozens to low hundreds).
+     *
+     * @return list<object{id: int, target_kind: string, target_id: int, kind: string, attestation_order_in_target: int, created_at: string}>
+     */
+    public function listActiveByAttestor(int $attestorUserId, int $limit = 5000): array
+    {
+        if ($attestorUserId <= 0) {
+            return [];
+        }
+        $limit = max(1, min(5000, $limit));
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT id, target_kind, target_id, kind, attestation_order_in_target, created_at"
+            . " FROM `{$table}`"
+            . ' WHERE attestor_user_id = %d'
+            . ' AND revoked_at IS NULL'
+            . ' ORDER BY created_at ASC, id ASC'
+            . ' LIMIT %d';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $attestorUserId, $limit);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row)) {
+                continue;
+            }
+            $out[] = (object) [
+                'id'                          => (int) ($row->id ?? 0),
+                'target_kind'                 => (string) ($row->target_kind ?? ''),
+                'target_id'                   => (int) ($row->target_id ?? 0),
+                'kind'                        => (string) ($row->kind ?? ''),
+                'attestation_order_in_target' => (int) ($row->attestation_order_in_target ?? 0),
+                'created_at'                  => (string) ($row->created_at ?? ''),
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Count DISTINCT OTHER attestors who cast an ACTIVE attestation on a
+     * target AFTER a given moment — the "further attestations" outcome probe
+     * for the §J.3.2.1 reliability classifier (Slice 2).
+     *
+     * "Other" excludes the operator being scored ($excludeUserId) so their own
+     * later casts on the same target don't count as independent confirmation.
+     * Both kinds count; revoked rows are excluded; the window is strict
+     * (created_at > since) so a follow-on cast at the exact same second as the
+     * operator's own cast isn't double-counted.
+     *
+     * Bounded with LIMIT — a single target's distinct-attestor count is
+     * realistically dozens; the cap is a runaway-dataset fence.
+     *
+     * @param string $sinceMysqlUtc UTC datetime "YYYY-MM-DD HH:MM:SS".
+     */
+    public function countDistinctAttestorsOnTargetSince(
+        string $targetKind,
+        int $targetId,
+        int $excludeUserId,
+        string $sinceMysqlUtc
+    ): int {
+        if (!in_array($targetKind, self::TARGET_KINDS, true)) {
+            return 0;
+        }
+        if ($targetId <= 0 || $sinceMysqlUtc === '') {
+            return 0;
+        }
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT COUNT(DISTINCT attestor_user_id) FROM `{$table}`"
+            . ' WHERE target_kind = %s'
+            . ' AND target_id = %d'
+            . ' AND attestor_user_id != %d'
+            . ' AND created_at > %s'
+            . ' AND revoked_at IS NULL'
+            . ' LIMIT 5000';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $targetKind, $targetId, $excludeUserId, $sinceMysqlUtc);
+        if (!is_string($prepared)) {
+            return 0;
+        }
+
+        $raw = $wpdb->get_var($prepared);
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
      * Distinct (target_kind, target_id) pairs that currently hold at least one
      * active attestation — the daily decay-recompute sweep work-list (Slice E).
      * Decay is time-dependent, so a target's score drifts even with no new
