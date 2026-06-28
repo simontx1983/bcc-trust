@@ -127,6 +127,19 @@ final class FeedEndpoint
                 ],
             ]
         );
+
+        // GET /feed/{id} — single-activity permalink, anonymous-OK
+        // (numeric-only so it never collides with /feed/hot, /feed/tag).
+        // Backs the post-detail page; the frontend already calls this.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/feed/(?P<id>\d+)',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'feedItem'],
+                'permission_callback' => '__return_true',
+            ]
+        );
     }
 
     public function hot(WP_REST_Request $request): WP_REST_Response
@@ -190,6 +203,29 @@ final class FeedEndpoint
         // Per-viewer scope filtering — no shared cache.
         $response->header('Cache-Control', 'private, max-age=15');
         // The scope tag varies the response; keep CDNs honest.
+        $response->header('Vary', 'Authorization, Cookie');
+
+        return $response;
+    }
+
+    /**
+     * GET /feed/{id} — single-activity permalink (post-detail). Same
+     * hydration + visibility gates as the list feed (§F3 — one brain) via
+     * FeedRankingService::getActivityById(); 404s rather than leaking a
+     * not-found/not-visible distinction to the client.
+     */
+    public function feedItem(WP_REST_Request $request): WP_REST_Response
+    {
+        $viewerId = get_current_user_id();
+        $actId    = (int) $request->get_param('id');
+
+        $item = Plugin::instance()->feedRankingService()->getActivityById($actId, $viewerId);
+        if ($item === null) {
+            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+        }
+
+        $response = ApiResponse::ok($item);
+        $response->header('Cache-Control', 'private, max-age=15');
         $response->header('Vary', 'Authorization, Cookie');
 
         return $response;

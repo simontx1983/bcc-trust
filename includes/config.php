@@ -21,3 +21,4 @@ require_once $config_dir . 'tiers.php';
 require_once $config_dir . 'limits.php';
 require_once $config_dir . 'behavioral.php';
 require_once $config_dir . 'quest-rewards.php';
+require_once $config_dir . 'stoke.php';

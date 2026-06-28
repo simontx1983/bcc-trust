@@ -27,4 +27,22 @@ if (!defined('BCC_DISPUTES_TTL_DAYS')) {
     define('BCC_DISPUTES_TTL_DAYS', 7);
 }
 
+// Stoke stage thresholds — StokeRepositoryTest exercises stageForScore()
+// directly via reflection.
+if (!defined('BCC_STOKE_DECAY_WINDOW_HOURS')) {
+    define('BCC_STOKE_DECAY_WINDOW_HOURS', 48);
+}
+if (!defined('BCC_STOKE_STAGE_2_MIN')) {
+    define('BCC_STOKE_STAGE_2_MIN', 3);
+}
+if (!defined('BCC_STOKE_STAGE_3_MIN')) {
+    define('BCC_STOKE_STAGE_3_MIN', 8);
+}
+if (!defined('BCC_STOKE_STAGE_4_MIN')) {
+    define('BCC_STOKE_STAGE_4_MIN', 20);
+}
+if (!defined('BCC_STOKE_STAGE_5_MIN')) {
+    define('BCC_STOKE_STAGE_5_MIN', 50);
+}
+
 require_once __DIR__ . '/../vendor/autoload.php';

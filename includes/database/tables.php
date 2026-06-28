@@ -43,6 +43,10 @@ require_once __DIR__ . '/schema-trust-attestations.php';
 // V2 Trust Attestation Layer PR-8b: divergence-state sidecar — prior-state
 // memory for the PolarizationTransitionNotifier cron worker.
 require_once __DIR__ . '/schema-target-divergence-state.php';
+// Stoke — the forge-fire feed reaction (cosmetic for trust, real input
+// to feed ranking). One row per (act_id, user_id); never touches
+// bcc_trust_scores.
+require_once __DIR__ . '/schema-stokes.php';
 // NOTE: bcc_user_locals removed — Locals membership lives in PeepSo's
 // peepso_group_members (single graph rule); primary-Local pointer in
 // wp_usermeta.bcc_primary_local_group_id.
@@ -167,6 +171,10 @@ function bcc_trust_create_tables() {
         bcc_trust_create_target_divergence_state_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Target divergence-state sidecar table created', []);
     }
+    if (function_exists('bcc_trust_create_stokes_table')) {
+        bcc_trust_create_stokes_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Stokes table created', []);
+    }
 
     // §D5 reaction seeding — idempotent insert of the three custom
     // reactions (Solid / Vouch / Stand behind) as peepso_reaction_user
@@ -251,6 +259,8 @@ function bcc_trust_verify_all_tables() {
         'bcc_photo_alts',
         // V2 Trust Attestation Layer
         'bcc_trust_attestations',
+        // Stoke accumulator
+        'bcc_trust_stokes',
     ];
 
     $missing = [];

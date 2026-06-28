@@ -144,6 +144,9 @@ if (!function_exists('current_time')) {
 require_once dirname(__DIR__, 2) . '/includes/database/schema-content-reports.php';
 bcc_trust_create_content_reports_table();
 
+require_once dirname(__DIR__, 2) . '/includes/database/schema-stokes.php';
+bcc_trust_create_stokes_table();
+
 // WordPress core wp_options (the rate limiter is option-backed via $wpdb->options).
 $GLOBALS['wpdb']->query(
     "CREATE TABLE `wp_options` (

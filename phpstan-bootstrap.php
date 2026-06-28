@@ -59,6 +59,7 @@ $configs = [
     'limits.php',
     'behavioral.php',
     'quest-rewards.php',
+    'stoke.php',
 ];
 
 foreach ($configs as $file) {
