@@ -16,8 +16,9 @@
  * What remains here is read-only:
  *   - getEndorseEligibility* — the §L5 can_endorse preflight gate the
  *     card composer + PageCardPrefetcher consume (eligibility hint, not
- *     a write path; aligning it to vouch eligibility is a documented
- *     follow-up).
+ *     a write path). Now vouch-aligned: the gate delegates to
+ *     AttestationService::getViewerActionPermissions()['can_vouch'] so
+ *     can_endorse tracks the same Neutral-standing tier gate as vouch.
  *   - getUserEndorsements / getUserEndorsementStats / hasEndorsedPage —
  *     legacy endorsement-table reads still surfaced by
  *     UserEndorsementsEndpoint / UsersEndpoint.
@@ -31,7 +32,6 @@
 
 namespace BCC\Trust\Core\Services;
 
-use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Services\PeepSoPageResolver;
 
 if (!defined('ABSPATH')) {
@@ -40,14 +40,14 @@ if (!defined('ABSPATH')) {
 
 class EndorsementService {
 
-    private UserInfoRepository $userInfoRepo;
+    private AttestationService $attestationService;
     private EndorsementQueryService $queryService;
 
     public function __construct(
-        UserInfoRepository     $userInfoRepo
+        AttestationService     $attestationService
     ) {
-        $this->userInfoRepo      = $userInfoRepo;
-        $this->queryService      = new EndorsementQueryService();
+        $this->attestationService = $attestationService;
+        $this->queryService       = new EndorsementQueryService();
     }
 
     /**
@@ -68,10 +68,11 @@ class EndorsementService {
      * exposing internal fraud signals (reason_code is intentionally
      * coarse).
      *
-     * NOTE (Slice E follow-up): the write path is now vouch-attestation,
-     * not the legacy endorsement. Aligning these gates to vouch
-     * eligibility (tier-based) is a documented follow-up; this method
-     * keeps the legacy quest / account-age / fraud gates for V1.
+     * NOTE: the write path is vouch-attestation, not the legacy
+     * endorsement, so this gate is now vouch-aligned — it delegates to
+     * the same Neutral-standing tier gate vouch uses
+     * (AttestationService::getViewerActionPermissions()['can_vouch']).
+     * The legacy quest / account-age / fraud gates were retired.
      *
      * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
      */
@@ -89,10 +90,10 @@ class EndorsementService {
             }
         }
 
-        // Viewer-level gates (quest / account-age / fraud) — extracted
-        // so the batch path can evaluate them ONCE per request instead
-        // of once per card. Gate order inside is unchanged.
-        $viewerGate = $this->evaluateViewerEndorseGates($viewerId);
+        // Viewer-level gate: the vouch tier gate (Neutral standing), shared
+        // with the byline Vouch toggle so can_endorse and can_vouch track
+        // the same threshold. Page-independent, so the batch path memoizes it.
+        $viewerGate = $this->resolveViewerVouchGate($viewerId);
         if ($viewerGate !== null) {
             return $viewerGate;
         }
@@ -101,61 +102,32 @@ class EndorsementService {
     }
 
     /**
-     * The viewer-level (page-independent) endorse gates: quest /
-     * account-age / fraud-score, in that order. Returns the first
-     * failing gate's Permission shape, or null when every gate passes
-     * (including BCC_TRUST_TEST_MODE, which skips all three).
+     * The viewer-level (page-independent) endorse gate, now vouch-aligned:
+     * delegates to the same Neutral-standing tier gate the byline Vouch
+     * toggle uses (AttestationService::getViewerActionPermissions, with
+     * target 0 so only the viewer tier gate applies). Returns the failing
+     * Permission shape, or null when the viewer may endorse (including
+     * BCC_TRUST_TEST_MODE, which skips the gate).
      *
-     * Page-level gates (auth, self-endorse) stay with the callers —
-     * this method only owns what's constant across pages for a viewer,
-     * so getEndorseEligibilityForPages can memoize one result for a
-     * whole cards-list page.
+     * Page-level gates (auth, self-endorse) stay with the callers — this
+     * method only owns what's constant across pages for a viewer, so
+     * getEndorseEligibilityForPages can memoize one result for a whole
+     * cards-list page.
      *
      * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}|null
      */
-    private function evaluateViewerEndorseGates(int $viewerId): ?array {
+    private function resolveViewerVouchGate(int $viewerId): ?array {
         $testMode = defined('BCC_TRUST_TEST_MODE') && \BCC_TRUST_TEST_MODE;
         if ($testMode) {
             return null;
         }
 
-        // Quest gate (identity verification).
-        $questService = \BCC\Trust\Core\Plugin::instance()->questProgressService();
-        if (!$questService->canEndorse($viewerId)) {
-            $progress = $questService->getEndorseProgress($viewerId);
-            $hint = is_string($progress['missing_reason'] ?? null) && $progress['missing_reason'] !== ''
-                ? (string) $progress['missing_reason']
-                : 'Verify your identity to unlock endorsements.';
-            return ['allowed' => false, 'unlock_hint' => $hint, 'reason_code' => 'identity_required'];
-        }
-
-        // Account-age gate.
-        $user = get_userdata($viewerId);
-        if ($user instanceof \WP_User) {
-            $registeredTs = strtotime($user->user_registered);
-            $accountAgeDays = $registeredTs !== false
-                ? (int) floor((time() - $registeredTs) / DAY_IN_SECONDS)
-                : 0;
-            /** @var int $minAgeDays */
-            $minAgeDays = (int) apply_filters('bcc_trust_endorse_min_account_age_days', 7);
-            if ($accountAgeDays < $minAgeDays) {
-                return [
-                    'allowed' => false,
-                    'unlock_hint' => sprintf('Your account must be at least %d days old to endorse.', $minAgeDays),
-                    'reason_code' => 'account_too_new',
-                ];
-            }
-        }
-
-        // Fraud-score gate. Defense-in-depth — the cast() path re-checks
-        // its own fraud gate inside the transaction.
-        $userInfo = $this->userInfoRepo->getByUserId($viewerId);
-        if ($userInfo !== null && (int) $userInfo->fraud_score >= BCC_TRUST_FRAUD_HIGH) {
-            // Coarse reason — never echo the actual fraud score.
+        $canVouch = $this->attestationService->getViewerActionPermissions($viewerId, 0)['can_vouch'];
+        if (!$canVouch['allowed']) {
             return [
                 'allowed' => false,
-                'unlock_hint' => 'Endorsements are temporarily restricted on this account.',
-                'reason_code' => 'account_restricted',
+                'unlock_hint' => 'Reach Neutral standing to endorse.',
+                'reason_code' => 'tier_too_low',
             ];
         }
 
@@ -164,11 +136,10 @@ class EndorsementService {
 
     /**
      * Batch variant of getEndorseEligibility for the cards-list path.
-     * The viewer-level gates (quest / account-age / fraud) are
-     * page-independent, so they're evaluated ONCE; per page only the
-     * self-endorse check remains. Per-page gate order is unchanged
-     * relative to getEndorseEligibility: self-check first, then the
-     * memoized viewer-gate result.
+     * The viewer-level vouch tier gate is page-independent, so it's
+     * evaluated ONCE; per page only the self-endorse check remains.
+     * Per-page gate order is unchanged relative to getEndorseEligibility:
+     * self-check first, then the memoized viewer-gate result.
      *
      * The self-check resolves owners through PageOwnerResolver — the
      * same canonical source getEndorseEligibility reaches via
@@ -191,7 +162,7 @@ class EndorsementService {
         }
 
         $testMode = defined('BCC_TRUST_TEST_MODE') && \BCC_TRUST_TEST_MODE;
-        $viewerGate = $this->evaluateViewerEndorseGates($viewerId);
+        $viewerGate = $this->resolveViewerVouchGate($viewerId);
         $allowed = ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
 
         // Canonical owner resolution, batched (1-3 queries for the whole

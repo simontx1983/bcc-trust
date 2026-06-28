@@ -29,7 +29,6 @@ class PageScore {
     private float $confidenceScore;
     private string $reputationTier;
     private int $endorsementCount;
-    private float $endorsementBonus;
     private float $onchainBonus;
     private float $contributionBonus;
     private float $penaltyAdjustment;
@@ -74,7 +73,6 @@ class PageScore {
      *
      * @param float $positive          positive_score column
      * @param float $negative          negative_score column
-     * @param float $endorsementBonus  endorsement_bonus column
      * @param float $onchainBonus      onchain_bonus column
      * @param float $contributionBonus contribution_bonus column (0 for entity pages)
      * @param float $penaltyAdjustment  penalty_adjustment column (negative; dispute/admin penalties)
@@ -82,7 +80,6 @@ class PageScore {
     public static function computeExpectedTotal(
         float $positive,
         float $negative,
-        float $endorsementBonus,
         float $onchainBonus,
         float $contributionBonus = 0.0,
         float $penaltyAdjustment = 0.0,
@@ -91,7 +88,6 @@ class PageScore {
         return \BCC\Trust\Core\Services\TrustScoreService::compute(
             $positive,
             $negative,
-            $endorsementBonus,
             $onchainBonus,
             $contributionBonus,
             $penaltyAdjustment,
@@ -119,7 +115,6 @@ class PageScore {
         ?DateTimeImmutable $lastVoteAt,
         ?DateTimeImmutable $lastCalculatedAt = null,
         ?array $fraudMetadata = null,
-        float $endorsementBonus = 0.0,
         float $onchainBonus = 0.0,
         float $contributionBonus = 0.0,
         float $penaltyAdjustment = 0.0,
@@ -131,7 +126,7 @@ class PageScore {
         // Validate all inputs
         $this->validatePageId($pageId);
         $this->validateOwnerId($pageOwnerId);
-        $this->validateScores($totalScore, $positiveScore, $negativeScore, $voteCount, $endorsementBonus, $onchainBonus, $contributionBonus, $penaltyAdjustment, $attestationBonus);
+        $this->validateScores($totalScore, $positiveScore, $negativeScore, $voteCount, $onchainBonus, $contributionBonus, $penaltyAdjustment, $attestationBonus);
         $this->validateCounts($voteCount, $uniqueVoters);
         $this->validateConfidence($confidenceScore);
         $this->validateTier($reputationTier);
@@ -145,7 +140,6 @@ class PageScore {
         $this->confidenceScore = $confidenceScore;
         $this->reputationTier = $reputationTier;
         $this->endorsementCount = $endorsementCount;
-        $this->endorsementBonus = $endorsementBonus;
         $this->onchainBonus = $onchainBonus;
         $this->contributionBonus = $contributionBonus;
         $this->penaltyAdjustment = $penaltyAdjustment;
@@ -177,7 +171,7 @@ class PageScore {
         }
     }
     
-    private function validateScores(float $total, float $positive, float $negative, int $voteCount, float $endorsementBonus = 0.0, float $onchainBonus = 0.0, float $contributionBonus = 0.0, float $penaltyAdjustment = 0.0, float $attestationBonus = 0.0): void {
+    private function validateScores(float $total, float $positive, float $negative, int $voteCount, float $onchainBonus = 0.0, float $contributionBonus = 0.0, float $penaltyAdjustment = 0.0, float $attestationBonus = 0.0): void {
         if ($total < 0 || $total > 100) {
             throw new InvalidArgumentException(
                 sprintf('Total score must be between 0 and 100, got: %f', $total)
@@ -198,18 +192,17 @@ class PageScore {
 
         // Only validate the mathematical relationship if there are inputs.
         // penalty_adjustment is negative, so test `!= 0` (not `> 0`).
-        if ($voteCount > 0 || $positive > 0 || $negative > 0 || $endorsementBonus > 0 || $onchainBonus > 0 || $contributionBonus > 0 || $penaltyAdjustment != 0.0 || $attestationBonus > 0) {
-            $expectedTotal = self::computeExpectedTotal($positive, $negative, $endorsementBonus, $onchainBonus, $contributionBonus, $penaltyAdjustment, $attestationBonus);
+        if ($voteCount > 0 || $positive > 0 || $negative > 0 || $onchainBonus > 0 || $contributionBonus > 0 || $penaltyAdjustment != 0.0 || $attestationBonus > 0) {
+            $expectedTotal = self::computeExpectedTotal($positive, $negative, $onchainBonus, $contributionBonus, $penaltyAdjustment, $attestationBonus);
             $difference    = abs($total - $expectedTotal);
 
             if ($difference > self::SCORE_TOLERANCE) {
                 throw new InvalidArgumentException(
                     sprintf(
-                        'Total score %f does not match formula (expected ~%f, difference %f, endorsement_bonus=%f, onchain_bonus=%f, contribution_bonus=%f, penalty_adjustment=%f)',
+                        'Total score %f does not match formula (expected ~%f, difference %f, onchain_bonus=%f, contribution_bonus=%f, penalty_adjustment=%f)',
                         $total,
                         $expectedTotal,
                         $difference,
-                        $endorsementBonus,
                         $onchainBonus,
                         $contributionBonus,
                         $penaltyAdjustment
@@ -314,10 +307,6 @@ class PageScore {
     
     public function getEndorsementCount(): int {
         return $this->endorsementCount;
-    }
-
-    public function getEndorsementBonus(): float {
-        return $this->endorsementBonus;
     }
 
     public function getOnchainBonus(): float {
@@ -463,7 +452,6 @@ class PageScore {
      *   last_vote_at: string|null,
      *   last_calculated_at: string|null,
      *   fraud_metadata?: string|null,
-     *   endorsement_bonus?: float|numeric-string|null,
      *   onchain_bonus?: float|numeric-string|null,
      *   contribution_bonus?: float|numeric-string|null,
      *   penalty_adjustment?: float|numeric-string|null,
@@ -485,7 +473,6 @@ class PageScore {
             $row->last_vote_at ? new DateTimeImmutable($row->last_vote_at) : null,
             $row->last_calculated_at ? new DateTimeImmutable($row->last_calculated_at) : null,
             !empty($row->fraud_metadata) ? json_decode($row->fraud_metadata, true) : null,
-            (float) ($row->endorsement_bonus ?? 0.0),
             (float) ($row->onchain_bonus ?? 0.0),
             (float) ($row->contribution_bonus ?? 0.0),
             (float) ($row->penalty_adjustment ?? 0.0),
@@ -511,7 +498,6 @@ class PageScore {
             null,  // last_vote_at
             new DateTimeImmutable(),
             null,  // fraud_metadata
-            0.0,   // endorsement_bonus
             0.0    // onchain_bonus
         );
     }
@@ -539,7 +525,6 @@ class PageScore {
             'confidence_score' => $this->confidenceScore,
             'reputation_tier' => $this->reputationTier,
             'endorsement_count' => $this->endorsementCount,
-            'endorsement_bonus' => $this->endorsementBonus,
             'onchain_bonus' => $this->onchainBonus,
             'last_vote_at' => $this->lastVoteAt?->format('Y-m-d H:i:s'),
             'last_calculated_at' => $this->lastCalculatedAt->format('Y-m-d H:i:s'),
@@ -573,7 +558,6 @@ class PageScore {
             'fraud_alert_count' => $this->getFraudAlertCount(),
             'is_highly_trusted' => $this->isHighlyTrusted(),
             'is_risky' => $this->isRisky(),
-            'endorsement_bonus' => round($this->endorsementBonus, 2),
             'onchain_bonus' => round($this->onchainBonus, 2),
         ];
     }

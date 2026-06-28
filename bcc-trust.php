@@ -242,6 +242,11 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-orphans.php';
 // bcc_trust_legacy_indexes_trimmed; non-destructive. Dev DBs pre-marked at
 // staging so the local dups are left alone.
 require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-indexes.php';
+// Slice E follow-up: drops the retired endorsement_bonus column from both score
+// tables (code refs removed this release; formula already excluded it). Guarded
+// by bcc_trust_endorsement_bonus_dropped + per-table column-existence; no-op once
+// done / on fresh installs.
+require_once BCC_TRUST_PATH . 'includes/database/drop-endorsement-bonus.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**
@@ -1424,78 +1429,6 @@ add_action('init', function () {
     }
 }, 20);
 
-/*
-|--------------------------------------------------------------------------
-| Slice E cutover — one-time endorsement_bonus retirement
-|--------------------------------------------------------------------------
-|
-| The vouch reaction now feeds attestation_bonus (via the attestation
-| layer) instead of the legacy endorsement_bonus term, which has been
-| removed from the canonical formula (TrustScoreService). This one-time,
-| option-gated task:
-|   (a) zeros endorsement_bonus on every score row that still carries it
-|       and recomputes total_score + reputation_tier under the new
-|       formula (ScoreRepository::retireEndorsementBonus — §1, the
-|       $wpdb lives in the repo);
-|   (b) recomputes attestation_bonus for every target that holds an
-|       active attestation, so any migrated post_vouch backing folds in
-|       immediately. Mirrors the daily decay cron handler: paginated,
-|       per-target try/catch, fire-and-forget.
-|
-| No double-count: the formula already excludes endorsement_bonus, so
-| attestation_bonus is the only backing term after this runs. Hooked at
-| priority 20 (Plugin is wired by then). Self-disables via its option.
-*/
-add_action('init', static function (): void {
-    if (get_option('bcc_trust_endorsement_bonus_retired')) {
-        return;
-    }
-
-    try {
-        $plugin = \BCC\Trust\Core\Plugin::instance();
-
-        // (a) Zero the retired column + recompute total under the new formula.
-        $plugin->scoreRepository()->retireEndorsementBonus();
-
-        // (b) Re-synthesize attestation_bonus for all active-attestation
-        // targets so migrated post_vouch backing folds in now. Mirrors
-        // bcc_trust_daily_attestation_decay's paginated per-target loop.
-        $repo      = $plugin->attestationRepository();
-        $synthesis = $plugin->attestationScoreSynthesis();
-        $offset     = 0;
-        $batch      = 500;
-        $maxBatches = 200; // safety bound — up to 100k targets.
-
-        for ($i = 0; $i < $maxBatches; $i++) {
-            $targets = $repo->listTargetsWithActiveAttestations($offset, $batch);
-            if ($targets === []) {
-                break;
-            }
-            foreach ($targets as $t) {
-                try {
-                    $synthesis->recomputeFor($t->target_kind, (int) $t->target_id);
-                } catch (\Throwable $e) {
-                    \BCC\Core\Observability\DegradationMetrics::record(
-                        'attestation_synthesis',
-                        'endorsement_retire_recompute_failed'
-                    );
-                }
-            }
-            if (count($targets) < $batch) {
-                break;
-            }
-            $offset += $batch;
-        }
-
-        update_option('bcc_trust_endorsement_bonus_retired', time(), false);
-    } catch (\Throwable $e) {
-        // Leave the option unset so the task retries next request rather
-        // than half-completing. Log + drop.
-        \BCC\Core\Log\Logger::warning('[bcc-trust] endorsement_bonus retirement task failed', [
-            'error' => $e->getMessage(),
-        ]);
-    }
-}, 20);
 
 /*
 |--------------------------------------------------------------------------

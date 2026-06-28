@@ -34,7 +34,6 @@ if (!defined('ABSPATH')) {
  *   page_owner_id: int|numeric-string,
  *   total_score: float|numeric-string,
  *   onchain_bonus: float|numeric-string,
- *   endorsement_bonus: float|numeric-string,
  *   positive_score: float|numeric-string,
  *   negative_score: float|numeric-string,
  *   vote_count: int|numeric-string,
@@ -52,7 +51,7 @@ if (!defined('ABSPATH')) {
 class ScoreRepository {
 
     /** Explicit column list for bcc_trust_scores table. */
-    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, endorsement_bonus, contribution_bonus, penalty_adjustment, attestation_bonus, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
+    private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, contribution_bonus, penalty_adjustment, attestation_bonus, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
 
     private string $table;
 
@@ -349,7 +348,6 @@ class ScoreRepository {
                 case 'positive_score':
                 case 'negative_score':
                 case 'confidence_score':
-                case 'endorsement_bonus':
                 case 'onchain_bonus':
                     $formats[] = '%f';
                     break;
@@ -442,13 +440,13 @@ class ScoreRepository {
         $now           = current_time('mysql');
 
         // ON DUPLICATE KEY UPDATE targets the composite PK (page_id, category_id).
-        // INSERT path: new page gets endorsement_bonus=0, onchain_bonus=0.
-        // UPDATE path: endorsement_bonus and onchain_bonus are preserved (not in SET).
+        // INSERT path: new page gets onchain_bonus=0.
+        // UPDATE path: onchain_bonus is preserved (not in SET).
         //
         // NOTE: The INSERT total_score formula must mirror
         // TrustScoreService::formulaSql(). It uses literal 0.0 for
-        // endorsement_bonus + onchain_bonus because column references
-        // are unavailable inside VALUES on a new row.
+        // onchain_bonus because column references are unavailable inside
+        // VALUES on a new row.
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
         // Recompute reputation_tier inline on the delta path so it never lags
@@ -463,13 +461,13 @@ class ScoreRepository {
                      positive_score, negative_score, total_score,
                      vote_count, unique_voters,
                      confidence_score, reputation_tier, endorsement_count,
-                     endorsement_bonus, onchain_bonus,
+                     onchain_bonus,
                      last_vote_at, last_calculated_at)
                  VALUES (%d, %d, %d, %f, %f,
-                     LEAST(100, GREATEST(0, 50 + (%f - %f) * 2 + 0.0 + 0.0)),
+                     LEAST(100, GREATEST(0, 50 + (%f - %f) * 2 + 0.0)),
                      1, %d,
                      0.0, 'neutral', 0,
-                     0.0, 0.0,
+                     0.0,
                      %s, %s)
                  ON DUPLICATE KEY UPDATE
                      positive_score     = positive_score  + VALUES(positive_score),
@@ -793,80 +791,6 @@ class ScoreRepository {
     }
 
     /**
-     * Recompute endorsement_bonus from the endorsements table (source of truth)
-     * and update total_score atomically.
-     *
-     * This is the AUTHORITATIVE derivation path.  It is called during
-     * recalculation (cron, repair, manual) to set endorsement_bonus from
-     * the actual sum of active endorsement weights.
-     *
-     * The real-time path (applyEndorsementBonus / removeEndorsementBonus)
-     * now also uses absolute derivation via deriveAndWriteEndorsementBonus(),
-     * so both paths are idempotent and race-free.
-     *
-     * @param int $pageId
-     * @return float  The recomputed endorsement_bonus value.
-     */
-    /**
-     * Recompute endorsement_bonus from the endorsements table (source of truth)
-     * and update total_score atomically.
-     *
-     * This is the AUTHORITATIVE derivation path.  It is called by the admin
-     * repair tool and one-off corrections.  It should NOT be called from the
-     * cron recalculation loop — recalculateScore() already derives
-     * endorsement_bonus inside its FOR UPDATE transaction and writing it a
-     * second time outside that transaction creates a TOCTOU race with live
-     * EndorsementService calls (which now also use absolute derivation).
-     *
-     * To prevent races when called standalone, this method wraps the
-     * read + write in a transaction with FOR UPDATE on the scores row.
-     *
-     * @param int $pageId
-     * @return float  The recomputed endorsement_bonus value.
-     */
-    public function recomputeEndorsementBonus(int $pageId): float {
-        global $wpdb;
-
-        $endorsementsTable = \BCC\Trust\Core\Database\TableRegistry::endorsements();
-        $totalScoreSql     = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $table             = $this->table;
-
-        return \BCC\Trust\Core\Security\TransactionManager::run(function () use (
-            $wpdb, $pageId, $endorsementsTable, $totalScoreSql, $table
-        ) {
-            // Lock the score row to prevent concurrent delta-based writes
-            // (applyEndorsementBonus, applyVoteDelta, applyBonus) from
-            // landing between our SUM read and our UPDATE write.
-            $wpdb->get_row($wpdb->prepare(
-                "SELECT page_id FROM {$table} WHERE page_id = %d FOR UPDATE",
-                $pageId
-            ));
-
-            // Read endorsement weights under the lock.
-            $trueBonus = (float) $wpdb->get_var($wpdb->prepare(
-                "SELECT COALESCE(SUM(weight), 0) FROM {$endorsementsTable}
-                 WHERE page_id = %d AND status = 1",
-                $pageId
-            ));
-
-            $now = current_time('mysql');
-
-            $wpdb->query($wpdb->prepare(
-                "UPDATE {$table}
-                 SET endorsement_bonus  = %f,
-                     total_score        = {$totalScoreSql},
-                     last_calculated_at = %s
-                 WHERE page_id = %d",
-                $trueBonus,
-                $now,
-                $pageId
-            ));
-
-            return $trueBonus;
-        });
-    }
-
-    /**
      * Create default score for a new page.
      *
      * Delegates to createIfNotExists() which uses INSERT IGNORE — the
@@ -913,11 +837,11 @@ class ScoreRepository {
                 (page_id, category_id, page_owner_id, total_score,
                  positive_score, negative_score, vote_count, unique_voters,
                  confidence_score, reputation_tier, endorsement_count,
-                 endorsement_bonus, onchain_bonus, contribution_bonus, penalty_adjustment, last_calculated_at)
+                 onchain_bonus, contribution_bonus, penalty_adjustment, last_calculated_at)
              VALUES (%d, 0, %d, %f,
                      0.0, 0.0, 0, 0,
                      0.0, 'neutral', 0,
-                     0.0, 0.0, 0.0, 0.0, %s)",
+                     0.0, 0.0, 0.0, %s)",
             $pageId,
             $ownerId,
             $neutralScore,
@@ -974,7 +898,7 @@ class ScoreRepository {
 
         $results = $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT s.page_id, s.category_id, s.page_owner_id, s.total_score, s.onchain_bonus, s.endorsement_bonus, s.positive_score, s.negative_score, s.vote_count, s.unique_voters, s.confidence_score, s.reputation_tier, s.endorsement_count, s.last_vote_at, s.last_calculated_at, s.fraud_metadata, s.recalculate_required, p.post_title
+                "SELECT s.page_id, s.category_id, s.page_owner_id, s.total_score, s.onchain_bonus, s.positive_score, s.negative_score, s.vote_count, s.unique_voters, s.confidence_score, s.reputation_tier, s.endorsement_count, s.last_vote_at, s.last_calculated_at, s.fraud_metadata, s.recalculate_required, p.post_title
                  FROM {$this->table} s
                  LEFT JOIN {$wpdb->posts} p ON s.page_id = p.ID
                  WHERE s.page_owner_id = %d
@@ -1075,7 +999,7 @@ class ScoreRepository {
     /**
      * Write a member self-page's `contribution_bonus` (the "Trust Recovery
      * Through Contribution" term, Architecture A) and recompute total_score
-     * via the canonical formula. Unlike endorsement_bonus this is an absolute
+     * via the canonical formula. This is an absolute
      * value computed upstream (ContributionRecoveryEvaluator) and clamped
      * before it reaches here. Locks the score row FOR UPDATE to serialise with
      * concurrent vote/endorsement deltas; safe inside an existing transaction.
@@ -1254,7 +1178,7 @@ class ScoreRepository {
                  last_calculated_at = %s
              WHERE page_id = %d
                AND vote_count = 0 AND positive_score = 0 AND negative_score = 0
-               AND endorsement_bonus = 0 AND contribution_bonus = 0 AND penalty_adjustment = 0",
+               AND contribution_bonus = 0 AND penalty_adjustment = 0",
             $positive,
             $negative,
             $now,
@@ -2027,7 +1951,7 @@ class ScoreRepository {
         foreach (array_keys($data) as $field) {
             $formats[] = match ($field) {
                 'total_score', 'positive_score', 'negative_score',
-                'confidence_score', 'endorsement_bonus', 'onchain_bonus' => '%f',
+                'confidence_score', 'onchain_bonus' => '%f',
                 'vote_count', 'unique_voters', 'endorsement_count' => '%d',
                 default => '%s',
             };
@@ -2310,7 +2234,7 @@ class ScoreRepository {
      * Set a bonus column and recompute total_score atomically.
      *
      * @param int    $pageId  Target page.
-     * @param string $column  Bonus column name (must be 'onchain_bonus' or 'endorsement_bonus').
+     * @param string $column  Bonus column name (must be 'onchain_bonus').
      * @param float  $value   New value for the bonus column.
      * @return bool True on success, false on failure.
      */
@@ -2319,7 +2243,7 @@ class ScoreRepository {
         global $wpdb;
 
         // Whitelist columns to prevent SQL injection
-        $allowed = ['onchain_bonus', 'endorsement_bonus'];
+        $allowed = ['onchain_bonus'];
         if (!in_array($column, $allowed, true)) {
             return false;
         }
@@ -2360,44 +2284,6 @@ class ScoreRepository {
             return true;
         }
         return false;
-    }
-
-    /**
-     * One-time Slice E retirement: zero endorsement_bonus on every score
-     * row that still carries it, and recompute total_score +
-     * reputation_tier under the new canonical formula (which no longer
-     * sums endorsement_bonus). Returns the number of rows changed.
-     *
-     * §1 — the retirement UPDATE lives in the repository (no $wpdb in
-     * the bootstrap task). No double-count risk: the formula already
-     * excludes endorsement_bonus, so zeroing the column + recomputing
-     * under formulaSql() is the clean cutover. Bounded by the natural
-     * WHERE endorsement_bonus <> 0 predicate — only rows that actually
-     * carried a bonus are touched.
-     */
-    public function retireEndorsementBonus(): int
-    {
-        global $wpdb;
-
-        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
-        $now           = current_time('mysql');
-
-        // endorsement_bonus is SET to 0 in the same statement that
-        // recomputes total_score; because formulaSql() no longer
-        // references endorsement_bonus, the recompute reflects the
-        // retired term regardless of SET ordering.
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table}
-             SET endorsement_bonus  = 0,
-                 total_score        = {$totalScoreSql},
-                 reputation_tier    = {$tierSql},
-                 last_calculated_at = %s
-             WHERE endorsement_bonus <> 0",
-            $now
-        ));
-
-        return is_int($result) ? $result : 0;
     }
 
     /**

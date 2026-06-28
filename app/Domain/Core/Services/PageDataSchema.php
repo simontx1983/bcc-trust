@@ -79,9 +79,8 @@ class PageDataSchema {
                 'positive'          => 0.0,  // float  Weighted positive vote score
                 'negative'          => 0.0,  // float  Weighted negative vote score
                 'net'               => 0.0,  // float  positive − negative
-                'endorsement_bonus' => 0.0,  // float  Bonus from endorsements
                 'onchain_bonus'     => 0.0,  // float  Bonus from on-chain verification
-                'community_weight'  => 0.5,  // float  0.0–1.0 proportion of score from votes + endorsements
+                'community_weight'  => 0.5,  // float  0.0–1.0 proportion of score from votes
                 'identity_weight'   => 0.5,  // float  0.0–1.0 proportion from verifications + on-chain (always 1 − community_weight)
             ],
         ],

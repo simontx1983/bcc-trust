@@ -237,10 +237,11 @@ final class Plugin
     {
         // Slice E cutover: the write surface (endorsePage / vouch / bonus
         // application) is retired. Only the read / eligibility / hydration
-        // / vesting reads remain, so the service now depends solely on
-        // UserInfoRepository (the fraud-gate read in evaluateViewerEndorseGates).
+        // / vesting reads remain. The can_endorse eligibility gate is now
+        // vouch-aligned, so the service depends on AttestationService (the
+        // vouch tier gate in resolveViewerVouchGate).
         return $this->endorsementService ??= new EndorsementService(
-            $this->userInfoRepository()
+            $this->attestationService()
         );
     }
 

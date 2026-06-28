@@ -185,7 +185,6 @@ function bcc_trust_render_debug_page() {
             esc_attr($tierColor), $score['total_score'], esc_html(ucfirst($score['reputation_tier'])), $check),
         __('Positive', 'bcc-trust')    => round($score['positive_score'], 2),
         __('Negative', 'bcc-trust')    => round($score['negative_score'], 2),
-        __('Endorsement Bonus', 'bcc-trust') => '+' . round($score['endorsement_bonus'], 2),
         __('On-chain Bonus', 'bcc-trust')    => '+' . round($score['onchain_bonus'], 2),
         __('Confidence', 'bcc-trust')  => ($score['confidence_percentage'] ?? 0) . '%',
         __('Votes / Unique', 'bcc-trust') => $score['vote_count'] . ' / ' . $score['unique_voters'],

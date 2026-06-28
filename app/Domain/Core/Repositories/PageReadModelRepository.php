@@ -37,7 +37,6 @@ if (!defined('ABSPATH')) {
  *   positive_score: float|numeric-string,
  *   negative_score: float|numeric-string,
  *   onchain_bonus: float|numeric-string,
- *   endorsement_bonus: float|numeric-string,
  *   attestation_bonus: float|numeric-string,
  *   vote_count: int|numeric-string,
  *   unique_voters: int|numeric-string,
@@ -65,7 +64,7 @@ class PageReadModelRepository
 
     /** @var string Explicit column list — must match schema-project.php. */
     private const COLUMNS = 'page_id, owner_id, trust_score, reputation_tier, confidence_score,
-                 positive_score, negative_score, onchain_bonus, endorsement_bonus, attestation_bonus,
+                 positive_score, negative_score, onchain_bonus, attestation_bonus,
                  vote_count, unique_voters, endorsement_count, follower_count,
                  page_type, is_verified, github_username, github_followers,
                  x_username, x_followers, has_wallet, last_vote_at, last_endorsement_at, updated_at';
@@ -231,7 +230,7 @@ class PageReadModelRepository
         $score = $wpdb->get_row($wpdb->prepare(
             "SELECT total_score, reputation_tier, confidence_score,
                     positive_score, negative_score, onchain_bonus,
-                    endorsement_bonus, attestation_bonus, vote_count, unique_voters,
+                    attestation_bonus, vote_count, unique_voters,
                     endorsement_count, page_owner_id, last_vote_at
              FROM {$scores_table}
              WHERE page_id = %d AND category_id = 0
@@ -243,7 +242,7 @@ class PageReadModelRepository
             $score = $wpdb->get_row($wpdb->prepare(
                 "SELECT total_score, reputation_tier, confidence_score,
                         positive_score, negative_score, onchain_bonus,
-                        endorsement_bonus, attestation_bonus, vote_count, unique_voters,
+                        attestation_bonus, vote_count, unique_voters,
                         endorsement_count, page_owner_id, last_vote_at
                  FROM {$scores_table}
                  WHERE page_id = %d AND vote_count > 0
@@ -332,11 +331,11 @@ class PageReadModelRepository
         $wpdb->query($wpdb->prepare(
             "INSERT INTO {$this->table}
                 (page_id, owner_id, trust_score, reputation_tier, confidence_score,
-                 positive_score, negative_score, onchain_bonus, endorsement_bonus, attestation_bonus,
+                 positive_score, negative_score, onchain_bonus, attestation_bonus,
                  vote_count, unique_voters, endorsement_count, follower_count,
                  page_type, is_verified, github_username, github_followers,
                  x_username, x_followers, has_wallet, last_vote_at, last_endorsement_at, updated_at)
-             VALUES (%d, %d, %f, %s, %f, %f, %f, %f, %f, %f, %d, %d, %d, %d, %s, %d, %s, %d, %s, %d, %d, %s, %s, NOW())
+             VALUES (%d, %d, %f, %s, %f, %f, %f, %f, %f, %d, %d, %d, %d, %s, %d, %s, %d, %s, %d, %d, %s, %s, NOW())
              ON DUPLICATE KEY UPDATE
                 owner_id            = VALUES(owner_id),
                 trust_score         = VALUES(trust_score),
@@ -345,7 +344,6 @@ class PageReadModelRepository
                 positive_score      = VALUES(positive_score),
                 negative_score      = VALUES(negative_score),
                 onchain_bonus       = VALUES(onchain_bonus),
-                endorsement_bonus   = VALUES(endorsement_bonus),
                 attestation_bonus   = VALUES(attestation_bonus),
                 vote_count          = VALUES(vote_count),
                 unique_voters       = VALUES(unique_voters),
@@ -369,7 +367,6 @@ class PageReadModelRepository
             $score ? (float) ($score->positive_score ?? 0) : 0.00,
             $score ? (float) ($score->negative_score ?? 0) : 0.00,
             $score ? (float) ($score->onchain_bonus ?? 0) : 0.00,
-            $score ? (float) ($score->endorsement_bonus ?? 0) : 0.00,
             $score ? (float) ($score->attestation_bonus ?? 0) : 0.00,
             $score ? (int) $score->vote_count : 0,
             $score ? (int) $score->unique_voters : 0,

@@ -50,7 +50,7 @@ class TrustDebugService
 
         $scoreData = $score ? $score->toApiResponse() : [
             'total_score' => BCC_TRUST_NEUTRAL_SCORE, 'positive_score' => 0, 'negative_score' => 0,
-            'endorsement_bonus' => 0, 'onchain_bonus' => 0, 'confidence_score' => 0,
+            'onchain_bonus' => 0, 'confidence_score' => 0,
             'reputation_tier' => 'neutral', 'vote_count' => 0, 'unique_voters' => 0,
             'endorsement_count' => 0,
         ];
@@ -60,7 +60,6 @@ class TrustDebugService
         $expectedTotal = PageScore::computeExpectedTotal(
             (float) $scoreData['positive_score'],
             (float) $scoreData['negative_score'],
-            (float) $scoreData['endorsement_bonus'],
             (float) $scoreData['onchain_bonus']
         );
         $scoreData['formula_check']    = abs($scoreData['total_score'] - round($expectedTotal, 1)) <= PageScore::SCORE_TOLERANCE;

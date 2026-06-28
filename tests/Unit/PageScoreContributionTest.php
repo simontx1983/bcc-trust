@@ -12,19 +12,23 @@ use PHPUnit\Framework\TestCase;
  * Locks the contribution_bonus term added to the canonical trust-score
  * formula (Architecture A — a member's tier is their self-page's total_score,
  * which now includes contribution). Pure: no DB, no WP.
+ *
+ * compute() / PageScore signatures: the retired endorsement_bonus param was
+ * removed (Slice E follow-up); positions are now
+ * (positive, negative, onchain, contribution, penalty, attestation).
  */
 final class PageScoreContributionTest extends TestCase
 {
     public function testComputeAddsTheContributionTerm(): void
     {
         // Default (entity pages) — contribution defaults 0, formula unchanged.
-        self::assertSame(50.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0));
+        self::assertSame(50.0, TrustScoreService::compute(0.0, 0.0, 0.0));
         // The new term lifts the score…
-        self::assertSame(58.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, 8.0));
+        self::assertSame(58.0, TrustScoreService::compute(0.0, 0.0, 0.0, 8.0));
         // …alongside votes + the other bonuses…
-        self::assertSame(78.0, TrustScoreService::compute(10.0, 0.0, 0.0, 0.0, 8.0));
+        self::assertSame(78.0, TrustScoreService::compute(10.0, 0.0, 0.0, 8.0));
         // …and is still clamped to [0, 100].
-        self::assertSame(100.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, 200.0));
+        self::assertSame(100.0, TrustScoreService::compute(0.0, 0.0, 0.0, 200.0));
     }
 
     public function testFormulaSqlIncludesContributionBonus(): void
@@ -35,13 +39,13 @@ final class PageScoreContributionTest extends TestCase
     public function testComputeSubtractsThePenaltyTerm(): void
     {
         // penalty_adjustment is negative (dispute/admin penalties subtract).
-        self::assertSame(45.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, 0.0, -5.0));
+        self::assertSame(45.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, -5.0));
         // Stacks with votes + the other terms…
-        self::assertSame(73.0, TrustScoreService::compute(10.0, 0.0, 0.0, 0.0, 8.0, -5.0));
+        self::assertSame(73.0, TrustScoreService::compute(10.0, 0.0, 0.0, 8.0, -5.0));
         // …and is still clamped to [0, 100] (a big penalty floors at 0).
-        self::assertSame(0.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, 0.0, -200.0));
+        self::assertSame(0.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, -200.0));
         // Default 0 leaves the formula unchanged (entity pages never penalised).
-        self::assertSame(50.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+        self::assertSame(50.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, 0.0));
     }
 
     public function testFormulaSqlIncludesPenaltyAdjustment(): void
@@ -54,7 +58,7 @@ final class PageScoreContributionTest extends TestCase
         // total 45 = 50 + 0 + (-5 penalty) — must validate.
         $score = new PageScore(
             1_000_000_004, 4, 45.0, 0.0, 0.0, 0, 0, 0.0, 'neutral',
-            0, null, null, null, 0.0, 0.0, 0.0, -5.0
+            0, null, null, null, 0.0, 0.0, -5.0
         );
         self::assertSame(-5.0, $score->getPenaltyAdjustment());
         self::assertSame(45.0, $score->getTotalScore());
@@ -66,7 +70,7 @@ final class PageScoreContributionTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         new PageScore(
             1_000_000_004, 4, 50.0, 0.0, 0.0, 0, 0, 0.0, 'neutral',
-            0, null, null, null, 0.0, 0.0, 0.0, -5.0
+            0, null, null, null, 0.0, 0.0, -5.0
         );
     }
 
@@ -85,7 +89,7 @@ final class PageScoreContributionTest extends TestCase
 
     public function testPageScoreCarriesContributionAndPassesTheFormulaCheck(): void
     {
-        // total 78 = 50 + (10-0)*2 + 0 + 0 + 8(contribution) — must validate.
+        // total 78 = 50 + (10-0)*2 + 0 + 8(contribution) — must validate.
         $score = new PageScore(
             1_000_000_005, // a self-page id (member 5)
             5,
@@ -100,7 +104,6 @@ final class PageScoreContributionTest extends TestCase
             null,          // last_vote_at
             null,          // last_calculated_at
             null,          // fraud_metadata
-            0.0,           // endorsement_bonus
             0.0,           // onchain_bonus
             8.0            // contribution_bonus
         );
@@ -116,7 +119,7 @@ final class PageScoreContributionTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         new PageScore(
             1_000_000_005, 5, 70.0, 10.0, 0.0, 1, 1, 0.0, 'neutral',
-            0, null, null, null, 0.0, 0.0, 8.0
+            0, null, null, null, 0.0, 8.0
         );
     }
 }
