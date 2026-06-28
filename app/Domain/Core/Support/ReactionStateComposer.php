@@ -5,8 +5,9 @@
  *
  * Extracted from ReactionsEndpoint::buildStateResponse (§11 reuse) so
  * StokeEndpoint can return the identical kind_grammar/counts/
- * viewer_reaction trio alongside its own heat_stage/viewer_stoke_count
- * fields, without re-implementing the count/viewer-reaction lookup.
+ * viewer_reaction trio alongside its own heat_stage/viewer_has_stoked/
+ * stoke_count fields, without re-implementing the count/viewer-reaction
+ * lookup.
  *
  * @package BCC\Trust\Core\Support
  */

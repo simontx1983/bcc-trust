@@ -11,10 +11,16 @@ use ReflectionMethod;
 
 /**
  * Unit tests for StokeRepository::stageForScore() — the pure threshold
- * lookup that turns a velocity score (SUM of capped per-stoker
- * stoke_count within the decay window) into a 1-5 heat_stage. Exercised
- * via reflection (private static, no DB dependency) — same pattern as
- * CosmosVerifierTest in bcc-core.
+ * lookup that turns a velocity score (COUNT(*) of distinct stokers
+ * within the decay window — one stoke per person, no per-user
+ * weighting) into a 1-5 heat_stage. Exercised via reflection (private
+ * static, no DB dependency) — same pattern as CosmosVerifierTest in
+ * bcc-core.
+ *
+ * DB-backed idempotency/unique-key/shape coverage for addStoke/
+ * removeStoke/viewerHasStoked/countForActivity lives in
+ * tests/Integration/StokeRepositoryIntegrationTest.php — this file
+ * stays DB-free per the Unit-tier convention.
  */
 #[CoversMethod(StokeRepository::class, 'stageForScore')]
 final class StokeRepositoryTest extends TestCase

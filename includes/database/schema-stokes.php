@@ -2,13 +2,19 @@
 /**
  * Stoke Table Schema
  *
- * One row per (act_id, user_id). `stoke_count` accumulates up to
- * BCC_STOKE_CAP_PER_USER (server-enforced in StokeRepository's upsert,
- * not by a column constraint) — this is why Stoke needs its own table
- * rather than reusing PeepSo's peepso_reactions: that table's unique
- * (reaction_act_id, reaction_user_id) key models "one reaction, set/
- * replace", not "tap N times, accumulate, cap." Cosmetic for trust —
- * never written to bcc_trust_scores.
+ * One row per (act_id, user_id) — `uq_act_user` makes the row's mere
+ * existence the stoke: one per person, X-"like" semantics. `stoke_count`
+ * is a vestigial always-1 column (StokeRepository inserts it once via
+ * INSERT IGNORE and never increments it — see that class's docblock);
+ * kept rather than dropped via an ALTER TABLE since presence/COUNT(*)
+ * is now the actual signal, not the column's value.
+ *
+ * Still its own table rather than reusing PeepSo's peepso_reactions:
+ * that table's unique (reaction_act_id, reaction_user_id) key models
+ * "one reaction, set/replace" and is read-only from bcc-trust's side
+ * (PeepSo owns the write path) — Stoke needs its own write path that
+ * bcc-trust owns outright, isolated from the existing reaction grammar.
+ * Cosmetic for trust — never written to bcc_trust_scores.
  *
  * @package BCC\Trust\Core
  */

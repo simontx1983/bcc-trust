@@ -2,12 +2,17 @@
 /**
  * Stoke Repository
  *
- * Owns reads + writes against `bcc_trust_stokes` (one row per
- * act_id/user_id, `stoke_count` capped server-side). Combined
- * read+write in one repository, matching this codebase's convention
- * for simple per-user-per-target signal tables (see PageFlagRepository)
- * — unlike PeepSoReactionRepository, which is read-only because PeepSo
- * owns that table's write path; bcc-trust owns this one outright.
+ * Owns reads + writes against `bcc_trust_stokes` — one row per
+ * (act_id, user_id), enforced by a unique key, so the row's mere
+ * existence IS the stoke (X-"like" model: one stoke per person, no
+ * counter). `stoke_count` is a vestigial always-1 column kept from the
+ * original accumulate-and-cap design rather than dropped in an ALTER
+ * TABLE — every read here now treats presence/COUNT(*) as the signal,
+ * not the column's value. Combined read+write in one repository,
+ * matching this codebase's convention for simple per-user-per-target
+ * signal tables (see PageFlagRepository) — unlike PeepSoReactionRepository,
+ * which is read-only because PeepSo owns that table's write path;
+ * bcc-trust owns this one outright.
  *
  * Stoke is cosmetic for trust — this class never touches
  * bcc_trust_scores or any trust-score write path.
@@ -33,12 +38,13 @@ class StokeRepository
     }
 
     /**
-     * Add one stoke from $userId on $actId. Atomic upsert: the
-     * `IF(stoke_count < cap, ...)` clause enforces the per-user cap
-     * server-side in a single statement, so concurrent taps from the
-     * same user can't race past it.
+     * Add $userId's one stoke on $actId. Idempotent insert: the unique
+     * key on (act_id, user_id) means a second POST from the same user
+     * just hits the duplicate and no-ops (INSERT IGNORE) rather than
+     * accumulating — one stoke per person, X-"like" semantics, not a
+     * counter anymore.
      *
-     * @return bool True on success (including the no-op-at-cap case).
+     * @return bool True on success (including the already-stoked no-op).
      */
     public function addStoke(int $actId, int $userId): bool
     {
@@ -47,21 +53,14 @@ class StokeRepository
         }
 
         global $wpdb;
-        $cap = (int) BCC_STOKE_CAP_PER_USER;
         $now = current_time('mysql', true);
 
         $result = $wpdb->query($wpdb->prepare(
-            "INSERT INTO {$this->table} (act_id, user_id, stoke_count, last_stoked_at, created_at)
-                  VALUES (%d, %d, 1, %s, %s)
-             ON DUPLICATE KEY UPDATE
-                  stoke_count    = IF(stoke_count < %d, stoke_count + 1, stoke_count),
-                  last_stoked_at = IF(stoke_count < %d, %s, last_stoked_at)",
+            "INSERT IGNORE INTO {$this->table} (act_id, user_id, stoke_count, last_stoked_at, created_at)
+                  VALUES (%d, %d, 1, %s, %s)",
             $actId,
             $userId,
             $now,
-            $now,
-            $cap,
-            $cap,
             $now
         ));
 
@@ -69,8 +68,9 @@ class StokeRepository
     }
 
     /**
-     * Remove one stoke from $userId on $actId. Floors at 0 — idempotent
-     * when the viewer has no stokes (or the row doesn't exist) on this act.
+     * Remove $userId's stoke on $actId. Deletes the row outright (one
+     * stoke per person — there's no count to decrement anymore).
+     * Idempotent: no-op when the viewer has no stoke on this act.
      */
     public function removeStoke(int $actId, int $userId): bool
     {
@@ -80,43 +80,45 @@ class StokeRepository
 
         global $wpdb;
 
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table}
-                SET stoke_count = GREATEST(stoke_count - 1, 0)
-              WHERE act_id = %d AND user_id = %d",
-            $actId,
-            $userId
-        ));
+        $result = $wpdb->delete(
+            $this->table,
+            ['act_id' => $actId, 'user_id' => $userId],
+            ['%d', '%d']
+        );
 
         return $result !== false;
     }
 
     /**
-     * This viewer's current stoke_count on one activity (0 if none).
+     * Does $userId have a stoke on $actId. Drives the rail's fill
+     * (ash <-> orange) — the personal axis, orthogonal to heat_stage.
      */
-    public function viewerStokeCount(int $actId, int $userId): int
+    public function viewerHasStoked(int $actId, int $userId): bool
     {
         if ($actId <= 0 || $userId <= 0) {
-            return 0;
+            return false;
         }
 
         global $wpdb;
 
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT stoke_count FROM {$this->table} WHERE act_id = %d AND user_id = %d",
+        $exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT 1 FROM {$this->table} WHERE act_id = %d AND user_id = %d LIMIT 1",
             $actId,
             $userId
         ));
+
+        return $exists !== null;
     }
 
     /**
-     * Batched form of viewerStokeCount for feed-page hydration.
+     * Batched form of viewerHasStoked for feed-page hydration.
      *
      * @param list<int> $actIds
-     * @return array<int, int> act_id => stoke_count. Activities the
-     *   viewer hasn't stoked are absent — callers default to 0.
+     * @return array<int, true> act_id => true for every activity this
+     *   viewer has stoked. Activities absent from the map mean false —
+     *   callers default missing entries to false.
      */
-    public function viewerStokesByActIds(int $viewerId, array $actIds): array
+    public function viewerStokedActIds(int $viewerId, array $actIds): array
     {
         if ($viewerId <= 0 || $actIds === []) {
             return [];
@@ -131,7 +133,7 @@ class StokeRepository
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT act_id, stoke_count FROM {$this->table}
+            "SELECT act_id FROM {$this->table}
               WHERE user_id = %d AND act_id IN ({$idList})",
             $viewerId
         ));
@@ -140,7 +142,63 @@ class StokeRepository
         foreach ($rows ?: [] as $row) {
             $actId = (int) $row->act_id;
             if ($actId > 0) {
-                $out[$actId] = (int) $row->stoke_count;
+                $out[$actId] = true;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Total distinct stokers on one activity (the public count shown
+     * beside the flame). All-time — unlike heat_stage, this never decays.
+     */
+    public function countForActivity(int $actId): int
+    {
+        if ($actId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table} WHERE act_id = %d",
+            $actId
+        ));
+    }
+
+    /**
+     * Batched form of countForActivity for feed-page hydration.
+     *
+     * @param list<int> $actIds
+     * @return array<int, int> act_id => total distinct stokers.
+     *   Activities with zero stokes are absent — callers default to 0.
+     */
+    public function countsByActIds(array $actIds): array
+    {
+        if ($actIds === []) {
+            return [];
+        }
+
+        $ids = self::cleanIds($actIds);
+        if ($ids === []) {
+            return [];
+        }
+        $idList = implode(',', $ids);
+
+        global $wpdb;
+
+        $rows = $wpdb->get_results(
+            "SELECT act_id, COUNT(*) AS total
+               FROM {$this->table}
+              WHERE act_id IN ({$idList})
+              GROUP BY act_id"
+        );
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $actId = (int) $row->act_id;
+            if ($actId > 0) {
+                $out[$actId] = (int) $row->total;
             }
         }
         return $out;
@@ -148,11 +206,11 @@ class StokeRepository
 
     /**
      * Batched heat_stage (1-5) for feed-page hydration. Velocity score
-     * is SUM(stoke_count) within the decay window — each row's
-     * stoke_count is already capped per-user, so the sum across rows
-     * IS "distinct stokers × their capped stokes" in aggregate form.
-     * Stage thresholds are config (includes/config/stoke.php),
-     * tunable without a deploy.
+     * is COUNT(*) within the decay window — distinct stokers, recency-
+     * weighted by the window rather than by any single user's repeat
+     * taps (there are none anymore — one stoke per person). Stage
+     * thresholds are config (includes/config/stoke.php), tunable
+     * without a deploy.
      *
      * @param list<int> $actIds
      * @return array<int, int> act_id => heat_stage (1-5). Every
@@ -175,7 +233,7 @@ class StokeRepository
         $since = gmdate('Y-m-d H:i:s', time() - ((int) BCC_STOKE_DECAY_WINDOW_HOURS * HOUR_IN_SECONDS));
 
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT act_id, SUM(stoke_count) AS total
+            "SELECT act_id, COUNT(*) AS total
                FROM {$this->table}
               WHERE act_id IN ({$idList}) AND last_stoked_at >= %s
               GROUP BY act_id",

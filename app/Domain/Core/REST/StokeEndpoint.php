@@ -3,21 +3,23 @@
  * Stoke Endpoint — handles /bcc/v1/feed/{id}/stoke.
  *
  * Routes registered:
- *   - POST   /feed/{id}/stoke — add one stoke (capped server-side, ~5/post)
- *   - DELETE /feed/{id}/stoke — remove one stoke
+ *   - POST   /feed/{id}/stoke — stoke (idempotent: one per person)
+ *   - DELETE /feed/{id}/stoke — un-stoke (idempotent)
  *
  * Both routes are auth-required. Auth is checked inside each handler so
  * unauthenticated requests return the canonical error envelope.
  *
  * Stoke is NOT a reaction-kind write — unlike /reactions (set/replace,
- * one kind per viewer, backed by PeepSo's peepso_reactions), Stoke
- * ACCUMULATES (tap N times, capped), so it's backed by its own
- * bcc_trust_stokes table via StokeRepository rather than
- * PeepSoReactionWriter. It slots into the same surrounding architecture
- * though: same Throttle pattern, same GroupInteractionGate membership
- * check, same bcc_reaction_added-style event-emission convention, and
- * the same response shape (api-contract-v1.md §2.11's reactions block)
- * — extended with `heat_stage` + `viewer_stoke_count`, both additive.
+ * one kind per viewer, backed by PeepSo's peepso_reactions), Stoke is
+ * backed by its own bcc_trust_stokes table via StokeRepository rather
+ * than PeepSoReactionWriter (X-"like" model: one stoke per person, the
+ * row's existence IS the stoke, no accumulate/cap). It slots into the
+ * same surrounding architecture though: same Throttle pattern, same
+ * GroupInteractionGate membership check, same bcc_reaction_added-style
+ * event-emission convention, and the same response shape (api-contract
+ * -v1.md §2.11's reactions block) — extended with `heat_stage` (aggregate
+ * heat) + `viewer_has_stoked` + `stoke_count` (public total), all
+ * additive.
  *
  * Stoke is cosmetic for trust — this endpoint never writes to
  * bcc_trust_scores.
@@ -45,7 +47,7 @@ final class StokeEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
-    /** Per-user-per-minute throttle. Generous — the per-post cap (~5) is the real limiter. */
+    /** Per-user-per-minute throttle. Generous — Stoke is now one-per-post-per-person, not a repeat-tap accumulator. */
     private const STOKE_RATE_LIMIT  = 60;
     private const STOKE_RATE_WINDOW = 60;
 
@@ -141,7 +143,8 @@ final class StokeEndpoint
      * Same `reactions` shape ReactionsEndpoint returns (so the frontend
      * cache patch never drops the legacy kind_grammar/counts/
      * viewer_reaction trio it still carries, even though the rail no
-     * longer renders them), extended with heat_stage + viewer_stoke_count.
+     * longer renders them), extended with heat_stage + viewer_has_stoked
+     * + stoke_count.
      */
     private static function buildStateResponse(int $actId, int $viewerId): WP_REST_Response
     {
@@ -152,8 +155,9 @@ final class StokeEndpoint
 
         $stokeRepo = Plugin::instance()->stokeRepository();
         $heat      = $stokeRepo->heatByActIds([$actId]);
-        $state['heat_stage']          = $heat[$actId] ?? 1;
-        $state['viewer_stoke_count']  = $stokeRepo->viewerStokeCount($actId, $viewerId);
+        $state['heat_stage']        = $heat[$actId] ?? 1;
+        $state['viewer_has_stoked'] = $stokeRepo->viewerHasStoked($actId, $viewerId);
+        $state['stoke_count']       = $stokeRepo->countForActivity($actId);
 
         $response = ApiResponse::ok($state);
         $response->header('Cache-Control', 'no-store');

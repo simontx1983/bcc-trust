@@ -29,9 +29,6 @@ if (!defined('BCC_DISPUTES_TTL_DAYS')) {
 
 // Stoke stage thresholds — StokeRepositoryTest exercises stageForScore()
 // directly via reflection.
-if (!defined('BCC_STOKE_CAP_PER_USER')) {
-    define('BCC_STOKE_CAP_PER_USER', 5);
-}
 if (!defined('BCC_STOKE_DECAY_WINDOW_HOURS')) {
     define('BCC_STOKE_DECAY_WINDOW_HOURS', 48);
 }

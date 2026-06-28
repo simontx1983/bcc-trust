@@ -282,9 +282,9 @@ final class TableRegistry
     }
 
     /**
-     * Stoke accumulator — one row per (act_id, user_id), `stoke_count`
-     * capped server-side at `BCC_STOKE_CAP_PER_USER`. Backs the feed-
-     * ranking `heat_stage` signal; never feeds `bcc_trust_scores`.
+     * Stoke — one row per (act_id, user_id), the row's existence IS the
+     * stoke (one per person). Backs the feed-ranking `heat_stage`
+     * signal and the public `stoke_count`; never feeds `bcc_trust_scores`.
      */
     public static function stokes(): string
     {

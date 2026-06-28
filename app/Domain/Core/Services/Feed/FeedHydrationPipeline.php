@@ -837,11 +837,12 @@ final class FeedHydrationPipeline
      *     kind_grammar: 'trust' | 'social' | 'tribal',
      *     counts: { <kind>: int, ... }      // keys depend on grammar
      *     viewer_reaction: <kind> | null,   // belongs to grammar
-     *     heat_stage: int,                  // 1-5, Stoke — additive, not grammar-gated
-     *     viewer_stoke_count: int           // 0-5, additive
+     *     heat_stage: int,                  // 1-5, Stoke aggregate — additive, not grammar-gated
+     *     viewer_has_stoked: bool,          // Stoke personal axis — additive
+     *     stoke_count: int                  // Stoke public total — additive
      *   }
-     * heat_stage/viewer_stoke_count are Stoke's fields — purely
-     * additive on top of the legacy trio above (the rail stopped
+     * heat_stage/viewer_has_stoked/stoke_count are Stoke's fields —
+     * purely additive on top of the legacy trio above (the rail stopped
      * rendering kind_grammar/counts/viewer_reaction, it didn't remove
      * them from the wire contract).
      *
@@ -909,12 +910,13 @@ final class FeedHydrationPipeline
             : [];
 
         // Stoke (additive — see schema-stokes.php for why this is its
-        // own table rather than a peepso_reactions kind). heat_stage is
-        // public; viewer_stoke_count only needs a query for authed
-        // viewers.
-        $heatByAct = $this->stokeRepo->heatByActIds($actIds);
-        $viewerStokesByAct = $viewerId > 0
-            ? $this->stokeRepo->viewerStokesByActIds($viewerId, $actIds)
+        // own table rather than a peepso_reactions kind). heat_stage and
+        // stoke_count are public; viewer_has_stoked only needs a query
+        // for authed viewers.
+        $heatByAct  = $this->stokeRepo->heatByActIds($actIds);
+        $countByAct = $this->stokeRepo->countsByActIds($actIds);
+        $viewerStokedAct = $viewerId > 0
+            ? $this->stokeRepo->viewerStokedActIds($viewerId, $actIds)
             : [];
 
         $hydrated = [];
@@ -948,11 +950,12 @@ final class FeedHydrationPipeline
             }
 
             $item['reactions'] = [
-                'kind_grammar'        => $grammar,
-                'counts'              => $counts,
-                'viewer_reaction'     => $viewerKind,
-                'heat_stage'          => $heatByAct[$actId] ?? 1,
-                'viewer_stoke_count'  => $viewerStokesByAct[$actId] ?? 0,
+                'kind_grammar'       => $grammar,
+                'counts'             => $counts,
+                'viewer_reaction'    => $viewerKind,
+                'heat_stage'         => $heatByAct[$actId] ?? 1,
+                'viewer_has_stoked'  => $viewerStokedAct[$actId] ?? false,
+                'stoke_count'        => $countByAct[$actId] ?? 0,
             ];
             $hydrated[] = $item;
         }
