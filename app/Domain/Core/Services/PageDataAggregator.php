@@ -278,7 +278,6 @@ class PageDataAggregator {
      *   positive_score?: float|numeric-string,
      *   negative_score?: float|numeric-string,
      *   onchain_bonus?: float|numeric-string,
-     *   endorsement_bonus?: float|numeric-string,
      *   unique_voters?: int|numeric-string,
      *   endorsement_count?: int|numeric-string,
      *   last_vote_at?: string|null
@@ -293,7 +292,6 @@ class PageDataAggregator {
         $onchain  = (float) ($rm->onchain_bonus ?? 0);
 
         $total             = (float) $rm->trust_score;
-        $endorsement_bonus = round((float) ($rm->endorsement_bonus ?? 0), 2);
 
         return [
             'score'         => (int) round($total),
@@ -308,9 +306,8 @@ class PageDataAggregator {
                 'positive'          => round($positive, 2),
                 'negative'          => round($negative, 2),
                 'net'               => $net,
-                'endorsement_bonus' => $endorsement_bonus,
                 'onchain_bonus'     => round($onchain, 2),
-            ], $this->computeWeights($positive, $endorsement_bonus, $onchain)),
+            ], $this->computeWeights($positive, $onchain)),
         ];
     }
 
@@ -340,7 +337,6 @@ class PageDataAggregator {
                     'positive'          => 0.0,
                     'negative'          => 0.0,
                     'net'               => 0.0,
-                    'endorsement_bonus' => 0.0,
                     'onchain_bonus'     => 0.0,
                     'community_weight'  => 0.5,
                     'identity_weight'   => 0.5,
@@ -365,11 +361,9 @@ class PageDataAggregator {
                 'positive'          => round($score->getPositiveScore(), 2),
                 'negative'          => round($score->getNegativeScore(), 2),
                 'net'               => round($score->getNetScore(), 2),
-                'endorsement_bonus' => round($score->getEndorsementBonus(), 2),
                 'onchain_bonus'     => round($score->getOnchainBonus(), 2),
             ], $this->computeWeights(
                 $score->getPositiveScore(),
-                $score->getEndorsementBonus(),
                 $score->getOnchainBonus()
             )),
         ];
@@ -793,19 +787,18 @@ class PageDataAggregator {
     /**
      * Compute community vs identity weight percentages.
      *
-     * community = votes (positive + endorsement bonus)
+     * community = votes (positive)
      * identity  = on-chain bonus + verification signals
      *
      * Clamped: identity_weight = 1 − community_weight (no float drift).
      * Falls back to 50/50 when no data.
      *
      * @param float $positive
-     * @param float $endorsement_bonus
      * @param float $onchain_bonus
      * @return array{community_weight: float, identity_weight: float}
      */
-    private function computeWeights(float $positive, float $endorsement_bonus, float $onchain_bonus): array {
-        $community_raw = abs($positive) + abs($endorsement_bonus);
+    private function computeWeights(float $positive, float $onchain_bonus): array {
+        $community_raw = abs($positive);
         $identity_raw  = abs($onchain_bonus);
         $total         = $community_raw + $identity_raw;
 

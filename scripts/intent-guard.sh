@@ -206,9 +206,8 @@ check_read_model() {
 #                                     + onchain_bonus
 #                                     + contribution_bonus + penalty_adjustment
 #                                     + attestation_bonus)
-# (endorsement_bonus is RETIRED post Slice E cutover — compute() ignores the
-#  arg, so the wp-eval block below still passes it harmlessly and the guard
-#  stays correct; the arg is NOT removed to avoid arg-position drift.)
+# (endorsement_bonus is fully retired — column dropped + compute()/
+#  computeExpectedTotal() params removed — so it no longer appears here.)
 # within ±SCORE_TOLERANCE. This is the same formula the scorer uses; drift
 # here means the read model is lying to the UI.
 # ═════════════════════════════════════════════════════════════════════════════
@@ -232,7 +231,6 @@ check_trust_scores() {
                 'trust_score'       => (float)\$r->trust_score,
                 'positive_score'    => (float)\$r->positive_score,
                 'negative_score'    => (float)\$r->negative_score,
-                'endorsement_bonus' => (float)\$r->endorsement_bonus,
                 'onchain_bonus'     => (float)\$r->onchain_bonus,
                 'contribution_bonus'=> (float)(\$r->contribution_bonus ?? 0),
                 'penalty_adjustment'=> (float)(\$r->penalty_adjustment ?? 0),
@@ -276,7 +274,6 @@ check_trust_scores() {
             \$expected = \BCC\Trust\Core\ValueObjects\PageScore::computeExpectedTotal(
                 (float) \$r['positive_score'],
                 (float) \$r['negative_score'],
-                (float) \$r['endorsement_bonus'],
                 (float) \$r['onchain_bonus'],
                 (float) (\$r['contribution_bonus'] ?? 0),
                 (float) (\$r['penalty_adjustment'] ?? 0),
@@ -292,7 +289,6 @@ check_trust_scores() {
                 'tolerance' => \$tol,
                 'pos'       => (float) \$r['positive_score'],
                 'neg'       => (float) \$r['negative_score'],
-                'eb'        => (float) \$r['endorsement_bonus'],
                 'ob'        => (float) \$r['onchain_bonus'],
             ];
         }

@@ -33,11 +33,9 @@ if (!defined('ABSPATH')) {
  *         0, 100
  *     )
  *
- * `endorsement_bonus` is RETIRED (Slice E cutover, §J.11): the vouch
- * reaction now writes attestations that fold into attestation_bonus, so
- * the legacy term is no longer summed. The $endorsementBonus parameter
- * is retained for caller arg-position stability (post-cutover it is
- * always 0) but is intentionally ignored.
+ * `endorsement_bonus` is RETIRED (endorse-subsystem retirement, §J.11):
+ * the vouch reaction now writes attestations that fold into
+ * attestation_bonus, so the legacy term — and its parameter — are gone.
  *
  * `contribution_bonus` is 0 for entity pages; it carries the "Trust
  * Recovery Through Contribution" term on member self-pages (Architecture A —
@@ -84,13 +82,12 @@ final class TrustScoreService
      * repair service, intent-guard) delegate to this method.
      *
      * Floats throughout: callers pass DECIMAL columns (positive_score,
-     * negative_score, endorsement_bonus, onchain_bonus) which arrive
-     * from $wpdb as floats. Output is clamped to [0.0, 100.0].
+     * negative_score, onchain_bonus) which arrive from $wpdb as floats.
+     * Output is clamped to [0.0, 100.0].
      */
     public static function compute(
         float $positiveScore,
         float $negativeScore,
-        float $endorsementBonus,
         float $onchainBonus,
         float $contributionBonus = 0.0,
         float $penaltyAdjustment = 0.0,
@@ -103,11 +100,8 @@ final class TrustScoreService
         // attestation_bonus (Slice E) is the trust-attestation synthesis term —
         // bounded upstream by AttestationScoreSynthesis (decay + caps + ceiling).
         //
-        // $endorsementBonus is RETIRED (Slice E cutover) and intentionally NOT
-        // summed — the vouch reaction now feeds attestation_bonus. The param
-        // stays in the signature for caller arg-position stability (always 0
-        // post-cutover); dropping it here would risk arg drift at the wp-eval
-        // call sites (intent-guard) that still pass it.
+        // endorsement_bonus is RETIRED (endorse-subsystem retirement) and no
+        // longer a term — the vouch reaction now feeds attestation_bonus.
         $bonus = $onchainBonus + $contributionBonus + $penaltyAdjustment + $attestationBonus;
         $total = $base + $bonus;
         return max((float) self::MIN, min((float) self::MAX, $total));
@@ -123,10 +117,10 @@ final class TrustScoreService
      */
     public static function formulaSql(): string
     {
-        // endorsement_bonus RETIRED (Slice E cutover) — the column stays in
-        // the schema (zeroed by the one-time retirement task) but is no longer
-        // part of the canonical formula; the vouch backing now lives in
-        // attestation_bonus.
+        // endorsement_bonus RETIRED (endorse-subsystem retirement) — no
+        // longer part of the canonical formula; the vouch backing now lives
+        // in attestation_bonus. The physical column is dropped by a
+        // follow-up migration.
         return 'LEAST(' . self::MAX . ', GREATEST(' . self::MIN . ', '
              . self::neutral()
              . ' + (positive_score - negative_score) * 2 + onchain_bonus + contribution_bonus + penalty_adjustment + attestation_bonus))';

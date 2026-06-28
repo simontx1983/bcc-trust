@@ -79,7 +79,6 @@ function bcc_trust_create_core_tables() {
         total_score DECIMAL(5,2) NOT NULL DEFAULT 50.00,
         positive_score DECIMAL(5,2) NOT NULL DEFAULT 0,
         negative_score DECIMAL(5,2) NOT NULL DEFAULT 0,
-        endorsement_bonus DECIMAL(10,2) NOT NULL DEFAULT 0.00,
         onchain_bonus DECIMAL(10,2) NOT NULL DEFAULT 0.00,
         contribution_bonus DECIMAL(10,2) NOT NULL DEFAULT 0.00,
         penalty_adjustment DECIMAL(10,2) NOT NULL DEFAULT 0.00,

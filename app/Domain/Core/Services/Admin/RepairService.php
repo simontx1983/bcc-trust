@@ -198,7 +198,6 @@ final class RepairService
 
         $scoreRepo      = Plugin::instance()->scoreRepository();
         $voteRepo       = Plugin::instance()->voteRepository();
-        $endorseRepo    = Plugin::instance()->endorsementRepository();
 
         if (!$scoreRepo->tableExists()) {
             wp_die('Trust scores table missing.');
@@ -224,8 +223,6 @@ final class RepairService
             foreach ($pageIds as $page_id) {
                 $vote_stats = $voteRepo->getPageStats($page_id);
 
-                $endorsementBonus = $endorseRepo->sumActiveWeight($page_id);
-
                 $existing = $scoreRepo->getRawRow($page_id);
                 $onchainBonus = (float) ($existing->onchain_bonus ?? 0.0);
 
@@ -240,7 +237,6 @@ final class RepairService
                 $total_score = PageScore::computeExpectedTotal(
                     $voteCount > 0 ? $positiveScore : 0.0,
                     $voteCount > 0 ? $negativeScore : 0.0,
-                    $endorsementBonus,
                     $onchainBonus
                 );
 
@@ -258,7 +254,6 @@ final class RepairService
                     'unique_voters'      => $uniqueVoters,
                     'confidence_score'   => $confidence,
                     'reputation_tier'    => $tier,
-                    'endorsement_bonus'  => $endorsementBonus,
                 ]);
 
                 $results['pages_recalculated']++;
@@ -458,7 +453,6 @@ final class RepairService
 
         $scoreRepo      = Plugin::instance()->scoreRepository();
         $voteRepo       = Plugin::instance()->voteRepository();
-        $endorseRepo    = Plugin::instance()->endorsementRepository();
         $fraudRepo      = Plugin::instance()->fraudAnalysisRepository();
 
         $results = [
@@ -527,8 +521,6 @@ final class RepairService
             foreach ($pageIds as $page_id) {
                 $vote_stats = $voteRepo->getPageStats($page_id);
 
-                $endorsementBonus = $endorseRepo->sumActiveWeight($page_id);
-
                 $existing = $scoreRepo->getRawRow($page_id);
                 $onchainBonus = (float) ($existing->onchain_bonus ?? 0.0);
 
@@ -541,7 +533,6 @@ final class RepairService
                 $total_score = PageScore::computeExpectedTotal(
                     $voteCount > 0 ? $positiveScore : 0.0,
                     $voteCount > 0 ? $negativeScore : 0.0,
-                    $endorsementBonus,
                     $onchainBonus
                 );
 
@@ -559,7 +550,6 @@ final class RepairService
                     'unique_voters'      => $uniqueVoters,
                     'confidence_score'   => $confidence,
                     'reputation_tier'    => $tier,
-                    'endorsement_bonus'  => $endorsementBonus,
                 ]);
 
                 $results['pages_recalculated']++;

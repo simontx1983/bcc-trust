@@ -38,7 +38,6 @@ use BCC\Trust\Core\Services\Vote\VoteJobDispatcher;
 use BCC\Trust\Core\Services\Vote\VoteWeightCalculator;
 use BCC\Trust\Core\Services\Vote\VoteWriter;
 use BCC\Trust\Core\Support\CacheManager;
-use BCC\Trust\Core\Services\EndorsementWeightCalculator;
 use BCC\Trust\Core\ValueObjects\PageScore;
 
 if (!defined('ABSPATH')) exit;
@@ -1389,7 +1388,8 @@ class VoteService {
         $lastVoteAt         = $voteAggregates->last_vote_at;
         $netScore           = $positive - $negative;
 
-        // Fetch endorsement rows (source of truth for endorsement_bonus).
+        // Fetch endorsement rows (still the source of truth for the
+        // endorsement_count display denorm).
         $endorsementRows = $this->endorsementRepo->getActiveWithFraudScoresForPage($pageId);
 
         // Preserve fields that recalculation does not recompute. penalty_adjustment
@@ -1405,28 +1405,21 @@ class VoteService {
         $attestationBonus  = $existing ? $existing->getAttestationBonus() : 0.0;
         $fraudMetadata     = $existing ? $existing->getFraudMetadata() : null;
 
-        // SINGLE SOURCE OF TRUTH — DO NOT DIVERGE.
-        // Delegate endorsement_bonus computation to EndorsementWeightCalculator
-        // so the live apply/remove path (ScoreRepository::deriveAndWriteEndorsementBonus)
-        // and this cron recalc path use the identical formula. The stored `weight`
-        // column is NEVER read — it is frozen at creation time and would oscillate
-        // against this dynamic recompute.
-        // endorsement_bonus is RETIRED (Slice E cutover) — kept 0 here so a vote
-        // recalc doesn't re-populate the zeroed column; the formula ignores it and
-        // the vouch backing now lives in attestation_bonus. We still surface the
-        // active endorsement-row count for the endorsement_count display denorm.
-        $derived          = EndorsementWeightCalculator::computePageEndorsementBonus($endorsementRows);
-        $endorsementBonus = 0.0;
-        $endorsementCount = (int) $derived['count'];
+        // endorsement_bonus is RETIRED (Slice 1 of the endorse-subsystem
+        // retirement) — the legacy term is gone from the formula and the
+        // column; the vouch backing now lives in attestation_bonus. We still
+        // surface the active endorsement-row count for the endorsement_count
+        // display denorm.
+        $endorsementCount = count($endorsementRows);
 
         // Canonical formula (single source of truth — TrustScoreService):
-        // base + endorsement_bonus + onchain_bonus + contribution_bonus.
-        // contribution_bonus is 0 for entity pages; non-zero only on member
-        // self-pages (preserved here, written by ScoreRepository::applyContributionBonus).
+        // base + onchain_bonus + contribution_bonus + penalty_adjustment +
+        // attestation_bonus. contribution_bonus is 0 for entity pages; non-zero
+        // only on member self-pages (preserved here, written by
+        // ScoreRepository::applyContributionBonus).
         $totalScore = \BCC\Trust\Core\Services\TrustScoreService::compute(
             $positive,
             $negative,
-            $endorsementBonus,
             $onchainBonus,
             $contributionBonus,
             $penaltyAdjustment,
@@ -1443,7 +1436,6 @@ class VoteService {
             $lastVoteAt ? new DateTimeImmutable($lastVoteAt) : null,
             new DateTimeImmutable(),
             $fraudMetadata,
-            $endorsementBonus,
             $onchainBonus,
             $contributionBonus,
             $penaltyAdjustment,
