@@ -45,4 +45,11 @@ if (!defined('BCC_STOKE_STAGE_5_MIN')) {
     define('BCC_STOKE_STAGE_5_MIN', 50);
 }
 
+// Slice 4 — §J.3.2.1 pre-consensus band edge. Read by
+// AttestationService::isPreConsensusPick(), exercised in
+// AttestationSlotGraduationTest via reflection.
+if (!defined('BCC_RELIABILITY_PRECONSENSUS_MAX_ORDER')) {
+    define('BCC_RELIABILITY_PRECONSENSUS_MAX_ORDER', 5);
+}
+
 require_once __DIR__ . '/../vendor/autoload.php';

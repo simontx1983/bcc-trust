@@ -610,6 +610,11 @@ class CronService
         $countedCasts   = $classification['counted'];
         $totalCasts     = (int) ($classification['track_record']['total_attestations'] ?? 0);
 
+        // Slice 4 — Early Read sub-tracks (SELF-ONLY). Persisted so a cache
+        // HIT serves the same /me/reliability sub-track values as a MISS.
+        $consensusReliability = (float) ($classification['consensus_reliability'] ?? 0.0);
+        $earlyReadAccuracy    = (float) ($classification['early_read_accuracy'] ?? 0.0);
+
         // The outcome breakdown — persisted so a cache HIT serves the same
         // /me/reliability track_record as a cache MISS (live classify).
         $rawOutcomes = $classification['track_record']['outcomes'] ?? [];
@@ -687,7 +692,9 @@ class CronService
             $baseline,
             $baselineAt,
             $outcomes,
-            $now
+            $now,
+            $consensusReliability,
+            $earlyReadAccuracy
         );
     }
 
