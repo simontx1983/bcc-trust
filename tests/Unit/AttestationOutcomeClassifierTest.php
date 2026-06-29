@@ -161,4 +161,49 @@ final class AttestationOutcomeClassifierTest extends TestCase
         // overrides the tier table entirely.
         self::assertSame(1.0, $this->erm('stand_behind', 1, true));
     }
+
+    // ── Slice 4 Early Read sub-tracks (weightedGoodness) ────────────────────
+
+    /**
+     * @param list<array{goodness: float, kind_weight: float, early_read_mult: float}> $rows
+     */
+    private function subTrack(array $rows): float
+    {
+        return AttestationOutcomeClassifier::weightedGoodness($rows);
+    }
+
+    public function testSubTrackEmptySubsetIsZero(): void
+    {
+        // An operator with no stand_behind attestations (consensus subset) or
+        // no pre-consensus stand_behinds (early-read subset) has no number.
+        self::assertSame(0.0, $this->subTrack([]));
+    }
+
+    public function testSubTrackIsTheSameWeightedAverageAsReliability(): void
+    {
+        // The sub-tracks reuse the identical normalization — same rows in,
+        // same value out as computeReliability. This is the lockstep guard:
+        // if weightedGoodness ever diverges from computeReliability the
+        // sub-tracks would silently drift from the headline math.
+        $rows = [
+            $this->row(self::G_FURTHER, self::KW_STAND_BEHIND, self::M1),
+            $this->row(self::G_CLEAN, self::KW_STAND_BEHIND, self::M620),
+        ];
+        self::assertSame($this->compute($rows), $this->subTrack($rows));
+    }
+
+    public function testEarlyReadMultiplierIsReflectedInTheWeighting(): void
+    {
+        // early_read_accuracy is a weighted average where the 1st-mover
+        // multiplier (2.5×) is the point: a GOOD 1st-mover call (1.0, kw 1.5,
+        // erm 2.5) outweighs a BAD later call (0.0, kw 1.5, erm 0.5):
+        //   num = 1.0*1.5*2.5 + 0.0*1.5*0.5 = 3.75
+        //   den = 1.5*2.5 + 1.5*0.5         = 3.75 + 0.75 = 4.5
+        //   3.75 / 4.5 = 0.8333…
+        $rows = [
+            $this->row(self::G_FURTHER, self::KW_STAND_BEHIND, self::M1),
+            $this->row(self::G_UPHELD, self::KW_STAND_BEHIND, self::M21PLUS),
+        ];
+        self::assertSame(0.8333, $this->subTrack($rows));
+    }
 }

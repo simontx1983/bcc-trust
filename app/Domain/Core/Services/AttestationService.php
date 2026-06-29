@@ -1020,7 +1020,7 @@ final class AttestationService
     {
         $tier      = $this->reputationRepo->getTier($attestorUserId);
         $baseline  = self::standBehindBaselineFor($tier);
-        $graduated = 0; // V1 — Slice E ships graduation.
+        $graduated = $this->resolveGraduatedSlots($attestorUserId); // §J.1 (Slice 4)
         $total     = $baseline + $graduated;
         $used      = $this->repo->countActiveStandBehindByAttestor($attestorUserId);
 
@@ -1411,20 +1411,24 @@ final class AttestationService
     }
 
     /**
-     * §J.3.2.1 pre-consensus pick marker. V1 heuristic: the first 3
-     * stand_behind attestations on a target are early reads. Vouch
-     * is abundant; the marker is reserved for the scarcer signal
+     * §J.3.2.1 pre-consensus pick marker (PUBLIC roster boolean). A
+     * stand_behind whose attestation_order_in_target falls in the
+     * early-conviction band (1st + the 2nd–5th tier) is an early read.
+     * Vouch is abundant; the marker is reserved for the scarcer signal
      * where ordering actually matters.
      *
-     * Slice E refines using the §J.3.2.1 Early Read sub-track
-     * synthesis (compares the attestor's call to later consensus).
+     * The band edge is BCC_RELIABILITY_PRECONSENSUS_MAX_ORDER (default 5),
+     * the same band that gates the SELF-ONLY early_read_accuracy sub-track —
+     * keeping the public marker and the private metric on one definition.
+     * (This boolean is public; the numeric early_read_accuracy is not.)
      */
     private static function isPreConsensusPick(string $kind, int $orderInTarget): bool
     {
         if ($kind !== 'stand_behind') {
             return false;
         }
-        return $orderInTarget > 0 && $orderInTarget <= 3;
+        $maxOrder = (int) apply_filters('bcc_reliability_preconsensus_max_order', BCC_RELIABILITY_PRECONSENSUS_MAX_ORDER);
+        return $orderInTarget > 0 && $orderInTarget <= $maxOrder;
     }
 
     /**
@@ -1433,6 +1437,91 @@ final class AttestationService
     private static function standBehindBaselineFor(string $tier): int
     {
         return self::STAND_BEHIND_BASELINE_SLOTS[$tier] ?? 0;
+    }
+
+    /**
+     * §J.1 slot-graduation ladder — PURE, no I/O, fully unit-testable.
+     *
+     * Returns the number of BONUS stand_behind slots an operator has earned
+     * ABOVE their tier baseline. Graduation requires SUSTAINED reliability:
+     * only 'highly_reliable' or 'consistent' standings graduate at all
+     * ('newly_active' → 0 regardless of count — a high accurate-count with an
+     * unproven standing earns nothing). The ladder is keyed on the operator's
+     * cumulative ACCURATE-attestation count:
+     *   accurateCount ≥ $t3 → 3, ≥ $t2 → 2, ≥ $t1 → 1, else 0,
+     * then clamped to $maxBonus (the §J.1 "+3 above baseline" cap → Elite
+     * baseline 7 + 3 = the 8th–10th slots).
+     */
+    public static function graduatedSlotsFor(
+        string $standing,
+        int $accurateCount,
+        int $t1,
+        int $t2,
+        int $t3,
+        int $maxBonus
+    ): int {
+        if ($standing !== 'highly_reliable' && $standing !== 'consistent') {
+            return 0;
+        }
+
+        $graduated = 0;
+        if ($accurateCount >= $t3) {
+            $graduated = 3;
+        } elseif ($accurateCount >= $t2) {
+            $graduated = 2;
+        } elseif ($accurateCount >= $t1) {
+            $graduated = 1;
+        }
+
+        return max(0, min($graduated, $maxBonus));
+    }
+
+    /**
+     * Resolve the operator's earned graduated stand_behind slots (§J.1).
+     *
+     * Reads the nightly reliability cache for the operator's standing + the
+     * positive-outcome ("accurate") count, falling back to a LIVE
+     * classifyForAttestor on a cache miss so a never-swept operator still
+     * gets the slots they've earned. Per §5 / Slice 3 the read path NEVER
+     * writes the cache — the cron owns all writes.
+     *
+     * "accurateCount" = the positive outcomes (further-attested +
+     * clean-and-active + disputed-and-dismissed), excluding disputed-upheld.
+     */
+    private function resolveGraduatedSlots(int $attestorUserId): int
+    {
+        $standing      = 'newly_active';
+        $accurateCount = 0;
+
+        $cached = $this->reliabilityCacheRepo->getByUserId($attestorUserId);
+        if ($cached !== null) {
+            $standing      = isset($cached->reliability_standing) ? (string) $cached->reliability_standing : 'newly_active';
+            $accurateCount = (isset($cached->targets_received_further_attestations) ? (int) $cached->targets_received_further_attestations : 0)
+                + (isset($cached->targets_clean_and_active) ? (int) $cached->targets_clean_and_active : 0)
+                + (isset($cached->targets_disputed_and_dismissed) ? (int) $cached->targets_disputed_and_dismissed : 0);
+        } else {
+            $classification = $this->outcomeClassifier->classifyForAttestor($attestorUserId);
+            $standing = ReliabilityStandingComputer::fromReliability(
+                $classification['reliability'],
+                $classification['counted'],
+                (float) apply_filters('bcc_reliability_highly_min', BCC_RELIABILITY_HIGHLY_MIN),
+                (float) apply_filters('bcc_reliability_consistent_min', BCC_RELIABILITY_CONSISTENT_MIN),
+                (int) apply_filters('bcc_reliability_min_for_standing', BCC_RELIABILITY_MIN_FOR_STANDING)
+            );
+            $outcomes = $classification['track_record']['outcomes'];
+            $accurateCount = $outcomes['targets_received_further_attestations']
+                + $outcomes['targets_clean_and_active']
+                + $outcomes['targets_disputed_and_dismissed'];
+        }
+
+        return self::graduatedSlotsFor(
+            $standing,
+            $accurateCount,
+            (int) apply_filters('bcc_slot_graduation_t1', BCC_SLOT_GRADUATION_T1),
+            (int) apply_filters('bcc_slot_graduation_t2', BCC_SLOT_GRADUATION_T2),
+            (int) apply_filters('bcc_slot_graduation_t3', BCC_SLOT_GRADUATION_T3),
+            (int) apply_filters('bcc_slot_graduation_max', BCC_SLOT_GRADUATION_MAX)
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1478,6 +1567,8 @@ final class AttestationService
      *
      * @return array{
      *   operator_reliability: float,
+     *   consensus_reliability: float,
+     *   early_read_accuracy: float,
      *   reliability_standing: string,
      *   since_attestation_count: int,
      *   stand_behind_allocation: array{
@@ -1511,7 +1602,7 @@ final class AttestationService
         }
 
         $tier         = $this->reputationRepo->getTier($userId);
-        $slotsTotal   = self::standBehindBaselineFor($tier);
+        $baselineSlots = self::standBehindBaselineFor($tier);
         $slotsUsed    = $this->repo->countActiveStandBehindByAttestor($userId);
         $totalCasts   = $this->repo->countAllByAttestor($userId);
 
@@ -1528,18 +1619,26 @@ final class AttestationService
             $standing     = isset($cached->reliability_standing) ? (string) $cached->reliability_standing : 'newly_active';
             $cachedCount  = isset($cached->attestation_count) ? (int) $cached->attestation_count : 0;
             $direction    = isset($cached->trend) ? (string) $cached->trend : 'steady';
+            // Slice 4 sub-tracks (SELF-ONLY) — persisted by the nightly sweep.
+            $consensusReliability = isset($cached->consensus_reliability) ? (float) $cached->consensus_reliability : 0.0;
+            $earlyReadAccuracy    = isset($cached->early_read_accuracy) ? (float) $cached->early_read_accuracy : 0.0;
             // The full track_record — total + the four outcome counts — is
             // persisted by the nightly sweep, so a cache HIT serves a
             // track_record byte-identical to a cache MISS (live classify).
+            $furtherCount = isset($cached->targets_received_further_attestations) ? (int) $cached->targets_received_further_attestations : 0;
+            $cleanCount   = isset($cached->targets_clean_and_active) ? (int) $cached->targets_clean_and_active : 0;
+            $dismissCount = isset($cached->targets_disputed_and_dismissed) ? (int) $cached->targets_disputed_and_dismissed : 0;
             $trackRecord  = [
                 'total_attestations' => $cachedCount,
                 'outcomes' => [
                     'targets_disputed_and_upheld'           => isset($cached->targets_disputed_and_upheld) ? (int) $cached->targets_disputed_and_upheld : 0,
-                    'targets_disputed_and_dismissed'        => isset($cached->targets_disputed_and_dismissed) ? (int) $cached->targets_disputed_and_dismissed : 0,
-                    'targets_received_further_attestations' => isset($cached->targets_received_further_attestations) ? (int) $cached->targets_received_further_attestations : 0,
-                    'targets_clean_and_active'              => isset($cached->targets_clean_and_active) ? (int) $cached->targets_clean_and_active : 0,
+                    'targets_disputed_and_dismissed'        => $dismissCount,
+                    'targets_received_further_attestations' => $furtherCount,
+                    'targets_clean_and_active'              => $cleanCount,
                 ],
             ];
+            // §J.1 accurate-count = positive outcomes (excl. disputed-upheld).
+            $accurateCount = $furtherCount + $cleanCount + $dismissCount;
         } else {
             // Cache miss — live compute. The outcome classifier walks the
             // operator's active attestations, classifies each target's fate
@@ -1549,6 +1648,8 @@ final class AttestationService
             $reliability    = $classification['reliability'];
             $countedCasts   = $classification['counted'];
             $trackRecord    = $classification['track_record'];
+            $consensusReliability = $classification['consensus_reliability'];
+            $earlyReadAccuracy    = $classification['early_read_accuracy'];
 
             // Standing derives from the LIVE numeric reliability + counted
             // attestations via the pure ReliabilityStandingComputer::
@@ -1562,9 +1663,26 @@ final class AttestationService
                 (int) apply_filters('bcc_reliability_min_for_standing', BCC_RELIABILITY_MIN_FOR_STANDING)
             );
 
+            // §J.1 accurate-count = positive outcomes (excl. disputed-upheld).
+            $outcomes = $classification['track_record']['outcomes'];
+            $accurateCount = $outcomes['targets_received_further_attestations']
+                + $outcomes['targets_clean_and_active']
+                + $outcomes['targets_disputed_and_dismissed'];
+
             // No cached trend on a miss — steady until the cron stamps one.
             $direction = 'steady';
         }
+
+        // §J.1 slot graduation — bonus slots above the tier baseline, from the
+        // same standing + accurate-count already resolved above (no extra read).
+        $graduatedSlots = self::graduatedSlotsFor(
+            $standing,
+            $accurateCount,
+            (int) apply_filters('bcc_slot_graduation_t1', BCC_SLOT_GRADUATION_T1),
+            (int) apply_filters('bcc_slot_graduation_t2', BCC_SLOT_GRADUATION_T2),
+            (int) apply_filters('bcc_slot_graduation_t3', BCC_SLOT_GRADUATION_T3),
+            (int) apply_filters('bcc_slot_graduation_max', BCC_SLOT_GRADUATION_MAX)
+        );
 
         // §J.5 divergence_state + explainer (PR-8a). Classifier runs
         // against the operator's own user_profile target — disputes
@@ -1579,10 +1697,15 @@ final class AttestationService
             // Self-only per §J.3.2 asymmetric display: this surface IS the
             // asymmetry; the number never appears in third-party responses.
             'operator_reliability'   => $reliability,
+            // Slice 4 Early Read sub-tracks — SELF-ONLY (§J.3.2.1). This /me
+            // surface is the only place these surface; third-party roster /
+            // card view-models keep them null/omitted.
+            'consensus_reliability'  => $consensusReliability,
+            'early_read_accuracy'    => $earlyReadAccuracy,
             'reliability_standing'   => $standing,
             'since_attestation_count' => $totalCasts,
             'stand_behind_allocation' => [
-                'slots_total'             => $slotsTotal,
+                'slots_total'             => $baselineSlots + $graduatedSlots,
                 'slots_used'              => $slotsUsed,
                 'slots_recyclable_count'  => 0,
                 'next_slot_unlocks_at'    => null,
@@ -1604,6 +1727,8 @@ final class AttestationService
     /**
      * @return array{
      *   operator_reliability: float,
+     *   consensus_reliability: float,
+     *   early_read_accuracy: float,
      *   reliability_standing: string,
      *   since_attestation_count: int,
      *   stand_behind_allocation: array{
@@ -1634,6 +1759,8 @@ final class AttestationService
     {
         return [
             'operator_reliability'   => 0.0,
+            'consensus_reliability'  => 0.0,
+            'early_read_accuracy'    => 0.0,
             'reliability_standing'   => 'newly_active',
             'since_attestation_count' => 0,
             'stand_behind_allocation' => [
@@ -1838,8 +1965,14 @@ final class AttestationService
     {
         $tier      = $this->reputationRepo->getTier($attestorUserId);
         $baseline  = self::standBehindBaselineFor($tier);
-        $graduated = 0; // V1 baseline; Slice E.
         $used      = $this->repo->countActiveStandBehindByAttestor($attestorUserId);
+
+        // §J.1 graduated slots — only matters when we have a reliability
+        // signal to read. Resolved once from the cache (live-fallback on miss).
+        // For third-party rows we still need the EFFECTIVE total (baseline +
+        // graduated) since that's the operator's real capacity; only the
+        // graduated COUNT itself is self-only.
+        $graduated = $this->resolveGraduatedSlots($attestorUserId);
 
         $summary = [
             'stand_behind_slots_used'  => $used,
@@ -1850,17 +1983,46 @@ final class AttestationService
         ];
 
         if ($selfView) {
-            // Self-only fields per §J.3.2 — never exposed to
-            // third-party queries. V1 emits the keys with null/zero so
-            // the contract shape stays stable for FE consumers; Slice E
-            // populates real values.
+            // Self-only fields per §J.3.2 — never exposed to third-party
+            // queries. operator_reliability stays null here (the live numeric
+            // belongs to /me/reliability, not the cast/revoke summary); the
+            // two sub-tracks are filled from the same cache-first source as
+            // /me/reliability so the self-view is internally consistent.
             $summary['stand_behind_slots_graduated'] = $graduated;
             $summary['operator_reliability']  = null;
-            $summary['consensus_reliability'] = null;
-            $summary['early_read_accuracy']   = null;
+
+            [$consensusReliability, $earlyReadAccuracy] = $this->resolveReliabilitySubTracks($attestorUserId);
+            $summary['consensus_reliability'] = $consensusReliability;
+            $summary['early_read_accuracy']   = $earlyReadAccuracy;
         }
 
         return $summary;
+    }
+
+    /**
+     * Resolve the operator's two §J.3.2.1 Early Read sub-tracks
+     * (consensus_reliability, early_read_accuracy) cache-first with a live
+     * classify fallback on miss — the same SELF-ONLY source /me/reliability
+     * uses, so the cast/revoke self-view never disagrees with the self-mirror.
+     * Read path only — never writes the cache (§5 / Slice 3: cron owns writes).
+     *
+     * @return array{0: float, 1: float} [consensus_reliability, early_read_accuracy]
+     */
+    private function resolveReliabilitySubTracks(int $attestorUserId): array
+    {
+        $cached = $this->reliabilityCacheRepo->getByUserId($attestorUserId);
+        if ($cached !== null) {
+            return [
+                isset($cached->consensus_reliability) ? (float) $cached->consensus_reliability : 0.0,
+                isset($cached->early_read_accuracy) ? (float) $cached->early_read_accuracy : 0.0,
+            ];
+        }
+
+        $classification = $this->outcomeClassifier->classifyForAttestor($attestorUserId);
+        return [
+            $classification['consensus_reliability'],
+            $classification['early_read_accuracy'],
+        ];
     }
 
     /**

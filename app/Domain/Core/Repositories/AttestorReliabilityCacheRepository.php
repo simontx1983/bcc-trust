@@ -111,12 +111,14 @@ final class AttestorReliabilityCacheRepository
     /**
      * Upsert one attestor's recomputed reliability snapshot. Called by
      * the daily sweep only. INSERT … ON DUPLICATE KEY UPDATE on the
-     * user_id PRIMARY KEY. consensus_reliability / early_read_accuracy
-     * stay at their column defaults (Slice 4 populates them).
+     * user_id PRIMARY KEY.
      *
      * The four `$outcomes` counts are the classifier's
      * track_record['outcomes'] breakdown — persisted so a cache HIT on
      * the read path serves the same track_record as a cache MISS.
+     * $consensusReliability / $earlyReadAccuracy are the §J.3.2.1 Early
+     * Read sub-tracks (Slice 4) — written to the existing columns so a
+     * SELF-ONLY cache HIT serves the same sub-track values as a MISS.
      *
      * Bumps the cache generation after the write so the next getByUserId
      * for this user re-reads from the DB.
@@ -137,7 +139,9 @@ final class AttestorReliabilityCacheRepository
         float $baseline,
         ?string $baselineAt,
         array $outcomes,
-        string $computedAtMysqlUtc
+        string $computedAtMysqlUtc,
+        float $consensusReliability,
+        float $earlyReadAccuracy
     ): void {
         if ($userId <= 0) {
             return;
@@ -149,27 +153,32 @@ final class AttestorReliabilityCacheRepository
             $wpdb->prepare(
                 "INSERT INTO {$this->table}
                     (user_id, operator_reliability, reliability_standing,
+                     consensus_reliability, early_read_accuracy,
                      attestation_count, trend, reliability_baseline,
                      baseline_at,
                      targets_disputed_and_upheld, targets_disputed_and_dismissed,
                      targets_received_further_attestations, targets_clean_and_active,
                      computed_at)
-                 VALUES (%d, %f, %s, %d, %s, %f, %s, %d, %d, %d, %d, %s)
+                 VALUES (%d, %f, %s, %f, %f, %d, %s, %f, %s, %d, %d, %d, %d, %s)
                  ON DUPLICATE KEY UPDATE
-                     operator_reliability = VALUES(operator_reliability),
-                     reliability_standing = VALUES(reliability_standing),
-                     attestation_count    = VALUES(attestation_count),
-                     trend                = VALUES(trend),
-                     reliability_baseline = VALUES(reliability_baseline),
-                     baseline_at          = VALUES(baseline_at),
+                     operator_reliability  = VALUES(operator_reliability),
+                     reliability_standing  = VALUES(reliability_standing),
+                     consensus_reliability = VALUES(consensus_reliability),
+                     early_read_accuracy   = VALUES(early_read_accuracy),
+                     attestation_count     = VALUES(attestation_count),
+                     trend                 = VALUES(trend),
+                     reliability_baseline  = VALUES(reliability_baseline),
+                     baseline_at           = VALUES(baseline_at),
                      targets_disputed_and_upheld           = VALUES(targets_disputed_and_upheld),
                      targets_disputed_and_dismissed        = VALUES(targets_disputed_and_dismissed),
                      targets_received_further_attestations = VALUES(targets_received_further_attestations),
                      targets_clean_and_active              = VALUES(targets_clean_and_active),
-                     computed_at          = VALUES(computed_at)",
+                     computed_at           = VALUES(computed_at)",
                 $userId,
                 $reliability,
                 $standing,
+                $consensusReliability,
+                $earlyReadAccuracy,
                 $attestationCount,
                 $trend,
                 $baseline,

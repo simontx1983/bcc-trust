@@ -129,3 +129,30 @@ define('BCC_RELIABILITY_EARLY_PROTECT_FIRST', 5);
 // Filterable: 'bcc_reliability_trend_epsilon'.
 // ─────────────────────────────────────────────────────────────────────────
 define('BCC_RELIABILITY_TREND_EPSILON', 0.02);
+
+// ─────────────────────────────────────────────────────────────────────────
+// Slice 4 — Stand-Behind slot graduation (§J.1) + Early Read sub-tracks
+// (§J.3.2.1) + proper pre-consensus band.
+// ─────────────────────────────────────────────────────────────────────────
+
+// §J.1 slot-graduation ladder. An operator with SUSTAINED reliability
+// (standing 'highly_reliable' or 'consistent' — 'newly_active' graduates
+// nothing) earns +1 / +2 / +3 stand_behind slots above their tier baseline
+// as their cumulative ACCURATE-attestation count crosses T1 / T2 / T3. The
+// bonus is hard-capped at BCC_SLOT_GRADUATION_MAX (+3) above baseline; the
+// §J.1 "Elite w/ 100+ accurate unlocks 8th–10th" case is the elite baseline
+// (7) + the +3 cap = 10. "accurateCount" is the cache row's POSITIVE outcomes
+// (further-attested + clean-and-active + disputed-and-dismissed), excluding
+// disputed-and-upheld. Filterable: 'bcc_slot_graduation_t1' / '..._t2' /
+// '..._t3' / 'bcc_slot_graduation_max'.
+define('BCC_SLOT_GRADUATION_T1', 100);
+define('BCC_SLOT_GRADUATION_T2', 250);
+define('BCC_SLOT_GRADUATION_T3', 500);
+define('BCC_SLOT_GRADUATION_MAX', 3);
+
+// §J.3.2.1 pre-consensus band: a stand_behind whose
+// attestation_order_in_target is at or below this is an early-conviction
+// call (1st + the 2nd–5th tier). Feeds both the SELF-ONLY early_read_accuracy
+// sub-track (subject to first-5 first-mover protection) and the PUBLIC roster
+// is_pre_consensus_pick boolean. Filterable: 'bcc_reliability_preconsensus_max_order'.
+define('BCC_RELIABILITY_PRECONSENSUS_MAX_ORDER', 5);

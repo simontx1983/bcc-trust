@@ -144,6 +144,25 @@ final class AttestationOutcomeClassifier
     }
 
     /**
+     * Weighted-average goodness over a SUBSET of rows — the pure core behind
+     * the two §J.3.2.1 Early Read sub-tracks (consensus_reliability,
+     * early_read_accuracy). Same arithmetic as {@see computeReliability}
+     * (weight = kind_weight × early_read_mult), factored so each sub-track is
+     * a clamp01 weighted average of its own row subset and so unit tests can
+     * pin the multiplier weighting independently. Empty subset / zero total
+     * weight → 0.0.
+     *
+     * @param list<array{goodness: float, kind_weight: float, early_read_mult: float}> $rows
+     */
+    public static function weightedGoodness(array $rows): float
+    {
+        // Identical normalization to computeReliability — sub-tracks are the
+        // same weighted-average over a filtered row subset, never a second
+        // formula. Delegating keeps the two in lockstep by construction.
+        return self::computeReliability($rows);
+    }
+
+    /**
      * Classify every active attestation an operator has cast, returning the
      * §J.5 self-mirror reliability payload fields: the numeric reliability,
      * the counted-attestation total (the standing-gate denominator), and the
@@ -162,6 +181,8 @@ final class AttestationOutcomeClassifier
      * @return array{
      *   reliability: float,
      *   counted: int,
+     *   consensus_reliability: float,
+     *   early_read_accuracy: float,
      *   track_record: array{
      *     total_attestations: int,
      *     outcomes: array{
@@ -200,6 +221,10 @@ final class AttestationOutcomeClassifier
         $m21plus = (float) apply_filters('bcc_reliability_early_21plus', BCC_RELIABILITY_EARLY_21PLUS);
         $protect = (int) apply_filters('bcc_reliability_early_protect_first', BCC_RELIABILITY_EARLY_PROTECT_FIRST);
 
+        // Slice 4 — Early Read sub-track band. A stand_behind at or below this
+        // order_in_target is a pre-consensus call.
+        $preConsensusMaxOrder = (int) apply_filters('bcc_reliability_preconsensus_max_order', BCC_RELIABILITY_PRECONSENSUS_MAX_ORDER);
+
         // Resolve each attestation's target page id once + collect the set for
         // the single batched dispute fetch. Keyed by attestation index so the
         // per-row classification below can look its page id back up.
@@ -217,6 +242,11 @@ final class AttestationOutcomeClassifier
             : DisputeRepository::listResolvedForPages(array_keys($pageIdSet));
 
         $rows     = [];
+        // Slice 4 sub-track row subsets, same row shape as $rows so they feed
+        // the identical weighted-average core. consensus = every stand_behind;
+        // earlyRead = pre-consensus stand_behind NOT under first-mover protection.
+        $standBehindRows = [];
+        $earlyReadRows   = [];
         $outcomes = [
             'targets_disputed_and_upheld'           => 0,
             'targets_disputed_and_dismissed'        => 0,
@@ -279,19 +309,35 @@ final class AttestationOutcomeClassifier
                 $m21plus
             );
 
-            $rows[] = [
+            $weightedRow = [
                 'goodness'        => $goodness,
                 'kind_weight'     => $kindWeight,
                 'early_read_mult' => $erm,
             ];
+            $rows[] = $weightedRow;
+
+            // Sub-track accumulation (stand_behind ONLY — vouch is excluded
+            // from both sub-tracks). consensus_reliability spans every
+            // stand_behind; early_read_accuracy is the pre-consensus subset
+            // (order ≤ band) MINUS the first-mover-protected casts (those have
+            // no early-read signal — the operator joined already-crowded
+            // targets while building history, and $isProtected reflects that).
+            if ($kind === 'stand_behind') {
+                $standBehindRows[] = $weightedRow;
+                if (!$isProtected && $att->attestation_order_in_target <= $preConsensusMaxOrder) {
+                    $earlyReadRows[] = $weightedRow;
+                }
+            }
         }
 
         $reliability = self::computeReliability($rows);
         $counted     = count($rows);
 
         return [
-            'reliability'  => $reliability,
-            'counted'      => $counted,
+            'reliability'           => $reliability,
+            'counted'               => $counted,
+            'consensus_reliability' => self::weightedGoodness($standBehindRows),
+            'early_read_accuracy'   => self::weightedGoodness($earlyReadRows),
             'track_record' => [
                 'total_attestations' => $counted,
                 'outcomes'           => $outcomes,
@@ -423,6 +469,8 @@ final class AttestationOutcomeClassifier
      * @return array{
      *   reliability: float,
      *   counted: int,
+     *   consensus_reliability: float,
+     *   early_read_accuracy: float,
      *   track_record: array{
      *     total_attestations: int,
      *     outcomes: array{
@@ -437,8 +485,10 @@ final class AttestationOutcomeClassifier
     private static function emptyResult(): array
     {
         return [
-            'reliability'  => 0.0,
-            'counted'      => 0,
+            'reliability'           => 0.0,
+            'counted'               => 0,
+            'consensus_reliability' => 0.0,
+            'early_read_accuracy'   => 0.0,
             'track_record' => [
                 'total_attestations' => 0,
                 'outcomes'           => [
