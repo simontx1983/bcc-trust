@@ -1685,10 +1685,12 @@ final class AttestationService
         );
 
         // §J.5 divergence_state + explainer (PR-8a). Classifier runs
-        // against the operator's own user_profile target — disputes
-        // don't fire on user_profile in V1 (Phase 1.5), so the slot
-        // resolves via the active/revocation heuristic only. Explainer
-        // returns server-pinned headline+body per the §2.7 mitigation.
+        // against the operator's own user_profile target — the classifier
+        // translates the raw user id to the self-page id for the dispute
+        // read (id-duality), so the `disputed` state now fires for members
+        // with an active dispute on their self-page, same as entities.
+        // Explainer returns server-pinned headline+body per the §2.7
+        // mitigation.
         $divergenceState = $this->divergenceClassifier->classify('user_profile', $userId);
         $explainer       = $this->contestedStateExplainer->explain($divergenceState);
 

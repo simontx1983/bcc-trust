@@ -25,6 +25,25 @@
  *      returned under the `viewer_attestations` key (same key + row shape
  *      the page-card path uses, consumed via
  *      AttestationService::shapeViewerAttestationFromRows)
+ *   6. §J.6 negative_signals counts (members are full trust subjects):
+ *        - dispute_active_counts      — DisputeRepository::
+ *          countActiveDisputesForPages, keyed by the member's SELF-PAGE
+ *          id (MemberSelfPageService::selfPageId) where disputes/votes/
+ *          scores live;
+ *        - attestation_active_counts  — AttestationRepository::
+ *          countActiveByTargets('user_profile', …), keyed by the RAW
+ *          user id where user_profile attestations live;
+ *        - attestation_revoked_counts — the revoked sibling, same raw id.
+ *      This is the id-duality: the dispute map keys on selfPageId, the
+ *      attestation maps key on the raw user id, exactly as
+ *      CardViewService::buildNegativeSignals consumes them. These three
+ *      keys are the page-card prefetch bundle's keys verbatim, so the
+ *      member-card list path resolves negative_signals from the batch
+ *      instead of the per-row reads (O(1) dispute + O(1) attestation
+ *      queries for the whole page, not O(N)). Only THIS prefetcher
+ *      carries them — the lighter MemberSummaryPrefetcher (rosters,
+ *      group members, suggestions) stays untouched, so non-card member
+ *      surfaces pay nothing for a signal block they never render.
  *
  * Batches 2-4 warm request-scoped memos inside their owners, so the
  * existing single-user accessors (getTier, getScore,
@@ -41,7 +60,9 @@ namespace BCC\Trust\Core\Support;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
+use BCC\Trust\Disputes\Repositories\DisputeRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -85,13 +106,36 @@ final class MemberCardPrefetcher
 
         $map = MemberSummaryPrefetcher::primeFor($idList);
 
+        $attestationRepo = new AttestationRepository();
+
         $map['viewer_attestations'] = $viewerId > 0 && $idList !== []
-            ? (new AttestationRepository())->findActiveByAttestorForTargets(
+            ? $attestationRepo->findActiveByAttestorForTargets(
                 $viewerId,
                 'user_profile',
                 $idList
             )
             : [];
+
+        // §J.6 negative_signals batch (id-duality). Three bounded queries
+        // for the whole page — the same keys CardViewService::
+        // buildNegativeSignals' prefetch branch reads. Disputes key on
+        // the member self-page id (selfPageId), attestation counts on the
+        // raw user id; CardViewService translates user_profile→selfPageId
+        // for its dispute lookup, so the dispute map MUST be self-page
+        // keyed here to match. Absent ids default to 0 at the read side.
+        if ($idList === []) {
+            $map['dispute_active_counts']      = [];
+            $map['attestation_active_counts']  = [];
+            $map['attestation_revoked_counts'] = [];
+        } else {
+            $selfPageIds = [];
+            foreach ($idList as $userId) {
+                $selfPageIds[] = MemberSelfPageService::selfPageId($userId);
+            }
+            $map['dispute_active_counts']      = DisputeRepository::countActiveDisputesForPages($selfPageIds);
+            $map['attestation_active_counts']  = $attestationRepo->countActiveByTargets('user_profile', $idList);
+            $map['attestation_revoked_counts'] = $attestationRepo->countRevokedByTargets('user_profile', $idList);
+        }
 
         return $map;
     }

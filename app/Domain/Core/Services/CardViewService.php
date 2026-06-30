@@ -418,8 +418,28 @@ final class CardViewService
      * routes through classifyFromCounts — the same single heuristic
      * implementation classify() delegates to.
      *
+     * ── id-duality (`user_profile` / member cards) ──────────────────
+     * For `targetKind === 'user_profile'` the `$targetId` is a RAW user
+     * id: attestation counts (active/revoked) key on it, but disputes /
+     * votes / scores key on the member's self-page id
+     * `MemberSelfPageService::selfPageId($targetId)`. So the dispute
+     * reads here translate to the self-page id while the attestation
+     * counts (and the classifier's own attestation reads inside
+     * classify()) stay on the raw user id. Entity card kinds carry a
+     * peepso-page post id directly, so `$disputeId === $targetId` for
+     * them and nothing changes.
+     *
+     * Two prefetch bundle shapes feed the prefetched branch: the
+     * page-card PageCardPrefetcher bundle (dispute counts keyed by page
+     * id) and the member-card MemberCardPrefetcher bundle (dispute
+     * counts keyed by selfPageId, attestation counts keyed by raw user
+     * id). Both expose the same three keys this branch reads; the
+     * `$disputeId` translation above resolves the right dispute key for
+     * each. Single-card callers pass null and take the per-row read
+     * fallback. `$prefetched` is therefore typed loosely (the union of
+     * the two bundle shapes) — every read is `isset`/`?? 0` guarded.
+     *
      * @param array<string, mixed>|null $prefetched
-     * @phpstan-param PageCardPrefetch|null $prefetched
      * @return array{
      *   under_review: bool,
      *   divergence_state: string,
@@ -427,32 +447,42 @@ final class CardViewService
      *   unresolved_claims_count: int
      * }
      */
-    private function buildNegativeSignals(?string $targetKind, int $pageId, ?array $prefetched = null): array
+    private function buildNegativeSignals(?string $targetKind, int $targetId, ?array $prefetched = null): array
     {
+        // Dispute reads are self-page-scoped for user_profile; attestation
+        // counts stay on the raw user id (id-duality). Entity kinds pass
+        // a page id directly, so this is a no-op for them.
+        $disputeId = $targetKind === 'user_profile'
+            ? MemberSelfPageService::selfPageId($targetId)
+            : $targetId;
+
         if (
             $prefetched !== null
             && isset($prefetched['dispute_active_counts'])
             && isset($prefetched['attestation_active_counts'])
             && isset($prefetched['attestation_revoked_counts'])
         ) {
-            $activeCount = $prefetched['dispute_active_counts'][$pageId] ?? 0;
+            $activeCount = $prefetched['dispute_active_counts'][$disputeId] ?? 0;
             $hasActive   = $activeCount > 0;
 
             $state = $targetKind !== null
                 ? $this->divergenceClassifier->classifyFromCounts(
                     $targetKind,
-                    $pageId,
+                    $targetId,
                     $hasActive,
-                    $prefetched['attestation_active_counts'][$pageId] ?? 0,
-                    $prefetched['attestation_revoked_counts'][$pageId] ?? 0
+                    $prefetched['attestation_active_counts'][$targetId] ?? 0,
+                    $prefetched['attestation_revoked_counts'][$targetId] ?? 0
                 )
                 : DivergenceStateClassifier::STATE_UNTESTED;
         } else {
-            $hasActive   = \BCC\Trust\Disputes\Repositories\DisputeRepository::hasActiveDisputeForPage($pageId);
-            $activeCount = \BCC\Trust\Disputes\Repositories\DisputeRepository::countActiveDisputesForPage($pageId);
+            $hasActive   = $disputeId > 0
+                && \BCC\Trust\Disputes\Repositories\DisputeRepository::hasActiveDisputeForPage($disputeId);
+            $activeCount = $disputeId > 0
+                ? \BCC\Trust\Disputes\Repositories\DisputeRepository::countActiveDisputesForPage($disputeId)
+                : 0;
 
             $state = $targetKind !== null
-                ? $this->divergenceClassifier->classify($targetKind, $pageId)
+                ? $this->divergenceClassifier->classify($targetKind, $targetId)
                 : DivergenceStateClassifier::STATE_UNTESTED;
         }
 
@@ -606,6 +636,19 @@ final class CardViewService
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
             'social_proof'        => null,
+            // §J.6 negative_signals — members are full trust subjects on
+            // their self-page, so they carry the SAME signal block as
+            // entity cards (was previously omitted on member cards). The
+            // id-duality is threaded inside buildNegativeSignals: target
+            // kind 'user_profile' + the raw $userId — the helper reads
+            // attestation counts on the raw user id and the dispute
+            // signals on selfPageId($userId). On the member-card LIST path
+            // $prefetched is a MemberCardPrefetcher bundle carrying
+            // dispute_active_counts (self-page keyed) + attestation
+            // active/revoked counts (raw-user keyed), so this resolves
+            // O(1) per page instead of N+1; single-card callers pass null
+            // and take the per-row read fallback.
+            'negative_signals'    => $this->buildNegativeSignals('user_profile', $userId, $prefetched),
             // member_dossier — the back-of-card signal blocks the
             // /members + watchers + followers lists used to carry as a
             // bare MemberSummary. Copied straight from getSummary's
@@ -1458,9 +1501,15 @@ final class CardViewService
                 'can_dispute'        => $isSelf
                     ? self::deny(null, 'self_action_blocked')
                     : self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
-                // Owner vote-disputes target page-cards only — member
-                // profiles have no disputable page votes.
-                'can_open_dispute'   => self::deny(null, 'not_applicable'),
+                // §4.4 can_open_dispute — members are full trust subjects:
+                // a member viewing their OWN self-page can open a dispute
+                // when the self-page carries a contestable active downvote
+                // (vote_type=-1, status=1 on selfPageId). Non-owners never
+                // see can_open_dispute=true (the owner-only entry point).
+                // Mirrors the page-card owner gate, but member profiles
+                // have no claimer concept — ownership IS being the member,
+                // resolved zero-DB via the self-page id.
+                'can_open_dispute'   => $this->resolveMemberOpenDispute($targetUserId, $isSelf),
                 // Endorsements target page-cards (validator/project/creator)
                 // only. Members are followed/reviewed via different surfaces.
                 'can_endorse'        => self::deny(null, 'not_applicable'),
@@ -1472,6 +1521,37 @@ final class CardViewService
             ],
             $attestationFields
         );
+    }
+
+    /**
+     * §4.4 can_open_dispute for a member self-page. Owner-only: a
+     * non-owner viewer never gets the dispute entry point (returns
+     * not_applicable, the locked member-card shape). The owner gets
+     * allow() iff their self-page carries a contestable active downvote
+     * (vote_type=-1, status=1), else a not-yet-applicable denial so the
+     * FE can hide the entry point until there is something to contest.
+     *
+     * id-duality: the downvote read keys on the member's self-page id
+     * (MemberSelfPageService::selfPageId), where votes/scores live — not
+     * the raw user id. ScoreRepository / VoteRepository are self-page
+     * aware (Architecture A), so this is the same predicate the
+     * DisputeController enforces per-vote, surfaced page-scoped.
+     *
+     * @return Permission
+     */
+    private function resolveMemberOpenDispute(int $targetUserId, bool $isSelf): array
+    {
+        if (!$isSelf) {
+            return self::deny(null, 'not_applicable');
+        }
+        $selfPageId = MemberSelfPageService::selfPageId($targetUserId);
+        if ($selfPageId <= 0 || !$this->voteRepo->hasActiveDownvoteForPage($selfPageId)) {
+            // Owner, but nothing to contest yet — distinct from the
+            // not_applicable a non-owner gets so the FE can message
+            // "no contestable downvotes" vs hide the control entirely.
+            return self::deny(null, 'no_contestable_downvote');
+        }
+        return self::allow();
     }
 
     /**

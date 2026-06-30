@@ -35,10 +35,15 @@
  * memoizes the result via a nightly worker. Until then the classifier
  * runs at request time — cheap at V1 scale.
  *
- * **user_profile targets:** disputes don't exist for user_profile in
- * V1 (Phase 1.5 backlog). The classifier returns the same five-state
- * enum but the `disputed` branch never fires for user_profile —
- * effectively a 4-state surface until disputes-on-profiles ship.
+ * **user_profile targets (id-duality):** members are full trust
+ * subjects on their self-pages, so the `disputed` branch DOES fire for
+ * user_profile — they get the same five-state surface as entities.
+ * The one trap: for `user_profile` the `target_id` is a RAW user id
+ * (attestation counts key on it), but disputes/votes/scores key on the
+ * member's self-page id `MemberSelfPageService::selfPageId(target_id)`.
+ * classify() reads attestation counts by the raw user id and the
+ * dispute existence by the translated self-page id — never crossing the
+ * two. (`polarizing` remains the Slice E.5 forward-compat stub.)
  *
  * @package BCC\Trust\Core\Services
  * @since V2 Trust Attestation Layer PR-8a (2026-05-14)
@@ -95,10 +100,15 @@ final class DivergenceStateClassifier
             return self::STATE_UNTESTED;
         }
 
-        // user_profile disputes are Phase 1.5; the dispute read is
-        // page-scoped only in V1 — skip it entirely for user_profile.
-        $hasActiveDispute = $targetKind !== 'user_profile'
-            && DisputeRepository::hasActiveDisputeForPage($targetId);
+        // Dispute reads are page-scoped. For user_profile the backing
+        // page is the member's self-page (ID_BASE + user_id), NOT the
+        // raw user id the attestation counts below use — translate here
+        // so the dispute existence read hits the right row (id-duality).
+        $disputePageId = $targetKind === 'user_profile'
+            ? MemberSelfPageService::selfPageId($targetId)
+            : $targetId;
+        $hasActiveDispute = $disputePageId > 0
+            && DisputeRepository::hasActiveDisputeForPage($disputePageId);
 
         $counts = $this->repo->countByTarget($targetKind, $targetId);
         $activeTotal = (int) ($counts['total'] ?? 0);
@@ -138,10 +148,10 @@ final class DivergenceStateClassifier
         }
 
         // 1. Disputed wins over every other state — an active dispute
-        //    is the strongest single signal. user_profile disputes are
-        //    Phase 1.5; the flag can only be true page-scoped in V1
-        //    (the guard keeps a stray true harmless for user_profile).
-        if ($targetKind !== 'user_profile' && $hasActiveDispute) {
+        //    is the strongest single signal. Applies to user_profile too
+        //    (members are full trust subjects on their self-page); the
+        //    caller resolves the self-page id before setting the flag.
+        if ($hasActiveDispute) {
             return self::STATE_DISPUTED;
         }
 
