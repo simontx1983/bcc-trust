@@ -289,10 +289,15 @@ final class PolarizationTransitionNotifier
         }
 
         // Dispute-driven candidates are page-scoped — map post_id to
-        // the entity card target_kind. user_profile disputes don't
-        // exist in V1, so every dispute resolves to one of the three
-        // entity-card kinds. The classifier itself reads
-        // `_bcc_page_type` post_meta to disambiguate downstream.
+        // the entity card target_kind. Member self-page disputes
+        // (page_id = ID_BASE + user_id) have no peepso-page post, so
+        // pageTypeToTargetKind() returns null and they're skipped here:
+        // member user_profile candidates enter the set via the
+        // attestation-driven loop above instead. The classifier itself
+        // reads `_bcc_page_type` post_meta to disambiguate downstream.
+        // (Self-page dispute→polarizing notification is a Slice E.5
+        // follow-up — the read-time card/`/me` surfaces this PR wires
+        // up don't depend on this candidate path.)
         foreach (DisputeRepository::listPagesWithRecentDisputeActivity($sinceMysqlUtc) as $pageId) {
             $pageType = (string) get_post_meta($pageId, '_bcc_page_type', true);
             $targetKind = self::pageTypeToTargetKind($pageType);

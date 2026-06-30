@@ -2078,6 +2078,38 @@ class VoteRepository {
     }
 
     /**
+     * Whether a page carries at least one active (contestable) downvote
+     * — an `vote_type = -1`, `status = 1` row. Feeds the §4.4
+     * `can_open_dispute` gate on the owner's own card: the dispute
+     * entry point only makes sense when there is a live downvote to
+     * contest. Bounded by the existing (page_id, status) index + an
+     * explicit LIMIT 1 (existence check, not a count).
+     *
+     * Mirrors the active-downvote predicate the DisputeController write
+     * path enforces per-vote (vote_type < 0, vote active); this is the
+     * page-scoped "any contestable downvote?" read for the view-model.
+     */
+    public function hasActiveDownvoteForPage(int $pageId): bool
+    {
+        if ($pageId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+
+        $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$this->table}
+             WHERE page_id = %d
+               AND vote_type = -1
+               AND status = 1
+             LIMIT 1",
+            $pageId
+        ));
+
+        return (bool) $existing;
+    }
+
+    /**
      * Count recent downvotes on a page within a time window.
      */
     public function countRecentDownvotesForPage(int $pageId, string $interval = '1 HOUR'): int
