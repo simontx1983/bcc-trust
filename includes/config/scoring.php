@@ -98,6 +98,16 @@ define('BCC_TRUST_GITHUB_ORGS_HIGH', 10);
 define('BCC_TRUST_GITHUB_ORGS_MEDIUM', 5);
 
 // ======================================================
+// CLAIM-VERIFIED RANKING BONUS
+// ======================================================
+// Discovery/search ranking bonus applied when a page has a verified
+// on-chain operator/creator claim (bcc_page_read_model.has_verified_claim).
+// This is on-chain ownership — distinct from, and dominant over, the
+// owner-EMAIL verification term (+3.0). Consumed by ScoreReadService's
+// composite ranking_score. Filterable via `bcc_rank_claim_verified_bonus`.
+define('BCC_RANK_CLAIM_VERIFIED_BONUS', 10.0);
+
+// ======================================================
 // X (TWITTER) INTEGRATION SCORING
 // ======================================================
 define('BCC_TRUST_X_TRUST_BOOST', 10);       // Flat trust boost for verified X account

@@ -422,6 +422,32 @@ class ClaimRepository {
     }
 
     /**
+     * Batch-check which page IDs have a verified operator/creator claim.
+     *
+     * Thin wrapper over getPrimaryClaimsByPageIds() (which already applies
+     * the exact `status = 'verified' AND claim_role IN ('operator','creator')`
+     * filter and is bounded by the caller-paginated IN-list) — returns a
+     * presence map instead of claimer names so callers that only need the
+     * boolean `is_claim_verified` flag don't carry a claim-name dependency.
+     *
+     * Keys are page_ids with at least one verified primary claim; pages
+     * without one are simply absent (O(1) `isset()` lookup).
+     *
+     * @param int[] $pageIds
+     * @return array<int, true>
+     */
+    public static function getVerifiedPagesMap(array $pageIds): array {
+        $map = [];
+        // Late static binding so the DB-touching source method can be
+        // stubbed in isolation (the SQL filter itself is exercised by the
+        // integration suite); production binds to the real implementation.
+        foreach (static::getPrimaryClaimsByPageIds($pageIds) as $pageId => $_claimerName) {
+            $map[(int) $pageId] = true;
+        }
+        return $map;
+    }
+
+    /**
      * Batch-load all verified claims for multiple entities of the same type.
      * Single query replacing N per-entity lookups.
      *

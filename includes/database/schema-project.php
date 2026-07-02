@@ -49,6 +49,7 @@ function bcc_trust_create_page_tables() {
         follower_count INT UNSIGNED NOT NULL DEFAULT 0,
         page_type VARCHAR(50) NOT NULL DEFAULT 'builder',
         is_verified TINYINT(1) NOT NULL DEFAULT 0,
+        has_verified_claim TINYINT(1) NOT NULL DEFAULT 0,
         github_username VARCHAR(100) DEFAULT NULL,
         github_followers INT UNSIGNED NOT NULL DEFAULT 0,
         x_username VARCHAR(100) DEFAULT NULL,
@@ -65,6 +66,7 @@ function bcc_trust_create_page_tables() {
         KEY idx_type_trust (page_type, trust_score),
         KEY idx_owner (owner_id),
         KEY idx_verified_trust (is_verified, trust_score),
+        KEY idx_claim_verified_trust (has_verified_claim, trust_score),
         KEY idx_confidence (confidence_score)
     ) $charset_collate;";
 

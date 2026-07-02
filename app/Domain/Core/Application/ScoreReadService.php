@@ -16,6 +16,25 @@ if (!defined('ABSPATH')) {
  *
  * Uses a single batched query (WHERE page_id IN (...)) so callers
  * never trigger N+1 lookups against the scores table.
+ *
+ * The loose read-model row shape enrichRow() consumes. Scalars arrive from
+ * $wpdb as numeric-string|string|null; the method casts every field, so the
+ * shape is deliberately permissive (mirrors PageReadModelRepository's row).
+ *
+ * @phpstan-type PageReadModelRowLike object{
+ *   trust_score: float|int|numeric-string,
+ *   confidence_score: float|int|numeric-string,
+ *   onchain_bonus: float|int|numeric-string,
+ *   endorsement_count: int|numeric-string,
+ *   unique_voters: int|numeric-string,
+ *   vote_count?: int|numeric-string|null,
+ *   is_verified: int|numeric-string|bool,
+ *   has_verified_claim?: int|numeric-string|bool|null,
+ *   page_type?: string|null,
+ *   last_vote_at?: string|null,
+ *   reputation_tier?: string|null,
+ *   follower_count: int|numeric-string
+ * }
  */
 final class ScoreReadService implements ScoreReadServiceInterface
 {
@@ -99,7 +118,7 @@ final class ScoreReadService implements ScoreReadServiceInterface
 
     /**
      * @param int[] $pageIds
-     * @return array<int, array{total_score: float, reputation_tier: string, ranking_score: float, endorsement_count: int, is_verified: bool, follower_count: int}>
+     * @return array<int, array{total_score: float, reputation_tier: string, ranking_score: float, endorsement_count: int, is_verified: bool, is_claim_verified: bool, follower_count: int}>
      */
     public function getEnrichedScoresForPageIds(array $pageIds): array
     {
@@ -138,7 +157,7 @@ final class ScoreReadService implements ScoreReadServiceInterface
      * bcc-search relevance ranking) sort consistently with the read model.
      *
      * @param int[] $pageIds
-     * @return array<int, array{total_score: float, reputation_tier: string, ranking_score: float, endorsement_count: int, is_verified: bool, follower_count: int}>
+     * @return array<int, array{total_score: float, reputation_tier: string, ranking_score: float, endorsement_count: int, is_verified: bool, is_claim_verified: bool, follower_count: int}>
      */
     private function getEnrichedFromReadModel(array $pageIds): array
     {
@@ -156,6 +175,7 @@ final class ScoreReadService implements ScoreReadServiceInterface
                     'ranking_score'     => $ts * 0.5,
                     'endorsement_count' => 0,
                     'is_verified'       => false,
+                    'is_claim_verified' => false,
                     'follower_count'    => 0,
                 ];
             }
@@ -166,52 +186,109 @@ final class ScoreReadService implements ScoreReadServiceInterface
 
         $result = [];
         foreach ($rows as $pageId => $row) {
-            $trustScore      = (float) $row->trust_score;
-            $confidence      = (float) $row->confidence_score;
-            $onchainBonus    = (float) $row->onchain_bonus;
-            $endorsementCount = (int) $row->endorsement_count;
-            $uniqueVoters    = (int) $row->unique_voters;
-            $voteCount       = max(1, (int) ($row->vote_count ?? 1));
-            $isVerified      = (bool) $row->is_verified;
-            $pageType        = $row->page_type ?? 'builder';
-            $lastVoteAt      = $row->last_vote_at ?? '2020-01-01';
-
-            // Freshness decay: 1.0 → 0.5 over 180 days since last vote.
-            $daysSinceVote = (time() - strtotime($lastVoteAt ?: '2020-01-01')) / 86400;
-            $freshness     = max(0.5, 1.0 - ($daysSinceVote / 180.0));
-
-            // On-chain bonus weight by page type.
-            $onchainWeight = match ($pageType) {
-                'validator' => 0.30,
-                'nft'       => 0.10,
-                default     => 0.15,
-            };
-
-            // Endorsement logarithmic boost by page type.
-            $endorseWeight = match ($pageType) {
-                'nft'       => 4.0,
-                'validator' => 1.5,
-                default     => 2.5,
-            };
-
-            // Composite ranking — identical to PageDiscoveryRepository::queryFromReadModel().
-            $rankingScore = $trustScore * $confidence * $freshness
-                + $onchainBonus * $onchainWeight
-                + log(1 + $endorsementCount, 2) * $endorseWeight
-                + ($uniqueVoters / $voteCount) * 5.0
-                + ($isVerified ? 3.0 : 0.0);
-
-            $result[$pageId] = [
-                'total_score'       => $trustScore,
-                'reputation_tier'   => $row->reputation_tier ?? 'neutral',
-                'ranking_score'     => round($rankingScore, 4),
-                'endorsement_count' => $endorsementCount,
-                'is_verified'       => $isVerified,
-                'follower_count'    => (int) $row->follower_count,
-            ];
+            $result[$pageId] = self::enrichRow($row);
         }
 
         return $result;
+    }
+
+    /**
+     * Shape a single read-model row into the enriched score entry — pure
+     * so the composite ranking + the is_claim_verified threading are both
+     * unit-testable from a plain row object (no read-model repo / singleton).
+     *
+     * @phpstan-param PageReadModelRowLike $row
+     * @return array{total_score: float, reputation_tier: string, ranking_score: float, endorsement_count: int, is_verified: bool, is_claim_verified: bool, follower_count: int}
+     */
+    public static function enrichRow(object $row): array
+    {
+        $trustScore       = (float) $row->trust_score;
+        $confidence       = (float) $row->confidence_score;
+        $onchainBonus     = (float) $row->onchain_bonus;
+        $endorsementCount = (int) $row->endorsement_count;
+        $uniqueVoters     = (int) $row->unique_voters;
+        $voteCount        = max(1, (int) ($row->vote_count ?? 1));
+        $isVerified       = (bool) $row->is_verified;
+        $hasVerifiedClaim = (bool) ($row->has_verified_claim ?? 0);
+        $pageType         = $row->page_type ?? 'builder';
+        $lastVoteAt       = $row->last_vote_at ?? '2020-01-01';
+
+        $rankingScore = self::computeRankingScore(
+            $trustScore,
+            $confidence,
+            $onchainBonus,
+            $endorsementCount,
+            $uniqueVoters,
+            $voteCount,
+            $isVerified,
+            $hasVerifiedClaim,
+            (string) $pageType,
+            is_string($lastVoteAt) ? $lastVoteAt : '2020-01-01'
+        );
+
+        return [
+            'total_score'       => $trustScore,
+            'reputation_tier'   => is_string($row->reputation_tier ?? null) ? $row->reputation_tier : 'neutral',
+            'ranking_score'     => round($rankingScore, 4),
+            'endorsement_count' => $endorsementCount,
+            'is_verified'       => $isVerified,
+            'is_claim_verified' => $hasVerifiedClaim,
+            'follower_count'    => (int) $row->follower_count,
+        ];
+    }
+
+    /**
+     * Composite discovery/search ranking score — pure compute so the
+     * formula is unit-testable and the claim-verified bonus is pinned.
+     *
+     * Mirrors PageDiscoveryRepository::queryFromReadModel() with the added
+     * has_verified_claim term. The claim-verified bonus is filterable via
+     * `bcc_rank_claim_verified_bonus` (default BCC_RANK_CLAIM_VERIFIED_BONUS,
+     * dominant over the +3.0 email-verified term).
+     */
+    public static function computeRankingScore(
+        float $trustScore,
+        float $confidence,
+        float $onchainBonus,
+        int $endorsementCount,
+        int $uniqueVoters,
+        int $voteCount,
+        bool $isVerified,
+        bool $hasVerifiedClaim,
+        string $pageType,
+        string $lastVoteAt
+    ): float {
+        $voteCount = max(1, $voteCount);
+
+        // Freshness decay: 1.0 → 0.5 over 180 days since last vote.
+        $daysSinceVote = (time() - strtotime($lastVoteAt !== '' ? $lastVoteAt : '2020-01-01')) / 86400;
+        $freshness     = max(0.5, 1.0 - ($daysSinceVote / 180.0));
+
+        // On-chain bonus weight by page type.
+        $onchainWeight = match ($pageType) {
+            'validator' => 0.30,
+            'nft'       => 0.10,
+            default     => 0.15,
+        };
+
+        // Endorsement logarithmic boost by page type.
+        $endorseWeight = match ($pageType) {
+            'nft'       => 4.0,
+            'validator' => 1.5,
+            default     => 2.5,
+        };
+
+        $claimVerifiedBonus = (float) apply_filters(
+            'bcc_rank_claim_verified_bonus',
+            BCC_RANK_CLAIM_VERIFIED_BONUS
+        );
+
+        return $trustScore * $confidence * $freshness
+            + $onchainBonus * $onchainWeight
+            + log(1 + $endorsementCount, 2) * $endorseWeight
+            + ($uniqueVoters / $voteCount) * 5.0
+            + ($isVerified ? 3.0 : 0.0)
+            + ($hasVerifiedClaim ? $claimVerifiedBonus : 0.0);
     }
 
     /**
