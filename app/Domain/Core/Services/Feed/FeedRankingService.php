@@ -45,6 +45,16 @@ if (!defined('ABSPATH')) {
 
 final class FeedRankingService
 {
+    /**
+     * Anon hot-feed payload cache (first page only). The key folds in
+     * the HiddenActivityRepository generation counter (§5), so a §K1-C
+     * moderation hide/unhide invalidates instantly; everything else is
+     * bounded by the TTL + the minutely `bcc_trust_feed_hot_warm` cron
+     * refresh. TTL 300s is the upper bound if the warm cron stalls.
+     */
+    private const HOT_CACHE_GROUP = 'bcc_trust:feed';
+    private const HOT_CACHE_TTL   = 300; // 5 min
+
     public function __construct(
         private readonly ActivityFeedService $activityFeed,
         private readonly ReputationRepository $reputationRepo,
@@ -57,9 +67,58 @@ final class FeedRankingService
     /**
      * Hot feed (§F2) — global trending, anonymous-OK, zero-follow fallback.
      *
+     * Payload cache (first page only): the hot feed is ALWAYS built with
+     * the anonymous posture (viewer 0), so the fully hydrated
+     * `{items, pagination}` payload is viewer-independent and safe to
+     * share. `$cursor === null` hits are served from the object cache;
+     * cursor pages stay live (rare + cheap once per-item caches are warm).
+     *
+     * Freshness: a NEW post appears on the cached anon first page within
+     * TTL/cron bounds (≤~60s once the minutely `bcc_trust_feed_hot_warm`
+     * cron ticks; 300s worst case if it stalls) — the endpoint already
+     * declares equivalent staleness via `Cache-Control: public,
+     * max-age=60, stale-while-revalidate=120`. Moderation hides are
+     * INSTANT: the cache key folds in the HiddenActivityRepository
+     * generation counter, so a §K1-C hide/unhide changes the key.
+     *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
     public function getHotFeed(?string $cursor = null, int $limit = 20): array
+    {
+        if ($cursor !== null) {
+            return $this->buildHotFeed($cursor, $limit);
+        }
+
+        $key    = self::hotFeedCacheKey($limit);
+        $cached = wp_cache_get($key, self::HOT_CACHE_GROUP);
+        if (is_array($cached) && isset($cached['items'], $cached['pagination'])) {
+            /** @var array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} $cached */
+            return $cached;
+        }
+
+        $payload = $this->buildHotFeed(null, $limit);
+        wp_cache_set($key, $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+        return $payload;
+    }
+
+    /**
+     * Cron-side warm of the anon hot-feed first page — rebuilds the
+     * payload and stores it UNCONDITIONALLY (refresh-on-hit), so the
+     * request path above stays a pure cache read between cron ticks.
+     * Owned by CronService::warmHotFeed() on `bcc_trust_feed_hot_warm`.
+     */
+    public function warmHotFeed(int $limit = 20): void
+    {
+        $payload = $this->buildHotFeed(null, $limit);
+        wp_cache_set(self::hotFeedCacheKey($limit), $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+    }
+
+    /**
+     * The pre-cache hot-feed build — exactly the former getHotFeed body.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    private function buildHotFeed(?string $cursor, int $limit): array
     {
         $excluded       = $this->reputationRepo->getCautionAndRiskyUserIds();
         $hidden         = $this->hiddenRepo->getAllHiddenIds();
@@ -83,6 +142,16 @@ final class FeedRankingService
         // skips viewer_reaction (always null for anon).
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], 0);
         return $payload;
+    }
+
+    /**
+     * Cache key for the anon first page: limit-scoped + §5 generation-
+     * keyed on the moderation hidden-list (instant invalidation on
+     * hide/unhide — stale generations age out via TTL).
+     */
+    private static function hotFeedCacheKey(int $limit): string
+    {
+        return 'hot:v1:' . $limit . ':g' . HiddenActivityRepository::getGeneration();
     }
 
     /**

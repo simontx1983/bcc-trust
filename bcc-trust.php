@@ -412,6 +412,12 @@ add_action('bcc_trust_process_recalculations', function () {
 add_action('bcc_attestor_reliability_sweep', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->sweepAttestorReliability();
 });
+// §F2 hot-feed warm: minutely rebuild of the anonymous /feed/hot
+// first-page payload so cold anonymous hits serve from the object
+// cache instead of paying the inline build.
+add_action('bcc_trust_feed_hot_warm', function () {
+    \BCC\Trust\Core\Plugin::instance()->cronService()->warmHotFeed();
+});
 add_action('bcc_trust_weekly_digest', function () {
     \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest();
 });
@@ -625,6 +631,7 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
         'bcc_trust_divergence_state_sweep'=> ['interval' => 'daily',                'description' => 'divergence-state classification + §J.7 notifications'],
         'bcc_trust_daily_attestation_decay'=> ['interval' => 'daily',               'description' => 'attestation_bonus decay recompute sweep (Slice E)'],
         'bcc_attestor_reliability_sweep'  => ['interval' => 'daily',                'description' => 'operator-reliability cache recompute (Slice 3)'],
+        'bcc_trust_feed_hot_warm'         => ['interval' => 'bcc_one_minute',       'description' => 'anon /feed/hot first-page payload warm'],
         // Onchain domain
         'bcc_onchain_daily_refresh'       => ['interval' => 'daily',                'description' => 'onchain holdings refresh sweep'],
         'bcc_onchain_retry_bonus'         => ['interval' => 'hourly',               'description' => 'onchain bonus-application retry'],
@@ -713,6 +720,17 @@ add_action('plugins_loaded', static function (): void {
     // the divergence sweep. Same anti-drift triple-redundancy idiom.
     if (!wp_next_scheduled('bcc_trust_daily_attestation_decay')) {
         wp_schedule_event(time() + 3 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_daily_attestation_decay');
+    }
+
+    // §F2 hot-feed warm self-heal. NEW hook shipped WITHOUT a plugin
+    // version bump (batch-release discipline), so CronService::
+    // maybeReschedule() — gated on bcc_trust_cron_version vs
+    // BCC_TRUST_VERSION — will NOT fire on an update-without-
+    // reactivation. This guarded, additive schedule is what actually
+    // lands the hook on such installs (the documented silent-drift
+    // failure mode). Mirrors the scheduleAll() entry.
+    if (!wp_next_scheduled('bcc_trust_feed_hot_warm')) {
+        wp_schedule_event(time() + 60, 'bcc_one_minute', 'bcc_trust_feed_hot_warm');
     }
 
     // Slice 3 — nightly operator-reliability recompute self-heal. NEW hook;
@@ -1847,6 +1865,8 @@ function bcc_trust_deactivate() {
         'bcc_watch_batch_sweep',
         // Slice 3: nightly operator-reliability recompute.
         'bcc_attestor_reliability_sweep',
+        // §F2 anon hot-feed first-page payload warm.
+        'bcc_trust_feed_hot_warm',
     ];
 
     foreach ($cron_hooks as $hook) {

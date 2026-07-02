@@ -814,6 +814,34 @@ class CronService
         }
     }
 
+    // ── Hot-feed warm (anon first page) ─────────────────────────────────
+
+    /**
+     * Minutely warm of the anonymous /feed/hot first page (§F2).
+     *
+     * Rebuilds the post-hydration `{items, pagination}` payload and
+     * stores it unconditionally (refresh even on hit), so anonymous
+     * cold hits never pay the inline build (~20s measured cold on
+     * Local — docs/capacity-model.md baseline).
+     *
+     * No DegradationMetric subsystem here — deliberate scope cut: the
+     * failure mode is benign (requests fall back to the inline build)
+     * and a new subsystem would require the cross-repo canonical-map +
+     * docs registration dance.
+     */
+    public function warmHotFeed(): void
+    {
+        try {
+            Plugin::instance()->feedRankingService()->warmHotFeed(20);
+        } catch (\Throwable $e) {
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] hot-feed warm failed', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
     // ── Cron scheduling ─────────────────────────────────────────────────
 
     /**
@@ -864,6 +892,7 @@ class CronService
             'bcc_trust_weekly_slow_ring_scan'  => 'bcc_weekly',       // scale-hardening: slow endorsement-ring detection
             'bcc_trust_daily_contribution_recovery' => 'daily',      // trust recovery through contribution
             'bcc_attestor_reliability_sweep'   => 'daily',           // Slice 3: nightly operator-reliability recompute
+            'bcc_trust_feed_hot_warm'          => 'bcc_one_minute',  // anon /feed/hot first-page payload warm
         ];
 
         // Clear retired hooks so they don't fire orphaned actions.
