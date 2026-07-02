@@ -315,6 +315,12 @@ final class CardViewService
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::buildFlags((int) $post->post_author),
             'is_claimed'          => $isClaimed,
+            // On-chain claim-verified: true when this page has a verified
+            // operator/creator claim. Read straight from the read-model row
+            // ($rm->has_verified_claim, projected in syncPage) — no per-card
+            // ClaimRepository query, so the prefetched-list path stays
+            // N+1-free. Distinct from the owner-EMAIL verification signal.
+            'is_claim_verified'   => $rm !== null && (bool) ($rm->has_verified_claim ?? 0),
             // §D2 — true when the current viewer has already cast a
             // vote on this page. Drives the entity profile's
             // "WRITE A REVIEW" → "REMOVE YOUR REVIEW" CTA swap.
@@ -619,6 +625,9 @@ final class CardViewService
             // evaluate truthy and render the WANTED stamp on member
             // cards — fixed now by setting them explicitly.
             'is_claimed'          => true,
+            // Members aren't on-chain-claimed — always false, emitted for
+            // shape uniformity with entity cards (matches is_claimed above).
+            'is_claim_verified'   => false,
             'claim_target'        => null,
             'crest'               => self::buildCrest(
                 (string) $user->display_name ?: $user->user_login,
@@ -765,6 +774,9 @@ final class CardViewService
             'viewer_attestation'  => null,
             'chains'              => null,
             'is_claimed'          => true,
+            // Communities aren't on-chain-claimed — always false, emitted
+            // for shape uniformity (mirrors is_claimed above).
+            'is_claim_verified'   => false,
             'claim_target'        => null,
             'onchain_signals'     => null,
             'member_dossier'      => null,

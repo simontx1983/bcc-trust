@@ -44,6 +44,7 @@ if (!defined('ABSPATH')) {
  *   follower_count: int|numeric-string,
  *   page_type: string,
  *   is_verified: int|numeric-string,
+ *   has_verified_claim: int|numeric-string,
  *   github_username: string|null,
  *   github_followers: int|numeric-string,
  *   x_username: string|null,
@@ -66,7 +67,7 @@ class PageReadModelRepository
     private const COLUMNS = 'page_id, owner_id, trust_score, reputation_tier, confidence_score,
                  positive_score, negative_score, onchain_bonus, attestation_bonus,
                  vote_count, unique_voters, endorsement_count, follower_count,
-                 page_type, is_verified, github_username, github_followers,
+                 page_type, is_verified, has_verified_claim, github_username, github_followers,
                  x_username, x_followers, has_wallet, last_vote_at, last_endorsement_at, updated_at';
 
     private string $table;
@@ -299,6 +300,16 @@ class PageReadModelRepository
             $isVerified = $userInfo ? (int) $userInfo : 0;
         }
 
+        // ── On-chain claim-verified status ──────────────────────────────
+        // "Claim-verified" = this page has at least one verified
+        // operator/creator claim (validator or collection), resolved via
+        // the same filter ClaimRepository::getPrimaryClaimsByPageIds uses.
+        // Distinct from is_verified (owner EMAIL verification) — this is
+        // on-chain ownership. A single bounded batch call for one page.
+        $hasVerifiedClaim = \BCC\Trust\Onchain\Repositories\ClaimRepository::getPrimaryClaimsByPageIds([$pageId]) !== []
+            ? 1
+            : 0;
+
         // ── Social verification + wallet data ──────────────────────────
         $ghUsername  = null;
         $ghFollowers = 0;
@@ -355,9 +366,9 @@ class PageReadModelRepository
                 (page_id, owner_id, trust_score, reputation_tier, confidence_score,
                  positive_score, negative_score, onchain_bonus, attestation_bonus,
                  vote_count, unique_voters, endorsement_count, follower_count,
-                 page_type, is_verified, github_username, github_followers,
+                 page_type, is_verified, has_verified_claim, github_username, github_followers,
                  x_username, x_followers, has_wallet, last_vote_at, last_endorsement_at, updated_at)
-             VALUES (%d, %d, %f, %s, %f, %f, %f, %f, %f, %d, %d, %d, %d, %s, %d, %s, %d, %s, %d, %d, %s, %s, NOW())
+             VALUES (%d, %d, %f, %s, %f, %f, %f, %f, %f, %d, %d, %d, %d, %s, %d, %d, %s, %d, %s, %d, %d, %s, %s, NOW())
              ON DUPLICATE KEY UPDATE
                 owner_id            = VALUES(owner_id),
                 trust_score         = VALUES(trust_score),
@@ -373,6 +384,7 @@ class PageReadModelRepository
                 follower_count      = VALUES(follower_count),
                 page_type           = VALUES(page_type),
                 is_verified         = VALUES(is_verified),
+                has_verified_claim  = VALUES(has_verified_claim),
                 github_username     = VALUES(github_username),
                 github_followers    = VALUES(github_followers),
                 x_username          = VALUES(x_username),
@@ -396,6 +408,7 @@ class PageReadModelRepository
             $followerCount,
             $pageType,
             $isVerified,
+            $hasVerifiedClaim,
             $ghUsername,
             $ghFollowers,
             $xUsername,

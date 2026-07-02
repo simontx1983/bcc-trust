@@ -141,10 +141,25 @@ final class CardsSearchEndpoint
             ? $body['results']
             : [];
 
+        // Batch-resolve on-chain claim-verified status for every result
+        // page in a SINGLE bounded query (autocomplete tops out at
+        // bcc-search's page cap) so per-row buildSuggestion() stays N+1-free.
+        $resultPageIds = [];
+        foreach ($rows as $row) {
+            $rowArr = is_array($row) ? $row : (array) $row;
+            $pid    = isset($rowArr['page_id']) ? (int) $rowArr['page_id'] : 0;
+            if ($pid > 0) {
+                $resultPageIds[] = $pid;
+            }
+        }
+        $claimVerifiedMap = $resultPageIds !== []
+            ? \BCC\Trust\Onchain\Repositories\ClaimRepository::getVerifiedPagesMap($resultPageIds)
+            : [];
+
         $items = [];
         foreach ($rows as $row) {
             $rowArr = is_array($row) ? $row : (array) $row;
-            $suggestion = self::buildSuggestion($rowArr);
+            $suggestion = self::buildSuggestion($rowArr, $claimVerifiedMap);
             if ($suggestion !== null) {
                 $items[] = $suggestion;
             }
@@ -162,6 +177,8 @@ final class CardsSearchEndpoint
      * in V1 per §C1).
      *
      * @param array<string, mixed> $row
+     * @param array<int, true> $claimVerifiedMap page_id => true for pages
+     *        with a verified on-chain operator/creator claim.
      * @return array{
      *   id: int,
      *   name: string,
@@ -171,10 +188,11 @@ final class CardsSearchEndpoint
      *   tier_label: string|null,
      *   trust_score: int|null,
      *   is_verified: bool,
+     *   is_claim_verified: bool,
      *   href: string
      * }|null
      */
-    private static function buildSuggestion(array $row): ?array
+    private static function buildSuggestion(array $row, array $claimVerifiedMap = []): ?array
     {
         $pageId = isset($row['page_id']) ? (int) $row['page_id'] : 0;
         if ($pageId <= 0) {
@@ -221,6 +239,10 @@ final class CardsSearchEndpoint
 
         $name = isset($row['page_name']) && is_string($row['page_name']) ? $row['page_name'] : '';
         $isVerified = isset($row['verified']) ? (bool) $row['verified'] : false;
+        // On-chain claim-verified (operator/creator) — distinct from the
+        // owner-EMAIL `is_verified` above. Sourced from the pre-batched map
+        // so no per-suggestion query fires.
+        $isClaimVerified = isset($claimVerifiedMap[$pageId]);
 
         return [
             'id'                  => $pageId,
@@ -231,6 +253,7 @@ final class CardsSearchEndpoint
             'tier_label'          => $tierLabel,
             'trust_score'         => $trustScore,
             'is_verified'         => $isVerified,
+            'is_claim_verified'   => $isClaimVerified,
             'href'                => self::KIND_TO_ROUTE_PREFIX[$kind] . $handle,
         ];
     }

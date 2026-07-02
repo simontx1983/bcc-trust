@@ -52,4 +52,11 @@ if (!defined('BCC_RELIABILITY_PRECONSENSUS_MAX_ORDER')) {
     define('BCC_RELIABILITY_PRECONSENSUS_MAX_ORDER', 5);
 }
 
+// Claim-verified ranking bonus — read by
+// ScoreReadService::computeRankingScore(), pinned in
+// RankingClaimVerifiedBonusTest.
+if (!defined('BCC_RANK_CLAIM_VERIFIED_BONUS')) {
+    define('BCC_RANK_CLAIM_VERIFIED_BONUS', 10.0);
+}
+
 require_once __DIR__ . '/../vendor/autoload.php';
