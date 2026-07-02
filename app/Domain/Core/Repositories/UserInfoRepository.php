@@ -347,18 +347,31 @@ class UserInfoRepository {
         // one transaction — even though this now runs in an async handler
         // (post-C2 fix), unbounded page fan-outs can still starve the
         // cron if one voter has 100k+ votes.
+        //
+        // Batching via a derived-table LIMIT: MySQL rejects LIMIT on a
+        // multi-table UPDATE (the previous UPDATE…JOIN…LIMIT shape errored
+        // silently and marked nothing — same defect class as the endorsed
+        // variant below). The unmarked filter lives INSIDE the derived
+        // table so every iteration picks a fresh batch of genuinely
+        // unmarked pages; the derived table is materialized, which is what
+        // makes selecting from the updated table legal here.
         $batchSize = (int) apply_filters('bcc_trust_fraud_recalc_batch', 2000);
         $maxLoops  = 50;
         $total     = 0;
         for ($i = 0; $i < $maxLoops; $i++) {
             $affected = $wpdb->query($wpdb->prepare(
                 "UPDATE {$scores_table} s
-                 INNER JOIN {$votes_table} v ON v.page_id = s.page_id
+                 INNER JOIN (
+                     SELECT DISTINCT v.page_id
+                     FROM {$votes_table} v
+                     INNER JOIN {$scores_table} s2 ON s2.page_id = v.page_id
+                     WHERE v.voter_user_id = %d
+                       AND v.status = 1
+                       AND s2.recalculate_required = 0
+                     LIMIT %d
+                 ) t ON t.page_id = s.page_id
                  SET s.recalculate_required = 1
-                 WHERE v.voter_user_id = %d
-                   AND v.status = 1
-                   AND s.recalculate_required = 0
-                 LIMIT %d",
+                 WHERE s.recalculate_required = 0",
                 $userId,
                 $batchSize
             ));
