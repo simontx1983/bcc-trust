@@ -31,7 +31,7 @@ namespace BCC\Trust\Core\Support;
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Repositories\PeepSoPageRepository;
-use BCC\Trust\Core\Repositories\EndorsementRepository;
+use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
@@ -92,7 +92,10 @@ final class MemberSummaryPrefetcher
             'primary_locals'               => PeepSoGroupRepository::getPrimaryLocalForUsers($userIds),
             'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
             'owned_pages_by_type'          => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
-            'endorsements_received_counts' => (new EndorsementRepository())->getReceivedCountsForUsers($userIds),
+            // Attestation-backed since the endorsements-table retirement:
+            // "received" = active vouches cast ON the member
+            // (target_kind='user_profile', keyed by raw user id).
+            'endorsements_received_counts' => (new AttestationRepository())->countActiveVouchesByTargets('user_profile', $userIds),
             'solids_received_counts'       => $solidsReceivedCounts,
             'reviews_written_counts'       => (new VoteRepository())->countByVoters($userIds),
             'disputes_signed_counts'       => (new FlagsRepository())->countByFlaggers($userIds),

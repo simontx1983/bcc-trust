@@ -698,8 +698,18 @@ class PageDataAggregator {
         }
 
         try {
-            $endorseService = \BCC\Trust\Core\Plugin::instance()->endorsementService();
-            $has_endorsed   = $endorseService->hasEndorsedPage($post_id, $viewer_id);
+            // Attestation-backed since the endorsements-table retirement:
+            // "endorsed" ≡ the viewer holds an active vouch attestation on
+            // this entity page. Non-entity pages (no resolvable card
+            // target_kind) can't be endorsed → false.
+            $targetKind = AttestationService::targetKindForPage($post_id);
+            if ($targetKind !== null) {
+                $viewerAttestation = \BCC\Trust\Core\Plugin::instance()
+                    ->attestationService()
+                    ->getViewerAttestation($viewer_id, $targetKind, $post_id);
+                $has_endorsed = $viewerAttestation !== null
+                    && ($viewerAttestation['vouch'] ?? null) !== null;
+            }
         } catch (Exception $e) {
             self::logViewerError('endorsement_lookup', $viewer_id, $post_id, $e);
             $viewer_data_degraded = true;

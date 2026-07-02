@@ -342,7 +342,7 @@ final class RepairService
         $tables = [
             'votes'              => TableRegistry::votes(),
             'scores'             => TableRegistry::scores(),
-            'endorsements'       => TableRegistry::endorsements(),
+            'attestations'       => TableRegistry::trustAttestations(),
             'user_info'          => TableRegistry::userInfo(),
             'fingerprints'       => TableRegistry::fingerprints(),
             'patterns'           => TableRegistry::patterns(),

@@ -324,9 +324,11 @@ class CronService
     /**
      * Weekly slow-ring endorsement scan — scale-hardening Phase 3.
      *
-     * Detects paced reciprocal-endorse rings that evade the existing
-     * burst gates (3-in-300s, 6-in-1h, 3-pages-24h in EndorsementService)
-     * by spreading endorsements over multiple days. Patience-evasion.
+     * Detects paced reciprocal-vouch rings that evade the per-request
+     * throttles on the cast path (MeAttestationsEndpoint Throttle +
+     * AttestationService advisory-lock serialization) by spreading
+     * casts over multiple days. Patience-evasion. Reads attestation
+     * edges via AttestationRepository::getMutualVouchPairsInWindow.
      *
      * Why a separate weekly cron (not merged into dailyGraphUpdate):
      *   1. Different cadence — slow rings by definition don't need daily

@@ -164,7 +164,7 @@ class AdminDashboardRepository
         global $wpdb;
 
         $votesTable        = TableRegistry::votes();
-        $endorseTable      = TableRegistry::endorsements();
+        $attestationsTable = TableRegistry::trustAttestations();
         $userInfoTable     = TableRegistry::userInfo();
         $fingerprintTable  = TableRegistry::fingerprints();
         $fraudTable        = TableRegistry::fraudAnalysis();
@@ -173,8 +173,10 @@ class AdminDashboardRepository
         // READ MODEL ONLY — DO NOT BYPASS.
         // Page counts + tier counts come from bcc_page_read_model, the single
         // source of truth for frontend/API/admin page reads.
+        // total_endorsements is attestation-backed (active kind=vouch rows)
+        // since the legacy endorsements-table retirement.
         $totalVotes        = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$votesTable} WHERE status = %d", 1));
-        $totalEndorsements = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$endorseTable} WHERE status = %d", 1));
+        $totalEndorsements = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$attestationsTable} WHERE kind = 'vouch' AND revoked_at IS NULL");
         $totalPages        = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$readModelTable}");
         $totalUsers        = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$userInfoTable}");
 
@@ -1714,7 +1716,12 @@ class AdminDashboardRepository
     }
 
     /**
-     * Get active endorsements for a page with endorser display names.
+     * Get active endorsements (= vouch attestations) for a page with
+     * attestor display names. Attestation-backed since the legacy
+     * endorsements-table retirement; column ALIASES preserved so the
+     * wp-admin debug template renders unchanged (vesting_stage is a
+     * constant 0 — attestations don't vest; context carries the
+     * attestation kind).
      *
      * @param int $pageId
      * @return list<object>  Rows with endorser_user_id, weight, vesting_stage, context, created_at, endorser_name.
@@ -1731,18 +1738,48 @@ class AdminDashboardRepository
     {
         global $wpdb;
 
-        $table = TableRegistry::endorsements();
+        $table = TableRegistry::trustAttestations();
+        [$kindsSql, $targetId] = self::attestationTargetPredicateForPage($pageId);
 
         return $wpdb->get_results($wpdb->prepare(
-            "SELECT e.endorser_user_id, e.weight, e.vesting_stage, e.context, e.created_at,
+            "SELECT a.attestor_user_id AS endorser_user_id, a.weight_at_time AS weight,
+                    0 AS vesting_stage, a.kind AS context, a.created_at,
                     u.display_name AS endorser_name
-             FROM {$table} e
-             LEFT JOIN {$wpdb->users} u ON e.endorser_user_id = u.ID
-             WHERE e.page_id = %d AND e.status = 1
-             ORDER BY e.created_at DESC
+             FROM {$table} a
+             LEFT JOIN {$wpdb->users} u ON a.attestor_user_id = u.ID
+             WHERE a.target_id = %d
+               AND a.target_kind IN ({$kindsSql})
+               AND a.kind = 'vouch'
+               AND a.revoked_at IS NULL
+             ORDER BY a.created_at DESC
              LIMIT 50",
-            $pageId
+            $targetId
         )) ?: [];
+    }
+
+    /**
+     * Map a score-row page id onto the attestation target predicate:
+     * member self-page ids (> ID_BASE) key user_profile rows on the RAW
+     * member id; entity pages key the card kinds on the page id itself.
+     * Kind strings are class-constant literals (never user input), so
+     * inlining them quoted is prepare-safe.
+     *
+     * @return array{0: string, 1: int} [quoted target_kind IN-list SQL, target id]
+     */
+    private static function attestationTargetPredicateForPage(int $pageId): array
+    {
+        if (\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageId)) {
+            return [
+                "'user_profile'",
+                \BCC\Trust\Core\Services\MemberSelfPageService::ownerOfSelfPage($pageId),
+            ];
+        }
+
+        $kinds = array_map(
+            static fn(string $kind): string => "'" . $kind . "'",
+            AttestationRepository::PAGE_TARGET_KINDS
+        );
+        return [implode(',', $kinds), $pageId];
     }
 
     /**
@@ -1779,7 +1816,10 @@ class AdminDashboardRepository
     }
 
     /**
-     * Get recent endorsement events for a page (timeline).
+     * Get recent endorsement (= vouch attestation) events for a page
+     * (timeline). Attestation-backed since the legacy endorsements-table
+     * retirement; event_type / action aliases preserved for the debug
+     * template.
      *
      * @param int $pageId
      * @param int $limit
@@ -1796,16 +1836,20 @@ class AdminDashboardRepository
     {
         global $wpdb;
 
-        $endorseTable = TableRegistry::endorsements();
+        $table = TableRegistry::trustAttestations();
+        [$kindsSql, $targetId] = self::attestationTargetPredicateForPage($pageId);
 
         return $wpdb->get_results($wpdb->prepare(
-            "SELECT 'endorsement' AS event_type, endorser_user_id AS actor_id,
-                    'endorsed' AS action, weight, created_at
-             FROM {$endorseTable}
-             WHERE page_id = %d AND status = 1
+            "SELECT 'endorsement' AS event_type, attestor_user_id AS actor_id,
+                    'endorsed' AS action, weight_at_time AS weight, created_at
+             FROM {$table}
+             WHERE target_id = %d
+               AND target_kind IN ({$kindsSql})
+               AND kind = 'vouch'
+               AND revoked_at IS NULL
              ORDER BY created_at DESC
              LIMIT %d",
-            $pageId,
+            $targetId,
             $limit
         )) ?: [];
     }

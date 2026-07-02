@@ -94,11 +94,9 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_page_scores';
     }
 
-    public static function endorsements(): string
-    {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_trust_endorsements';
-    }
+    // NOTE: bcc_trust_endorsements retired (endorse-retirement final slice,
+    // 2026-07-02) — reads repointed to bcc_trust_attestations (kind=vouch);
+    // the table is dropped by includes/database/drop-endorsements-table.php.
 
     public static function activity(): string
     {
@@ -261,8 +259,8 @@ final class TableRegistry
     // V2 Trust Attestation Layer: §J wire contract.
     // Stores Layer-1 attestations (Vouch + Stand Behind). Disputes
     // live separately (stake + panel mechanics don't fit this shape).
-    // Generalized successor to bcc_trust_endorsements per the §J.11
-    // "endorse collapses into vouch" migration.
+    // Generalized successor to the retired bcc_trust_endorsements table
+    // per the §J.11 "endorse collapses into vouch" migration.
 
     public static function trustAttestations(): string
     {
@@ -320,7 +318,6 @@ final class TableRegistry
         return [
             'votes'              => self::votes(),
             'scores'             => self::scores(),
-            'endorsements'       => self::endorsements(),
             'user_verifications' => self::userVerifications(),
             'activity'           => self::activity(),
             'activity_archive'   => self::activityArchive(),

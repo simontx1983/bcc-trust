@@ -12,7 +12,6 @@ use BCC\Trust\Core\Controllers\UserStatusController;
 use BCC\Trust\Core\Controllers\XController;
 use BCC\Trust\Core\Controllers\AdminStatsController;
 use BCC\Trust\Core\Repositories\EdgeRepository;
-use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\FraudAnalysisRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\ScoreEventRepository;
@@ -87,12 +86,6 @@ final class Plugin
     public function userInfoRepository(): UserInfoRepository
     {
         return $this->userInfoRepository ??= new UserInfoRepository();
-    }
-
-    private ?EndorsementRepository $endorsementRepository = null;
-    public function endorsementRepository(): EndorsementRepository
-    {
-        return $this->endorsementRepository ??= new EndorsementRepository();
     }
 
     private ?VerificationRepository $verificationRepository = null;
@@ -235,12 +228,11 @@ final class Plugin
     private ?EndorsementService $endorsementService = null;
     public function endorsementService(): EndorsementService
     {
-        // Slice E cutover: the write surface (endorsePage / vouch / bonus
-        // application) is retired, and endorsement vesting was deleted in
-        // the final endorse-retirement cleanup. Only the read / eligibility
-        // / hydration reads remain. The can_endorse eligibility gate is now
-        // vouch-aligned, so the service depends on AttestationService (the
-        // vouch tier gate in resolveViewerVouchGate).
+        // Endorse-retirement final slice: every read here is attestation-
+        // backed (active kind=vouch rows) — the legacy endorsements table
+        // and its repository are deleted. What remains is the vouch-aligned
+        // can_endorse eligibility gate + the §4.22/§4.30 given-direction
+        // reads and their §J.6 hydration (external shapes preserved).
         return $this->endorsementService ??= new EndorsementService(
             $this->attestationService()
         );
@@ -1967,22 +1959,6 @@ final class Plugin
             }
         }, 20, 4);
 
-        // first_endorsement_received fires on the page owner. Hook
-        // carries 3 args (endorser, page, context); we use the first
-        // two. The listener looks up the owner internally and no-ops
-        // on self-endorsements + missing owners.
-        add_action('bcc_trust_endorsement_added', function (int $endorserUserId, int $pageId): void {
-            try {
-                $this->firstActionListener()->onEndorsementAdded($endorserUserId, $pageId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] first_action endorsement_added failed', [
-                    'endorser_id' => $endorserUserId,
-                    'page_id'     => $pageId,
-                    'error'       => $e->getMessage(),
-                ]);
-            }
-        }, 20, 2);
-
         // ── §C1 / §N11 / §O1.2 tier-upgrade listener ─────────────────────
         //
         // Detects reputation_tier crossings off the back of activity
@@ -2112,12 +2088,6 @@ final class Plugin
 
         add_action('bcc_rank_awarded', function (int $userId, string $newRank, string $oldRank): void {
             $this->notificationDispatcher()->onRankAwarded($userId, $newRank, $oldRank);
-        }, 30, 3);
-
-        // §I1 V1.5 — endorse → bell. Fired by EndorsementService::endorsePage
-        // post-commit; the dispatcher checks per-event bell prefs before writing.
-        add_action('bcc_trust_endorsement_added', function (int $endorserId, int $pageId, string $context): void {
-            $this->notificationDispatcher()->onEndorseAdded($endorserId, $pageId, $context);
         }, 30, 3);
 
         // Slice E — fold the attestation into the subject's trust score. Runs

@@ -20,8 +20,8 @@ namespace BCC\Trust\Core\Security;
 
 if (!defined('ABSPATH')) exit;
 
+use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\EdgeRepository;
-use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\PatternRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
@@ -32,7 +32,7 @@ class TrustGraph {
     private EdgeRepository $edgeRepo;
     private VoteRepository $voteRepo;
     private PatternRepository $patternRepo;
-    private EndorsementRepository $endorsementRepo;
+    private AttestationRepository $attestationRepo;
 
     const CACHE_GROUP = 'bcc_trust_graph';
     const CACHE_TTL   = BCC_TRUST_CACHE_GRAPH;
@@ -62,7 +62,7 @@ class TrustGraph {
         $plugin = \BCC\Trust\Core\Plugin::instance();
         $this->voteRepo        = $plugin->voteRepository();
         $this->patternRepo     = $plugin->patternRepository();
-        $this->endorsementRepo = $plugin->endorsementRepository();
+        $this->attestationRepo = $plugin->attestationRepository();
 
         $this->voteWeightMultiplier   = BCC_TRUST_GRAPH_VOTE_MULTIPLIER;
         $this->endorseWeightMultiplier = BCC_TRUST_GRAPH_ENDORSE_MULTIPLIER;
@@ -132,8 +132,9 @@ class TrustGraph {
 
         // ── 1. Read the materialized edge table in chunks ────────────────────
         //
-        // The edge table is kept current by VoteService and EndorsementRepository
-        // on every write.  At 100k users this is O(distinct user pairs) rows
+        // The edge table is kept current by VoteService on every vote write
+        // (legacy endorsement edges are frozen — the endorse write path is
+        // retired; stored endorsement-type rows still participate below).  At 100k users this is O(distinct user pairs) rows
         // rather than O(all votes) rows — typically 5-20× smaller result set.
         //
         // CRITICAL: chunk by primary key to bound a single SQL response and
@@ -826,7 +827,9 @@ class TrustGraph {
             // surfaces; component-size gates further. (Vote rings use
             // $minSize for both pair- and component-thresholds; for
             // slow endorsement rings we decouple them.)
-            $mutuals = $this->endorsementRepo->getMutualEndorsePairsInWindow(
+            // Attestation-edge primitive (active vouch rows) — the frozen
+            // bcc_trust_endorsements table was retired; aliases unchanged.
+            $mutuals = $this->attestationRepo->getMutualVouchPairsInWindow(
                 $windowDays,
                 1,
                 $pageLimit,
@@ -1065,8 +1068,10 @@ class TrustGraph {
         }
 
         // Build directed graph: endorser_user_id → page_owner_id
+        // (vouch-attestation edges since the endorsements-table retirement;
+        // row aliases preserved by AttestationRepository::getVouchEdges).
         // LIMIT prevents unbounded result sets on large deployments.
-        $endorsements = $this->voteRepo->getEndorsementEdges(10000);
+        $endorsements = $this->attestationRepo->getVouchEdges(10000);
 
         $graph = [];
         foreach ($endorsements as $e) {

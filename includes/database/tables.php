@@ -176,7 +176,7 @@ function bcc_trust_create_tables() {
     }
     if (function_exists('bcc_trust_create_trust_attestations_table')) {
         bcc_trust_create_trust_attestations_table();
-        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Trust attestations table created + legacy endorsement migration applied', []);
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Trust attestations table created', []);
     }
     if (function_exists('bcc_trust_create_target_divergence_state_table')) {
         bcc_trust_create_target_divergence_state_table();
@@ -244,7 +244,9 @@ function bcc_trust_verify_all_tables() {
     $required_tables = [
         'bcc_trust_votes',
         'bcc_trust_page_scores',
-        'bcc_trust_endorsements',
+        // bcc_trust_endorsements retired (endorse-retirement final slice) —
+        // vouch attestations live in bcc_trust_attestations.
+        'bcc_trust_attestations',
         'bcc_trust_user_verifications',
         'bcc_trust_activity',
         'bcc_trust_activity_archive',

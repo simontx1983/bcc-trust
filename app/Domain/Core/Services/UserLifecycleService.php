@@ -93,8 +93,12 @@ class UserLifecycleService
         // Soft-delete votes
         $plugin->voteRepository()->softDeleteAllByVoter($userId);
 
-        // Soft-delete endorsements
-        $plugin->endorsementRepository()->softDeleteByEndorser($userId);
+        // Endorsement parity: the legacy endorsements table is retired.
+        // The user's vouch/stand_behind footprint is removed by the
+        // attestationRepository()->deleteForUser() call below (rows they
+        // cast AND rows cast against their profile), which also stops the
+        // attestation-backed endorsement_count denorm from counting them
+        // on the next per-target recompute.
 
         // Hard-delete analytics data
         $plugin->userInfoRepository()->deleteByUserId($userId);
@@ -134,8 +138,30 @@ class UserLifecycleService
         (new \BCC\Trust\Core\Repositories\PushSubscriptionRepository())->deleteAllForUser($userId);
 
         // Trust attestations: rows the user cast AND rows cast against the
-        // user's profile (target_kind='user_profile').
+        // user's profile (target_kind='user_profile'). Snapshot the distinct
+        // targets the user actively backed FIRST so their scores can be
+        // re-synthesized below — with the endorsement_count denorm +
+        // attestation_bonus both sourced from attestations, a deleted
+        // user's vouches must stop counting immediately, not at the next
+        // nightly decay sweep.
+        $castTargets = [];
+        foreach ($plugin->attestationRepository()->listActiveByAttestor($userId) as $row) {
+            $castTargets[$row->target_kind . ':' . $row->target_id] = [$row->target_kind, $row->target_id];
+        }
+
         $plugin->attestationRepository()->deleteForUser($userId);
+
+        foreach ($castTargets as [$targetKind, $targetId]) {
+            try {
+                $plugin->attestationScoreSynthesis()->recomputeFor($targetKind, $targetId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] user-delete attestation recompute failed', [
+                    'target_kind' => $targetKind,
+                    'target_id'   => $targetId,
+                    'error'       => $e->getMessage(),
+                ]);
+            }
+        }
 
         // Dispute footprint: panel seats, credited participations, and
         // user-reports in both directions (reporter + reported). Dispute
@@ -159,9 +185,11 @@ class UserLifecycleService
     /**
      * Clean up trust data when a PeepSo page (post) is permanently deleted.
      *
-     * Only acts on 'peepso-page' post type. Soft-deletes votes and
-     * endorsements (preserving audit trail), hard-deletes scores, flags,
-     * score events, read model, and dirty queue entries.
+     * Only acts on 'peepso-page' post type. Soft-deletes votes
+     * (preserving audit trail), hard-deletes scores, flags, score
+     * events, read model, dirty queue entries, and the page-target
+     * attestations (the endorse-shaped signal since the legacy
+     * endorsements-table retirement).
      */
     public function onPageDelete(int $postId): void
     {
@@ -172,9 +200,8 @@ class UserLifecycleService
 
         $plugin = Plugin::instance();
 
-        // Soft-delete all votes and endorsements on this page.
+        // Soft-delete all votes on this page.
         PageReadModelRepository::softDeleteVotesForPage($postId);
-        PageReadModelRepository::softDeleteEndorsementsForPage($postId);
 
         // Hard-delete derived/materialized data (no audit value).
         PageReadModelRepository::deletePageData($postId, [

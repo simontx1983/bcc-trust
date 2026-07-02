@@ -66,6 +66,19 @@ final class AttestationScoreSynthesis
 
         $bonus = $this->synthesize($targetKind, $targetId);
         $this->scoreRepo->applyAttestationBonus($pageId, $bonus);
+
+        // endorsement_count display denorm — refreshed here so the count is
+        // LIVE on every cast/revoke/reaffirm (this method runs on all three
+        // events plus the nightly decay sweep). Source of truth since the
+        // legacy endorsements-table retirement: active kind=vouch
+        // attestations on this exact target. VoteService::recalculateFromVotes
+        // rewrites the same value on full vote recalcs; both paths converge
+        // on countActiveVouchesForTarget.
+        $this->scoreRepo->updateEndorsementCount(
+            $pageId,
+            $this->attestationRepo->countActiveVouchesForTarget([$targetKind], $targetId)
+        );
+
         $this->scoreRepo->invalidateCache($pageId);
         PageReadModelRepository::enqueueDirty($pageId);
     }

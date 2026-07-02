@@ -250,63 +250,9 @@ final class NotificationDispatcher
         }
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // bcc_trust_endorsement_added — endorsement on a page
-    // ──────────────────────────────────────────────────────────────────
-
-    /**
-     * Notify the page owner when someone endorses their page.
-     * Skips self-endorsements (defense-in-depth — EndorsementService
-     * already rejects them, but the dispatcher stays safe even if a
-     * future code path sneaks one through).
-     *
-     * Context isn't surfaced in the message: V1 only supports the
-     * 'general' context per the controller's allowlist, so no
-     * disambiguation needed. Context arg is preserved on the
-     * subscriber for forward compatibility.
-     */
-    public function onEndorseAdded(int $endorserId, int $pageId, string $context): void
-    {
-        unset($context); // Reserved for future context-aware messaging.
-        if ($endorserId <= 0 || $pageId <= 0) {
-            return;
-        }
-        try {
-            $ownerId = $this->pageOwnerResolver->getPageOwner($pageId);
-            if ($ownerId <= 0 || $ownerId === $endorserId) {
-                return;
-            }
-
-            $actorHandle = self::resolveHandle($endorserId);
-            $pageName    = self::resolvePageName($pageId);
-            $message     = $pageName !== ''
-                ? sprintf('@%s endorsed %s.', $actorHandle, $pageName)
-                : sprintf('@%s endorsed your page.', $actorHandle);
-
-            $this->dispatch(
-                $endorserId,
-                $ownerId,
-                $message,
-                NotificationType::ENDORSE,
-                $pageId,
-                0
-            );
-
-            // V2 Phase 1: parallel push enqueue. Same self-gating
-            // semantics as review (above).
-            $this->pushDispatcher->enqueue($ownerId, 'endorse', [
-                'actor_handle' => $actorHandle,
-                'page_id'      => $pageId,
-                'page_name'    => $pageName,
-            ]);
-        } catch (\Throwable $e) {
-            Logger::warning('[NotificationDispatcher] endorse dispatch failed', [
-                'endorser_id' => $endorserId,
-                'page_id'     => $pageId,
-                'error'       => $e->getMessage(),
-            ]);
-        }
-    }
+    // NOTE: the bcc_trust_endorsement_added bell/push subscriber was
+    // retired with the legacy endorse write path — vouch casts dispatch
+    // owner notifications via the bcc_attestation_created subscribers.
 
     // ──────────────────────────────────────────────────────────────────
     // bcc_rank_awarded — self-notification, audit trail beyond toast

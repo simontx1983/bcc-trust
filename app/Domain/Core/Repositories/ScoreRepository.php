@@ -1059,6 +1059,38 @@ class ScoreRepository {
     }
 
     /**
+     * Refresh a page's `endorsement_count` display denorm to an absolute
+     * value (the active vouch-attestation count computed upstream). This is
+     * what keeps the denorm LIVE on cast/revoke/reaffirm now that the
+     * legacy endorsements table is retired: AttestationScoreSynthesis::
+     * recomputeFor() calls this alongside applyAttestationBonus on every
+     * attestation event, and VoteService::recalculateFromVotes rewrites the
+     * same value on full recalcs. Display-only — endorsement_count is not a
+     * formula term, so total_score / reputation_tier are untouched. Updates
+     * every category row for the page (same WHERE scope as the bonus
+     * writers).
+     *
+     * @throws Exception on database failure
+     */
+    public function updateEndorsementCount(int $pageId, int $count): void {
+        global $wpdb;
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET endorsement_count = %d
+             WHERE page_id = %d",
+            max(0, $count),
+            $pageId
+        ));
+
+        if ($result === false) {
+            throw new Exception(
+                'Failed to update endorsement count for page ' . $pageId . ': ' . $wpdb->last_error
+            );
+        }
+    }
+
+    /**
      * Apply a dispute/admin penalty to a member self-page (Architecture A).
      * `$delta` is the score change (negative for a penalty, e.g. -5) and
      * ACCUMULATES into `penalty_adjustment` — the clobber-safe home for

@@ -139,26 +139,6 @@ class AuditLogger {
         self::log('vote_removed', $pageId, $meta, 'page');
     }
 
-    /**
-     * @param array<string, mixed> $meta
-     */
-    public static function endorse(int $pageId, string $context = 'general', array $meta = []): void {
-        $action = 'endorse_' . sanitize_key($context);
-
-        if (isset($meta['weight']) && $meta['weight'] > BCC_TRUST_MAX_ENDORSE_WEIGHT) {
-            $meta['exceeds_max'] = true;
-        }
-
-        self::log($action, $pageId, $meta, 'page');
-    }
-
-    /**
-     * @param array<string, mixed> $meta
-     */
-    public static function revokeEndorsement(int $pageId, string $context = 'general', array $meta = []): void {
-        self::log('endorse_revoked_' . sanitize_key($context), $pageId, $meta, 'page');
-    }
-
     public static function verificationComplete(int $userId): void {
         self::log('email_verified', $userId, [], 'user');
     }

@@ -1,39 +1,47 @@
 <?php
 /**
- * Endorsement Services (read / eligibility / hydration).
+ * Endorsement Services (read / eligibility / hydration) — attestation-backed.
  *
- * Slice E cutover (2026-06-25): the WRITE surface of this service —
- * endorsePage / revokePageEndorsement / vouchForAuthor /
- * revokeVouchForAuthor and their bonus-application + fraud + cap
- * helpers — was retired. endorsement_bonus is dropped from the trust
- * formula and the Trust Attestation Layer (AttestationService) is the
- * single backing the score reads. The REST /endorse + /revoke-endorsement
- * surfaces now route through AttestationService::cast / ::revokeByTarget.
- * Vouch later relocated off the PeepSo reaction entirely onto the
- * first-class per-author byline Vouch toggle (full-weight cast() via
- * /me/attestations) — it is no longer a reaction.
+ * Slice E cutover (2026-06-25) retired the WRITE surface; the final
+ * endorse-retirement slice (2026-07-02) retired the READ surface's legacy
+ * backing table too. Every read here now sources the Trust Attestation
+ * Layer (`bcc_trust_attestations`, active kind=vouch rows) — the live
+ * truth since Slice E — while preserving the external §J.6 row shape
+ * BYTE-FOR-BYTE (field names, endpoint envelopes, `/endorsements/mine`
+ * + `/endorsements/mine/stats` unenveloped realities per contract §4.30,
+ * `/users/:handle/endorsements` per §4.22). The frozen
+ * `bcc_trust_endorsements` table, EndorsementRepository, and
+ * EndorsementQueryService were deleted outright (fresh-install doctrine).
  *
- * What remains here is read-only:
- *   - getEndorseEligibility* — the §L5 can_endorse preflight gate the
- *     card composer + PageCardPrefetcher consume (eligibility hint, not
- *     a write path). Now vouch-aligned: the gate delegates to
- *     AttestationService::getViewerActionPermissions()['can_vouch'] so
- *     can_endorse tracks the same Neutral-standing tier gate as vouch.
- *   - getUserEndorsements / getUserEndorsementStats / hasEndorsedPage —
- *     legacy endorsement-table reads still surfaced by
- *     UserEndorsementsEndpoint / UsersEndpoint.
- *   - hydrateEndorsementItems — §J.6 row hydration shared by those reads.
+ * Kind-scope decision (locked here): "given endorsements" = active VOUCH
+ * attestations only. stand_behind is a distinct, slot-bounded action with
+ * its own surfaces (the §J.4 attestation roster + slot_holders picker) —
+ * folding it into the endorse-shaped list would double-surface it and
+ * blur the two vocabularies.
  *
- * Endorsement vesting (processEndorsementVesting /
- * EndorsementVestingProcessor) was deleted in the final endorse-retirement
- * cleanup — the daily cron now vests votes only.
+ * Target mapping (locked here): attestations target entity cards AND
+ * user_profiles; both map to their score-row page ids for the §J.6 row —
+ * `*_card` target_id IS the peepso-page id; `user_profile` maps to the
+ * member self-page (MemberSelfPageService::selfPageId). Member rows
+ * hydrate title/avatar/tier from the member (display name, user avatar,
+ * self-page score row); `page_url` stays '' for self-pages (no permalink),
+ * the same documented fallback as unresolvable pages.
+ *
+ * What remains here:
+ *   - getEndorseEligibility* — the §L5 can_endorse preflight gate
+ *     (vouch-aligned; delegates to AttestationService's can_vouch tier gate).
+ *   - getUserEndorsements / getUserEndorsementStats — given-direction
+ *     reads, attestation-backed.
+ *   - hydrateEndorsementItems — §J.6 row hydration shared by
+ *     UserEndorsementsEndpoint + UsersEndpoint.
  *
  * @package BCC\Trust\Core\Services
- * @version 3.0.0
+ * @version 4.0.0
  */
 
 namespace BCC\Trust\Core\Services;
 
+use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Services\PeepSoPageResolver;
 
 if (!defined('ABSPATH')) {
@@ -43,20 +51,16 @@ if (!defined('ABSPATH')) {
 class EndorsementService {
 
     private AttestationService $attestationService;
-    private EndorsementQueryService $queryService;
+    private AttestationRepository $attestationRepo;
+
+    /** Defensive ceiling on the stats aggregate read (§4 bounded queries). */
+    private const STATS_MAX_ROWS = 5000;
 
     public function __construct(
         AttestationService     $attestationService
     ) {
         $this->attestationService = $attestationService;
-        $this->queryService       = new EndorsementQueryService();
-    }
-
-    /**
-     * Check if user has endorsed page
-     */
-    public function hasEndorsedPage(int $pageId, ?int $endorserUserId = null, ?string $context = null): bool {
-        return $this->queryService->hasEndorsedPage($pageId, $endorserUserId, $context);
+        $this->attestationRepo    = \BCC\Trust\Core\Plugin::instance()->attestationRepository();
     }
 
     /**
@@ -203,23 +207,91 @@ class EndorsementService {
     }
 
     /**
-     * Get endorsements given by user with fraud data from user_info.
+     * Given-direction read: active vouch attestations AUTHORED by the
+     * user, shaped as the legacy raw-row array the two REST surfaces
+     * feed through hydrateEndorsementItems.
      *
-     * Passthrough to the query service. See EndorsementQueryService::getUserEndorsements()
-     * for the per-entry shape — each element is an associative array of the
-     * EndorsementWithPage columns plus the computed `endorser_fraud_score`.
+     * Per-entry keys (superset of what hydrate consumes; the raw rows
+     * also leak — documented as OPAQUE — via the §4.30 stats
+     * `recent_endorsements` slot):
+     *   id, page_id, page_title, context ('general' constant — the only
+     *   value the legacy allowlist ever admitted on this surface),
+     *   weight (the attestation's cast-time weight_at_time), reason
+     *   (the attestation context_note; null when blank), created_at,
+     *   endorser_user_id.
+     *
+     * `page_id` mapping per the class docblock: card target_id passes
+     * through; user_profile maps to the member self-page id.
      *
      * @return list<array<string, mixed>>
      */
     public function getUserEndorsements(?int $endorserUserId = null, int $limit = 20): array {
-        return $this->queryService->getUserEndorsements($endorserUserId, $limit);
+        $endorserUserId = $endorserUserId ?? get_current_user_id();
+
+        if (!$endorserUserId) {
+            return [];
+        }
+
+        $rows = $this->attestationRepo->listActiveVouchesByAttestor($endorserUserId, $limit);
+        return $this->shapeGivenRows($rows, $endorserUserId);
+    }
+
+    /**
+     * Shape raw active-vouch attestation rows into the legacy raw-row
+     * array shape (see getUserEndorsements). Title resolution:
+     * card targets read the page post title (post cache primed in one
+     * batch); user_profile targets read the member display name.
+     *
+     * @param list<object{id: int, target_kind: string, target_id: int, weight_at_time: float, context_note: ?string, created_at: string}> $rows
+     * @return list<array<string, mixed>>
+     */
+    private function shapeGivenRows(array $rows, int $endorserUserId): array {
+        if ($rows === []) {
+            return [];
+        }
+
+        // Batch-prime the WP post cache for card targets so the per-row
+        // get_the_title calls below are cache hits (no N+1).
+        $cardPageIds = [];
+        foreach ($rows as $row) {
+            if ($row->target_kind !== 'user_profile' && $row->target_id > 0) {
+                $cardPageIds[] = $row->target_id;
+            }
+        }
+        if ($cardPageIds !== []) {
+            _prime_post_caches($cardPageIds, false, false);
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if ($row->target_kind === 'user_profile') {
+                $pageId = MemberSelfPageService::selfPageId($row->target_id);
+                $user   = get_userdata($row->target_id);
+                $title  = $user instanceof \WP_User ? (string) $user->display_name : null;
+            } else {
+                $pageId = $row->target_id;
+                $title  = get_the_title($row->target_id);
+                $title  = $title !== '' ? $title : null;
+            }
+
+            $out[] = [
+                'id'               => $row->id,
+                'endorser_user_id' => $endorserUserId,
+                'page_id'          => $pageId,
+                'page_title'       => $title,
+                'context'          => 'general',
+                'weight'           => $row->weight_at_time,
+                'reason'           => $row->context_note,
+                'created_at'       => $row->created_at,
+            ];
+        }
+        return $out;
     }
 
     /**
      * Hydrate raw endorsement rows into the §J.6 contract-stable item
      * shape (page_title + page_url + page-owner avatar, current tier
-     * snapshot from the read model, weight + context + reason +
-     * timestamp).
+     * snapshot, weight + context + reason + timestamp).
      *
      * Shared between:
      *   - UserEndorsementsEndpoint::handleList  (`GET /endorsements/mine`)
@@ -229,10 +301,19 @@ class EndorsementService {
      * row shapes. The owner-side and public-side reads diverge on
      * permission + cache headers, not on row shape.
      *
+     * Snapshot sources by target family:
+     *   - entity-card rows — tier/score/avatar from bcc_page_read_model,
+     *     page_url from the post permalink (unchanged from the legacy read).
+     *   - member self-page rows (page_id > ID_BASE; only produced by the
+     *     attestation-backed read — the frozen legacy table never held
+     *     them) — tier/score from the member's self-page score row (the
+     *     single source of member trust), avatar from the member's user
+     *     avatar, page_url '' (no permalink exists; same documented
+     *     fallback as an unresolvable page).
+     *
      * §A view-model boundary: this is presentation-layer assembly
      * (avatar URL via WP, esc_url / sanitize_key for the wire). The
-     * underlying score / tier / weight values are computed elsewhere
-     * (read model). This method only joins them per row.
+     * underlying score / tier / weight values are computed elsewhere.
      *
      * @param list<array<string, mixed>> $endorsements Raw rows from
      *     EndorsementService::getUserEndorsements.
@@ -240,35 +321,58 @@ class EndorsementService {
      */
     public function hydrateEndorsementItems(array $endorsements): array
     {
-        $page_ids = array_map(static fn(array $e): int => (int) ($e['page_id'] ?? 0), $endorsements);
-        $rm_rows  = [];
-        if (!empty($page_ids)) {
-            $rm_rows = \BCC\Trust\Core\Plugin::instance()->pageReadModelRepository()->getByPageIds($page_ids);
+        $card_page_ids = [];
+        foreach ($endorsements as $e) {
+            $pid = (int) ($e['page_id'] ?? 0);
+            if ($pid > 0 && !MemberSelfPageService::isSelfPage($pid)) {
+                $card_page_ids[] = $pid;
+            }
         }
+        $rm_rows = [];
+        if (!empty($card_page_ids)) {
+            $rm_rows = \BCC\Trust\Core\Plugin::instance()->pageReadModelRepository()->getByPageIds($card_page_ids);
+        }
+
+        $scoreRepo = \BCC\Trust\Core\Plugin::instance()->scoreRepository();
 
         $items = [];
         foreach ($endorsements as $e) {
             $pid = (int) ($e['page_id'] ?? 0);
-            $rm  = $rm_rows[$pid] ?? null;
-
-            $avatar = '';
-            if ($rm && $rm->owner_id) {
-                $avatar = get_avatar_url((int) $rm->owner_id, ['size' => 64]);
-            }
 
             $pageTitle = isset($e['page_title']) && is_string($e['page_title']) ? $e['page_title'] : null;
             $context   = isset($e['context'])    && is_string($e['context'])    ? $e['context']    : null;
             $reason    = isset($e['reason'])     && is_string($e['reason'])     ? $e['reason']     : null;
             $createdAt = isset($e['created_at']) && is_string($e['created_at']) ? $e['created_at'] : null;
 
+            if (MemberSelfPageService::isSelfPage($pid)) {
+                // Member self-page row: snapshot from the self-page score
+                // row + the member's own avatar. No permalink exists.
+                $memberId = MemberSelfPageService::ownerOfSelfPage($pid);
+                $score    = $scoreRepo->getByPageId($pid);
+                $avatar   = $memberId > 0 ? get_avatar_url($memberId, ['size' => 64]) : '';
+
+                $trustScore = $score ? (int) round($score->getTotalScore()) : null;
+                $tier       = $score ? sanitize_key($score->getReputationTier()) : 'unavailable';
+                $pageUrl    = '';
+            } else {
+                $rm     = $rm_rows[$pid] ?? null;
+                $avatar = '';
+                if ($rm && $rm->owner_id) {
+                    $avatar = get_avatar_url((int) $rm->owner_id, ['size' => 64]);
+                }
+                $trustScore = $rm ? (int) round((float) $rm->trust_score) : null;
+                $tier       = $rm ? sanitize_key($rm->reputation_tier ?? 'neutral') : 'unavailable';
+                $pageUrl    = get_permalink($pid) ? esc_url(get_permalink($pid)) : '';
+            }
+
             $items[] = [
                 'id'           => (int) ($e['id'] ?? 0),
                 'page_id'      => $pid,
                 'page_title'   => $pageTitle ?? __('(Untitled)', 'bcc-trust'),
-                'page_url'     => get_permalink($pid) ? esc_url(get_permalink($pid)) : '',
+                'page_url'     => $pageUrl,
                 'avatar_url'   => $avatar ? esc_url($avatar) : '',
-                'trust_score'  => $rm ? (int) round((float) $rm->trust_score) : null,
-                'tier'         => $rm ? sanitize_key($rm->reputation_tier ?? 'neutral') : 'unavailable',
+                'trust_score'  => $trustScore,
+                'tier'         => $tier,
                 'weight'       => round((float) ($e['weight'] ?? 0), 2),
                 'context'      => $context ?? 'general',
                 'reason'       => $reason,
@@ -279,11 +383,46 @@ class EndorsementService {
     }
 
     /**
-     * Get endorsement statistics for a user
+     * Aggregate stats over the caller's authored endorsements (§4.30,
+     * UNENVELOPED raw array at the document root — preserved exactly).
+     * Attestation-backed: one bounded repo read feeds every field.
+     *
+     * Key-for-key legacy parity:
+     *   - total_endorsements_given — count of ACTIVE vouch attestations.
+     *   - unique_pages_endorsed — distinct pages within the 10 most
+     *     recent only (legacy semantics preserved, not lifetime distinct).
+     *   - recent_endorsements — up to 5 raw rows (contract: OPAQUE).
+     *   - endorsement_weight_avg — avg cast-time weight across active
+     *     vouches; floors to 1.0 when no positive average.
+     *   - last_endorsement — newest active vouch created_at, or null.
      *
      * @return array<string, mixed>
      */
     public function getUserEndorsementStats(int $userId): array {
-        return $this->queryService->getUserEndorsementStats($userId);
+        $rows   = $this->attestationRepo->listActiveVouchesByAttestor($userId, self::STATS_MAX_ROWS);
+        $shaped = $this->shapeGivenRows($rows, $userId);
+
+        $uniquePages = [];
+        foreach (array_slice($shaped, 0, 10) as $e) {
+            $uniquePages[(int) $e['page_id']] = true;
+        }
+
+        $weightSum = 0.0;
+        foreach ($shaped as $e) {
+            $weightSum += (float) $e['weight'];
+        }
+        $avg = count($shaped) > 0 ? $weightSum / count($shaped) : 0.0;
+
+        return [
+            'user_id' => $userId,
+            'total_endorsements_given' => count($shaped),
+            'unique_pages_endorsed' => count($uniquePages),
+            'recent_endorsements' => array_map(
+                static fn(array $e): object => (object) $e,
+                array_slice($shaped, 0, 5)
+            ),
+            'endorsement_weight_avg' => $avg > 0 ? round($avg, 2) : 1.0,
+            'last_endorsement' => $shaped !== [] ? $shaped[0]['created_at'] : null,
+        ];
     }
 }

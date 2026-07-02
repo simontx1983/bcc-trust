@@ -42,7 +42,7 @@ use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Repositories\PeepSoPageRepository;
-use BCC\Trust\Core\Repositories\EndorsementRepository;
+use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
@@ -431,8 +431,8 @@ final class UserViewService
         if ($prefetched !== null && isset($prefetched['endorsements_received_counts'])) {
             $endorsementsReceived = $prefetched['endorsements_received_counts'][$userId] ?? 0;
         } else {
-            $endorsementsReceived = (new EndorsementRepository())
-                ->getReceivedCountsForUsers([$userId])[$userId] ?? 0;
+            $endorsementsReceived = (new AttestationRepository())
+                ->countActiveVouchesByTargets('user_profile', [$userId])[$userId] ?? 0;
         }
 
         // Solids: PeepSo reaction of kind=KIND_SOLID. ReactionTypeRegistry
