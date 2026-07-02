@@ -1,7 +1,7 @@
 <?php
 /**
  * Scoring Configuration
- * Score velocity, endorsement diversity, coordination detection, account age, GitHub integration
+ * Score velocity, coordination detection, account age, GitHub integration
  */
 if (!defined('ABSPATH')) exit;
 
@@ -30,18 +30,6 @@ define('BCC_TRUST_RETALIATION_WINDOW_DAYS', 14);
 define('BCC_TRUST_MAX_SCORE_CHANGE_PER_DAY', 8);
 
 // ======================================================
-// ENDORSEMENT SOURCE DIVERSITY
-// ======================================================
-define('BCC_TRUST_ENDORSE_DIVERSITY_LOW', 0.20);
-define('BCC_TRUST_ENDORSE_DIVERSITY_MED', 0.40);
-define('BCC_TRUST_ENDORSE_DIVERSITY_HIGH', 0.60);
-
-// ======================================================
-// ENDORSEMENT-TO-VOTE RATIO DETECTION
-// ======================================================
-define('BCC_TRUST_ENDORSE_VOTE_RATIO_THRESHOLD', 5);
-
-// ======================================================
 // TEMPORAL COORDINATION DETECTION
 // ======================================================
 define('BCC_TRUST_COORDINATION_ACTION_THRESHOLD', 5);
@@ -58,10 +46,6 @@ define('BCC_TRUST_AGE_VERIFIED', 1095);    // > 3 years = veteran account
 define('BCC_TRUST_AGE_NEW_MULTIPLIER', 0.70);
 define('BCC_TRUST_AGE_ESTABLISHED_MULTIPLIER', 0.85);
 define('BCC_TRUST_AGE_VERIFIED_MULTIPLIER', 1.15);
-
-// Endorsement weight multipliers for account age (EndorsementWeightCalculator)
-define('BCC_TRUST_ENDORSE_AGE_1YR_MULTIPLIER', 1.1);
-define('BCC_TRUST_ENDORSE_AGE_2YR_MULTIPLIER', 1.2);
 
 // ======================================================
 // GITHUB INTEGRATION SCORING

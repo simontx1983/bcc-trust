@@ -359,38 +359,12 @@ class EndorsementRepository {
     }
 
     /**
-     * Count endorsements for a page
-     */
-    public function countForPage(int $pageId): int {
-        $gen      = $this->getGeneration($pageId);
-        $cacheKey = "endorsement_count:{$pageId}:{$gen}";
-        $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
-        if ($cached !== false) {
-            return (int) $cached;
-        }
-
-        global $wpdb;
-
-        $count = (int) $wpdb->get_var(
-            $wpdb->prepare(
-                "SELECT COUNT(*) FROM {$this->table}
-                 WHERE page_id = %d
-                 AND status = 1",
-                $pageId
-            )
-        );
-
-        wp_cache_set($cacheKey, $count, self::CACHE_GROUP, self::CACHE_TTL);
-        return $count;
-    }
-
-    /**
      * Batched: lifetime count of endorsements RECEIVED per user, where
      * "received" means endorsements on any `peepso-page` post the user
      * owns (`peepso_page_members.pm_user_status = 'member_owner'`).
      *
      * One JOIN scan replaces N×(M+1) sequential queries (per-user owned-
-     * pages lookup × per-page countForPage). Powers the /members
+     * pages lookup × per-page COUNT). Powers the /members
      * directory back-of-card endorsements_received slot.
      *
      * Users who own no pages — or whose pages have no endorsements —
@@ -702,123 +676,6 @@ class EndorsementRepository {
         ));
 
         return $avg !== null ? (float) $avg : 0.0;
-    }
-
-    /**
-     * Count endorsers in a cluster (sharing same set of endorsed pages).
-     */
-    public function countClusterEndorsers(int $pageId, int $endorserUserId): int
-    {
-        global $wpdb;
-
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(DISTINCT e2.endorser_user_id)
-             FROM {$this->table} e1
-             JOIN {$this->table} e2 ON e1.page_id = e2.page_id
-             WHERE e1.endorser_user_id = %d
-               AND e2.endorser_user_id != %d
-               AND e1.status = 1
-               AND e2.status = 1
-               AND e2.page_id = %d",
-            $endorserUserId,
-            $endorserUserId,
-            $pageId
-        ));
-    }
-
-    /**
-     * Graduate endorsements from one vesting stage to the next.
-     *
-     * @return int Number of rows updated.
-     */
-    public function graduateVestingStage(
-        int $fromStage,
-        int $toStage,
-        float $fromFactor,
-        float $toFactor,
-        string $now,
-        int $ageDays
-    ): int {
-        global $wpdb;
-
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table}
-             SET weight        = weight / %f * %f,
-                 vesting_stage = %d
-             WHERE status = 1
-               AND vesting_stage = %d
-               AND created_at <= DATE_SUB(%s, INTERVAL %d DAY)
-             LIMIT 500",
-            $fromFactor,
-            $toFactor,
-            $toStage,
-            $fromStage,
-            $now,
-            $ageDays
-        ));
-
-        return ($result !== false) ? (int) $result : 0;
-    }
-
-    /**
-     * Flag page scores for recalculation where endorsements just graduated.
-     */
-    public function flagScoresForGraduatedEndorsements(int $stage, string $now, int $ageDays): void
-    {
-        global $wpdb;
-
-        $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
-
-        $wpdb->query($wpdb->prepare(
-            "UPDATE {$scoresTable} s
-             INNER JOIN {$this->table} e ON e.page_id = s.page_id
-             SET s.recalculate_required = 1
-             WHERE e.status = 1
-               AND e.vesting_stage = %d
-               AND e.created_at <= DATE_SUB(%s, INTERVAL %d DAY)",
-            $stage,
-            $now,
-            $ageDays
-        ));
-    }
-
-    /**
-     * Get page IDs flagged for recalculation (for cache invalidation).
-     *
-     * @return int[]
-     */
-    public function getFlaggedPageIds(int $limit = 500): array
-    {
-        global $wpdb;
-
-        $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
-
-        return array_map('intval', $wpdb->get_col($wpdb->prepare(
-            "SELECT DISTINCT s.page_id FROM {$scoresTable} s
-             WHERE s.recalculate_required = 1
-             LIMIT %d",
-            $limit
-        )));
-    }
-
-    /**
-     * Count reciprocal endorsements between an endorser and a page owner.
-     */
-    public function countReciprocal(int $endorserUserId, int $pageOwnerId): int
-    {
-        global $wpdb;
-
-        $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
-
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table} e
-             JOIN {$scoresTable} s ON e.page_id = s.page_id
-             WHERE e.endorser_user_id = %d
-               AND s.page_owner_id = %d
-               AND e.status = 1",
-            $pageOwnerId,
-            $endorserUserId
-        ));
     }
 
     /**

@@ -4,7 +4,6 @@
  *
  * Unifies fraud-based weight reduction across:
  *   - VoteWeightCalculator (real-time vote submission)
- *   - EndorsementWeightCalculator (real-time endorsement)
  *   - VoteService::recalculateFromVotes (recalculation)
  *   - VoteRepository SQL (retroactive aggregation — simplified mirror)
  *
