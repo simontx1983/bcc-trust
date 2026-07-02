@@ -483,7 +483,7 @@ final class FeedHydrationPipeline
         $authorIds = [];
         foreach ($items as $item) {
             $author = is_array($item['author'] ?? null) ? $item['author'] : [];
-            $uid    = is_int($author['user_id'] ?? null) ? $author['user_id'] : 0;
+            $uid    = is_int($author['id'] ?? null) ? $author['id'] : 0;
             if ($uid > 0) {
                 $authorIds[$uid] = true;
             }
@@ -500,7 +500,7 @@ final class FeedHydrationPipeline
         $hydrated = [];
         foreach ($items as $item) {
             $author = is_array($item['author'] ?? null) ? $item['author'] : [];
-            $uid    = is_int($author['user_id'] ?? null) ? $author['user_id'] : 0;
+            $uid    = is_int($author['id'] ?? null) ? $author['id'] : 0;
             if ($uid > 0 && isset($operatorSet[$uid])) {
                 $author['is_operator'] = true;
                 $item['author'] = $author;
@@ -533,11 +533,8 @@ final class FeedHydrationPipeline
      * (ReputationRepository::getTiersForUsers) regardless of items
      * count; feed page cap is 50, comment drawer cap is 50.
      *
-     * NOTE: ActivityFeedService emits `author.id` (the user id). The
-     * sibling `hydrateAuthorBadges` reads `author.user_id` which is a
-     * key-name inconsistency — flagged separately as deferred work.
-     * This hydrator reads from `id` to match what's actually on the
-     * wire today.
+     * NOTE: ActivityFeedService emits `author.id` (the user id) — this
+     * hydrator reads from `id` to match what's actually on the wire.
      *
      * @param list<array<string, mixed>> $items
      * @return list<array<string, mixed>>
@@ -987,7 +984,7 @@ final class FeedHydrationPipeline
         $hydrated = [];
         foreach ($items as $item) {
             $author     = is_array($item['author'] ?? null) ? $item['author'] : [];
-            $authorId   = is_int($author['user_id'] ?? null) ? $author['user_id'] : 0;
+            $authorId   = is_int($author['id'] ?? null) ? $author['id'] : 0;
             $canReport  = $viewerId > 0 && $authorId > 0 && $authorId !== $viewerId;
 
             $perms = is_array($item['permissions'] ?? null) ? $item['permissions'] : [];
