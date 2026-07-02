@@ -188,14 +188,27 @@ final class HiddenActivityRepository
     // Cache invalidation — generation counter pattern (per §L6).
     // ─────────────────────────────────────────────────────────────────
 
-    private static function cacheGenerationKey(): string
+    /**
+     * Current cache generation — public so payload-level caches that
+     * fold hidden-list state into their own keys (§5 generation-counter
+     * convention) invalidate instantly when moderation hides/unhides a
+     * row. Consumer: FeedRankingService's anon hot-feed payload cache.
+     * Same read-or-init logic the internal list cache keys by; do NOT
+     * duplicate this elsewhere — call this accessor.
+     */
+    public static function getGeneration(): int
     {
         $gen = wp_cache_get(self::CACHE_KEY_GEN, self::CACHE_GROUP);
         if (!is_int($gen)) {
             $gen = 0;
             wp_cache_set(self::CACHE_KEY_GEN, $gen, self::CACHE_GROUP);
         }
-        return self::CACHE_KEY_LIST . ':' . $gen;
+        return $gen;
+    }
+
+    private static function cacheGenerationKey(): string
+    {
+        return self::CACHE_KEY_LIST . ':' . self::getGeneration();
     }
 
     private static function bustCache(): void
