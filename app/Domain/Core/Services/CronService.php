@@ -150,14 +150,6 @@ class CronService
                     break;
                 }
                 try {
-                    // recalculateScore() already derives endorsement_bonus
-                    // from SUM(weight) of active endorsements inside its
-                    // FOR UPDATE transaction (see recalculateFromVotes()).
-                    // A separate recomputeEndorsementBonus() call here would
-                    // run OUTSIDE that transaction, creating a TOCTOU race
-                    // with live EndorsementService::applyEndorsementBonus()
-                    // calls — the cron's stale SUM could overwrite a real-time
-                    // endorsement delta that landed between the two commits.
                     // clearRecalcFlag=true: clear the recalculation flag
                     // inside the FOR UPDATE transaction to prevent the race
                     // where a live vote re-flags the page between COMMIT and
@@ -448,36 +440,8 @@ class CronService
         // Flag page scores for recalculation where votes just fully vested
         $this->voteRepo->flagScoresForFullyVestedVotes();
 
-        // ── Endorsement vesting ────────────────────────────────────────
-        // Graduate endorsements through Stage 0 → 1 → 2 and flag
-        // affected pages for recalculation so endorsement_bonus is
-        // re-derived from SUM(endorsements.weight) with the new weights.
-        if (time() < $deadline) {
-            try {
-                $endorsementsGraduated = Plugin::instance()
-                    ->endorsementService()
-                    ->processEndorsementVesting();
-
-                if ($endorsementsGraduated > 0) {
-                    AuditLogger::log('daily_vesting_endorsements', 0, [
-                        'endorsements_graduated' => $endorsementsGraduated,
-                    ], 'system');
-                }
-            } catch (\Throwable $e) {
-                if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-                    \BCC\Core\Log\Logger::error(
-                        '[bcc-trust] Endorsement vesting failed during daily cron',
-                        ['error' => $e->getMessage()]
-                    );
-                }
-            }
-        } else {
-            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-                \BCC\Core\Log\Logger::info(
-                    '[bcc-trust] dailyVesting hit time budget before endorsement stage — deferred to next run'
-                );
-            }
-        }
+        // Endorsement vesting was deleted in the final endorse-retirement
+        // cleanup — this cron graduates VOTES only.
         } finally {
             $this->releaseLock('bcc_cron_vesting_lock');
         }
@@ -885,7 +849,7 @@ class CronService
             'bcc_trust_hourly_recalc'          => 'hourly',   // stale page recalc
             'bcc_trust_daily_ml_update'        => 'daily',    // daily fraud refresh (renamed from ML)
             'bcc_trust_daily_graph_update'     => 'daily',    // PageRank + ring detection (merged)
-            'bcc_trust_daily_vesting'          => 'daily',    // vote/endorsement vesting
+            'bcc_trust_daily_vesting'          => 'daily',    // vote vesting
             'bcc_trust_process_recalculations' => 'bcc_five_minutes', // recalc queue processor
             'bcc_trust_daily_maintenance'      => 'daily',            // read model sync safety net
             'bcc_trust_weekly_digest'          => 'bcc_weekly',       // §I1 email digest

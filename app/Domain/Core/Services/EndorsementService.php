@@ -1,6 +1,6 @@
 <?php
 /**
- * Endorsement Services (read / eligibility / hydration / vesting).
+ * Endorsement Services (read / eligibility / hydration).
  *
  * Slice E cutover (2026-06-25): the WRITE surface of this service —
  * endorsePage / revokePageEndorsement / vouchForAuthor /
@@ -23,8 +23,10 @@
  *     legacy endorsement-table reads still surfaced by
  *     UserEndorsementsEndpoint / UsersEndpoint.
  *   - hydrateEndorsementItems — §J.6 row hydration shared by those reads.
- *   - processEndorsementVesting — the daily-cron graduation of any
- *     remaining legacy endorsement rows (shared vesting cron).
+ *
+ * Endorsement vesting (processEndorsementVesting /
+ * EndorsementVestingProcessor) was deleted in the final endorse-retirement
+ * cleanup — the daily cron now vests votes only.
  *
  * @package BCC\Trust\Core\Services
  * @version 3.0.0
@@ -283,22 +285,5 @@ class EndorsementService {
      */
     public function getUserEndorsementStats(int $userId): array {
         return $this->queryService->getUserEndorsementStats($userId);
-    }
-
-    // ======================================================
-    // DEFENSE: Endorsement Vesting
-    // ======================================================
-
-    /**
-     * Batch-update endorsement vesting stages and weights.
-     *
-     * Called by the daily cron (CronService::dailyVesting) to graduate
-     * any remaining legacy endorsements through vesting stages. Delegates
-     * to EndorsementVestingProcessor.
-     *
-     * @return int Number of endorsements updated.
-     */
-    public function processEndorsementVesting(): int {
-        return (new EndorsementVestingProcessor())->process();
     }
 }

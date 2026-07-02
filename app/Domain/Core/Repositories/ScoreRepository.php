@@ -17,7 +17,6 @@ use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Exceptions\RepositoryException;
 use DateTimeImmutable;
 use Exception;
-use stdClass;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -55,11 +54,8 @@ class ScoreRepository {
 
     private string $table;
 
-    private int $minVotesReliable;
-
     public function __construct() {
-        $this->table            = \BCC\Trust\Core\Database\TableRegistry::scores();
-        $this->minVotesReliable = BCC_TRUST_MIN_VOTES_RELIABLE;
+        $this->table = \BCC\Trust\Core\Database\TableRegistry::scores();
     }
 
     /** Cache group for page scores. */
@@ -74,7 +70,6 @@ class ScoreRepository {
      * ALL writes to total_score MUST use the canonical formula from
      * \BCC\Trust\Core\Services\TrustScoreService::formulaSql(). It includes:
      *   - Vote-based score: BCC_TRUST_NEUTRAL_SCORE + (positive_score - negative_score) * 2
-     *   - Endorsement bonus: stored in dedicated column, survives recalculation
      *   - On-chain bonus: stored in dedicated column, survives recalculation
      *
      * Clamped to [0, 100]. The prior `private const TOTAL_SCORE_SQL` was
@@ -889,34 +884,6 @@ class ScoreRepository {
     }
 
     /**
-     * Get pages by owner
-     *
-     * @return stdClass[]
-     */
-    public function getByOwnerId(int $ownerId): array {
-        global $wpdb;
-
-        $results = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT s.page_id, s.category_id, s.page_owner_id, s.total_score, s.onchain_bonus, s.positive_score, s.negative_score, s.vote_count, s.unique_voters, s.confidence_score, s.reputation_tier, s.endorsement_count, s.last_vote_at, s.last_calculated_at, s.fraud_metadata, s.recalculate_required, p.post_title
-                 FROM {$this->table} s
-                 LEFT JOIN {$wpdb->posts} p ON s.page_id = p.ID
-                 WHERE s.page_owner_id = %d
-                 ORDER BY s.total_score DESC
-                 LIMIT 200",
-                $ownerId
-            )
-        );
-
-        $scores = [];
-        foreach ($results as $row) {
-            $scores[] = $this->buildScoreResult($row, PageScore::fromDatabaseRow($row));
-        }
-
-        return $scores;
-    }
-
-    /**
      * Batch-fetch lightweight score data (total_score, reputation_tier) for multiple pages.
      *
      * @param  int[] $pageIds
@@ -1376,26 +1343,6 @@ class ScoreRepository {
         });
 
         return $updated;
-    }
-
-    /**
-     * Build a standard result object from a DB row and its PageScore.
-     */
-    private function buildScoreResult(object $row, PageScore $score): stdClass {
-        $result = new stdClass();
-        $result->score             = $score;
-        $result->post_title        = $row->post_title ?? null;
-        $result->owner_name        = $row->owner_name ?? null;
-        $result->page_id           = $score->getPageId();
-        $result->total_score       = $score->getTotalScore();
-        $result->reputation_tier   = $score->getReputationTier();
-        $result->vote_count        = $score->getVoteCount();
-        $result->endorsement_count = $score->getEndorsementCount();
-        $result->confidence_score  = $score->getConfidenceScore();
-        $result->confidence_percent = $score->getConfidencePercentage();
-        $result->has_fraud_alerts  = $score->hasFraudAlerts();
-        $result->is_reliable       = $score->getVoteCount() >= $this->minVotesReliable;
-        return $result;
     }
 
     /**

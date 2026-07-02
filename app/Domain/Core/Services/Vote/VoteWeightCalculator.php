@@ -32,7 +32,6 @@
 
 namespace BCC\Trust\Core\Services\Vote;
 
-use BCC\Trust\Core\Services\EndorsementWeightCalculator;
 use BCC\Trust\Core\Services\FraudDiscountCalculator;
 use BCC\Trust\Core\ValueObjects\VoteWeight;
 
@@ -194,7 +193,7 @@ class VoteWeightCalculator {
             return [$vested, 0, $startedAt, null];
         }
 
-        $stage  = EndorsementWeightCalculator::resolveVestingStage($daysSinceFirst)['stage'];
+        $stage  = self::resolveVestingStage($daysSinceFirst)['stage'];
         $vested = round($effective * self::getVestingMultipliers()[$stage], 4);
 
         $fullyVestedAt = ($stage === 4)
@@ -202,6 +201,32 @@ class VoteWeightCalculator {
             : null;
 
         return [$vested, $stage, null, $fullyVestedAt];
+    }
+
+    /**
+     * Resolve vesting stage and factor from age in days.
+     *
+     * Single source of truth for the 5-stage vesting model. Relocated
+     * here from the retired EndorsementWeightCalculator (endorse
+     * retirement, §J.11) — votes are the only remaining consumer.
+     *
+     * @param  int $ageDays  Age of the vote in days.
+     * @return array{factor: float, stage: int}
+     */
+    private static function resolveVestingStage(int $ageDays): array {
+        if ($ageDays >= BCC_TRUST_VESTING_STAGE_4_DAYS) {
+            return ['factor' => BCC_TRUST_VESTING_STAGE_4_PCT, 'stage' => 4];
+        }
+        if ($ageDays >= BCC_TRUST_VESTING_STAGE_3_DAYS) {
+            return ['factor' => BCC_TRUST_VESTING_STAGE_3_PCT, 'stage' => 3];
+        }
+        if ($ageDays >= BCC_TRUST_VESTING_STAGE_2_DAYS) {
+            return ['factor' => BCC_TRUST_VESTING_STAGE_2_PCT, 'stage' => 2];
+        }
+        if ($ageDays >= BCC_TRUST_VESTING_STAGE_1_DAYS) {
+            return ['factor' => BCC_TRUST_VESTING_STAGE_1_PCT, 'stage' => 1];
+        }
+        return ['factor' => BCC_TRUST_VESTING_STAGE_0_PCT, 'stage' => 0];
     }
 
     private function approximateFullVestDate(int $daysSinceFirst, \DateTimeImmutable $now): string {

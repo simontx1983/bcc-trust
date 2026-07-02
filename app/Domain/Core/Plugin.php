@@ -236,8 +236,9 @@ final class Plugin
     public function endorsementService(): EndorsementService
     {
         // Slice E cutover: the write surface (endorsePage / vouch / bonus
-        // application) is retired. Only the read / eligibility / hydration
-        // / vesting reads remain. The can_endorse eligibility gate is now
+        // application) is retired, and endorsement vesting was deleted in
+        // the final endorse-retirement cleanup. Only the read / eligibility
+        // / hydration reads remain. The can_endorse eligibility gate is now
         // vouch-aligned, so the service depends on AttestationService (the
         // vouch tier gate in resolveViewerVouchGate).
         return $this->endorsementService ??= new EndorsementService(
