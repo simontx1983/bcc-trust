@@ -836,7 +836,10 @@ final class GroupsService
         }
 
         $defaults = [
-            'stargaze'  => ['template' => 'https://www.stargaze.zone/m/%s/tokens',     'label' => 'Stargaze'],
+            // Bare /m/{contract} — the post-Hub-migration app parses a
+            // trailing /tokens segment as token_id "tokens" (verified
+            // 2026-07-02).
+            'cosmos'    => ['template' => 'https://www.stargaze.zone/m/%s',             'label' => 'Stargaze'],
             'ethereum'  => ['template' => 'https://opensea.io/assets/ethereum/%s',     'label' => 'OpenSea'],
             'polygon'   => ['template' => 'https://opensea.io/assets/matic/%s',        'label' => 'OpenSea'],
             'arbitrum'  => ['template' => 'https://opensea.io/assets/arbitrum/%s',     'label' => 'OpenSea'],

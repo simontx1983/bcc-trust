@@ -54,7 +54,7 @@ final class VerifyCollectionsPage
      *
      * @var list<string>
      */
-    private const PILL_CHAIN_SLUGS = ['ethereum', 'solana', 'stargaze'];
+    private const PILL_CHAIN_SLUGS = ['ethereum', 'solana', 'cosmos'];
 
     public static function register_page(): void
     {
@@ -263,7 +263,8 @@ final class VerifyCollectionsPage
                 <summary style="cursor:pointer;font-weight:600;">Add a collection manually</summary>
                 <p style="color:#646970;margin:8px 0;">
                     Onboard a collection that auto-discovery can't reach (e.g. a Cosmos
-                    CW-721 not listed on Stargaze). Cosmos contracts are validated as
+                    Hub CW-721 — no public Hub indexer exists post-Stargaze-migration).
+                    Cosmos contracts are validated as
                     CW-721 before saving; other chains are trusted as entered. The row
                     is added <strong>unverified</strong> — verify it below to give its
                     holders a community.
@@ -395,7 +396,7 @@ final class VerifyCollectionsPage
                     <input type="text"
                            name="bcc_vc_add_contract"
                            id="bcc-vc-add-contract"
-                           placeholder="CW-721 contract address (inj1… / stars1… / …)"
+                           placeholder="CW-721 contract address (cosmos1… / inj1… / …)"
                            style="flex:1;min-width:280px;font-family:monospace;font-size:12px;"
                            required>
                     <button type="submit" class="button">Add collection</button>
@@ -529,11 +530,12 @@ final class VerifyCollectionsPage
                                     <?php
                                     // Source badge — where the row came from.
                                     //   manual    → operator added it by hand (safe to remove)
-                                    //   stargaze  → auto-pulled from Stargaze top-collections
+                                    //   toplist   → auto-pulled from a chain's top-collections
+                                    //               sync (was 'stargaze' pre-Hub-migration)
                                     //   discovery → seen by the holdings transfer indexer
                                     $badge = [
                                         'manual'    => ['Manual', '#2271b1'],
-                                        'stargaze'  => ['Stargaze', '#646970'],
+                                        'toplist'   => ['Top list', '#646970'],
                                         'discovery' => ['Discovered', '#646970'],
                                     ][$source] ?? ['Discovered', '#646970'];
                                     ?>
@@ -1001,7 +1003,7 @@ final class VerifyCollectionsPage
     /**
      * Operator-curated "Add Collection" handler. Inserts one collection
      * row (chain + contract + metadata) so chains with no auto-discovery
-     * (e.g. a Cosmos CW-721 not listed on Stargaze) can be onboarded.
+     * (e.g. a Cosmos Hub CW-721 — no public Hub indexer) can be onboarded.
      *
      * The row lands unverified — the operator still flips `is_verified`
      * via the existing checkbox, which is what gates holdings queries and

@@ -234,7 +234,7 @@ final class CollectionRepository
                      total_supply, floor_price, floor_currency, unique_holders, total_volume,
                      listed_percentage, royalty_percentage, metadata_storage, image_url,
                      source, fetched_at, expires_at)
-                 VALUES (NULL, %s, %d, %s, %s, {$sqlSupply}, {$sqlFloor}, %s, {$sqlHolders}, {$sqlVolume}, {$sqlListed}, {$sqlRoyalty}, %s, %s, 'stargaze', %s, %s)
+                 VALUES (NULL, %s, %d, %s, %s, {$sqlSupply}, {$sqlFloor}, %s, {$sqlHolders}, {$sqlVolume}, {$sqlListed}, {$sqlRoyalty}, %s, %s, 'toplist', %s, %s)
                  ON DUPLICATE KEY UPDATE
                     collection_name    = VALUES(collection_name),
                     token_standard     = VALUES(token_standard),
@@ -246,7 +246,10 @@ final class CollectionRepository
                     royalty_percentage  = VALUES(royalty_percentage),
                     image_url          = VALUES(image_url),
                     -- Preserve operator curation: a 'manual' row that later
-                    -- shows up in Stargaze top-collections keeps source='manual'.
+                    -- shows up in a top-collections sync keeps source='manual'.
+                    -- ('toplist' was 'stargaze' before the 2026 Stargaze →
+                    -- Cosmos Hub migration; retire-stargaze-chain.php renames
+                    -- the legacy rows.)
                     source             = IF(source = 'manual', 'manual', VALUES(source)),
                     fetched_at         = VALUES(fetched_at),
                     expires_at         = VALUES(expires_at)",
@@ -280,7 +283,7 @@ final class CollectionRepository
      * (chain_id, contract_address). Powers the admin "Add Collection"
      * form on the Verify Collections page — the only path that creates
      * a collection row for a chain with no auto-discovery (e.g. a
-     * curated Cosmos CW-721 contract not listed on Stargaze).
+     * curated Cosmos Hub CW-721 contract).
      *
      * Mirrors bulkUpsert()'s row shape and NULL-preservation, scoped to
      * one row. wallet_link_id stays NULL (chain-level, not wallet-owned);
