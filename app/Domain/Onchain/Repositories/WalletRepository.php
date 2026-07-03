@@ -467,6 +467,45 @@ final class WalletRepository
     }
 
     /**
+     * Check whether ANY user has a wallet link on a chain — cheap
+     * existence probe (SELECT 1 … LIMIT 1, same shape as
+     * hasLinkForChain above but chain-wide).
+     *
+     * Used by NftEthIndexerWorker's zero-wallet short-circuit: a chain
+     * with no linked wallets can never ingest a transfer, so the worker
+     * follows the head without paging the transfer firehose. Cached
+     * per-request because the worker ticks every chain sequentially in
+     * one cron run and admin "Run now" / webhook paths may re-enter.
+     *
+     * Cache is positive-and-negative but request-scoped only — a wallet
+     * linked mid-request is picked up on the next cron tick, which is
+     * exactly the freshness the indexer needs.
+     */
+    public static function hasAnyLinksForChain(int $chainId): bool
+    {
+        if ($chainId <= 0) {
+            return false;
+        }
+
+        /** @var array<int, bool> $cache */
+        static $cache = [];
+        if (array_key_exists($chainId, $cache)) {
+            return $cache[$chainId];
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT 1 FROM {$table} WHERE chain_id = %d LIMIT 1",
+            $chainId
+        ));
+
+        $cache[$chainId] = ($exists !== null);
+        return $cache[$chainId];
+    }
+
+    /**
      * Get distinct user IDs that have wallet links on any of the given chain slugs.
      *
      * @param string[] $chainSlugs

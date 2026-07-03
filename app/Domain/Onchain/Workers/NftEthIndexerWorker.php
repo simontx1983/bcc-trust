@@ -6,6 +6,7 @@ use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\EvmFetcher;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Services\NftHoldingsIndexer;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
@@ -249,6 +250,36 @@ final class NftEthIndexerWorker
             return; // Nothing to do — already caught up to safe head.
         }
 
+        // Step 5.5: zero-wallet short-circuit. A chain with no linked
+        // wallets can never ingest a transfer — every row the firehose
+        // returns is filtered out at ingest (WalletRepository lookup in
+        // NftHoldingsIndexer). Before this gate, zero-wallet chains
+        // burned the full page budget per tick on guaranteed skips and,
+        // on transfer-dense chains, hit the dense-block stall path every
+        // minute (sustained `dense_block_stall` alert + wasted CU).
+        //
+        // We follow the head instead of freezing the checkpoint: when a
+        // first wallet links later, the V1 snapshot fetch covers history
+        // and the V2 walker only needs "from now" — a months-stale
+        // checkpoint would trigger a pointless deep catch-up walk.
+        //
+        // Only the cheap eth_blockNumber head poll (Step 5, un-budgeted)
+        // is spent; ALL getAssetTransfers paging is skipped. This gate
+        // MUST precede the transfer paging: chains on public RPCs that
+        // don't support the Alchemy method (e.g. Avalanche/BSC) would
+        // otherwise fail loudly every tick now that fetch errors are
+        // explicit (fetch_transfers_since returning null).
+        if (!WalletRepository::hasAnyLinksForChain($chainId)) {
+            ChainCheckpointRepository::recordSuccess($chainId, $safeHead, $headBlock);
+            OnchainCircuitBreaker::recordSuccess($chainId);
+            \BCC\Core\Log\Logger::info('[NftEthIndexerWorker] no linked wallets — following head', [
+                'chain_id'         => $chainId,
+                'head_block'       => $headBlock,
+                'checkpoint_block' => $safeHead,
+            ]);
+            return;
+        }
+
         // Step 6: clamp the per-tick range so a long catch-up splits
         // across multiple ticks instead of blowing CU budget in one shot.
         $rangeFrom = $lastProcessed + 1;
@@ -277,15 +308,29 @@ final class NftEthIndexerWorker
         // is the starting point.
         $remainingLocal = $cuRemaining;
 
+        // Set when a page fetch fails (transport error, JSON-RPC error,
+        // malformed body — fetch_transfers_since returns null). A failed
+        // page means we CANNOT prove the range was read, so the normal
+        // Step-8 advance is skipped in favor of the error path below.
+        $fetchFailed = false;
+
         for ($pageNum = 0; $pageNum < self::MAX_PAGES_PER_TICK; $pageNum++) {
             if ($remainingLocal < self::CU_PER_CALL) {
                 break;
             }
 
             $page = $fetcher->fetch_transfers_since($rangeFrom, $rangeTo, $pageKey);
+            // Charge CU unconditionally — a failed call may still have
+            // hit the provider (same posture as before this error path
+            // existed; under-counting risks budget overrun).
             ChainCheckpointRepository::addCuUsage($chainId, self::CU_PER_CALL);
             $cuUsed         += self::CU_PER_CALL;
             $remainingLocal -= self::CU_PER_CALL;
+
+            if ($page === null) {
+                $fetchFailed = true;
+                break;
+            }
 
             $transfers = $page['transfers'];
             if ($transfers !== []) {
@@ -305,6 +350,45 @@ final class NftEthIndexerWorker
             if ($pageKey === null) {
                 break; // Range fully drained.
             }
+        }
+
+        // Step 7.5: fetch-error path. Historically a failed page was
+        // indistinguishable from an empty range (the fetcher returned the
+        // empty-success shape on wp_error / malformed JSON / JSON-RPC
+        // error), so the worker advanced the checkpoint over blocks it
+        // NEVER READ — permanent data loss on any transient provider
+        // failure. Now the failure is explicit: abort the tick without
+        // the normal Step-8 advance. Transfers already ingested from
+        // earlier successful pages this tick are safe (ingest is
+        // idempotent), and per the safe-partial-advance invariant
+        // (Step 8 below) we may still advance to maxBlockSeen - 1 —
+        // every block strictly below the watermark was proven read by
+        // the SUCCESSFUL pages. Otherwise the checkpoint holds and the
+        // next tick re-reads the same range.
+        if ($fetchFailed) {
+            $errorAdvanceTarget = null;
+            if ($maxBlockSeen > 0 && ($maxBlockSeen - 1) >= $rangeFrom) {
+                $errorAdvanceTarget = $maxBlockSeen - 1;
+                ChainCheckpointRepository::recordSuccess($chainId, $errorAdvanceTarget, $headBlock);
+            }
+            // recordFailure after the (optional) advance so the row ends
+            // degraded with last_error set, but keeps the advanced block.
+            OnchainCircuitBreaker::recordFailure($chainId);
+            ChainCheckpointRepository::recordFailure(
+                $chainId,
+                ChainCheckpointRepository::STATE_DEGRADED,
+                'alchemy_getAssetTransfers page fetch failed (see EVM Fetcher log for cause)'
+            );
+            \BCC\Core\Log\Logger::warning('[NftEthIndexerWorker] transfer page fetch failed — tick aborted without full advance', [
+                'chain_id'            => $chainId,
+                'range'               => "[{$rangeFrom}, {$rangeTo}]",
+                'max_block_seen'      => $maxBlockSeen,
+                'pages_read'          => intdiv($cuUsed, self::CU_PER_CALL),
+                'cu_used'             => $cuUsed,
+                'checkpoint_advanced' => $errorAdvanceTarget !== null,
+                'checkpoint_block'    => $errorAdvanceTarget,
+            ]);
+            return;
         }
 
         // Step 8: advance checkpoint — INVARIANT: the checkpoint only
@@ -351,9 +435,13 @@ final class NftEthIndexerWorker
         // $maxBlockSeen would skip the unread tail of that same block. So we
         // hold the checkpoint AND emit a DegradationMetric so an operator
         // sees the dense-block stall instead of a silent CU-burning spin.
-        // A single block carrying >5000 transfers of one tracked contract is
-        // near-impossible under block gas limits, so this is visibility, not
-        // a path we expect to hit.
+        // NOTE: this fetch is NOT contract-scoped — getAssetTransfers reads
+        // the chain-wide ERC-721/1155 firehose — so a single block with
+        // >5000 transfers is entirely realistic on high-throughput chains
+        // (observed sustained on Optimism, 2026-07). The zero-wallet
+        // short-circuit at Step 5.5 keeps walletless chains out of this
+        // path; a wallet-bearing chain hitting it is a real operator
+        // signal (page budget too small for that chain's density).
         $rangeFullyDrained = ($pageKey === null);
         $checkpointTarget  = null;
         if ($rangeFullyDrained) {
@@ -365,6 +453,16 @@ final class NftEthIndexerWorker
             } else {
                 // Dense single-block stall — cannot advance without loss.
                 \BCC\Core\Observability\DegradationMetrics::record('nft_indexer', 'dense_block_stall');
+                // The metric alone is context-free — give the operator
+                // chasing the alert the chain + range without DB
+                // archaeology.
+                \BCC\Core\Log\Logger::warning('[NftEthIndexerWorker] dense block stall — page budget exhausted inside a single block', [
+                    'chain_id'       => $chainId,
+                    'range'          => "[{$rangeFrom}, {$rangeTo}]",
+                    'max_block_seen' => $maxBlockSeen,
+                    'pages_read'     => intdiv($cuUsed, self::CU_PER_CALL),
+                    'cu_used'        => $cuUsed,
+                ]);
             }
         }
         // ($maxBlockSeen === 0 on a partial drain means the read pages held
