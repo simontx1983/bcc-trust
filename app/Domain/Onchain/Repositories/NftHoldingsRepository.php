@@ -671,13 +671,14 @@ final class NftHoldingsRepository
      *
      * @param list<array<string, mixed>>                                $upserts
      * @param list<array{wallet_link_id: int, contract: string, token_id: string}> $deletes
+     * @param list<array<string, mixed>>                                $deltas   ERC-1155 signed balance deltas.
      * @return array{inserts: int, deletes: int}
      * @throws \RuntimeException when the batch fails to commit
      */
-    public static function ingestBatch(array $upserts, array $deletes): array
+    public static function ingestBatch(array $upserts, array $deletes, array $deltas = []): array
     {
         $result = ['inserts' => 0, 'deletes' => 0];
-        if ($upserts === [] && $deletes === []) {
+        if ($upserts === [] && $deletes === [] && $deltas === []) {
             return $result;
         }
 
@@ -693,6 +694,14 @@ final class NftHoldingsRepository
                     if ($linkId > 0) {
                         $touchedWallets[$linkId] = true;
                     }
+                }
+            }
+            if ($deltas !== []) {
+                $applied = self::applyDeltas($deltas);
+                $result['inserts'] += $applied['upserts'];
+                $result['deletes'] += $applied['deletes'];
+                foreach ($applied['touched'] as $linkId) {
+                    $touchedWallets[$linkId] = true;
                 }
             }
             foreach ($deletes as $d) {
@@ -718,6 +727,111 @@ final class NftHoldingsRepository
         }
 
         return $result;
+    }
+
+    /**
+     * Apply signed ERC-1155 balance deltas within the caller's transaction.
+     *
+     * Each row does a block-guarded upsert that adds the signed delta to the
+     * existing balance, clamped at zero, then deletes the row if the balance
+     * reached zero. The `balance` column is INT UNSIGNED, so the arithmetic
+     * is cast to SIGNED before adding a negative delta to avoid unsigned
+     * underflow wrapping to a huge value before GREATEST clamps it.
+     *
+     * IDEMPOTENCY: the balance is only adjusted when the incoming block is
+     * strictly newer than the row's stored `last_seen_block`. A batch's delta
+     * row carries the MAX block among the events it folded, so re-processing
+     * the same block range (the worker retries a range on failure, and the
+     * 12-confirmation safe head keeps ranges non-overlapping) is a no-op.
+     * A brand-new key seeds with GREATEST(0, delta); a negative-only net
+     * (forward-history gap: we never saw the acquiring IN) seeds 0 and is
+     * then cleaned up.
+     *
+     * @param list<array<string, mixed>> $deltas
+     * @return array{upserts: int, deletes: int, touched: list<int>}
+     */
+    private static function applyDeltas(array $deltas): array
+    {
+        global $wpdb;
+        $table = self::table();
+        $now   = current_time('mysql', true);
+
+        $upserts = 0;
+        $deletes = 0;
+        $touched = [];
+
+        foreach ($deltas as $d) {
+            $walletLinkId = (int) ($d['wallet_link_id'] ?? 0);
+            $chainId      = (int) ($d['chain_id'] ?? 0);
+            $contract     = strtolower((string) ($d['contract_address'] ?? ''));
+            $tokenId      = (string) ($d['token_id'] ?? '');
+            $confirmedAt  = (string) ($d['confirmed_at'] ?? '');
+            $block        = (int) ($d['last_seen_block'] ?? 0);
+            $delta        = (int) ($d['delta'] ?? 0);
+
+            if ($walletLinkId <= 0 || $chainId <= 0 || $contract === '' || $tokenId === '' || $confirmedAt === '' || $delta === 0) {
+                continue;
+            }
+
+            $tokenStd = isset($d['token_standard']) ? (string) $d['token_standard'] : '';
+            $status   = isset($d['metadata_status']) ? (int) $d['metadata_status'] : self::STATUS_PENDING;
+            if ($status < 0 || $status > 3) {
+                $status = self::STATUS_PENDING;
+            }
+
+            // New-row seed: a positive delta becomes the starting balance; a
+            // negative-only net clamps to 0 (then the cleanup below removes it).
+            $seedBalance = max(0, $delta);
+
+            $sql = "INSERT INTO {$table}
+                    (wallet_link_id, chain_id, contract_address, token_id,
+                     token_standard, balance, metadata_status, last_seen_block,
+                     confirmed_at, indexed_at)
+                 VALUES (%d, %d, %s, %s, %s, %d, %d, %d, %s, %s)
+                 ON DUPLICATE KEY UPDATE
+                    balance = IF(
+                        VALUES(last_seen_block) > last_seen_block,
+                        GREATEST(0, CAST(balance AS SIGNED) + %d),
+                        balance
+                    ),
+                    metadata_status = CASE
+                        WHEN metadata_status = %d THEN VALUES(metadata_status)
+                        ELSE metadata_status
+                    END,
+                    last_seen_block = GREATEST(last_seen_block, VALUES(last_seen_block)),
+                    confirmed_at = GREATEST(confirmed_at, VALUES(confirmed_at)),
+                    indexed_at = VALUES(indexed_at)";
+
+            $wpdb->query($wpdb->prepare(
+                $sql,
+                $walletLinkId, $chainId, $contract, $tokenId,
+                $tokenStd, $seedBalance, $status, $block,
+                $confirmedAt, $now,
+                $delta, self::STATUS_PENDING
+            ));
+
+            // Zero-cleanup: a holding decremented to zero (or a negative-only
+            // seed) leaves no row, matching the 721 delete semantics and
+            // keeping SUM(balance) gates + the gallery clean. Idempotent.
+            $removed = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$table}
+                  WHERE wallet_link_id = %d AND contract_address = %s AND token_id = %s AND balance <= 0",
+                $walletLinkId, $contract, $tokenId
+            ));
+
+            if (is_int($removed) && $removed > 0) {
+                $deletes++;
+            } else {
+                $upserts++;
+            }
+            $touched[$walletLinkId] = true;
+        }
+
+        return [
+            'upserts' => $upserts,
+            'deletes' => $deletes,
+            'touched' => array_map('intval', array_keys($touched)),
+        ];
     }
 
     /**
