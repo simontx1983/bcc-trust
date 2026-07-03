@@ -77,8 +77,12 @@ class UserStatusController {
                 throw new Exception('Invalid fingerprint format');
             }
 
+            // Client-reported signals (webdriver, outer_zero, screen, …)
+            // feed auxiliary automation scoring only — never identity.
+            $clientSignals = (isset($data['data']) && is_array($data['data'])) ? $data['data'] : [];
+
             $fingerprinter  = \BCC\Trust\Core\Plugin::instance()->deviceFingerprinter();
-            $automationData = $fingerprinter->detectAutomation();
+            $automationData = $fingerprinter->detectAutomation($clientSignals);
 
             // SECURITY: identity hash is server-only. $clientHash is kept for
             // correlation in automation_signals but MUST NOT influence the
@@ -89,10 +93,15 @@ class UserStatusController {
             $hash     = hash('sha256', $serverFp . '|' . wp_salt('auth'));
             unset($clientHash); // explicit: not used as identity.
 
+            $screen = (isset($clientSignals['screen']) && is_string($clientSignals['screen']))
+                ? $clientSignals['screen']
+                : null;
+
             $fingerprintId = $fingerprinter->storeFingerprint(
                 $userId,
                 $hash,
-                $automationData
+                $automationData,
+                $screen
             );
 
             $userCount = $fingerprinter->getFingerprintUserCount($hash);
@@ -120,7 +129,11 @@ class UserStatusController {
                 $alert = true;
             }
 
-            if (!empty($data['data'])) {
+            // Persist the raw client payload only when the fingerprint was
+            // actually stored — storeFingerprint returns false when consent
+            // is absent, so this keeps the raw-data store behind the same
+            // consent gate rather than hoarding client data regardless.
+            if ($fingerprintId !== false && !empty($data['data'])) {
                 // Size guard: reject payloads > 10KB to prevent user_meta bloat.
                 // An attacker sending multi-MB fingerprint data could exhaust storage.
                 $encodedSize = strlen(wp_json_encode($data['data']) ?: '');
