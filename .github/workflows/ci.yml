@@ -82,6 +82,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: app/public/wp-content/plugins/bcc-trust
+
+      # The integration bootstrap requires bcc-core's DB.php (table-name
+      # resolution for the claims/validators/collections/wallet_links
+      # schemas) — same adjacent checkout the phpstan job uses.
+      - uses: actions/checkout@v4
+        with:
+          repository: simontx1983/bcc-core
+          path: app/public/wp-content/plugins/bcc-core
+
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'

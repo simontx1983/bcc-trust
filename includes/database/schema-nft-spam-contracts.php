@@ -35,6 +35,11 @@ function bcc_onchain_nft_spam_contracts_table(): string {
 /**
  * Create the NFT spam contracts table.
  */
+// contract_address is VARCHAR(128): Cosmos CW-721 contract addresses are
+// 66 chars ('cosmos1' + 59-char bech32 body) — the original VARCHAR(64)
+// silently TRUNCATED them on non-strict MySQL, so rules written for
+// cosmos contracts never matched getRule() lookups (caught live
+// 2026-07-03 by the Verify Collections hide smoke).
 function bcc_onchain_create_nft_spam_contracts_table(): void {
     global $wpdb;
 
@@ -44,7 +49,7 @@ function bcc_onchain_create_nft_spam_contracts_table(): void {
     $sql = "CREATE TABLE {$table} (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         chain_id BIGINT UNSIGNED NOT NULL,
-        contract_address VARCHAR(64) NOT NULL,
+        contract_address VARCHAR(128) NOT NULL,
         rule VARCHAR(10) NOT NULL DEFAULT 'deny',
         reason VARCHAR(255) DEFAULT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

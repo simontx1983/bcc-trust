@@ -552,11 +552,31 @@ class BlockchainQueryService {
     */
 
     /**
+     * Resolve the Solana RPC endpoint from wp-config.
+     *
+     * Prefers the documented `BCC_SOLANA_RPC_URL` (the name the admin
+     * Settings page and SignalFetcher both use), falls back to the legacy
+     * `BCC_SOL_RPC_URL` for back-compat, then the public default. Single
+     * source of truth for the call sites below — an operator who sets the
+     * documented constant no longer silently stays pinned to the
+     * rate-limited public endpoint.
+     */
+    private static function resolveSolanaRpc(): string {
+        if (defined('BCC_SOLANA_RPC_URL') && BCC_SOLANA_RPC_URL) {
+            return (string) BCC_SOLANA_RPC_URL;
+        }
+        if (defined('BCC_SOL_RPC_URL') && BCC_SOL_RPC_URL) {
+            return (string) BCC_SOL_RPC_URL;
+        }
+        return self::DEFAULT_SOL_RPC;
+    }
+
+    /**
      * Check if wallet is a verified creator of the collection.
      * We query the mint account metadata to read the creators array.
      */
     private static function isSolanaCollectionCreator(string $wallet, string $mint): bool {
-        $rpc = defined('BCC_SOL_RPC_URL') ? BCC_SOL_RPC_URL : self::DEFAULT_SOL_RPC;
+        $rpc = self::resolveSolanaRpc();
 
         // Derive Metaplex metadata PDA — complex; skip for now and rely on holder check
         // Full creator verification would require deriving the metadata PDA from the mint
@@ -569,7 +589,7 @@ class BlockchainQueryService {
      * Uses getTokenAccountsByOwner with the mint address.
      */
     private static function isSolanaNftHolder(string $wallet, string $mint): bool {
-        $rpc = defined('BCC_SOL_RPC_URL') ? BCC_SOL_RPC_URL : self::DEFAULT_SOL_RPC;
+        $rpc = self::resolveSolanaRpc();
 
         $body = json_encode([
             'jsonrpc' => '2.0',

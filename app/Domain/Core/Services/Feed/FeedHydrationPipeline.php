@@ -37,6 +37,7 @@ use BCC\Trust\Core\Services\BlogService;
 use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
+use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
@@ -516,18 +517,22 @@ final class FeedHydrationPipeline
 
     /**
      * Overlay rank-chip fields on every author block: reputation_tier,
-     * reputation_tier_label, card_tier, tier_label, rank_label. The
-     * rank_label is now level-derived (not tier-derived); reputation_tier_label
-     * is the honest member trust chip. Server-resolved per §A2 so the
-     * frontend's AuthorBadge never derives card_tier from
-     * reputation_tier client-side.
+     * reputation_tier_label, card_tier, tier_label, rank_label, and the
+     * honest tier-derived is_in_good_standing. The rank_label is now
+     * level-derived (not tier-derived); reputation_tier_label is the
+     * honest member trust chip. Server-resolved per §A2 so the frontend's
+     * AuthorBadge never derives card_tier from reputation_tier client-side.
      *
      * This bcc-trust layer is where the chip fields appear — bcc-core's
      * ActivityFeedService::hydrateAuthors emits card_tier:null /
-     * rank_label:null sentinels (it can't see the trust read model)
-     * and this hydrator overwrites them with real values. Same
-     * pattern as `hydrateAuthorBadges` (operator chip) — bcc-trust
-     * is the only place that knows about trust state.
+     * rank_label:null / is_in_good_standing:true SENTINELS (it can't see
+     * the trust read model) and this hydrator overwrites them with real
+     * values. The is_in_good_standing sentinel is a shape-stable `true`;
+     * left unoverwritten it falsely stamps "good standing" on sub-neutral
+     * authors that slip past the reputation shadow-limit (e.g. a low-trust
+     * holder inside an NFT group feed, where getGroupFeed drops the
+     * caution/risky exclusion). Same pattern as `hydrateAuthorBadges`
+     * (operator chip) — bcc-trust is the only place that knows trust state.
      *
      * Bounded: one batched query inside AuthorBadgeResolver
      * (ReputationRepository::getTiersForUsers) regardless of items
@@ -566,17 +571,36 @@ final class FeedHydrationPipeline
             $author = is_array($item['author'] ?? null) ? $item['author'] : [];
             $uid    = is_int($author['id'] ?? null) ? $author['id'] : 0;
             if ($uid > 0 && isset($badgeMap[$uid])) {
-                $badge = $badgeMap[$uid];
-                $author['reputation_tier']       = $badge['reputation_tier'];
-                $author['reputation_tier_label'] = $badge['reputation_tier_label'];
-                $author['card_tier']             = $badge['card_tier'];
-                $author['tier_label']            = $badge['tier_label'];
-                $author['rank_label']            = $badge['rank_label'];
-                $item['author'] = $author;
+                $item['author'] = self::applyAuthorRankBadge($author, $badgeMap[$uid]);
             }
             $hydrated[] = $item;
         }
         return $hydrated;
+    }
+
+    /**
+     * Apply resolved rank-chip fields onto an author block — including the
+     * honest, tier-derived `is_in_good_standing`. Pure (no DB) so the
+     * badge→author mapping is unit-pinnable.
+     *
+     * The good-standing value overwrites bcc-core's shape-stable `true`
+     * sentinel with the real §E1 value. Reuses the canonical predicate
+     * (UserViewService::isInGoodStanding — tier-alone, single source of
+     * truth); do NOT inline the good-standing tier list here.
+     *
+     * @param array<string, mixed> $author
+     * @param array{reputation_tier: string, reputation_tier_label: string, card_tier: string|null, tier_label: string|null, rank_label: string} $badge
+     * @return array<string, mixed>
+     */
+    private static function applyAuthorRankBadge(array $author, array $badge): array
+    {
+        $author['reputation_tier']       = $badge['reputation_tier'];
+        $author['reputation_tier_label'] = $badge['reputation_tier_label'];
+        $author['card_tier']             = $badge['card_tier'];
+        $author['tier_label']            = $badge['tier_label'];
+        $author['rank_label']            = $badge['rank_label'];
+        $author['is_in_good_standing']   = UserViewService::isInGoodStanding($badge['reputation_tier']);
+        return $author;
     }
 
     /**

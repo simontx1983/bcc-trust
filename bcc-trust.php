@@ -211,6 +211,9 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-validators.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-delegations.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collections.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
+// Per-user collection stances (waitlist / spam) — the airdrop-proof
+// demand + scam signals behind the Verify Collections queue.
+require_once BCC_TRUST_PATH . 'includes/database/schema-collection-signals.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
 // V2 Phase 1a — confirmation-gated NFT indexer
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-holdings.php';
@@ -277,6 +280,7 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_delegations_table();
     bcc_onchain_create_collections_table();
     bcc_onchain_create_user_nft_selections_table();
+    bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
     // V2 Phase 1a NFT indexer
     bcc_onchain_create_nft_holdings_table();
@@ -1561,6 +1565,18 @@ add_action('delete_user', function (int $userId): void {
     }
     wp_cache_delete('report_status_counts', 'bcc_disputes');
 }, 10, 1);
+
+// Device-fingerprint consent: granted when a user completes signup. All
+// three BCC signup paths (password, wallet, OAuth) fire bcc_user_signup
+// only after the account is created through the disclosure-bearing signup
+// UI, so completion is the consent event. Admin-created users never fire
+// it, so they are not fingerprinted. See DeviceFingerprinter::hasConsent.
+add_action(
+    'bcc_user_signup',
+    ['\\BCC\\Trust\\Core\\Security\\DeviceFingerprinter', 'grantSignupConsent'],
+    10,
+    1
+);
 
 // REST routes.
 add_action('rest_api_init', function () {

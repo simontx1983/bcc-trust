@@ -448,6 +448,60 @@ class ClaimRepository {
     }
 
     /**
+     * Whether a user holds a verified operator/creator claim on an entity
+     * whose wallet link binds to THIS page — the canonical claim→page
+     * resolution (the SAME two-leg validator+collection join as
+     * getPrimaryClaimsByPageIds, which feeds has_verified_claim /
+     * is_claim_verified), narrowed to one user + one page.
+     *
+     * Used by the page-image permission gate (PagesEndpoint::requireClaimer).
+     * The gate must agree with the verified-operator state users see, so it
+     * reads the underlying validator/collection claim rather than the
+     * best-effort entity_type='page' mirror row — the mirror only exists
+     * when the POST /pages/:id/claim mirror write succeeded, and is never
+     * repaired afterwards (the idempotent re-claim path returns early).
+     *
+     * Bounded: point lookup (indexed user_id + post_id equality per leg);
+     * the trailing LIMIT 1 applies to the whole UNION.
+     */
+    public static function userHasVerifiedClaimOnPage(int $userId, int $pageId): bool {
+        if ($userId <= 0 || $pageId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        $table       = self::table();
+        $validators  = \BCC\Core\DB\DB::table('onchain_validators');
+        $collections = \BCC\Core\DB\DB::table('onchain_collections');
+        $wallets     = \BCC\Core\DB\DB::table('wallet_links');
+
+        $found = $wpdb->get_var($wpdb->prepare(
+            "SELECT 1
+             FROM {$table} cl
+             JOIN {$validators} v ON v.id = cl.entity_id AND cl.entity_type = 'validator'
+             JOIN {$wallets} w ON w.id = v.wallet_link_id
+             WHERE cl.user_id = %d AND w.post_id = %d
+               AND cl.status = 'verified' AND cl.claim_role IN ('operator','creator')
+
+             UNION ALL
+
+             SELECT 1
+             FROM {$table} cl
+             JOIN {$collections} c ON c.id = cl.entity_id AND cl.entity_type = 'collection'
+             JOIN {$wallets} w ON w.id = c.wallet_link_id
+             WHERE cl.user_id = %d AND w.post_id = %d
+               AND cl.status = 'verified' AND cl.claim_role IN ('operator','creator')
+             LIMIT 1",
+            $userId,
+            $pageId,
+            $userId,
+            $pageId
+        ));
+
+        return $found !== null;
+    }
+
+    /**
      * Batch-load all verified claims for multiple entities of the same type.
      * Single query replacing N per-entity lookups.
      *

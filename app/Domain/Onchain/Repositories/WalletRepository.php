@@ -506,6 +506,41 @@ final class WalletRepository
     }
 
     /**
+     * Distinct linked wallet addresses on one chain, address-ordered
+     * (deterministic across renders).
+     *
+     * Powers CollectionDemandService's Cosmos rollup fan-out — the
+     * bounded set of wallets whose marketplace profiles are consulted
+     * for "N linked wallets hold this collection." LIMIT caps the
+     * fan-out; past it the demand count is a floor, which the caller
+     * logs (no silent truncation).
+     *
+     * @return list<string>
+     */
+    public static function listAddressesForChain(int $chainId, int $limit = 200): array
+    {
+        if ($chainId <= 0) {
+            return [];
+        }
+        $limit = max(1, min(1000, $limit));
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<string>|null $rows */
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT wallet_address
+               FROM {$table}
+              WHERE chain_id = %d
+              ORDER BY wallet_address ASC
+              LIMIT %d",
+            $chainId,
+            $limit
+        ));
+        return $rows ?: [];
+    }
+
+    /**
      * Get distinct user IDs that have wallet links on any of the given chain slugs.
      *
      * @param string[] $chainSlugs

@@ -60,6 +60,83 @@ namespace {
             return is_array($response) ? (string) ($response['body'] ?? '') : '';
         }
     }
+
+    if (!function_exists('wp_remote_retrieve_response_code')) {
+        /** @param mixed $response */
+        function wp_remote_retrieve_response_code($response): int
+        {
+            // Queued fake responses default to 200 unless they carry an
+            // explicit 'code'.
+            return is_array($response) ? (int) ($response['code'] ?? 200) : 0;
+        }
+    }
+
+    if (!function_exists('esc_url_raw')) {
+        function esc_url_raw(string $url): string
+        {
+            return filter_var($url, FILTER_VALIDATE_URL) !== false ? $url : '';
+        }
+    }
+
+    if (!class_exists('BccTestObjectCache', false)) {
+        /** In-memory wp_cache fake shared by the shims below. */
+        final class BccTestObjectCache
+        {
+            /** @var array<string, mixed> */
+            public static array $store = [];
+
+            public static function reset(): void
+            {
+                self::$store = [];
+            }
+        }
+    }
+
+    if (!function_exists('wp_cache_get')) {
+        /** @return mixed */
+        function wp_cache_get(string $key, string $group = '')
+        {
+            return \BccTestObjectCache::$store[$group . ':' . $key] ?? false;
+        }
+    }
+
+    if (!function_exists('wp_cache_set')) {
+        /** @param mixed $value */
+        function wp_cache_set(string $key, $value, string $group = '', int $ttl = 0): bool
+        {
+            \BccTestObjectCache::$store[$group . ':' . $key] = $value;
+            return true;
+        }
+    }
+
+    if (!function_exists('wp_cache_delete')) {
+        function wp_cache_delete(string $key, string $group = ''): bool
+        {
+            unset(\BccTestObjectCache::$store[$group . ':' . $key]);
+            return true;
+        }
+    }
+
+    if (!function_exists('apply_filters')) {
+        /**
+         * @param mixed $value
+         * @return mixed
+         */
+        function apply_filters(string $hook, $value)
+        {
+            return $value; // No filter registry in unit scope — pass through.
+        }
+    }
+
+    if (!defined('MINUTE_IN_SECONDS')) {
+        define('MINUTE_IN_SECONDS', 60);
+    }
+    if (!defined('HOUR_IN_SECONDS')) {
+        define('HOUR_IN_SECONDS', 3600);
+    }
+    if (!defined('DAY_IN_SECONDS')) {
+        define('DAY_IN_SECONDS', 86400);
+    }
 }
 
 // ── Core\Log\Logger ─────────────────────────────────────────────────────────
@@ -153,10 +230,44 @@ namespace BCC\Trust\Onchain\Support {
             /** @var list<array{url: string, body: string}> */
             public static array $calls = [];
 
+            /**
+             * Keyed by full URL → batch entry (array{code,body}|WP_Error).
+             * getBatchSameHost() returns one entry per input URL, defaulting
+             * to a 404 for any URL the test did not register.
+             *
+             * @var array<string, array{code: int, body: string}|\WP_Error>
+             */
+            public static array $batchResponses = [];
+
+            /** @var list<array{urls: list<string>, chain_id: int}> */
+            public static array $batchCalls = [];
+
             public static function reset(): void
             {
-                self::$queue = [];
-                self::$calls = [];
+                self::$queue          = [];
+                self::$calls          = [];
+                self::$batchResponses = [];
+                self::$batchCalls     = [];
+            }
+
+            /**
+             * @param list<string>         $urls
+             * @param array<string, mixed> $args
+             * @param array<string, mixed> $options
+             * @return array<int, array{code: int, body: string}|\WP_Error>
+             */
+            public static function getBatchSameHost(array $urls, array $args = [], array $options = []): array
+            {
+                self::$batchCalls[] = [
+                    'urls'     => array_values($urls),
+                    'chain_id' => (int) ($options['chain_id'] ?? 0),
+                ];
+                $out = [];
+                foreach (array_values($urls) as $i => $url) {
+                    $out[$i] = self::$batchResponses[$url]
+                        ?? ['code' => 404, 'body' => ''];
+                }
+                return $out;
             }
 
             /**
@@ -172,6 +283,20 @@ namespace BCC\Trust\Onchain\Support {
                 }
                 return array_shift(self::$queue);
             }
+
+            /**
+             * @param array<string,mixed> $args
+             * @param array<string,mixed> $options
+             * @return mixed
+             */
+            public static function get(string $url, array $args = [], array $options = [])
+            {
+                self::$calls[] = ['url' => $url, 'body' => ''];
+                if (self::$queue === []) {
+                    return new \WP_Error('queue exhausted');
+                }
+                return array_shift(self::$queue);
+            }
         }
     }
 }
@@ -179,6 +304,25 @@ namespace BCC\Trust\Onchain\Support {
 // ── Trust\Onchain repositories + services (worker collaborators) ────────────
 
 namespace BCC\Trust\Onchain\Repositories {
+
+    if (!class_exists(__NAMESPACE__ . '\\CollectionRepository', false)) {
+        final class CollectionRepository
+        {
+            /** @var array<int, array<int, object>> chainId → known collection rows */
+            public static array $knownByChain = [];
+
+            public static function reset(): void
+            {
+                self::$knownByChain = [];
+            }
+
+            /** @return array<int, object> */
+            public static function listKnownByChain(int $chainId, int $limit): array
+            {
+                return array_slice(self::$knownByChain[$chainId] ?? [], 0, $limit);
+            }
+        }
+    }
 
     if (!class_exists(__NAMESPACE__ . '\\ChainCheckpointRepository', false)) {
         final class ChainCheckpointRepository
@@ -264,6 +408,13 @@ namespace BCC\Trust\Onchain\Repositories {
                 return self::$chain;
             }
 
+            public static function getBySlug(string $slug): ?object
+            {
+                return (self::$chain !== null && (string) (self::$chain->slug ?? '') === $slug)
+                    ? self::$chain
+                    : null;
+            }
+
             /** @return list<object> */
             public static function getActive(): array
             {
@@ -280,16 +431,66 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @var list<int> */
             public static array $checkedChains = [];
 
+            /** @var list<string> */
+            public static array $chainAddresses = [];
+
             public static function reset(): void
             {
-                self::$hasLinks      = true;
-                self::$checkedChains = [];
+                self::$hasLinks       = true;
+                self::$checkedChains  = [];
+                self::$chainAddresses = [];
             }
 
             public static function hasAnyLinksForChain(int $chainId): bool
             {
                 self::$checkedChains[] = $chainId;
                 return self::$hasLinks;
+            }
+
+            /** @return list<string> */
+            public static function listAddressesForChain(int $chainId, int $limit = 200): array
+            {
+                return array_slice(self::$chainAddresses, 0, $limit);
+            }
+        }
+    }
+
+    if (!class_exists(__NAMESPACE__ . '\\NftSpamContractRepository', false)) {
+        final class NftSpamContractRepository
+        {
+            public const RULE_DENY  = 'deny';
+            public const RULE_ALLOW = 'allow';
+
+            /** @var array<string, string> Keyed "chainId|contract(lower)". */
+            public static array $rules = [];
+
+            public static function reset(): void
+            {
+                self::$rules = [];
+            }
+
+            public static function getRule(int $chainId, string $contract): ?string
+            {
+                return self::$rules[$chainId . '|' . strtolower($contract)] ?? null;
+            }
+        }
+    }
+
+    if (!class_exists(__NAMESPACE__ . '\\NftHoldingsRepository', false)) {
+        final class NftHoldingsRepository
+        {
+            /** @var list<object{chain_id: string, contract_address: string, wallets: string}> */
+            public static array $walletCounts = [];
+
+            public static function reset(): void
+            {
+                self::$walletCounts = [];
+            }
+
+            /** @return list<object{chain_id: string, contract_address: string, wallets: string}> */
+            public static function countDistinctWalletsPerContract(int $limit = 500): array
+            {
+                return array_slice(self::$walletCounts, 0, $limit);
             }
         }
     }

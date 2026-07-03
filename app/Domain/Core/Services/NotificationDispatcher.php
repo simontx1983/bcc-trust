@@ -337,7 +337,7 @@ final class NotificationDispatcher
         }
 
         try {
-            $message = 'Welcome to The Floor. Pull cards, post reviews, build trust.';
+            $message = 'Welcome to The Floor. Keep tabs on cards, post reviews, build trust.';
             $this->dispatch(
                 $userId,
                 $userId,
@@ -1013,8 +1013,22 @@ final class NotificationDispatcher
                 ? 'Your entity is now under active dispute. The panel mechanic will resolve it.'
                 : 'Your entity reads as polarizing — reliable operators currently disagree on you.';
 
+            // System event — but PeepSoNotificationWriter REJECTS sender
+            // id <= 0 by contract ('invalid_user'), so the original
+            // dispatch(0, …) here NEVER delivered a bell (found live
+            // 2026-07-03 while wiring the holder-community-live bell,
+            // which hit the identical wall). Send as the platform's
+            // first administrator instead.
+            $senderId = self::resolveSystemSenderId();
+            if ($senderId <= 0) {
+                Logger::warning('[NotificationDispatcher] divergence warning: no administrator to send as — bell skipped', [
+                    'target_owner_id' => $targetOwnerId,
+                ]);
+                return;
+            }
+
             $this->dispatch(
-                0, // System event — no human actor.
+                $senderId,
                 $targetOwnerId,
                 $message,
                 NotificationType::DIVERGENCE_STATE_WARNING,
@@ -1039,6 +1053,95 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'error'           => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // bcc_gated_group_provisioned — waitlist go-live bell
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Notify everyone who WAITLISTED a collection (explicit opt-in via
+     * the stance panel) that its holder community is now live.
+     *
+     * This is the waitlist's payoff — verification converts directly
+     * into founding members instead of an empty room. Idempotent: only
+     * stance rows with `notified_at IS NULL` are fetched, and every
+     * delivered user is stamped afterwards, so provisioning re-runs
+     * (the daily sweep re-fires the hook path for its whole scan on
+     * some flows) can never double-bell.
+     *
+     * System event — no human actor (same posture as the divergence
+     * warning above).
+     */
+    public function onHolderCommunityProvisioned(int $groupId, int $collectionId, int $chainId, string $contract): void
+    {
+        $contract = strtolower(trim($contract));
+        if ($groupId <= 0 || $chainId <= 0 || $contract === '') {
+            return;
+        }
+
+        try {
+            $pending = \BCC\Trust\Onchain\Repositories\CollectionSignalRepository::waitlistUserIdsPending($chainId, $contract);
+            if ($pending === []) {
+                return;
+            }
+
+            $name = null;
+            if ($collectionId > 0) {
+                foreach (\BCC\Trust\Onchain\Repositories\CollectionRepository::findManyByIds([$collectionId]) as $row) {
+                    $name = is_string($row->collection_name ?? null) && $row->collection_name !== ''
+                        ? (string) $row->collection_name
+                        : null;
+                }
+            }
+
+            $message = $name !== null
+                ? sprintf("The %s holders community is live — you're on its waitlist and you qualify to join.", $name)
+                : 'A holders community you waitlisted is live — you qualify to join.';
+
+            // Sender = the group's owner (provisioning sets post_author).
+            // PeepSoNotificationWriter REJECTS sender id <= 0 by contract
+            // ('invalid_user'), so a bare "system" 0 never delivers —
+            // caught live 2026-07-03; the divergence-state warning above
+            // shares this latent bug (tracked separately).
+            $senderId = (int) get_post_field('post_author', $groupId);
+            if ($senderId <= 0) {
+                Logger::warning('[NotificationDispatcher] holder-community-live: group has no owner — bell skipped', [
+                    'group_id' => $groupId,
+                ]);
+                return;
+            }
+
+            $delivered = [];
+            foreach ($pending as $userId) {
+                $this->dispatch(
+                    $senderId,
+                    $userId,
+                    $message,
+                    NotificationType::HOLDER_COMMUNITY_LIVE,
+                    $groupId, // external_id → the PeepSo group
+                    0         // no associated activity row
+                );
+                $delivered[] = $userId;
+
+                $this->pushDispatcher->enqueue($userId, 'holder_community_live', [
+                    'group_id'         => $groupId,
+                    'collection_id'    => $collectionId,
+                    'chain_id'         => $chainId,
+                    'contract_address' => $contract,
+                ]);
+            }
+
+            \BCC\Trust\Onchain\Repositories\CollectionSignalRepository::markNotified($chainId, $contract, $delivered);
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] holder-community-live dispatch failed', [
+                'group_id'      => $groupId,
+                'collection_id' => $collectionId,
+                'chain_id'      => $chainId,
+                'contract'      => $contract,
+                'error'         => $e->getMessage(),
             ]);
         }
     }
@@ -1099,6 +1202,37 @@ final class NotificationDispatcher
     // ──────────────────────────────────────────────────────────────────
     // Resolvers
     // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Sender for system-originated bells (no human actor).
+     *
+     * PeepSo has no system-user concept and its notification writer
+     * rejects sender id <= 0, so system events send as the platform's
+     * first administrator (lowest user id, deterministic). Request-
+     * cached — the admin set doesn't change mid-request.
+     *
+     * Returns 0 when no administrator exists (broken install — callers
+     * log and skip rather than throw; a bell is never worth breaking
+     * its producer per §A3).
+     */
+    private static function resolveSystemSenderId(): int
+    {
+        static $senderId = null;
+        if ($senderId !== null) {
+            return $senderId;
+        }
+
+        $admins = get_users([
+            'role'    => 'administrator',
+            'orderby' => 'ID',
+            'order'   => 'ASC',
+            'number'  => 1,
+            'fields'  => 'ID',
+        ]);
+
+        $senderId = isset($admins[0]) ? (int) $admins[0] : 0;
+        return $senderId;
+    }
 
     /**
      * Look up the post author the activity row points to. Returns 0

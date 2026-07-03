@@ -139,6 +139,54 @@ if (!function_exists('current_time')) {
     }
 }
 
+// Object-cache stubs — repositories bump §5 generation counters via
+// wp_cache_* after a write commits (e.g. NftHoldingsRepository::ingestBatch →
+// bumpWalletGeneration). A tiny in-memory store keeps those functional so the
+// write path doesn't fatal. Read paths under test query MySQL directly, so
+// this cache never masks real DB state.
+if (!function_exists('wp_cache_get')) {
+    $GLOBALS['__bcc_test_object_cache'] = [];
+
+    /**
+     * @param bool $found
+     * @return mixed
+     */
+    function wp_cache_get(string $key, string $group = '', bool $force = false, &$found = null)
+    {
+        $hit   = isset($GLOBALS['__bcc_test_object_cache'][$group][$key]);
+        $found = $hit;
+        return $hit ? $GLOBALS['__bcc_test_object_cache'][$group][$key] : false;
+    }
+    /** @param mixed $value */
+    function wp_cache_set(string $key, $value, string $group = '', int $expire = 0): bool
+    {
+        $GLOBALS['__bcc_test_object_cache'][$group][$key] = $value;
+        return true;
+    }
+    /** @param mixed $value */
+    function wp_cache_add(string $key, $value, string $group = '', int $expire = 0): bool
+    {
+        if (isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
+            return false;
+        }
+        $GLOBALS['__bcc_test_object_cache'][$group][$key] = $value;
+        return true;
+    }
+    function wp_cache_delete(string $key, string $group = ''): bool
+    {
+        unset($GLOBALS['__bcc_test_object_cache'][$group][$key]);
+        return true;
+    }
+    /** @return int|false */
+    function wp_cache_incr(string $key, int $offset = 1, string $group = '')
+    {
+        if (!isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
+            return false;
+        }
+        return $GLOBALS['__bcc_test_object_cache'][$group][$key] += $offset;
+    }
+}
+
 // ── Install the schema(s) the integration tests touch ───────────────────────
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-content-reports.php';
@@ -163,3 +211,27 @@ $GLOBALS['wpdb']->query(
 // endorsement migration uses get_option/update_option (stubbed above).
 require_once dirname(__DIR__, 2) . '/includes/database/schema-core.php';
 bcc_trust_create_core_tables();
+
+// On-chain claim-resolution tables (claims / validators / collections /
+// wallet_links) — exercised by UserVerifiedClaimOnPageIntegrationTest.
+// Their table-name helpers resolve via bcc-core's DB::table(); CI checks
+// out bcc-core adjacent to this plugin (see .github/workflows/ci.yml), and
+// local dev has it at the same relative path.
+if (!class_exists(\BCC\Core\DB\DB::class)) {
+    require_once dirname(__DIR__, 2) . '/../bcc-core/src/DB/DB.php';
+}
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-claims.php';
+bcc_onchain_create_claims_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-validators.php';
+bcc_onchain_create_validators_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-collections.php';
+bcc_onchain_create_collections_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-wallets.php';
+bcc_onchain_create_wallet_links_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-holdings.php';
+bcc_onchain_create_nft_holdings_table();

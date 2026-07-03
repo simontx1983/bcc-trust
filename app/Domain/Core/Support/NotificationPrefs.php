@@ -111,6 +111,7 @@ final class NotificationPrefs
         'bell_bcc_attestation_revoked'                       => true,
         'bell_bcc_attestation_reaffirmed'                    => true,
         'bell_bcc_divergence_state_warning'                  => true,
+        'bell_bcc_holder_community_live'                     => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,
         'push_event_endorse'                                 => true,
@@ -124,6 +125,7 @@ final class NotificationPrefs
         'push_event_attestation_revoked'                     => true,
         'push_event_attestation_reaffirmed'                  => true,
         'push_event_divergence_state_warning'                => true,
+        'push_event_holder_community_live'                   => true,
     ];
 
     /**
