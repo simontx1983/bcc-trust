@@ -412,6 +412,17 @@ class CosmosFetcher implements FetcherInterface
             return $empty;
         }
 
+        // ── Phase A: parallel first-page discovery ───────────────────────
+        // Every known collection's `tokens{owner}` FIRST page is fetched
+        // concurrently (one same-host batch, waves of 12), replacing the
+        // old ~330ms × 30 sequential walk. Per contract we produce a
+        // list<string>|null first page with the SAME semantics as
+        // cw721Tokens (null = query failed / breaker-open; [] = owns none),
+        // and we WRITE each success back to the shared cw721_tokens cache
+        // so warm gallery loads and the single-path count_holdings stay
+        // consistent. Cache HITS are served locally and never batched.
+        $firstPages = $this->discoverFirstPages($known, $wallet);
+
         $items     = [];
         $truncated = false;
 
@@ -425,14 +436,34 @@ class CosmosFetcher implements FetcherInterface
             // batch (mirror Phase 1c NftEnrichmentService::runForChain
             // structural isolation pattern).
             try {
+                $firstPage = $firstPages[$contract] ?? null;
                 // list_holdings is the gallery (cold) path — a failed or
                 // empty contract is simply omitted from the gallery (the
-                // pre-fail-open behaviour). The count (gate) path above is
-                // where the null vs empty distinction is load-bearing.
-                $tokenIds = $this->cw721AllTokensForOwner($contract, $wallet);
-                if ($tokenIds === null || $tokenIds === []) {
+                // pre-fail-open behaviour). The count (gate) path is where
+                // the null vs empty distinction is load-bearing.
+                if ($firstPage === null || $firstPage === []) {
                     continue;
                 }
+
+                // ── Phase B: finish the walk only when needed ────────────
+                // The first page filled to the page size → this wallet may
+                // hold more under this contract; complete the (rare) walk
+                // sequentially. cw721AllTokensForOwner re-reads page 0 from
+                // the cache we just warmed in Phase A (no re-fetch), then
+                // paginates. We defer to its result fully so the null-means-
+                // omit fail-open semantics stay byte-identical to the old
+                // sequential path. When the first page is short (< page
+                // size) it IS the complete set — no walk needed.
+                if (count($firstPage) >= self::TOKENS_PAGE_SIZE) {
+                    $walked = $this->cw721AllTokensForOwner($contract, $wallet);
+                    if ($walked === null || $walked === []) {
+                        continue;
+                    }
+                    $tokenIds = $walked;
+                } else {
+                    $tokenIds = $firstPage;
+                }
+
                 if (count($tokenIds) >= self::PER_CONTRACT_TOKEN_CAP) {
                     $truncated = true;
                 }
@@ -474,6 +505,92 @@ class CosmosFetcher implements FetcherInterface
         ];
     }
 
+    /**
+     * Phase A helper: resolve the FIRST `tokens{owner}` page for every
+     * known collection, using the shared cw721_tokens cache and ONE
+     * concurrent same-host batch for the misses.
+     *
+     * Returns a contract → (list<string>|null) map with cw721Tokens'
+     * fail-open semantics per contract:
+     *   - list<string> (possibly empty) → successful first page (empty =
+     *     owns none under this contract);
+     *   - null → the first-page query FAILED (transport / non-200 /
+     *     breaker-open) — caller omits the collection from the gallery but
+     *     MUST NOT read it as "owns none".
+     *
+     * Cache HITS are served without a network call; MISSES are batched and
+     * each SUCCESS is written back to the same cw721_tokens key + TTL
+     * (empty cached, null NOT cached) so warm loads and count_holdings read
+     * identical rows.
+     *
+     * @param array<int, object> $known collection rows (contract_address, …)
+     * @return array<string, list<string>|null> keyed by contract_address
+     */
+    private function discoverFirstPages(array $known, string $wallet): array
+    {
+        /** @var array<string, list<string>|null> $result */
+        $result = [];
+        /** @var array<string, string> $missPaths contract → LCD path */
+        $missPaths = [];
+
+        foreach ($known as $coll) {
+            $contract = (string) ($coll->contract_address ?? '');
+            if ($contract === '' || isset($result[$contract]) || isset($missPaths[$contract])) {
+                continue;
+            }
+
+            $cacheKey = $this->cw721TokensCacheKey($contract, $wallet, null);
+            $cached   = wp_cache_get($cacheKey, 'bcc_onchain');
+            if (is_array($cached)) {
+                /** @var list<string> $cached */
+                $result[$contract] = $cached;
+                continue;
+            }
+
+            $path = self::cw721TokensPath($contract, $wallet, null, self::TOKENS_PAGE_SIZE);
+            if ($path === null) {
+                // Unencodable / empty — treat as a failed first page.
+                $result[$contract] = null;
+                continue;
+            }
+            $missPaths[$contract] = $path;
+        }
+
+        if ($missPaths === []) {
+            return $result;
+        }
+
+        // ONE same-host batch for all the misses. Index alignment is
+        // preserved by iterating the ordered contract → path map.
+        $contracts = array_keys($missPaths);
+        $decoded   = $this->lcdGetBatch(array_values($missPaths));
+
+        foreach ($contracts as $i => $contract) {
+            // lcdGetBatch returns the FULL decoded LCD JSON (or null); the
+            // wasm smart-query wraps the payload under `data` exactly like
+            // wasmSmartQuery unwraps for the single path. A non-null
+            // response without a well-formed `data` envelope is a failed/
+            // malformed query → null (never "owns none").
+            $response = $decoded[$i] ?? null;
+            if ($response === null || !isset($response['data']) || !is_array($response['data'])) {
+                $result[$contract] = null;
+                continue;
+            }
+            $tokenIds = self::parseCw721TokensData($response['data']);
+            $result[$contract] = $tokenIds;
+
+            // Write successes back to the shared cache (empty cached; null
+            // NOT cached — a failed query must never poison the TTL window
+            // with a false empty, matching cw721Tokens).
+            if ($tokenIds !== null) {
+                $cacheKey = $this->cw721TokensCacheKey($contract, $wallet, null);
+                wp_cache_set($cacheKey, $tokenIds, 'bcc_onchain', self::TOKENS_CACHE_TTL);
+            }
+        }
+
+        return $result;
+    }
+
     // ── CW-721 query helpers (V2 Phase 2, private) ────────────────────────
 
     /**
@@ -493,6 +610,41 @@ class CosmosFetcher implements FetcherInterface
      */
     private function wasmSmartQuery(string $contractAddress, array $queryArr): ?array
     {
+        $path = self::wasmSmartQueryPath($contractAddress, $queryArr);
+        if ($path === null) {
+            return null;
+        }
+
+        $response = $this->lcdGet($path);
+        if (!is_array($response) || !isset($response['data']) || !is_array($response['data'])) {
+            return null;
+        }
+        return $response['data'];
+    }
+
+    /**
+     * Build the LCD smart-query PATH for a CosmWasm contract state query.
+     *
+     * Single source of truth for the base64/url-safe path encoding so the
+     * single-request {@see wasmSmartQuery} and the batch {@see lcdGetBatch}
+     * consumers share ONE encoding (§11 — no duplicated base64 logic).
+     * Returns the leading-slash path (no host); the caller prefixes
+     * `$this->rest_url`. Returns null on an empty contract or unencodable
+     * query.
+     *
+     * Cosmos SDK wasm module expects the query JSON as base64 in the path:
+     *   1. URL-safe alphabet (`-_` instead of `+/`) — a literal `/` in the
+     *      encoded string would split the URL path at the wrong segment
+     *      boundary.
+     *   2. Padding `=` MUST be preserved — strict cosmos-sdk LCD parsers
+     *      return 400 "illegal base64 data" on unpadded input (observed on
+     *      Stargaze pre-migration); cosmos-hub's LCD happens to be lenient,
+     *      but we can't rely on that across all chains.
+     *
+     * @param array<string, mixed> $queryArr e.g. ['tokens' => ['owner' => '...']]
+     */
+    private static function wasmSmartQueryPath(string $contractAddress, array $queryArr): ?string
+    {
         if ($contractAddress === '') {
             return null;
         }
@@ -501,25 +653,82 @@ class CosmosFetcher implements FetcherInterface
         if ($json === false) {
             return null;
         }
-        // Cosmos SDK wasm module expects the query JSON as base64 in the
-        // path. Two requirements:
-        //   1. URL-safe alphabet (`-_` instead of `+/`) — a literal `/` in
-        //      the encoded string would split the URL path at the wrong
-        //      segment boundary.
-        //   2. Padding `=` MUST be preserved — strict cosmos-sdk LCD
-        //      parsers return 400 "illegal base64 data" on unpadded input
-        //      (observed on Stargaze pre-migration); cosmos-hub's LCD
-        //      happens to be lenient, but we can't rely on that across
-        //      all chains.
+
         $encoded = strtr(base64_encode($json), '+/', '-_');
 
-        $response = $this->lcdGet(
-            '/cosmwasm/wasm/v1/contract/' . rawurlencode($contractAddress) . '/smart/' . $encoded
-        );
-        if (!is_array($response) || !isset($response['data']) || !is_array($response['data'])) {
+        return '/cosmwasm/wasm/v1/contract/' . rawurlencode($contractAddress) . '/smart/' . $encoded;
+    }
+
+    /**
+     * Build the CW-721 `tokens { owner, start_after, limit }` query array —
+     * shared by the single-request {@see cw721Tokens} and the batch
+     * {@see cw721TokensPath} so the wire shape can never drift between the
+     * cold gallery path and the count/gate path.
+     *
+     * @return array{tokens: array{owner: string, limit: int, start_after?: string}}
+     */
+    private static function cw721TokensQuery(string $owner, ?string $startAfter, int $limit): array
+    {
+        $query = ['tokens' => ['owner' => $owner, 'limit' => max(1, min(100, $limit))]];
+        if ($startAfter !== null && $startAfter !== '') {
+            $query['tokens']['start_after'] = $startAfter;
+        }
+        return $query;
+    }
+
+    /**
+     * LCD path for a CW-721 first-/next-page `tokens{owner}` query on a
+     * given contract. Reuses {@see wasmSmartQueryPath} for the encoding so
+     * the batch discovery pass and the single `cw721Tokens` produce byte-
+     * identical paths for the same (contract, owner, cursor, limit).
+     */
+    private static function cw721TokensPath(string $contract, string $owner, ?string $startAfter = null, int $limit = self::TOKENS_PAGE_SIZE): ?string
+    {
+        if ($contract === '' || $owner === '') {
             return null;
         }
-        return $response['data'];
+        return self::wasmSmartQueryPath($contract, self::cw721TokensQuery($owner, $startAfter, $limit));
+    }
+
+    /**
+     * Cache key for a single `cw721Tokens` page — shared by the single-
+     * request path and the batch discovery pass so a warm gallery load and
+     * the single-path {@see count_holdings} read the SAME cached rows.
+     */
+    private function cw721TokensCacheKey(string $contract, string $owner, ?string $startAfter): string
+    {
+        return sprintf(
+            'cw721_tokens_%d_%s_%s_%s',
+            (int) $this->chain->id,
+            strtolower($contract),
+            strtolower($owner),
+            $startAfter ?? ''
+        );
+    }
+
+    /**
+     * Parse a CW-721 `tokens` smart-query `data` envelope into a list of
+     * token_id strings. Null-in → null (preserve the failed-query signal);
+     * a successful envelope with no/empty `tokens` → `[]` (owns none).
+     *
+     * @param array<string, mixed>|null $data unwrapped `data` from the smart query
+     * @return list<string>|null
+     */
+    private static function parseCw721TokensData(?array $data): ?array
+    {
+        if ($data === null) {
+            return null;
+        }
+        if (!isset($data['tokens']) || !is_array($data['tokens'])) {
+            return [];
+        }
+        $out = [];
+        foreach ($data['tokens'] as $t) {
+            if (is_string($t) && $t !== '') {
+                $out[] = $t;
+            }
+        }
+        return $out;
     }
 
     /**
@@ -545,16 +754,10 @@ class CosmosFetcher implements FetcherInterface
         // Cache key per locked rule — explicit + readable for debugging.
         // "why does THIS wallet show stale holdings only on page 2?"
         // → grep `cw721_tokens_<chain>_<contract>_<wallet>_<cursor>` in
-        //   the cache dump and the answer is one row.
-        $chainId  = (int) $this->chain->id;
-        $cursorKey = $startAfter ?? '';
-        $cacheKey = sprintf(
-            'cw721_tokens_%d_%s_%s_%s',
-            $chainId,
-            strtolower($contract),
-            strtolower($owner),
-            $cursorKey
-        );
+        //   the cache dump and the answer is one row. Shares the key with
+        //   the batch discovery pass (cw721TokensCacheKey) so a warm
+        //   gallery load and this single/gate path never diverge.
+        $cacheKey = $this->cw721TokensCacheKey($contract, $owner, $startAfter);
 
         $cached = wp_cache_get($cacheKey, 'bcc_onchain');
         if (is_array($cached)) {
@@ -562,10 +765,7 @@ class CosmosFetcher implements FetcherInterface
             return $cached;
         }
 
-        $query = ['tokens' => ['owner' => $owner, 'limit' => max(1, min(100, $limit))]];
-        if ($startAfter !== null && $startAfter !== '') {
-            $query['tokens']['start_after'] = $startAfter;
-        }
+        $query = self::cw721TokensQuery($owner, $startAfter, $limit);
 
         // wasmSmartQuery returns null on transport / non-200 / unparseable
         // (it threads through lcdGet which inherits the per-chain
@@ -573,21 +773,9 @@ class CosmosFetcher implements FetcherInterface
         // that as a failed page so the page-walk can distinguish "couldn't
         // verify" from "verified empty," and do NOT cache it (caching a
         // failed query would poison the TTL window with a false empty).
-        $data = $this->wasmSmartQuery($contract, $query);
-        if ($data === null) {
+        $out = self::parseCw721TokensData($this->wasmSmartQuery($contract, $query));
+        if ($out === null) {
             return null;
-        }
-        if (!isset($data['tokens']) || !is_array($data['tokens'])) {
-            // Successful response with no `tokens` envelope — treat as a
-            // genuine empty page (owns none under this contract).
-            return [];
-        }
-
-        $out = [];
-        foreach ($data['tokens'] as $t) {
-            if (is_string($t) && $t !== '') {
-                $out[] = $t;
-            }
         }
 
         wp_cache_set($cacheKey, $out, 'bcc_onchain', self::TOKENS_CACHE_TTL);
@@ -1221,6 +1409,85 @@ class CosmosFetcher implements FetcherInterface
         $body = wp_remote_retrieve_body($response);
         $data = json_decode($body, true);
 
+        return is_array($data) ? $data : null;
+    }
+
+    /** Batch timeout for the parallel discovery wave — some LCD queries are
+     * slow, so we run well above the primitive's 3s default but under its
+     * 30s hard cap. Kept as a constant so the tuning is one grep away. */
+    private const BATCH_LCD_TIMEOUT = 10;
+
+    /**
+     * Concurrent same-host LCD GET for N paths on THIS chain.
+     *
+     * Given N LCD paths (leading-slash, e.g. from {@see cw721TokensPath}),
+     * builds the full same-host URLs (`$this->rest_url . $path`) and fetches
+     * them concurrently via {@see ApiRetry::getBatchSameHost} (which wraps
+     * the curl_multi primitive + per-chain CircuitBreaker). Returns an
+     * index-aligned array of decoded `array|null` with the SAME null
+     * semantics as {@see lcdGet}: a non-200, a transport WP_Error, or an
+     * unparseable body all decode to null for THAT index only. A per-URL
+     * mix of 200s and 404s is normal (some contracts 404 a `tokens` query);
+     * the breaker treats the batch as a host success as long as the host
+     * answered at all.
+     *
+     * @param list<string> $paths leading-slash LCD paths, all on this chain's host
+     * @return array<int, array<string, mixed>|null> index-aligned with $paths
+     */
+    private function lcdGetBatch(array $paths): array
+    {
+        if ($paths === []) {
+            return [];
+        }
+
+        $chainId = (int) ($this->chain->id ?? 0);
+        $urls    = [];
+        foreach ($paths as $path) {
+            $urls[] = $this->rest_url . $path;
+        }
+
+        $responses = ApiRetry::getBatchSameHost(
+            $urls,
+            [
+                'timeout' => self::BATCH_LCD_TIMEOUT,
+                'headers' => ['Accept' => 'application/json'],
+            ],
+            [
+                'label'    => 'Cosmos LCD batch',
+                'chain_id' => $chainId,
+            ]
+        );
+
+        $out = [];
+        foreach (array_keys($urls) as $i) {
+            $res = $responses[$i] ?? null;
+            $out[$i] = $this->decodeBatchEntry($res);
+        }
+        return $out;
+    }
+
+    /**
+     * Decode one {@see ApiRetry::getBatchSameHost} entry into the same
+     * shape {@see lcdGet} returns: null on WP_Error / non-200 / unparseable,
+     * otherwise the decoded array.
+     *
+     * @param array{code: int, body: string}|\WP_Error|null $entry
+     * @return array<string, mixed>|null
+     */
+    private function decodeBatchEntry($entry): ?array
+    {
+        // A success entry is array{code,body}; a failure is a \WP_Error
+        // object (SSRF block / transport / breaker-open) or null (missing).
+        if (!is_array($entry)) {
+            return null;
+        }
+
+        $code = (int) ($entry['code'] ?? 0);
+        if ($code !== 200) {
+            return null;
+        }
+
+        $data = json_decode((string) ($entry['body'] ?? ''), true);
         return is_array($data) ? $data : null;
     }
 

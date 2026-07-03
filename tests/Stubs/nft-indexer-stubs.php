@@ -230,10 +230,44 @@ namespace BCC\Trust\Onchain\Support {
             /** @var list<array{url: string, body: string}> */
             public static array $calls = [];
 
+            /**
+             * Keyed by full URL → batch entry (array{code,body}|WP_Error).
+             * getBatchSameHost() returns one entry per input URL, defaulting
+             * to a 404 for any URL the test did not register.
+             *
+             * @var array<string, array{code: int, body: string}|\WP_Error>
+             */
+            public static array $batchResponses = [];
+
+            /** @var list<array{urls: list<string>, chain_id: int}> */
+            public static array $batchCalls = [];
+
             public static function reset(): void
             {
-                self::$queue = [];
-                self::$calls = [];
+                self::$queue          = [];
+                self::$calls          = [];
+                self::$batchResponses = [];
+                self::$batchCalls     = [];
+            }
+
+            /**
+             * @param list<string>         $urls
+             * @param array<string, mixed> $args
+             * @param array<string, mixed> $options
+             * @return array<int, array{code: int, body: string}|\WP_Error>
+             */
+            public static function getBatchSameHost(array $urls, array $args = [], array $options = []): array
+            {
+                self::$batchCalls[] = [
+                    'urls'     => array_values($urls),
+                    'chain_id' => (int) ($options['chain_id'] ?? 0),
+                ];
+                $out = [];
+                foreach (array_values($urls) as $i => $url) {
+                    $out[$i] = self::$batchResponses[$url]
+                        ?? ['code' => 404, 'body' => ''];
+                }
+                return $out;
             }
 
             /**
@@ -270,6 +304,25 @@ namespace BCC\Trust\Onchain\Support {
 // ── Trust\Onchain repositories + services (worker collaborators) ────────────
 
 namespace BCC\Trust\Onchain\Repositories {
+
+    if (!class_exists(__NAMESPACE__ . '\\CollectionRepository', false)) {
+        final class CollectionRepository
+        {
+            /** @var array<int, array<int, object>> chainId → known collection rows */
+            public static array $knownByChain = [];
+
+            public static function reset(): void
+            {
+                self::$knownByChain = [];
+            }
+
+            /** @return array<int, object> */
+            public static function listKnownByChain(int $chainId, int $limit): array
+            {
+                return array_slice(self::$knownByChain[$chainId] ?? [], 0, $limit);
+            }
+        }
+    }
 
     if (!class_exists(__NAMESPACE__ . '\\ChainCheckpointRepository', false)) {
         final class ChainCheckpointRepository

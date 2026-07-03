@@ -299,7 +299,127 @@ final class ApiRetry
         );
     }
 
+    /**
+     * Concurrent same-host batch GET with circuit-breaker integration.
+     *
+     * Wraps {@see \BCC\Core\Http\SafeHttpClient::getBatchSameHost} (raw
+     * curl_multi, waves of 12) the way {@see get()} wraps the single
+     * request: the per-chain {@see OnchainCircuitBreaker} is consulted
+     * ONCE up front and its outcome recorded ONCE afterwards. All N URLs
+     * MUST share a single host (the primitive enforces this per index).
+     *
+     * NO retry loop and NO backoff here (unlike {@see request()}): the
+     * batch is the gallery cold-path, run under a user request, and a
+     * per-URL retry storm across 30 collections would blow the request
+     * budget. A failed URL simply comes back as its own WP_Error and the
+     * caller treats it as "unknown" for that one collection. This mirrors
+     * the load-bearing null-vs-empty distinction the single path relies on.
+     *
+     * Breaker outcome rule (documented, matches the single-path intent —
+     * "the breaker tracks host reachability, not per-URL HTTP status"):
+     *   - Breaker already OPEN → return an index-aligned array of
+     *     `circuit_breaker_open` WP_Errors WITHOUT calling out (fail fast,
+     *     same as {@see request()}'s top-of-method guard).
+     *   - Batch returns and AT LEAST ONE entry is a real HTTP response
+     *     (any status, including 404/500) → the host answered →
+     *     `recordSuccess`. A per-URL mix of 200s and 404s is a SUCCESS for
+     *     the breaker; a 404 means "that contract has no such query," not
+     *     "the chain is down."
+     *   - EVERY entry is a WP_Error (host-level failure: DNS, connection
+     *     refused, all-timed-out, SSRF-blocked host) → `recordFailure`
+     *     ONCE. We charge the breaker a single failure for the wave, not N,
+     *     so one bad batch doesn't fast-trip a chain that a single call
+     *     would have charged once.
+     *
+     * CU/budget note: {@see request()} does NOT meter a per-call CU budget
+     * (see the two "PHASE X2 REMOVAL" blocks above — that counter was
+     * deliberately moved out of transport into EnrichmentScheduler + the
+     * physical `cu_used_today` checkpoint). There is therefore no per-call
+     * meter for this batch path to replicate; the only transport-layer
+     * concern is the CircuitBreaker, preserved above. The batch's own
+     * fairness bound is its caller's contract cap (~30 collections) plus
+     * the primitive's 12-wide concurrency wave cap.
+     *
+     * @param list<string>          $urls    all share ONE host
+     * @param array<string, mixed>  $args    passed to SafeHttpClient::getBatchSameHost
+     *                                        (timeout, headers, limit_response_size)
+     * @param array<string, mixed>  $options {
+     *     @type int    $chain_id  Chain ID for circuit-breaker integration.
+     *     @type string $label     Human-readable label for logging.
+     * }
+     * @return array<int, array{code: int, body: string}|\WP_Error> index-aligned with $urls
+     */
+    public static function getBatchSameHost(array $urls, array $args = [], array $options = []): array
+    {
+        if ($urls === []) {
+            return [];
+        }
+
+        $urls    = array_values($urls);
+        $chainId = (int) ($options['chain_id'] ?? 0);
+        $label   = (string) ($options['label'] ?? 'API batch');
+
+        // Circuit breaker: check ONCE before the whole batch (mirrors the
+        // single-request guard at the top of request()).
+        if ($chainId > 0 && OnchainCircuitBreaker::isOpen($chainId)) {
+            self::log("BLOCKED by circuit breaker: {$label} (chain {$chainId}, {" . count($urls) . '} urls)');
+            $err = new \WP_Error('circuit_breaker_open', "Circuit breaker open for chain {$chainId}");
+            return self::failEveryBatchIndex($urls, $err);
+        }
+
+        try {
+            $results = \BCC\Core\Http\SafeHttpClient::getBatchSameHost($urls, $args);
+
+            if ($chainId > 0) {
+                $anyResponse = false;
+                foreach ($results as $res) {
+                    if (!is_wp_error($res)) {
+                        $anyResponse = true;
+                        break;
+                    }
+                }
+
+                if ($anyResponse) {
+                    // Host answered at least once → reachable → success.
+                    OnchainCircuitBreaker::recordSuccess($chainId);
+                } else {
+                    // Every URL failed at transport → host-level failure.
+                    self::log(sprintf(
+                        'BATCH host-level failure %s — all %d urls errored',
+                        $label,
+                        count($urls)
+                    ));
+                    OnchainCircuitBreaker::recordFailure($chainId);
+                }
+            }
+
+            return $results;
+        } finally {
+            // Match request()'s finally: release the HALF-OPEN probe lock
+            // on every exit path so an unrecorded outcome can't hold it.
+            if ($chainId > 0) {
+                OnchainCircuitBreaker::releaseProbe($chainId);
+            }
+        }
+    }
+
     // ── Internal ────────────────────────────────────────────────────────────
+
+    /**
+     * Build an index-aligned WP_Error result array for a whole batch —
+     * used when the breaker is already open and we never call out.
+     *
+     * @param list<string> $urls
+     * @return array<int, \WP_Error>
+     */
+    private static function failEveryBatchIndex(array $urls, \WP_Error $error): array
+    {
+        $out = [];
+        foreach (array_keys($urls) as $i) {
+            $out[$i] = $error;
+        }
+        return $out;
+    }
 
     /**
      * Parse the Retry-After header from a 429 response.
