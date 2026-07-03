@@ -118,6 +118,110 @@ final class EvmFetcherTransfersTest extends TestCase
         self::assertSame(['transfers' => [], 'page_key' => null], $result);
     }
 
+    public function testErc1155MetadataExpandsToPerTokenTransfers(): void
+    {
+        // Alchemy returns top-level tokenId: null for erc1155 — the ids
+        // live in erc1155Metadata[] (one entry per token in the batch).
+        // The pre-2026-07 reader keyed on top-level tokenId only and
+        // dropped 100% of 1155 transfers (never-indexed 1155 holdings +
+        // the Polygon dense_block_stall false positive).
+        $this->queueJson([
+            'jsonrpc' => '2.0',
+            'id'      => 1,
+            'result'  => [
+                'transfers' => [
+                    [
+                        'rawContract'     => ['address' => '0xABCDEF0000000000000000000000000000000002'],
+                        'tokenId'         => null,
+                        'category'        => 'erc1155',
+                        'blockNum'        => '0x97', // 151
+                        'from'            => '0x2222222222222222222222222222222222222222',
+                        'to'              => '0x3333333333333333333333333333333333333333',
+                        'value'           => null,
+                        'erc1155Metadata' => [
+                            ['tokenId' => '0x1', 'value' => '0x3'],
+                            ['tokenId' => '0x2a', 'value' => '0x1'],
+                        ],
+                        'metadata'        => ['blockTimestamp' => '2026-07-01T00:00:00.000Z'],
+                        'asset'           => 'Test1155',
+                    ],
+                ],
+            ],
+        ]);
+
+        $result = $this->makeFetcher()->fetch_transfers_since(100, 200);
+
+        self::assertNotNull($result);
+        self::assertCount(2, $result['transfers']);
+        [$a, $b] = $result['transfers'];
+        self::assertSame('1', $a['token_id']);
+        self::assertSame(3, $a['amount']);
+        self::assertSame('42', $b['token_id']);
+        self::assertSame(1, $b['amount']);
+        foreach ([$a, $b] as $t) {
+            self::assertSame('ERC-1155', $t['token_standard']);
+            self::assertSame(151, $t['block_number']);
+            self::assertSame('0x3333333333333333333333333333333333333333', $t['to_address']);
+        }
+    }
+
+    public function testErc1155AmountClampsToBalanceColumnCeiling(): void
+    {
+        // Fungible-style 1155s mint astronomically large amounts; the
+        // holdings `balance` column is INT UNSIGNED, so an unclamped
+        // amount would error the whole strict-mode upsert batch.
+        $this->queueJson([
+            'jsonrpc' => '2.0',
+            'id'      => 1,
+            'result'  => [
+                'transfers' => [
+                    [
+                        'rawContract'     => ['address' => '0xABCDEF0000000000000000000000000000000003'],
+                        'tokenId'         => null,
+                        'category'        => 'erc1155',
+                        'blockNum'        => '0x98',
+                        'erc1155Metadata' => [
+                            // 2^64 — far past the 4294967295 ceiling.
+                            ['tokenId' => '0x5', 'value' => '0x10000000000000000'],
+                        ],
+                        'metadata'        => ['blockTimestamp' => '2026-07-01T00:00:00.000Z'],
+                    ],
+                ],
+            ],
+        ]);
+
+        $result = $this->makeFetcher()->fetch_transfers_since(100, 200);
+
+        self::assertNotNull($result);
+        self::assertCount(1, $result['transfers']);
+        self::assertSame(4294967295, $result['transfers'][0]['amount']);
+    }
+
+    public function testErc1155WithoutTokenIdAnywhereIsSkipped(): void
+    {
+        $this->queueJson([
+            'jsonrpc' => '2.0',
+            'id'      => 1,
+            'result'  => [
+                'transfers' => [
+                    [
+                        'rawContract'     => ['address' => '0xABCDEF0000000000000000000000000000000004'],
+                        'tokenId'         => null,
+                        'category'        => 'erc1155',
+                        'blockNum'        => '0x99',
+                        'erc1155Metadata' => [],
+                        'metadata'        => ['blockTimestamp' => '2026-07-01T00:00:00.000Z'],
+                    ],
+                ],
+            ],
+        ]);
+
+        $result = $this->makeFetcher()->fetch_transfers_since(100, 200);
+
+        self::assertNotNull($result);
+        self::assertSame([], $result['transfers']);
+    }
+
     public function testSuccessfulPageParsesTransfersAndPageKey(): void
     {
         $this->queueJson([

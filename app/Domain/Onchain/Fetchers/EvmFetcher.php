@@ -332,8 +332,7 @@ class EvmFetcher implements FetcherInterface
                 continue;
             }
             $contract = strtolower((string) ($t['rawContract']['address'] ?? ''));
-            $tokenId  = (string) ($t['tokenId'] ?? '');
-            if ($contract === '' || $tokenId === '') {
+            if ($contract === '') {
                 continue;
             }
 
@@ -341,36 +340,83 @@ class EvmFetcher implements FetcherInterface
             $tokenStd = $category === 'erc721' ? 'ERC-721'
                 : ($category === 'erc1155' ? 'ERC-1155' : null);
 
+            // Resolve the (token_id, amount) pairs this transfer carries.
+            //
+            // erc721: Alchemy puts the id in top-level `tokenId` and the
+            // amount is definitionally 1 (`value` is 0/null in edge cases —
+            // coerce, since holding a 721 means balance=1).
+            //
+            // erc1155: top-level `tokenId` is NULL — the ids live in
+            // `erc1155Metadata[]` as {tokenId, value} hex pairs, one per
+            // token in the (possibly batched) TransferSingle/TransferBatch.
+            // The old top-level-only read dropped 100% of 1155 transfers:
+            // 1155 holdings never indexed on any chain, and on 1155-heavy
+            // chains (Polygon) the worker's per-tick watermark saw zero
+            // normalized transfers past the first block and fired
+            // dense_block_stall every tick — the 2026-06/07 false-positive
+            // stall storm.
+            $pairs      = [];
+            $topTokenId = (string) ($t['tokenId'] ?? '');
+            if ($topTokenId !== '') {
+                $rawValue = $t['value'] ?? 1;
+                $pairs[]  = [
+                    $topTokenId,
+                    $category === 'erc1155'
+                        ? max(1, (int) (is_numeric($rawValue) ? $rawValue : 1))
+                        : 1,
+                ];
+            } elseif ($category === 'erc1155' && is_array($t['erc1155Metadata'] ?? null)) {
+                foreach ($t['erc1155Metadata'] as $meta) {
+                    if (!is_array($meta)) {
+                        continue;
+                    }
+                    $idHex = (string) ($meta['tokenId'] ?? '');
+                    if ($idHex === '') {
+                        continue;
+                    }
+                    // `value` is a hex quantity ("0x1"). Clamp to the
+                    // holdings `balance` column's INT UNSIGNED ceiling —
+                    // fungible-style 1155s mint astronomically large
+                    // amounts (observed 4e7+ on Polygon) and an overflow
+                    // would error the whole strict-mode upsert batch.
+                    // (Token IDS go through hexToDecimalString below —
+                    // those exceed PHP int range and stay strings.)
+                    $valHex  = strtolower(ltrim((string) ($meta['value'] ?? '0x1'), '0x'));
+                    $amount  = (float) hexdec($valHex === '' ? '1' : $valHex);
+                    $pairs[] = [$idHex, (int) min(4294967295.0, max(1.0, $amount))];
+                }
+            }
+            if ($pairs === []) {
+                continue;
+            }
+
             $blockNumHex = (string) ($t['blockNum'] ?? '0x0');
             $blockNum    = $blockNumHex !== '' ? (int) hexdec(substr($blockNumHex, 2)) : 0;
-
-            // For 1155, value is amount; for 721, value is 1 (or 0 in some
-            // edge cases — coerce to 1 since holding a 721 means balance=1).
-            $rawValue = $t['value'] ?? 1;
-            $amount   = $category === 'erc1155'
-                ? max(1, (int) (is_numeric($rawValue) ? $rawValue : 1))
-                : 1;
 
             $blockTimestamp = (string) ($t['metadata']['blockTimestamp'] ?? '');
             $confirmedAt    = self::isoToMysqlUtc($blockTimestamp);
 
-            // Alchemy returns hex token_id; convert to decimal for storage
-            // consistency (standard practice — exchanges/marketplaces
-            // store token_id as decimal strings).
-            $tokenIdDecimal = self::hexToDecimalString($tokenId);
+            $fromAddress    = strtolower((string) ($t['from'] ?? ''));
+            $toAddress      = strtolower((string) ($t['to'] ?? ''));
+            $collectionName = isset($t['asset']) ? (string) $t['asset'] : null;
 
-            $transfers[] = [
-                'chain_id'         => $chainId,
-                'contract_address' => $contract,
-                'token_id'         => $tokenIdDecimal,
-                'token_standard'   => $tokenStd,
-                'from_address'     => strtolower((string) ($t['from'] ?? '')),
-                'to_address'       => strtolower((string) ($t['to'] ?? '')),
-                'amount'           => $amount,
-                'block_number'     => $blockNum,
-                'confirmed_at'     => $confirmedAt,
-                'collection_name'  => isset($t['asset']) ? (string) $t['asset'] : null,
-            ];
+            foreach ($pairs as [$tokenIdHex, $amount]) {
+                // Alchemy returns hex token_id; convert to decimal for
+                // storage consistency (standard practice — exchanges/
+                // marketplaces store token_id as decimal strings).
+                $transfers[] = [
+                    'chain_id'         => $chainId,
+                    'contract_address' => $contract,
+                    'token_id'         => self::hexToDecimalString($tokenIdHex),
+                    'token_standard'   => $tokenStd,
+                    'from_address'     => $fromAddress,
+                    'to_address'       => $toAddress,
+                    'amount'           => $amount,
+                    'block_number'     => $blockNum,
+                    'confirmed_at'     => $confirmedAt,
+                    'collection_name'  => $collectionName,
+                ];
+            }
         }
 
         return [
