@@ -337,7 +337,7 @@ final class NotificationDispatcher
         }
 
         try {
-            $message = 'Welcome to The Floor. Pull cards, post reviews, build trust.';
+            $message = 'Welcome to The Floor. Keep tabs on cards, post reviews, build trust.';
             $this->dispatch(
                 $userId,
                 $userId,
