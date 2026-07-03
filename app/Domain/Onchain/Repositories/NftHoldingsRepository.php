@@ -148,6 +148,41 @@ final class NftHoldingsRepository
     }
 
     /**
+     * Distinct linked-wallet count per (chain, contract) across the
+     * whole visible index — the demand signal behind the Verify
+     * Collections queue: "N linked wallets hold this collection."
+     *
+     * Aggregate over the indexed chains only (EVM/SOL persistence);
+     * Cosmos demand comes from CollectionDemandService's marketplace
+     * rollups. Bounded by LIMIT — beyond 500 distinct contracts the
+     * tail is noise for a curation queue (and the caller logs the cap).
+     *
+     * @return list<object{chain_id: string, contract_address: string, wallets: string}>
+     */
+    public static function countDistinctWalletsPerContract(int $limit = 500): array
+    {
+        $limit = max(1, min(2000, $limit));
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{chain_id: string, contract_address: string, wallets: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT chain_id, contract_address,
+                    COUNT(DISTINCT wallet_link_id) AS wallets
+               FROM {$table}
+              WHERE metadata_status IN (%d, %d)
+              GROUP BY chain_id, contract_address
+              ORDER BY wallets DESC
+              LIMIT %d",
+            self::STATUS_PENDING,
+            self::STATUS_OK,
+            $limit
+        ));
+        return $rows ?: [];
+    }
+
+    /**
      * Per-wallet visible-balance map for a single (chain, contract) pair.
      *
      * Used by the gate fast-path. Returns map keyed by wallet_link_id;

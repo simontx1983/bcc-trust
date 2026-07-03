@@ -23,6 +23,7 @@ use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
+use BCC\Trust\Onchain\Services\CollectionDemandService;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -191,6 +192,52 @@ final class VerifyCollectionsPage
             $isVerified
         );
 
+        // Demand signal: distinct linked wallets holding each collection
+        // (EVM/SOL from the holdings index; Cosmos Hub from marketplace
+        // rollups — see CollectionDemandService). Rendered as a column on
+        // both tabs; the UNVERIFIED tab additionally re-ranks by it so
+        // collections that real platform users hold surface at the top
+        // of the queue instead of hiding behind marketplace-wide holder
+        // counts.
+        $demand = CollectionDemandService::linkedHolderCounts();
+
+        // Re-rank the unverified queue by demand. The repo caps perPage
+        // at 100, so ranking re-fetches the scope in chunks up to a
+        // 500-row ceiling — same fetch-sort-paginate-in-PHP posture as
+        // the §4.7 groups-discovery sort. Past the ceiling ranking is
+        // DISABLED (not silently partial): SQL order is already a sane
+        // fallback and a lying rank order is worse than none.
+        $demandRanked = false;
+        if (!$isVerified && $listing['total'] > 0 && $listing['total'] <= 500) {
+            $all = [];
+            $chunkPages = (int) ceil($listing['total'] / 100);
+            for ($p = 1; $p <= $chunkPages; $p++) {
+                $chunk = CollectionRepository::listForAdminVerification($p, 100, $chainArg, $standardArg, false);
+                foreach ($chunk['items'] as $chunkRow) {
+                    $all[] = $chunkRow;
+                }
+                if (count($chunk['items']) < 100) {
+                    break;
+                }
+            }
+            usort($all, static function (object $a, object $b) use ($demand): int {
+                $da = $demand[CollectionDemandService::key((int) $a->chain_id, (string) $a->contract_address)] ?? 0;
+                $db = $demand[CollectionDemandService::key((int) $b->chain_id, (string) $b->contract_address)] ?? 0;
+                if ($da !== $db) {
+                    return $db <=> $da;
+                }
+                // Tie-break: marketplace-wide holders (nulls last), then id.
+                $ha = $a->unique_holders !== null ? (int) $a->unique_holders : -1;
+                $hb = $b->unique_holders !== null ? (int) $b->unique_holders : -1;
+                if ($ha !== $hb) {
+                    return $hb <=> $ha;
+                }
+                return (int) $b->id <=> (int) $a->id;
+            });
+            $listing['items'] = array_slice($all, ($page - 1) * 50, 50);
+            $demandRanked     = true;
+        }
+
         $stateCounts = CollectionRepository::countByVerification($chainArg, $standardArg);
 
         // Pill chains: intersection of PILL_CHAIN_SLUGS (filterable) and
@@ -259,11 +306,19 @@ final class VerifyCollectionsPage
                 </a>
             </h2>
 
+            <?php if (!$isVerified && $demandRanked): ?>
+                <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
+                    Queue ranked by <strong>Linked holders</strong> — collections that
+                    real platform wallets hold sort first.
+                </p>
+            <?php endif; ?>
+
             <details style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;">
                 <summary style="cursor:pointer;font-weight:600;">Add a collection manually</summary>
                 <p style="color:#646970;margin:8px 0;">
-                    Onboard a collection that auto-discovery can't reach (e.g. a Cosmos
-                    Hub CW-721 — no public Hub indexer exists post-Stargaze-migration).
+                    Onboard a collection that auto-discovery can't reach. Cosmos Hub
+                    collections auto-discover when a holder links a wallet (Stargaze
+                    marketplace rollup); this form covers everything else.
                     Cosmos contracts are validated as
                     CW-721 before saving; other chains are trusted as entered. The row
                     is added <strong>unverified</strong> — verify it below to give its
@@ -475,7 +530,11 @@ final class VerifyCollectionsPage
                             <th style="width:90px;">Source</th>
                             <th>Chain</th>
                             <th>Contract</th>
-                            <th style="width:100px;">Holders</th>
+                            <th style="width:110px;"
+                                title="Linked platform wallets currently holding this collection — the demand signal. The unverified queue is ranked by it.">
+                                Linked holders
+                            </th>
+                            <th style="width:100px;" title="Marketplace-wide unique holders (upstream metadata).">Holders</th>
                             <th style="width:160px;" title="Members of the collection's holder community (only meaningful once verified).">
                                 Community
                             </th>
@@ -485,7 +544,7 @@ final class VerifyCollectionsPage
                     <tbody>
                         <?php if ($listing['items'] === []): ?>
                             <tr>
-                                <td colspan="9"><em>
+                                <td colspan="10"><em>
                                     <?php if ($isVerified): ?>
                                         No verified collections yet. Verify a collection in the Unverified tab to give its holders a community.
                                     <?php else: ?>
@@ -564,6 +623,18 @@ final class VerifyCollectionsPage
                                                 title="Run CW-721 contract_info — confirms the contract is a real CW-721 NFT before flipping is_verified.">
                                             Test CW-721
                                         </button>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php
+                                    $demandCount = $demand[CollectionDemandService::key(
+                                        (int) $row->chain_id,
+                                        (string) $row->contract_address
+                                    )] ?? 0;
+                                    if ($demandCount > 0): ?>
+                                        <strong style="color:#00a32a;"><?php echo number_format_i18n($demandCount); ?></strong>
+                                    <?php else: ?>
+                                        <span style="color:#999;">&mdash;</span>
                                     <?php endif; ?>
                                 </td>
                                 <td><?php echo number_format_i18n((int) ($row->unique_holders ?? 0)); ?></td>

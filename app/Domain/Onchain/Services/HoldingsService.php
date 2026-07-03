@@ -345,7 +345,7 @@ final class HoldingsService
         }
 
         return [
-            'items'             => $items,
+            'items'             => self::annotateCollectionVerified($items),
             'truncated'         => $truncatedCount > 0,
             'wallets_checked'   => $walletsChecked,
             'wallets_truncated' => $truncatedCount,
@@ -354,6 +354,58 @@ final class HoldingsService
                 'indexer_state_label' => self::buildIndexerStateLabels($indexerState),
             ],
         ];
+    }
+
+    /**
+     * Annotate every gallery item with `collection_verified` — whether
+     * the operator has verified the item's collection (Verify
+     * Collections page). The frontend dims unverified items ("community
+     * not yet activated") instead of the pre-2026-07 behaviour of
+     * either hiding them (Cosmos) or rendering them indistinguishable
+     * from activated ones (EVM/SOL).
+     *
+     * DISPLAY-ONLY: nothing gates on this flag — group gating resolves
+     * per-contract through ownsAny/count_holdings against verified
+     * collections. A holding whose contract has no collections row at
+     * all annotates false (unverified is the safe default).
+     *
+     * One bounded lookup per chain present in the response
+     * ({@see CollectionRepository::verifiedMapForContracts}).
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private static function annotateCollectionVerified(array $items): array
+    {
+        if ($items === []) {
+            return $items;
+        }
+
+        $contractsByChain = [];
+        foreach ($items as $item) {
+            $chainId  = (int) ($item['chain_id'] ?? 0);
+            $contract = strtolower((string) ($item['contract_address'] ?? ''));
+            if ($chainId > 0 && $contract !== '') {
+                $contractsByChain[$chainId][$contract] = true;
+            }
+        }
+
+        $verifiedMaps = [];
+        foreach ($contractsByChain as $chainId => $contracts) {
+            $verifiedMaps[$chainId] = CollectionRepository::verifiedMapForContracts(
+                $chainId,
+                array_keys($contracts)
+            );
+        }
+
+        foreach ($items as &$item) {
+            $chainId  = (int) ($item['chain_id'] ?? 0);
+            $contract = strtolower((string) ($item['contract_address'] ?? ''));
+            $item['collection_verified'] = (bool) ($verifiedMaps[$chainId][$contract] ?? false);
+        }
+        unset($item);
+
+        return $items;
     }
 
     /**
