@@ -69,7 +69,13 @@ class CosmosFetcher implements FetcherInterface
             // chains (Cosmos Hub, Injective, Kujira, Dungeon). Curated-only
             // posture means non-NFT-active Cosmos chains naturally produce
             // empty results — no per-chain blocklist needed in this method.
-            ['validator', 'delegations', 'dao', 'top_collections', 'holdings_count', 'holdings_list'],
+            //
+            // 'collection' (V1 wallet-link discovery) rides the Stargaze
+            // marketplace indexer and therefore only yields rows on the
+            // Cosmos Hub — fetch_collections itself gates on the slug, so
+            // advertising the feature chain-wide stays harmless (other
+            // cosmos chains return [] and WalletSeedService moves on).
+            ['validator', 'delegations', 'dao', 'collection', 'top_collections', 'holdings_count', 'holdings_list'],
             true
         );
     }
@@ -341,6 +347,9 @@ class CosmosFetcher implements FetcherInterface
     /** Default contract cap when BCC_COSMOS_HOLDINGS_CONTRACT_CAP is undefined. */
     private const DEFAULT_CONTRACT_CAP = 30;
 
+    /** Max discovery rows one wallet can land on the Verify queue. */
+    private const DISCOVERY_COLLECTION_CAP = 50;
+
     /**
      * Count tokens this wallet holds in a single CW-721 contract on this chain.
      *
@@ -389,15 +398,24 @@ class CosmosFetcher implements FetcherInterface
 
         $chainId = (int) $this->chain->id;
         $cap     = self::contractCap();
-        $verified = \BCC\Trust\Onchain\Repositories\CollectionRepository::listVerifiedByChain($chainId, $cap);
-        if ($verified === []) {
+        // Gallery iterates every KNOWN collection — verified first, then
+        // unverified discovery rows (verified ones win the cap when a
+        // wallet's chain has more known contracts than the cap allows).
+        // A user's own assets should never silently vanish just because
+        // the operator hasn't verified the collection yet; the caller
+        // annotates each item with `collection_verified` so the UI can
+        // dim rather than hide. GATING is unaffected: ownsAny/
+        // count_holdings resolve per gate contract and gates only exist
+        // on verified collections.
+        $known = \BCC\Trust\Onchain\Repositories\CollectionRepository::listKnownByChain($chainId, $cap);
+        if ($known === []) {
             return $empty;
         }
 
         $items     = [];
         $truncated = false;
 
-        foreach ($verified as $coll) {
+        foreach ($known as $coll) {
             $contract = (string) $coll->contract_address;
             if ($contract === '') {
                 continue;
@@ -951,13 +969,66 @@ class CosmosFetcher implements FetcherInterface
     // ── NFT Collections (per-chain discovery) ─────────────────────────────
 
     /**
-     * Per-wallet collection fetch is not supported on Cosmos LCD.
+     * V1 wallet-link discovery: which CW-721 collections does this
+     * wallet hold?
      *
-     * @return array<int, array<string, mixed>>
+     * The LCD cannot answer this (wasmd has no owner→contracts index),
+     * so the Cosmos Hub rides the Stargaze marketplace indexer via
+     * {@see StargazeMarketplaceApi::profileCollections}. Other cosmos
+     * chains return [] — no indexer covers them.
+     *
+     * Called from WalletSeedService at wallet-verify time; rows land in
+     * wp_bcc_onchain_collections as source='discovery', is_verified=0
+     * (schema defaults), so a linked wallet's collections surface on the
+     * Verify Collections queue instead of staying invisible until the
+     * operator happens to know them. Verification stays operator-gated:
+     * a discovery row grants nothing until the admin flips it (and the
+     * Test CW-721 probe validates the contract against the LCD first).
+     *
+     * Best-effort by design: API unreachable → [] (the seed path treats
+     * discovery as an enhancement, never a link-time dependency).
+     *
+     * @return array<int, array<string, mixed>> Normalized rows for CollectionRepository::upsert().
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
-        return [];
+        $chainId = $chainId ?: (int) $this->chain->id;
+
+        if ((string) ($this->chain->slug ?? '') !== 'cosmos') {
+            return [];
+        }
+
+        $rollup = \BCC\Trust\Onchain\Support\StargazeMarketplaceApi::profileCollections($walletAddress);
+        if ($rollup === null || $rollup === []) {
+            return [];
+        }
+
+        // Cap discovery per wallet — a junk-stuffed wallet shouldn't
+        // flood the admin queue. Largest holdings first: those are the
+        // collections the user demonstrably cares about.
+        usort($rollup, static fn(array $a, array $b): int => $b['owned_count'] <=> $a['owned_count']);
+        $rollup = array_slice($rollup, 0, self::DISCOVERY_COLLECTION_CAP);
+
+        $collections = [];
+        foreach ($rollup as $c) {
+            $collections[] = [
+                'contract_address'   => $c['contract_address'],
+                'collection_name'    => $c['collection_name'],
+                'chain_id'           => $chainId,
+                'token_standard'     => 'CW-721',
+                'total_supply'       => $c['total_supply'],
+                'floor_price'        => null,
+                'floor_currency'     => null,
+                'total_volume'       => null,
+                'unique_holders'     => null,
+                'listed_percentage'  => null,
+                'royalty_percentage' => null,
+                'metadata_storage'   => null,
+                'image_url'          => $c['image_url'],
+            ];
+        }
+
+        return $collections;
     }
 
     /**

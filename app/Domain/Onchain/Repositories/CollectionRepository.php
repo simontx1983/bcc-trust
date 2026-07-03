@@ -1221,6 +1221,109 @@ final class CollectionRepository
     }
 
     /**
+     * Every known collection on a chain — verified AND unverified —
+     * verified first, then by holder count.
+     *
+     * Sibling of {@see listVerifiedByChain} for the user's OWN gallery
+     * (CosmosFetcher::list_holdings): a linked wallet's assets render
+     * even when the operator hasn't verified the collection yet (the UI
+     * dims them via the `collection_verified` annotation). Verified
+     * rows win the cap so widening the iteration can never evict a
+     * verified collection from the gallery. NOT for gating — gate
+     * reads stay on the verified-only queries.
+     *
+     * @return list<object{
+     *     id: string,
+     *     chain_id: string,
+     *     contract_address: string,
+     *     collection_name: string|null,
+     *     image_url: string|null,
+     *     is_verified: string,
+     *     chain_slug: string,
+     *     chain_type: string
+     * }>
+     */
+    public static function listKnownByChain(int $chainId, int $limit = 30): array
+    {
+        if ($chainId <= 0) {
+            return [];
+        }
+        $limit = max(1, min(200, $limit));
+
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        /** @var list<object{
+         *     id: string,
+         *     chain_id: string,
+         *     contract_address: string,
+         *     collection_name: string|null,
+         *     image_url: string|null,
+         *     is_verified: string,
+         *     chain_slug: string,
+         *     chain_type: string
+         * }>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT c.id, c.chain_id, c.contract_address, c.collection_name, c.image_url,
+                    c.is_verified, ch.slug AS chain_slug, ch.chain_type
+             FROM {$table} c
+             JOIN {$chains} ch ON ch.id = c.chain_id
+             WHERE c.chain_id = %d
+             ORDER BY c.is_verified DESC,
+                      c.unique_holders IS NULL ASC,
+                      c.unique_holders DESC,
+                      c.id ASC
+             LIMIT %d",
+            $chainId,
+            $limit
+        ));
+
+        return $rows ?: [];
+    }
+
+    /**
+     * Verification map for a bounded set of contracts on one chain:
+     * `strtolower(contract) => bool`. Contracts with NO collection row
+     * are absent from the map — callers treat absent as unverified.
+     *
+     * Powers the gallery's per-item `collection_verified` annotation
+     * (HoldingsService); chunked IN() keeps the query bounded per §4.
+     *
+     * @param list<string> $contracts
+     * @return array<string, bool>
+     */
+    public static function verifiedMapForContracts(int $chainId, array $contracts): array
+    {
+        if ($chainId <= 0 || $contracts === []) {
+            return [];
+        }
+
+        $contracts = array_values(array_unique(array_map('strtolower', $contracts)));
+
+        global $wpdb;
+        $table = self::table();
+        $map   = [];
+
+        foreach (array_chunk($contracts, 100) as $chunk) {
+            $ph = implode(',', array_fill(0, count($chunk), '%s'));
+            /** @var list<object{contract_address: string, is_verified: string}>|null $rows */
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT contract_address, is_verified
+                 FROM {$table}
+                 WHERE chain_id = %d
+                   AND contract_address IN ({$ph})",
+                array_merge([$chainId], $chunk)
+            ));
+            foreach ($rows ?: [] as $row) {
+                $map[strtolower((string) $row->contract_address)] = ((int) $row->is_verified === 1);
+            }
+        }
+
+        return $map;
+    }
+
+    /**
      * Get collection counts grouped by chain_id.
      * Used by the admin Chains page to show per-chain stats.
      *
