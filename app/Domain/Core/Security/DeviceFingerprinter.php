@@ -84,31 +84,56 @@ class DeviceFingerprinter {
     }
     
     /**
-     * Check whether the user has granted fingerprinting consent.
+     * Whether device-fingerprint storage is permitted for this user.
      *
-     * Mirrors the client-side hasConsent() check in fingerprint.js so that
-     * direct REST API calls cannot bypass the consent gate.
+     * Consent is granted per-user AT SIGNUP: all three BCC signup paths
+     * (password, wallet, OAuth) fire `bcc_user_signup`, whose listener
+     * stamps the `_bcc_fingerprint_consent` user-meta (see
+     * {@see grantSignupConsent}). The signup UI discloses automated
+     * fraud-prevention device checks, so completing signup IS the consent
+     * event. Admin-created users never fire that action, so they are not
+     * fingerprinted.
+     *
+     * An operator may also enable fingerprinting installation-wide via the
+     * `bcc_trust_fingerprint_consent` option (e.g. to cover pre-existing
+     * accounts created before this gate shipped).
+     *
+     * Server-readable sources only — no client cookie is trusted. The
+     * headless frontend is a separate origin (so a WP-domain cookie never
+     * arrives) and cookies are forgeable anyway; the old `bcc_fp_consent`
+     * cookie source was removed as dead + spoofable.
      *
      * @param int $userId WordPress user ID.
      * @return bool
      */
     public function hasConsent(int $userId): bool {
-        // Server-side admin setting (localized as window.bccTrust.fingerprint_consent).
+        // Optional operator-wide override: enable for every user.
         if (\get_option('bcc_trust_fingerprint_consent', false)) {
             return true;
         }
 
-        // Per-user consent stored as user meta (set when consent banner accepted).
+        // Per-user consent, granted at signup (grantSignupConsent).
         if (\get_user_meta($userId, '_bcc_fingerprint_consent', true)) {
             return true;
         }
 
-        // Client-side cookie set by the consent banner.
-        if (isset($_COOKIE['bcc_fp_consent']) && $_COOKIE['bcc_fp_consent'] === '1') {
-            return true;
-        }
-
         return false;
+    }
+
+    /**
+     * Grant device-fingerprint consent when a user completes signup.
+     *
+     * Registered on `bcc_user_signup`, which every BCC signup path fires
+     * only after the account is created through the (disclosure-bearing)
+     * signup UI. Idempotent; a no-op for non-positive ids (system actors).
+     *
+     * Called unqualified `update_user_meta` on purpose so the unit test
+     * can shadow it in this namespace (same pattern as JwtToken).
+     */
+    public static function grantSignupConsent(int $userId): void {
+        if ($userId > 0) {
+            update_user_meta($userId, '_bcc_fingerprint_consent', 1);
+        }
     }
 
     /**
@@ -179,11 +204,19 @@ class DeviceFingerprinter {
     }
     
     /**
-     * Detect headless browsers and automation tools using config thresholds
+     * Detect headless browsers and automation tools using config thresholds.
      *
+     * Combines server-readable tells (UA signatures, automation headers,
+     * missing content-negotiation headers, datacenter IP) with the
+     * client-reported tells in the POSTed fingerprint payload (webdriver,
+     * zero outer viewport). Client signals are auxiliary scoring only and
+     * never influence the identity hash.
+     *
+     * @param array<string, mixed> $clientSignals The POSTed `data` block
+     *                                             from collect.ts (optional).
      * @return array<string, mixed> Automation detection results
      */
-    public function detectAutomation(): array {
+    public function detectAutomation(array $clientSignals = []): array {
         $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
         $headers = $this->getAllHeaders();
         
@@ -243,63 +276,18 @@ class DeviceFingerprinter {
             $confidence += 5;
         }
         
-        // Check for consistent request timing (from cookie)
-        $timingData = $this->getCookie('bcc_request_timing');
-        if ($timingData) {
-            $timings = json_decode($timingData, true);
-            if (is_array($timings) && count($timings) > 5) {
-                $variance = $this->calculateTimingVariance($timings);
-                if ($variance < 0.1) { // Very consistent timing
-                    $signals[] = 'consistent_timing';
-                    $confidence += 20;
-                }
-            }
+        // Client-reported automation tells from the POSTed fingerprint
+        // payload (collect.ts). Client-supplied, so these feed auxiliary
+        // scoring ONLY — never the identity hash (see generateFingerprint's
+        // security invariant). Replaces the legacy cookie signals that the
+        // retired WP-side fingerprint.js used to set; the headless frontend
+        // never runs that script, so those cookie reads were always inert.
+        $client = self::clientAutomationSignals($clientSignals);
+        foreach ($client['signals'] as $clientSignal) {
+            $signals[] = $clientSignal;
         }
-        
-        // Check for WebDriver property (from client-side detection)
-        if ($this->getCookie('bcc_webdriver') === 'true') {
-            $signals[] = 'webdriver_detected';
-            $confidence += 25;
-        }
-        
-        // Check for headless property
-        if ($this->getCookie('bcc_headless') === 'true') {
-            $signals[] = 'headless_detected';
-            $confidence += 25;
-        }
-        
-        // Check for no plugins
-        $plugins = $this->getCookie('bcc_plugins');
-        if ($plugins === '[]' || $plugins === '') {
-            $signals[] = 'no_plugins';
-            $confidence += 10;
-        }
-        
-        // Check for missing fonts
-        $fonts = $this->getCookie('bcc_fonts');
-        if (empty($fonts) || $fonts === '[]') {
-            $signals[] = 'no_fonts';
-            $confidence += 15;
-        }
-        
-        // Check for headless WebGL
-        if ($this->getCookie('bcc_webgl_headless') === 'true') {
-            $signals[] = 'headless_webgl';
-            $confidence += 20;
-        }
-        
-        // Check for no mouse movement
-        if ($this->getCookie('bcc_mouse_moved') === 'false') {
-            $signals[] = 'no_mouse_movement';
-            $confidence += 15;
-        }
-        
-        // Check for no scroll
-        if ($this->getCookie('bcc_scrolled') === 'false') {
-            $signals[] = 'no_scroll';
-            $confidence += 10;
-        }
-        
+        $confidence += $client['confidence'];
+
         // Cloud/VPS IP detection (simplified)
         $ip = $this->getClientIp();
         if ($this->isDatacenterIp($ip)) {
@@ -319,16 +307,50 @@ class DeviceFingerprinter {
             'signals' => array_unique($signals)
         ];
     }
-    
+
+    /**
+     * Automation tells derived from the client-reported fingerprint
+     * payload (collect.ts's `data` block).
+     *
+     * Pure + client-supplied: these feed AUXILIARY automation scoring only,
+     * never the identity hash. Strict `=== true` so a forged string value
+     * ('true', 1) cannot inflate the score — real browsers send booleans.
+     *
+     * @param array<string, mixed> $clientSignals
+     * @return array{signals: list<string>, confidence: int}
+     */
+    private static function clientAutomationSignals(array $clientSignals): array {
+        $signals    = [];
+        $confidence = 0;
+
+        // navigator.webdriver === true — the canonical automation flag
+        // (Selenium / Puppeteer / Playwright set it).
+        if (($clientSignals['webdriver'] ?? null) === true) {
+            $signals[]   = 'webdriver_detected';
+            $confidence += 25;
+        }
+
+        // window.outerHeight === 0 — a headless-browser tell (no browser
+        // chrome around the viewport).
+        if (($clientSignals['outer_zero'] ?? null) === true) {
+            $signals[]   = 'zero_outer_viewport';
+            $confidence += 25;
+        }
+
+        return ['signals' => $signals, 'confidence' => $confidence];
+    }
+
     /**
      * Store fingerprint for user
-     * 
+     *
      * @param int $userId
      * @param string $fingerprint
      * @param array<string, mixed> $automationData
+     * @param string|null $screenResolution Client-reported "WxH" (collect.ts),
+     *                                       validated before storage.
      * @return int|false Insert ID or false on failure
      */
-    public function storeFingerprint(int $userId, string $fingerprint, array $automationData = []) {
+    public function storeFingerprint(int $userId, string $fingerprint, array $automationData = [], ?string $screenResolution = null) {
         // Server-side consent gate: refuse to store fingerprint without consent.
         if (!$this->hasConsent($userId)) {
             return false;
@@ -361,10 +383,10 @@ class DeviceFingerprinter {
         $ip = $this->getClientIp();
         $ipHash = self::hashIp($ip);
 
-        // Capture screen resolution from the cookie set by fingerprint.js
-        $screenRes = $this->getCookie('bcc_screen');
-        if ($screenRes && preg_match('/^\d{1,5}x\d{1,5}$/', $screenRes)) {
-            $screenResClean = $screenRes; // e.g. "1920x1080"
+        // Screen resolution from the client payload (collect.ts sends
+        // "WxH", e.g. "1920x1080"); validated to a strict WxH shape.
+        if ($screenResolution !== null && preg_match('/^\d{1,5}x\d{1,5}$/', $screenResolution)) {
+            $screenResClean = $screenResolution;
         } else {
             $screenResClean = null;
         }
@@ -944,45 +966,6 @@ class DeviceFingerprinter {
         }
 
         return false;
-    }
-    
-    /**
-     * Calculate variance in request timings
-     * 
-     * @param float[] $timings
-     * @return float
-     */
-    private function calculateTimingVariance(array $timings): float {
-        if (count($timings) < 2) return 1;
-        
-        $intervals = [];
-        for ($i = 1; $i < count($timings); $i++) {
-            $intervals[] = $timings[$i] - $timings[$i - 1];
-        }
-        
-        $mean = array_sum($intervals) / count($intervals);
-        if ($mean == 0) return 0;
-        
-        $variance = 0;
-        foreach ($intervals as $interval) {
-            $variance += pow($interval - $mean, 2);
-        }
-        $variance /= count($intervals);
-        
-        $stdDev = sqrt($variance);
-        
-        // Coefficient of variation (normalized variance)
-        return $stdDev / $mean;
-    }
-    
-    /**
-     * Get cookie value
-     * 
-     * @param string $name
-     * @return string|null
-     */
-    private function getCookie(string $name): ?string {
-        return isset($_COOKIE[$name]) ? sanitize_text_field($_COOKIE[$name]) : null;
     }
     
     /**

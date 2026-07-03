@@ -1566,6 +1566,18 @@ add_action('delete_user', function (int $userId): void {
     wp_cache_delete('report_status_counts', 'bcc_disputes');
 }, 10, 1);
 
+// Device-fingerprint consent: granted when a user completes signup. All
+// three BCC signup paths (password, wallet, OAuth) fire bcc_user_signup
+// only after the account is created through the disclosure-bearing signup
+// UI, so completion is the consent event. Admin-created users never fire
+// it, so they are not fingerprinted. See DeviceFingerprinter::hasConsent.
+add_action(
+    'bcc_user_signup',
+    ['\\BCC\\Trust\\Core\\Security\\DeviceFingerprinter', 'grantSignupConsent'],
+    10,
+    1
+);
+
 // REST routes.
 add_action('rest_api_init', function () {
     (new \BCC\Trust\Disputes\Controllers\DisputeController())->register_routes();
