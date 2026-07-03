@@ -139,6 +139,54 @@ if (!function_exists('current_time')) {
     }
 }
 
+// Object-cache stubs — repositories bump §5 generation counters via
+// wp_cache_* after a write commits (e.g. NftHoldingsRepository::ingestBatch →
+// bumpWalletGeneration). A tiny in-memory store keeps those functional so the
+// write path doesn't fatal. Read paths under test query MySQL directly, so
+// this cache never masks real DB state.
+if (!function_exists('wp_cache_get')) {
+    $GLOBALS['__bcc_test_object_cache'] = [];
+
+    /**
+     * @param bool $found
+     * @return mixed
+     */
+    function wp_cache_get(string $key, string $group = '', bool $force = false, &$found = null)
+    {
+        $hit   = isset($GLOBALS['__bcc_test_object_cache'][$group][$key]);
+        $found = $hit;
+        return $hit ? $GLOBALS['__bcc_test_object_cache'][$group][$key] : false;
+    }
+    /** @param mixed $value */
+    function wp_cache_set(string $key, $value, string $group = '', int $expire = 0): bool
+    {
+        $GLOBALS['__bcc_test_object_cache'][$group][$key] = $value;
+        return true;
+    }
+    /** @param mixed $value */
+    function wp_cache_add(string $key, $value, string $group = '', int $expire = 0): bool
+    {
+        if (isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
+            return false;
+        }
+        $GLOBALS['__bcc_test_object_cache'][$group][$key] = $value;
+        return true;
+    }
+    function wp_cache_delete(string $key, string $group = ''): bool
+    {
+        unset($GLOBALS['__bcc_test_object_cache'][$group][$key]);
+        return true;
+    }
+    /** @return int|false */
+    function wp_cache_incr(string $key, int $offset = 1, string $group = '')
+    {
+        if (!isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
+            return false;
+        }
+        return $GLOBALS['__bcc_test_object_cache'][$group][$key] += $offset;
+    }
+}
+
 // ── Install the schema(s) the integration tests touch ───────────────────────
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-content-reports.php';
