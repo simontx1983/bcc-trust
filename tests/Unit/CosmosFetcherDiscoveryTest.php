@@ -114,6 +114,45 @@ final class CosmosFetcherDiscoveryTest extends TestCase
         self::assertNull($row['unique_holders']);
     }
 
+    public function testOperatorDenyRuleBlocksRediscovery(): void
+    {
+        // The flag-don't-delete invariant: a RULE_DENY on the contract
+        // must keep the collection from ever landing again via
+        // wallet-link discovery — this is what makes the admin Hide
+        // button permanent where a row delete would silently resurrect.
+        \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::reset();
+        \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::$rules['8|' . self::contract(1)] =
+            \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::RULE_DENY;
+
+        $this->queueJson(['total' => 2, 'collections' => [
+            ['contractAddress' => self::contract(1), 'name' => 'Hidden Scam', 'ownedTokensCount' => 9],
+            ['contractAddress' => self::contract(2), 'name' => 'Fine Collection', 'ownedTokensCount' => 1],
+        ]]);
+
+        $rows = $this->makeFetcher()->fetch_collections(self::WALLET);
+
+        self::assertCount(1, $rows);
+        self::assertSame('Fine Collection', $rows[0]['collection_name']);
+    }
+
+    public function testSpamNameHeuristicDropsRow(): void
+    {
+        \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::reset();
+
+        // NftSpamFilter's default patterns catch airdrop-bait names; a
+        // "$10,000 reward at site.com"-shaped name must not land.
+        $this->queueJson(['total' => 2, 'collections' => [
+            ['contractAddress' => self::contract(1), 'name' => 'Claim reward at freemint-usdt.com', 'ownedTokensCount' => 9],
+            ['contractAddress' => self::contract(2), 'name' => 'Fine Collection', 'ownedTokensCount' => 1],
+        ]]);
+
+        $rows = $this->makeFetcher()->fetch_collections(self::WALLET);
+
+        $names = array_column($rows, 'collection_name');
+        self::assertContains('Fine Collection', $names);
+        self::assertNotContains('Claim reward at freemint-usdt.com', $names);
+    }
+
     public function testCapKeepsLargestHoldings(): void
     {
         // 60 collections, owned counts 1..60 — the cap (50) must keep
