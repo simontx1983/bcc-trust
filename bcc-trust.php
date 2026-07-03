@@ -211,6 +211,9 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-validators.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-delegations.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collections.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
+// Per-user collection stances (waitlist / spam) — the airdrop-proof
+// demand + scam signals behind the Verify Collections queue.
+require_once BCC_TRUST_PATH . 'includes/database/schema-collection-signals.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
 // V2 Phase 1a — confirmation-gated NFT indexer
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-holdings.php';
@@ -277,6 +280,7 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_delegations_table();
     bcc_onchain_create_collections_table();
     bcc_onchain_create_user_nft_selections_table();
+    bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
     // V2 Phase 1a NFT indexer
     bcc_onchain_create_nft_holdings_table();

@@ -1011,6 +1011,15 @@ class CosmosFetcher implements FetcherInterface
 
         $collections = [];
         foreach ($rollup as $c) {
+            // Spam gate — parity with EvmFetcher's discovery pipeline
+            // (minus the upstream isSpam field Alchemy provides there).
+            // NftSpamFilter folds in the operator rule table: RULE_DENY
+            // drops unconditionally — this is what makes admin-hidden
+            // collections STAY hidden across rediscovery — RULE_ALLOW
+            // bypasses the name heuristics.
+            if (\BCC\Trust\Onchain\Services\NftSpamFilter::isSpam($chainId, $c['contract_address'], $c['collection_name'])) {
+                continue;
+            }
             $collections[] = [
                 'contract_address'   => $c['contract_address'],
                 'collection_name'    => $c['collection_name'],

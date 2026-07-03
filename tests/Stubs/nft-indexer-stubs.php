@@ -117,6 +117,17 @@ namespace {
         }
     }
 
+    if (!function_exists('apply_filters')) {
+        /**
+         * @param mixed $value
+         * @return mixed
+         */
+        function apply_filters(string $hook, $value)
+        {
+            return $value; // No filter registry in unit scope — pass through.
+        }
+    }
+
     if (!defined('MINUTE_IN_SECONDS')) {
         define('MINUTE_IN_SECONDS', 60);
     }
@@ -387,6 +398,27 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function listAddressesForChain(int $chainId, int $limit = 200): array
             {
                 return array_slice(self::$chainAddresses, 0, $limit);
+            }
+        }
+    }
+
+    if (!class_exists(__NAMESPACE__ . '\\NftSpamContractRepository', false)) {
+        final class NftSpamContractRepository
+        {
+            public const RULE_DENY  = 'deny';
+            public const RULE_ALLOW = 'allow';
+
+            /** @var array<string, string> Keyed "chainId|contract(lower)". */
+            public static array $rules = [];
+
+            public static function reset(): void
+            {
+                self::$rules = [];
+            }
+
+            public static function getRule(int $chainId, string $contract): ?string
+            {
+                return self::$rules[$chainId . '|' . strtolower($contract)] ?? null;
             }
         }
     }

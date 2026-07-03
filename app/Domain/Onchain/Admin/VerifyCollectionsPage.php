@@ -192,21 +192,29 @@ final class VerifyCollectionsPage
             $isVerified
         );
 
-        // Demand signal: distinct linked wallets holding each collection
-        // (EVM/SOL from the holdings index; Cosmos Hub from marketplace
-        // rollups — see CollectionDemandService). Rendered as a column on
-        // both tabs; the UNVERIFIED tab additionally re-ranks by it so
-        // collections that real platform users hold surface at the top
-        // of the queue instead of hiding behind marketplace-wide holder
-        // counts.
-        $demand = CollectionDemandService::linkedHolderCounts();
+        // Demand signals, strongest first:
+        //   1. Waitlist count — EXPLICIT user opt-ins ("activate this and
+        //      count me in"). Airdrop-proof: a scammer can put tokens in
+        //      every wallet but can't check the box for anyone.
+        //   2. Linked holders — passive holdings (EVM/SOL from the
+        //      holdings index; Cosmos Hub from marketplace rollups).
+        //      Forgeable by airdrop, so it's the tiebreaker, not the rank.
+        // Spam flags render red and sort flagged rows to the bottom.
+        $demand  = CollectionDemandService::linkedHolderCounts();
+        $signals = [];
+        foreach (\BCC\Trust\Onchain\Repositories\CollectionSignalRepository::countsByCollection() as $t) {
+            $signals[CollectionDemandService::key((int) $t->chain_id, (string) $t->contract_address)] = [
+                'waitlist' => (int) $t->waitlist_count,
+                'spam'     => (int) $t->spam_count,
+            ];
+        }
 
-        // Re-rank the unverified queue by demand. The repo caps perPage
-        // at 100, so ranking re-fetches the scope in chunks up to a
-        // 500-row ceiling — same fetch-sort-paginate-in-PHP posture as
-        // the §4.7 groups-discovery sort. Past the ceiling ranking is
-        // DISABLED (not silently partial): SQL order is already a sane
-        // fallback and a lying rank order is worse than none.
+        // Re-rank the unverified queue. The repo caps perPage at 100, so
+        // ranking re-fetches the scope in chunks up to a 500-row ceiling
+        // — same fetch-sort-paginate-in-PHP posture as the §4.7
+        // groups-discovery sort. Past the ceiling ranking is DISABLED
+        // (not silently partial): SQL order is already a sane fallback
+        // and a lying rank order is worse than none.
         $demandRanked = false;
         if (!$isVerified && $listing['total'] > 0 && $listing['total'] <= 500) {
             $all = [];
@@ -220,9 +228,21 @@ final class VerifyCollectionsPage
                     break;
                 }
             }
-            usort($all, static function (object $a, object $b) use ($demand): int {
-                $da = $demand[CollectionDemandService::key((int) $a->chain_id, (string) $a->contract_address)] ?? 0;
-                $db = $demand[CollectionDemandService::key((int) $b->chain_id, (string) $b->contract_address)] ?? 0;
+            usort($all, static function (object $a, object $b) use ($demand, $signals): int {
+                $ka = CollectionDemandService::key((int) $a->chain_id, (string) $a->contract_address);
+                $kb = CollectionDemandService::key((int) $b->chain_id, (string) $b->contract_address);
+                $sa = $signals[$ka] ?? ['waitlist' => 0, 'spam' => 0];
+                $sb = $signals[$kb] ?? ['waitlist' => 0, 'spam' => 0];
+
+                // Spam-flagged rows sink below everything unflagged.
+                if (($sa['spam'] > 0) !== ($sb['spam'] > 0)) {
+                    return $sa['spam'] > 0 ? 1 : -1;
+                }
+                if ($sa['waitlist'] !== $sb['waitlist']) {
+                    return $sb['waitlist'] <=> $sa['waitlist'];
+                }
+                $da = $demand[$ka] ?? 0;
+                $db = $demand[$kb] ?? 0;
                 if ($da !== $db) {
                     return $db <=> $da;
                 }
@@ -530,8 +550,16 @@ final class VerifyCollectionsPage
                             <th style="width:90px;">Source</th>
                             <th>Chain</th>
                             <th>Contract</th>
+                            <th style="width:90px;"
+                                title="Users who explicitly opted in via the stance panel — the strongest demand signal (airdrop-proof). The unverified queue ranks by it.">
+                                Waitlist
+                            </th>
+                            <th style="width:80px;"
+                                title="Users who flagged this as airdropped scam junk. Flagged rows sink to the bottom; at the soft-hide threshold the collection stops surfacing to users.">
+                                Flags
+                            </th>
                             <th style="width:110px;"
-                                title="Linked platform wallets currently holding this collection — the demand signal. The unverified queue is ranked by it.">
+                                title="Linked platform wallets currently holding this collection (passive — airdrops inflate it; tiebreaker only).">
                                 Linked holders
                             </th>
                             <th style="width:100px;" title="Marketplace-wide unique holders (upstream metadata).">Holders</th>
@@ -544,7 +572,7 @@ final class VerifyCollectionsPage
                     <tbody>
                         <?php if ($listing['items'] === []): ?>
                             <tr>
-                                <td colspan="10"><em>
+                                <td colspan="12"><em>
                                     <?php if ($isVerified): ?>
                                         No verified collections yet. Verify a collection in the Unverified tab to give its holders a community.
                                     <?php else: ?>
@@ -625,12 +653,27 @@ final class VerifyCollectionsPage
                                         </button>
                                     <?php endif; ?>
                                 </td>
+                                <?php
+                                $rowKey    = CollectionDemandService::key((int) $row->chain_id, (string) $row->contract_address);
+                                $rowSignal = $signals[$rowKey] ?? ['waitlist' => 0, 'spam' => 0];
+                                ?>
+                                <td>
+                                    <?php if ($rowSignal['waitlist'] > 0): ?>
+                                        <strong style="color:#2271b1;"><?php echo number_format_i18n($rowSignal['waitlist']); ?></strong>
+                                    <?php else: ?>
+                                        <span style="color:#999;">&mdash;</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php if ($rowSignal['spam'] > 0): ?>
+                                        <strong style="color:#d63638;">⚑ <?php echo number_format_i18n($rowSignal['spam']); ?></strong>
+                                    <?php else: ?>
+                                        <span style="color:#999;">&mdash;</span>
+                                    <?php endif; ?>
+                                </td>
                                 <td>
                                     <?php
-                                    $demandCount = $demand[CollectionDemandService::key(
-                                        (int) $row->chain_id,
-                                        (string) $row->contract_address
-                                    )] ?? 0;
+                                    $demandCount = $demand[$rowKey] ?? 0;
                                     if ($demandCount > 0): ?>
                                         <strong style="color:#00a32a;"><?php echo number_format_i18n($demandCount); ?></strong>
                                     <?php else: ?>
@@ -677,12 +720,42 @@ final class VerifyCollectionsPage
                                     ?>
                                 </td>
                                 <td>
+                                    <?php
+                                    // Hide/Unhide — the flag-don't-delete kill switch. A
+                                    // DENY rule on the contract survives rediscovery
+                                    // (delete doesn't: the next wallet link would land
+                                    // the row again).
+                                    $rowRule = \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::getRule(
+                                        (int) $row->chain_id,
+                                        (string) $row->contract_address
+                                    );
+                                    $isHidden = $rowRule === \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::RULE_DENY;
+                                    ?>
+                                    <?php if ($isHidden): ?>
+                                        <span style="display:inline-block;margin-bottom:4px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:#d63638;">HIDDEN</span>
+                                        <button type="submit"
+                                                name="bcc_vc_action"
+                                                value="unhide_<?php echo $rowId; ?>"
+                                                class="button button-small"
+                                                title="Restore this collection for users (writes an explicit ALLOW rule on the contract).">
+                                            Unhide
+                                        </button>
+                                    <?php else: ?>
+                                        <button type="submit"
+                                                name="bcc_vc_action"
+                                                value="hide_<?php echo $rowId; ?>"
+                                                class="button button-small"
+                                                title="Hide this collection from all user-facing surfaces and block rediscovery (writes a DENY rule on the contract — reversible, unlike delete)."
+                                                onclick="return confirm('Hide this collection from users? The contract gets a DENY rule, so it stays hidden even if wallets holding it link later. Reversible via Unhide.');">
+                                            Hide
+                                        </button>
+                                    <?php endif; ?>
                                     <button type="submit"
                                             name="bcc_vc_action"
                                             value="delete_<?php echo $rowId; ?>"
                                             class="button button-small button-link-delete"
                                             style="color:#b32d2e;"
-                                            onclick="return confirm('Remove this collection from the list? This deletes the row only. A collection with a live community can\'t be removed until its community is gone.');">
+                                            onclick="return confirm('Remove this collection from the list? This deletes the row only — rediscovery can bring it back. Use Hide to keep it away permanently. A collection with a live community can\'t be removed until its community is gone.');">
                                         Remove
                                     </button>
                                 </td>
@@ -836,7 +909,73 @@ final class VerifyCollectionsPage
             return self::handleAddCosmosCollection();
         }
 
+        // Per-row Hide / Unhide. Writes an operator rule to the spam
+        // table rather than touching the collection row — a DENY rule
+        // is what survives rediscovery (wallet-link discovery consults
+        // it before landing rows), so a hidden scam can't resurrect
+        // itself the way a deleted row would.
+        if (strpos($action, 'hide_') === 0) {
+            return self::handleHideToggle((int) substr($action, strlen('hide_')), true);
+        }
+        if (strpos($action, 'unhide_') === 0) {
+            return self::handleHideToggle((int) substr($action, strlen('unhide_')), false);
+        }
+
         return [];
+    }
+
+    /**
+     * Hide = RULE_DENY (drops from every user-facing surface + blocks
+     * rediscovery). Unhide = RULE_ALLOW (explicit operator allow — also
+     * wins over the name heuristics, which is exactly what "I looked at
+     * this and it's fine" means).
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function handleHideToggle(int $collectionId, bool $hide): array
+    {
+        $rows = CollectionRepository::findManyByIds([$collectionId]);
+        $row  = $rows[0] ?? null;
+        if ($row === null) {
+            return [['type' => 'error', 'message' => 'Hide: collection not found.']];
+        }
+
+        $chainId  = (int) $row->chain_id;
+        $contract = (string) $row->contract_address;
+        $rule     = $hide
+            ? \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::RULE_DENY
+            : \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::RULE_ALLOW;
+
+        $ok = \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::addRule(
+            $chainId,
+            $contract,
+            $rule,
+            sprintf('operator %s via Verify Collections', $hide ? 'hide' : 'unhide')
+        );
+
+        if (!$ok) {
+            return [['type' => 'error', 'message' => 'Hide: rule write failed. Check the bcc-trust error log.']];
+        }
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections hide toggle', [
+            'action'        => 'verify_collections_hide',
+            'collection_id' => $collectionId,
+            'chain_id'      => $chainId,
+            'contract'      => $contract,
+            'rule'          => $rule,
+            'operator'      => get_current_user_id(),
+        ]);
+
+        return [[
+            'type'    => 'success',
+            'message' => sprintf(
+                '%s "%s" %s users (%s rule on the contract).',
+                $hide ? 'Hid' : 'Restored',
+                (string) ($row->collection_name ?? $contract),
+                $hide ? 'from' : 'for',
+                $rule
+            ),
+        ]];
     }
 
     /**

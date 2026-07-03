@@ -95,6 +95,15 @@ final class NotificationType
     public const DIVERGENCE_STATE_WARNING           = 'bcc_divergence_state_warning';
 
     /**
+     * Collection-stances slice — a holder community the user WAITLISTED
+     * (explicit opt-in via the stance panel) has been verified +
+     * provisioned. Fired once per (user, collection):
+     * CollectionSignalRepository::notified_at stamps delivery so
+     * provisioning re-runs can't re-notify.
+     */
+    public const HOLDER_COMMUNITY_LIVE              = 'bcc_holder_community_live';
+
+    /**
      * Whitelist of valid type slugs. Used by the read-side validation
      * (NotificationViewService) to reject corrupt rows rather than
      * surface garbage to the frontend.
@@ -116,6 +125,7 @@ final class NotificationType
         self::ATTESTATION_REVOKED,
         self::ATTESTATION_REAFFIRMED,
         self::DIVERGENCE_STATE_WARNING,
+        self::HOLDER_COMMUNITY_LIVE,
     ];
 
     public static function isValid(string $type): bool

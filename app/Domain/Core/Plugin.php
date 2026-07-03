@@ -1423,6 +1423,14 @@ final class Plugin
         // PeepSoGroupWriter lands eligible holders directly as `member`.
         \BCC\Trust\Onchain\REST\HolderGroupsEndpoint::register();
 
+        // Collection stances — the airdrop-proof demand + scam signals:
+        //   GET    /me/collection-stances/panel — held collections + state
+        //   POST   /me/collection-stances       — waitlist|spam (holder-gated)
+        //   DELETE /me/collection-stances       — retract
+        // Waitlist counts rank the admin Verify Collections queue; spam
+        // tallies soft-hide at threshold (operator RULE_DENY = hard kill).
+        \BCC\Trust\Onchain\REST\CollectionStancesEndpoint::register();
+
         // V2 Trust Attestation Layer — Slice C mutation endpoints:
         //   POST   /me/attestations              — cast new (vouch / stand_behind)
         //   DELETE /me/attestations/{id}         — revoke (soft-delete)
@@ -2148,6 +2156,25 @@ final class Plugin
             },
             30,
             6
+        );
+
+        // Collection-stances slice — waitlist go-live bell. Fired by
+        // GatedGroupProvisioningService when a verified collection's
+        // holder community is created. Dispatcher is idempotent per
+        // (user, collection) via CollectionSignalRepository.notified_at,
+        // so re-provision sweeps can't double-bell.
+        add_action(
+            'bcc_gated_group_provisioned',
+            function (int $groupId, int $collectionId, int $chainId, string $contract): void {
+                $this->notificationDispatcher()->onHolderCommunityProvisioned(
+                    $groupId,
+                    $collectionId,
+                    $chainId,
+                    $contract
+                );
+            },
+            30,
+            4
         );
 
         add_action(
