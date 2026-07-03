@@ -23,6 +23,7 @@ final class MysqliWpdb
 {
     public string $prefix;
     public int $insert_id = 0;
+    public int $rows_affected = 0;
     public string $last_error = '';
 
     // WP core table-name properties some repo SQL references.
@@ -96,7 +97,8 @@ final class MysqliWpdb
         $this->insert_id = (int) $this->db->insert_id;
         if ($result === true) {
             // DML (INSERT/UPDATE/DELETE) → affected rows; DDL → 0 affected, still success.
-            $affected = $this->db->affected_rows;
+            $affected            = $this->db->affected_rows;
+            $this->rows_affected = max(0, (int) $affected);
             return $affected >= 0 ? $affected : true;
         }
         // SELECT returned a result set — caller should have used get_*; free it.

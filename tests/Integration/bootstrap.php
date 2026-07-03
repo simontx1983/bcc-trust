@@ -163,3 +163,24 @@ $GLOBALS['wpdb']->query(
 // endorsement migration uses get_option/update_option (stubbed above).
 require_once dirname(__DIR__, 2) . '/includes/database/schema-core.php';
 bcc_trust_create_core_tables();
+
+// On-chain claim-resolution tables (claims / validators / collections /
+// wallet_links) — exercised by UserVerifiedClaimOnPageIntegrationTest.
+// Their table-name helpers resolve via bcc-core's DB::table(); CI checks
+// out bcc-core adjacent to this plugin (see .github/workflows/ci.yml), and
+// local dev has it at the same relative path.
+if (!class_exists(\BCC\Core\DB\DB::class)) {
+    require_once dirname(__DIR__, 2) . '/../bcc-core/src/DB/DB.php';
+}
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-claims.php';
+bcc_onchain_create_claims_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-validators.php';
+bcc_onchain_create_validators_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-collections.php';
+bcc_onchain_create_collections_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-wallets.php';
+bcc_onchain_create_wallet_links_table();

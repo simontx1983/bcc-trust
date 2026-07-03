@@ -132,7 +132,9 @@ final class PagesEndpoint
     /**
      * POST /pages/:id/avatar — claimer uploads a page image.
      *
-     * Gate: authenticated AND holds a verified `page` claim on this page.
+     * Gate: authenticated AND holds a verified operator/creator claim on
+     * an entity whose wallet link binds to this page (canonical claim→page
+     * resolution — see ClaimRepository::userHasVerifiedClaimOnPage).
      * Persists via BlogCoverImageWriter (attachment owned by the uploader)
      * then pins it with set_post_thumbnail so CardViewService's crest
      * resolver picks it up above the auto-imported logo.
@@ -218,7 +220,8 @@ final class PagesEndpoint
     /**
      * Shared gate for the avatar routes: returns an error response when the
      * caller is unauthenticated, the page doesn't exist, or the caller does
-     * not hold a verified `page` claim on it; null when allowed to proceed.
+     * not hold a verified operator/creator claim resolving to it; null when
+     * allowed to proceed.
      */
     private static function requireClaimer(int $pageId, int $userId): ?WP_REST_Response
     {
@@ -237,8 +240,15 @@ final class PagesEndpoint
             return ApiResponse::error('bcc_not_found', 'Page not found.', 404);
         }
 
-        $claim = ClaimRepository::getUserClaim($userId, 'page', $pageId);
-        if ($claim === null || (string) $claim->status !== 'verified') {
+        // Canonical claim→page resolution: the caller holds a VERIFIED
+        // operator/creator claim on an entity (validator/collection) whose
+        // wallet link binds to this page — the same source of truth as the
+        // read model's has_verified_claim flag. Deliberately NOT the
+        // entity_type='page' mirror row: the mirror is best-effort (a failed
+        // mirror write is never repaired — the idempotent re-claim path
+        // returns before re-mirroring), so gating on it 403s real verified
+        // operators whose mirror row is missing.
+        if (!ClaimRepository::userHasVerifiedClaimOnPage($userId, $pageId)) {
             return ApiResponse::error(
                 'bcc_forbidden',
                 'Only the verified operator of this page can change its image.',
