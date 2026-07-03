@@ -3,7 +3,17 @@
  * Score Events (Audit Trail) Table Schema
  *
  * Records every trust score change with reason, delta, and actor.
- * Used for: dispute evidence, admin debugging, user-facing score history.
+ *
+ * Used for (verified by the 2026-06-18 read-path trace — do not re-widen
+ * this list without adding the reader):
+ *   - the 24h highlights slot (§O2.1) — `ScoreEventRepository::findForPagesSince`,
+ *     the ONLY live read path;
+ *   - write-time audit trail (rows are written on every score transition
+ *     and retained for admin/DB forensics — no runtime reader).
+ *
+ * NOT used for dispute evidence (disputes read the votes table) and NOT
+ * used for user-facing score history (those readers were deleted
+ * 2026-06-18 — `getForPage`/`getForActor`/`getTierChanges`, zero callers).
  *
  * @package BCC\Trust\Core
  */
