@@ -1013,8 +1013,22 @@ final class NotificationDispatcher
                 ? 'Your entity is now under active dispute. The panel mechanic will resolve it.'
                 : 'Your entity reads as polarizing — reliable operators currently disagree on you.';
 
+            // System event — but PeepSoNotificationWriter REJECTS sender
+            // id <= 0 by contract ('invalid_user'), so the original
+            // dispatch(0, …) here NEVER delivered a bell (found live
+            // 2026-07-03 while wiring the holder-community-live bell,
+            // which hit the identical wall). Send as the platform's
+            // first administrator instead.
+            $senderId = self::resolveSystemSenderId();
+            if ($senderId <= 0) {
+                Logger::warning('[NotificationDispatcher] divergence warning: no administrator to send as — bell skipped', [
+                    'target_owner_id' => $targetOwnerId,
+                ]);
+                return;
+            }
+
             $this->dispatch(
-                0, // System event — no human actor.
+                $senderId,
                 $targetOwnerId,
                 $message,
                 NotificationType::DIVERGENCE_STATE_WARNING,
@@ -1188,6 +1202,37 @@ final class NotificationDispatcher
     // ──────────────────────────────────────────────────────────────────
     // Resolvers
     // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Sender for system-originated bells (no human actor).
+     *
+     * PeepSo has no system-user concept and its notification writer
+     * rejects sender id <= 0, so system events send as the platform's
+     * first administrator (lowest user id, deterministic). Request-
+     * cached — the admin set doesn't change mid-request.
+     *
+     * Returns 0 when no administrator exists (broken install — callers
+     * log and skip rather than throw; a bell is never worth breaking
+     * its producer per §A3).
+     */
+    private static function resolveSystemSenderId(): int
+    {
+        static $senderId = null;
+        if ($senderId !== null) {
+            return $senderId;
+        }
+
+        $admins = get_users([
+            'role'    => 'administrator',
+            'orderby' => 'ID',
+            'order'   => 'ASC',
+            'number'  => 1,
+            'fields'  => 'ID',
+        ]);
+
+        $senderId = isset($admins[0]) ? (int) $admins[0] : 0;
+        return $senderId;
+    }
 
     /**
      * Look up the post author the activity row points to. Returns 0
