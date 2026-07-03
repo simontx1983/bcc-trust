@@ -472,7 +472,7 @@ final class FeatureAccessService
 
             if ($minLevel === self::LEVEL_ACTIVE) {
                 return sprintf(
-                    'Pull %d cards to unlock this.',
+                    'Keep tabs on %d cards to unlock this.',
                     (int) ($target['pulls'] ?? 0)
                 );
             }
