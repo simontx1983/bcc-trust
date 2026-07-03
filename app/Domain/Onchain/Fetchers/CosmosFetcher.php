@@ -17,8 +17,9 @@ use BCC\Trust\Onchain\Support\Bech32;
  * Fetches validator and DAO data from Cosmos SDK chains via LCD REST API.
  * Supports any Cosmos SDK chain (cosmoshub, osmosis, akash, juno, etc.).
  *
- * NFT collections: Cosmos SDK chains may have CW-721 NFTs (e.g. Stargaze)
- * but no standardized LCD endpoint exists for discovery. Returns empty.
+ * NFT collections: Cosmos SDK chains may have CW-721 NFTs (e.g. the
+ * Cosmos Hub post-Stargaze-migration, Injective) but no standardized LCD
+ * endpoint exists for discovery. Returns empty.
  *
  * @phpstan-import-type ChainRow from ChainRepository
  */
@@ -65,7 +66,7 @@ class CosmosFetcher implements FetcherInterface
         return in_array(
             $feature,
             // V2 Phase 2 added 'holdings_count' + 'holdings_list' for CW-721
-            // chains (Stargaze, Injective, Kujira, Dungeon). Curated-only
+            // chains (Cosmos Hub, Injective, Kujira, Dungeon). Curated-only
             // posture means non-NFT-active Cosmos chains naturally produce
             // empty results — no per-chain blocklist needed in this method.
             ['validator', 'delegations', 'dao', 'top_collections', 'holdings_count', 'holdings_list'],
@@ -330,7 +331,7 @@ class CosmosFetcher implements FetcherInterface
     private const PER_CONTRACT_TOKEN_CAP = 100;
     private const DEFAULT_SIGNED_BLOCKS_WINDOW = 10000;
 
-    /** CW-721 `tokens` query page size — Stargaze / Injective LCDs allow up to ~30. */
+    /** CW-721 `tokens` query page size — Cosmos LCDs commonly cap at ~30. */
     private const TOKENS_PAGE_SIZE = 30;
 
     /** wp_cache TTLs. nft_info is static; tokens lists track wallet activity. */
@@ -487,10 +488,11 @@ class CosmosFetcher implements FetcherInterface
         //   1. URL-safe alphabet (`-_` instead of `+/`) — a literal `/` in
         //      the encoded string would split the URL path at the wrong
         //      segment boundary.
-        //   2. Padding `=` MUST be preserved — Stargaze's LCD (cosmos-sdk
-        //      strict parser) returns 400 "illegal base64 data" on
-        //      unpadded input; cosmos-hub's LCD happens to be lenient,
-        //      but we can't rely on that across all chains.
+        //   2. Padding `=` MUST be preserved — strict cosmos-sdk LCD
+        //      parsers return 400 "illegal base64 data" on unpadded input
+        //      (observed on Stargaze pre-migration); cosmos-hub's LCD
+        //      happens to be lenient, but we can't rely on that across
+        //      all chains.
         $encoded = strtr(base64_encode($json), '+/', '-_');
 
         $response = $this->lcdGet(
@@ -523,7 +525,7 @@ class CosmosFetcher implements FetcherInterface
         }
 
         // Cache key per locked rule — explicit + readable for debugging.
-        // "why does THIS wallet show stale holdings only on Stargaze page 2?"
+        // "why does THIS wallet show stale holdings only on page 2?"
         // → grep `cw721_tokens_<chain>_<contract>_<wallet>_<cursor>` in
         //   the cache dump and the answer is one row.
         $chainId  = (int) $this->chain->id;
@@ -699,9 +701,9 @@ class CosmosFetcher implements FetcherInterface
         $imageThumb = $imageUrl;
 
         // attributes[]: CW-721 standard puts these under
-        // `extension.attributes[]` (Stargaze + most CW-721 contracts
-        // follow the OpenSea convention). Defensive map; malformed
-        // entries dropped silently.
+        // `extension.attributes[]` (most CW-721 contracts follow the
+        // OpenSea convention). Defensive map; malformed entries dropped
+        // silently.
         $attributes = [];
         $rawAttrs   = is_array($extension['attributes'] ?? null) ? $extension['attributes'] : [];
         foreach ($rawAttrs as $attr) {
@@ -734,9 +736,39 @@ class CosmosFetcher implements FetcherInterface
     }
 
     /**
-     * Public CW-721 `contract_info` probe used by the admin
+     * CW-721 collection-info smart query with a modern-variant fallback.
+     *
+     * Classic cw721 (≤ v0.18: Injective/Talis, most deployed contracts)
+     * answers `contract_info`. cw721 v0.19+ renamed the variant to
+     * `get_collection_info_and_extension` — the Stargaze collections
+     * re-instantiated on the Cosmos Hub (cw721_migration, 2026) reject
+     * `contract_info` outright with an unknown-variant error. Both shapes
+     * carry top-level `name` / `symbol`, so callers parse one envelope.
+     *
+     * The LCD returns the unknown-variant error as a non-200, which
+     * `wasmSmartQuery` folds into null — indistinguishable from a
+     * transport failure. The fallback therefore fires on ANY null; on a
+     * genuinely dead LCD the second call just fails the same way (and the
+     * per-chain CircuitBreaker absorbs the doubled failure count).
+     *
+     * @return array<string, mixed>|null
+     */
+    private function cw721CollectionInfoQuery(string $contractAddress): ?array
+    {
+        $data = $this->wasmSmartQuery($contractAddress, ['contract_info' => new \stdClass()]);
+        if ($data !== null) {
+            return $data;
+        }
+        return $this->wasmSmartQuery(
+            $contractAddress,
+            ['get_collection_info_and_extension' => new \stdClass()]
+        );
+    }
+
+    /**
+     * Public CW-721 collection-info probe used by the admin
      * "Test CW-721 query" button on `VerifyCollectionsPage`. Returns
-     * the unwrapped `data` envelope (typically `{name, symbol}`) on
+     * the unwrapped `data` envelope (typically `{name, symbol, …}`) on
      * success, null on transport / non-200 / non-CW-721 contracts.
      *
      * Catches three operator-facing failure modes pre-verify:
@@ -751,7 +783,7 @@ class CosmosFetcher implements FetcherInterface
      */
     public function testCw721ContractInfo(string $contractAddress): ?array
     {
-        return $this->wasmSmartQuery($contractAddress, ['contract_info' => new \stdClass()]);
+        return $this->cw721CollectionInfoQuery($contractAddress);
     }
 
     /**
@@ -785,7 +817,7 @@ class CosmosFetcher implements FetcherInterface
             return $cached;
         }
 
-        $data = $this->wasmSmartQuery($contract, ['contract_info' => new \stdClass()]);
+        $data = $this->cw721CollectionInfoQuery($contract);
         if ($data === null) {
             // Don't cache transport failures.
             return null;
@@ -916,7 +948,7 @@ class CosmosFetcher implements FetcherInterface
         return $rows;
     }
 
-    // ── NFT Collections (Stargaze Constellations GraphQL) ─────────────────
+    // ── NFT Collections (per-chain discovery) ─────────────────────────────
 
     /**
      * Per-wallet collection fetch is not supported on Cosmos LCD.
@@ -932,13 +964,16 @@ class CosmosFetcher implements FetcherInterface
      * Per-chain dispatcher for "top NFT collections" discovery.
      *
      * Each Cosmos chain needs its own data source — there is no Cosmos-wide
-     * marketplace indexer covering all chains. Stargaze uses Constellations
-     * GraphQL (free, public, no auth). Injective uses on-chain enumeration of
-     * the Talis Collection Whitelist contract (no API key, no third-party
-     * dependency — DappRadar shut down in November 2025). Other curated Cosmos
-     * NFT chains (Kujira, Dungeon) have no public registry contract identified
-     * yet and explicitly return an empty list — manual curation via the
-     * "Add Cosmos collection" admin form fills the gap.
+     * marketplace indexer covering all chains. Injective uses on-chain
+     * enumeration of the Talis Collection Whitelist contract (no API key, no
+     * third-party dependency — DappRadar shut down in November 2025). Other
+     * curated Cosmos NFT chains explicitly return an empty list — manual
+     * curation via the "Add Cosmos collection" admin form fills the gap.
+     *
+     * History: Stargaze had a Constellations-GraphQL discovery path here
+     * until the 2026 Stargaze → Cosmos Hub migration killed the public API
+     * (indexer access went partner-only). Hub collections are curated
+     * manually; there is no public Hub-wide NFT indexer to replace it.
      *
      * @param int $limit Max collections to return.
      * @return array<int, array<string, mixed>> Normalized rows for CollectionRepository::bulkUpsert().
@@ -948,117 +983,11 @@ class CosmosFetcher implements FetcherInterface
         $slug = (string) ($this->chain->slug ?? '');
 
         switch ($slug) {
-            case 'stargaze':
-                return $this->fetchTopCollectionsStargaze($limit);
             case 'injective':
                 return $this->fetchTopCollectionsInjectiveViaTalisWhitelist($limit);
             default:
                 return [];
         }
-    }
-
-    /**
-     * Stargaze top collections via the public Constellations GraphQL API.
-     * Free, no authentication required. Constellations indexes Stargaze (and
-     * Cosmos NFT projects listed on the Stargaze marketplace) only — NOT
-     * Injective / Kujira / Dungeon.
-     *
-     * @param int $limit Max collections to return.
-     * @return array<int, array<string, mixed>>
-     */
-    private function fetchTopCollectionsStargaze(int $limit): array
-    {
-        $chainId = (int) $this->chain->id;
-
-        $query = 'query TopCollections($limit: Int, $offset: Int, $sortBy: CollectionSort) {
-            collections(limit: $limit, offset: $offset, sortBy: $sortBy) {
-                collections {
-                    contractAddress
-                    name
-                    floorPriceStars
-                    media { visualAssets { lg { url } } }
-                    tokenCounts { total listed }
-                    stats { volumeTotal numOwners }
-                    royaltyInfo { sharePercent }
-                }
-            }
-        }';
-
-        $variables = [
-            'limit'  => min($limit, 100),
-            'offset' => 0,
-            'sortBy' => 'VOLUME_ALL_TIME_DESC',
-        ];
-
-        $response = ApiRetry::post('https://graphql.mainnet.stargaze-apis.com/graphql', [
-            'timeout' => 20,
-            'headers' => [
-                'Content-Type' => 'application/json',
-                'Accept'       => 'application/json',
-            ],
-            'body' => wp_json_encode([
-                'query'     => $query,
-                'variables' => $variables,
-            ]),
-        ], [
-            'label'    => 'Stargaze top collections',
-            'chain_id' => $chainId,
-        ]);
-
-        if (is_wp_error($response)) {
-            \BCC\Core\Log\Logger::error('[Cosmos Fetcher] Stargaze GraphQL failed: ' . $response->get_error_message());
-            return [];
-        }
-
-        $code = wp_remote_retrieve_response_code($response);
-        if ($code !== 200) {
-            \BCC\Core\Log\Logger::error('[Cosmos Fetcher] Stargaze returned ' . $code);
-            return [];
-        }
-
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        $items = $body['data']['collections']['collections'] ?? [];
-
-        if (empty($items)) {
-            return [];
-        }
-
-        $collections = [];
-
-        foreach ($items as $item) {
-            $addr = $item['contractAddress'] ?? '';
-            if (!$addr) {
-                continue;
-            }
-
-            $floorStars  = isset($item['floorPriceStars']) ? (float) $item['floorPriceStars'] / 1e6 : null;
-            $volumeStars = isset($item['stats']['volumeTotal']) ? (float) $item['stats']['volumeTotal'] / 1e6 : null;
-
-            $tokenTotal  = $item['tokenCounts']['total'] ?? null;
-            $tokenListed = $item['tokenCounts']['listed'] ?? null;
-
-            $imageUrl = $item['media']['visualAssets']['lg']['url'] ?? null;
-
-            $collections[] = [
-                'contract_address'   => $addr,
-                'chain_id'           => $chainId,
-                'collection_name'    => $item['name'] ?? null,
-                'token_standard'     => 'CW-721',
-                'total_supply'       => $tokenTotal !== null ? (int) $tokenTotal : null,
-                'floor_price'        => $floorStars,
-                'floor_currency'     => 'STARS',
-                'unique_holders'     => isset($item['stats']['numOwners']) ? (int) $item['stats']['numOwners'] : null,
-                'total_volume'       => $volumeStars,
-                'listed_percentage'  => ($tokenTotal && $tokenListed)
-                    ? round((int) $tokenListed / (int) $tokenTotal * 100, 2)
-                    : null,
-                'royalty_percentage' => $item['royaltyInfo']['sharePercent'] ?? null,
-                'metadata_storage'   => null,
-                'image_url'          => $imageUrl,
-            ];
-        }
-
-        return $collections;
     }
 
     /**

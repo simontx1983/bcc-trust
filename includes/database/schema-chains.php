@@ -168,17 +168,10 @@ function bcc_onchain_create_chains_table(): void {
             'decimals'       => 6,
             'bech32_prefix'  => 'juno',
         ],
-        [
-            'slug'           => 'stargaze',
-            'name'           => 'Stargaze',
-            'chain_type'     => 'cosmos',
-            'rest_url'       => 'https://rest.cosmos.directory/stargaze',
-            'rpc_url'        => 'https://rpc.cosmos.directory/stargaze',
-            'explorer_url'   => 'https://www.mintscan.io/stargaze',
-            'native_token'   => 'STARS',
-            'decimals'       => 6,
-            'bech32_prefix'  => 'stars',
-        ],
+        // Stargaze retired 2026-06: the stargaze-1 L1 halted after the
+        // Prop-1017 migration; its CW-721 collections were re-instantiated
+        // on the Cosmos Hub (`cosmos` slug above). See
+        // includes/database/retire-stargaze-chain.php for the data cleanup.
 
         [
             'slug'           => 'injective',
@@ -308,9 +301,10 @@ function bcc_onchain_create_chains_table(): void {
     // `WHERE marketplace_template IS NULL` so an admin-edited override
     // is never clobbered on re-run. New chains landing later can carry
     // their own template via a future seed extension or per-row admin
-    // edit. Stargaze takes the `cosmos` slot since the contract spec's
-    // chainSlug enum collapses Cosmos NFT chains under "cosmos" for
-    // V2 Phase 6.
+    // edit. stargaze.zone stays the `cosmos` template target: the
+    // marketplace app survived the Stargaze→Hub migration and now serves
+    // the Hub-instantiated collections; the contract spec's chainSlug
+    // enum collapses Cosmos NFT chains under "cosmos" for V2 Phase 6.
     $marketplace_defaults = [
         'ethereum' => 'https://opensea.io/assets/ethereum/{contract}/{token_id}',
         'solana'   => 'https://magiceden.io/item-details/{contract}',

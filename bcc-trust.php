@@ -258,6 +258,12 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-endorsements-table.php';
 // belongs in includes/database/). Idempotent, per-index existence-checked,
 // guarded by bcc_peepso_reaction_indexes_v1; runs on init priority 28.
 require_once BCC_TRUST_PATH . 'includes/database/peepso-reaction-indexes.php';
+// Stargaze → Cosmos Hub migration (2026-06): the stargaze-1 L1 halted and
+// its CW-721 collections were re-instantiated on the Hub with new cosmos1
+// addresses. Deletes the dead chain row + its collections/wallet links
+// (re-curated manually against the `cosmos` chain). Guarded by
+// bcc_trust_stargaze_chain_retired; runs on init priority 29.
+require_once BCC_TRUST_PATH . 'includes/database/retire-stargaze-chain.php';
 require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 
 /**

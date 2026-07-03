@@ -704,8 +704,8 @@ final class NftPieceViewModelBuilder
                 return $std;
             }
         }
-        // Cosmos chains default to CW-721 in this codebase (Stargaze
-        // and friends). Solana defaults to SPL.
+        // Cosmos chains default to CW-721 in this codebase (Cosmos Hub,
+        // Injective, and friends). Solana defaults to SPL.
         return match ($chainType) {
             'cosmos' => 'CW-721',
             'solana' => 'SPL-NFT',

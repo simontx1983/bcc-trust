@@ -675,10 +675,12 @@ final class GroupsDiscoveryEndpoint
      * a code release. Each entry: `['template' => sprintf-string with one
      * %s for the contract address, 'label' => display label]`.
      *
-     * V1 covers Stargaze (current production) and the major EVM chains
-     * via OpenSea. Solana, NEAR, and the long tail of cosmos chains
-     * (Osmosis/Juno/Akash/etc.) return null until canonical marketplace
-     * URLs are picked — the surface degrades gracefully.
+     * V1 covers the Cosmos Hub (stargaze.zone — the Stargaze marketplace
+     * app survived the 2026 chain migration and now serves Hub-hosted
+     * collections) and the major EVM chains via OpenSea. Solana, NEAR,
+     * and the long tail of cosmos chains (Osmosis/Juno/Akash/etc.)
+     * return null until canonical marketplace URLs are picked — the
+     * surface degrades gracefully.
      *
      * @return array{url: string, label: string}|null
      */
@@ -689,7 +691,10 @@ final class GroupsDiscoveryEndpoint
         }
 
         $defaults = [
-            'stargaze'  => ['template' => 'https://www.stargaze.zone/m/%s/tokens',     'label' => 'Stargaze'],
+            // Bare /m/{contract} — the post-Hub-migration app parses a
+            // trailing /tokens segment as token_id "tokens" (verified
+            // 2026-07-02).
+            'cosmos'    => ['template' => 'https://www.stargaze.zone/m/%s',             'label' => 'Stargaze'],
             'ethereum'  => ['template' => 'https://opensea.io/assets/ethereum/%s',     'label' => 'OpenSea'],
             'polygon'   => ['template' => 'https://opensea.io/assets/matic/%s',        'label' => 'OpenSea'],
             'arbitrum'  => ['template' => 'https://opensea.io/assets/arbitrum/%s',     'label' => 'OpenSea'],
