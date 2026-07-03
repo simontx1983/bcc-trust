@@ -86,9 +86,6 @@ class CacheManager {
         // for up to 600s. The cache is correctly invalidated AFTER the DB
         // write inside PageReadModelRepository::syncPage().
 
-        // Endorsement repository caches (generation-based)
-        \BCC\Trust\Core\Plugin::instance()->endorsementRepository()->invalidateEndorsementCache($pageId);
-
         // ScoreReadService batch cache (generation-bumped so all batch
         // key permutations containing stale scores miss on next read).
         \BCC\Trust\Core\Application\ScoreReadService::bustBatchCache();

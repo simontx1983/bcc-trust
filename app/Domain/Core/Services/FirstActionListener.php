@@ -9,9 +9,11 @@
  *   - first_blog                  — first blog post the user publishes
  *   - first_watcher               — first time someone else watches the user's
  *                                   page or follows them as a member
- *   - first_endorsement_received  — first time someone endorses a page the user owns
  *
- * The latter two are the social-gravity retention moments — they
+ * (first_endorsement_received retired with the legacy endorse write
+ * path — vouch casts celebrate via the attestation event chain.)
+ *
+ * The watcher slot is the social-gravity retention moment — it
  * close the audit's #1 weak loop ("someone chose to keep tabs on
  * your work" was bell-only with no payoff). They fire on the
  * RECIPIENT, not the actor — which means a brand-new account that
@@ -74,7 +76,6 @@ final class FirstActionListener
     private const META_FIRST_REVIEW              = 'bcc_first_review_celebrated';
     private const META_FIRST_BLOG                = 'bcc_first_blog_celebrated';
     private const META_FIRST_WATCHER             = 'bcc_first_watcher_celebrated';
-    private const META_FIRST_ENDORSEMENT_RECEIVED = 'bcc_first_endorsement_received_celebrated';
 
     /**
      * Stable kind/icon pairs the frontend CelebrationToast maps to
@@ -86,13 +87,11 @@ final class FirstActionListener
     private const KIND_FIRST_REVIEW               = 'first_review';
     private const KIND_FIRST_BLOG                 = 'first_blog';
     private const KIND_FIRST_WATCHER              = 'first_watcher';
-    private const KIND_FIRST_ENDORSEMENT_RECEIVED = 'first_endorsement_received';
 
     private const ICON_FIRST_POST                 = 'first-post';
     private const ICON_FIRST_REVIEW               = 'first-review';
     private const ICON_FIRST_BLOG                 = 'first-blog';
     private const ICON_FIRST_WATCHER              = 'first-watcher';
-    private const ICON_FIRST_ENDORSEMENT_RECEIVED = 'first-endorsement-received';
 
     /**
      * `bcc_post_created` handler. Hook signature:
@@ -190,43 +189,10 @@ final class FirstActionListener
         );
     }
 
-    /**
-     * `bcc_trust_endorsement_added` handler — fires on the RECIPIENT
-     * (the owner of the endorsed page).
-     *
-     * Hook signature:
-     *   (int $endorserUserId, int $pageId, string $context)
-     *
-     * Self-endorse guard: when the endorser is the page owner, the
-     * listener no-ops. (The endorse service itself usually rejects
-     * self-endorsements upstream, but the guard is defense-in-depth.)
-     *
-     * Why endorsements specifically: an endorsement is a vested trust
-     * bonus on the recipient's page — costly to give, reputational on
-     * the giver, and durable. First endorsement received is the moment
-     * the platform's commitment ladder paid off for the user without
-     * them having to do anything.
-     */
-    public function onEndorsementAdded(int $endorserUserId, int $pageId): void
-    {
-        if ($pageId <= 0) {
-            return;
-        }
-
-        $ownerId = (int) Plugin::instance()->scoreRepository()->getPageOwnerId($pageId);
-        if ($ownerId <= 0 || $ownerId === $endorserUserId) {
-            return;
-        }
-
-        $this->stashFirstAction(
-            $ownerId,
-            self::META_FIRST_ENDORSEMENT_RECEIVED,
-            self::KIND_FIRST_ENDORSEMENT_RECEIVED,
-            'First endorsement on your page.',
-            self::ICON_FIRST_ENDORSEMENT_RECEIVED,
-            'endorsement_added'
-        );
-    }
+    // NOTE: the first_endorsement_received celebration was retired with
+    // the legacy endorse write path — its `bcc_trust_endorsement_added`
+    // event no longer fires anywhere (vouch casts dispatch their own
+    // bell/push via the bcc_attestation_created subscribers).
 
     /**
      * Resolve the user id that should receive the first_watcher

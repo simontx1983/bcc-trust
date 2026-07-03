@@ -22,8 +22,8 @@ namespace BCC\Trust\Core\Services;
 
 use DateTimeImmutable;
 use Exception;
+use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\AuditLogRepository;
-use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
@@ -51,7 +51,7 @@ class VoteService {
     private ScoreRepository        $scoreRepo;
     private ReputationRepository   $reputationRepo;
     private UserInfoRepository     $userInfoRepo;
-    private EndorsementRepository  $endorsementRepo;
+    private AttestationRepository  $attestationRepo;
     private AuditLogRepository     $auditLogRepo;
     private DeviceFingerprinter    $fingerprinter;
     private VoteEligibilityChecker $eligibilityChecker;
@@ -78,7 +78,7 @@ class VoteService {
         $this->reputationRepo  = $reputationRepo;
         $this->userInfoRepo    = $userInfoRepo;
         $this->fingerprinter   = $fingerprinter;
-        $this->endorsementRepo = \BCC\Trust\Core\Plugin::instance()->endorsementRepository();
+        $this->attestationRepo = \BCC\Trust\Core\Plugin::instance()->attestationRepository();
         $this->auditLogRepo    = new AuditLogRepository();
 
         $this->eligibilityChecker = new VoteEligibilityChecker(
@@ -1352,15 +1352,13 @@ class VoteService {
     // =========================================================================
 
     /**
-     * Build a PageScore from pre-aggregated vote data and endorsement rows.
+     * Build a PageScore from pre-aggregated vote data plus the vouch-
+     * attestation count (the endorsement_count display denorm).
      *
      * Vote aggregation (positive/negative scores, counts) is now performed
      * in SQL by VoteRepository::getVoteAggregatesForPage(), eliminating the
      * O(N) PHP memory cost of loading every vote row. The fraud discount and
      * time decay formulas are replicated identically in the SQL expressions.
-     *
-     * Endorsement recomputation remains in PHP because it involves vesting
-     * stage resolution and per-row fraud discount with low row counts.
      *
      * @param int            $pageId
      * @param object         $voteAggregates  Result from getVoteAggregatesForPage():
@@ -1388,9 +1386,13 @@ class VoteService {
         $lastVoteAt         = $voteAggregates->last_vote_at;
         $netScore           = $positive - $negative;
 
-        // Fetch endorsement rows (still the source of truth for the
-        // endorsement_count display denorm).
-        $endorsementRows = $this->endorsementRepo->getActiveWithFraudScoresForPage($pageId);
+        // endorsement_count display denorm — sourced from the Trust
+        // Attestation Layer (active kind=vouch rows) since the frozen
+        // bcc_trust_endorsements table was retired. The COLUMN name and
+        // every downstream consumer (PageScore VO, read model, cards,
+        // search's `endorsements` field + sort axis, wp-admin tables)
+        // stay untouched; only the data source changed.
+        $endorsementCount = $this->countActiveVouchAttestations($pageId);
 
         // Preserve fields that recalculation does not recompute. penalty_adjustment
         // and attestation_bonus (Slice E) are written by their own dedicated paths
@@ -1404,13 +1406,6 @@ class VoteService {
         $penaltyAdjustment = $existing ? $existing->getPenaltyAdjustment() : 0.0;
         $attestationBonus  = $existing ? $existing->getAttestationBonus() : 0.0;
         $fraudMetadata     = $existing ? $existing->getFraudMetadata() : null;
-
-        // endorsement_bonus is RETIRED (Slice 1 of the endorse-subsystem
-        // retirement) — the legacy term is gone from the formula and the
-        // column; the vouch backing now lives in attestation_bonus. We still
-        // surface the active endorsement-row count for the endorsement_count
-        // display denorm.
-        $endorsementCount = count($endorsementRows);
 
         // Canonical formula (single source of truth — TrustScoreService):
         // base + onchain_bonus + contribution_bonus + penalty_adjustment +
@@ -1440,6 +1435,31 @@ class VoteService {
             $contributionBonus,
             $penaltyAdjustment,
             $attestationBonus
+        );
+    }
+
+    /**
+     * Active vouch-attestation count for a score-row page — the source of
+     * the endorsement_count denorm. Maps the score-row page id back onto
+     * the attestation target space per the locked target_id invariant:
+     * a member self-page (page_id > ID_BASE) counts user_profile vouches
+     * on the RAW member id; an entity page counts card-kind vouches on
+     * the page id itself (a page has exactly one true card kind, so the
+     * IN-list over PAGE_TARGET_KINDS is exact, not approximate).
+     */
+    private function countActiveVouchAttestations(int $pageId): int {
+        if ($pageId <= 0) {
+            return 0;
+        }
+        if (MemberSelfPageService::isSelfPage($pageId)) {
+            return $this->attestationRepo->countActiveVouchesForTarget(
+                ['user_profile'],
+                MemberSelfPageService::ownerOfSelfPage($pageId)
+            );
+        }
+        return $this->attestationRepo->countActiveVouchesForTarget(
+            AttestationRepository::PAGE_TARGET_KINDS,
+            $pageId
         );
     }
 

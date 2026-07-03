@@ -16,20 +16,13 @@ define('BCC_TRUST_WEIGHT_RISKY', 0.03);
 define('BCC_TRUST_MIN_VOTE_WEIGHT', 0.1);
 define('BCC_TRUST_MAX_VOTE_WEIGHT', 0.6);
 
-// ======================================================
-// ENDORSEMENT WEIGHT TIERS
-// ======================================================
-define('BCC_TRUST_ENDORSE_ELITE', 1.0);
-define('BCC_TRUST_ENDORSE_TRUSTED', .5);
-define('BCC_TRUST_ENDORSE_NEUTRAL', .20);
-define('BCC_TRUST_ENDORSE_CAUTION', 0.1);
-define('BCC_TRUST_ENDORSE_RISKY', 0.08);
-define('BCC_TRUST_MAX_ENDORSE_WEIGHT', 2.0);
-
-// Light per-post "vouch" weight (Slice 3). A vouch is a FIXED-weight,
-// NON-vesting endorsement (context='post_vouch') — ~10% of a top
-// (elite=1.0) endorsement. Filterable via 'bcc_trust_vouch_weight'.
-define('BCC_TRUST_VOUCH_WEIGHT', 0.1);
+// NOTE: the legacy ENDORSEMENT WEIGHT TIERS block
+// (BCC_TRUST_ENDORSE_ELITE/TRUSTED/NEUTRAL/CAUTION/RISKY,
+// BCC_TRUST_MAX_ENDORSE_WEIGHT, BCC_TRUST_VOUCH_WEIGHT) was deleted in
+// the endorse-retirement final slice — its last readers
+// (EndorsementRepository, AuditLogger::endorse) are gone. Vouch weight
+// now composes at cast time in AttestationService (wallet-age ×
+// reciprocity × cohort multipliers, captured in weight_at_time).
 
 // ======================================================
 // UNIFIED VESTING (5-stage graduated model)

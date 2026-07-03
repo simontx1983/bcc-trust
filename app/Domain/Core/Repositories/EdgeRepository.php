@@ -8,14 +8,15 @@
  * from one user (source) to another (target) for a given edge type:
  *
  *   'vote'        — sum of vote weights cast by source on pages owned by target
- *   'endorsement' — sum of endorsement weights given by source for pages owned by target
+ *   'endorsement' — LEGACY: sum of endorsement weights given by source for
+ *                   pages owned by target. The endorse write path (and its
+ *                   backing table) is retired, so stored endorsement-type
+ *                   rows are frozen — still read by PageRank, never written.
  *
  * The edge table is kept up to date incrementally:
  *   - When a vote is cast, VoteAuditor calls incrementEdge() — O(1) single-row update.
  *   - When a vote is changed / removed, VoteService calls recalculateVoteEdge() — O(n)
  *     full recalculation is acceptable for the rare edit/delete path.
- *   - When an endorsement is added / removed, EndorsementRepository calls
- *     recalculateEndorsementEdge().
  *
  * TrustGraph::batchCalculateAllRanks() reads this table instead of joining
  * votes + endorsements + scores on every hourly run, reducing that step from
@@ -69,13 +70,11 @@ class EdgeRepository {
     private string $table;
     private string $votesTable;
     private string $scoresTable;
-    private string $endorsementsTable;
 
     public function __construct() {
-        $this->table             = \BCC\Trust\Core\Database\TableRegistry::edges();
-        $this->votesTable        = \BCC\Trust\Core\Database\TableRegistry::votes();
-        $this->scoresTable       = \BCC\Trust\Core\Database\TableRegistry::scores();
-        $this->endorsementsTable = \BCC\Trust\Core\Database\TableRegistry::endorsements();
+        $this->table       = \BCC\Trust\Core\Database\TableRegistry::edges();
+        $this->votesTable  = \BCC\Trust\Core\Database\TableRegistry::votes();
+        $this->scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
     }
 
     // =========================================================================
@@ -177,29 +176,6 @@ class EdgeRepository {
             self::TYPE_VOTE,
             (int)   ( $row->vote_count   ?? 0 )
         );
-    }
-
-    /**
-     * Recalculate and persist the endorsement edge from $sourceUserId → $targetUserId.
-     *
-     * @param int $sourceUserId  The endorser.
-     * @param int $targetUserId  The page owner receiving the trust signal.
-     */
-    public function recalculateEndorsementEdge( int $sourceUserId, int $targetUserId ): void {
-        global $wpdb;
-
-        $weight = (float) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COALESCE( SUM( e.weight ), 0 )
-               FROM {$this->endorsementsTable} e
-               JOIN {$this->scoresTable} s
-                    ON s.page_id = e.page_id AND s.page_owner_id = %d
-              WHERE e.endorser_user_id = %d
-                AND e.status = 1",
-            $targetUserId,
-            $sourceUserId
-        ) );
-
-        $this->upsertOrDelete( $sourceUserId, $targetUserId, $weight, self::TYPE_ENDORSEMENT );
     }
 
     // =========================================================================
@@ -322,10 +298,15 @@ class EdgeRepository {
     // =========================================================================
 
     /**
-     * Populate the edge table from existing votes and endorsements.
+     * Populate the edge table from existing votes.
      *
      * Idempotent — ON DUPLICATE KEY UPDATE means existing rows are refreshed,
      * not duplicated. Safe to call multiple times.
+     *
+     * The legacy endorsement leg was removed with the endorsements-table
+     * retirement: existing endorsement-type edge rows are frozen data;
+     * vouch attestations do not materialize into the edge table (they
+     * carry their own graph reads in AttestationRepository).
      *
      * @return int Number of edges written.
      */
@@ -355,29 +336,6 @@ class EdgeRepository {
                 (float) $edge->total_weight,
                 self::TYPE_VOTE,
                 (int)   ( $edge->vote_count ?? 0 )
-            );
-            $count++;
-        }
-
-        // Aggregate all endorsement weights: endorser → page_owner
-        /** @var list<EdgeBackfillRow> $endorseEdges */
-        $endorseEdges = $wpdb->get_results( $wpdb->prepare(
-            "SELECT e.endorser_user_id AS source_user_id,
-                    s.page_owner_id    AS target_user_id,
-                    SUM( e.weight )    AS total_weight
-               FROM {$this->endorsementsTable} e
-               JOIN {$this->scoresTable} s ON s.page_id = e.page_id
-              WHERE e.status = %d
-           GROUP BY e.endorser_user_id, s.page_owner_id",
-            1
-        ) ) ?: [];
-
-        foreach ( $endorseEdges as $edge ) {
-            $this->upsertOrDelete(
-                (int)   $edge->source_user_id,
-                (int)   $edge->target_user_id,
-                (float) $edge->total_weight,
-                self::TYPE_ENDORSEMENT
             );
             $count++;
         }

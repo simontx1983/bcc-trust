@@ -347,18 +347,31 @@ class UserInfoRepository {
         // one transaction — even though this now runs in an async handler
         // (post-C2 fix), unbounded page fan-outs can still starve the
         // cron if one voter has 100k+ votes.
+        //
+        // Batching via a derived-table LIMIT: MySQL rejects LIMIT on a
+        // multi-table UPDATE (the previous UPDATE…JOIN…LIMIT shape errored
+        // silently and marked nothing — same defect class as the endorsed
+        // variant below). The unmarked filter lives INSIDE the derived
+        // table so every iteration picks a fresh batch of genuinely
+        // unmarked pages; the derived table is materialized, which is what
+        // makes selecting from the updated table legal here.
         $batchSize = (int) apply_filters('bcc_trust_fraud_recalc_batch', 2000);
         $maxLoops  = 50;
         $total     = 0;
         for ($i = 0; $i < $maxLoops; $i++) {
             $affected = $wpdb->query($wpdb->prepare(
                 "UPDATE {$scores_table} s
-                 INNER JOIN {$votes_table} v ON v.page_id = s.page_id
+                 INNER JOIN (
+                     SELECT DISTINCT v.page_id
+                     FROM {$votes_table} v
+                     INNER JOIN {$scores_table} s2 ON s2.page_id = v.page_id
+                     WHERE v.voter_user_id = %d
+                       AND v.status = 1
+                       AND s2.recalculate_required = 0
+                     LIMIT %d
+                 ) t ON t.page_id = s.page_id
                  SET s.recalculate_required = 1
-                 WHERE v.voter_user_id = %d
-                   AND v.status = 1
-                   AND s.recalculate_required = 0
-                 LIMIT %d",
+                 WHERE s.recalculate_required = 0",
                 $userId,
                 $batchSize
             ));
@@ -371,38 +384,51 @@ class UserInfoRepository {
     }
     
     /**
-     * Mark all page scores that this user has endorsed as needing recalculation.
+     * Mark all page scores that this user has endorsed (= actively
+     * vouched for via the Trust Attestation Layer) as needing
+     * recalculation.
      *
-     * Used after fraud is detected so that endorsement weights are
-     * retroactively discounted during the next recalculation pass.
+     * Used after fraud is detected / suspension flips so the affected
+     * targets get re-scored on the next recalculation pass. Attestation-
+     * backed since the legacy endorsements-table retirement; the join
+     * maps attestation targets onto their score-row page ids per the
+     * locked target_id invariant (user_profile → ID_BASE + user id,
+     * *_card → page id directly).
+     *
+     * Bounded via the derived-table LIMIT (MySQL rejects LIMIT on a
+     * multi-table UPDATE — the legacy UPDATE…JOIN…LIMIT shape errored
+     * silently and marked nothing). A single user's active vouch set is
+     * realistically dozens; the cap is a runaway fence, not pagination.
      */
     public function markEndorsedPagesForRecalculation(int $userId): int {
         global $wpdb;
 
-        $endorsements_table = \BCC\Trust\Core\Database\TableRegistry::endorsements();
+        $attestations_table = \BCC\Trust\Core\Database\TableRegistry::trustAttestations();
         $scores_table       = \BCC\Trust\Core\Database\TableRegistry::scores();
+        $idBase             = \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE;
 
         $batchSize = (int) apply_filters('bcc_trust_fraud_recalc_batch', 2000);
-        $maxLoops  = 50;
-        $total     = 0;
-        for ($i = 0; $i < $maxLoops; $i++) {
-            $affected = $wpdb->query($wpdb->prepare(
-                "UPDATE {$scores_table} s
-                 INNER JOIN {$endorsements_table} e ON e.page_id = s.page_id
-                 SET s.recalculate_required = 1
-                 WHERE e.endorser_user_id = %d
-                   AND e.status = 1
-                   AND s.recalculate_required = 0
-                 LIMIT %d",
-                $userId,
-                $batchSize
-            ));
-            if ($affected === false || (int) $affected === 0) {
-                break;
-            }
-            $total += (int) $affected;
-        }
-        return $total;
+
+        $affected = $wpdb->query($wpdb->prepare(
+            "UPDATE {$scores_table} s
+             INNER JOIN (
+                 SELECT CASE
+                     WHEN a.target_kind = 'user_profile' THEN a.target_id + {$idBase}
+                     ELSE a.target_id
+                 END AS page_id
+                 FROM {$attestations_table} a
+                 WHERE a.attestor_user_id = %d
+                   AND a.kind = 'vouch'
+                   AND a.revoked_at IS NULL
+                 LIMIT %d
+             ) t ON t.page_id = s.page_id
+             SET s.recalculate_required = 1
+             WHERE s.recalculate_required = 0",
+            $userId,
+            $batchSize
+        ));
+
+        return $affected === false ? 0 : (int) $affected;
     }
 
     /**

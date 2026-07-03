@@ -700,13 +700,35 @@ final class AttestationRepository
     }
 
     /**
-     * Shared SQL for the two grouped count variants above — identical
-     * shape except for the revoked_at IS NULL / IS NOT NULL predicate.
+     * Grouped count of active VOUCH attestations per target — the
+     * kind-filtered sibling of {@see countActiveByTargets}. Powers the
+     * `endorsements_received` member-card stat (MemberSummaryPrefetcher /
+     * FeedColdStartService / UserViewService) after the legacy
+     * bcc_trust_endorsements read retirement: "received" now means
+     * active vouches cast ON the member (target_kind='user_profile',
+     * keyed by RAW user id), replacing the old endorsements-on-owned-pages
+     * join.
+     *
+     * Targets with zero active vouches are absent from the map —
+     * consumers default with `?? 0`.
+     *
+     * @param list<int> $targetIds
+     * @return array<int, int> target_id => active vouch count.
+     */
+    public function countActiveVouchesByTargets(string $targetKind, array $targetIds): array
+    {
+        return $this->countByTargetsWhereRevoked($targetKind, $targetIds, false, 'vouch');
+    }
+
+    /**
+     * Shared SQL for the grouped count variants above — identical shape
+     * except for the revoked_at IS NULL / IS NOT NULL predicate and the
+     * optional kind pin.
      *
      * @param list<int> $targetIds
      * @return array<int, int> target_id => count.
      */
-    private function countByTargetsWhereRevoked(string $targetKind, array $targetIds, bool $revoked): array
+    private function countByTargetsWhereRevoked(string $targetKind, array $targetIds, bool $revoked, ?string $kind = null): array
     {
         if (!in_array($targetKind, self::TARGET_KINDS, true)) {
             return [];
@@ -727,6 +749,10 @@ final class AttestationRepository
         global $wpdb;
         $table = TableRegistry::trustAttestations();
 
+        if ($kind !== null && !in_array($kind, self::KINDS, true)) {
+            return [];
+        }
+
         $revokedPredicate = $revoked ? 'IS NOT NULL' : 'IS NULL';
         $placeholders = implode(',', array_fill(0, count($ids), '%d'));
         $sql = "SELECT target_id, COUNT(*) AS c"
@@ -734,11 +760,16 @@ final class AttestationRepository
             . ' WHERE target_kind = %s'
             . " AND target_id IN ({$placeholders})"
             . " AND revoked_at {$revokedPredicate}"
+            . ($kind !== null ? ' AND kind = %s' : '')
             . ' GROUP BY target_id'
             . ' LIMIT 100';
 
+        $args = array_merge([$targetKind], array_keys($ids));
+        if ($kind !== null) {
+            $args[] = $kind;
+        }
         /** @phpstan-ignore-next-line argument.type */
-        $prepared = $wpdb->prepare($sql, $targetKind, ...array_keys($ids));
+        $prepared = $wpdb->prepare($sql, ...$args);
         if (!is_string($prepared)) {
             return [];
         }
@@ -1269,6 +1300,273 @@ final class AttestationRepository
                 'kind'                        => (string) ($row->kind ?? ''),
                 'attestation_order_in_target' => (int) ($row->attestation_order_in_target ?? 0),
                 'created_at'                  => (string) ($row->created_at ?? ''),
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Active VOUCH attestations cast by one operator, newest-first — the
+     * backing read for the §4.22 / §4.30 "given endorsements" surfaces
+     * (GET /endorsements/mine, GET /users/:handle/endorsements) after the
+     * legacy bcc_trust_endorsements read retirement.
+     *
+     * Sibling of {@see listActiveByAttestor} with three deliberate
+     * differences (kept separate rather than parameterised so the
+     * reliability classifier's oldest-first invariant can't be broken
+     * by a flag): vouch-only kind filter, created_at DESC ordering
+     * (the legacy getByEndorser order), and a projection that carries
+     * weight_at_time + context_note for the §J.6 row hydration.
+     *
+     * Bounded by $limit (endpoint max 50; the stats path reads up to
+     * the 5000 defensive ceiling — a single operator's active vouch
+     * count is realistically dozens).
+     *
+     * @return list<object{id: int, target_kind: string, target_id: int, weight_at_time: float, context_note: ?string, created_at: string}>
+     */
+    public function listActiveVouchesByAttestor(int $attestorUserId, int $limit = 20): array
+    {
+        if ($attestorUserId <= 0) {
+            return [];
+        }
+        $limit = max(1, min(5000, $limit));
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $sql = "SELECT id, target_kind, target_id, weight_at_time, context_note, created_at"
+            . " FROM `{$table}`"
+            . ' WHERE attestor_user_id = %d'
+            . " AND kind = 'vouch'"
+            . ' AND revoked_at IS NULL'
+            . ' ORDER BY created_at DESC, id DESC'
+            . ' LIMIT %d';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $attestorUserId, $limit);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row)) {
+                continue;
+            }
+            $note = null;
+            if (isset($row->context_note) && is_string($row->context_note) && trim($row->context_note) !== '') {
+                $note = trim($row->context_note);
+            }
+            $out[] = (object) [
+                'id'             => (int) ($row->id ?? 0),
+                'target_kind'    => (string) ($row->target_kind ?? ''),
+                'target_id'      => (int) ($row->target_id ?? 0),
+                'weight_at_time' => (float) ($row->weight_at_time ?? 0),
+                'context_note'   => $note,
+                'created_at'     => (string) ($row->created_at ?? ''),
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Count active VOUCH attestations against a single target across one
+     * or more target_kinds in a single bounded round-trip. Powers the
+     * `endorsement_count` denorm refresh (VoteService::recalculateFromVotes
+     * + AttestationScoreSynthesis::recomputeFor) after the legacy
+     * endorsements-table count retirement. Sibling of {@see countByTarget}
+     * (which splits per kind for one target_kind) — this collapses to one
+     * COUNT because the denorm only wants the vouch total and a card page's
+     * true kind may be any of PAGE_TARGET_KINDS.
+     *
+     * @param list<string> $targetKinds Subset of TARGET_KINDS.
+     */
+    public function countActiveVouchesForTarget(array $targetKinds, int $targetId): int
+    {
+        if ($targetId <= 0) {
+            return 0;
+        }
+        $kinds = [];
+        foreach ($targetKinds as $kind) {
+            if (is_string($kind) && in_array($kind, self::TARGET_KINDS, true)) {
+                $kinds[$kind] = true;
+            }
+        }
+        if ($kinds === []) {
+            return 0;
+        }
+        $kindList = array_keys($kinds);
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $placeholders = implode(',', array_fill(0, count($kindList), '%s'));
+        $sql = "SELECT COUNT(*) FROM `{$table}`"
+            . " WHERE target_kind IN ({$placeholders})"
+            . ' AND target_id = %d'
+            . " AND kind = 'vouch'"
+            . ' AND revoked_at IS NULL'
+            . ' LIMIT 10000';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, ...array_merge($kindList, [$targetId]));
+        if (!is_string($prepared)) {
+            return 0;
+        }
+
+        $raw = $wpdb->get_var($prepared);
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
+     * Directed vouch graph edges (attestor → target OWNER) for the
+     * endorsement-ring DFS cycle detector. Replaces the retired
+     * VoteRepository::getEndorsementEdges read of the frozen
+     * bcc_trust_endorsements table; column aliases are preserved
+     * (endorser_user_id / page_owner_id) so TrustGraph::detectEndorsementRings
+     * consumes the rows unchanged.
+     *
+     * Owner resolution mirrors the locked target_id invariant:
+     *   - user_profile → target_id IS the owner user id.
+     *   - *_card       → owner comes from the page's score row
+     *                    (bcc_trust_page_scores.page_owner_id), the same
+     *                    join the legacy edge query used.
+     * Card rows whose page has no score row resolve to NULL owner and are
+     * filtered out (no edge to nowhere).
+     *
+     * Active vouch rows only — stand_behind is a scarcer, slot-bounded
+     * signal with its own surfaces; the ring detector models the
+     * endorse-shaped reciprocity graph.
+     *
+     * @return list<object{endorser_user_id: int, page_owner_id: int}>
+     */
+    public function getVouchEdges(int $limit = 10000): array
+    {
+        $limit = max(1, min(100000, $limit));
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table       = TableRegistry::trustAttestations();
+        $scoresTable = TableRegistry::scores();
+
+        $sql = "SELECT a.attestor_user_id AS endorser_user_id,"
+            . " CASE WHEN a.target_kind = 'user_profile' THEN a.target_id ELSE s.page_owner_id END AS page_owner_id"
+            . " FROM `{$table}` a"
+            . " LEFT JOIN `{$scoresTable}` s ON a.target_kind != 'user_profile' AND s.page_id = a.target_id"
+            . " WHERE a.kind = 'vouch'"
+            . ' AND a.revoked_at IS NULL'
+            . " AND (a.target_kind = 'user_profile' OR s.page_owner_id IS NOT NULL)"
+            . ' LIMIT %d';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $limit);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->endorser_user_id, $row->page_owner_id)) {
+                continue;
+            }
+            $out[] = (object) [
+                'endorser_user_id' => (int) $row->endorser_user_id,
+                'page_owner_id'    => (int) $row->page_owner_id,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Mutual vouch pairs within a rolling time window — the slow-ring
+     * detection primitive. Replaces the retired
+     * EndorsementRepository::getMutualEndorsePairsInWindow read of the
+     * frozen endorsements table with the attestation-edge equivalent;
+     * output aliases (user_a / user_b / mutual_count / total_weight) are
+     * preserved so TrustGraph::detectSlowEndorsementRings consumes the
+     * rows unchanged.
+     *
+     * A pair (A, B) surfaces when A holds an active vouch on a target
+     * OWNED by B and B holds an active vouch on a target owned by A,
+     * both cast inside the window. Owner resolution matches
+     * {@see getVouchEdges}: user_profile targets ARE the owner id;
+     * card targets resolve through the score row.
+     *
+     * Bounded: LIMIT/OFFSET caller-paginated (cron cursor walks 500 a
+     * page); GROUP BY collapses per ordered pair; the window + active
+     * filters bound the self-join.
+     *
+     * @return list<object{user_a: int, user_b: int, mutual_count: int, total_weight: float}>
+     */
+    public function getMutualVouchPairsInWindow(
+        int $windowDays = 14,
+        int $minSize = 1,
+        int $pageLimit = 500,
+        int $offset = 0
+    ): array {
+        $windowDays = max(1, $windowDays);
+        $minSize    = max(1, $minSize);
+        $pageLimit  = max(1, min(5000, $pageLimit));
+        $offset     = max(0, $offset);
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table       = TableRegistry::trustAttestations();
+        $scoresTable = TableRegistry::scores();
+
+        $sql = "SELECT"
+            . ' a1.attestor_user_id AS user_a,'
+            . ' a2.attestor_user_id AS user_b,'
+            . ' COUNT(*) AS mutual_count,'
+            . ' SUM(a1.weight_at_time + a2.weight_at_time) AS total_weight'
+            . " FROM `{$table}` a1"
+            . " LEFT JOIN `{$scoresTable}` s1 ON a1.target_kind != 'user_profile' AND s1.page_id = a1.target_id"
+            . " JOIN `{$table}` a2"
+            . " ON a2.attestor_user_id = CASE WHEN a1.target_kind = 'user_profile' THEN a1.target_id ELSE s1.page_owner_id END"
+            . " LEFT JOIN `{$scoresTable}` s2 ON a2.target_kind != 'user_profile' AND s2.page_id = a2.target_id"
+            . " WHERE a1.kind = 'vouch' AND a2.kind = 'vouch'"
+            . ' AND a1.revoked_at IS NULL AND a2.revoked_at IS NULL'
+            . " AND CASE WHEN a2.target_kind = 'user_profile' THEN a2.target_id ELSE s2.page_owner_id END = a1.attestor_user_id"
+            . ' AND a1.attestor_user_id != a2.attestor_user_id'
+            . ' AND a1.created_at > DATE_SUB(NOW(), INTERVAL %d DAY)'
+            . ' AND a2.created_at > DATE_SUB(NOW(), INTERVAL %d DAY)'
+            . ' GROUP BY a1.attestor_user_id, a2.attestor_user_id'
+            . ' HAVING mutual_count >= %d'
+            . ' LIMIT %d OFFSET %d';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, $windowDays, $windowDays, $minSize, $pageLimit, $offset);
+        if (!is_string($prepared)) {
+            return [];
+        }
+
+        $rows = $wpdb->get_results($prepared);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_object($row) || !isset($row->user_a, $row->user_b)) {
+                continue;
+            }
+            $out[] = (object) [
+                'user_a'       => (int) $row->user_a,
+                'user_b'       => (int) $row->user_b,
+                'mutual_count' => (int) ($row->mutual_count ?? 0),
+                'total_weight' => (float) ($row->total_weight ?? 0),
             ];
         }
         return $out;

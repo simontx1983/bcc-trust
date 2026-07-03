@@ -153,101 +153,15 @@ function bcc_trust_create_core_tables() {
 
     /*
     ======================================================
-    ENDORSEMENTS
+    ENDORSEMENTS (retired)
     ======================================================
+    The bcc_trust_endorsements table was frozen after the Slice E
+    endorse→vouch cutover (legacy rows materialized into
+    bcc_trust_attestations as kind=vouch) and is dropped by
+    includes/database/drop-endorsements-table.php. Its CREATE TABLE
+    + unique-key + base_weight migrations were removed here so fresh
+    installs never create it.
     */
-
-    $endorsements_table = \BCC\Trust\Core\Database\TableRegistry::endorsements();
-
-    $sql = "CREATE TABLE $endorsements_table (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        endorser_user_id BIGINT UNSIGNED NOT NULL,
-        page_id BIGINT UNSIGNED NOT NULL,
-        context VARCHAR(50) NOT NULL DEFAULT 'general',
-        weight DECIMAL(5,2) NOT NULL DEFAULT 3.0,
-        base_weight DECIMAL(5,2) NOT NULL DEFAULT 0.00,
-        vesting_stage TINYINT UNSIGNED NOT NULL DEFAULT 0,
-        fraud_score_at_endorsement TINYINT UNSIGNED NULL DEFAULT NULL,
-        reason TEXT NULL,
-        status TINYINT NOT NULL DEFAULT 1,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        UNIQUE KEY unique_endorsement (endorser_user_id, page_id, context),
-        KEY idx_page_endorsements (page_id, status, created_at),
-        KEY idx_endorser_history (endorser_user_id, created_at),
-        KEY idx_page_endorser (page_id, endorser_user_id, status),
-        KEY idx_vesting (vesting_stage, status, created_at)
-    ) ENGINE=InnoDB $charset_collate;";
-
-    dbDelta($sql);
-
-    /*
-     * Migration: Remove `status` from the endorsement unique key.
-     *
-     * The old key (endorser_user_id, page_id, context, status) allowed a
-     * soft-deleted row (status=0) and an active row (status=1) for the same
-     * endorser+page+context, bypassing the uniqueness guarantee at the schema
-     * level. The new key (endorser_user_id, page_id, context) enforces one row
-     * per endorser+page+context regardless of status.
-     *
-     * dbDelta cannot alter existing unique keys, so we handle it manually.
-     */
-    $key_has_status = $wpdb->get_var(
-        $wpdb->prepare(
-            "SELECT COUNT(1) FROM information_schema.STATISTICS
-             WHERE table_schema = DATABASE()
-               AND table_name   = %s
-               AND index_name   = 'unique_endorsement'
-               AND column_name  = 'status'",
-            $endorsements_table
-        )
-    );
-
-    if ($key_has_status) {
-        // 1. Deduplicate: keep the active (status=1) row; if no active row, keep
-        //    the most recently created one. Delete the rest.
-        $wpdb->query(
-            "DELETE e FROM {$endorsements_table} e
-             INNER JOIN (
-                 SELECT endorser_user_id, page_id, context,
-                        MAX(CASE WHEN status = 1 THEN id ELSE 0 END) AS active_id,
-                        MAX(id) AS latest_id
-                 FROM {$endorsements_table}
-                 GROUP BY endorser_user_id, page_id, context
-                 HAVING COUNT(*) > 1
-             ) dups ON e.endorser_user_id = dups.endorser_user_id
-                   AND e.page_id          = dups.page_id
-                   AND e.context          = dups.context
-                   AND e.id != IF(dups.active_id > 0, dups.active_id, dups.latest_id)"
-        );
-
-        // 2. Swap the key.
-        $wpdb->query("ALTER TABLE {$endorsements_table} DROP KEY unique_endorsement");
-        $wpdb->query("ALTER TABLE {$endorsements_table} ADD UNIQUE KEY unique_endorsement (endorser_user_id, page_id, context)");
-    }
-
-    /*
-     * Migration: Backfill endorsements.base_weight for rows created before the
-     * column existed. dbDelta added the column with DEFAULT 0.00, which would
-     * zero-out legacy endorsements' contribution during the next authoritative
-     * recalc. Seeding base_weight = weight recovers the original contribution
-     * closely enough (weight already embeds the creation-time fraud/diversity
-     * factors) and is strictly better than leaving the bonus at zero.
-     *
-     * Gated by a one-time option so this UPDATE never runs twice. The WHERE
-     * clause is also idempotent (base_weight > 0 rows are skipped) but the
-     * option avoids a pointless table scan on every subsequent schema-hash
-     * change.
-     */
-    if (!get_option('bcc_trust_endorsement_base_weight_backfilled')) {
-        $wpdb->query(
-            "UPDATE {$endorsements_table}
-             SET base_weight = weight
-             WHERE base_weight = 0
-               AND weight > 0"
-        );
-        update_option('bcc_trust_endorsement_base_weight_backfilled', time(), false);
-    }
 
     /*
     ======================================================

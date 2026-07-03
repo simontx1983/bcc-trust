@@ -15,8 +15,7 @@
  *   COUNT(*) contention saturates a worker. Coalescing the badge
  *   reads into one cached endpoint moves that ceiling ~10×.
  *
- * Cache shape (§5 generation-counter pattern, same shape as
- * EndorsementRepository::invalidateEndorsementCache):
+ * Cache shape (§5 generation-counter pattern):
  *   - Group: `bcc_badges`
  *   - Generation key:   `me_badges_gen:{userId}`
  *   - Payload key:      `me_badges:{userId}:gen{N}:{openThreadsKey}`

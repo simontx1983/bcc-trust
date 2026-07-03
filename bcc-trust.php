@@ -247,6 +247,12 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-legacy-indexes.php';
 // by bcc_trust_endorsement_bonus_dropped + per-table column-existence; no-op once
 // done / on fresh installs.
 require_once BCC_TRUST_PATH . 'includes/database/drop-endorsement-bonus.php';
+// Endorse-retirement final slice: drops the frozen bcc_trust_endorsements
+// table (rows already materialized into bcc_trust_attestations as kind=vouch;
+// every read repointed this release). Guarded by
+// bcc_trust_endorsements_table_dropped + DROP TABLE IF EXISTS; no-op once
+// done / on fresh installs. Runs on init priority 28, after the bonus drop.
+require_once BCC_TRUST_PATH . 'includes/database/drop-endorsements-table.php';
 // §1 remediation: covering indexes on PeepSo's reaction/activity tables that
 // BCC's aggregation queries depend on. Moved out of ReactionSeeder (DDL
 // belongs in includes/database/). Idempotent, per-index existence-checked,

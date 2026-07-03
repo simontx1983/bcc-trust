@@ -19,10 +19,10 @@
  *     unique key so operators can revoke and re-attest; only one
  *     active row per (attestor, target, kind) at a time.
  *
- * Migration: §J.11 — existing bcc_endorsements rows materialize as
- * kind=vouch with target_kind matching the source post_type. This
- * runs idempotently inside the activation hook; the unique key
- * prevents duplicate migration on re-activation.
+ * Migration history: the §J.11 / Slice E legacy-endorsement
+ * materializations ran once (option-gated) and were deleted in the
+ * endorse-retirement final slice — see the note inside
+ * bcc_trust_create_trust_attestations_table().
  *
  * @package BCC\Trust\Core
  * @subpackage Database
@@ -64,82 +64,23 @@ function bcc_trust_create_trust_attestations_table(): void {
 
     dbDelta($sql);
 
-    // §J.11 migration: materialize legacy endorsements as
-    // kind=vouch attestations. Idempotent — guarded by a
-    // one-time option + the unique key on the attestations table.
-    if (!get_option('bcc_trust_attestation_legacy_endorsement_migrated')) {
-        bcc_trust_migrate_legacy_endorsements_to_attestations();
-        update_option('bcc_trust_attestation_legacy_endorsement_migrated', time(), false);
-    }
+    // NOTE (endorse-retirement final slice, 2026-07-02): the two §J.11 /
+    // Slice E legacy-endorsement migrations
+    // (bcc_trust_migrate_legacy_endorsements_to_attestations +
+    // bcc_trust_migrate_postvouch_endorsements_to_attestations) were
+    // DELETED. They ran once on the live site (option-gated:
+    // bcc_trust_attestation_legacy_endorsement_migrated +
+    // bcc_trust_attestation_postvouch_migrated remain set) and fresh
+    // installs have no legacy endorsements table to migrate from — the
+    // table itself is dropped by drop-endorsements-table.php.
 
-    // Slice E cutover: migrate self-page `post_vouch` endorsements into
-    // user_profile vouch attestations so the legacy reaction backing is
-    // preserved under the new attestation_bonus term. Idempotent — own
-    // option gate + INSERT IGNORE on the attestations unique key.
-    if (!get_option('bcc_trust_attestation_postvouch_migrated')) {
-        bcc_trust_migrate_postvouch_endorsements_to_attestations();
-        update_option('bcc_trust_attestation_postvouch_migrated', time(), false);
-    }
-
-    // Slice E: backfill attestation_order_in_target for ALL rows. The two
-    // migrations above leave order=0; order is NOT score-relevant (the
-    // synthesis ignores it), so a one-time ROW_NUMBER() backfill is safe.
+    // Slice E: backfill attestation_order_in_target for ALL rows. The
+    // (now-deleted) migrations left order=0; order is NOT score-relevant
+    // (the synthesis ignores it), so a one-time ROW_NUMBER() backfill is safe.
     if (!get_option('bcc_trust_attestation_order_backfilled')) {
         bcc_trust_backfill_attestation_order();
         update_option('bcc_trust_attestation_order_backfilled', time(), false);
     }
-}
-
-/**
- * Migrate legacy self-page `post_vouch` endorsements into user_profile
- * vouch attestations (Slice E cutover).
- *
- * post_vouch endorsements land on a member's self-page (page_id =
- * ID_BASE + user_id, ID_BASE = 1_000_000_000). They materialize as
- * kind=vouch attestations with target_kind='user_profile' and
- * target_id = the RAW author user id (page_id - ID_BASE) — the same
- * raw-author-id invariant the byline Vouch toggle's cast() path writes,
- * so the score subscriber folds both uniformly.
- *
- * Idempotency + safety:
- *   - INSERT IGNORE + the attestations unique key (attestor, target_kind,
- *     target_id, kind, revoked_at) make re-runs non-duplicating, and make
- *     it non-colliding with native casts on the same (voucher, author).
- *   - The JOIN to wp_users guards live-user only (a deleted author's
- *     self-page leg is skipped).
- *   - revoked_at mirrors endorsement status: status=1 (active) → NULL,
- *     otherwise the created_at (revoked).
- *
- * attestation_order_in_target is left at 0 here; the order backfill
- * (bcc_trust_backfill_attestation_order) repairs it for all rows.
- */
-function bcc_trust_migrate_postvouch_endorsements_to_attestations(): void {
-    global $wpdb;
-
-    $endorsements_table = \BCC\Trust\Core\Database\TableRegistry::endorsements();
-    $attestations_table = \BCC\Trust\Core\Database\TableRegistry::trustAttestations();
-
-    $sql = "INSERT IGNORE INTO {$attestations_table} (
-        attestor_user_id, target_kind, target_id, kind,
-        weight_at_time, attestation_order_in_target,
-        created_at, reaffirmed_at, revoked_at
-    )
-    SELECT
-        e.endorser_user_id,
-        'user_profile' AS target_kind,
-        (e.page_id - 1000000000) AS target_id,
-        'vouch' AS kind,
-        e.weight AS weight_at_time,
-        0 AS attestation_order_in_target,
-        e.created_at,
-        NULL AS reaffirmed_at,
-        CASE WHEN e.status = 1 THEN NULL ELSE e.created_at END AS revoked_at
-    FROM {$endorsements_table} e
-    JOIN {$wpdb->users} u ON u.ID = (e.page_id - 1000000000)
-    WHERE e.context = 'post_vouch'
-      AND e.page_id > 1000000000";
-
-    $wpdb->query($sql);
 }
 
 /**
@@ -174,66 +115,3 @@ function bcc_trust_backfill_attestation_order(): void {
     $wpdb->query($sql);
 }
 
-/**
- * Migrate legacy bcc_endorsements rows into bcc_trust_attestations.
- *
- * Per §J.11: existing endorsement rows materialize as
- * kind=vouch with target_kind in the *_card set. Idempotent —
- * INSERT IGNORE skips rows that already exist (the unique key on
- * the attestations table catches them). Re-running is safe.
- *
- * The migration is intentionally additive: legacy endorsement rows
- * remain in bcc_trust_endorsements; the new attestation rows are a
- * parallel copy. The FE prefers the new shape via viewer_attestation
- * but the legacy boolean viewer_has_endorsed continues to work for
- * the Phase 1 Endorse→Vouch fallback per §J.11.
- */
-function bcc_trust_migrate_legacy_endorsements_to_attestations(): void {
-    global $wpdb;
-
-    $endorsements_table = \BCC\Trust\Core\Database\TableRegistry::endorsements();
-    $attestations_table = \BCC\Trust\Core\Database\TableRegistry::trustAttestations();
-
-    // Determine target_kind from post_type. Only *_card kinds get
-    // migrated — endorsements against pages with unrecognized
-    // post_types are skipped (no target_kind to apply).
-    //
-    // We use INSERT IGNORE so re-running is safe: the unique key on
-    // the attestations table catches duplicates. The CASE expression
-    // resolves the target_kind from the page's post_type at
-    // migration time.
-    //
-    // Phase 1 plan §5.3 SQL with the consistency-audit reconciliation
-    // applied: the WHERE clause filters to known post_types only;
-    // revoked_at is copied through verbatim (no redundant tautology).
-    //
-    // attestation_order_in_target is left at the default 0 here; a
-    // followup recompute (when the synthesis layer ships) will
-    // populate it via ROW_NUMBER() OVER (PARTITION BY target_kind,
-    // target_id ORDER BY created_at).
-    $sql = "INSERT IGNORE INTO {$attestations_table} (
-        attestor_user_id, target_kind, target_id, kind,
-        weight_at_time, attestation_order_in_target,
-        created_at, reaffirmed_at, revoked_at
-    )
-    SELECT
-        e.endorser_user_id,
-        CASE
-            WHEN p.post_type = 'peepso-validator' THEN 'validator_card'
-            WHEN p.post_type = 'peepso-project'   THEN 'project_card'
-            WHEN p.post_type = 'peepso-creator'   THEN 'creator_card'
-            ELSE NULL
-        END AS target_kind,
-        e.page_id AS target_id,
-        'vouch' AS kind,
-        e.weight AS weight_at_time,
-        0 AS attestation_order_in_target,
-        e.created_at,
-        NULL AS reaffirmed_at,
-        CASE WHEN e.status = 1 THEN NULL ELSE e.created_at END AS revoked_at
-    FROM {$endorsements_table} e
-    JOIN {$wpdb->posts} p ON p.ID = e.page_id
-    WHERE p.post_type IN ('peepso-validator', 'peepso-project', 'peepso-creator')";
-
-    $wpdb->query($sql);
-}

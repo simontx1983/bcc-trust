@@ -7,9 +7,9 @@
  *
  * Event sources:
  *   - bcc_trust_vote_changed       (VoteService)
- *   - bcc_trust_endorsement_added  (EndorsementService)
- *   - bcc_trust_endorsement_removed(EndorsementService)
  *   - bcc.trust.recalculate_score  (helpers.php / ModerationService)
+ *   (attestation mutations enqueue directly via
+ *   AttestationScoreSynthesis::recomputeFor → enqueueDirty)
  *
  * @package BCC\Trust\Core\Services
  */
@@ -77,9 +77,10 @@ final class PageReadModelSync
     public static function register(): void
     {
         // ── High-frequency events → DEFERRED (dirty flag) ───────────────
+        // (Endorse-shaped mutations enqueue via AttestationScoreSynthesis::
+        // recomputeFor → PageReadModelRepository::enqueueDirty — the legacy
+        // bcc_trust_endorsement_* events no longer fire.)
         add_action('bcc_trust_vote_changed',          [self::class, 'onVoteChanged'], 20, 2);
-        add_action('bcc_trust_endorsement_added',     [self::class, 'onEndorsementChanged'], 20, 2);
-        add_action('bcc_trust_endorsement_removed',   [self::class, 'onEndorsementChanged'], 20, 2);
 
         // ── Low-frequency events → IMMEDIATE sync ───────────────────────
         add_action('bcc.trust.recalculate_score',     [self::class, 'onScoreRecalculated'], 20, 1);
@@ -130,13 +131,6 @@ final class PageReadModelSync
         self::markDirty($pageId);
     }
 
-    /**
-     * An endorsement was added or removed — mark page as dirty.
-     */
-    public static function onEndorsementChanged(int $endorserUserId, int $pageId): void
-    {
-        self::markDirty($pageId);
-    }
 
     /**
      * Score recalculated (cron, moderation) — sync immediately.

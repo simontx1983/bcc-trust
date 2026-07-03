@@ -176,8 +176,8 @@ final class PhotoAltRepository
     }
 
     /**
-     * Invalidate the per-photo alt cache. Pattern mirrors
-     * EndorsementRepository::invalidateEndorsementCache.
+     * Invalidate the per-photo alt cache (§5 generation-counter
+     * pattern — bump the generation; readers key their cache by it).
      */
     private function invalidateCache(int $phoId): void
     {

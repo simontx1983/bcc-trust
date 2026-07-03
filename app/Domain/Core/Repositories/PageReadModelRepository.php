@@ -351,13 +351,26 @@ class PageReadModelRepository
         }
 
         // ── Last endorsement date ──────────────────────────────────
+        // Attestation-backed since the legacy endorsements-table
+        // retirement: newest ACTIVE kind=vouch attestation on this page
+        // target. Read-model rows only exist for real peepso-page posts
+        // (the ghost-row guard above), so the card target_kinds are the
+        // complete key space here — member self-pages never reach this.
         $lastEndorsementAt = null;
         if ($score) {
-            $endorsements_table = TableRegistry::endorsements();
+            $attestations_table = TableRegistry::trustAttestations();
+            $kindPlaceholders   = implode(
+                ',',
+                array_fill(0, count(\BCC\Trust\Core\Repositories\AttestationRepository::PAGE_TARGET_KINDS), '%s')
+            );
             $lastEndorsementAt = $wpdb->get_var($wpdb->prepare(
-                "SELECT MAX(created_at) FROM {$endorsements_table}
-                 WHERE page_id = %d AND status = 1",
-                $pageId
+                "SELECT MAX(created_at) FROM {$attestations_table}
+                 WHERE target_id = %d
+                   AND target_kind IN ({$kindPlaceholders})
+                   AND kind = 'vouch'
+                   AND revoked_at IS NULL",
+                $pageId,
+                ...\BCC\Trust\Core\Repositories\AttestationRepository::PAGE_TARGET_KINDS
             ));
         }
 
@@ -622,19 +635,6 @@ class PageReadModelRepository
     {
         global $wpdb;
         $table = TableRegistry::votes();
-        $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET status = 0 WHERE page_id = %d AND status = 1",
-            $pageId
-        ));
-    }
-
-    /**
-     * Soft-delete all endorsements for a page (set status = 0).
-     */
-    public static function softDeleteEndorsementsForPage(int $pageId): void
-    {
-        global $wpdb;
-        $table = TableRegistry::endorsements();
         $wpdb->query($wpdb->prepare(
             "UPDATE {$table} SET status = 0 WHERE page_id = %d AND status = 1",
             $pageId

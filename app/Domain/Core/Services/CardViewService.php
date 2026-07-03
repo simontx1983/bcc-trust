@@ -70,7 +70,6 @@ if (!defined('ABSPATH')) {
  *   claimed_pages?: array<int, bool>,
  *   viewer_claims?: array<int, ClaimRow>,
  *   viewer_votes?: array<int, true>,
- *   viewer_endorsements?: array<int, true>,
  *   viewer_attestations?: array<int, array{vouch: object|null, stand_behind: object|null}>,
  *   endorse_eligibility?: array<int, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>,
  *   dispute_active_counts?: array<int, int>,
@@ -243,14 +242,6 @@ final class CardViewService
             $viewerHasReviewed = $this->voteService->hasUserVotedPage($pageId, $viewerId);
         }
 
-        if ($viewerId <= 0) {
-            $viewerHasEndorsed = false;
-        } elseif ($prefetched !== null && isset($prefetched['viewer_endorsements'])) {
-            $viewerHasEndorsed = isset($prefetched['viewer_endorsements'][$pageId]);
-        } else {
-            $viewerHasEndorsed = $this->endorsementService->hasEndorsedPage($pageId, $viewerId, 'general');
-        }
-
         if ($prefetched !== null && isset($prefetched['endorse_eligibility'])) {
             // Anon viewers get an empty prefetch map; the single-page
             // fallback short-circuits to the auth_required shape with
@@ -278,6 +269,15 @@ final class CardViewService
                 $viewerAttestation = $this->attestationService->getViewerAttestation($viewerId, $cardTargetKind, $pageId);
             }
         }
+
+        // viewer_has_endorsed — since the legacy endorsements-table
+        // retirement this is DERIVED from the same viewer-attestation
+        // read above: "endorsed" ≡ the viewer holds an active vouch on
+        // this card. Field name + false-for-anon semantics unchanged;
+        // both single-card and batched paths converge on one source so
+        // the boolean can never disagree with viewer_attestation.vouch.
+        $viewerHasEndorsed = $viewerAttestation !== null
+            && ($viewerAttestation['vouch'] ?? null) !== null;
 
         // Validator on-chain projection — one shared batch row-set per
         // page feeds claim_target + chains + onchain_signals + the logo
@@ -327,7 +327,8 @@ final class CardViewService
             // Always false for anonymous viewers.
             'viewer_has_reviewed' => $viewerHasReviewed,
             // §V1.5 — true when the current viewer has already endorsed
-            // this page. Drives the EndorseButton's "ENDORSE" → "REMOVE
+            // this page (= holds an active vouch attestation on it).
+            // Drives the EndorseButton's "ENDORSE" → "REMOVE
             // ENDORSEMENT" CTA swap. Always false for anonymous viewers.
             'viewer_has_endorsed' => $viewerHasEndorsed,
             // §V1.5 — server-rendered "why is endorse disabled?" copy.
@@ -340,9 +341,10 @@ final class CardViewService
             // null identically per the §4.20 contract). The FE's
             // AttestationActionCluster reads the inner vouch /
             // stand_behind slots to render cast state ("VOUCHED" /
-            // "STANDING BEHIND") on the action buttons. Coexists with
-            // the legacy viewer_has_endorsed boolean during the §J.11
-            // endorse→vouch migration window.
+            // "STANDING BEHIND") on the action buttons. The
+            // viewer_has_endorsed boolean above is DERIVED from this
+            // field's vouch slot (single source since the endorsements-
+            // table retirement).
             'viewer_attestation'  => $viewerAttestation,
             // §N8: claim flow needs entity_type + entity_id + chain_slug
             // to drive the four-step modal. Server resolves these from

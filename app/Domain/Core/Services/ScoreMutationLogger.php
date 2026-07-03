@@ -38,12 +38,11 @@ final class ScoreMutationLogger
     {
         // Capture pre-mutation snapshot (priority 5 = before score delta is applied).
         add_action('bcc_trust_vote_pre',        [self::class, 'snapshotBeforeVote'], 5, 2);
-        add_action('bcc_trust_endorsement_pre',  [self::class, 'snapshotBeforeEndorsement'], 5, 2);
 
         // Record post-mutation delta (priority 25 = after cache invalidation at 20).
+        // (The bcc_trust_endorsement_* subscribers were retired with the
+        // legacy endorse write path — those events no longer fire.)
         add_action('bcc_trust_vote_changed',          [self::class, 'recordVoteChange'], 25, 3);
-        add_action('bcc_trust_endorsement_added',     [self::class, 'recordEndorsementAdded'], 25, 2);
-        add_action('bcc_trust_endorsement_removed',   [self::class, 'recordEndorsementRemoved'], 25, 2);
         add_action('bcc_trust_score_recalculated',    [self::class, 'recordRecalculation'], 25, 1);
     }
 
@@ -54,15 +53,6 @@ final class ScoreMutationLogger
      * @param int $pageId
      */
     public static function snapshotBeforeVote(int $voterId, int $pageId): void
-    {
-        self::captureSnapshot($pageId);
-    }
-
-    /**
-     * @param int $endorserId
-     * @param int $pageId
-     */
-    public static function snapshotBeforeEndorsement(int $endorserId, int $pageId): void
     {
         self::captureSnapshot($pageId);
     }
@@ -105,24 +95,6 @@ final class ScoreMutationLogger
         self::recordEvent($pageId, 'vote_changed', $voterId, [
             'category_id' => $categoryId,
         ]);
-    }
-
-    /**
-     * @param int $endorserId
-     * @param int $pageId
-     */
-    public static function recordEndorsementAdded(int $endorserId, int $pageId): void
-    {
-        self::recordEvent($pageId, 'endorsement_added', $endorserId);
-    }
-
-    /**
-     * @param int $endorserId
-     * @param int $pageId
-     */
-    public static function recordEndorsementRemoved(int $endorserId, int $pageId): void
-    {
-        self::recordEvent($pageId, 'endorsement_removed', $endorserId);
     }
 
     /**

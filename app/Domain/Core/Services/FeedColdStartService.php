@@ -373,8 +373,8 @@ final class FeedColdStartService
             'primary_locals'               => PeepSoGroupRepository::getPrimaryLocalForUsers($userIds),
             'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
             'owned_pages_by_type'          => \BCC\Core\Repositories\PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
-            'endorsements_received_counts' => (new \BCC\Trust\Core\Repositories\EndorsementRepository())
-                ->getReceivedCountsForUsers($userIds),
+            'endorsements_received_counts' => (new \BCC\Trust\Core\Repositories\AttestationRepository())
+                ->countActiveVouchesByTargets('user_profile', $userIds),
             'solids_received_counts'       => $solidsReceivedCounts,
             'reviews_written_counts'       => (new \BCC\Trust\Core\Repositories\VoteRepository())
                 ->countByVoters($userIds),

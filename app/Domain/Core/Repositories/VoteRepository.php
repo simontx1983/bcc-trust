@@ -73,10 +73,6 @@ use BCC\Trust\Core\Security\TransactionManager;
  *   mutual_count: int|numeric-string,
  *   total_weight: float|numeric-string
  * }
- * @phpstan-type EndorsementEdgeRow object{
- *   endorser_user_id: int|numeric-string,
- *   page_owner_id: int|numeric-string
- * }
  * @phpstan-type UserVoteWithContext object{
  *   id: int|numeric-string,
  *   voter_user_id: int|numeric-string,
@@ -1906,29 +1902,6 @@ class VoteRepository {
             $minSize,
             $pageLimit,
             $offset
-        ) );
-    }
-
-    /**
-     * Get endorsement graph edges for endorsement ring detection.
-     *
-     * @param int $limit
-     * @return object[]
-     * @phpstan-return list<EndorsementEdgeRow>
-     */
-    public function getEndorsementEdges( int $limit = 10000 ): array {
-        global $wpdb;
-
-        $endorseTable = \BCC\Trust\Core\Database\TableRegistry::endorsements();
-        $scoresTable  = \BCC\Trust\Core\Database\TableRegistry::scores();
-
-        return $wpdb->get_results( $wpdb->prepare(
-            "SELECT e.endorser_user_id, s.page_owner_id
-             FROM {$endorseTable} e
-             JOIN {$scoresTable} s ON e.page_id = s.page_id
-             WHERE e.status = 1
-             LIMIT %d",
-            $limit
         ) );
     }
 

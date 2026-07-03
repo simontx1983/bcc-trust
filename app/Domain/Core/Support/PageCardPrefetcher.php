@@ -30,7 +30,6 @@ namespace BCC\Trust\Core\Support;
 
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\AttestationRepository;
-use BCC\Trust\Core\Repositories\EndorsementRepository;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
@@ -49,16 +48,17 @@ if (!defined('ABSPATH')) {
  *
  * The bundle CardViewService::getPageCard() reads. Every key is ALWAYS
  * present; viewer-keyed maps (viewer_claims / viewer_votes /
- * viewer_endorsements / viewer_attestations / endorse_eligibility) are
- * empty arrays when `$viewerId <= 0`, so consumers short-circuit to
- * the empty-map default rather than falling back to per-card queries.
+ * viewer_attestations / endorse_eligibility) are empty arrays when
+ * `$viewerId <= 0`, so consumers short-circuit to the empty-map default
+ * rather than falling back to per-card queries. viewer_has_endorsed is
+ * derived from viewer_attestations (vouch slot) — there is no separate
+ * endorsements batch since the legacy endorsements-table retirement.
  *
  * @phpstan-type PageCardPrefetchBundle array{
  *   read_models: array<int, PageReadModelRow>,
  *   claimed_pages: array<int, bool>,
  *   viewer_claims: array<int, ClaimRow>,
  *   viewer_votes: array<int, true>,
- *   viewer_endorsements: array<int, true>,
  *   viewer_attestations: array<int, array{vouch: object|null, stand_behind: object|null}>,
  *   endorse_eligibility: array<int, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>,
  *   dispute_active_counts: array<int, int>,
@@ -123,7 +123,6 @@ final class PageCardPrefetcher
             'claimed_pages'              => [],
             'viewer_claims'              => [],
             'viewer_votes'               => [],
-            'viewer_endorsements'        => [],
             'viewer_attestations'        => [],
             'endorse_eligibility'        => [],
             'dispute_active_counts'      => [],
@@ -237,7 +236,6 @@ final class PageCardPrefetcher
         // ── 4. Viewer-keyed batches (skipped entirely for anon) ─────
         $viewerClaims       = [];
         $viewerVotes        = [];
-        $viewerEndorsements = [];
         $viewerAttestations = [];
         $endorseEligibility = [];
         if ($viewerId > 0) {
@@ -245,7 +243,9 @@ final class PageCardPrefetcher
 
             $viewerClaims       = ClaimRepository::getUserClaimsForEntities($viewerId, 'page', $pageIds);
             $viewerVotes        = (new VoteRepository())->getVotedPageIdsForVoter($viewerId, $pageIds);
-            $viewerEndorsements = (new EndorsementRepository())->getEndorsedPageIdsForUser($viewerId, $pageIds, 'general');
+            // viewer_has_endorsed is derived from viewer_attestations below
+            // (vouch slot non-null) — no separate endorsements batch since
+            // the legacy endorsements-table retirement.
             foreach ($idsByTargetKind as $targetKind => $targetIds) {
                 $viewerAttestations += $attestationRepo->findActiveByAttestorForTargets(
                     $viewerId,
@@ -262,7 +262,6 @@ final class PageCardPrefetcher
             'claimed_pages'              => $claimedPages,
             'viewer_claims'              => $viewerClaims,
             'viewer_votes'               => $viewerVotes,
-            'viewer_endorsements'        => $viewerEndorsements,
             'viewer_attestations'        => $viewerAttestations,
             'endorse_eligibility'        => $endorseEligibility,
             'dispute_active_counts'      => $disputeActiveCounts,
