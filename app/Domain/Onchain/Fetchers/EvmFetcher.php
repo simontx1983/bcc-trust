@@ -214,21 +214,43 @@ class EvmFetcher implements FetcherInterface
      * results exist; the caller passes it back via `$pageKey` to
      * continue. `page_key === null` means the range is fully drained.
      *
+     * FAILURE SEMANTICS: returns `null` on any path where we cannot
+     * prove the range was read — transport error (WP_Error), non-JSON /
+     * malformed body, JSON-RPC error member, or a missing `result`
+     * (e.g. a public RPC that doesn't implement the Alchemy method).
+     * Historically these collapsed into the empty-success shape, which
+     * the worker read as "range fully drained" and ADVANCED THE
+     * CHECKPOINT over blocks it never read — silent data loss on any
+     * transient provider failure. `null` is now the explicit "unknown,
+     * do not advance" signal; a genuinely-empty `result.transfers`
+     * stays the `['transfers' => [], 'page_key' => null]` success shape.
+     *
      * Returns events in the indexer's normalized TransferEvent shape:
      * see NftHoldingsIndexer phpstan-type for the contract.
      *
-     * @return array{transfers: list<array<string, mixed>>, page_key: string|null}
+     * @return array{transfers: list<array<string, mixed>>, page_key: string|null}|null
      */
-    public function fetch_transfers_since(int $fromBlock, int $toBlock, ?string $pageKey = null): array
+    public function fetch_transfers_since(int $fromBlock, int $toBlock, ?string $pageKey = null): ?array
     {
-        $empty = ['transfers' => [], 'page_key' => null];
+        $chainIdForLog = (int) ($this->chain->id ?? 0);
 
         $rpcUrl = (string) ($this->chain->rpc_url ?? '');
         if (!$rpcUrl || str_ends_with($rpcUrl, '/v2/')) {
-            return $empty;
+            // Misconfiguration, not an empty range — the caller must not
+            // treat this as "drained".
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers: rpc_url missing or placeholder', [
+                'chain_id' => $chainIdForLog,
+            ]);
+            return null;
         }
         if ($fromBlock < 0 || $toBlock < $fromBlock) {
-            return $empty;
+            // Caller bug — surface as failure rather than fake success.
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers: invalid block range', [
+                'chain_id'   => $chainIdForLog,
+                'from_block' => $fromBlock,
+                'to_block'   => $toBlock,
+            ]);
+            return null;
         }
 
         $chainId = (int) $this->chain->id;
@@ -264,19 +286,44 @@ class EvmFetcher implements FetcherInterface
         ]);
 
         if (is_wp_error($response)) {
-            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers error: ' . $response->get_error_message());
-            return $empty;
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers transport error: ' . $response->get_error_message(), [
+                'chain_id' => $chainId,
+            ]);
+            return null;
         }
 
         $json = json_decode(wp_remote_retrieve_body($response), true);
-        if (!is_array($json) || !isset($json['result']) || !is_array($json['result'])) {
-            return $empty;
+        if (!is_array($json)) {
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers: non-JSON response body', [
+                'chain_id' => $chainId,
+            ]);
+            return null;
+        }
+        if (isset($json['error'])) {
+            // JSON-RPC error member — includes public RPCs that don't
+            // support the Alchemy-proprietary method.
+            $msg = is_array($json['error']) && isset($json['error']['message']) && is_string($json['error']['message'])
+                ? $json['error']['message']
+                : '(no error.message)';
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers RPC error: ' . $msg, [
+                'chain_id' => $chainId,
+            ]);
+            return null;
+        }
+        if (!isset($json['result']) || !is_array($json['result'])) {
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers: missing result field', [
+                'chain_id' => $chainId,
+            ]);
+            return null;
         }
 
         $rawTransfers = $json['result']['transfers'] ?? [];
         $newPageKey   = $json['result']['pageKey'] ?? null;
         if (!is_array($rawTransfers)) {
-            return $empty;
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers: result.transfers not an array', [
+                'chain_id' => $chainId,
+            ]);
+            return null;
         }
 
         $transfers = [];
