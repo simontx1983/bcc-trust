@@ -613,6 +613,12 @@ class UserInfoRepository {
         }
 
         $this->invalidateCache($userId);
+        // Flush the cross-plugin suspension cache (bcc-core Permissions)
+        // immediately — its listener keys on this action. Without it,
+        // Permissions::is_not_suspended() serves a stale answer for up to
+        // its 60s TTL after a status change. invalidateCache() above only
+        // clears the user_info row cache, not the Permissions cache.
+        do_action('bcc_user_suspension_changed', $userId);
         $this->dispatchSuspensionFanout($userId);
     }
     
@@ -644,6 +650,10 @@ class UserInfoRepository {
         }
 
         $this->invalidateCache($userId);
+        // Mirror suspendUser(): flush the cross-plugin Permissions
+        // suspension cache immediately so a lifted suspension takes effect
+        // without waiting out the 60s TTL. See Permissions::registerHooks.
+        do_action('bcc_user_suspension_changed', $userId);
         $this->dispatchSuspensionFanout($userId);
     }
 
