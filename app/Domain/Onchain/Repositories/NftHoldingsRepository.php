@@ -802,13 +802,19 @@ final class NftHoldingsRepository
                     confirmed_at = GREATEST(confirmed_at, VALUES(confirmed_at)),
                     indexed_at = VALUES(indexed_at)";
 
-            $wpdb->query($wpdb->prepare(
+            $applied = $wpdb->query($wpdb->prepare(
                 $sql,
                 $walletLinkId, $chainId, $contract, $tokenId,
                 $tokenStd, $seedBalance, $status, $block,
                 $confirmedAt, $now,
                 $delta, self::STATUS_PENDING
             ));
+            // Fail loud, not silent: a failed balance write must roll the batch
+            // back (ingestBatch's try/catch) rather than leave the checkpoint
+            // out of sync with a half-applied row set.
+            if ($applied === false) {
+                throw new \RuntimeException('applyDeltas balance upsert failed: ' . (string) $wpdb->last_error);
+            }
 
             // Zero-cleanup: a holding decremented to zero (or a negative-only
             // seed) leaves no row, matching the 721 delete semantics and

@@ -232,3 +232,6 @@ bcc_onchain_create_collections_table();
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-wallets.php';
 bcc_onchain_create_wallet_links_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-holdings.php';
+bcc_onchain_create_nft_holdings_table();
