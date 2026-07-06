@@ -17,8 +17,8 @@ use BCC\Core\ServiceLocator;
  * bcc_trust_wallet_signals table is no longer written to.
  *
  * All public methods preserve the original static call signatures so
- * existing callers (PageDataAggregator, CronService, PeepSoIntegration,
- * WalletVerificationService) require zero changes.
+ * existing callers (CronService, PeepSoIntegration, WalletVerificationService)
+ * require zero changes.
  */
 final class WalletSignalRepository
 {

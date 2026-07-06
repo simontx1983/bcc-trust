@@ -11,7 +11,6 @@
  * @version 2.1.1
  *
  * Security notes preserved from TrustRestController:
- *  - get_user_status: removed reference to non-existent `pages_joined` column
  *  - store_fingerprint: automation_score now capped at 100 with LEAST()
  *
  * Email verification is handled by PeepSo; the PeepSo bridge in
@@ -21,11 +20,9 @@
  * @status alive — extracted-handler class wired by
  *                 {@see \BCC\Trust\Core\Controllers\TrustRestController}
  *                 (`POST /bcc-trust/v1/device-fingerprint` →
- *                 `store_fingerprint`; `GET /bcc-trust/v1/user/status` →
- *                 `get_user_status`, registered at TrustRestController.php:135
- *                 + :141). Not a duplicate handler — V-27 was a false positive.
- *                 Phase B V-18 classification 2026-05-09.
- *                 See docs/pattern-registry.md "Phase B inventory addendum".
+ *                 `store_fingerprint`). The former GET /user/status →
+ *                 get_user_status handler was never re-registered after the
+ *                 extraction and has been removed.
  */
 
 namespace BCC\Trust\Core\Controllers;
@@ -157,43 +154,6 @@ class UserStatusController {
             \BCC\Core\Log\Logger::error('[bcc-trust] store_fingerprint failed', ['error' => $e->getMessage()]);
             $safeMessages = ['User not authenticated', 'Invalid fingerprint data', 'Invalid fingerprint format'];
             $message = in_array($e->getMessage(), $safeMessages, true) ? $e->getMessage() : 'An unexpected error occurred.';
-            return self::errorWithCode('bcc_invalid_request', $message, 400);
-        }
-    }
-
-    /**
-     * Get user's fraud/trust status
-     *
-     * @return WP_REST_Response|WP_Error
-     */
-    public static function get_user_status(WP_REST_Request $request) {
-        if (!RateLimiter::allow('api')) {
-            return self::errorWithCode('bcc_rate_limited', 'Too many requests.', 429);
-        }
-
-        try {
-            $userId = get_current_user_id();
-            if (!$userId) {
-                throw new Exception('User not authenticated');
-            }
-
-            $userInfo = \BCC\Trust\Core\Plugin::instance()->userInfoRepository()->getByUserId($userId);
-
-            // Security: internal fraud metrics are never exposed to the client.
-            return self::success([
-                'user_id'   => $userId,
-                'suspended' => $userInfo ? (bool) $userInfo->is_suspended : false,
-                'verified'  => $userInfo ? (bool) $userInfo->is_verified : false,
-                'stats'     => [
-                    'votes_cast'        => $userInfo ? (int) $userInfo->votes_cast : 0,
-                    'endorsements_given'=> $userInfo ? (int) $userInfo->endorsements_given : 0,
-                    'pages_owned'       => $userInfo ? (int) $userInfo->pages_owned : 0,
-                ],
-            ]);
-
-        } catch (Exception $e) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] get_user_status failed', ['error' => $e->getMessage()]);
-            $message = $e->getMessage() === 'User not authenticated' ? $e->getMessage() : 'An unexpected error occurred.';
             return self::errorWithCode('bcc_invalid_request', $message, 400);
         }
     }
