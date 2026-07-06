@@ -8,7 +8,6 @@
  * @version 2.1.1
  *
  * Fixes in this version:
- *  - get_user_status: removed reference to non-existent `pages_joined` column
  *  - store_fingerprint: automation_score now capped at 100 with LEAST()
  *  - get_fraud_trend: fixed AND/OR operator precedence with parentheses around OR clauses
  *  - get_page_score: endorsement_count fallback now checks === null instead of falsy

@@ -68,7 +68,9 @@ final class ReadModelHealthEndpoint
         $lag_seconds     = $repo->getDirtyQueueLagSeconds();
         $dirty_queue_len = $repo->getDirtyQueueSize();
 
-        // 6. Fallback counter from object cache (set by PageDataAggregator::trackFallback).
+        // 6. Read-model fallback counter from object cache. Retained for
+        // back-compat; the former PageDataAggregator writer was removed with
+        // the FSE read path, so this reads 0 unless another path sets it.
         $fallback_count = (int) \wp_cache_get('rm_fallback_count', 'bcc_page_rm');
 
         // 7. Pages where read model trust_score diverges from scores table by > 1 point.

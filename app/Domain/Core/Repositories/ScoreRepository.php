@@ -224,7 +224,7 @@ class ScoreRepository {
      * @deprecated Use saveRecalculated() inside a transaction with lockForUpdate().
      *             This method uses REPLACE INTO (DELETE+INSERT) which races with
      *             concurrent applyVoteDelta() increments. Only safe when the
-     *             caller holds a FOR UPDATE lock (as bulkUpdate() does).
+     *             caller holds a FOR UPDATE lock (as recalculateScore() does).
      */
     public function save(PageScore $score): void {
         global $wpdb;
@@ -1306,75 +1306,6 @@ class ScoreRepository {
         }
 
         $this->invalidateCache($pageId);
-    }
-
-    /**
-     * Bulk update scores.
-     *
-     * Wraps save() inside a transaction with a table-level lock on each
-     * page's rows to prevent the REPLACE INTO DELETE+INSERT from racing
-     * with concurrent applyVoteDelta() increments during admin repair.
-     *
-     * @param PageScore[] $scores
-     */
-    public function bulkUpdate(array $scores): int {
-        if (empty($scores)) {
-            return 0;
-        }
-
-        $updated = 0;
-
-        TransactionManager::run(function () use ($scores, &$updated) {
-            foreach ($scores as $score) {
-                try {
-                    $pageId = $score->getPageId();
-
-                    // Lock ALL category rows for this page.
-                    // This serialises with concurrent applyVoteDelta() which also
-                    // acquires row-level locks on the same page_id.
-                    global $wpdb;
-                    $lockedRows = $wpdb->get_results($wpdb->prepare(
-                        "SELECT id, category_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
-                        $pageId
-                    ));
-
-                    if (!empty($lockedRows)) {
-                        // Use UPDATE (not REPLACE INTO) to avoid DELETE+INSERT race.
-                        foreach ($lockedRows as $row) {
-                            $this->saveRecalculated($score, (int) $row->category_id);
-                        }
-                    } else {
-                        // No existing row — but the FOR UPDATE above returned
-                        // nothing only because there was nothing to lock.
-                        // A concurrent applyVoteDeltaUpsert can INSERT between
-                        // the lock-select and any write we do here.
-                        //
-                        // Race-safe path: INSERT IGNORE (unique-key serialises
-                        // with the concurrent vote INSERT), then re-lock the
-                        // resulting row, then UPDATE via saveRecalculated().
-                        // The INSERT IGNORE is a no-op when the concurrent
-                        // voter already created (page_id, 0); otherwise we
-                        // created it. Either way, saveRecalculated runs on
-                        // a locked row.
-                        $this->createIfNotExists($pageId, $score->getPageOwnerId());
-                        $wpdb->get_results($wpdb->prepare(
-                            "SELECT id, category_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
-                            $pageId
-                        ));
-                        $this->saveRecalculated($score, 0);
-                    }
-                    $this->invalidateCache($pageId);
-                    $updated++;
-                } catch (Exception $e) {
-                    \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'Failed to update score', [
-                        'page_id' => $score->getPageId(),
-                        'error'   => $e->getMessage(),
-                    ]);
-                }
-            }
-        });
-
-        return $updated;
     }
 
     /**
