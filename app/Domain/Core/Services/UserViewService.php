@@ -1238,6 +1238,11 @@ final class UserViewService
      */
     private function resolveQuests(int $userId): array
     {
+        // Backfill quests completed before their emitter was wired (throttled,
+        // own-view only — resolveProgression is self-only). Makes the checklist
+        // and the vote-weight multiplier reflect the operator's real state.
+        $this->questProgress->reconcile($userId);
+
         $progress = $this->questProgress->getProgress($userId);
 
         $items = [];

@@ -244,6 +244,67 @@ class QuestProgressService {
         wp_cache_delete("quest_map_" . BCC_QUEST_CACHE_VER . "_{$userId}", BCC_QUEST_CACHE_GROUP);
     }
 
+    /**
+     * Quests whose completion is a durable, cheaply re-checkable server-side
+     * fact (a verified wallet/GitHub/X, a filled profile, a cast vote, three
+     * explored projects). These can be backfilled by re-running their
+     * validator. `share_x` is deliberately excluded — its validator can hit
+     * the X API, so it stays signal-driven only.
+     */
+    private const RECONCILABLE_SLUGS = [
+        'connect_wallet',
+        'verify_github',
+        'verify_x',
+        'complete_profile',
+        'first_vote',
+        'explore_projects',
+    ];
+
+    /** Throttle window for the reconcile scan (seconds). */
+    private const RECONCILE_TTL = 21600; // 6 hours
+
+    /**
+     * Self-heal quests completed before their emitter existed.
+     *
+     * The signal emitters (wallet-verified, github/x-verified, first vote, …)
+     * only fire on NEW actions. A user who did those things earlier has no
+     * quest_log row, so their multiplier understates reality. This re-runs the
+     * authoritative validator for each durable quest and records any that now
+     * pass — idempotent (complete() is INSERT IGNORE) and persisted, so the
+     * corrected multiplier also reaches the vote path.
+     *
+     * Throttled to once per RECONCILE_TTL per user via a transient so the
+     * validator sweep never runs on the hot path; new completions are still
+     * immediate via their emitters regardless of this throttle. Best-effort:
+     * a validator that throws is skipped, never fatal.
+     */
+    public function reconcile(int $userId): void {
+        if ($userId <= 0) {
+            return;
+        }
+
+        $throttleKey = 'bcc_quest_reconciled_' . $userId;
+        if (get_transient($throttleKey)) {
+            return;
+        }
+        set_transient($throttleKey, 1, self::RECONCILE_TTL);
+
+        $completed = $this->getCompletedMap($userId);
+
+        foreach (self::RECONCILABLE_SLUGS as $slug) {
+            if (isset($completed[$slug])) {
+                continue;
+            }
+            try {
+                if (QuestValidator::validate($userId, $slug)) {
+                    $this->complete($userId, $slug);
+                }
+            } catch (\Throwable $e) {
+                // Onchain/PeepSo dependency unavailable — skip this slug.
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Hook listeners — wired in boot file
     // -------------------------------------------------------------------------
