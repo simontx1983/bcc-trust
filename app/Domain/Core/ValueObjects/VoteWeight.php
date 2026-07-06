@@ -27,6 +27,7 @@ final class VoteWeight {
      * @param string      $voterTier          Reputation tier at calculation time.
      * @param string|null $vestingStartedAt   MySQL datetime when vesting clock began (new voters only).
      * @param string|null $fullyVestedAt      MySQL datetime when voter reached stage 2, or null.
+     * @param float       $questMultiplier    Earned quest reward applied to effective weight (1.00–1.30).
      */
     public function __construct(
         public readonly float   $base,
@@ -38,6 +39,7 @@ final class VoteWeight {
         public readonly string  $voterTier,
         public readonly ?string $vestingStartedAt,
         public readonly ?string $fullyVestedAt,
+        public readonly float   $questMultiplier = 1.0,
     ) {}
 
     /**

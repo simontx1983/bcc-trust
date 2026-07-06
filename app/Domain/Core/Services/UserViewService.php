@@ -51,6 +51,7 @@ use BCC\Trust\Core\Repositories\ScoreEventRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Repositories\XRepository;
+use BCC\Trust\Core\Services\Quest\QuestProgressService;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\RankCatalog;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
@@ -75,6 +76,7 @@ final class UserViewService
     private PeepSoReactionRepository $reactionRepo;
     private DisputeParticipationRepository $participationRepo;
     private AttestationService $attestationService;
+    private QuestProgressService $questProgress;
 
     /**
      * Per-request memoization of resolveAugmentedTrustScore — UserViewService
@@ -96,7 +98,8 @@ final class UserViewService
         ScoreEventRepository $scoreEventRepo,
         PeepSoReactionRepository $reactionRepo,
         DisputeParticipationRepository $participationRepo,
-        AttestationService $attestationService
+        AttestationService $attestationService,
+        QuestProgressService $questProgress
     ) {
         $this->voteRepo            = $voteRepo;
         $this->reputationRepo      = $reputationRepo;
@@ -108,6 +111,7 @@ final class UserViewService
         $this->reactionRepo        = $reactionRepo;
         $this->participationRepo   = $participationRepo;
         $this->attestationService  = $attestationService;
+        $this->questProgress       = $questProgress;
     }
 
     /**
@@ -1197,7 +1201,8 @@ final class UserViewService
      *   next_rank: string|null,
      *   next_rank_label: string|null,
      *   next_rank_thresholds: list<array{metric: string, label: string, current: int, required: int}>,
-     *   trust_score_recent_changes: list<array{delta: int, reason: string, at: string}>
+     *   trust_score_recent_changes: list<array{delta: int, reason: string, at: string}>,
+     *   quests: array{multiplier: float, completed_count: int, total_count: int, pct: int, items: list<array{slug: string, label: string, hint: string, done: bool, weight_bonus: float, category: string}>}
      * }
      */
     private function resolveProgression(array $rank, int $userId, array $featureAccess): array
@@ -1211,6 +1216,53 @@ final class UserViewService
             'next_rank_label'            => $next !== null ? RankCatalog::getLabel($next) : null,
             'next_rank_thresholds'       => $featureAccess['next_level_thresholds'],
             'trust_score_recent_changes' => $this->resolveTrustScoreRecentChanges($userId),
+            'quests'                     => $this->resolveQuests($userId),
+        ];
+    }
+
+    /**
+     * §N11 quest block — the completion checklist plus the earned vote-weight
+     * multiplier it grants (VoteWeightCalculator applies this at cast time).
+     * Sourced from QuestProgressService::getProgress (object-cached), reshaped
+     * from a slug-keyed map into a stable ordered list so the frontend renders
+     * without deriving anything. Own-only: resolveProgression is only reached
+     * on the self view.
+     *
+     * @return array{
+     *   multiplier: float,
+     *   completed_count: int,
+     *   total_count: int,
+     *   pct: int,
+     *   items: list<array{slug: string, label: string, hint: string, done: bool, weight_bonus: float, category: string}>
+     * }
+     */
+    private function resolveQuests(int $userId): array
+    {
+        // Backfill quests completed before their emitter was wired (throttled,
+        // own-view only — resolveProgression is self-only). Makes the checklist
+        // and the vote-weight multiplier reflect the operator's real state.
+        $this->questProgress->reconcile($userId);
+
+        $progress = $this->questProgress->getProgress($userId);
+
+        $items = [];
+        foreach ($progress['quests'] as $slug => $quest) {
+            $items[] = [
+                'slug'         => (string) $slug,
+                'label'        => (string) $quest['label'],
+                'hint'         => (string) $quest['hint'],
+                'done'         => (bool) $quest['done'],
+                'weight_bonus' => round((float) $quest['weight_bonus'], 2),
+                'category'     => (string) $quest['category'],
+            ];
+        }
+
+        return [
+            'multiplier'      => round((float) $progress['multiplier'], 2),
+            'completed_count' => (int) $progress['completed_count'],
+            'total_count'     => (int) $progress['total_count'],
+            'pct'             => (int) $progress['pct'],
+            'items'           => $items,
         ];
     }
 

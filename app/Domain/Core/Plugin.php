@@ -646,7 +646,8 @@ final class Plugin
             $this->scoreEventRepository(),
             $this->peepSoReactionRepository(),
             \BCC\Trust\Disputes\DisputesPlugin::instance()->disputeParticipationRepository(),
-            $this->attestationService()
+            $this->attestationService(),
+            $this->questProgressService()
         );
     }
 

@@ -1118,6 +1118,38 @@ add_action('init', function () {
     }, 10, 2);
 
     add_action('bcc_trust_vote_cast', [$questService, 'onVoteCast'], 20, 3);
+
+    // Bridge wallet verification → connect_wallet quest. Hooks the domain
+    // event (not a single controller) so BOTH the Core REST wallet-link path
+    // and the Onchain AJAX path award the quest. onQuestSignal re-validates via
+    // QuestValidator::validateWalletConnected (checks for a verified wallet
+    // link) before awarding, so a spurious or duplicate signal is a safe no-op.
+    add_action('bcc_wallet_verified', function ($userId) {
+        $userId = (int) $userId;
+        if ($userId > 0) {
+            do_action('bcc_trust_quest_signal', $userId, 'connect_wallet');
+        }
+    }, 10, 1);
+
+    // Symmetric revoke: when a wallet is disconnected AND the user has no
+    // verified wallets left, revoke the quest (mirrors GitHub/X unlink).
+    // bcc_wallet_disconnected fires AFTER the row is deleted, so the validator
+    // observes the post-removal state. A user with other linked wallets keeps
+    // the quest. Guarded: if the Onchain classes aren't loaded the validator
+    // throws — skip the revoke rather than fatal on a disconnect.
+    add_action('bcc_wallet_disconnected', function ($userId) {
+        $userId = (int) $userId;
+        if ($userId <= 0) {
+            return;
+        }
+        try {
+            if (!\BCC\Trust\Core\Services\Quest\QuestValidator::validate($userId, 'connect_wallet')) {
+                do_action('bcc_trust_quest_signal_revoke', $userId, 'connect_wallet');
+            }
+        } catch (\Throwable $e) {
+            // Onchain domain unavailable — leave the quest state untouched.
+        }
+    }, 10, 1);
 }, 20);
 
 /*
