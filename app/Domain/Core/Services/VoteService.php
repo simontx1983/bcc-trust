@@ -239,7 +239,9 @@ class VoteService {
             $preCheckIsNewVoter,    // estimate is acceptable here: wrong value can only
                                     // affect weight when was_inserted=false, in which case
                                     // VoteWriter skips the score delta entirely anyway
-            $this->daysSinceFirstVote($voterId)
+            $this->daysSinceFirstVote($voterId),
+            null,                                     // $now — default (real clock)
+            $this->resolveQuestMultiplier($voterId)   // earned quest reward (1.00–1.30)
         );
 
         // ── 4b. Idempotency check (AFTER all gates, BEFORE mutation) ────────
@@ -848,6 +850,25 @@ class VoteService {
             'behavior_score'           => $behaviorScore,
             'trust_rank'               => $trustRank,
         ];
+    }
+
+    /**
+     * Resolve the voter's earned quest multiplier (1.00–BCC_QUEST_MULTIPLIER_MAX).
+     *
+     * Read-through the QuestProgressService object cache (5-min TTL) so the hot
+     * vote path stays cheap. Fail-safe: any error yields 1.0 — a reward lookup
+     * problem must never block a vote or distort its weight downward. The
+     * calculator floors the returned value at 1.0 as defence in depth.
+     */
+    private function resolveQuestMultiplier(int $voterId): float {
+        if ($voterId <= 0) {
+            return 1.0;
+        }
+        try {
+            return \BCC\Trust\Core\Plugin::instance()->questProgressService()->getMultiplier($voterId);
+        } catch (\Throwable $e) {
+            return 1.0;
+        }
     }
 
     /**

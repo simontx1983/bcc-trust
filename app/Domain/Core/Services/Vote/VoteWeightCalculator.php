@@ -85,6 +85,12 @@ class VoteWeightCalculator {
      * }
      * @param bool $is_new_voter     True when no previous vote row exists.
      * @param int  $days_since_first Days since voter's first-ever vote (0 when new).
+     * @param float $questMultiplier Earned quest reward (1.00–1.30), resolved by the
+     *                               caller and passed in to keep this calculator pure.
+     *                               Floored at 1.0 here so it can only ever add weight,
+     *                               never penalise; the MAX_VOTE_WEIGHT clamp bounds the
+     *                               top, so the reward favours mid-tier voters rather
+     *                               than compounding already-maxed elite weight.
      */
     public function calculate(
         array               $voterProfile,
@@ -92,9 +98,15 @@ class VoteWeightCalculator {
         array               $signals,
         bool                $is_new_voter,
         int                 $days_since_first,
-        ?\DateTimeImmutable $now = null
+        ?\DateTimeImmutable $now = null,
+        float               $questMultiplier = 1.0
     ): VoteWeight {
         $now ??= new \DateTimeImmutable('now');
+
+        // Floor at 1.0: a bad/missing multiplier degrades to "no bonus", never
+        // to a penalty. Values above the quest ceiling are harmlessly bounded
+        // by the MAX_VOTE_WEIGHT clamp below.
+        $questMultiplier = max(1.0, $questMultiplier);
 
         // ── Stage 1: Base Weight ────────────────────────────────────────
         $base = $this->computeBase($voterProfile);
@@ -104,7 +116,10 @@ class VoteWeightCalculator {
         $discount    = $fraudResult['discount'];
 
         // ── Stage 3: Final Weight ───────────────────────────────────────
-        $effective = round($base * $discount, 4);
+        // Quest reward applies after the fraud discount so a flagged account
+        // earns a proportionally smaller bonus, then the whole thing is clamped
+        // to the platform ceiling.
+        $effective = round($base * $discount * $questMultiplier, 4);
         $effective = max(0.0, min(BCC_TRUST_MAX_VOTE_WEIGHT, $effective));
 
         [$vested, $stage, $startedAt, $fullyVestedAt] =
@@ -120,6 +135,7 @@ class VoteWeightCalculator {
             voterTier:         $voterProfile['tier'],
             vestingStartedAt:  $startedAt,
             fullyVestedAt:     $fullyVestedAt,
+            questMultiplier:   $questMultiplier,
         );
     }
 
