@@ -747,6 +747,16 @@ final class NftHoldingsRepository
      * (forward-history gap: we never saw the acquiring IN) seeds 0 and is
      * then cleaned up.
      *
+     * CALLER INVARIANT (load-bearing): every batch handed here must fold a
+     * WHOLE block — never a partial one. The strict `>` guard means a second
+     * delta for the same (key, block) is silently dropped, so if a single
+     * block's events are split across two ingest() calls (an Alchemy page
+     * boundary cutting mid-block) the second half is lost and the balance
+     * under-counts permanently. NftEthIndexerWorker guarantees this via its
+     * boundary-block carry buffer (it holds back the highest, possibly-
+     * incomplete block until a strictly higher block proves it done, or the
+     * range fully drains). Do NOT feed this method a mid-block slice.
+     *
      * @param list<array<string, mixed>> $deltas
      * @return array{upserts: int, deletes: int, touched: list<int>}
      */
