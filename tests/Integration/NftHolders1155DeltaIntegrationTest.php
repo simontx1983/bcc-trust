@@ -106,4 +106,28 @@ final class NftHolders1155DeltaIntegrationTest extends TestCase
 
         self::assertSame(7, $this->heldTotal());
     }
+
+    /**
+     * DB-layer contract that the worker's whole-block carry buffer exists
+     * to satisfy (Bug A, 2026-07-06 audit). The `> last_seen_block` guard
+     * means a SECOND delta for the same (key, block) is DROPPED — so if a
+     * single block's 1155 events are ever ingested in two separate batches
+     * (an Alchemy page boundary cutting mid-block), the second batch is
+     * silently lost and the balance under-counts. This test pins that
+     * failure so the invariant "never hand applyDeltas a partial block"
+     * can never be quietly regressed at the repository layer.
+     */
+    public function testSecondDeltaAtSameBlockIsDroppedByGuard(): void
+    {
+        // Airdrop mints 5 units in block 100, but split across two ingest
+        // calls the way a mid-block page boundary would: +2 then +3.
+        $this->delta(2, 100);
+        $this->delta(3, 100);
+
+        // The second +3 is dropped by the block guard → balance sticks at 2,
+        // NOT 5. A min_balance=3 gate would reject this real holder. The
+        // worker MUST fold the whole block into a single delta (+5) so this
+        // path is never exercised in production.
+        self::assertSame(2, $this->heldTotal());
+    }
 }

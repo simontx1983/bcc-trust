@@ -406,6 +406,44 @@ final class PushPayload
     }
 
     /**
+     * Holder-community go-live. Fired once per waitlisted-and-qualified
+     * user when a verified collection's holder group is provisioned, so
+     * aggregation (count > 1) means several communities went live inside
+     * one debounce window — rare, rendered as a plain count.
+     *
+     * @param array<string, mixed> $first First queued payload — provides
+     *   collection_name, group_id, and group_slug for the body + url.
+     * @return array{title: string, body: string, url: string, tag?: string}
+     */
+    public static function forHolderCommunityLive(int $count, array $first): array
+    {
+        $name    = self::stringFrom($first, 'collection_name');
+        $slug    = self::stringFrom($first, 'group_slug');
+        $groupId = self::intFrom($first, 'group_id');
+
+        $title = 'Community live';
+        $body  = $count > 1
+            ? sprintf('%d holder communities you waitlisted are live.', $count)
+            : ($name !== ''
+                ? sprintf("The %s holders community is live — you qualify to join.", $name)
+                : 'A holders community you waitlisted is live — you qualify to join.');
+
+        $payload = [
+            'title' => $title,
+            'body'  => $body,
+            'url'   => ($count === 1 && $slug !== '')
+                ? '/communities/' . $slug
+                : '/communities',
+        ];
+        if ($groupId > 0) {
+            // Per-group tag — two collections going live concurrently
+            // stay distinct on the OS shell.
+            $payload['tag'] = 'bcc-holder-live-' . $groupId;
+        }
+        return $payload;
+    }
+
+    /**
      * @param array<string, mixed> $arr
      */
     private static function stringFrom(array $arr, string $key): string

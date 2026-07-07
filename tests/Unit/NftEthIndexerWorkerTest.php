@@ -169,10 +169,55 @@ final class NftEthIndexerWorkerTest extends TestCase
         self::assertSame('degraded', $failures[0]['state']);
         self::assertSame([self::CHAIN_ID], \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::$failureChains);
 
-        // Page-1 transfers were ingested before the failure (idempotent).
+        // Carry buffer: block 600 was the highest in page 1 and had a
+        // pending pageKey, so it could NOT be proven complete — it was
+        // held back, NOT ingested, and discarded when page 2 failed. Only
+        // the proven-complete blocks 501 + 550 were ingested (count 2, not
+        // 3). The next tick re-reads block 600 whole from checkpoint 599.
         self::assertSame(
-            [['chain_id' => self::CHAIN_ID, 'count' => 3]],
+            [['chain_id' => self::CHAIN_ID, 'count' => 2]],
             \BCC\Trust\Onchain\Services\NftHoldingsIndexer::$batches
+        );
+        self::assertSame(
+            [[501, 550]],
+            \BCC\Trust\Onchain\Services\NftHoldingsIndexer::$batchBlocks
+        );
+    }
+
+    /**
+     * Core carry-buffer property: a single block whose transfers straddle
+     * an Alchemy page boundary is handed to ingest() exactly once, whole —
+     * never split across two calls (which would drop the second half via
+     * the applyDeltas `> last_seen_block` guard and under-count 1155
+     * balances). Bug A from the 2026-07-06 audit.
+     */
+    public function testSameBlockSplitAcrossPagesIsIngestedWhole(): void
+    {
+        $this->queueHeadBlock();
+        // Page 1 ends mid-block 502 (501, then two events of 502), more
+        // pages pending.
+        $this->queueTransferPage([501, 502, 502], 'page-2-token');
+        // Page 2 continues block 502 (one more event) then block 503, and
+        // fully drains (no pageKey).
+        $this->queueTransferPage([502, 503], null);
+
+        NftEthIndexerWorker::runForChain(self::CHAIN_ID);
+
+        // Full drain → checkpoint advances to rangeTo (safe head).
+        self::assertSame(
+            [['chain_id' => self::CHAIN_ID, 'block' => self::SAFE_HEAD, 'head' => self::HEAD_BLOCK]],
+            \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::$successes
+        );
+        self::assertSame([], \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::$failures);
+
+        // The critical assertion: every event of block 502 (two from page 1
+        // + one from page 2 = three total) lands in ONE ingest call, and no
+        // ingest call contains a partial 502. Page 1 ingested only the
+        // proven-complete block 501; the final drain ingested the whole of
+        // 502 (×3) plus 503.
+        self::assertSame(
+            [[501], [502, 502, 502, 503]],
+            \BCC\Trust\Onchain\Services\NftHoldingsIndexer::$batchBlocks
         );
     }
 

@@ -1114,6 +1114,11 @@ final class NotificationDispatcher
                 return;
             }
 
+            // get_post_field is typed array<int>|int|string by the stubs;
+            // post_name is always a string in practice — guard to satisfy L8.
+            $groupSlugRaw = get_post_field('post_name', $groupId);
+            $groupSlug    = is_string($groupSlugRaw) ? $groupSlugRaw : '';
+
             $delivered = [];
             foreach ($pending as $userId) {
                 $this->dispatch(
@@ -1128,6 +1133,8 @@ final class NotificationDispatcher
 
                 $this->pushDispatcher->enqueue($userId, 'holder_community_live', [
                     'group_id'         => $groupId,
+                    'group_slug'       => $groupSlug,
+                    'collection_name'  => $name ?? '',
                     'collection_id'    => $collectionId,
                     'chain_id'         => $chainId,
                     'contract_address' => $contract,

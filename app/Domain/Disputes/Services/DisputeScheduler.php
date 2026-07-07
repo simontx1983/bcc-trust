@@ -277,8 +277,16 @@ class DisputeScheduler
             return; // Another process is running — skip this tick.
         }
 
+        // Heartbeat (mirrors auto_resolve_expired): last_run = cron fired
+        // and we entered the body; last_success = the sweep completed.
+        // Without this, a stalled reconcile job is indistinguishable from
+        // a healthy one — the hook-name split-brain that hid this job from
+        // the monitor until 2026-07-06 also meant no heartbeat existed.
+        update_option('bcc_disputes_reconcile_last_run', time(), false);
+
         try {
             self::doReconcile();
+            update_option('bcc_disputes_reconcile_last_success', time(), false);
         } finally {
             DisputeRepository::releaseReconcileLock();
         }

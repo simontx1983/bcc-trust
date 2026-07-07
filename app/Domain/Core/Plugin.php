@@ -2415,7 +2415,7 @@ final class Plugin
                 ];
             };
             $health['cron_status'] = [
-                'bcc_disputes_reconcile'         => $nextRun('bcc_disputes_reconcile'),
+                'bcc_disputes_reconcile_orphans' => $nextRun(\BCC\Trust\Disputes\Services\DisputeScheduler::EVENT_RECONCILE),
                 'bcc_gated_group_provision'      => $nextRun('bcc_gated_group_provision'),
                 'bcc_gated_group_reconcile_sweep' => $nextRun('bcc_gated_group_reconcile_sweep'),
                 'bcc_nft_eth_indexer_tick'       => $nextRun(\BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK),

@@ -666,7 +666,11 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
         'bcc_watch_batch_sweep'           => ['interval' => 'bcc_pull_batch_sweep_minute', 'description' => 'WatchBatchAggregator sweep'],
         // Disputes domain
         'bcc_disputes_auto_resolve'       => ['interval' => 'daily',                'description' => 'dispute auto-resolve sweep'],
-        'bcc_disputes_reconcile'          => ['interval' => 'bcc_five_minutes',     'description' => 'dispute reconcile (covers cron + AS enqueue failures)'],
+        // Must match DisputeScheduler::EVENT_RECONCILE. The monitor watched
+        // 'bcc_disputes_reconcile' (the advisory-lock name, not the hook)
+        // until 2026-07-06 — a permanent false MISSING alarm for a job that
+        // was running fine under *_orphans.
+        'bcc_disputes_reconcile_orphans'  => ['interval' => 'bcc_five_minutes',     'description' => 'dispute reconcile (covers cron + AS enqueue failures)'],
     ];
     foreach ($bccTrustHooks as $hook => $meta) {
         $hooks[$hook] = array_merge($meta, ['source' => 'bcc-trust']);

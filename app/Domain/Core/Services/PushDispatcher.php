@@ -85,6 +85,14 @@ final class PushDispatcher
             return;
         }
         if (!in_array($eventType, NotificationPrefs::PUSH_TYPES, true)) {
+            // Fail closed, but never silently — an unknown type here means
+            // a dispatch site and the PUSH_TYPES allowlist have drifted
+            // (caught live 2026-07-06: holder_community_live pushes were
+            // dropped for every recipient with no trace).
+            Logger::warning('[PushDispatcher] enqueue dropped: event type not in PUSH_TYPES allowlist', [
+                'event_type'   => $eventType,
+                'recipient_id' => $recipientId,
+            ]);
             return;
         }
         if (!NotificationPrefs::isPushEnabled($recipientId, $eventType)) {
@@ -281,6 +289,7 @@ final class PushDispatcher
             'attestation_stand_behind_received'   => PushPayload::forAttestationStandBehindReceived($count, $first),
             'attestation_revoked'                 => PushPayload::forAttestationRevoked($count, $first),
             'attestation_reaffirmed'              => PushPayload::forAttestationReaffirmed($count, $first),
+            'holder_community_live'               => PushPayload::forHolderCommunityLive($count, $first),
             default                               => [
                 'title' => 'Blue Collar Crypto',
                 'body'  => 'You have new activity.',
