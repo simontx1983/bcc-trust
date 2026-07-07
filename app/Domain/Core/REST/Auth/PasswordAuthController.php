@@ -4,14 +4,14 @@
  *
  * Routes:
  *   - POST /auth/signup          — create account with email + handle
- *   - POST /auth/login           — email + password → 2FA challenge
+ *   - POST /auth/login           — email OR handle + password → 2FA challenge
  *   - POST /auth/forgot-password — anti-enumeration password-reset request
  *   - POST /auth/reset-password  — consume reset key + set new password
  *
  * Split out of AuthEndpoint (Phase 11 architecture split #3 of 4). Route
- * blocks + handler bodies are VERBATIM; shared helpers + constants moved
- * to AuthSupport. No auth logic, password check, OTP, or key string
- * changed.
+ * blocks + handler bodies were originally VERBATIM from that split; login()
+ * was later extended (identifier may be email or handle) — see its inline
+ * comment. Everything else (password check, OTP, key strings) is unchanged.
  *
  * @package BCC\Trust\Core\REST\Auth
  * @since V1 (Phase 11 split — 2026-06)
@@ -75,7 +75,10 @@ final class PasswordAuthController
             ]
         );
 
-        // POST /auth/login — email + password → JWT (same response as signup).
+        // POST /auth/login — email or handle + password → JWT (same
+        // response as signup). `identifier` may be either; sanitize as
+        // plain text here, the handler itself detects the shape (email
+        // vs. handle) before doing the corresponding sanitize/lookup.
         register_rest_route(
             AuthSupport::ROUTE_NAMESPACE,
             '/auth/login',
@@ -84,10 +87,10 @@ final class PasswordAuthController
                 'callback'            => [$instance, 'login'],
                 'permission_callback' => '__return_true',
                 'args' => [
-                    'email' => [
+                    'identifier' => [
                         'required'          => true,
                         'type'              => 'string',
-                        'sanitize_callback' => 'sanitize_email',
+                        'sanitize_callback' => 'sanitize_text_field',
                     ],
                     'password' => [
                         'required' => true,
@@ -287,21 +290,32 @@ final class PasswordAuthController
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
 
-        $email    = sanitize_email((string) $request->get_param('email'));
-        $password = (string) $request->get_param('password');
+        $identifier = trim((string) $request->get_param('identifier'));
+        $password   = (string) $request->get_param('password');
 
-        if ($email === '' || !is_email($email) || $password === '') {
-            return ApiResponse::error('bcc_invalid_request', 'Email and password are required.', 422);
+        if ($identifier === '' || $password === '') {
+            return ApiResponse::error('bcc_invalid_request', 'Email/handle and password are required.', 422);
         }
 
-        $user = get_user_by('email', $email);
+        // Accept either an email address or a handle on the same field.
+        // Detect which by shape: a real email always contains '@' + a
+        // valid domain per is_email(); anything else is treated as a
+        // handle and mapped through the same u_<handle> login convention
+        // signup() uses (a leading '@' is stripped defensively, since
+        // handles are always displayed with one in the UI).
+        if (is_email($identifier)) {
+            $user = get_user_by('email', sanitize_email($identifier));
+        } else {
+            $handle = ltrim(strtolower($identifier), '@');
+            $user   = get_user_by('login', AuthSupport::deriveLogin($handle));
+        }
 
-        // Generic error for both "user not found" and "wrong password" —
+        // Generic error for "not found" and "wrong password" alike —
         // never leak which one failed (account-enumeration resistance).
         // wp_check_password is the canonical path; it handles legacy
         // hash formats + rehash-on-login transparently.
         if ($user === false || !wp_check_password($password, $user->user_pass, $user->ID)) {
-            return ApiResponse::error('bcc_invalid_credentials', 'Invalid email or password.', 401);
+            return ApiResponse::error('bcc_invalid_credentials', 'Invalid credentials.', 401);
         }
 
         $userId = (int) $user->ID;
