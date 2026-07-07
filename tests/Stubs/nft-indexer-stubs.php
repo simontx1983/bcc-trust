@@ -542,9 +542,20 @@ namespace BCC\Trust\Onchain\Services {
             /** @var list<array{chain_id: int, count: int}> */
             public static array $batches = [];
 
+            /**
+             * Block numbers ingested per ingest() call, in call order.
+             * Additive to $batches — lets carry-buffer tests assert that a
+             * block is only ever handed to ingest() whole (all its
+             * transfers in one call).
+             *
+             * @var list<list<int>>
+             */
+            public static array $batchBlocks = [];
+
             public static function reset(): void
             {
-                self::$batches = [];
+                self::$batches     = [];
+                self::$batchBlocks = [];
             }
 
             /**
@@ -554,6 +565,11 @@ namespace BCC\Trust\Onchain\Services {
             public static function ingest(int $chainId, array $transfers): array
             {
                 self::$batches[] = ['chain_id' => $chainId, 'count' => count($transfers)];
+                $blocks = [];
+                foreach ($transfers as $t) {
+                    $blocks[] = (int) ($t['block_number'] ?? 0);
+                }
+                self::$batchBlocks[] = $blocks;
                 return ['inserts' => count($transfers), 'deletes' => 0, 'skipped' => 0];
             }
         }

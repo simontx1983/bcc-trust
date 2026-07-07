@@ -314,6 +314,24 @@ final class NftEthIndexerWorker
         // Step-8 advance is skipped in favor of the error path below.
         $fetchFailed = false;
 
+        // Boundary-block carry buffer. Holds the transfers of the highest
+        // block seen so far that we CANNOT yet prove is complete — the
+        // next page may carry more of the same block (Alchemy paginates
+        // within a block). It is never ingested until either a strictly
+        // higher block appears (proving this one is done) or the range
+        // fully drains on the final page. On a partial drain or a fetch
+        // failure it is DISCARDED, and the next tick re-reads its block
+        // whole from $maxBlockSeen.
+        //
+        // Why: NftHoldingsRepository::applyDeltas guards the 1155 delta
+        // upsert with `VALUES(last_seen_block) > last_seen_block`, so a
+        // second delta for the same (wallet, contract, token) key at the
+        // SAME block is dropped. Ingesting a block in two halves (a page
+        // split mid-block) therefore silently under-counts 1155 balances.
+        // Handing ingest() only whole blocks makes that guard correct by
+        // construction and keeps the Step-8 boundary re-read loss-free.
+        $carry = [];
+
         for ($pageNum = 0; $pageNum < self::MAX_PAGES_PER_TICK; $pageNum++) {
             if ($remainingLocal < self::CU_PER_CALL) {
                 break;
@@ -329,24 +347,61 @@ final class NftEthIndexerWorker
 
             if ($page === null) {
                 $fetchFailed = true;
-                break;
+                break; // $carry intentionally discarded — see Step 7.5.
             }
 
-            $transfers = $page['transfers'];
-            if ($transfers !== []) {
-                foreach ($transfers as $transfer) {
-                    $blockNumber = (int) ($transfer['block_number'] ?? 0);
-                    if ($blockNumber > $maxBlockSeen) {
-                        $maxBlockSeen = $blockNumber;
+            $pageKey = $page['page_key'];
+
+            // Prepend the carried boundary block. Its block number is <=
+            // every block in this page (ascending (blockNum, logIndex)
+            // order across pages), so the merged list stays ordered.
+            $combined = $carry === []
+                ? $page['transfers']
+                : array_merge($carry, $page['transfers']);
+            $carry = [];
+
+            if ($combined === []) {
+                if ($pageKey === null) {
+                    break; // Range fully drained (empty tail).
+                }
+                continue;
+            }
+
+            $maxBlockInBatch = 0;
+            foreach ($combined as $transfer) {
+                $blockNumber = (int) ($transfer['block_number'] ?? 0);
+                if ($blockNumber > $maxBlockInBatch) {
+                    $maxBlockInBatch = $blockNumber;
+                }
+            }
+            if ($maxBlockInBatch > $maxBlockSeen) {
+                $maxBlockSeen = $maxBlockInBatch;
+            }
+
+            if ($pageKey === null) {
+                // Final page: the max block is complete too — ingest all.
+                $toIngest = $combined;
+            } else {
+                // More pages may follow: the max block may continue into
+                // the next page. Carry it; ingest only proven-complete
+                // blocks (everything strictly below the batch max).
+                $toIngest = [];
+                foreach ($combined as $transfer) {
+                    if ((int) ($transfer['block_number'] ?? 0) === $maxBlockInBatch) {
+                        $carry[] = $transfer;
+                    } else {
+                        $toIngest[] = $transfer;
                     }
                 }
-                $batchResult = NftHoldingsIndexer::ingest($chainId, $transfers);
+            }
+
+            if ($toIngest !== []) {
+                $batchResult = NftHoldingsIndexer::ingest($chainId, $toIngest);
                 $totalIns  += $batchResult['inserts'];
                 $totalDel  += $batchResult['deletes'];
                 $totalSkip += $batchResult['skipped'];
             }
 
-            $pageKey = $page['page_key'];
             if ($pageKey === null) {
                 break; // Range fully drained.
             }
@@ -418,13 +473,15 @@ final class NftEthIndexerWorker
         // block we can SAFELY claim as processed is $maxBlockSeen - 1. We
         // advance the checkpoint there; the next tick resumes at
         // $maxBlockSeen, re-reading only the boundary block onward. That
-        // re-read is loss-free because ingest is idempotent: the holdings
-        // UPSERT is `INSERT ... ON DUPLICATE KEY UPDATE` keyed on
-        // (wallet_link_id, contract_address, token_id) with
-        // GREATEST(last_seen_block, VALUES(last_seen_block)) /
-        // GREATEST(confirmed_at, ...) (NftHoldingsRepository::upsertMany),
-        // and the OUT-leg delete is a no-op on a missing row. Re-reading the
-        // boundary block re-upserts identical state — it converges.
+        // re-read is loss-free because the boundary block ($maxBlockSeen)
+        // was NEVER ingested this tick — it sat in $carry and was discarded
+        // when the loop broke, so the next tick reads it whole from scratch.
+        // (For the 721 path this also composes with idempotent upsertMany —
+        // GREATEST(last_seen_block, VALUES(...)) keyed on (wallet_link_id,
+        // contract_address, token_id), OUT-leg delete a no-op on a missing
+        // row — but the carry buffer is what makes the 1155 delta path
+        // safe: applyDeltas' `> last_seen_block` guard would otherwise drop
+        // the re-read block's deltas as "already applied.")
         // This guarantees monotonic progress whenever the read pages span
         // >= 2 distinct blocks (the overwhelmingly common case).
         //

@@ -302,9 +302,14 @@ final class HoldingsService
 
             // Fall through: V1 transient path. Tag the chain as syncing
             // when the bypass reason is indexer-related (vs. just
-            // $force=true which is a user-driven refresh).
+            // $force=true which is a user-driven refresh). Non-checkpointed
+            // chains (Solana/Cosmos) have no walker to be "syncing" against
+            // — a read-time success is simply healthy, and the empty label
+            // hides the chip (Bug C fix).
             if (!$force) {
-                $bypassState = self::resolveTransientFallbackState($walletLinkId, (int) $chain->id);
+                $bypassState = self::usesCheckpointedIndexer($chain)
+                    ? self::resolveTransientFallbackState($walletLinkId, (int) $chain->id)
+                    : 'healthy';
                 self::recordIndexerState($indexerState, $chainSlug, $bypassState);
             }
 
@@ -640,6 +645,25 @@ final class HoldingsService
         }
     }
 
+    /**
+     * True when this chain is served by the checkpointed V2 walker
+     * (NftEthIndexerWorker) — i.e. EVM. Solana (Helius webhook →
+     * NftHoldingsIndexer::ingest) and Cosmos (read-time LCD fetch) are
+     * event-driven / read-time paths that never create a checkpoint row,
+     * so a null checkpoint for them is NORMAL, not "still syncing".
+     * Before this predicate, both mapped null-checkpoint → 'syncing' and
+     * their galleries showed "Syncing on-chain holdings…" permanently
+     * (2026-07-06 audit, Bug C). Their liveness is derived elsewhere:
+     * Solana from Helius delivery freshness (F6/X5), Cosmos from
+     * read-time 503s on the endpoint — not from this chip.
+     *
+     * @param ChainRow $chain
+     */
+    private static function usesCheckpointedIndexer(object $chain): bool
+    {
+        return (string) $chain->chain_type === 'evm';
+    }
+
     private static function stateRank(string $state): int
     {
         return [
@@ -684,9 +708,13 @@ final class HoldingsService
      * (`getForUser`) emits, scoped to ONE chain — the piece-detail
      * view doesn't span wallets so the per-wallet rollup is moot.
      *
-     * For Cosmos (read-time, no checkpoint) returns `healthy` — the
-     * contract treats Cosmos as always-fresh because there's no
-     * indexer to be syncing against.
+     * For non-checkpointed chains (Solana event-driven, Cosmos read-time)
+     * returns `healthy` — there's no walker checkpoint to be syncing
+     * against, so `healthy` is the only state the read path can report;
+     * transport failures surface as a 503 on the endpoint, and Solana
+     * ingest liveness is F6's Helius-freshness signal, not this chip.
+     * Before this, only Cosmos was special-cased and Solana piece-detail
+     * showed a permanent "Syncing…" (2026-07-06 audit, Bug C).
      *
      * @return array{indexer_state: array<string, string>, indexer_state_label: array<string, string>}
      */
@@ -701,14 +729,9 @@ final class HoldingsService
             return ['indexer_state' => [], 'indexer_state_label' => []];
         }
 
-        // Cosmos has no persistent indexer; healthy is the only state
-        // the read-time path can be in (transport failures surface as
-        // a 503 on the endpoint, not as a degraded-state chip).
-        if ((string) $chain->chain_type === 'cosmos') {
-            $state = 'healthy';
-        } else {
-            $state = self::resolvePersistentReadState((int) $chain->id);
-        }
+        $state = self::usesCheckpointedIndexer($chain)
+            ? self::resolvePersistentReadState((int) $chain->id)
+            : 'healthy';
 
         $bucket = [];
         self::recordIndexerState($bucket, $chainSlug, $state);
