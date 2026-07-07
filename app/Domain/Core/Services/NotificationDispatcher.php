@@ -1128,6 +1128,8 @@ final class NotificationDispatcher
 
                 $this->pushDispatcher->enqueue($userId, 'holder_community_live', [
                     'group_id'         => $groupId,
+                    'group_slug'       => (string) get_post_field('post_name', $groupId),
+                    'collection_name'  => $name ?? '',
                     'collection_id'    => $collectionId,
                     'chain_id'         => $chainId,
                     'contract_address' => $contract,

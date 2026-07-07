@@ -880,7 +880,7 @@ class SolanaFetcher implements FetcherInterface
             $message = (string) ($json['error']['message'] ?? 'unknown RPC error');
             \BCC\Core\Log\Logger::warning(sprintf(
                 '[Solana Fetcher] RPC %s returned error %d: %s (endpoint=%s)',
-                $method, $code, $message, $this->rpcUrl()
+                $method, $code, $message, self::redactRpcUrl($this->rpcUrl())
             ));
 
             // Method-not-found / method-not-supported on DAS-family calls
@@ -890,7 +890,7 @@ class SolanaFetcher implements FetcherInterface
             if (in_array($code, [-32601, -32603], true)
                 && str_starts_with($method, 'getAssets')
             ) {
-                self::markDasUnsupported($chainId, $this->rpcUrl(), $code, $message);
+                self::markDasUnsupported($chainId, self::redactRpcUrl($this->rpcUrl()), $code, $message);
             }
             return null;
         }
@@ -926,5 +926,21 @@ class SolanaFetcher implements FetcherInterface
             ],
             false
         );
+    }
+
+    /**
+     * Strip query-string secrets from an RPC URL before it reaches logs
+     * or a persisted wp_option (the DAS-unsupported payload is rendered
+     * on the admin Settings panel). Helius's canonical DAS URL embeds
+     * the API key as `?api-key=…`, so the whole query string is masked —
+     * host + path are what an operator needs to identify the endpoint.
+     */
+    private static function redactRpcUrl(string $url): string
+    {
+        $queryPos = strpos($url, '?');
+        if ($queryPos === false) {
+            return $url;
+        }
+        return substr($url, 0, $queryPos) . '?***REDACTED***';
     }
 }

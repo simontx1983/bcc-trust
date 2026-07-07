@@ -164,19 +164,6 @@ final class BearerAuth
             }
         }
 
-        // DIAGNOSTIC: log all three sources + request URI so we can see
-        // which one carries the real header on the deployed environment.
-        // REMOVE this block once the LiteSpeed/HTTP-2 issue is rooted out.
-        if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-            error_log(sprintf(
-                '[BCC BearerAuth] uri=%s http=%s redirect=%s apache=%s',
-                $_SERVER['REQUEST_URI'] ?? '?',
-                self::describeAuth($httpAuth),
-                self::describeAuth($redirectAuth),
-                self::describeAuth($apacheAuth)
-            ));
-        }
-
         // Try each source in order; pick the first that looks like a
         // real Bearer token. This is more defensive than the previous
         // "first set" logic because some PHP/HTTP-server combos populate
@@ -198,24 +185,5 @@ final class BearerAuth
         }
 
         return '';
-    }
-
-    /**
-     * Diagnostic helper — render an auth-header source as a short string
-     * for logging without leaking the full token. "absent", "empty",
-     * "bearer-LEN" or "nonbearer-PREFIX".
-     */
-    private static function describeAuth(?string $value): string
-    {
-        if ($value === null) {
-            return 'absent';
-        }
-        if ($value === '') {
-            return 'empty';
-        }
-        if (stripos($value, 'Bearer ') === 0) {
-            return 'bearer-len' . strlen($value);
-        }
-        return 'nonbearer-' . substr($value, 0, 16);
     }
 }
