@@ -20,14 +20,11 @@ class WalletSignalWriteService implements WalletSignalWriteInterface
         string $chain,
         string $walletAddress,
         string $role,
-        float  $trustBoost,
-        int    $fraudReduction,
         string $contractAddress = '',
         array  $extra = []
     ): void {
         SignalRepository::upsertTrustSignal(
-            $userId, $chain, $walletAddress, $role,
-            $trustBoost, $fraudReduction, $contractAddress, $extra
+            $userId, $chain, $walletAddress, $role, $contractAddress, $extra
         );
     }
 
@@ -35,10 +32,9 @@ class WalletSignalWriteService implements WalletSignalWriteInterface
         int    $userId,
         string $chain,
         string $walletAddress,
-        array  $collections,
-        float  $trustBoost
+        array  $collections
     ): void {
-        SignalRepository::saveCollections($userId, $chain, $walletAddress, $collections, $trustBoost);
+        SignalRepository::saveCollections($userId, $chain, $walletAddress, $collections);
     }
 
     public function disconnectTrustSignal(int $userId, string $chain): void
@@ -54,11 +50,6 @@ class WalletSignalWriteService implements WalletSignalWriteInterface
     public function getAllTrustSignalsForUser(int $userId): array
     {
         return SignalRepository::getAllTrustSignalsForUser($userId);
-    }
-
-    public function getTotalTrustBoost(int $userId): float
-    {
-        return SignalRepository::getTotalTrustBoost($userId);
     }
 
     public function deleteForUser(int $userId): void

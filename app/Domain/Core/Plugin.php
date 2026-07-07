@@ -408,12 +408,6 @@ final class Plugin
         return $this->scoreReadService ??= new ScoreReadService();
     }
 
-    private ?Services\wallet\WalletVerificationService $walletVerificationService = null;
-    public function walletVerificationService(): Services\wallet\WalletVerificationService
-    {
-        return $this->walletVerificationService ??= new Services\wallet\WalletVerificationService();
-    }
-
     private ?Services\PageDiscoveryService $pageDiscoveryService = null;
     public function pageDiscoveryService(): Services\PageDiscoveryService
     {
@@ -1674,19 +1668,6 @@ final class Plugin
                 ]);
             }
         }, 10, 1);
-
-        // ── Wallet verification ─────────────────────────────────────────
-
-        // Async blockchain RPC role check
-        add_action(
-            Services\wallet\WalletVerificationService::CHAIN_CHECK_HOOK,
-            function (int $userId, string $chain, string $walletAddress, string $contractAddress, array $extra) {
-                (new Services\wallet\WalletVerificationService())->completeChainCheck(
-                    $userId, $chain, $walletAddress, $contractAddress, $extra
-                );
-            },
-            10, 5
-        );
 
         // ── §C3 watch-batch aggregator ──────────────────────────────────
         //

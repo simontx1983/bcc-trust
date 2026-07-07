@@ -19,8 +19,6 @@ use BCC\Core\PeepSo\PeepSo;
  *     wallet_address: string,
  *     chain: string,
  *     role: string,
- *     trust_boost: string,
- *     fraud_reduction: string,
  *     contract_address: string|null,
  *     meta: string|null,
  *     last_synced: string|null
@@ -31,7 +29,7 @@ class SignalRepository
     /** @var string Explicit column list — must match schema (install_own_table). */
     private const COLUMNS = 'id, user_id, wallet_address, chain, wallet_age_days, first_tx_at,
                  tx_count, contract_count, score_contribution, raw_data, fetched_at,
-                 role, trust_boost, fraud_reduction, contract_address, meta, last_synced';
+                 role, contract_address, meta, last_synced';
 
     /** @var string Object-cache group. */
     private const CACHE_GROUP = 'bcc_onchain_signals';
@@ -53,11 +51,15 @@ class SignalRepository
         $charset = $wpdb->get_charset_collate();
         $table   = self::table();
 
-        // score_contribution / trust_boost use DECIMAL so arithmetic in SUM()
-        // and comparison against BCC_ONCHAIN_MAX_TOTAL_BONUS is exact — FLOAT
+        // score_contribution uses DECIMAL so arithmetic in SUM() and
+        // comparison against BCC_ONCHAIN_MAX_TOTAL_BONUS is exact — FLOAT
         // lost precision past ~7 significant digits and caused 19.9999999
         // vs 20.0000001 inconsistencies at the cap boundary, which directly
         // affects trust-score correctness (fail-fast rule).
+        //
+        // NOTE: the trust_boost / fraud_reduction columns (and their index)
+        // were removed 2026-07-07 with the dead role-based wallet boost.
+        // Existing tables are cleaned by drop-onchain-role-boost-columns.php.
         $sql = "CREATE TABLE {$table} (
             id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             user_id          BIGINT UNSIGNED NOT NULL,
@@ -71,15 +73,12 @@ class SignalRepository
             raw_data         LONGTEXT                 DEFAULT NULL,
             fetched_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
             role             VARCHAR(20)     NOT NULL DEFAULT 'pending',
-            trust_boost      DECIMAL(6,2)    NOT NULL DEFAULT 0,
-            fraud_reduction  INT             NOT NULL DEFAULT 0,
             contract_address VARCHAR(128)             DEFAULT NULL,
             meta             TEXT                     DEFAULT NULL,
             last_synced      DATETIME                 DEFAULT NULL,
             PRIMARY KEY (id),
             UNIQUE KEY uq_wallet_chain (wallet_address(191), chain),
-            INDEX idx_user (user_id),
-            INDEX idx_trust_boost (trust_boost)
+            INDEX idx_user (user_id)
         ) {$charset};";
 
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -96,9 +95,7 @@ class SignalRepository
         if (!$has_role) {
             $wpdb->query("ALTER TABLE {$table}
                 ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'pending' AFTER fetched_at,
-                ADD COLUMN trust_boost DECIMAL(6,2) NOT NULL DEFAULT 0 AFTER role,
-                ADD COLUMN fraud_reduction INT NOT NULL DEFAULT 0 AFTER trust_boost,
-                ADD COLUMN contract_address VARCHAR(128) DEFAULT NULL AFTER fraud_reduction,
+                ADD COLUMN contract_address VARCHAR(128) DEFAULT NULL AFTER role,
                 ADD COLUMN meta TEXT DEFAULT NULL AFTER contract_address,
                 ADD COLUMN last_synced DATETIME DEFAULT NULL AFTER meta");
         }
@@ -113,24 +110,6 @@ class SignalRepository
         ));
         if ($score_type !== null && strtolower((string) $score_type) === 'float') {
             $wpdb->query("ALTER TABLE {$table} MODIFY COLUMN score_contribution DECIMAL(6,2) NOT NULL DEFAULT 0");
-        }
-        $boost_type = $wpdb->get_var($wpdb->prepare(
-            "SELECT DATA_TYPE FROM information_schema.COLUMNS
-             WHERE table_schema = DATABASE() AND table_name = %s AND column_name = 'trust_boost'",
-            $table
-        ));
-        if ($boost_type !== null && strtolower((string) $boost_type) === 'float') {
-            $wpdb->query("ALTER TABLE {$table} MODIFY COLUMN trust_boost DECIMAL(6,2) NOT NULL DEFAULT 0");
-        }
-
-        // Add trust_boost index if missing.
-        $has_idx = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM information_schema.STATISTICS
-             WHERE table_schema = DATABASE() AND table_name = %s AND index_name = 'idx_trust_boost'",
-            $table
-        ));
-        if (!$has_idx) {
-            $wpdb->query("ALTER TABLE {$table} ADD INDEX idx_trust_boost (trust_boost)");
         }
     }
 
@@ -389,10 +368,12 @@ class SignalRepository
     // Trust-engine calls these via the WalletSignalWriteInterface contract.
 
     /**
-     * Upsert trust-scoring columns for a wallet signal row.
+     * Upsert the role + presence row for a wallet signal.
      *
-     * If a row already exists for (wallet_address, chain), updates the trust
-     * columns. Otherwise inserts a minimal row with the trust columns set.
+     * If a row already exists for (wallet_address, chain), updates the role
+     * columns. Otherwise inserts a minimal row so the wallet is visible to
+     * presence checks (e.g. the read-model hasWallet flag). The role-based
+     * trust_boost / fraud_reduction columns were removed 2026-07-07.
      *
      * @param array<string, mixed> $extra
      */
@@ -401,27 +382,11 @@ class SignalRepository
         string $chain,
         string $walletAddress,
         string $role,
-        float  $trustBoost,
-        int    $fraudReduction,
         string $contractAddress = '',
         array  $extra = []
     ): void {
         global $wpdb;
         $table = self::table();
-
-        // Range-clamp before the write — matches upsert()'s defence.
-        // Trust-engine callers are trusted but a bug or schema drift
-        // upstream shouldn't corrupt the DECIMAL(6,2) column or the
-        // downstream onchain_bonus math.
-        $trustBoost = self::clampTrustBoost($trustBoost, $walletAddress, $chain);
-        if ($fraudReduction < 0 || $fraudReduction > 100) {
-            \BCC\Core\Log\Logger::warning('[Onchain] fraud_reduction out of range — clamped', [
-                'wallet' => $walletAddress,
-                'chain'  => $chain,
-                'value'  => $fraudReduction,
-            ]);
-            $fraudReduction = max(0, min(100, $fraudReduction));
-        }
 
         $meta = wp_json_encode(array_merge($extra, [
             'verified_at' => current_time('mysql', true),
@@ -431,13 +396,11 @@ class SignalRepository
 
         $wpdb->query($wpdb->prepare(
             "INSERT INTO {$table}
-                (user_id, wallet_address, chain, role, trust_boost, fraud_reduction, contract_address, meta, last_synced, fetched_at)
-             VALUES (%d, %s, %s, %s, %f, %d, %s, %s, %s, NOW())
+                (user_id, wallet_address, chain, role, contract_address, meta, last_synced, fetched_at)
+             VALUES (%d, %s, %s, %s, %s, %s, %s, NOW())
              ON DUPLICATE KEY UPDATE
                user_id          = VALUES(user_id),
                role             = VALUES(role),
-               trust_boost      = VALUES(trust_boost),
-               fraud_reduction  = VALUES(fraud_reduction),
                contract_address = VALUES(contract_address),
                meta             = VALUES(meta),
                last_synced      = VALUES(last_synced)",
@@ -445,8 +408,6 @@ class SignalRepository
             $walletAddress,
             $chain,
             $role,
-            $trustBoost,
-            $fraudReduction,
             $contractAddress ?: null,
             $meta,
             current_time('mysql', true)
@@ -456,7 +417,7 @@ class SignalRepository
     }
 
     /**
-     * Save NFT collection metadata and recalculated trust boost for a wallet.
+     * Save NFT collection metadata for a wallet.
      *
      * @param list<array<string, mixed>> $collections
      */
@@ -464,13 +425,10 @@ class SignalRepository
         int    $userId,
         string $chain,
         string $walletAddress,
-        array  $collections,
-        float  $trustBoost
+        array  $collections
     ): void {
         global $wpdb;
         $table = self::table();
-
-        $trustBoost = self::clampTrustBoost($trustBoost, $walletAddress, $chain);
 
         /** @var TrustSignalMinimalRow|null $existing */
         $existing = $wpdb->get_row($wpdb->prepare(
@@ -492,7 +450,6 @@ class SignalRepository
         $wpdb->update(
             $table,
             [
-                'trust_boost' => $trustBoost,
                 'meta'        => wp_json_encode($decoded),
                 'last_synced' => current_time('mysql', true),
             ],
@@ -537,7 +494,7 @@ class SignalRepository
 
         /** @var TrustSignalRow|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT wallet_address, chain, role, trust_boost, fraud_reduction,
+            "SELECT wallet_address, chain, role,
                     contract_address, meta, last_synced
              FROM {$table}
              WHERE user_id = %d AND chain = %s
@@ -569,7 +526,7 @@ class SignalRepository
 
         /** @var list<TrustSignalRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT wallet_address, chain, role, trust_boost, fraud_reduction,
+            "SELECT wallet_address, chain, role,
                     contract_address, meta, last_synced
              FROM {$table}
              WHERE user_id = %d AND role != 'pending'",
@@ -686,7 +643,7 @@ class SignalRepository
     }
 
     /**
-     * Zero out trust scoring for a disconnected wallet.
+     * Reset a disconnected wallet's role to 'none'.
      */
     public static function disconnectTrustSignal(int $userId, string $chain): void
     {
@@ -695,7 +652,7 @@ class SignalRepository
 
         $wpdb->query($wpdb->prepare(
             "UPDATE {$table}
-             SET role = 'none', trust_boost = 0, fraud_reduction = 0,
+             SET role = 'none',
                  last_synced = %s
              WHERE user_id = %d AND chain = %s",
             current_time('mysql', true),
@@ -704,20 +661,6 @@ class SignalRepository
         ));
 
         self::invalidateUser($userId);
-    }
-
-    /**
-     * Sum trust_boost across all chains for a user.
-     */
-    public static function getTotalTrustBoost(int $userId): float
-    {
-        global $wpdb;
-        $table = self::table();
-
-        return (float) $wpdb->get_var($wpdb->prepare(
-            "SELECT COALESCE(SUM(trust_boost), 0) FROM {$table} WHERE user_id = %d",
-            $userId
-        ));
     }
 
     /**
@@ -734,27 +677,5 @@ class SignalRepository
     private static function ttl(): int
     {
         return (int) apply_filters('bcc_onchain_signal_cache_ttl', self::DEFAULT_TTL);
-    }
-
-    /**
-     * Clamp a trust_boost value to the 0..100 range expected by the
-     * DECIMAL(6,2) column and the onchain_bonus cap. NaN/Inf collapses
-     * to 0 so downstream SUM() math never produces a NaN row. Logs on
-     * coercion so a broken upstream is visible rather than silent.
-     */
-    private static function clampTrustBoost(float $trustBoost, string $walletAddress, string $chain): float
-    {
-        if (is_finite($trustBoost) && $trustBoost >= 0.0 && $trustBoost <= 100.0) {
-            return $trustBoost;
-        }
-        \BCC\Core\Log\Logger::warning('[Onchain] trust_boost out of range — clamped', [
-            'wallet' => $walletAddress,
-            'chain'  => $chain,
-            'value'  => is_finite($trustBoost) ? $trustBoost : 'non-finite',
-        ]);
-        if (!is_finite($trustBoost)) {
-            return 0.0;
-        }
-        return max(0.0, min(100.0, $trustBoost));
     }
 }

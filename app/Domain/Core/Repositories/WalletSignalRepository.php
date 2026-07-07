@@ -41,14 +41,12 @@ final class WalletSignalRepository
         string $chain,
         string $walletAddress,
         string $role,
-        float  $trustBoost,
-        int    $fraudReduction,
         string $contractAddress = '',
         array  $extra = []
     ): void {
         $svc = self::service();
         if ($svc) {
-            $svc->upsertTrustSignal($userId, $chain, $walletAddress, $role, $trustBoost, $fraudReduction, $contractAddress, $extra);
+            $svc->upsertTrustSignal($userId, $chain, $walletAddress, $role, $contractAddress, $extra);
         }
     }
 
@@ -58,15 +56,14 @@ final class WalletSignalRepository
     public static function saveCollections(
         int    $userId,
         string $chain,
-        array  $collections,
-        float  $trustBoost
+        array  $collections
     ): void {
         $svc = self::service();
         if (!$svc) {
             return;
         }
 
-        // Resolve wallet address from chain for this user — the new
+        // Resolve wallet address from chain for this user — the
         // saveCollections signature requires it. Look up via the existing
         // signal to get the wallet_address.
         /** @var object{wallet_address: string}|null $existing */
@@ -75,7 +72,7 @@ final class WalletSignalRepository
             return;
         }
 
-        $svc->saveCollections($userId, $chain, $existing->wallet_address, $collections, $trustBoost);
+        $svc->saveCollections($userId, $chain, $existing->wallet_address, $collections);
     }
 
     /**
@@ -102,12 +99,6 @@ final class WalletSignalRepository
         if ($svc) {
             $svc->disconnectTrustSignal($userId, $chain);
         }
-    }
-
-    public static function getTotalTrustBoost(int $userId): float
-    {
-        $svc = self::service();
-        return $svc ? $svc->getTotalTrustBoost($userId) : 0.0;
     }
 
     public static function deleteForUser(int $userId): void
