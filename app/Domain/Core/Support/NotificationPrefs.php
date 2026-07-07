@@ -81,6 +81,7 @@ final class NotificationPrefs
         'attestation_revoked',
         'attestation_reaffirmed',
         'divergence_state_warning',
+        'holder_community_live',
     ];
 
     /** wp_usermeta key prefix. Renaming requires a migration. */
