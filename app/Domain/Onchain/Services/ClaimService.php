@@ -9,8 +9,7 @@
  *   2. Wallet matches the on-chain entity's ownership/operator address
  *   3. Records the verified claim
  *
- * Delegates RPC verification to bcc-trust's Core BlockchainQueryService
- * via the existing WalletVerificationService infrastructure.
+ * Delegates RPC verification to bcc-trust's Core BlockchainQueryService.
  *
  * @package BCC\Trust\Onchain\Services
  */

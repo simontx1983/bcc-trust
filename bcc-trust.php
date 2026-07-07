@@ -256,6 +256,12 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-endorsement-bonus.php';
 // bcc_trust_endorsements_table_dropped + DROP TABLE IF EXISTS; no-op once
 // done / on fresh installs. Runs on init priority 28, after the bonus drop.
 require_once BCC_TRUST_PATH . 'includes/database/drop-endorsements-table.php';
+// Role-based wallet trust boost cut (2026-07-07): drops the unread
+// trust_boost / fraud_reduction columns + idx_trust_boost from
+// bcc_onchain_signals. Guarded by option + hourly transient re-check;
+// per-column existence-probed. Runs on init priority 29, after the
+// endorsements drop.
+require_once BCC_TRUST_PATH . 'includes/database/drop-onchain-role-boost-columns.php';
 // §1 remediation: covering indexes on PeepSo's reaction/activity tables that
 // BCC's aggregation queries depend on. Moved out of ReactionSeeder (DDL
 // belongs in includes/database/). Idempotent, per-index existence-checked,

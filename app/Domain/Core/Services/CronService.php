@@ -923,9 +923,7 @@ class CronService
                             (int) $userId,
                             $chain,
                             $address,
-                            'none',  // No contract_address available from hook — role stays 'none'
-                            0.0,
-                            0
+                            'none'  // No contract_address available from hook — role stays 'none'
                         );
                     }
                 }
