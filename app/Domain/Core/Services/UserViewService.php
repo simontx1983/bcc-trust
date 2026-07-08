@@ -14,8 +14,8 @@
  *                                    (suspended/shadow_limited/hidden/under_review)
  *   - wallets                      → resolveWallets() reads WalletRepository::getForUser
  *   - living                       → delegated to LivingService::compose
- *   - counts.disputes_signed       → FlagsRepository::countByFlagger
- *                                    (per §B5/§D2: signing a dispute = bcc_trust_flags row)
+ *   - counts.disputes_signed       → DisputeRepository::countByReporter
+ *                                    (disputes FILED by the user; live bcc_disputes.reporter_id)
  *   - counts.solids_given/received → PeepSoReactionRepository::countGivenByUser /
  *                                    countReceivedByUser, gated on §D5 reaction-id
  *                                    presence (returns 0 pre-seeder)
@@ -43,7 +43,6 @@ use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Repositories\PeepSoPageRepository;
 use BCC\Trust\Core\Repositories\AttestationRepository;
-use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
@@ -58,6 +57,7 @@ use BCC\Trust\Core\Support\ReactionTypeRegistry;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Core\Support\WalletAddressValidator;
 use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
+use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
 if (!defined('ABSPATH')) {
@@ -70,7 +70,6 @@ final class UserViewService
     private ReputationRepository $reputationRepo;
     private RankService $rankService;
     private FeatureAccessService $featureAccess;
-    private FlagsRepository $flagsRepo;
     private LivingService $livingService;
     private ScoreEventRepository $scoreEventRepo;
     private PeepSoReactionRepository $reactionRepo;
@@ -93,7 +92,6 @@ final class UserViewService
         ReputationRepository $reputationRepo,
         RankService $rankService,
         FeatureAccessService $featureAccess,
-        FlagsRepository $flagsRepo,
         LivingService $livingService,
         ScoreEventRepository $scoreEventRepo,
         PeepSoReactionRepository $reactionRepo,
@@ -105,7 +103,6 @@ final class UserViewService
         $this->reputationRepo      = $reputationRepo;
         $this->rankService         = $rankService;
         $this->featureAccess       = $featureAccess;
-        $this->flagsRepo           = $flagsRepo;
         $this->livingService       = $livingService;
         $this->scoreEventRepo      = $scoreEventRepo;
         $this->reactionRepo        = $reactionRepo;
@@ -460,7 +457,7 @@ final class UserViewService
         if ($prefetched !== null && isset($prefetched['disputes_signed_counts'])) {
             $disputesSigned = $prefetched['disputes_signed_counts'][$userId] ?? 0;
         } else {
-            $disputesSigned = $this->flagsRepo->countByFlagger($userId);
+            $disputesSigned = DisputeRepository::countByReporter($userId);
         }
 
         // Verifications. X / GitHub are batched-prefetched maps of
@@ -960,11 +957,11 @@ final class UserViewService
     private function resolveCounts(int $userId, array $followCounts, bool $isSelf, array $privacy): array
     {
         $reviewsWritten = (int) $this->voteRepo->countByVoter($userId);
-        // disputes_signed: per §B5 / §D2, signing onto a dispute is
-        // recorded in bcc_trust_flags (flagger_user_id). One row
-        // per (user, vote) pair, so this is the count of votes the
-        // user has flagged.
-        $disputesSigned = $this->flagsRepo->countByFlagger($userId);
+        // disputes_signed: disputes this user has FILED, read from the
+        // live bcc_disputes table keyed on reporter_id (the filer). For
+        // a member, reporter_id = their user id (they own the self-page
+        // being defended), so the per-user count is direct.
+        $disputesSigned = DisputeRepository::countByReporter($userId);
 
         // §C2 single-graph rule: watchlist IS the follow set;
         // watching_size equals the following count by design. Do not
@@ -1070,11 +1067,12 @@ final class UserViewService
      *   can_block       — true for any other authed viewer
      *   can_edit_profile — true only on own profile
      *
-     * §J.6 attestation extension — the four trust-attestation gates
-     * (can_vouch / can_stand_behind / can_dispute / can_report) are
-     * resolved by reusing the same primitives the entity-card resolver
-     * uses (CardViewService::resolveMemberPermissions): AttestationService
-     * for vouch/stand-behind/report, FeatureAccessService for dispute.
+     * §J.6 attestation extension — the trust-attestation gates
+     * (can_vouch / can_stand_behind / can_report) are resolved by
+     * reusing the same primitives the entity-card resolver uses
+     * (CardViewService::resolveMemberPermissions) via AttestationService.
+     * The sole person-level negative action is can_report; vote-disputes
+     * are owner-only via can_open_dispute (page / self-page surfaces).
      * Same gates, same shape — so the frontend's AttestationActionCluster
      * renders identically on member profiles and entity cards.
      *
@@ -1100,25 +1098,6 @@ final class UserViewService
             $userId
         );
 
-        // can_dispute — feature-access gate (§J.1 "must be ≥ trusted").
-        // Self-target and anon both deny per CardViewService's parallel
-        // member-card resolver. Anon gets the sign-in hint; self gets
-        // the structural-deny shape (null hint → FE hides per §N7).
-        if ($viewerId <= 0) {
-            $canDispute = [
-                'allowed'     => false,
-                'unlock_hint' => 'Sign in to file a dispute.',
-            ];
-        } elseif ($isSelf) {
-            $canDispute = ['allowed' => false, 'unlock_hint' => null];
-        } else {
-            $featurePerm = $this->featureAccess->canPerform($viewerId, 'sign_dispute');
-            $canDispute = [
-                'allowed'     => (bool) $featurePerm['allowed'],
-                'unlock_hint' => $featurePerm['unlock_hint'] ?? null,
-            ];
-        }
-
         return [
             'can_follow'       => ['allowed' => $isOther,    'unlock_hint' => null],
             'can_message'      => ['allowed' => $canMessage, 'unlock_hint' => null],
@@ -1126,7 +1105,6 @@ final class UserViewService
             'can_edit_profile' => ['allowed' => $isSelf,     'unlock_hint' => null],
             'can_vouch'        => $attestationPerms['can_vouch'],
             'can_stand_behind' => $attestationPerms['can_stand_behind'],
-            'can_dispute'      => $canDispute,
             'can_report'       => $attestationPerms['can_report'],
         ];
     }

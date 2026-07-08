@@ -8,7 +8,7 @@
  * accumulator pattern).
  *
  * Auth-OPTIONAL: entity watchers are public per the §J trust-signal
- * doctrine. Cache mirrors CardReviewsEndpoint / CardDisputesEndpoint.
+ * doctrine. Cache mirrors CardReviewsEndpoint.
  *
  * @package BCC\Trust\Core\REST
  * @since 2026-05-14 (Phase 2 entity tab parity)

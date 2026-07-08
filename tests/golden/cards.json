@@ -58,11 +58,6 @@
         "voting_power_rank": 1
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -202,11 +197,6 @@
       },
       "onchain_signals": null,
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -346,11 +336,6 @@
       },
       "onchain_signals": null,
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -490,11 +475,6 @@
       },
       "onchain_signals": null,
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -648,11 +628,6 @@
         "voting_power_rank": 2
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -806,11 +781,6 @@
         "voting_power_rank": 3
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -964,11 +934,6 @@
         "voting_power_rank": 4
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -1122,11 +1087,6 @@
         "voting_power_rank": 5
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -1280,11 +1240,6 @@
         "voting_power_rank": 6
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -1438,11 +1393,6 @@
         "voting_power_rank": 8
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -1596,11 +1546,6 @@
         "voting_power_rank": 9
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -1754,11 +1699,6 @@
         "voting_power_rank": 10
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -1912,11 +1852,6 @@
         "voting_power_rank": 7
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -2070,11 +2005,6 @@
         "voting_power_rank": 11
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -2228,11 +2158,6 @@
         "voting_power_rank": 14
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -2386,11 +2311,6 @@
         "voting_power_rank": 13
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -2544,11 +2464,6 @@
         "voting_power_rank": 12
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -2702,11 +2617,6 @@
         "voting_power_rank": 15
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -2825,7 +2735,7 @@
         "background_kind": "tier",
         "background_value": "uncommon",
         "image_url": null,
-        "initials": "\ud83d\udc20",
+        "initials": "🐠",
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
@@ -2841,7 +2751,7 @@
         "self": "/v/%f0%9f%90%a0stake-fish-cosmos-2lcnj0"
       },
       "member_dossier": null,
-      "name": "\ud83d\udc20stake.fish",
+      "name": "🐠stake.fish",
       "negative_signals": {
         "divergence_state": "untested",
         "under_review": false,
@@ -2860,11 +2770,6 @@
         "voting_power_rank": 16
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -3018,11 +2923,6 @@
         "voting_power_rank": 17
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -3176,11 +3076,6 @@
         "voting_power_rank": 18
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -3334,11 +3229,6 @@
         "voting_power_rank": 19
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -3492,11 +3382,6 @@
         "voting_power_rank": 21
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -3650,11 +3535,6 @@
         "voting_power_rank": 20
       },
       "permissions": {
-        "can_dispute": {
-          "allowed": false,
-          "reason_code": "signin_required",
-          "unlock_hint": "Sign in to interact"
-        },
         "can_edit_bio": {
           "allowed": false,
           "reason_code": "signin_required",

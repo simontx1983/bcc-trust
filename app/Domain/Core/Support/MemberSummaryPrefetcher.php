@@ -32,12 +32,12 @@ use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Repositories\PeepSoPageRepository;
 use BCC\Trust\Core\Repositories\AttestationRepository;
-use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Repositories\XRepository;
+use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
 if (!defined('ABSPATH')) {
@@ -98,7 +98,7 @@ final class MemberSummaryPrefetcher
             'endorsements_received_counts' => (new AttestationRepository())->countActiveVouchesByTargets('user_profile', $userIds),
             'solids_received_counts'       => $solidsReceivedCounts,
             'reviews_written_counts'       => (new VoteRepository())->countByVoters($userIds),
-            'disputes_signed_counts'       => (new FlagsRepository())->countByFlaggers($userIds),
+            'disputes_signed_counts'       => DisputeRepository::countByReporters($userIds),
             'wallets_verified_counts'      => WalletRepository::getVerifiedCountsForUsers($userIds),
             'x_connections'                => (new XRepository())->getConnectionsForUsers($userIds),
             'github_connections'           => (new GitHubRepository())->getConnectionsForUsers($userIds),

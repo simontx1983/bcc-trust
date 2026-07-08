@@ -907,6 +907,84 @@ class DisputeRepository
     }
 
     /**
+     * Batched lifetime dispute-filed count per reporter. One bounded
+     * GROUP BY replaces N sequential countByReporter() calls for
+     * list-shape consumers (member directory / feed cold-start
+     * `disputes_signed`). Reporters with no filed disputes are absent
+     * from the map; callers default to 0.
+     *
+     * Replaces the retired FlagsRepository::countByFlaggers. A member's
+     * filed disputes key on `reporter_id` (= their user id — they own
+     * the self-page being defended), so the map is user-id keyed
+     * directly. Uncached (bounded IN aggregate; the batched consumers
+     * are already prefetch-bounded).
+     *
+     * @param int[] $userIds Bounded by caller.
+     * @return array<int, int> reporter_id => count
+     */
+    public static function countByReporters(array $userIds): array
+    {
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $table = self::disputes_table();
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<array{reporter_id: string, c: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT reporter_id, COUNT(*) AS c
+                   FROM {$table}
+                  WHERE reporter_id IN ({$placeholders})
+                  GROUP BY reporter_id",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['reporter_id']] = (int) $row['c'];
+        }
+        return $out;
+    }
+
+    /**
+     * Count disputes filed by this reporter since a MySQL DATETIME
+     * boundary. Powers the §O3 living-header today-line ("today: 1
+     * dispute opened") and the watching summary. Replaces the retired
+     * FlagsRepository::countByFlaggerSince. Uncached — a moving `since`
+     * boundary makes caching counterproductive; aggregate COUNT is cheap.
+     */
+    public static function countByReporterSince(int $userId, string $sinceMysql): int
+    {
+        if ($userId <= 0 || $sinceMysql === '') {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::disputes_table();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table}
+              WHERE reporter_id = %d
+                AND created_at >= %s",
+            $userId,
+            $sinceMysql
+        ));
+    }
+
+    /**
      * Paginated disputes filed by a user, with post/user display names.
      *
      * @return list<DisputeDetailDTO>
