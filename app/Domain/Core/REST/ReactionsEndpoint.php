@@ -17,7 +17,7 @@
  *     see numeric IDs and never compute them.
  *
  *   - `reaction` accepts any kind from `ReactionGrammarMap::allKnownKinds()`
- *     across grammars: trust ('solid' | 'vouch') and
+ *     across grammars: trust ('solid') and
  *     social ('like' | 'love' | 'haha' | 'wow' | 'fire'). The kind →
  *     reaction_type post-ID mapping lives in ReactionGrammarRegistry,
  *     which composes BCC-seeded IDs (ReactionTypeRegistry) with
@@ -215,8 +215,9 @@ final class ReactionsEndpoint
         // Symmetric counterpart to bcc_reaction_added. Subscribers can
         // tear down their own state (e.g. retract a notification that was
         // sent moments ago). The 3rd arg is retained for signature
-        // stability — vouch (the only kind that consumed it) is no longer
-        // a reaction, so it is always empty now.
+        // stability — it once carried the removed kind for a reaction
+        // (vouch) that has since moved to the attestation system, so it
+        // is always empty now.
         do_action('bcc_reaction_removed', $userId, $actId, '');
 
         return self::buildStateResponse($actId, $userId, $grammar);
