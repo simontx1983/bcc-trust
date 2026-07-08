@@ -40,9 +40,9 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Repositories\WatchingRepository;
-use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
 
 if (!defined('ABSPATH')) {
@@ -66,7 +66,6 @@ final class WatchingSummaryService
     public function __construct(
         private readonly WatchingRepository $watchingRepo,
         private readonly VoteRepository $voteRepo,
-        private readonly FlagsRepository $flagsRepo,
         private readonly PeepSoReactionRepository $reactionRepo
     ) {
     }
@@ -145,7 +144,7 @@ final class WatchingSummaryService
         return [
             'reviews'         => $this->voteRepo->countByVoterSince($userId, $sinceMysql),
             'solids_received' => $solidsReceived,
-            'disputes_signed' => $this->flagsRepo->countByFlaggerSince($userId, $sinceMysql),
+            'disputes_signed' => DisputeRepository::countByReporterSince($userId, $sinceMysql),
         ];
     }
 }

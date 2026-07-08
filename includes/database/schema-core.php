@@ -231,28 +231,16 @@ function bcc_trust_create_core_tables() {
 
     /*
     ======================================================
-    FLAGS
+    FLAGS — RETIRED (disputes reconciliation, 2026-07-08)
     ======================================================
+    bcc_trust_flags was the legacy vote-flag primitive that predated the
+    panel-adjudication dispute system (bcc_disputes). It was write-dead
+    (its only writer was the deleted report_vote route); every reader was
+    repointed to the live bcc_disputes table (reporter-keyed) and the table
+    is dropped by includes/database/drop-trust-flags-table.php. Do NOT
+    re-add a CREATE here — it would resurrect the retired table on the next
+    dbDelta.
     */
-
-    $flags_table = \BCC\Trust\Core\Database\TableRegistry::flags();
-
-    $sql = "CREATE TABLE $flags_table (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        vote_id BIGINT UNSIGNED NOT NULL,
-        flagger_user_id BIGINT UNSIGNED NOT NULL,
-        reason VARCHAR(100) NOT NULL,
-        status TINYINT NOT NULL DEFAULT 0,
-        resolved_by BIGINT UNSIGNED NULL,
-        resolved_at DATETIME NULL,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        UNIQUE KEY unique_vote_flagger (vote_id, flagger_user_id),
-        KEY idx_status (status),
-        KEY idx_flagger (flagger_user_id)
-    ) ENGINE=InnoDB $charset_collate;";
-
-    dbDelta($sql);
 
     /*
     ======================================================

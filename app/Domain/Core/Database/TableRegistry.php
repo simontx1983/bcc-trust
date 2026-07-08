@@ -110,11 +110,10 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_activity_archive';
     }
 
-    public static function flags(): string
-    {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_trust_flags';
-    }
+    // NOTE: bcc_trust_flags removed — the legacy vote-flag/dispute table was
+    // write-dead and retired (disputes reconciliation, 2026-07-08). Disputes
+    // live in bcc_disputes (Domain/Disputes); the table is dropped by
+    // includes/database/drop-trust-flags-table.php.
 
     public static function fingerprints(): string
     {
@@ -321,7 +320,6 @@ final class TableRegistry
             'user_verifications' => self::userVerifications(),
             'activity'           => self::activity(),
             'activity_archive'   => self::activityArchive(),
-            'flags'              => self::flags(),
             'fingerprints'       => self::fingerprints(),
             'patterns'           => self::patterns(),
             'user_info'          => self::userInfo(),

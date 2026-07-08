@@ -106,12 +106,6 @@ final class Plugin
         return $this->edgeRepository ??= new EdgeRepository();
     }
 
-    private ?Repositories\FlagsRepository $flagsRepository = null;
-    public function flagsRepository(): Repositories\FlagsRepository
-    {
-        return $this->flagsRepository ??= new Repositories\FlagsRepository();
-    }
-
     private ?Repositories\PageReadModelRepository $pageReadModelRepository = null;
     public function pageReadModelRepository(): Repositories\PageReadModelRepository
     {
@@ -622,7 +616,6 @@ final class Plugin
     {
         return $this->livingService ??= new Services\LivingService(
             $this->voteRepository(),
-            $this->flagsRepository(),
             $this->peepSoReactionRepository()
         );
     }
@@ -635,7 +628,6 @@ final class Plugin
             $this->reputationRepository(),
             $this->rankService(),
             $this->featureAccessService(),
-            $this->flagsRepository(),
             $this->livingService(),
             $this->scoreEventRepository(),
             $this->peepSoReactionRepository(),
@@ -841,9 +833,7 @@ final class Plugin
     private ?Services\UserDisputesService $userDisputesService = null;
     public function userDisputesService(): Services\UserDisputesService
     {
-        return $this->userDisputesService ??= new Services\UserDisputesService(
-            $this->flagsRepository()
-        );
+        return $this->userDisputesService ??= new Services\UserDisputesService();
     }
 
     /** §K1 Phase A — viewer's own blocked-users list, paginated. */
@@ -901,7 +891,6 @@ final class Plugin
         return $this->watchingSummaryService ??= new Services\WatchingSummaryService(
             $this->watchingRepository(),
             $this->voteRepository(),
-            $this->flagsRepository(),
             $this->peepSoReactionRepository()
         );
     }
@@ -1455,7 +1444,6 @@ final class Plugin
         // table read + hydrates authors/flaggers/watchers via the shared
         // MemberSummaryPrefetcher.
         \BCC\Trust\Core\REST\CardReviewsEndpoint::register();
-        \BCC\Trust\Core\REST\CardDisputesEndpoint::register();
         \BCC\Trust\Core\REST\CardWatchersEndpoint::register();
 
         // V2 Trust Attestation Layer — PR-2 self-mirror surface:

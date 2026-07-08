@@ -378,8 +378,7 @@ final class FeedColdStartService
             'solids_received_counts'       => $solidsReceivedCounts,
             'reviews_written_counts'       => (new \BCC\Trust\Core\Repositories\VoteRepository())
                 ->countByVoters($userIds),
-            'disputes_signed_counts'       => (new \BCC\Trust\Core\Repositories\FlagsRepository())
-                ->countByFlaggers($userIds),
+            'disputes_signed_counts'       => \BCC\Trust\Disputes\Repositories\DisputeRepository::countByReporters($userIds),
             'wallets_verified_counts'      => \BCC\Trust\Onchain\Repositories\WalletRepository::getVerifiedCountsForUsers($userIds),
             'x_connections'                => (new \BCC\Trust\Core\Repositories\XRepository())
                 ->getConnectionsForUsers($userIds),

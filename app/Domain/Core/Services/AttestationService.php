@@ -247,12 +247,11 @@ final class AttestationService
      * BEHIND" rather than the "STAND BEHIND · N OF M" allocation
      * indicator.
      *
-     * Phase 1 Slice B intentionally omits can_dispute on profile
-     * surfaces — profile-scoped disputes are Phase 1.5 per §J.1.
-     * On card surfaces, can_dispute is the existing §D5 gate (not
-     * computed here; this method only emits can_vouch + can_stand_
-     * behind + can_report on card surfaces; the card composer keeps
-     * its existing can_dispute resolution).
+     * This method emits can_vouch + can_stand_behind + can_report only.
+     * The sole person-level negative action is can_report; vote-disputes
+     * are owner-only via can_open_dispute, resolved by the card composer
+     * (Permissions::owns_page), not here. The dead can_dispute
+     * "attestation cast" gate was retired 2026-07-08.
      *
      * @return array{
      *   can_vouch: array{allowed: bool, unlock_hint: string|null},
@@ -441,10 +440,9 @@ final class AttestationService
     }
 
     /**
-     * Tier-comparison utility: is the viewer at Trusted+ standing
-     * (the §J.1 Dispute gate)? Page-card disputes already gate on
-     * this via the existing CardPermissions.can_dispute pathway;
-     * this method exists for future profile-scoped use (Phase 1.5).
+     * Tier-comparison utility: is the viewer at Trusted+ standing?
+     * A reusable tier predicate (the retired can_dispute gate formerly
+     * consumed it); kept for tier-gated surfaces.
      *
      * @phpstan-impure The tier is read from the reputation repo;
      *                 functionally pure across one request, but

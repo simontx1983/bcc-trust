@@ -72,8 +72,8 @@ final class MemberProfileComposer
         'review'      => 'reviews',
         'watch_batch' => 'pulls',
         'page_claim'  => 'posts',
-        // Disputes get their own count from FlagsRepository (signed-by-user
-        // semantics differ from peepso_activities rows).
+        // Disputes get their own count from DisputeRepository::countByReporter
+        // (disputes-filed semantics differ from peepso_activities rows).
     ];
 
     /**
@@ -168,10 +168,9 @@ final class MemberProfileComposer
         //   Service handles anon ("Sign in to vouch for operators."),
         //   self-target (hidden via allowed=false + unlock_hint=null
         //   per §N7), and tier-gating ("Reach Neutral standing to
-        //   vouch.") uniformly. can_dispute is intentionally omitted
-        //   on profile surfaces in Phase 1 — profile-scoped disputes
-        //   ship in Phase 1.5 per §J.1; per §N7 absent permission =
-        //   FE hides the action.
+        //   vouch.") uniformly. The person-level negative action is
+        //   can_report; vote-disputes are owner-only via can_open_dispute
+        //   (the dead can_dispute "attestation cast" gate was retired).
         $attestationPerms = $this->attestationService->getViewerActionPermissions(
             $viewerId,
             $userId
@@ -428,7 +427,6 @@ final class MemberProfileComposer
             'stats'               => [],
             'permissions'         => [
                 'can_review'         => ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'card_unavailable'],
-                'can_dispute'        => ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'card_unavailable'],
                 'can_watch'          => ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'card_unavailable'],
                 'can_endorse'        => ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'card_unavailable'],
                 'can_post_as_entity' => false,

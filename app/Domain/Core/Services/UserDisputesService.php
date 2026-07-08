@@ -5,10 +5,18 @@
  * shape so the frontend DisputesPanel renders the same MemberDispute[]
  * regardless of whether it came pre-baked or lazy-fetched.
  *
- * V1 dispute primitive (§D2 / §B5): `bcc_trust_flags` rows where
- * `flagger_user_id` = the user who signed onto the dispute. The
- * subject is the page being voted on (resolved via flag → vote → page
- * join in FlagsRepository::findByFlagger).
+ * Data source (2026-07-08): the LIVE `bcc_disputes` panel-adjudication
+ * table, read reporter-keyed via
+ * {@see \BCC\Trust\Disputes\Repositories\DisputeRepository::getByReporterPaginated}.
+ * A dispute is filed by the page owner contesting a downvote on a page
+ * they own (`reporter_id` = the filer). For a member, disputes key on
+ * their self-page — `reporter_id` = the member's user id — so the
+ * per-user query is direct.
+ *
+ * This replaced the retired `bcc_trust_flags` / FlagsRepository path,
+ * which was write-dead (its writer was the deleted `report_vote`
+ * route), so the tab always rendered empty. The response shape is
+ * unchanged — only the source table moved.
  *
  * Privacy honouring: same defense-in-depth pattern as UserReviewsService
  * — when `disputes_hidden=true` AND viewer ≠ owner, return empty +
@@ -20,8 +28,10 @@
 
 namespace BCC\Trust\Core\Services;
 
-use BCC\Trust\Core\Repositories\FlagsRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
+use BCC\Trust\Disputes\Domain\DisputeStatus;
+use BCC\Trust\Disputes\DTO\DisputeDetailDTO;
+use BCC\Trust\Disputes\Repositories\DisputeRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -33,25 +43,31 @@ final class UserDisputesService
     public const MAX_PAGE_SIZE     = 50;
 
     /**
-     * `bcc_trust_flags.status` (TINYINT) → frontend status enum + label.
-     * 0=open, 1=resolved, 2=dismissed (per schema-core.php). Unknown
-     * values fall back to "open" so a row never renders with an empty pill.
+     * `bcc_disputes.status` → frontend status enum + label.
      *
-     * @var array<int, array{status: 'open'|'resolved'|'dismissed', label: string}>
+     * The FE `MemberDispute.status` enum is the stable 3-value contract
+     * (open|resolved|dismissed) driving the status-pill colour; the
+     * label carries the richer real outcome. A dispute is the reporter's
+     * OWN filing, so accepted/rejected are meaningful to them:
+     *   - reviewing         → open      · "OPEN"        (panel still deliberating)
+     *   - accepted          → resolved  · "ACCEPTED"    (downvote invalidated)
+     *   - rejected          → resolved  · "REJECTED"    (downvote upheld)
+     *   - timeout_no_quorum → resolved  · "NOT DECIDED" (TTL, no penalty)
+     *   - dismissed         → dismissed · "DISMISSED"
+     * Unknown values fall back to "open" so a row never renders empty.
+     *
+     * @var array<string, array{status: 'open'|'resolved'|'dismissed', label: string}>
      */
     private const STATUS_MAP = [
-        0 => ['status' => 'open',      'label' => 'OPEN'],
-        1 => ['status' => 'resolved',  'label' => 'RESOLVED'],
-        2 => ['status' => 'dismissed', 'label' => 'DISMISSED'],
+        DisputeStatus::REVIEWING         => ['status' => 'open',      'label' => 'OPEN'],
+        DisputeStatus::ACCEPTED          => ['status' => 'resolved',  'label' => 'ACCEPTED'],
+        DisputeStatus::REJECTED          => ['status' => 'resolved',  'label' => 'REJECTED'],
+        DisputeStatus::TIMEOUT_NO_QUORUM => ['status' => 'resolved',  'label' => 'NOT DECIDED'],
+        DisputeStatus::DISMISSED         => ['status' => 'dismissed', 'label' => 'DISMISSED'],
     ];
 
-    public function __construct(
-        private readonly FlagsRepository $flagsRepository
-    ) {
-    }
-
     /**
-     * Return paginated disputes signed by $userId.
+     * Return paginated disputes filed by $userId.
      *
      * @return array{
      *   items: list<array{
@@ -91,12 +107,12 @@ final class UserDisputesService
         $perPage = max(1, min(self::MAX_PAGE_SIZE, $perPage));
         $offset  = ($page - 1) * $perPage;
 
-        $total = $this->flagsRepository->countByFlagger($userId);
+        $total = DisputeRepository::countByReporter($userId);
         if ($total === 0) {
             return self::emptyPage($page, $perPage, false);
         }
 
-        $rows = $this->flagsRepository->findByFlagger($userId, $perPage, $offset);
+        $rows = DisputeRepository::getByReporterPaginated($userId, $perPage, $offset);
 
         $items = [];
         $now   = time();
@@ -117,17 +133,6 @@ final class UserDisputesService
     }
 
     /**
-     * @param object{
-     *   id: int|numeric-string,
-     *   vote_id: int|numeric-string,
-     *   reason: string,
-     *   status: int|numeric-string,
-     *   created_at: string,
-     *   page_id: int|numeric-string|null,
-     *   page_title: string|null,
-     *   page_name: string|null,
-     *   page_type: string|null
-     * } $row
      * @return array{
      *   id: int,
      *   status: 'open'|'resolved'|'dismissed',
@@ -138,34 +143,24 @@ final class UserDisputesService
      *   posted_at_label: string
      * }
      */
-    private static function shapeDispute(object $row, int $now): array
+    private static function shapeDispute(DisputeDetailDTO $row, int $now): array
     {
-        $statusInt = (int) $row->status;
-        $mapped    = self::STATUS_MAP[$statusInt] ?? self::STATUS_MAP[0];
+        $mapped = self::STATUS_MAP[$row->status] ?? self::STATUS_MAP[DisputeStatus::REVIEWING];
 
-        $subjectTitle = is_string($row->page_title) ? trim($row->page_title) : '';
-        $subjectName  = is_string($row->page_name)  ? trim($row->page_name)  : '';
-        $pageType     = is_string($row->page_type)  ? $row->page_type        : '';
+        $subjectTitle = $row->page_title !== null ? trim($row->page_title) : '';
 
         return [
-            'id'              => (int) $row->id,
+            'id'              => $row->id,
             'status'          => $mapped['status'],
             'status_label'    => $mapped['label'],
-            'subject'         => $subjectTitle !== ''
-                ? $subjectTitle
-                : ($subjectName !== '' ? $subjectName : 'Page removed'),
+            'subject'         => $subjectTitle !== '' ? $subjectTitle : 'Page removed',
             'body'            => $row->reason,
-            'scope_label'     => self::scopeLabel($pageType),
-            'posted_at_label' => UserReviewsService::relativeLabel((string) $row->created_at, $now),
+            // Disputes are always page-scoped (they contest a vote on a
+            // page). Kept as a constant so the tab stays in lockstep with
+            // UserReviewsService's scope vocabulary.
+            'scope_label'     => 'PAGE',
+            'posted_at_label' => UserReviewsService::relativeLabel($row->created_at, $now),
         ];
-    }
-
-    private static function scopeLabel(string $pageType): string
-    {
-        // Page types map to the same scope strings UserReviewsService uses
-        // — keeping them in lockstep avoids drift when new entity types
-        // (e.g., 'peepso-page-creator') land on the §G2 directory.
-        return $pageType !== '' ? 'PAGE' : 'UNKNOWN';
     }
 
     /**

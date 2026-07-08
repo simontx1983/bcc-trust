@@ -262,6 +262,12 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-endorsements-table.php';
 // per-column existence-probed. Runs on init priority 29, after the
 // endorsements drop.
 require_once BCC_TRUST_PATH . 'includes/database/drop-onchain-role-boost-columns.php';
+// Disputes reconciliation (2026-07-08): drops the retired bcc_trust_flags
+// table. Its readers were repointed to the live bcc_disputes table
+// (reporter-keyed) and FlagsRepository + CardDisputes* were deleted this
+// release. Guarded by option + hourly transient re-check; DROP TABLE IF
+// EXISTS. Runs on init priority 30, after the role-boost drop.
+require_once BCC_TRUST_PATH . 'includes/database/drop-trust-flags-table.php';
 // §1 remediation: covering indexes on PeepSo's reaction/activity tables that
 // BCC's aggregation queries depend on. Moved out of ReactionSeeder (DDL
 // belongs in includes/database/). Idempotent, per-index existence-checked,

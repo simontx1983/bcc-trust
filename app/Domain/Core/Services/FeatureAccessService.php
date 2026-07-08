@@ -98,7 +98,6 @@ final class FeatureAccessService
     private const FEATURE_REQUIREMENTS = [
         'write_review'          => ['min_level' => self::LEVEL_ACTIVE,  'requires_min_tier' => 'neutral'],   // §D2: rep ≥ neutral
         'vouch_reaction'        => ['min_level' => self::LEVEL_ACTIVE],
-        'sign_dispute'          => ['min_level' => self::LEVEL_VETERAN, 'requires_wallet' => true,  'requires_min_tier' => 'neutral'], // §D2
         'open_dispute'          => ['min_level' => self::LEVEL_VETERAN, 'requires_wallet' => true,  'requires_min_tier' => 'neutral'], // §D2
         'see_signal_details'    => ['min_level' => self::LEVEL_VETERAN],
         'see_trust_breakdown'   => ['min_level' => self::LEVEL_VETERAN],
@@ -185,8 +184,8 @@ final class FeatureAccessService
     public function canPerform(int $userId, string $featureKey): array
     {
         // Per-request memoisation: card-list hydration asks the same
-        // (viewer, action) pair once per card (24× write_review + 24×
-        // sign_dispute on a directory page). The answer is constant
+        // (viewer, action) pair once per card (e.g. 24× write_review on
+        // a directory page). The answer is constant
         // within a request, so dedupe repeat lookups — same precedent
         // as UserViewService::resolveFlags' static memo. No reset
         // needed: mutations that would change the answer complete

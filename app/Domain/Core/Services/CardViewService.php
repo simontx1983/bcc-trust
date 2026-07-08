@@ -839,7 +839,6 @@ final class CardViewService
         return [
             'can_watch'          => $na,
             'can_review'         => $na,
-            'can_dispute'        => $na,
             'can_open_dispute'   => $na,
             'can_endorse'        => $na,
             'can_post_as_entity' => $na,
@@ -1435,15 +1434,15 @@ final class CardViewService
             [
                 'can_watch'          => self::allow(),
                 'can_review'         => self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
-                'can_dispute'        => self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
                 // §4.4 can_open_dispute — the OWNER vote-dispute entry
                 // (DisputeCallout → OpenDisputeModal → POST /disputes).
                 // Mirrors the write gate exactly: DisputeController
                 // requires Permissions::owns_page and nothing else — no
-                // feature-ladder gate on the write path. Distinct from
-                // can_dispute (the §J attestation cast, sign_dispute
-                // ladder). owns_page resolves through PageOwnerResolver,
-                // request-cached and pre-primed on cards-list paths.
+                // feature-ladder gate on the write path. owns_page
+                // resolves through PageOwnerResolver, request-cached and
+                // pre-primed on cards-list paths. This is the SOLE
+                // dispute gate — the retired can_dispute (a dead "§J
+                // attestation cast" that had no attestation kind) is gone.
                 'can_open_dispute'   => \BCC\Core\Permissions\Permissions::owns_page($targetId, $viewerId)
                     ? self::allow()
                     : self::deny(null, 'not_page_owner'),
@@ -1512,9 +1511,6 @@ final class CardViewService
                 'can_review'         => $isSelf
                     ? self::deny(null, 'self_action_blocked')
                     : self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
-                'can_dispute'        => $isSelf
-                    ? self::deny(null, 'self_action_blocked')
-                    : self::featureGate($this->featureAccess->canPerform($viewerId, 'sign_dispute')),
                 // §4.4 can_open_dispute — members are full trust subjects:
                 // a member viewing their OWN self-page can open a dispute
                 // when the self-page carries a contestable active downvote
@@ -1577,7 +1573,6 @@ final class CardViewService
         return [
             'can_watch'          => $sign,
             'can_review'         => $sign,
-            'can_dispute'        => $sign,
             'can_open_dispute'   => $sign,
             'can_endorse'        => $sign,
             'can_post_as_entity' => $sign,
@@ -1595,7 +1590,6 @@ final class CardViewService
         return [
             'can_watch'          => $sign,
             'can_review'         => $sign,
-            'can_dispute'        => $sign,
             'can_open_dispute'   => self::deny(null, 'not_applicable'),
             'can_endorse'        => self::deny(null, 'not_applicable'),
             'can_post_as_entity' => self::deny(null, 'not_applicable'),
