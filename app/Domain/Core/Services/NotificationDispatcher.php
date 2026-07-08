@@ -108,7 +108,7 @@ final class NotificationDispatcher
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // bcc_reaction_added — Solid/Vouch/Stand-behind on a post
+    // bcc_reaction_added — a reaction on a post (solid / social kinds)
     // ──────────────────────────────────────────────────────────────────
 
     /**
@@ -117,8 +117,10 @@ final class NotificationDispatcher
      * Skips when the actor IS the author (self-reactions don't
      * generate noise — the user already knows they reacted).
      *
-     * @param string $kind reaction key — 'solid' or 'vouch' (trust),
-     *                      or a social kind. (stand_behind retired in Slice 3.)
+     * @param string $kind reaction key — 'solid' (trust grammar) or a
+     *                      social kind. NOTE: `vouch`/`stand_behind` are
+     *                      NOT reactions — they're attestations (a
+     *                      different system, notified separately below).
      */
     public function onReactionAdded(int $actorId, int $actId, string $kind): void
     {
@@ -1282,7 +1284,6 @@ final class NotificationDispatcher
     {
         return match ($kind) {
             'solid' => 'agreed with',
-            'vouch' => 'vouched for',
             default => 'reacted to',
         };
     }
