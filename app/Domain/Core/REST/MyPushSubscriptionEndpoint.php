@@ -34,6 +34,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\Http\SafeHttpClient;
 use BCC\Trust\Core\Repositories\PushSubscriptionRepository;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\NotificationPrefs;
@@ -168,6 +169,30 @@ final class MyPushSubscriptionEndpoint
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'Push subscription endpoint exceeds 500 characters.',
+                422
+            );
+        }
+
+        // SSRF gate (audit HIGH #3). This URL is attacker-controlled and
+        // is later POSTed server-side by the push worker (PushDispatcher)
+        // through a library HTTP client that bypasses SafeHttpClient.
+        // Browser PushManager endpoints are ALWAYS https to a public push
+        // service, so require https and reject anything that resolves to a
+        // private/reserved/metadata IP. The private-IP definition is reused
+        // from SafeHttpClient::validatePublicUrl so it stays in one place
+        // (no IP-range logic duplicated here). PushDispatcher re-checks at
+        // send time as defence-in-depth for rows stored before this gate.
+        if (strtolower((string) wp_parse_url($endpoint, PHP_URL_SCHEME)) !== 'https') {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'Push subscription endpoint must be an https URL.',
+                422
+            );
+        }
+        if (SafeHttpClient::validatePublicUrl($endpoint) instanceof \WP_Error) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'Push subscription endpoint is not an allowed push-service URL.',
                 422
             );
         }

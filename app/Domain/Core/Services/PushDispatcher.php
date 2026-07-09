@@ -39,6 +39,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Cron\AsyncDispatcher;
+use BCC\Core\Http\SafeHttpClient;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Repositories\PushSubscriptionRepository;
 use BCC\Trust\Core\Support\NotificationPrefs;
@@ -190,7 +191,12 @@ final class PushDispatcher
 
         $payloadJson = (string) wp_json_encode($body);
 
-        $webPush = new WebPush(['VAPID' => $auth]);
+        // allow_redirects: false (audit HIGH #3) — the endpoint POST goes
+        // through minishlink/web-push's own Guzzle client, which bypasses
+        // SafeHttpClient. Disabling redirects stops a push service (or a
+        // hostile endpoint) from 3xx-redirecting the request to an internal
+        // IP, which would defeat the private-IP checks below.
+        $webPush = new WebPush(['VAPID' => $auth], [], 30, ['allow_redirects' => false]);
 
         // Build endpoint → row-id map so we can tombstone by id when
         // a report comes back as expired. The web-push library only
@@ -201,6 +207,24 @@ final class PushDispatcher
                 continue;
             }
             $endpoint = (string) $row->endpoint;
+
+            // Delivery-time SSRF re-check (audit HIGH #3). Store-time
+            // validation lives in MyPushSubscriptionEndpoint, but rows
+            // predating that gate — or whose host now resolves to a
+            // private IP — are caught here before we hand the URL to the
+            // library's Guzzle transport. Same https + public-IP rule,
+            // same single source of truth (SafeHttpClient).
+            if (strtolower((string) wp_parse_url($endpoint, PHP_URL_SCHEME)) !== 'https'
+                || SafeHttpClient::validatePublicUrl($endpoint) instanceof \WP_Error
+            ) {
+                Logger::warning('[PushDispatcher] skipping subscription with unsafe endpoint', [
+                    'event_type' => $eventType,
+                    'sub_id'     => (int) $row->id,
+                ]);
+                PushMetrics::recordFailure($eventType);
+                continue;
+            }
+
             $endpointToId[$endpoint] = (int) $row->id;
 
             try {
