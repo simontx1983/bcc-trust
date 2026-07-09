@@ -151,6 +151,14 @@ class TrustRestController {
                 return self::errorWithCode('bcc_unauthorized', 'Authentication required.', 401);
             }
 
+            // Per-user throttle — this legacy endpoint casts the same 'vouch'
+            // attestation as POST /me/attestations, which is rate-limited
+            // 10/60; without this the legacy path was an unthrottled write
+            // hole into the trust graph. [audit M]
+            if (!\BCC\Core\Security\Throttle::allow('attestation_cast:' . $viewerId, 10, 60)) {
+                return self::errorWithCode('bcc_rate_limited', 'Too many requests.', 429);
+            }
+
             $pageId  = (int) $request->get_param('page_id');
             $context = $request->get_param('context') ?? 'general';
             $allowedContexts = ['general'];
@@ -218,6 +226,12 @@ class TrustRestController {
             $viewerId = get_current_user_id();
             if ($viewerId <= 0) {
                 return self::errorWithCode('bcc_unauthorized', 'Authentication required.', 401);
+            }
+
+            // Throttle the revoke path too — same bucket as the cast, so a
+            // rapid cast/revoke toggle can't be used to churn the score. [audit M]
+            if (!\BCC\Core\Security\Throttle::allow('attestation_cast:' . $viewerId, 10, 60)) {
+                return self::errorWithCode('bcc_rate_limited', 'Too many requests.', 429);
             }
 
             $pageId = (int) $request->get_param('page_id');

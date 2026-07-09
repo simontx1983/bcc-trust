@@ -28,6 +28,7 @@ use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FrontendRedirect;
+use BCC\Trust\Core\Support\JwtToken;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -483,6 +484,15 @@ final class PasswordAuthController
         // user_activation_key (single-use), and fires the `password_reset`
         // action hook. Returns void.
         reset_password($user, $password);
+
+        // Revoke every outstanding bearer JWT for this user. reset_password()
+        // clears WP session tokens, but BCC JWTs are self-contained and only
+        // honour the per-user token-version counter — so without this bump a
+        // token stolen BEFORE the reset (the whole reason to reset) stays
+        // valid for its full TTL and can be renewed via /auth/refresh. The
+        // user is not logged in on this path, so there is no live session to
+        // preserve. [audit H-2]
+        JwtToken::revokeAllForUser($userId);
 
         // Side-channel security email — reuses the "password changed"
         // mail since the user-facing effect is identical.

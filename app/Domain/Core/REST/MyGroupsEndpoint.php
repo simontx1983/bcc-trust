@@ -137,6 +137,16 @@ final class MyGroupsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Suspended/banned accounts must not walk back into a community.
+        // The join lands members via the trusted PeepSoGroupWriter door
+        // (bypassing PeepSo's own UI approval), so the suspension gate has
+        // to be enforced HERE — nothing downstream re-checks it. Admin
+        // bypass off: a suspended account is blocked regardless of role.
+        // [audit M — group-rejoin]
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         // Per-user rate limit on plain group joins. Lower than the holder
         // group bucket since this surface doesn't gate behind an NFT check
         // and a flood could create more peepso_group_user rows faster.
