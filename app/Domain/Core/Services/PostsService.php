@@ -773,6 +773,26 @@ final class PostsService
             ];
         }
 
+        // ── §D6 blog discriminator — stamp at CREATION (draft + publish) ──
+        //
+        // `_bcc_activity_module='blog'` is the marker every blog surface
+        // uses to recognise a blog-kinded peepso-post: getBlogForEdit,
+        // updateBlog, and BlogStatusTransitionHandler ALL gate on it.
+        // handleBlogPostCreated also writes it — but only on publish — so a
+        // draft born here would carry no marker and be unreachable for
+        // load / edit / publish (a chicken-and-egg deadlock: the one handler
+        // that could stamp it, BlogStatusTransitionHandler, first checks for
+        // the very marker that was never written). Stamp it here so a draft
+        // is editable and publishable from birth.
+        //
+        // Do NOT move this back inside the publish branch — that is exactly
+        // the bug this fixes. It does not surface the draft anywhere: the
+        // peepso_activities row is inserted only by the publish-gated
+        // handleBlogPostCreated, so feeds and the blog tab still see
+        // published posts only. handleBlogPostCreated re-writing this on
+        // publish is an idempotent no-op.
+        update_post_meta($postId, '_bcc_activity_module', 'blog');
+
         // ── Side-car meta + chain-tag join ───────────────────────────
         //
         // Each meta key is OPTIONAL on the post — the hydrator returns
