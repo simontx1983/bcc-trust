@@ -509,7 +509,9 @@ final class Plugin
     private ?Services\LocalsService $localsService = null;
     public function localsService(): Services\LocalsService
     {
-        return $this->localsService ??= new Services\LocalsService();
+        return $this->localsService ??= new Services\LocalsService(
+            $this->groupContextResolver()
+        );
     }
 
     private ?Services\GroupsService $groupsService = null;

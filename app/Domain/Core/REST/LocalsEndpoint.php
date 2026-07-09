@@ -261,6 +261,13 @@ final class LocalsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Per-user rate limit on Local joins — parity with the plain-group
+        // join bucket (MyGroupsEndpoint) so this membership-write door can't
+        // be used to spray peepso_group_user rows.
+        if (!\BCC\Core\Security\Throttle::allow('local_join:' . $viewerId, 10, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
         $groupId = (int) $request->get_param('id');
         $result  = Plugin::instance()->localsService()->joinLocal($viewerId, $groupId);
 
