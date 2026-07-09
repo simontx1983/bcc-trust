@@ -145,6 +145,58 @@ class XOAuthService {
     }
 
     /**
+     * Exchange a stored refresh token for a fresh access token (OAuth2
+     * `refresh_token` grant). X rotates the refresh token, so the response
+     * carries a NEW refresh_token the caller must persist. Requires the
+     * `offline.access` scope, which getAuthUrl() always requests.
+     *
+     * @return array<string, mixed> Raw token response (access_token,
+     *                              refresh_token, expires_in, …).
+     */
+    public function refreshAccessToken(string $refreshToken): array {
+
+        if (!$this->isConfigured()) {
+            throw new Exception('X OAuth credentials not configured');
+        }
+
+        if ($refreshToken === '') {
+            throw new Exception('Missing refresh token');
+        }
+
+        $response = SafeHttpClient::post(self::TOKEN_URL, [
+            'body' => [
+                'grant_type'    => 'refresh_token',
+                'refresh_token' => $refreshToken,
+                'client_id'     => $this->clientId,
+            ],
+            'headers' => [
+                'Content-Type'  => 'application/x-www-form-urlencoded',
+                'Authorization' => 'Basic ' . base64_encode($this->clientId . ':' . $this->clientSecret),
+            ],
+            'timeout' => 30,
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new Exception('X token refresh failed: ' . $response->get_error_message());
+        }
+
+        $body = wp_remote_retrieve_body($response);
+        $data = json_decode($body, true);
+
+        if (!is_array($data)) {
+            throw new Exception('X OAuth refresh: invalid response');
+        }
+        if (!empty($data['error'])) {
+            throw new Exception('X OAuth refresh error: ' . ($data['error_description'] ?? $data['error']));
+        }
+        if (empty($data['access_token'])) {
+            throw new Exception('No access token returned from X refresh');
+        }
+
+        return $data;
+    }
+
+    /**
      * Validate OAuth state parameter.
      *
      * @return array{user_id: int}|false Returns array with user_id if valid, false otherwise.

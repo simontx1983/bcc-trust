@@ -45,6 +45,68 @@ class XVerificationService {
     }
 
     /**
+     * Return a usable X access token for a connected user, refreshing it
+     * transparently when the stored one has expired.
+     *
+     * X access tokens live ~2h, so any stored-token API call made after that
+     * (the share-X quest check is the only current one) would 401 without
+     * this. When token_expires_at is past (5-min buffer) and a refresh token
+     * exists, exchange it, persist the rotated set, and return the new token.
+     *
+     * @return string|null null when there is no connection, or when a refresh
+     *                     was needed but failed (caller should treat as "not
+     *                     currently usable" rather than crash).
+     */
+    public function getValidAccessToken(int $userId): ?string {
+        $conn = $this->repository->getConnection($userId);
+        if ($conn === null) {
+            return null;
+        }
+
+        // Still fresh (with a safety buffer)? Use the stored token.
+        if ($conn->x_token_expires_at !== null) {
+            $expiresTs = strtotime($conn->x_token_expires_at . ' UTC');
+            if ($expiresTs !== false && $expiresTs - 300 > time()) {
+                return $conn->x_access_token_decrypted;
+            }
+        }
+
+        // Expired or unknown expiry. Refresh if we can; otherwise fall back to
+        // whatever is stored (best effort for pre-refresh-token legacy rows).
+        $refresh = $conn->x_refresh_token_decrypted;
+        if ($refresh === null || $refresh === '') {
+            return $conn->x_access_token_decrypted;
+        }
+
+        try {
+            $refreshed = $this->oauthService->refreshAccessToken($refresh);
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::warning('x_token_refresh_failed', [
+                'user_id' => $userId,
+                'message' => $e->getMessage(),
+            ]);
+            return null;
+        }
+
+        $newAccess = isset($refreshed['access_token']) && is_string($refreshed['access_token'])
+            ? $refreshed['access_token']
+            : '';
+        if ($newAccess === '') {
+            return null;
+        }
+        $newRefresh = isset($refreshed['refresh_token']) && is_string($refreshed['refresh_token'])
+            ? $refreshed['refresh_token']
+            : null;
+        $expiresIn = isset($refreshed['expires_in']) && is_numeric($refreshed['expires_in'])
+            ? (int) $refreshed['expires_in']
+            : null;
+
+        $this->repository->updateTokens($userId, $newAccess, $newRefresh, $expiresIn);
+
+        return $newAccess;
+    }
+
+    /**
      * Complete an X OAuth connection for a user.
      *
      * Reads any previously-stored impact before overwriting it so the
@@ -162,8 +224,17 @@ class XVerificationService {
             $xData['name']     = $xData['name'] ?? '';
         }
 
-        // Persist connection (void — throws on failure)
-        $this->repository->saveConnection($userId, $xData, $accessToken);
+        // Persist connection (void — throws on failure). Capture the refresh
+        // token + expiry so a later stored-token API call (e.g. the share-X
+        // quest check) can refresh instead of failing once the ~2h access
+        // token expires.
+        $refreshToken = isset($tokenResponse['refresh_token']) && is_string($tokenResponse['refresh_token'])
+            ? $tokenResponse['refresh_token']
+            : null;
+        $expiresIn = isset($tokenResponse['expires_in']) && is_numeric($tokenResponse['expires_in'])
+            ? (int) $tokenResponse['expires_in']
+            : null;
+        $this->repository->saveConnection($userId, $xData, $accessToken, $refreshToken, $expiresIn);
 
         // Calculate and store trust scores
         $trustBoost     = $this->scoreService->calculateTrustBoost($xData);
