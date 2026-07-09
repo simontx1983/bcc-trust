@@ -52,10 +52,15 @@ final class WalletLinkWriteService implements WalletLinkWriteInterface
             return 0;
         }
 
-        if ($result['inserted']) {
-            // Mark as verified immediately (caller already verified the sig)
-            WalletRepository::verify($walletLinkId);
+        // Mark verified immediately (the caller already verified the sig).
+        // Called on BOTH the inserted and the found path: if a prior attempt
+        // created the row via insertOrFind but died before verifying, the
+        // retry hits ODK-UPDATE (inserted=false) and this heals the row.
+        // verify() is idempotent (verified_at IS NULL guard), so re-linking
+        // an already-verified wallet is a harmless no-op.
+        WalletRepository::verify($walletLinkId);
 
+        if ($result['inserted']) {
             // Auto-set primary if first wallet on this chain for this user
             $chainCount = WalletRepository::countForUserByChain($userId, $chainId);
             if ($chainCount <= 1) {
