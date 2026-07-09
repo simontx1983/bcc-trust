@@ -55,6 +55,16 @@ final class FeedRankingService
     private const HOT_CACHE_GROUP = 'bcc_trust:feed';
     private const HOT_CACHE_TTL   = 300; // 5 min
 
+    /**
+     * The one hot-feed page size the warm cron primes. The cache key folds in
+     * the limit, so every reader that wants the warmed entry MUST request this
+     * exact size (and slice down if it needs fewer). Cold-start previously
+     * asked for 2, missing the warmed `:20` entry and rebuilding inline every
+     * request. Keep the cron, getHotFeed default, warmHotFeed default, and
+     * cold-start all pinned to this constant. [audit L-B6]
+     */
+    public const HOT_WARM_LIMIT = 20;
+
     public function __construct(
         private readonly ActivityFeedService $activityFeed,
         private readonly ReputationRepository $reputationRepo,
@@ -83,7 +93,7 @@ final class FeedRankingService
      *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getHotFeed(?string $cursor = null, int $limit = 20): array
+    public function getHotFeed(?string $cursor = null, int $limit = self::HOT_WARM_LIMIT): array
     {
         if ($cursor !== null) {
             return $this->buildHotFeed($cursor, $limit);
@@ -107,7 +117,7 @@ final class FeedRankingService
      * request path above stays a pure cache read between cron ticks.
      * Owned by CronService::warmHotFeed() on `bcc_trust_feed_hot_warm`.
      */
-    public function warmHotFeed(int $limit = 20): void
+    public function warmHotFeed(int $limit = self::HOT_WARM_LIMIT): void
     {
         $payload = $this->buildHotFeed(null, $limit);
         wp_cache_set(self::hotFeedCacheKey($limit), $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
