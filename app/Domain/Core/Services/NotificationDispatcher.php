@@ -1121,29 +1121,60 @@ final class NotificationDispatcher
             $groupSlugRaw = get_post_field('post_name', $groupId);
             $groupSlug    = is_string($groupSlugRaw) ? $groupSlugRaw : '';
 
+            // Per-user isolation: a throw from one user's dispatch/enqueue must
+            // not abort the batch and skip markNotified for the already-belled
+            // subset — that left `notified_at` NULL and the daily sweep
+            // re-bells them (duplicate go-live bell). A user is recorded as
+            // delivered the moment the in-app bell (dispatch) succeeds; the
+            // web-push enqueue is best-effort and its failure must not un-count
+            // an already-sent bell. [audit L-B4]
             $delivered = [];
             foreach ($pending as $userId) {
-                $this->dispatch(
-                    $senderId,
-                    $userId,
-                    $message,
-                    NotificationType::HOLDER_COMMUNITY_LIVE,
-                    $groupId, // external_id → the PeepSo group
-                    0         // no associated activity row
-                );
+                try {
+                    $this->dispatch(
+                        $senderId,
+                        $userId,
+                        $message,
+                        NotificationType::HOLDER_COMMUNITY_LIVE,
+                        $groupId, // external_id → the PeepSo group
+                        0         // no associated activity row
+                    );
+                } catch (\Throwable $e) {
+                    // Bell not sent → leave unstamped so the next sweep retries;
+                    // no duplicate risk because notified_at stays NULL.
+                    Logger::warning('[NotificationDispatcher] holder-community-live bell failed', [
+                        'group_id' => $groupId,
+                        'user_id'  => $userId,
+                        'error'    => $e->getMessage(),
+                    ]);
+                    continue;
+                }
+
+                // Bell delivered — record it BEFORE the best-effort push so a
+                // push failure can't cause a re-bell on the next sweep.
                 $delivered[] = $userId;
 
-                $this->pushDispatcher->enqueue($userId, 'holder_community_live', [
-                    'group_id'         => $groupId,
-                    'group_slug'       => $groupSlug,
-                    'collection_name'  => $name ?? '',
-                    'collection_id'    => $collectionId,
-                    'chain_id'         => $chainId,
-                    'contract_address' => $contract,
-                ]);
+                try {
+                    $this->pushDispatcher->enqueue($userId, 'holder_community_live', [
+                        'group_id'         => $groupId,
+                        'group_slug'       => $groupSlug,
+                        'collection_name'  => $name ?? '',
+                        'collection_id'    => $collectionId,
+                        'chain_id'         => $chainId,
+                        'contract_address' => $contract,
+                    ]);
+                } catch (\Throwable $e) {
+                    Logger::warning('[NotificationDispatcher] holder-community-live push enqueue failed', [
+                        'group_id' => $groupId,
+                        'user_id'  => $userId,
+                        'error'    => $e->getMessage(),
+                    ]);
+                }
             }
 
-            \BCC\Trust\Onchain\Repositories\CollectionSignalRepository::markNotified($chainId, $contract, $delivered);
+            if ($delivered !== []) {
+                \BCC\Trust\Onchain\Repositories\CollectionSignalRepository::markNotified($chainId, $contract, $delivered);
+            }
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] holder-community-live dispatch failed', [
                 'group_id'      => $groupId,

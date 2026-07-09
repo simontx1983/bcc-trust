@@ -706,6 +706,18 @@ class CronService
             $failed      = 0;
             $quarantined = 0;
 
+            // Pages attempted THIS tick. A failed recalc rolls back its
+            // transaction, so recalculate_required stays 1 and
+            // last_calculated_at is unchanged — the page re-sorts to the front
+            // of the very next getFlaggedPageIds fetch. Without this guard the
+            // do-while would retry it back-to-back and burn all
+            // RECALC_MAX_FAILURES inside one tick, quarantining a page over a
+            // 1-3s transient. Attempt each page once per tick; its retries land
+            // on subsequent 5-min ticks (the documented "3 consecutive
+            // failures across runs" design), giving the transient time to
+            // clear. [audit M-B2]
+            $attempted = [];
+
             // Process in chunks until queue is empty or time budget exhausted
             do {
                 $pageIds = $this->scoreRepo->getFlaggedPageIds(
@@ -717,10 +729,19 @@ class CronService
                     break;
                 }
 
+                $progressed = false;
+
                 foreach ($pageIds as $pageId) {
                     if (time() >= $deadline) {
                         break 2; // Exit both loops — time's up
                     }
+
+                    $pid = (int) $pageId;
+                    if (isset($attempted[$pid])) {
+                        continue; // already tried this tick — retry next tick
+                    }
+                    $attempted[$pid] = true;
+                    $progressed = true;
 
                     try {
                         $voteService->recalculateScore((int) $pageId, true);
@@ -758,6 +779,14 @@ class CronService
                             }
                         }
                     }
+                }
+
+                // If the whole fetched batch was already attempted this tick
+                // (e.g. a small queue of only failing pages), stop re-fetching
+                // — otherwise the do-while spins on the same rows until the
+                // deadline. Fresh pages, if any, are picked next tick.
+                if (!$progressed) {
+                    break;
                 }
             } while (time() < $deadline);
 
