@@ -122,7 +122,6 @@ final class BonusRetryService
         }
 
         $contributor = \BCC\Core\ServiceLocator::resolveScoreContributor();
-        $walletTable = \BCC\Trust\Onchain\Repositories\WalletRepository::table();
 
         // ── Step 2: process each entry WITHOUT holding the lock ──────────
         // This allows concurrent queue() calls to succeed.
@@ -169,11 +168,7 @@ final class BonusRetryService
                 $ownerId = \BCC\Core\PeepSo\PeepSo::get_page_owner($pageIdInt);
                 $claimBonus = 0.0;
                 if ($ownerId) {
-                    $claimBonus = \BCC\Trust\Onchain\Repositories\ClaimRepository::computePageClaimBonus(
-                        $walletTable,
-                        $pageIdInt,
-                        $ownerId
-                    );
+                    $claimBonus = \BCC\Trust\Onchain\Repositories\ClaimRepository::computePageClaimBonus($ownerId);
                 }
 
                 $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
