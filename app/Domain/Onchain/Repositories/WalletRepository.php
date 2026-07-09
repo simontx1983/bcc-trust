@@ -80,17 +80,32 @@ final class WalletRepository
         ];
     }
 
+    /**
+     * Stamp verified_at on an unverified wallet-link row.
+     *
+     * Idempotent by design — the `verified_at IS NULL` guard means a
+     * second call (e.g. a retry after a crash that created the row but
+     * died before verifying) heals the row, while a re-link of an
+     * already-verified wallet is a no-op that does NOT move verified_at.
+     * That anchor matters: `oldestVerifiedAt` uses verified_at for the
+     * wallet-age Sybil multiplier, so re-stamping it would silently reset
+     * an operator's earned wallet age. Uses a guarded UPDATE rather than
+     * $wpdb->update() because the latter cannot express `IS NULL`.
+     */
     public static function verify(int $walletLinkId): bool
     {
         global $wpdb;
         $table = self::table();
 
-        return (bool) $wpdb->update(
-            $table,
-            ['verified_at' => current_time('mysql', true)],
-            ['id' => $walletLinkId],
-            ['%s'],
-            ['%d']
+        return (bool) $wpdb->query(
+            $wpdb->prepare(
+                "UPDATE {$table}
+                    SET verified_at = %s
+                  WHERE id = %d
+                    AND verified_at IS NULL",
+                current_time('mysql', true),
+                $walletLinkId
+            )
         );
     }
 
