@@ -773,6 +773,26 @@ final class PostsService
             ];
         }
 
+        // ── Classification marker — written at create time ───────────
+        //
+        // Drafts AND publishes get this marker immediately, so the
+        // edit-read gate (BlogService::getBlogForEdit), the update gate
+        // (updateBlog below), and BlogStatusTransitionHandler can all
+        // resolve a never-published draft. Without it a draft is
+        // orphaned: those gates require the marker, but the marker was
+        // historically only written on publish (via
+        // ActivityStreamWriter::handleBlogPostCreated), so a draft could
+        // neither be re-opened for editing nor published.
+        //
+        // Feed surfacing stays publish-only — it is driven by the
+        // peepso_activities row (inserted from the bcc_blog_post_created
+        // event below), NOT by this marker, so a marked draft never
+        // shows up in the floor feed or blog tab. The publish-path write
+        // in ActivityStreamWriter remains as a harmless idempotent
+        // re-write (update_post_meta is naturally idempotent).
+        update_post_meta($postId, '_bcc_activity_module', 'blog');
+        update_post_meta($postId, '_bcc_activity_sidecar_id', $postId);
+
         // ── Side-car meta + chain-tag join ───────────────────────────
         //
         // Each meta key is OPTIONAL on the post — the hydrator returns

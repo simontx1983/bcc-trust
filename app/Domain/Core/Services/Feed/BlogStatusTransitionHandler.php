@@ -82,8 +82,11 @@ final class BlogStatusTransitionHandler
 
         // Scope: only the blog-kinded peepso-post posts. Everything
         // else passes through untouched — PeepSo statuses share this
-        // CPT slug; the `_bcc_activity_module='blog'` meta marker
-        // (set immediately below) is the discriminator.
+        // CPT slug; the `_bcc_activity_module='blog'` meta marker is the
+        // discriminator. That marker is written at blog-create time
+        // (PostsService::createBlog), so it is already present here for
+        // both drafts and published posts — including a draft being
+        // published for the first time via this transition.
         if ($post->post_type !== 'peepso-post') {
             return;
         }
