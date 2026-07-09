@@ -330,6 +330,15 @@ final class MyGroupsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Suspended accounts must not create communities — creation is a
+        // heavier membership write than join (the creator lands as
+        // member_owner of a brand-new group), so it gets the same gate as
+        // postJoin above. Admin bypass off: a suspended account is blocked
+        // regardless of role. [audit M — group-rejoin]
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         if (!\BCC\Core\Security\Throttle::allow('group_create:' . $userId, 5, 3600)) {
             return ApiResponse::error(
                 'bcc_rate_limited',

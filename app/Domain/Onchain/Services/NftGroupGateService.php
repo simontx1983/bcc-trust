@@ -191,6 +191,16 @@ final class NftGroupGateService {
             return ['joined' => 0, 'skipped' => 0];
         }
 
+        // Suspension gate lives HERE (not only in the REST layer) because
+        // this method is also reached by the cron reconcile sweep — without
+        // it, a suspended holder with auto_join on would be silently
+        // re-added to gated groups by the server itself. Admin bypass off:
+        // a suspended account is blocked regardless of role. Parity with
+        // MyGroupsEndpoint::postJoin [audit M — group-rejoin].
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ['joined' => 0, 'skipped' => 0];
+        }
+
         $eligible = $this->findEligibleGroups($userId);
         if ($eligible === []) {
             return ['joined' => 0, 'skipped' => 0];
