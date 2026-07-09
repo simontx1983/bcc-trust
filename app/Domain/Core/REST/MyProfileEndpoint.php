@@ -72,6 +72,18 @@ final class MyProfileEndpoint
     private const COVER_MAX_BYTES = 5 * 1024 * 1024;
 
     /**
+     * Max total pixels (width × height) accepted before the image is handed
+     * to GD/Imagick. A small (< max-bytes) but pixel-huge image is a
+     * decompression bomb — it expands to a massive in-memory bitmap on decode
+     * and OOMs the worker, so MIME + byte-size checks alone don't stop it.
+     * 24 MP (~a 6000×4000 photo) is far above any avatar/cover need.
+     */
+    private const MAX_IMAGE_PIXELS = 24_000_000;
+
+    /** Max single-side length — guards extreme-aspect-ratio bombs (e.g. 1×10⁶). */
+    private const MAX_IMAGE_SIDE = 10_000;
+
+    /**
      * Allowed image MIME types. Server detects actual MIME via
      * `wp_check_filetype_and_ext` rather than trusting the request's
      * Content-Type header.
@@ -520,6 +532,30 @@ final class MyProfileEndpoint
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'Only JPEG, PNG, and WebP images are allowed.',
+                422
+            );
+        }
+
+        // Pixel-dimension guard BEFORE the image reaches GD/Imagick.
+        // getimagesize reads only the header, so it's cheap and runs ahead of
+        // any decode — the point where a decompression bomb would allocate.
+        $dimensions = @getimagesize($file['tmp_name']);
+        if (!is_array($dimensions) || $dimensions[0] < 1 || $dimensions[1] < 1) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'Could not read the image. Please upload a valid JPEG, PNG, or WebP.',
+                422
+            );
+        }
+        $width  = $dimensions[0];
+        $height = $dimensions[1];
+        if ($width > self::MAX_IMAGE_SIDE
+            || $height > self::MAX_IMAGE_SIDE
+            || $width * $height > self::MAX_IMAGE_PIXELS
+        ) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'Image dimensions are too large. Please upload a smaller image.',
                 422
             );
         }
