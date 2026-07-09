@@ -47,6 +47,20 @@ final class AuthSupport
     public const SIGNUP_RATE_LIMIT = 5;
     /** Anon-IP-keyed throttle for login. Same budget as signup — login is the obvious brute-force target. */
     public const LOGIN_RATE_LIMIT = 5;
+    /**
+     * Per-identifier login throttle (defense-in-depth vs distributed
+     * brute-force from many IPs against ONE account, which the IP bucket
+     * can't see). Keyed by a hash of the submitted identifier — so it fires
+     * the same whether or not the account exists (no enumeration oracle).
+     * Deliberately generous over a longer window: a legitimate user never
+     * makes 20 attempts in 15 minutes, while sustained probing of a single
+     * identifier is capped. Tradeoff: a determined attacker can trip this to
+     * briefly (one window) lock a targeted identifier — accepted because
+     * password login also requires the mandatory email OTP, so this only
+     * bounds password-probing rate, not account access.
+     */
+    public const LOGIN_ACCOUNT_RATE_LIMIT  = 20;
+    public const LOGIN_ACCOUNT_RATE_WINDOW = 900;
     /** Anon-IP-keyed throttle for the public wallet-nonce route. Same budget as the authed nonce. */
     public const WALLET_NONCE_RATE_LIMIT = 10;
     /** Anon-IP-keyed throttle for wallet-login. Sibling of /auth/login. */
