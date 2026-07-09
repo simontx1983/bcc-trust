@@ -2347,7 +2347,11 @@ final class Plugin
                             continue;
                         }
                         $fetcher = \BCC\Trust\Onchain\Factories\FetcherFactory::make_for_chain($chain);
-                        if (!$fetcher->supports_feature('nft')) {
+                        // Gate on 'collection' — the capability fetch_collections()
+                        // actually requires. No fetcher advertises 'nft' (the enum
+                        // key was never implemented), so the old gate skipped every
+                        // chain and this refresh silently no-op'd. [audit M]
+                        if (!$fetcher->supports_feature('collection')) {
                             continue;
                         }
 

@@ -231,6 +231,17 @@ final class MyAccountEndpoint
             wp_set_auth_cookie($userId, false);
         }
 
+        // Revoke every outstanding bearer JWT (bump the token-version counter)
+        // so a token stolen before this rotation can't outlive the password
+        // change — the bearer analogue of wp_set_password clearing WP sessions.
+        // Order matters: revoke FIRST, then mint, so the fresh token carries
+        // the bumped version and survives; every OTHER token now fails
+        // ERR_REVOKED. The new token is returned below so the caller's own
+        // session stays alive. [audit H-2]
+        \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
+        $handle    = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
+        $freshToken = \BCC\Trust\Core\Support\JwtToken::encode($userId, $handle);
+
         // Credential rotation — log without the password value (obviously).
         AuditLogger::log('account_password_changed', $userId, [], 'user', $userId);
 
@@ -238,7 +249,12 @@ final class MyAccountEndpoint
         // so a session-hijack-then-rotate attack is detectable.
         AccountSecurityMailer::passwordChanged($userId);
 
-        $resp = ApiResponse::ok(['ok' => true]);
+        $resp = ApiResponse::ok([
+            'ok'         => true,
+            'token'      => $freshToken,
+            'expires_in' => \BCC\Trust\Core\Support\JwtToken::TTL_SECONDS,
+            'token_type' => 'Bearer',
+        ]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
     }
