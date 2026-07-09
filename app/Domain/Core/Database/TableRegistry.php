@@ -207,12 +207,6 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_page_follows';
     }
 
-    public static function userRanks(): string
-    {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_user_ranks';
-    }
-
     public static function watchBatches(): string
     {
         global $wpdb;
@@ -333,7 +327,6 @@ final class TableRegistry
             'dirty_queue'        => self::dirtyQueue(),
             // V1 frontend support tables
             'watch_meta'         => self::watchMeta(),
-            'user_ranks'         => self::userRanks(),
             'watch_batches'      => self::watchBatches(),
             'content_reports'    => self::contentReports(),
             'hidden_activities'  => self::hiddenActivities(),

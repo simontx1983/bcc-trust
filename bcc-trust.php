@@ -262,6 +262,13 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-endorsements-table.php';
 // per-column existence-probed. Runs on init priority 29, after the
 // endorsements drop.
 require_once BCC_TRUST_PATH . 'includes/database/drop-onchain-role-boost-columns.php';
+// Option B ranking-system slice (2026-07-09): drops the retired bcc_user_ranks
+// table. The conferred-rank / Foreman-Role scaffolding it backed was never
+// built (0 rows, 0 write callers, always-false flags); rank is auto-derived
+// from feature-access level. UserRankRepository + schema + view-model fields
+// removed this release. Guarded by option + hourly transient re-check; DROP
+// TABLE IF EXISTS. Runs on init priority 30, after the role-boost drop.
+require_once BCC_TRUST_PATH . 'includes/database/drop-user-ranks-table.php';
 // Disputes reconciliation (2026-07-08): drops the retired bcc_trust_flags
 // table. Its readers were repointed to the live bcc_disputes table
 // (reporter-keyed) and FlagsRepository + CardDisputes* were deleted this
