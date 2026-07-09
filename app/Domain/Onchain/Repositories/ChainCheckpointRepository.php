@@ -3,6 +3,7 @@
 namespace BCC\Trust\Onchain\Repositories;
 
 use BCC\Core\DB\DB;
+use BCC\Core\Log\Logger;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -357,6 +358,15 @@ final class ChainCheckpointRepository
             return $newTotal;
         } catch (\Throwable $e) {
             $wpdb->query('ROLLBACK');
+            // Log the rollback — returning 0 silently corrupts the daily CU
+            // budget breaker. Callers charge CU unconditionally (the provider
+            // call already happened), so a lost write under-counts
+            // cu_used_today and can overrun real provider spend with no signal.
+            Logger::error('[ChainCheckpointRepository] addCuUsage rollback — CU usage not recorded', [
+                'chain_id' => $chainId,
+                'cu'       => $cu,
+                'db_error' => $e->getMessage(),
+            ]);
             return 0;
         }
     }

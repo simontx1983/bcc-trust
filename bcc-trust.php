@@ -69,6 +69,21 @@ if (!defined('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS')) {
  */
 define('BCC_TRUST_SCHEMA_VERSION', (static function (): string {
     $files = glob(__DIR__ . '/includes/database/schema-*.php') ?: [];
+
+    // Two repositories self-install their own DDL (inline CREATE TABLE +
+    // dbDelta) OUTSIDE includes/database/ — DisputeRepository::install() and
+    // SignalRepository::install_own_table(). Fold their file hashes in too,
+    // or an edit to their schema wouldn't change this version and the
+    // migration gate would early-return and never re-run their dbDelta.
+    foreach ([
+        __DIR__ . '/app/Domain/Disputes/Repositories/DisputeRepository.php',
+        __DIR__ . '/app/Domain/Onchain/Repositories/SignalRepository.php',
+    ] as $selfInstaller) {
+        if (is_file($selfInstaller)) {
+            $files[] = $selfInstaller;
+        }
+    }
+
     if (!$files) {
         return '0000000000';
     }
