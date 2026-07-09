@@ -24,6 +24,8 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\PeepSo\PeepSoGroupWriter;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\ValueObjects\GroupType;
+use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -45,6 +47,13 @@ final class LocalsService
         'cosmos', 'osmosis', 'injective', 'ethereum', 'solana',
         'polkadot', 'thorchain', 'near',
     ];
+
+    private GroupContextResolver $groupContext;
+
+    public function __construct(GroupContextResolver $groupContext)
+    {
+        $this->groupContext = $groupContext;
+    }
 
     /**
      * Render the /locals response payload.
@@ -248,8 +257,20 @@ final class LocalsService
         if ($groupId <= 0) {
             return ['error' => 'bcc_invalid_request', 'message' => 'Invalid group id.'];
         }
-        if (PeepSoGroupRepository::findOneById($groupId) === null) {
+
+        // Gate BEFORE the PeepSoGroupWriter::join door. The writer lands the
+        // user as `member` unconditionally — it bypasses PeepSo's UI approval
+        // (see PeepSoGroupWriter docblock), so without a server-side gate any
+        // peepso-group id, including a closed/secret or NFT-gated holder group,
+        // could be joined through this door. Locals are open by definition;
+        // NFT and plain groups have their own gated endpoints
+        // (/me/holder-groups, /me/groups) and MUST NOT be joinable here.
+        $context = $this->groupContext->forGroup($groupId);
+        if ($context === null || $context->type !== GroupType::Local) {
             return ['error' => 'bcc_not_found', 'message' => 'Local not found.'];
+        }
+        if ($context->privacy !== PeepSoPrivacy::Open) {
+            return ['error' => 'bcc_forbidden', 'message' => 'This Local does not accept open membership.'];
         }
 
         $existing = $this->loadViewerMemberships($viewerId, [$groupId]);
@@ -278,10 +299,10 @@ final class LocalsService
         $after = $this->loadViewerMemberships($viewerId, [$groupId]);
         $row   = $after[$groupId] ?? null;
         if ($row === null) {
-            // PeepSo accepted the call but no active row appeared — likely
-            // a closed group routing to pending_admin (V1 doesn't model
-            // pending). Surface as forbidden so the UI can hint at it.
-            return ['error' => 'bcc_forbidden', 'message' => 'This Local does not accept open membership.'];
+            // The group was gated to an open Local above, so member_join
+            // always yields an active `member` row. A null here means the
+            // PeepSo write silently failed — surface as unavailable.
+            return ['error' => 'bcc_unavailable', 'message' => 'Group membership service is unavailable.'];
         }
 
         return [
