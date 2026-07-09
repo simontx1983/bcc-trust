@@ -310,8 +310,13 @@ final class ChainCheckpointRepository
         // Single statement: reset to %d if the date has changed, else
         // increment. We can't use a CASE without a SELECT so we do this
         // in two steps inside one transaction.
-        $wpdb->query('START TRANSACTION');
         try {
+            // Fail closed if the transaction never opened (DB failover): a
+            // no-op START leaves the FOR UPDATE below as a plain read, losing
+            // the row lock that serialises concurrent CU increments.
+            if ($wpdb->query('START TRANSACTION') === false) {
+                throw new \RuntimeException('START TRANSACTION failed');
+            }
             /** @var object{cu_used_today: int|string, cu_budget_reset_at: string}|null $row */
             $row = $wpdb->get_row($wpdb->prepare(
                 "SELECT cu_used_today, cu_budget_reset_at

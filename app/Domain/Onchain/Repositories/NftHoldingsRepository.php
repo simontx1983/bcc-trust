@@ -685,8 +685,13 @@ final class NftHoldingsRepository
         global $wpdb;
         $touchedWallets = [];
 
-        $wpdb->query('START TRANSACTION');
         try {
+            // Fail closed if the transaction never opened (DB failover): a
+            // no-op START leaves the batch in autocommit, defeating the
+            // mid-batch rollback this wrapper provides.
+            if ($wpdb->query('START TRANSACTION') === false) {
+                throw new \RuntimeException('START TRANSACTION failed');
+            }
             if ($upserts !== []) {
                 $result['inserts'] = self::upsertMany($upserts);
                 foreach ($upserts as $r) {

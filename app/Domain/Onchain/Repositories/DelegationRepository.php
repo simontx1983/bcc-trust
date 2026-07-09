@@ -64,8 +64,13 @@ final class DelegationRepository
         $now       = current_time('mysql', true);
         $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
 
-        $wpdb->query('START TRANSACTION');
         try {
+            // Fail closed if the transaction never opened (DB failover): a
+            // no-op START leaves the delete+insert in autocommit with no
+            // rollback on partial failure.
+            if ($wpdb->query('START TRANSACTION') === false) {
+                throw new \RuntimeException('START TRANSACTION failed');
+            }
             $wpdb->delete($table, ['wallet_link_id' => $walletLinkId], ['%d']);
 
             $inserted = 0;
