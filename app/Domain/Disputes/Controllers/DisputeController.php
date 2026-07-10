@@ -634,12 +634,13 @@ class DisputeController
         }
 
         if (!$enqueued) {
-            // resolution_enqueued_at is now set but no job was queued. The
-            // reconciliation path (retryStuckReviewingDisputes) will NOT
-            // pick this up because majority is not met — so we must surface
-            // the failure here. Admin can retry after resolving the AS
-            // backlog issue; the claim gate will then trip until the cron
-            // reconciliation unsticks the row OR admin manually clears it.
+            // resolution_enqueued_at was claimed but no job was queued. Release
+            // the claim so a retry can re-claim — otherwise the claim gate 409s
+            // every retry and reconciliation won't unstick it (majority not
+            // met), silently deferring the admin's decision by up to the full
+            // dispute TTL. We own the claim we just won, so releasing it is
+            // safe. [audit L-B5]
+            DisputeRepository::releaseResolutionEnqueue($dispute_id);
             CoreLogger::error('[bcc-disputes] force_resolve_enqueue_soft_failed', [
                 'dispute_id' => $dispute_id,
                 'admin_id'   => $adminId,

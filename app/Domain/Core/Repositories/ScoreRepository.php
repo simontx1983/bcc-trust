@@ -2159,6 +2159,7 @@ class ScoreRepository {
         }
 
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
         $roundedValue  = round($value, 2);
         $now           = current_time('mysql');
 
@@ -2170,10 +2171,19 @@ class ScoreRepository {
         // see the onchain contract comment that explicitly documents SET
         // semantics. Aggregation of multiple sources is now the caller's
         // responsibility, not the repository's.
+        //
+        // reputation_tier is recomputed inline alongside total_score (same as
+        // applyAttestationBonus / applyPenalty). Without it an onchain bonus
+        // could lift total_score past a tier threshold while the tier denorm
+        // stayed stale — the zero-vote recalc fast path never recomputes it,
+        // so the stale tier would persist to disk + the read model. The bonus
+        // column is SET first so the formula + tier CASE read the NEW value
+        // (MySQL evaluates SET clauses left-to-right). [audit M-B3]
         $result = $wpdb->query($wpdb->prepare(
             "UPDATE {$this->table}
              SET {$column}         = %f,
                  total_score       = {$totalScoreSql},
+                 reputation_tier   = {$tierSql},
                  last_calculated_at = %s
              WHERE page_id = %d",
             $roundedValue,
@@ -2190,6 +2200,11 @@ class ScoreRepository {
         }
 
         if ($result > 0) {
+            // Mirror the (possibly changed) self-page tier into user_info, as
+            // applyAttestationBonus / applyPenalty do — otherwise an onchain
+            // bonus on a member self-page leaves the user_info tier denorm
+            // stale. No-op for non-self-pages. [audit M-B3]
+            $this->mirrorSelfPageTierToUserInfo($pageId);
             $this->invalidateCache($pageId);
             return true;
         }

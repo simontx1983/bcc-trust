@@ -416,6 +416,37 @@ class DisputeScheduler
                     continue;
                 }
 
+                // §D5 — backfill outcome_match on the credited participation
+                // rows, mirroring DisputeResolver::handle. The reconcile path
+                // calls executeAdjudication directly (never handle()), so
+                // without this the panelist accuracy mark was never written for
+                // any dispute resolved through reconciliation — countCorrect
+                // undercounted and those panelists silently lost their accuracy
+                // trust term. timeout_no_quorum orphans never reach here
+                // (status is accepted/rejected). [audit M-B4]
+                if ($dispute->status === 'accepted' || $dispute->status === 'rejected') {
+                    $finalDecision = $dispute->status === 'accepted' ? 'accept' : 'reject';
+                    try {
+                        $participationRepo = new \BCC\Trust\Disputes\Repositories\DisputeParticipationRepository();
+                        $backfilled = $participationRepo->backfillOutcomeMatch($disputeId, $finalDecision);
+                        CoreLogger::audit('dispute_participation_backfilled', [
+                            'dispute_id' => $disputeId,
+                            'outcome'    => $dispute->status,
+                            'rows'       => $backfilled,
+                            'via'        => 'reconcile',
+                        ]);
+                    } catch (\Throwable $e) {
+                        // Non-fatal: the dispute is resolved; the credited rows
+                        // just miss their accuracy mark (same posture as the
+                        // resolver's own backfill).
+                        CoreLogger::error('[bcc-disputes] reconcile_participation_backfill_failed', [
+                            'dispute_id' => $disputeId,
+                            'outcome'    => $dispute->status,
+                            'error'      => $e->getMessage(),
+                        ]);
+                    }
+                }
+
                 // Reporter penalty is now applied inside the trust-engine
                 // adjudicator's own transaction (see executeAdjudication →
                 // rejectVoteDispute). The deprecated

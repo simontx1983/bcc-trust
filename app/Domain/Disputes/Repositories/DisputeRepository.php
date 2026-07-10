@@ -1452,6 +1452,34 @@ class DisputeRepository
     }
 
     /**
+     * Release a resolution-enqueue claim that never produced a queued job.
+     *
+     * Counterpart to claimResolutionEnqueue: when the caller wins the claim but
+     * the Action Scheduler enqueue then fails, the claim must be released or the
+     * dispute becomes un-retryable — a retry re-hits the `IS NULL` guard and
+     * 409s until the TTL auto-resolve path or a manual clear (up to the full
+     * dispute TTL, since sub-majority admin-forced disputes are ignored by
+     * retryStuckReviewingDisputes). Guarded on status='reviewing' so it can
+     * never disturb a dispute that has since progressed; safe because the caller
+     * owns the claim it just won. [audit L-B5]
+     */
+    public static function releaseResolutionEnqueue(int $disputeId): bool
+    {
+        global $wpdb;
+        $table = self::disputes_table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET resolution_enqueued_at = NULL
+              WHERE id = %d
+                AND status = 'reviewing'",
+            $disputeId
+        ));
+
+        return $result !== false;
+    }
+
+    /**
      * Count disputes stuck between enqueue-claim and resolution.
      *
      * A dispute matches when:
