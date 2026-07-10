@@ -177,7 +177,24 @@ class VoteJobDispatcher {
 
         try {
             if ( ! as_has_scheduled_action( $hook, $args ) ) {
-                as_enqueue_async_action( $hook, $args );
+                // as_enqueue_async_action returns the new action id, or 0 when
+                // the Action Scheduler store rejects the insert. This is the
+                // PRIMARY dispatch path in production (AS present), yet it had
+                // NO failure handling — a soft enqueue failure silently
+                // stranded all post-vote sub-tasks (fraud, trust graph, stats)
+                // with neither a log nor a metric, unlike the wp-cron fallback
+                // in enqueue(). The cron_dispatch/vote_job_dispatcher subsystem
+                // already documents "AS returning 0" as its trigger; record it
+                // (+ log) so /system/health and the operator journal see the
+                // loss, at parity with the fallback.
+                $actionId = as_enqueue_async_action( $hook, $args );
+                if ( ! $actionId ) {
+                    \BCC\Core\Observability\DegradationMetrics::record( 'cron_dispatch', 'vote_job_dispatcher' );
+                    \BCC\Core\Log\Logger::error( '[bcc-trust] vote job dispatcher AS enqueue failed', [
+                        'hook' => $hook,
+                        'args' => $args,
+                    ] );
+                }
             }
         } finally {
             \BCC\Core\DB\AdvisoryLock::release( $lockName );
