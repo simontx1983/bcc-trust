@@ -172,15 +172,6 @@ class UserLifecycleService
         // Identity verifications (github / x / wallet).
         $plugin->verificationRepository()->deleteForUser($userId);
 
-        // Rank awards. (The member's trust snapshot is the self-page score
-        // row, cleared above via deleteSelfPage(); the legacy
-        // bcc_trust_reputation table is retired in Stage E. The
-        // bcc_reputation_events ledger was retired in the reputation cutover —
-        // "recent changes" now reads the self-page's bcc_trust_score_events,
-        // which is bounded audit data with no post-deletion view-model
-        // dependency, so no per-user purge call replaces the old one.)
-        $plugin->userRankRepository()->deleteForUser($userId);
-
         // Push subscriptions.
         (new \BCC\Trust\Core\Repositories\PushSubscriptionRepository())->deleteAllForUser($userId);
 

@@ -29,7 +29,6 @@ use BCC\Core\Repositories\PeepSoPageRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\GitHubRepository;
-use BCC\Trust\Core\Repositories\UserRankRepository;
 use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
@@ -322,17 +321,6 @@ final class UsersEndpoint
                         'enum'              => ['validator', 'project', 'nft', 'dao'],
                         'sanitize_callback' => 'sanitize_text_field',
                     ],
-                    'rank' => [
-                        'required'          => false,
-                        'type'              => 'string',
-                        // Rank slugs match RankCatalog (apprentice / journeyman /
-                        // foreman). Per UserRankRepository::getUserIdsWithRank
-                        // docblock, this filter targets EXPLICITLY-AWARDED ranks
-                        // — auto-derived Apprentice (display fallback) is not
-                        // included in the `apprentice` filter.
-                        'enum'              => ['apprentice', 'journeyman', 'foreman'],
-                        'sanitize_callback' => 'sanitize_text_field',
-                    ],
                     'verified' => [
                         'required' => false,
                         'type'     => 'array',
@@ -537,15 +525,6 @@ final class UsersEndpoint
             ? $typeParam
             : '';
 
-        // Optional rank filter — single-select per the §G1 chip strip.
-        // Server validates against the same allowlist the route schema
-        // enforces; an unknown value is silently dropped (matches the
-        // existing `type` posture).
-        $rankParam = $request->get_param('rank');
-        $rank      = is_string($rankParam) && in_array($rankParam, ['apprentice', 'journeyman', 'foreman'], true)
-            ? $rankParam
-            : '';
-
         // Optional verifications filter — multi-select with AND semantics.
         // The route schema accepts an array of {x, github, wallet}; we
         // re-validate here so direct callers + REST `verified[]=x&verified[]=…`
@@ -582,14 +561,6 @@ final class UsersEndpoint
                 return self::membersEmptyResponse($page, $perPage, $typeCounts);
             }
             $restrictedSets[] = $typeIds;
-        }
-
-        if ($rank !== '') {
-            $rankIds = (new UserRankRepository())->getUserIdsWithRank($rank);
-            if ($rankIds === []) {
-                return self::membersEmptyResponse($page, $perPage, $typeCounts);
-            }
-            $restrictedSets[] = $rankIds;
         }
 
         foreach ($verifiedAxes as $axis) {

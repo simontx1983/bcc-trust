@@ -306,12 +306,11 @@ final class CardViewService
             'reputation_tier_label' => null,
             'card_tier'           => $card['key'],
             'tier_label'          => $card['label'],
-            // Rank + Foreman Role are member-only — but the fields are
-            // ALWAYS emitted (nullable / false) per the contract, so the
-            // frontend can render without a kind check.
+            // Rank is member-only — but the fields are ALWAYS emitted
+            // (nullable) per the contract, so the frontend can render
+            // without a kind check.
             'rank_label'          => null,
             'current_rank_label'  => null,
-            'foreman_insignia'    => false,
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::buildFlags((int) $post->post_author),
             'is_claimed'          => $isClaimed,
@@ -604,7 +603,6 @@ final class CardViewService
             // getSummary's RankService path (no longer a hard-stubbed null).
             'rank_label'          => $summary['rank_label'],
             'current_rank_label'  => $summary['current_rank_label'],
-            'foreman_insignia'    => $summary['foreman_insignia'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::buildFlags($userId),
             // §V1.5 endorse fields stay present on member cards for
@@ -767,7 +765,6 @@ final class CardViewService
             'tier_label'          => self::COMMUNITY_TIER_LABEL_BY_TYPE[$type] ?? 'COMMUNITY',
             'rank_label'          => null,
             'current_rank_label'  => null,
-            'foreman_insignia'    => false,
             'is_in_good_standing' => true,
             'flags'               => [],
             'viewer_has_reviewed' => false,

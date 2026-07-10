@@ -22,7 +22,7 @@
  * V1.0 scaffolding: all three slot scorers are stubs that return null.
  * The architecture, contract shape, and dismissal pipeline are
  * production-ready; data fills in as the underlying aggregators land
- * (bcc_onchain_signals deltas for slot 1, bcc_user_ranks events for
+ * (bcc_onchain_signals deltas for slot 1, rank-promotion events for
  * slot 2, followed-entity activity for slot 3). No API shape change
  * when scorers come online — just data flips from null to populated.
  *
@@ -237,7 +237,7 @@ final class HighlightsService
                 $viewerId,
                 'rank_promoted',
                 'You just hit Journeyman',
-                'Demo entry — replace once bcc_user_ranks promotion events flow.'
+                'Demo entry — replace once rank-promotion events flow.'
             );
         }
 

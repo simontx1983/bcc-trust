@@ -28,7 +28,6 @@ require_once __DIR__ . '/schema-score-events.php';
 // V1 frontend support tables (per docs/api-contract-v1.md §6.5)
 require_once __DIR__ . '/schema-watch-meta.php';
 require_once __DIR__ . '/schema-page-follows.php';
-require_once __DIR__ . '/schema-user-ranks.php';
 require_once __DIR__ . '/schema-watch-batches.php';
 require_once __DIR__ . '/schema-content-reports.php';
 require_once __DIR__ . '/schema-hidden-activities.php';
@@ -137,7 +136,7 @@ function bcc_trust_create_tables() {
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Score events table created', []);
     }
 
-    // V1 frontend support tables (watch meta, ranks)
+    // V1 frontend support tables (watch meta)
     if (function_exists('bcc_trust_create_watch_meta_table')) {
         bcc_trust_create_watch_meta_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Watch meta table created', []);
@@ -145,10 +144,6 @@ function bcc_trust_create_tables() {
     if (function_exists('bcc_trust_create_page_follows_table')) {
         bcc_trust_create_page_follows_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Page follows table created', []);
-    }
-    if (function_exists('bcc_trust_create_user_ranks_table')) {
-        bcc_trust_create_user_ranks_table();
-        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: User ranks table created', []);
     }
     if (function_exists('bcc_trust_create_watch_batches_table')) {
         bcc_trust_create_watch_batches_table();
@@ -265,7 +260,6 @@ function bcc_trust_verify_all_tables() {
         'bcc_trust_score_events',
         // V1 frontend support tables
         'bcc_watch_meta',
-        'bcc_user_ranks',
         'bcc_watch_batches',
         'bcc_content_reports',
         'bcc_hidden_activities',

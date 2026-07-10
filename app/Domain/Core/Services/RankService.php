@@ -13,9 +13,7 @@
  *
  * This replaces the V1 reputation-tier derivation (a *caution* user is
  * no longer silently "promoted" by trust score). Activity earns the
- * level; the level names the rank. The Foreman **Role** is conferred
- * separately and never appears here as a rank — it only sets the
- * `foreman_insignia` flag in the viewer block.
+ * level; the level names the rank.
  *
  * @package BCC\Trust\Core\Services
  * @since V1 (2026-04)
@@ -23,7 +21,6 @@
 
 namespace BCC\Trust\Core\Services;
 
-use BCC\Trust\Core\Repositories\UserRankRepository;
 use BCC\Trust\Core\Support\RankCatalog;
 
 if (!defined('ABSPATH')) {
@@ -57,22 +54,19 @@ final class RankService
         return self::LEVEL_TO_RANK[$level] ?? RankCatalog::RANK_APPRENTICE;
     }
 
-    private UserRankRepository $rankRepository;
     private FeatureAccessService $featureAccess;
 
     public function __construct(
-        UserRankRepository $rankRepository,
         FeatureAccessService $featureAccess
     ) {
-        $this->rankRepository = $rankRepository;
-        $this->featureAccess  = $featureAccess;
+        $this->featureAccess = $featureAccess;
     }
 
     /**
      * The user's earned rank, derived from their feature-access level.
-     * "Auto-derived" name kept for caller compatibility — in the
-     * level model there is no admin-conferred *rank* (only the Foreman
-     * Role), so the current rank is always this value.
+     * "Auto-derived" name kept for caller compatibility — in the level
+     * model there is no admin-conferred *rank*, so the current rank is
+     * always this value.
      */
     public function autoDerivedRank(int $userId): string
     {
@@ -92,19 +86,13 @@ final class RankService
      *     rank (always equal; no rank demotion path in V1)
      *   - current_rank_label / next_rank / next_rank_label — pre-rendered
      *     §A2 progression labels (next_* null at Master, top of ladder)
-     *   - foreman_insignia — true iff an active conferred Foreman Role
-     *     row exists; orthogonal to rank, never changes current_rank
-     *   - is_admin_conferred — true iff any conferred Role is active
-     *     (today only Foreman); kept for future-build readiness
      *
      * @return array{
      *   current_rank: string,
      *   current_rank_label: string,
      *   auto_derived_rank: string,
      *   next_rank: string|null,
-     *   next_rank_label: string|null,
-     *   is_admin_conferred: bool,
-     *   foreman_insignia: bool
+     *   next_rank_label: string|null
      * }|null
      */
     public function getViewerBlock(int $userId): ?array
@@ -114,13 +102,6 @@ final class RankService
         }
 
         $currentRank = $this->autoDerivedRank($userId);
-        $active      = $this->rankRepository->findActive($userId);
-
-        // An active row in bcc_user_ranks is a conferred Role (earned
-        // ranks are derived, never stored). It sets the insignia but
-        // never overrides the earned rank — the three axes stay separate.
-        $hasRole        = $active !== null && RankCatalog::isRole($active->rank_key);
-        $foremanInsignia = $active !== null && $active->rank_key === RankCatalog::RANK_FOREMAN;
 
         $nextRank      = RankCatalog::getNextRank($currentRank);
         $nextRankLabel = $nextRank !== null ? RankCatalog::getLabel($nextRank) : null;
@@ -131,8 +112,6 @@ final class RankService
             'auto_derived_rank'  => $currentRank,
             'next_rank'          => $nextRank,
             'next_rank_label'    => $nextRankLabel,
-            'is_admin_conferred' => $hasRole,
-            'foreman_insignia'   => $foremanInsignia,
         ];
     }
 }

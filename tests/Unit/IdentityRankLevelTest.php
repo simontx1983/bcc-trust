@@ -48,16 +48,15 @@ final class IdentityRankLevelTest extends TestCase
         );
     }
 
-    // ── RankCatalog — earned ladder + Foreman as a Role ──────────────
+    // ── RankCatalog — earned ladder ──────────────────────────────────
 
-    public function testEarnedLadderIsApprenticeJourneymanMasterNoForeman(): void
+    public function testEarnedLadderIsApprenticeJourneymanMaster(): void
     {
         $keys = array_column(RankCatalog::all(), 'key');
         self::assertSame(
             [RankCatalog::RANK_APPRENTICE, RankCatalog::RANK_JOURNEYMAN, RankCatalog::RANK_MASTER],
             $keys
         );
-        self::assertNotContains(RankCatalog::RANK_FOREMAN, $keys, 'Foreman is a Role, never on the earned ladder');
     }
 
     public function testEarnedLadderRanksAreAllAutoAssigned(): void
@@ -72,22 +71,6 @@ final class IdentityRankLevelTest extends TestCase
         self::assertSame(RankCatalog::RANK_JOURNEYMAN, RankCatalog::getNextRank(RankCatalog::RANK_APPRENTICE));
         self::assertSame(RankCatalog::RANK_MASTER, RankCatalog::getNextRank(RankCatalog::RANK_JOURNEYMAN));
         self::assertNull(RankCatalog::getNextRank(RankCatalog::RANK_MASTER), 'Master is the top of the earned ladder');
-    }
-
-    public function testForemanIsARoleNotAnEarnedRank(): void
-    {
-        self::assertTrue(RankCatalog::isRole(RankCatalog::RANK_FOREMAN));
-        self::assertFalse(RankCatalog::isRole(RankCatalog::RANK_MASTER));
-        self::assertFalse(RankCatalog::isRole(RankCatalog::RANK_APPRENTICE));
-    }
-
-    public function testForemanStaysAValidStoredKeyWithALabelButOffTheLadder(): void
-    {
-        // A conferred Foreman row must still validate + resolve a label,
-        // even though it's off the earned ladder (a Role, not in all()).
-        self::assertTrue(RankCatalog::isValid(RankCatalog::RANK_FOREMAN));
-        self::assertSame('Foreman', RankCatalog::getLabel(RankCatalog::RANK_FOREMAN));
-        self::assertNotContains(RankCatalog::RANK_FOREMAN, array_column(RankCatalog::all(), 'key'));
     }
 
     public function testMasterResolvesLabelAndIsAnAutoEarnedRung(): void

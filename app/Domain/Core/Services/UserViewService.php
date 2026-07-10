@@ -163,11 +163,6 @@ final class UserViewService
             'rank'                => $rank['key'],
             'rank_label'          => $rank['label'],
             'current_rank_label'  => $rank['label'],
-            // Foreman is a conferred Role, orthogonal to Rank (see §4.8).
-            // Conferral is a later slice (roadmap C2); no member holds the
-            // role in V1, so this is a shape-stable false. The authoritative
-            // per-viewer computation lives in RankService::getViewerBlock.
-            'foreman_insignia'    => false,
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
             'bio'                 => self::resolveBio($user),
@@ -332,7 +327,6 @@ final class UserViewService
      *   tier_label: string|null,
      *   rank_label: string,
      *   current_rank_label: string,
-     *   foreman_insignia: bool,
      *   is_in_good_standing: bool,
      *   flags: list<string>,
      *   trust_score: int,
@@ -495,9 +489,6 @@ final class UserViewService
             'tier_label'          => $card['label'],
             'rank_label'          => $rank['label'],
             'current_rank_label'  => $rank['label'],
-            // Foreman Role conferral is a later slice (roadmap C2); always
-            // false in V1 (see getUser + contract §4.8).
-            'foreman_insignia'    => false,
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
