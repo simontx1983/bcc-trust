@@ -96,7 +96,14 @@ final class NftGroupGateService {
             );
         }
 
-        \BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId);
+        // Honor the writer's verdict: false = PeepSo absent OR an existing
+        // banned membership row (the writer refuses to flip a group-level
+        // ban back to member). Surface the same transient fail-closed 503
+        // the UNKNOWN verdict uses, and leave the opt-out untouched —
+        // nothing was written, so nothing may be reported as joined.
+        if (!\BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId)) {
+            return JoinResult::verifyUnavailable($config->minBalance);
+        }
         $this->clearOptOut($userId, $groupId);
 
         return JoinResult::ok($config->minBalance);

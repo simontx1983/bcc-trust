@@ -223,7 +223,14 @@ final class MyGroupsEndpoint
             $groupId
         ) !== null;
 
-        \BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId);
+        // Honor the writer's verdict: false = PeepSo absent OR an existing
+        // banned membership row (the writer refuses to flip a group-level
+        // ban back to member). Fail closed with the same surface
+        // LocalsService::joinLocal uses — never report a join that did
+        // not happen.
+        if (!\BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId)) {
+            return ApiResponse::error('bcc_unavailable', 'Group membership service is unavailable.', 503);
+        }
 
         // Audit only on the non-member → member transition. Disambiguated
         // from holder_group_join (Onchain/REST/HolderGroupsEndpoint) so
