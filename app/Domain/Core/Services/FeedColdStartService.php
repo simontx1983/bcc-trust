@@ -396,7 +396,12 @@ final class FeedColdStartService
      */
     private function composeHotPosts(): array
     {
-        $payload = $this->feedRankingService->getHotFeed(null, self::HOT_POSTS_LIMIT);
+        // Request the warm-cron page size (the only hot-feed entry that is
+        // primed) and slice locally to the 2 we show. Asking for
+        // HOT_POSTS_LIMIT directly keyed a separate `hot:v1:2` entry the cron
+        // never warms, so cold-start rebuilt the hot feed inline on every call.
+        // [audit L-B6]
+        $payload = $this->feedRankingService->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT);
 
         $items = $payload['items'] ?? [];
         if (!is_array($items)) {
@@ -407,6 +412,9 @@ final class FeedColdStartService
         foreach ($items as $item) {
             if (is_array($item)) {
                 $out[] = $item;
+            }
+            if (count($out) >= self::HOT_POSTS_LIMIT) {
+                break;
             }
         }
         return $out;

@@ -827,7 +827,9 @@ class CronService
     public function warmHotFeed(): void
     {
         try {
-            Plugin::instance()->feedRankingService()->warmHotFeed(20);
+            Plugin::instance()->feedRankingService()->warmHotFeed(
+                \BCC\Trust\Core\Services\Feed\FeedRankingService::HOT_WARM_LIMIT
+            );
         } catch (\Throwable $e) {
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::warning('[bcc-trust] hot-feed warm failed', [
