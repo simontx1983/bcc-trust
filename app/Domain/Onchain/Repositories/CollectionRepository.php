@@ -208,9 +208,15 @@ final class CollectionRepository
         // mid-loop left the top-collections list partially updated
         // (first N rows current-cycle, remaining N from hours earlier).
         // Mirrors ValidatorRepository::bulkUpsert's atomicity guarantee.
-        $wpdb->query('START TRANSACTION');
-
         try {
+
+        // Fail closed if the transaction never opened (DB failover): a no-op
+        // START leaves the batch in autocommit, defeating the mid-loop
+        // rollback this wrapper provides.
+        if ($wpdb->query('START TRANSACTION') === false) {
+            throw new \RuntimeException('START TRANSACTION failed');
+        }
+
         foreach ($collections as $data) {
             // Build the row manually so NULLs stay NULL in the DB
             // (wpdb::prepare with %d/%f converts null to 0).

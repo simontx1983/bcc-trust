@@ -680,8 +680,13 @@ class ClaimRepository {
     ): int {
         global $wpdb;
 
-        $wpdb->query('START TRANSACTION');
         try {
+            // Fail closed if the transaction never opened (DB failover): a
+            // no-op START leaves the multi-table delete in autocommit with no
+            // rollback if a later step fails.
+            if ($wpdb->query('START TRANSACTION') === false) {
+                throw new \RuntimeException('START TRANSACTION failed');
+            }
             $claimsRemoved  = self::deleteByUserAndWallet($userId, $walletAddress, $chainId);
             $signalsDeleted = SignalRepository::deleteByWallet($walletAddress, $chainSlug);
             // deleteByWallet returns int on success, false on DB error.
@@ -704,17 +709,27 @@ class ClaimRepository {
     }
 
     /**
-     * Compute the total claim bonus for a page across ALL entity types.
+     * Compute the total claim bonus for a user's own page.
      *
-     * Aggregates validator AND collection claims. Wallet-linked entities are
-     * matched via wallet_link → post_id. Bulk-indexed entities (wallet_link_id
-     * IS NULL) are matched via the claiming user's ID.
+     * Sums the bonus for every VERIFIED claim the user personally holds,
+     * across validator and collection entities. Attribution is
+     * claimant-centric: a claim credits the CLAIMANT's page, never the page
+     * a claimed entity happens to be wallet-linked to. Without this, a
+     * holder's verified claim on a creator-linked collection would inflate
+     * the CREATOR's score (a category error — each person's on-chain
+     * activity must boost their own trust, not someone else's). The caller
+     * already resolves the page from this same user via getPageForOwner, so
+     * the user is the sole attribution key.
+     *
+     * The entity JOINs restrict the sum to claims whose validator/collection
+     * row still exists (stale claims on deleted entities don't count) and
+     * naturally exclude the entity_type='page' mirror rows.
+     *
+     * Bonus map mirrors BonusService::CLAIM_BONUS_MAP:
+     *   operator/creator → 5.0, holder → 1.0.
      */
-    public static function computePageClaimBonus(
-        string $walletTable,
-        int $pageId,
-        int $userId
-    ): float {
+    public static function computePageClaimBonus(int $userId): float
+    {
         global $wpdb;
         $table       = self::table();
         $validators  = \BCC\Core\DB\DB::table('onchain_validators');
@@ -722,7 +737,7 @@ class ClaimRepository {
 
         return (float) $wpdb->get_var($wpdb->prepare(
             "SELECT COALESCE(SUM(bonus), 0) FROM (
-                /* Validator claims linked via wallet */
+                /* Validator claims held by the user */
                 SELECT CASE
                     WHEN cl.claim_role IN ('operator','creator') THEN 5.0
                     WHEN cl.claim_role = 'holder' THEN 1.0
@@ -730,26 +745,11 @@ class ClaimRepository {
                 END AS bonus
                 FROM {$table} cl
                 JOIN {$validators} e ON e.id = cl.entity_id AND cl.entity_type = 'validator'
-                JOIN {$walletTable} w ON w.id = e.wallet_link_id
-                WHERE w.post_id = %d AND cl.status = 'verified'
+                WHERE cl.user_id = %d AND cl.status = 'verified'
 
                 UNION ALL
 
-                /* Validator claims on bulk-indexed entities (no wallet_link) */
-                SELECT CASE
-                    WHEN cl.claim_role IN ('operator','creator') THEN 5.0
-                    WHEN cl.claim_role = 'holder' THEN 1.0
-                    ELSE 0
-                END AS bonus
-                FROM {$table} cl
-                JOIN {$validators} e ON e.id = cl.entity_id AND cl.entity_type = 'validator'
-                WHERE e.wallet_link_id IS NULL
-                  AND cl.status = 'verified'
-                  AND cl.user_id = %d
-
-                UNION ALL
-
-                /* Collection claims linked via wallet */
+                /* Collection claims held by the user */
                 SELECT CASE
                     WHEN cl.claim_role IN ('operator','creator') THEN 5.0
                     WHEN cl.claim_role = 'holder' THEN 1.0
@@ -757,26 +757,9 @@ class ClaimRepository {
                 END AS bonus
                 FROM {$table} cl
                 JOIN {$collections} e ON e.id = cl.entity_id AND cl.entity_type = 'collection'
-                JOIN {$walletTable} w ON w.id = e.wallet_link_id
-                WHERE w.post_id = %d AND cl.status = 'verified'
-
-                UNION ALL
-
-                /* Collection claims on bulk-indexed entities (no wallet_link) */
-                SELECT CASE
-                    WHEN cl.claim_role IN ('operator','creator') THEN 5.0
-                    WHEN cl.claim_role = 'holder' THEN 1.0
-                    ELSE 0
-                END AS bonus
-                FROM {$table} cl
-                JOIN {$collections} e ON e.id = cl.entity_id AND cl.entity_type = 'collection'
-                WHERE e.wallet_link_id IS NULL
-                  AND cl.status = 'verified'
-                  AND cl.user_id = %d
+                WHERE cl.user_id = %d AND cl.status = 'verified'
             ) AS combined_bonuses",
-            $pageId,
             $userId,
-            $pageId,
             $userId
         ));
     }

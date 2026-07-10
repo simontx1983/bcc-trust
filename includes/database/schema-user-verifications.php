@@ -42,6 +42,8 @@ function bcc_trust_create_user_verifications_table() {
         provider_avatar VARCHAR(255) DEFAULT NULL,
         meta TEXT DEFAULT NULL,
         access_token TEXT DEFAULT NULL,
+        refresh_token TEXT DEFAULT NULL,
+        token_expires_at DATETIME DEFAULT NULL,
         trust_boost FLOAT DEFAULT 0,
         fraud_reduction INT DEFAULT 0,
         status VARCHAR(20) NOT NULL DEFAULT 'active',

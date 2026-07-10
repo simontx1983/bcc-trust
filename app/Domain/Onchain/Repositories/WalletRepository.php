@@ -136,7 +136,12 @@ final class WalletRepository
         global $wpdb;
         $table = self::table();
 
-        $wpdb->query('START TRANSACTION');
+        // Bail if the transaction never opened (e.g. a DB failover): otherwise
+        // the FOR UPDATE below silently degrades to a plain read in autocommit
+        // mode, reopening the dual-primary race this method exists to close.
+        if ($wpdb->query('START TRANSACTION') === false) {
+            return false;
+        }
 
         // Lock the target row to prevent concurrent setPrimary calls
         // from reading stale chain_id between SELECT and UPDATE.

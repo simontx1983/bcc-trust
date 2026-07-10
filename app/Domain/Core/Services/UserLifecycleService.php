@@ -7,6 +7,7 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Security\IpResolver;
+use BCC\Trust\Core\Support\JwtToken;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -36,8 +37,16 @@ class UserLifecycleService
     public function register(): void
     {
         add_action('user_register', [$this, 'onUserRegister']);
-        add_action('profile_update', [$this, 'onProfileUpdate']);
+        add_action('profile_update', [$this, 'onProfileUpdate'], 10, 2);
         add_action('delete_user', [$this, 'onUserDelete']);
+
+        // JWT revocation on credential change outside the BCC REST
+        // endpoints (audit H-2 residual). WP core reset_password() fires
+        // after_password_reset — this also covers PeepSo's own
+        // reset-password shortcode, which calls reset_password(). The
+        // wp-admin / PeepSo-profile password-CHANGE path is handled by the
+        // hash diff in onProfileUpdate below.
+        add_action('after_password_reset', [$this, 'onPasswordReset'], 10, 1);
         add_action('wp_login', [$this, 'onLogin'], 10, 2);
         add_action('peepso_page_created', [$this, 'onPageCreated']);
         add_action('before_delete_post', [$this, 'onPageDelete'], 10, 1);
@@ -65,9 +74,32 @@ class UserLifecycleService
         $this->syncService->sync($userId);
     }
 
-    public function onProfileUpdate(int $userId): void
+    /**
+     * WP `profile_update` — fires on every profile save. The second arg is
+     * the pre-update WP_User snapshot (accepted_args=2).
+     *
+     * @param \WP_User|mixed $oldUserData pre-update user row, when supplied
+     */
+    public function onProfileUpdate(int $userId, mixed $oldUserData = null): void
     {
         $this->syncService->sync($userId);
+
+        // Revoke bearer JWTs when the PASSWORD actually changed (audit H-2
+        // residual). profile_update fires on every save, so diff the stored
+        // hash — bumping the token version unconditionally would log the
+        // user out of the frontend on any profile edit. This closes the
+        // path where a password changes OUTSIDE the BCC REST endpoints
+        // (wp-admin user edit, PeepSo profile shortcode), which those
+        // endpoints' point-wise revokes don't cover.
+        if ($oldUserData instanceof \WP_User) {
+            $fresh = get_userdata($userId);
+            if ($fresh instanceof \WP_User
+                && is_string($fresh->user_pass)
+                && $fresh->user_pass !== $oldUserData->user_pass
+            ) {
+                JwtToken::revokeAllForUser($userId);
+            }
+        }
 
         // Attempt to auto-complete the profile quest whenever the user
         // saves their profile. The quest signal is validated server-side
@@ -75,6 +107,21 @@ class UserLifecycleService
         // PeepSo avatar + display name + bio/social link — so firing
         // the signal on every save is safe (no-op if conditions aren't met).
         do_action('bcc_trust_quest_signal', $userId, 'complete_profile');
+    }
+
+    /**
+     * WP `after_password_reset` — fires from core reset_password(), used by
+     * WP's own reset flow AND PeepSo's reset-password shortcode. Revoke
+     * every bearer JWT so a token stolen before the reset can't outlive it.
+     * WP passes ($user, $new_pass); only the user is needed.
+     *
+     * @param \WP_User|mixed $user
+     */
+    public function onPasswordReset(mixed $user): void
+    {
+        if ($user instanceof \WP_User) {
+            JwtToken::revokeAllForUser((int) $user->ID);
+        }
     }
 
     /**
@@ -124,15 +171,6 @@ class UserLifecycleService
 
         // Identity verifications (github / x / wallet).
         $plugin->verificationRepository()->deleteForUser($userId);
-
-        // Rank awards. (The member's trust snapshot is the self-page score
-        // row, cleared above via deleteSelfPage(); the legacy
-        // bcc_trust_reputation table is retired in Stage E. The
-        // bcc_reputation_events ledger was retired in the reputation cutover —
-        // "recent changes" now reads the self-page's bcc_trust_score_events,
-        // which is bounded audit data with no post-deletion view-model
-        // dependency, so no per-user purge call replaces the old one.)
-        $plugin->userRankRepository()->deleteForUser($userId);
 
         // Push subscriptions.
         (new \BCC\Trust\Core\Repositories\PushSubscriptionRepository())->deleteAllForUser($userId);

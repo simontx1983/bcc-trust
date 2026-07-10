@@ -150,12 +150,7 @@ final class BonusService
                 'score_contribution'
             ));
 
-            $walletTable = \BCC\Trust\Onchain\Repositories\WalletRepository::table();
-            $claimBonus  = ClaimRepository::computePageClaimBonus(
-                $walletTable,
-                $pageId,
-                $userId
-            );
+            $claimBonus = ClaimRepository::computePageClaimBonus($userId);
 
             $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
             self::applyBonus($pageId, $totalBonus);

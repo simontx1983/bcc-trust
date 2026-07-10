@@ -47,6 +47,20 @@ final class AuthSupport
     public const SIGNUP_RATE_LIMIT = 5;
     /** Anon-IP-keyed throttle for login. Same budget as signup — login is the obvious brute-force target. */
     public const LOGIN_RATE_LIMIT = 5;
+    /**
+     * Per-identifier login throttle (defense-in-depth vs distributed
+     * brute-force from many IPs against ONE account, which the IP bucket
+     * can't see). Keyed by a hash of the submitted identifier — so it fires
+     * the same whether or not the account exists (no enumeration oracle).
+     * Deliberately generous over a longer window: a legitimate user never
+     * makes 20 attempts in 15 minutes, while sustained probing of a single
+     * identifier is capped. Tradeoff: a determined attacker can trip this to
+     * briefly (one window) lock a targeted identifier — accepted because
+     * password login also requires the mandatory email OTP, so this only
+     * bounds password-probing rate, not account access.
+     */
+    public const LOGIN_ACCOUNT_RATE_LIMIT  = 20;
+    public const LOGIN_ACCOUNT_RATE_WINDOW = 900;
     /** Anon-IP-keyed throttle for the public wallet-nonce route. Same budget as the authed nonce. */
     public const WALLET_NONCE_RATE_LIMIT = 10;
     /** Anon-IP-keyed throttle for wallet-login. Sibling of /auth/login. */
@@ -491,6 +505,34 @@ final class AuthSupport
         if ($token !== '') {
             delete_transient('bcc_oauth_pt_' . $token);
         }
+    }
+
+    /**
+     * Single-use nonce gate for the signed /auth/oauth bridge request.
+     *
+     * Returns true the FIRST time a given nonce is seen (and marks it seen
+     * for $ttl seconds), false on reuse — so a captured, still-in-window
+     * signed request cannot be replayed. The nonce is hashed into the
+     * transient key to bound its length and keep arbitrary header bytes out
+     * of the key name.
+     *
+     * Callers MUST verify the request signature BEFORE consuming a nonce, so
+     * a flood of bad-signature requests can't churn the transient store.
+     * The tiny get→set window is acceptable: within it the only replay is
+     * the identical, already-authentic request racing itself, which is not
+     * a meaningful attack, and the timestamp-skew check bounds the rest.
+     */
+    public static function consumeOauthBridgeNonce(string $nonce, int $ttl): bool
+    {
+        if ($nonce === '') {
+            return false;
+        }
+        $key = 'bcc_oauth_nonce_' . hash('sha256', $nonce);
+        if (get_transient($key) !== false) {
+            return false;
+        }
+        set_transient($key, 1, $ttl);
+        return true;
     }
 
     /**

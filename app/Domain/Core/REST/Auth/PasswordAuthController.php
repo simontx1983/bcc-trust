@@ -298,6 +298,22 @@ final class PasswordAuthController
             return ApiResponse::error('bcc_invalid_request', 'Email/handle and password are required.', 422);
         }
 
+        // Per-identifier throttle — the IP bucket above can't see a
+        // distributed brute-force (many IPs, one account). Keyed by a hash
+        // of the normalized identifier so it applies whether or not the
+        // account exists (no account-enumeration oracle) and fires before the
+        // CPU-bound bcrypt compare. See AuthSupport::LOGIN_ACCOUNT_RATE_* for
+        // the limit rationale + the targeted-lockout tradeoff.
+        $identifierKey = 'bcc_throttle_login_account_' . hash('sha256', strtolower($identifier));
+        if (!\BCC\Core\Security\Throttle::allow(
+            'login_account',
+            AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
+            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
+            $identifierKey
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
+        }
+
         // Accept either an email address or a handle on the same field.
         // Detect which by shape: a real email always contains '@' + a
         // valid domain per is_email(); anything else is treated as a

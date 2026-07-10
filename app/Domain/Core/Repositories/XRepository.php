@@ -56,9 +56,19 @@ class XRepository {
 
     /**
      * @param array<string, mixed> $xData
+     * @param int|null             $expiresIn access-token lifetime in seconds
+     *                                        (from the OAuth `expires_in`), used
+     *                                        to stamp token_expires_at so the
+     *                                        service can proactively refresh.
      * @throws RepositoryException on database failure
      */
-    public function saveConnection(int $userId, array $xData, string $accessToken): void {
+    public function saveConnection(
+        int $userId,
+        array $xData,
+        string $accessToken,
+        ?string $refreshToken = null,
+        ?int $expiresIn = null
+    ): void {
 
         global $wpdb;
 
@@ -76,6 +86,12 @@ class XRepository {
             'provider_avatar'   => $xData['profile_image_url'] ?? null,
             'meta'              => $meta,
             'access_token'      => $encryptedToken,
+            'refresh_token'     => ($refreshToken !== null && $refreshToken !== '')
+                ? $this->encryptToken($refreshToken)
+                : null,
+            'token_expires_at'  => $expiresIn !== null
+                ? gmdate('Y-m-d H:i:s', time() + $expiresIn)
+                : null,
             'status'            => 'active',
             'verified_at'       => current_time('mysql'),
             'last_synced'       => current_time('mysql'),
@@ -99,25 +115,54 @@ class XRepository {
             $userId
         ));
 
+        // Formats align 1:1 with $data insertion order: user_id (%d) then
+        // 11 string/datetime columns (%s), including the two new token columns.
+        $formats = ['%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s'];
+
         if ($exists) {
             $result = $wpdb->update(
                 $this->table,
                 $data,
                 ['user_id' => $userId, 'type' => 'x'],
-                ['%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s'],
+                $formats,
                 ['%d', '%s']
             );
         } else {
             $result = $wpdb->insert(
                 $this->table,
                 $data,
-                ['%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s']
+                $formats
             );
         }
 
         if ($result === false) {
             throw new RepositoryException('XRepository::saveConnection failed for user ' . $userId . ': ' . $wpdb->last_error);
         }
+    }
+
+    /**
+     * Persist a refreshed OAuth token set (from XOAuthService::refreshAccessToken).
+     * UPDATE-only — the connection row already exists. refresh_token is
+     * rewritten only when X returns a rotated one; token_expires_at only when
+     * an `expires_in` is present.
+     */
+    public function updateTokens(int $userId, string $accessToken, ?string $refreshToken, ?int $expiresIn): void {
+
+        global $wpdb;
+
+        $data    = ['access_token' => $this->encryptToken($accessToken), 'last_synced' => current_time('mysql')];
+        $formats = ['%s', '%s'];
+
+        if ($refreshToken !== null && $refreshToken !== '') {
+            $data['refresh_token'] = $this->encryptToken($refreshToken);
+            $formats[]             = '%s';
+        }
+        if ($expiresIn !== null) {
+            $data['token_expires_at'] = gmdate('Y-m-d H:i:s', time() + $expiresIn);
+            $formats[]                = '%s';
+        }
+
+        $wpdb->update($this->table, $data, ['user_id' => $userId, 'type' => 'x'], $formats, ['%d', '%s']);
     }
 
     /*
@@ -223,6 +268,8 @@ class XRepository {
                 trust_boost         AS x_trust_boost,
                 fraud_reduction     AS x_fraud_reduction,
                 access_token        AS x_access_token,
+                refresh_token       AS x_refresh_token,
+                token_expires_at    AS x_token_expires_at,
                 verified_at         AS x_verified_at,
                 last_synced         AS x_last_synced,
                 meta
@@ -247,6 +294,9 @@ class XRepository {
         $encryptedToken = RowAssert::optString($row, 'x_access_token');
         $decryptedToken = $encryptedToken !== null ? $this->decryptToken($encryptedToken) : null;
 
+        $encryptedRefresh = RowAssert::optString($row, 'x_refresh_token');
+        $decryptedRefresh = $encryptedRefresh !== null ? $this->decryptToken($encryptedRefresh) : null;
+
         return new XConnectionDTO(
             x_id:                     RowAssert::optString($row, 'x_id'),
             x_username:               RowAssert::optString($row, 'x_username'),
@@ -258,6 +308,8 @@ class XRepository {
             x_last_synced:            RowAssert::optString($row, 'x_last_synced'),
             x_email:                  $email,
             x_access_token_decrypted: $decryptedToken,
+            x_refresh_token_decrypted: $decryptedRefresh,
+            x_token_expires_at:        RowAssert::optString($row, 'x_token_expires_at'),
         );
     }
 

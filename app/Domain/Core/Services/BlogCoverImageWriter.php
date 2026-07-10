@@ -66,6 +66,17 @@ final class BlogCoverImageWriter
     ];
 
     /**
+     * Max total pixels (width × height) before the image reaches GD/Imagick.
+     * MIME + byte-size checks don't stop a decompression bomb — a small file
+     * that decodes to a huge bitmap OOMs the worker. 24 MP is well above any
+     * legitimate cover image. See MyProfileEndpoint for the sibling guard.
+     */
+    private const MAX_IMAGE_PIXELS = 24_000_000;
+
+    /** Max single-side length — guards extreme-aspect-ratio bombs. */
+    private const MAX_IMAGE_SIDE = 10_000;
+
+    /**
      * Validate + persist a single multipart cover-image upload.
      *
      * `$file` is the loose shape `WP_REST_Request::get_file_params()`
@@ -171,6 +182,30 @@ final class BlogCoverImageWriter
                 'error'   => 'bcc_invalid_request',
                 'message' => 'Only JPEG, PNG, WebP, and GIF cover images are allowed.',
                 'data'    => ['mime' => $mime],
+            ];
+        }
+
+        // Pixel-dimension guard BEFORE wp_handle_upload →
+        // wp_generate_attachment_metadata decodes via GD/Imagick. getimagesize
+        // reads only the header, so it runs ahead of any decompression bomb's
+        // allocation.
+        $dimensions = @getimagesize($tmpName);
+        if (!is_array($dimensions) || $dimensions[0] < 1 || $dimensions[1] < 1) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => 'Could not read the image. Please upload a valid image file.',
+            ];
+        }
+        $width  = $dimensions[0];
+        $height = $dimensions[1];
+        if ($width > self::MAX_IMAGE_SIDE
+            || $height > self::MAX_IMAGE_SIDE
+            || $width * $height > self::MAX_IMAGE_PIXELS
+        ) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => 'Cover image dimensions are too large.',
+                'data'    => ['max_pixels' => self::MAX_IMAGE_PIXELS],
             ];
         }
 

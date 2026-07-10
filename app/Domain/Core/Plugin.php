@@ -138,12 +138,6 @@ final class Plugin
         return $this->watchMetaRepository ??= new Repositories\WatchMetaRepository();
     }
 
-    private ?Repositories\UserRankRepository $userRankRepository = null;
-    public function userRankRepository(): Repositories\UserRankRepository
-    {
-        return $this->userRankRepository ??= new Repositories\UserRankRepository();
-    }
-
     // NOTE: UserLocalRepository removed — Locals membership reads from
     // PeepSo's peepso_group_members directly via PeepSoGroupRepository
     // (single graph rule). LocalsService composes membership view-models
@@ -432,7 +426,6 @@ final class Plugin
     public function rankService(): Services\RankService
     {
         return $this->rankService ??= new Services\RankService(
-            $this->userRankRepository(),
             $this->featureAccessService()
         );
     }

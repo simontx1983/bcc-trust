@@ -56,26 +56,24 @@ final class ModerationService
     {
         $fraudScore = $this->userInfoRepository->getFraudScore($userId);
 
+        // Atomic: the suspensions row and the user_info gate flag must land
+        // together. Written non-transactionally, a crash between them leaves a
+        // suspensions row with is_suspended still 0 — an "audited but ungated"
+        // window where every enforcement path (Permissions::is_not_suspended,
+        // getSuspendedUserIds) still lets the account through. Mirrors the
+        // already-atomic unsuspendUser().
         try {
-            $this->suspensionRepository->create($userId, get_current_user_id(), $reason, $notes, $fraudScore);
-        } catch (\Exception $e) {
-            Logger::error('[bcc-trust] suspend_insert_failed', [
+            \BCC\Trust\Core\Security\TransactionManager::run(function () use ($userId, $reason, $notes, $fraudScore) {
+                $this->suspensionRepository->create($userId, get_current_user_id(), $reason, $notes, $fraudScore);
+                $this->userInfoRepository->suspendUser($userId, $reason);
+            });
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] suspend_failed', [
                 'user_id'  => $userId,
                 'db_error' => $e->getMessage(),
             ]);
             echo '<div class="notice notice-error"><p>Failed to suspend user: database error.</p></div>';
             return ['success' => false, 'message' => 'Failed to suspend user: database error.'];
-        }
-
-        try {
-            $this->userInfoRepository->suspendUser($userId, $reason);
-        } catch (\Exception $e) {
-            Logger::error('[bcc-trust] suspend_flag_update_failed', [
-                'user_id'  => $userId,
-                'db_error' => $e->getMessage(),
-            ]);
-            echo '<div class="notice notice-error"><p>Suspension recorded but user flag update failed.</p></div>';
-            return ['success' => false, 'message' => 'Suspension recorded but user flag update failed.'];
         }
 
         $this->logAction('admin_suspend', $userId, [
@@ -324,11 +322,18 @@ final class ModerationService
                     $fraudScore = $this->userInfoRepository->getFraudScore($uid);
 
                     try {
-                        $this->suspensionRepository->create($uid, $adminId, 'vote_ring', 'Suspended as part of vote ring action.', $fraudScore);
-                        $this->userInfoRepository->suspendUser($uid, 'vote_ring');
+                        \BCC\Trust\Core\Security\TransactionManager::run(function () use ($uid, $adminId, $fraudScore) {
+                            $this->suspensionRepository->create($uid, $adminId, 'vote_ring', 'Suspended as part of vote ring action.', $fraudScore);
+                            $this->userInfoRepository->suspendUser($uid, 'vote_ring');
+                        });
                         $suspended++;
-                    } catch (\Exception $e) {
-                        // Continue with remaining users
+                    } catch (\Throwable $e) {
+                        // Skip this user but keep going; count only the ones
+                        // that actually landed atomically.
+                        Logger::error('[bcc-trust] ring_suspend_failed', [
+                            'user_id'  => $uid,
+                            'db_error' => $e->getMessage(),
+                        ]);
                     }
                 }
 
@@ -443,22 +448,35 @@ final class ModerationService
                 case 'suspend':
                     $score = $this->userInfoRepository->getFraudScore($uid);
                     try {
-                        $this->suspensionRepository->create($uid, $adminId, 'manual_suspension', '', $score);
-                        $this->userInfoRepository->suspendUser($uid, 'manual_suspension');
-                    } catch (\Exception $e) {
-                        // Continue with remaining users
+                        \BCC\Trust\Core\Security\TransactionManager::run(function () use ($uid, $adminId, $score) {
+                            $this->suspensionRepository->create($uid, $adminId, 'manual_suspension', '', $score);
+                            $this->userInfoRepository->suspendUser($uid, 'manual_suspension');
+                        });
+                        $processed++;
+                    } catch (\Throwable $e) {
+                        // Log + skip; count only users who actually suspended,
+                        // so the "N processed" report can't claim a swallowed
+                        // failure as success.
+                        Logger::error('[bcc-trust] bulk_suspend_failed', [
+                            'user_id'  => $uid,
+                            'db_error' => $e->getMessage(),
+                        ]);
                     }
-                    $processed++;
                     break;
 
                 case 'unsuspend':
                     try {
-                        $this->suspensionRepository->closeActive($uid, $adminId);
-                        $this->userInfoRepository->unsuspendUser($uid);
-                    } catch (\Exception $e) {
-                        // Continue with remaining users
+                        \BCC\Trust\Core\Security\TransactionManager::run(function () use ($uid, $adminId) {
+                            $this->suspensionRepository->closeActive($uid, $adminId);
+                            $this->userInfoRepository->unsuspendUser($uid);
+                        });
+                        $processed++;
+                    } catch (\Throwable $e) {
+                        Logger::error('[bcc-trust] bulk_unsuspend_failed', [
+                            'user_id'  => $uid,
+                            'db_error' => $e->getMessage(),
+                        ]);
                     }
-                    $processed++;
                     break;
 
                 case 'clear_votes':

@@ -69,6 +69,21 @@ if (!defined('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS')) {
  */
 define('BCC_TRUST_SCHEMA_VERSION', (static function (): string {
     $files = glob(__DIR__ . '/includes/database/schema-*.php') ?: [];
+
+    // Two repositories self-install their own DDL (inline CREATE TABLE +
+    // dbDelta) OUTSIDE includes/database/ — DisputeRepository::install() and
+    // SignalRepository::install_own_table(). Fold their file hashes in too,
+    // or an edit to their schema wouldn't change this version and the
+    // migration gate would early-return and never re-run their dbDelta.
+    foreach ([
+        __DIR__ . '/app/Domain/Disputes/Repositories/DisputeRepository.php',
+        __DIR__ . '/app/Domain/Onchain/Repositories/SignalRepository.php',
+    ] as $selfInstaller) {
+        if (is_file($selfInstaller)) {
+            $files[] = $selfInstaller;
+        }
+    }
+
     if (!$files) {
         return '0000000000';
     }
@@ -262,6 +277,13 @@ require_once BCC_TRUST_PATH . 'includes/database/drop-endorsements-table.php';
 // per-column existence-probed. Runs on init priority 29, after the
 // endorsements drop.
 require_once BCC_TRUST_PATH . 'includes/database/drop-onchain-role-boost-columns.php';
+// Option B ranking-system slice (2026-07-09): drops the retired bcc_user_ranks
+// table. The conferred-rank / Foreman-Role scaffolding it backed was never
+// built (0 rows, 0 write callers, always-false flags); rank is auto-derived
+// from feature-access level. UserRankRepository + schema + view-model fields
+// removed this release. Guarded by option + hourly transient re-check; DROP
+// TABLE IF EXISTS. Runs on init priority 30, after the role-boost drop.
+require_once BCC_TRUST_PATH . 'includes/database/drop-user-ranks-table.php';
 // Disputes reconciliation (2026-07-08): drops the retired bcc_trust_flags
 // table. Its readers were repointed to the live bcc_disputes table
 // (reporter-keyed) and FlagsRepository + CardDisputes* were deleted this
@@ -668,6 +690,7 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
         'bcc_gated_group_revoke_sweep'    => ['interval' => 'twicedaily',           'description' => 'holder-group revoke re-verification sweep'],
         'bcc_nft_eth_indexer_tick'        => ['interval' => 'bcc_one_minute',       'description' => 'NFT EVM indexer per-chain tick'],
         'bcc_helius_dedupe_sweep'         => ['interval' => 'bcc_five_minutes',     'description' => 'Helius signature replay LRU eviction'],
+        'bcc_helius_subscription_reconcile' => ['interval' => 'twicedaily',         'description' => 'Helius subscription address-list reconcile (covers dropped subscribe/unsubscribe)'],
         'bcc_nft_enrichment_tick'         => ['interval' => 'bcc_five_minutes',     'description' => 'NFT metadata backfill (name + image_url)'],
         'bcc_watch_batch_sweep'           => ['interval' => 'bcc_pull_batch_sweep_minute', 'description' => 'WatchBatchAggregator sweep'],
         // Disputes domain
@@ -689,6 +712,25 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
 add_action('bcc_helius_dedupe_sweep', static function (): void {
     $stats = \BCC\Trust\Onchain\Repositories\HeliusSeenSignaturesRepository::sweep();
     update_option('bcc_helius_dedupe_size', (int) $stats['remaining'], false);
+});
+
+// V2 Phase 1b: Helius subscription reconcile. resyncFromWalletLinks
+// rebuilds the shared webhook's address list from the canonical
+// wallet_links table, so any subscribe/unsubscribe lost to a transient
+// Helius failure (beyond its bounded per-event retries) converges here.
+add_action('bcc_helius_subscription_reconcile', static function (): void {
+    try {
+        $result = \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::resyncFromWalletLinks();
+        if (is_array($result) && $result['applied']) {
+            \BCC\Core\Log\Logger::info('[bcc-trust] Helius subscription reconcile applied', $result);
+        }
+    } catch (\Throwable $e) {
+        if (class_exists('BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] Helius subscription reconcile failed', [
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
 });
 
 // V2 Phase 1c: NFT metadata enrichment cron handler. Per-batch + per-
@@ -737,6 +779,10 @@ add_action('plugins_loaded', static function (): void {
     // as the two register() calls — guarded, additive, no clearing.
     if (!wp_next_scheduled('bcc_helius_dedupe_sweep')) {
         wp_schedule_event(time() + 60, 'bcc_five_minutes', 'bcc_helius_dedupe_sweep');
+    }
+
+    if (!wp_next_scheduled('bcc_helius_subscription_reconcile')) {
+        wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_helius_subscription_reconcile');
     }
 
     // PR-8b — divergence-state sweep self-heal. Mirrors activation-time
@@ -1312,6 +1358,12 @@ add_action('plugins_loaded', function (): void {
         }
     }, 10, 3);
 
+    // Bounded backoff for the Helius subscribe/unsubscribe async jobs.
+    // Overridable via wp-config for ops tuning.
+    if (!defined('BCC_HELIUS_SUBSCRIBE_MAX_RETRIES')) {
+        define('BCC_HELIUS_SUBSCRIBE_MAX_RETRIES', 3);
+    }
+
     // V2 Phase 1b: Solana wallet → Helius shared-webhook subscription
     // membership. Per spike 2: one shared webhook handles up to 100k
     // addresses; we just PATCH the address list on link/unlink.
@@ -1328,7 +1380,7 @@ add_action('plugins_loaded', function (): void {
         );
     }, 10, 3);
 
-    add_action('bcc_helius_subscribe_wallet', function (int $userId, string $walletAddress): void {
+    add_action('bcc_helius_subscribe_wallet', function (int $userId, string $walletAddress, int $attempt = 0): void {
         $chain = \BCC\Trust\Onchain\Repositories\ChainRepository::getBySlug('solana');
         if ($chain === null) {
             return;
@@ -1341,8 +1393,32 @@ add_action('plugins_loaded', function (): void {
         if ($walletLinkId <= 0) {
             return;
         }
-        \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::addAddress($walletLinkId, $walletAddress);
-    }, 10, 2);
+        if (\BCC\Trust\Onchain\Services\HeliusSubscriptionManager::addAddress($walletLinkId, $walletAddress)) {
+            return;
+        }
+        // addAddress returns false (not throws) on a transient Helius
+        // fetch/patch error, so Action Scheduler won't retry on its own and
+        // the subscription would be silently lost. Re-enqueue with linear
+        // backoff, bounded; the twice-daily reconcile cron
+        // (bcc_helius_subscription_reconcile) is the ultimate backstop if
+        // every retry fails.
+        if ($attempt < BCC_HELIUS_SUBSCRIBE_MAX_RETRIES) {
+            \BCC\Core\Cron\AsyncDispatcher::scheduleSingle(
+                time() + (($attempt + 1) * 120),
+                'bcc_helius_subscribe_wallet',
+                [$userId, $walletAddress, $attempt + 1],
+                'bcc-onchain'
+            );
+            return;
+        }
+        if (class_exists('BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] Helius subscribe failed after retries; reconcile cron will backstop', [
+                'user_id'        => $userId,
+                'wallet_link_id' => $walletLinkId,
+                'attempts'       => $attempt + 1,
+            ]);
+        }
+    }, 10, 3);
 
     // $_userId is unused by this handler — the do_action signature is
     // (userId, chainSlug, walletAddress) and PHP positional binding
@@ -1364,9 +1440,29 @@ add_action('plugins_loaded', function (): void {
         );
     }, 10, 3);
 
-    add_action('bcc_helius_unsubscribe_wallet', function (int $walletLinkId, string $walletAddress): void {
-        \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::removeAddress($walletLinkId, $walletAddress);
-    }, 10, 2);
+    add_action('bcc_helius_unsubscribe_wallet', function (int $walletLinkId, string $walletAddress, int $attempt = 0): void {
+        if (\BCC\Trust\Onchain\Services\HeliusSubscriptionManager::removeAddress($walletLinkId, $walletAddress)) {
+            return;
+        }
+        // Same transient-failure handling as subscribe: a dropped unsubscribe
+        // leaves a stale address on the shared webhook. Bounded backoff retry,
+        // with the reconcile cron as the backstop.
+        if ($attempt < BCC_HELIUS_SUBSCRIBE_MAX_RETRIES) {
+            \BCC\Core\Cron\AsyncDispatcher::scheduleSingle(
+                time() + (($attempt + 1) * 120),
+                'bcc_helius_unsubscribe_wallet',
+                [$walletLinkId, $walletAddress, $attempt + 1],
+                'bcc-onchain'
+            );
+            return;
+        }
+        if (class_exists('BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] Helius unsubscribe failed after retries; reconcile cron will backstop', [
+                'wallet_link_id' => $walletLinkId,
+                'attempts'       => $attempt + 1,
+            ]);
+        }
+    }, 10, 3);
 
     // User deletion: clean up wallet links, signals, claims, and the
     // per-wallet on-chain data hung off them (NFT holdings + profile
@@ -1866,6 +1962,10 @@ function bcc_trust_activate() {
         wp_schedule_event(time() + 60, 'bcc_five_minutes', 'bcc_helius_dedupe_sweep');
     }
 
+    if (!wp_next_scheduled('bcc_helius_subscription_reconcile')) {
+        wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_helius_subscription_reconcile');
+    }
+
     // V2 Phase 1c: NFT enrichment scheduler. Backfills name +
     // image_url + collection_name on freshly-indexed rows so the
     // gallery's read-path swap doesn't render thumbnail-less rows.
@@ -1934,6 +2034,8 @@ function bcc_trust_deactivate() {
         \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK,
         // V2 Phase 1b: Helius dedupe-sweep.
         'bcc_helius_dedupe_sweep',
+        // V2 Phase 1b: Helius subscription reconcile.
+        'bcc_helius_subscription_reconcile',
         // V2 Phase 1c: NFT enrichment scheduler.
         \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK,
         // §C3 watch-batch sweep + legacy hook (release-N drain).
