@@ -127,27 +127,33 @@ final class FeedHydrationPipeline
             return [];
         }
 
-        // Extract the underlying act_id for each item — for native
-        // PeepSo modules act_id matches wp_posts.ID, which is what
-        // PeepSo's `peepso_group_id` post-meta is keyed on. The id is
-        // encoded in the public `id` field as `feed_<act_id>`.
-        $actIdsByItem = [];
+        // Read `peepso_group_id` from each item's backing wp_post — that is
+        // the `external_id`, NOT the act_id parsed from the `feed_<act_id>` id
+        // field. For a PeepSo activity, act_id (the activity-stream row) is not
+        // wp_posts.ID; the post PeepSo writes the group meta onto is the one
+        // `external_id` points at. Keying on act_id read meta off unrelated
+        // low-numbered posts (almost always empty), so the group /
+        // verification block was never attached on any feed surface — and the
+        // comment-count gate that depends on that block silently showed gated
+        // group posts' comment counts to non-members. Every other hydrator in
+        // this file already keys on external_id. [audit H-B1]
+        $postIdsByItem = [];
         foreach ($items as $i => $item) {
-            $idField = isset($item['id']) && is_string($item['id']) ? $item['id'] : '';
-            if (preg_match('/^feed_(\d+)$/', $idField, $m) === 1) {
-                $actIdsByItem[$i] = (int) $m[1];
+            $extId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
+            if ($extId > 0) {
+                $postIdsByItem[$i] = $extId;
             }
         }
-        if ($actIdsByItem === []) {
+        if ($postIdsByItem === []) {
             return $items;
         }
 
-        update_meta_cache('post', array_values($actIdsByItem));
+        update_meta_cache('post', array_values($postIdsByItem));
 
         $groupIdsByItem = [];
         $allGroupIds   = [];
-        foreach ($actIdsByItem as $i => $actId) {
-            $gid = (int) get_post_meta($actId, 'peepso_group_id', true);
+        foreach ($postIdsByItem as $i => $postId) {
+            $gid = (int) get_post_meta($postId, 'peepso_group_id', true);
             if ($gid > 0) {
                 $groupIdsByItem[$i]    = $gid;
                 $allGroupIds[$gid]     = true;
