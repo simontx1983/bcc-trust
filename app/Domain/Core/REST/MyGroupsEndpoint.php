@@ -223,7 +223,14 @@ final class MyGroupsEndpoint
             $groupId
         ) !== null;
 
-        \BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId);
+        // Honor the writer's verdict: false = PeepSo absent OR an existing
+        // banned membership row (the writer refuses to flip a group-level
+        // ban back to member). Fail closed with the same surface
+        // LocalsService::joinLocal uses — never report a join that did
+        // not happen.
+        if (!\BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId)) {
+            return ApiResponse::error('bcc_unavailable', 'Group membership service is unavailable.', 503);
+        }
 
         // Audit only on the non-member → member transition. Disambiguated
         // from holder_group_join (Onchain/REST/HolderGroupsEndpoint) so
@@ -328,6 +335,15 @@ final class MyGroupsEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // Suspended accounts must not create communities — creation is a
+        // heavier membership write than join (the creator lands as
+        // member_owner of a brand-new group), so it gets the same gate as
+        // postJoin above. Admin bypass off: a suspended account is blocked
+        // regardless of role. [audit M — group-rejoin]
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
         }
 
         if (!\BCC\Core\Security\Throttle::allow('group_create:' . $userId, 5, 3600)) {

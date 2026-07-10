@@ -96,7 +96,14 @@ final class NftGroupGateService {
             );
         }
 
-        \BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId);
+        // Honor the writer's verdict: false = PeepSo absent OR an existing
+        // banned membership row (the writer refuses to flip a group-level
+        // ban back to member). Surface the same transient fail-closed 503
+        // the UNKNOWN verdict uses, and leave the opt-out untouched —
+        // nothing was written, so nothing may be reported as joined.
+        if (!\BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId)) {
+            return JoinResult::verifyUnavailable($config->minBalance);
+        }
         $this->clearOptOut($userId, $groupId);
 
         return JoinResult::ok($config->minBalance);
@@ -188,6 +195,16 @@ final class NftGroupGateService {
      */
     public function reconcileForUser(int $userId): array {
         if ($userId <= 0 || !$this->autoJoinEnabled($userId)) {
+            return ['joined' => 0, 'skipped' => 0];
+        }
+
+        // Suspension gate lives HERE (not only in the REST layer) because
+        // this method is also reached by the cron reconcile sweep — without
+        // it, a suspended holder with auto_join on would be silently
+        // re-added to gated groups by the server itself. Admin bypass off:
+        // a suspended account is blocked regardless of role. Parity with
+        // MyGroupsEndpoint::postJoin [audit M — group-rejoin].
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
             return ['joined' => 0, 'skipped' => 0];
         }
 

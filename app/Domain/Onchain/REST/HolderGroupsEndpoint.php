@@ -235,6 +235,18 @@ final class HolderGroupsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Suspended accounts must not walk back into a community — holding
+        // the NFT is the eligibility gate, not an override of moderation.
+        // The join lands members via the trusted PeepSoGroupWriter door
+        // (bypassing PeepSo's own UI approval), so the suspension gate has
+        // to be enforced HERE — NftGroupGateService checks opt-out and
+        // holdings, never suspension. Admin bypass off: a suspended account
+        // is blocked regardless of role. Parity with
+        // MyGroupsEndpoint::postJoin [audit M — group-rejoin].
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         // Rate-limit the trusted-backend join door. The gate service already
         // does eligibility / opt-out / chain / balance checks, but each call
         // touches the holdings RPC — so unbounded retry by a buggy client

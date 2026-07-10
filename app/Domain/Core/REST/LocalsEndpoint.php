@@ -261,6 +261,17 @@ final class LocalsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Suspended accounts must not walk back into a community. The join
+        // lands members via the trusted PeepSoGroupWriter door (bypassing
+        // PeepSo's own UI approval), so the suspension gate has to be
+        // enforced HERE — LocalsService gates type/privacy but never
+        // suspension. Admin bypass off: a suspended account is blocked
+        // regardless of role. Parity with MyGroupsEndpoint::postJoin
+        // [audit M — group-rejoin].
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($viewerId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         // Per-user rate limit on Local joins — parity with the plain-group
         // join bucket (MyGroupsEndpoint) so this membership-write door can't
         // be used to spray peepso_group_user rows.
