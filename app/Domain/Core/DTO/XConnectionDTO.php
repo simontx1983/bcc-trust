@@ -30,11 +30,14 @@ final class XConnectionDTO
         public readonly ?string $x_last_synced,
         public readonly ?string $x_email,
         public readonly ?string $x_access_token_decrypted,
+        public readonly ?string $x_refresh_token_decrypted = null,
+        public readonly ?string $x_token_expires_at = null,
     ) {
         $dto = 'XConnectionDTO';
         DTOAssert::finiteFloat($x_trust_boost,        $dto, 'x_trust_boost');
         DTOAssert::nonNegativeInt($x_fraud_reduction, $dto, 'x_fraud_reduction');
         DTOAssert::nullableDatetime($x_verified_at,   $dto, 'x_verified_at');
         DTOAssert::nullableDatetime($x_last_synced,   $dto, 'x_last_synced');
+        DTOAssert::nullableDatetime($x_token_expires_at, $dto, 'x_token_expires_at');
     }
 }

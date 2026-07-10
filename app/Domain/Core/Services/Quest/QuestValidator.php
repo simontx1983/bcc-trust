@@ -213,7 +213,16 @@ class QuestValidator {
             $repo = new \BCC\Trust\Core\Repositories\XRepository();
             $conn = $repo->getConnection($userId);
 
-            if (!$conn || empty($conn->x_access_token_decrypted) || empty($conn->x_id)) {
+            if (!$conn || empty($conn->x_id)) {
+                return false;
+            }
+
+            // The stored access token may have expired (~2h) since the user
+            // connected X; getValidAccessToken refreshes it transparently via
+            // the stored refresh token so this quest check doesn't 401.
+            $accessToken = (new \BCC\Trust\Core\Services\x\XVerificationService())
+                ->getValidAccessToken($userId);
+            if ($accessToken === null || $accessToken === '') {
                 return false;
             }
 
@@ -221,7 +230,7 @@ class QuestValidator {
             $api      = new \BCC\Trust\Core\Services\x\XApiService();
 
             $found = $api->hasRecentTweetContaining(
-                $conn->x_access_token_decrypted,
+                $accessToken,
                 $conn->x_id,
                 $siteHost
             );
