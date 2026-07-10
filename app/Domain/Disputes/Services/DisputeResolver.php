@@ -182,8 +182,11 @@ final class DisputeResolver
             } catch (\Throwable $e) {
                 // Backfill failure is non-fatal: the dispute is already
                 // resolved and the panelist's credited rows still exist —
-                // they just don't get an accuracy mark. A reconciliation
-                // sweep can pick them up later if we add one.
+                // they just don't get an accuracy mark. There is no
+                // reconciliation sweep, so surface it on /system/health
+                // (sustained activation = accuracy marks accruing NULL)
+                // alongside the log.
+                \BCC\Core\Observability\DegradationMetrics::record('post_commit_task', 'dispute_backfill_failed');
                 CoreLogger::error('[bcc-disputes] participation_backfill_failed', [
                     'dispute_id' => $disputeId,
                     'outcome'    => $outcome,

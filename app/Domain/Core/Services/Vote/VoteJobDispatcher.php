@@ -68,6 +68,14 @@ class VoteJobDispatcher {
             try {
                 do_action( $hook, $voteId );
             } catch ( \Throwable $e ) {
+                // The composite job fired but a sub-task threw during execution
+                // (not a dispatch miss — that's cron_dispatch). Trust-graph +
+                // stats recover via their recurring sweeps; fraud analysis has
+                // none. Surface it so /system/health sees swallowed post-vote
+                // work, then keep going so one failure doesn't block the rest.
+                if ( class_exists( '\\BCC\\Core\\Observability\\DegradationMetrics' ) ) {
+                    \BCC\Core\Observability\DegradationMetrics::record( 'post_commit_task', 'vote_subtask_failed' );
+                }
                 if ( class_exists( '\\BCC\\Core\\Log\\Logger' ) ) {
                     \BCC\Core\Log\Logger::error( '[BCC Trust] Post-vote sub-task failed', [
                         'hook'    => $hook,
