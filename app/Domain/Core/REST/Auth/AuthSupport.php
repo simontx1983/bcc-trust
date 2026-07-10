@@ -508,6 +508,34 @@ final class AuthSupport
     }
 
     /**
+     * Single-use nonce gate for the signed /auth/oauth bridge request.
+     *
+     * Returns true the FIRST time a given nonce is seen (and marks it seen
+     * for $ttl seconds), false on reuse — so a captured, still-in-window
+     * signed request cannot be replayed. The nonce is hashed into the
+     * transient key to bound its length and keep arbitrary header bytes out
+     * of the key name.
+     *
+     * Callers MUST verify the request signature BEFORE consuming a nonce, so
+     * a flood of bad-signature requests can't churn the transient store.
+     * The tiny get→set window is acceptable: within it the only replay is
+     * the identical, already-authentic request racing itself, which is not
+     * a meaningful attack, and the timestamp-skew check bounds the rest.
+     */
+    public static function consumeOauthBridgeNonce(string $nonce, int $ttl): bool
+    {
+        if ($nonce === '') {
+            return false;
+        }
+        $key = 'bcc_oauth_nonce_' . hash('sha256', $nonce);
+        if (get_transient($key) !== false) {
+            return false;
+        }
+        set_transient($key, 1, $ttl);
+        return true;
+    }
+
+    /**
      * Find a WP user by OAuth provider ID stored in user meta.
      * Returns the user ID or null if not found.
      */

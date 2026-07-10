@@ -35,6 +35,13 @@ if (!defined('ABSPATH')) {
 
 final class OAuthController
 {
+    /**
+     * Max clock skew (seconds) tolerated on a signed /auth/oauth bridge
+     * request, and the TTL of its single-use nonce. Bounds how long a
+     * captured signed request stays replayable.
+     */
+    private const OAUTH_BRIDGE_MAX_SKEW_SECONDS = 300;
+
     public static function register(): void
     {
         $instance = new self();
@@ -125,32 +132,67 @@ final class OAuthController
      * `/auth/oauth` trusts the caller's asserted OAuth identity (provider +
      * email) to mint a JWT, so it MUST only be reachable by the trusted
      * NextAuth backend — which performs the actual Google/Twitter token
-     * verification before calling here. We enforce that with a shared secret
-     * (`BCC_OAUTH_BRIDGE_SECRET`) compared in constant time, mirroring the
-     * internal indexer-tick / Helius-webhook machine-to-machine pattern.
+     * verification before calling here.
+     *
+     * The caller proves it holds `BCC_OAUTH_BRIDGE_SECRET` by SIGNING each
+     * request rather than transmitting the secret (audit HIGH #4). It sends:
+     *   - x-bcc-oauth-timestamp — unix seconds, must be within the skew window
+     *   - x-bcc-oauth-nonce     — random, single-use within that window
+     *   - x-bcc-oauth-signature — hex HMAC-SHA256(secret, "{ts}\n{nonce}\n{rawBody}")
+     * The secret is now a signing key that never crosses the wire, so a
+     * TLS-terminating proxy or a request log can't capture a replayable
+     * bearer value; the timestamp + single-use nonce bound replay of a
+     * captured signed request. The old x-bcc-oauth-secret bearer header is no
+     * longer accepted (atomic cutover with the NextAuth caller).
      *
      * Without this gate the endpoint is a pre-auth account takeover: an
      * anonymous caller could POST a victim's email and receive a valid session
      * JWT for that account (password + email-2FA both bypassed).
      *
-     * Fail-closed: if the secret isn't configured on both ends, refuse — OAuth
-     * SSO stays disabled until an operator pins the secret rather than running
-     * open.
+     * Fail-closed: if the secret isn't configured, refuse — OAuth SSO stays
+     * disabled until an operator pins the secret rather than running open.
      *
      * @return WP_REST_Response|null  Error response when the gate fails; null when OK.
      */
     private function oauthBridgeGate(WP_REST_Request $request): ?WP_REST_Response
     {
-        $expected = defined('BCC_OAUTH_BRIDGE_SECRET')
+        $secret = defined('BCC_OAUTH_BRIDGE_SECRET')
             ? (string) constant('BCC_OAUTH_BRIDGE_SECRET')
             : '';
-        if ($expected === '') {
-            \BCC\Core\Log\Logger::error('[AuthEndpoint] BCC_OAUTH_BRIDGE_SECRET not configured — /auth/oauth disabled');
+        if ($secret === '') {
+            Logger::error('[AuthEndpoint] BCC_OAUTH_BRIDGE_SECRET not configured — /auth/oauth disabled');
             return ApiResponse::error('bcc_internal', 'OAuth bridge not configured.', 500);
         }
 
-        $provided = (string) $request->get_header('x-bcc-oauth-secret');
-        if ($provided === '' || !hash_equals($expected, $provided)) {
+        $timestamp = (string) $request->get_header('x-bcc-oauth-timestamp');
+        $nonce     = (string) $request->get_header('x-bcc-oauth-nonce');
+        $signature = (string) $request->get_header('x-bcc-oauth-signature');
+
+        if ($timestamp === '' || $nonce === '' || $signature === '') {
+            return ApiResponse::error('bcc_unauthorized', 'OAuth bridge authentication failed.', 401);
+        }
+
+        // Timestamp must be a fresh unix time within the skew window.
+        if (!ctype_digit($timestamp)
+            || abs(time() - (int) $timestamp) > self::OAUTH_BRIDGE_MAX_SKEW_SECONDS
+        ) {
+            return ApiResponse::error('bcc_unauthorized', 'OAuth bridge authentication failed.', 401);
+        }
+
+        // Verify the HMAC over timestamp + nonce + raw body BEFORE spending a
+        // nonce, so bad-signature floods can't churn the nonce store.
+        $expected = hash_hmac(
+            'sha256',
+            $timestamp . "\n" . $nonce . "\n" . $request->get_body(),
+            $secret
+        );
+        if (!hash_equals($expected, $signature)) {
+            return ApiResponse::error('bcc_unauthorized', 'OAuth bridge authentication failed.', 401);
+        }
+
+        // Single-use nonce — rejects replay of a captured, still-in-window
+        // signed request.
+        if (!AuthSupport::consumeOauthBridgeNonce($nonce, self::OAUTH_BRIDGE_MAX_SKEW_SECONDS)) {
             return ApiResponse::error('bcc_unauthorized', 'OAuth bridge authentication failed.', 401);
         }
 
