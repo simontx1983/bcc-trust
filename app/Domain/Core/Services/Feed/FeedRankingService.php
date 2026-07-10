@@ -48,9 +48,15 @@ final class FeedRankingService
     /**
      * Anon hot-feed payload cache (first page only). The key folds in
      * the HiddenActivityRepository generation counter (§5), so a §K1-C
-     * moderation hide/unhide invalidates instantly; everything else is
-     * bounded by the TTL + the minutely `bcc_trust_feed_hot_warm` cron
-     * refresh. TTL 300s is the upper bound if the warm cron stalls.
+     * moderation hide/unhide invalidates instantly; everything else —
+     * including RANKING ORDER shifting as votes/scores change — is
+     * intentionally bounded by the TTL + the minutely
+     * `bcc_trust_feed_hot_warm` cron refresh, matching the endpoint's
+     * `Cache-Control: max-age=60`. This is deliberate (audit-confirmed
+     * 2026-07-10): a trending feed is windowed, not real-time; folding a
+     * score/vote generation into the key would bust this cache on every
+     * vote and defeat the warm cron. TTL 300s is the upper bound if the
+     * warm cron stalls.
      */
     private const HOT_CACHE_GROUP = 'bcc_trust:feed';
     private const HOT_CACHE_TTL   = 300; // 5 min

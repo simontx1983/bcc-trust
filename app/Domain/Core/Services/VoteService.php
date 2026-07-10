@@ -1283,8 +1283,11 @@ class VoteService {
         if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
             $lockAcquired = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, 10);
             // If the lock cannot be acquired within 10s, proceed without it
-            // rather than silently skipping — correctness degrades only in
-            // the narrow new-category-insert race window. Logged for ops.
+            // rather than silently skipping — a result is still produced. The
+            // narrow new-category-insert race can only bite here, so a lock-less
+            // recalc deliberately does NOT clear recalculate_required (see the
+            // $lockAcquired guards below): the page re-processes on the next
+            // cron tick and self-corrects. Logged for ops.
             if (!$lockAcquired && class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::warning('[bcc-trust] recalculateScore advisory lock timed out', [
                     'page_id' => $pageId,
@@ -1294,7 +1297,7 @@ class VoteService {
         }
 
         try {
-        $newScore = TransactionManager::run(function () use ($pageId, $ownerId, $clearRecalcFlag) {
+        $newScore = TransactionManager::run(function () use ($pageId, $ownerId, $clearRecalcFlag, $lockAcquired) {
 
             // Lock ALL score rows for this page before reading anything else.
             // This serialises concurrent recalculations and concurrent
@@ -1315,7 +1318,9 @@ class VoteService {
             if ((int) $voteAggregates->vote_count === 0) {
                 $score = $this->scoreRepo->getByPageId($pageId)
                     ?? $this->scoreRepo->createDefault($pageId, $ownerId);
-                if ($clearRecalcFlag) {
+                // Only clear the flag when the page lock was actually held —
+                // a lock-less recalc leaves it set so the next tick re-processes.
+                if ($clearRecalcFlag && $lockAcquired) {
                     $this->scoreRepo->clearRecalcFlagAndFailures($pageId);
                 }
                 return $score;
@@ -1353,7 +1358,11 @@ class VoteService {
             //     is visible in our REPEATABLE READ snapshot (via the
             //     aggregate query), so the recalculated score already
             //     includes it.
-            if ($clearRecalcFlag && !empty($lockedRows)) {
+            // ...and only when the page advisory lock was actually held. A
+            // lock-less recalc (10s acquire timeout) can miss a brand-new
+            // category vote that raced the unlocked window, so we leave the
+            // flag set and let the next cron tick re-process with the lock.
+            if ($clearRecalcFlag && $lockAcquired && !empty($lockedRows)) {
                 $this->scoreRepo->clearRecalcFlagAndFailures($pageId);
             }
 
