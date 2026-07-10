@@ -719,9 +719,14 @@ final class ValidatorRepository
 
         // Wrap all writes in a transaction so a PHP timeout mid-batch
         // rolls back cleanly instead of leaving partial state.
-        $wpdb->query('START TRANSACTION');
-
         try {
+
+        // Fail closed if the transaction never opened (DB failover): a no-op
+        // START leaves the batch in autocommit, defeating the mid-batch
+        // rollback this wrapper provides.
+        if ($wpdb->query('START TRANSACTION') === false) {
+            throw new \RuntimeException('START TRANSACTION failed');
+        }
 
         // Collect IDs of unchanged rows whose fetched_at is stale (>6h).
         // These get a single batch UPDATE at the end instead of N individual writes.

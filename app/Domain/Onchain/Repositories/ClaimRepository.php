@@ -680,8 +680,13 @@ class ClaimRepository {
     ): int {
         global $wpdb;
 
-        $wpdb->query('START TRANSACTION');
         try {
+            // Fail closed if the transaction never opened (DB failover): a
+            // no-op START leaves the multi-table delete in autocommit with no
+            // rollback if a later step fails.
+            if ($wpdb->query('START TRANSACTION') === false) {
+                throw new \RuntimeException('START TRANSACTION failed');
+            }
             $claimsRemoved  = self::deleteByUserAndWallet($userId, $walletAddress, $chainId);
             $signalsDeleted = SignalRepository::deleteByWallet($walletAddress, $chainSlug);
             // deleteByWallet returns int on success, false on DB error.
