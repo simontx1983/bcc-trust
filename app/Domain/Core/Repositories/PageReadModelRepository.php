@@ -539,7 +539,15 @@ class PageReadModelRepository
     }
 
     /**
-     * Fetch the oldest dirty pages (FIFO) up to $limit.
+     * Fetch the oldest DUE dirty pages (FIFO) up to $limit.
+     *
+     * The `created_at <= NOW(6)` gate is what makes quarantine work: a
+     * quarantined page is pushed to a FUTURE created_at (see
+     * quarantineDirtyPage), and without this gate it was re-fetched on the
+     * very next tick whenever the queue fit inside one batch — so the 1h/4h/24h
+     * backoff never actually happened and the CRITICAL escalation log looped.
+     * NOW(6) matches the local clock every other queue write uses (enqueueDirty
+     * NOW(6), quarantine, the nowSnapshot cutoff).
      *
      * @return list<\stdClass>  Each row has ->page_id.
      */
@@ -548,7 +556,9 @@ class PageReadModelRepository
         global $wpdb;
         $table = TableRegistry::dirtyQueue();
         return $wpdb->get_results($wpdb->prepare(
-            "SELECT page_id FROM {$table} ORDER BY created_at ASC LIMIT %d",
+            "SELECT page_id FROM {$table}
+             WHERE created_at <= NOW(6)
+             ORDER BY created_at ASC LIMIT %d",
             $limit
         )) ?: [];
     }
@@ -613,13 +623,19 @@ class PageReadModelRepository
 
     /**
      * Quarantine a page: push it to the back of the queue with a delay.
+     *
+     * Uses NOW(6) (MySQL session tz) — NOT UTC_TIMESTAMP() — so the future
+     * cutoff is on the SAME clock as enqueueDirty's NOW(6) and the
+     * fetchDirtyPages `<= NOW(6)` gate. With UTC_TIMESTAMP() on a non-UTC
+     * MySQL the delay was skewed by the session offset (e.g. a 1h quarantine
+     * became 1h + offset), on top of the missing fetch gate.
      */
     public static function quarantineDirtyPage(int $pageId, int $delayHours = 1): void
     {
         global $wpdb;
         $table = TableRegistry::dirtyQueue();
         $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET created_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL %d HOUR)
+            "UPDATE {$table} SET created_at = DATE_ADD(NOW(6), INTERVAL %d HOUR)
              WHERE page_id = %d",
             $delayHours,
             $pageId

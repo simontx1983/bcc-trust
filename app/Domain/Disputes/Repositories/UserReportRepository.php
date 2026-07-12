@@ -152,13 +152,19 @@ class UserReportRepository
             return null;
         }
 
+        // Stamp created_at explicitly in UTC. The column DEFAULT is
+        // CURRENT_TIMESTAMP (MySQL session tz — LOCAL), but every read of
+        // this column compares against UTC (`UTC_TIMESTAMP()` daily cap +
+        // gmdate() retaliation cutoff). Relying on the local default made
+        // the "5 reports / 24h" cap a ~19h window on any non-UTC MySQL.
         $wpdb->insert($table, [
             'reported_id'   => $reportedId,
             'reporter_id'   => $reporterId,
             'reason_key'    => $reasonKey,
             'reason_detail' => $reasonDetail,
             'status'        => 'open',
-        ], ['%d', '%d', '%s', '%s', '%s']);
+            'created_at'    => current_time('mysql', true),
+        ], ['%d', '%d', '%s', '%s', '%s', '%s']);
 
         $id = (int) $wpdb->insert_id;
         if (!$id) {

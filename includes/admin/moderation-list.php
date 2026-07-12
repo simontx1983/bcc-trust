@@ -260,7 +260,6 @@ function bcc_trust_render_user_list() {
                 var fields = {
                     'action':      'bcc_trust_bulk_action',
                     'bulk_action': action,
-                    'users':       ids.join( ',' ),
                     '_wpnonce':    '<?php echo esc_js( wp_create_nonce( 'bcc_trust_bulk_action' ) ); ?>'
                 };
                 for ( var key in fields ) {
@@ -270,6 +269,18 @@ function bcc_trust_render_user_list() {
                     input.value = fields[ key ];
                     form.appendChild( input );
                 }
+                // Post each id as user_ids[] (an ARRAY) so PHP receives what the
+                // handler reads — (array) $_POST['user_ids']. The prior code sent
+                // a comma-joined 'users' string, which the handler ignored (wrong
+                // key) and could not have parsed (wrong shape) → bulk actions
+                // silently no-op'd.
+                ids.forEach( function ( id ) {
+                    var input = document.createElement( 'input' );
+                    input.type  = 'hidden';
+                    input.name  = 'user_ids[]';
+                    input.value = id;
+                    form.appendChild( input );
+                } );
                 document.body.appendChild( form );
                 form.submit();
             }
