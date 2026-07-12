@@ -48,7 +48,8 @@ if (!defined('ABSPATH')) {
  * @phpstan-type CommentMetaRow object{
  *   act_id: int|numeric-string,
  *   comment_post_id: int|numeric-string,
- *   author_id: int|numeric-string
+ *   author_id: int|numeric-string,
+ *   parent_post_id: int|numeric-string
  * }
  */
 final class CommentRepository
@@ -256,7 +257,10 @@ final class CommentRepository
     /**
      * Single-comment lookup keyed by act_id — returns just the fields
      * the delete-own path needs (author_id for ownership check,
-     * comment_post_id for the writer's wp_trash_post call).
+     * comment_post_id for the writer's wp_trash_post call) plus
+     * parent_post_id (= act_comment_object_id, the parent post's
+     * wp_posts.ID) for the comment-stoke group gate, which must resolve
+     * membership off the PARENT post, not the comment's own wp_post.
      *
      * Returns null when the act_id doesn't resolve to a published
      * comment row (already trashed, never existed, or points at a
@@ -275,8 +279,9 @@ final class CommentRepository
         /** @phpstan-var CommentMetaRow|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
             "SELECT a.act_id,
-                    a.act_external_id AS comment_post_id,
-                    p.post_author     AS author_id
+                    a.act_external_id       AS comment_post_id,
+                    a.act_comment_object_id AS parent_post_id,
+                    p.post_author           AS author_id
                FROM {$activities} a
                INNER JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
               WHERE a.act_id = %d

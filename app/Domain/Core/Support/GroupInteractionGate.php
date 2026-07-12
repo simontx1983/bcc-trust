@@ -46,6 +46,22 @@ final class GroupInteractionGate
             return null;
         }
 
+        return self::checkPost($userId, $postId);
+    }
+
+    /**
+     * Same membership gate as check(), but keyed by a resolved parent
+     * wp_post ID rather than an activity id. Comment-stoke uses this: a
+     * comment's own activity row carries no `peepso_group_id`, so the
+     * gate must resolve membership off the PARENT post the comment hangs
+     * under (its `act_comment_object_id`).
+     */
+    public static function checkPost(int $userId, int $postId): ?WP_REST_Response
+    {
+        if ($postId <= 0) {
+            return null;
+        }
+
         $groupId = (int) get_post_meta($postId, 'peepso_group_id', true);
         if ($groupId <= 0) {
             // Not a group-scoped post — no membership gate (PeepSo's own

@@ -36,6 +36,7 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Repositories\CommentRepository;
+use BCC\Trust\Core\Repositories\StokeRepository;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
@@ -99,7 +100,8 @@ final class CommentService
         private readonly CommentRepository $commentRepo,
         private readonly MentionOverlayService $mentionOverlay,
         private readonly AuthorBadgeResolver $authorBadgeResolver,
-        private readonly AttestationService $attestationService
+        private readonly AttestationService $attestationService,
+        private readonly StokeRepository $stokeRepo
     ) {
     }
 
@@ -173,14 +175,37 @@ final class CommentService
             ? []
             : $this->attestationService->getViewerVouchStateForAuthors($viewerId, array_keys($authorIds));
 
+        // Batch the page's per-comment stoke state — a comment is itself a
+        // peepso_activities row, so its act_id keys bcc_trust_stokes just
+        // like a post's. Two bounded IN-list reads for the whole page:
+        // public counts + (authed) the viewer's own stoked set.
+        $commentActIds = [];
+        foreach ($rows as $row) {
+            $cid = (int) $row->act_id;
+            if ($cid > 0) {
+                $commentActIds[] = $cid;
+            }
+        }
+        $stokeCounts = $commentActIds === []
+            ? []
+            : $this->stokeRepo->countsByActIds($commentActIds);
+        $viewerStoked = ($commentActIds === [] || $viewerId <= 0)
+            ? []
+            : $this->stokeRepo->viewerStokedActIds($viewerId, $commentActIds);
+
         $items     = [];
         $lastTime  = null;
         $lastActId = null;
         foreach ($rows as $row) {
             $aid   = (int) $row->author_id;
+            $cid   = (int) $row->act_id;
             $badge = $badgeMap[$aid] ?? null;
             $vouch = $vouchMap[$aid] ?? null;
-            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch);
+            $stoke = [
+                'stoke_count'       => $stokeCounts[$cid] ?? 0,
+                'viewer_has_stoked' => $viewerStoked[$cid] ?? false,
+            ];
+            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke);
             $lastTime  = (string) $row->posted_at;
             $lastActId = (int) $row->act_id;
         }
@@ -311,7 +336,16 @@ final class CommentService
         // path, so the resolver's singleton helper is the right shape
         // (vs. an array detour that batchers don't need).
         $badge  = $this->authorBadgeResolver->resolveForUser($authorId);
-        $shaped = $this->shapeCommentRow($newRow, $authorId, $feedId, $badge);
+        // A just-created comment has no stokes yet — emit the zero/false
+        // baseline so the response carries the same shape as list rows.
+        $shaped = $this->shapeCommentRow(
+            $newRow,
+            $authorId,
+            $feedId,
+            $badge,
+            null,
+            ['stoke_count' => 0, 'viewer_has_stoked' => false]
+        );
 
         // §A3 event — single emission per state change. Subscribers
         // (NotificationDispatcher, future analytics) attach independently.
@@ -451,9 +485,13 @@ final class CommentService
      * @param array{viewer_attestation: array<string, mixed>, can_vouch: array{allowed: bool, unlock_hint: string|null}}|null $vouch
      *               Pre-resolved per-author vouch state + can-vouch permission
      *               (see AttestationService::getViewerVouchStateForAuthors).
+     * @param array{stoke_count: int, viewer_has_stoked: bool}|null $stoke
+     *               Pre-resolved per-comment stoke state (public count +
+     *               the viewer's own toggle). Null → omit both fields, so a
+     *               stale frontend keeps rendering the row without a rail.
      * @return array<string, mixed>
      */
-    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null): array
+    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null): array
     {
         $authorId = (int) $row->author_id;
         $authorHandle = (string) $row->author_login;
@@ -488,7 +526,7 @@ final class CommentService
             $author['can_vouch']          = $vouch['can_vouch'];
         }
 
-        return [
+        $shaped = [
             'id'          => 'comment_' . (int) $row->act_id,
             'comment_id'  => 'comment_' . (int) $row->act_id,
             'feed_id'     => $parentFeedId,
@@ -507,6 +545,16 @@ final class CommentService
                 ],
             ],
         ];
+
+        // Stoke on comments — a plain X-"like" toggle (no heat_stage; a
+        // comment isn't a velocity rail). Additive per §3.5: absent when
+        // $stoke is null so a stale frontend degrades to no rail.
+        if ($stoke !== null) {
+            $shaped['stoke_count']       = (int) $stoke['stoke_count'];
+            $shaped['viewer_has_stoked'] = (bool) $stoke['viewer_has_stoked'];
+        }
+
+        return $shaped;
     }
 
     /**
