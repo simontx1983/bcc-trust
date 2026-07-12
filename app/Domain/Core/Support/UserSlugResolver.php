@@ -78,6 +78,23 @@ final class UserSlugResolver
             return (int) $userByLogin->ID;
         }
 
+        // Last-resort fallback: slugify the input and match user_nicename
+        // (WP's URL slug). Legacy accounts created before the §B6 handle
+        // picker can carry a display-style handle with spaces / mixed case
+        // ("Tialuxe Tech"), which neither bcc_handle nor user_login store
+        // verbatim, so both lookups above 404 — leaving the profile page
+        // AND the /users/:handle card fetch dead for those accounts.
+        // sanitize_title('tialuxe tech') === 'tialuxe-tech' === the
+        // user_nicename WP generated for them. user_nicename is unique per
+        // user, so this can't cross-match.
+        $sluggified = sanitize_title($slug);
+        if ($sluggified !== '' && $sluggified !== $slug) {
+            $userBySlug = get_user_by('slug', $sluggified);
+            if ($userBySlug instanceof \WP_User) {
+                return (int) $userBySlug->ID;
+            }
+        }
+
         return 0;
     }
 }
