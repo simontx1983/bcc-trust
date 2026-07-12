@@ -570,7 +570,8 @@ final class Plugin
             $this->commentRepository(),
             $this->mentionOverlayService(),
             $this->authorBadgeResolver(),
-            $this->attestationService()
+            $this->attestationService(),
+            $this->stokeRepository()
         );
     }
 
@@ -1250,6 +1251,13 @@ final class Plugin
         // route through PeepSoCommentWriter (single-graph rule, mirrors
         // PeepSoReactionWriter). Holder-groups gate is per-parent-post.
         \BCC\Trust\Core\REST\CommentsEndpoint::register();
+
+        // Stoke on comments — POST / DELETE /comments/{id}/stoke. A comment
+        // is a peepso_activities row, so it shares bcc_trust_stokes +
+        // StokeRepository with the post rail; dedicated endpoint because the
+        // group gate resolves off the PARENT post (the comment row has no
+        // peepso_group_id). Plain X-"like" toggle, no heat_stage.
+        \BCC\Trust\Core\REST\CommentStokeEndpoint::register();
 
         // V1 contract: §D1 Composer status posts — POST /posts.
         // Wraps PeepSoActivity::add_post via PeepSoStatusWriter
