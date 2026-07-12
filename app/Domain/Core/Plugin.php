@@ -675,7 +675,8 @@ final class Plugin
             $this->reviewBodyHydrator(),
             $this->photoBodyHydrator(),
             $this->gifBodyHydrator(),
-            $this->pageClaimBodyHydrator()
+            $this->pageClaimBodyHydrator(),
+            $this->postShortcodeRepository()
         );
     }
 
@@ -812,7 +813,8 @@ final class Plugin
     {
         return $this->blogService ??= new Services\BlogService(
             $this->hiddenActivityRepository(),
-            $this->blogChainTagRepository()
+            $this->blogChainTagRepository(),
+            $this->postShortcodeRepository()
         );
     }
 
@@ -859,6 +861,13 @@ final class Plugin
     public function hiddenActivityRepository(): Repositories\HiddenActivityRepository
     {
         return $this->hiddenActivityRepository ??= new Repositories\HiddenActivityRepository();
+    }
+
+    /** Post-shortcode permalink sidecar — /u/{handle}/post/{code}. */
+    private ?Repositories\PostShortcodeRepository $postShortcodeRepository = null;
+    public function postShortcodeRepository(): Repositories\PostShortcodeRepository
+    {
+        return $this->postShortcodeRepository ??= new Repositories\PostShortcodeRepository();
     }
 
     /** §K1 Phase C — threshold-based auto-hide subscriber. */

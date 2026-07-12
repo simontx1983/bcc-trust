@@ -140,6 +140,22 @@ final class FeedEndpoint
                 'permission_callback' => '__return_true',
             ]
         );
+
+        // GET /feed/{code} — shortcode permalink resolver, anonymous-OK.
+        // Exactly 8 ASCII letters, which is disjoint from the numeric
+        // route above (\d+) AND from /feed/hot + /feed/tag (3-letter
+        // literals can never match {8}); PostShortcodeRepository's
+        // RESERVED list backstops that by construction. Backs the
+        // /u/{handle}/post/{code} post-detail page.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/feed/(?P<id>[a-zA-Z]{8})',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'feedItemByShortcode'],
+                'permission_callback' => '__return_true',
+            ]
+        );
     }
 
     public function hot(WP_REST_Request $request): WP_REST_Response
@@ -216,8 +232,36 @@ final class FeedEndpoint
      */
     public function feedItem(WP_REST_Request $request): WP_REST_Response
     {
+        return $this->respondWithFeedItem((int) $request->get_param('id'));
+    }
+
+    /**
+     * GET /feed/{code} — 8-letter shortcode permalink. Resolves the code
+     * via PostShortcodeRepository, then shares feedItem()'s body — same
+     * gates, same envelope, same 404 posture (unknown code and hidden /
+     * not-visible item are indistinguishable to the client).
+     */
+    public function feedItemByShortcode(WP_REST_Request $request): WP_REST_Response
+    {
+        $code  = $request->get_param('id');
+        $actId = is_string($code)
+            ? Plugin::instance()->postShortcodeRepository()->resolveActId($code)
+            : null;
+
+        if ($actId === null) {
+            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+        }
+
+        return $this->respondWithFeedItem($actId);
+    }
+
+    /**
+     * Shared single-activity body for the numeric + shortcode permalink
+     * routes — one gate path, one envelope, one cache posture.
+     */
+    private function respondWithFeedItem(int $actId): WP_REST_Response
+    {
         $viewerId = get_current_user_id();
-        $actId    = (int) $request->get_param('id');
 
         $item = Plugin::instance()->feedRankingService()->getActivityById($actId, $viewerId);
         if ($item === null) {

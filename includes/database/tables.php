@@ -49,6 +49,9 @@ require_once __DIR__ . '/schema-stokes.php';
 // V2 Trust Attestation Layer Slice 3 — nightly operator-reliability
 // recompute cache (memoizes AttestationOutcomeClassifier per attestor).
 require_once __DIR__ . '/schema-attestor-reliability-cache.php';
+// Post-shortcode permalink sidecar — act_id → 8-letter code behind
+// /u/{handle}/post/{code}. Includes a one-time option-guarded dev backfill.
+require_once __DIR__ . '/schema-post-shortcodes.php';
 // NOTE: bcc_user_locals removed — Locals membership lives in PeepSo's
 // peepso_group_members (single graph rule); primary-Local pointer in
 // wp_usermeta.bcc_primary_local_group_id.
@@ -185,6 +188,18 @@ function bcc_trust_create_tables() {
         bcc_trust_create_attestor_reliability_cache_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Attestor reliability cache table created', []);
     }
+    if (function_exists('bcc_trust_create_post_shortcodes_table')) {
+        bcc_trust_create_post_shortcodes_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Post shortcodes table created', []);
+    }
+
+    // One-shot canonical-handle backfill — assigns bcc_handle usermeta to
+    // legacy accounts so /u/{handle} (and the new /u/{handle}/post/{code}
+    // permalinks) resolve for every author. Option-guarded internally;
+    // required from bcc-trust.php next to rename-pull-to-watch.php.
+    if (function_exists('bcc_trust_backfill_canonical_handles')) {
+        bcc_trust_backfill_canonical_handles();
+    }
 
     // §D5 reaction seeding — idempotent insert of the three custom
     // reactions (Solid / Vouch / Stand behind) as peepso_reaction_user
@@ -274,6 +289,8 @@ function bcc_trust_verify_all_tables() {
         'bcc_trust_stokes',
         // Slice 3 operator-reliability recompute cache
         'bcc_attestor_reliability_cache',
+        // Post-shortcode permalink sidecar
+        'bcc_post_shortcodes',
     ];
 
     $missing = [];

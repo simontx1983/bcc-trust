@@ -76,4 +76,22 @@ final class CardUrlMap
     {
         return '/wp-json/bcc/v1/cards/' . $kind . '/' . $identifier;
     }
+
+    /**
+     * Frontend permalink for a single post:
+     *   /u/{handle}/post/{shortcode}
+     *
+     * The SAME centralization rule as the kind prefixes above applies
+     * (LOCKED): every emitter of a post permalink — the feed hydration
+     * links stage, the blog-tab emitter, any future surface — MUST call
+     * this composer. Do not concatenate '/post/' inline in service code.
+     *
+     * Identifier semantics:
+     *   - $handle    → bcc_handle (per §B6), same as the member kind
+     *   - $shortCode → the 8-letter code from PostShortcodeRepository
+     */
+    public static function postUrl(string $handle, string $shortCode): string
+    {
+        return self::KIND_URL_PREFIX['member'] . $handle . '/post/' . $shortCode;
+    }
 }
