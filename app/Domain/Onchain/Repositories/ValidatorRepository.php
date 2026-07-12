@@ -1033,9 +1033,14 @@ final class ValidatorRepository
         // LIMIT %d at tail of the prepared SQL; $limit is the caller's cap.
         /** @var list<ValidatorRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
+            // next_enrichment_at / retry_after are written in UTC
+            // (EnrichmentScheduler uses gmdate()), so the due-check must
+            // compare against UTC_TIMESTAMP(), not NOW() (MySQL session tz).
+            // With NOW() on a non-UTC MySQL, every row fired late by the
+            // session offset and retry backoffs were inflated by it.
             "SELECT " . self::COLUMNS . " FROM {$table}
-             WHERE (next_enrichment_at IS NULL OR next_enrichment_at <= NOW())
-               AND (retry_after IS NULL OR retry_after <= NOW())
+             WHERE (next_enrichment_at IS NULL OR next_enrichment_at <= UTC_TIMESTAMP())
+               AND (retry_after IS NULL OR retry_after <= UTC_TIMESTAMP())
                AND enrichment_attempts < %d
              ORDER BY
                 CASE

@@ -1007,6 +1007,11 @@ class ScoreRepository {
         }
 
         $this->mirrorSelfPageTierToUserInfo($pageId);
+
+        // Bump the score-cache generation like every other score writer —
+        // without this the bonus served a stale getByPageId() score for up
+        // to CACHE_TTL (the generation-counter invariant, ScoreRepository:141).
+        $this->invalidateCache($pageId);
     }
 
     /**
@@ -1135,6 +1140,11 @@ class ScoreRepository {
         }
 
         $this->mirrorSelfPageTierToUserInfo($pageId);
+
+        // Bump the score-cache generation like every other score writer —
+        // without this a penalty served a stale getByPageId() score for up
+        // to CACHE_TTL (the generation-counter invariant, ScoreRepository:141).
+        $this->invalidateCache($pageId);
     }
 
     /**
