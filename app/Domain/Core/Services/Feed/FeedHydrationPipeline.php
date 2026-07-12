@@ -30,6 +30,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\GifRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
+use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Repositories\StokeRepository;
 use BCC\Trust\Core\Services\AttestationService;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
@@ -38,6 +39,7 @@ use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
 use BCC\Trust\Core\Services\UserViewService;
+use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
@@ -62,7 +64,8 @@ final class FeedHydrationPipeline
         private readonly ReviewBodyHydrator $reviewBodyHydrator,
         private readonly PhotoBodyHydrator $photoBodyHydrator,
         private readonly GifBodyHydrator $gifBodyHydrator,
-        private readonly PageClaimBodyHydrator $pageClaimBodyHydrator
+        private readonly PageClaimBodyHydrator $pageClaimBodyHydrator,
+        private readonly PostShortcodeRepository $postShortcodeRepo
     ) {
     }
 
@@ -89,6 +92,81 @@ final class FeedHydrationPipeline
         $items = self::hydrateViewerPermissions($items, $viewerId);
         $items = $this->hydrateGroupContexts($items);
         $items = $this->hydrateCommentCounts($items, $viewerId);
+        // Links stage runs LAST — after hydrateAuthorBadges/Ranks, so
+        // author.handle is final when the permalink is composed.
+        $items = $this->hydrateLinks($items);
+        return $items;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Links hydration — canonical post permalink (/u/{handle}/post/{code})
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Rewrite each item's `links.self` from the numeric `/post/{act_id}`
+     * fallback (stamped by bcc-core's FeedItemNormalizer) to the
+     * canonical shortcode permalink `/u/{handle}/post/{code}`.
+     *
+     * One batched `ensureForActIds` call per page (§4) — codes mint
+     * lazily on first emission and are permanent thereafter. Items
+     * whose code could not be resolved (pre-migration table, retry
+     * exhaustion) or whose author has no handle keep the numeric
+     * fallback — a degraded-but-working link beats a broken one.
+     *
+     * `links.author` is untouched by design.
+     *
+     * URL composition goes through CardUrlMap::postUrl — the single
+     * composer every permalink emitter shares (see the LOCKED
+     * centralization rule in CardUrlMap).
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private function hydrateLinks(array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        // Extract act_ids from the normalized 'feed_<actId>' id — same
+        // parse as hydrateReactions / hydrateSocialProofReactors.
+        $actIds    = [];
+        $actByItem = [];
+        foreach ($items as $idx => $item) {
+            $rawId = is_string($item['id'] ?? null) ? $item['id'] : '';
+            if ($rawId === '' || strncmp($rawId, 'feed_', 5) !== 0) {
+                continue;
+            }
+            $actId = (int) substr($rawId, 5);
+            if ($actId <= 0) {
+                continue;
+            }
+            $actIds[]        = $actId;
+            $actByItem[$idx] = $actId;
+        }
+        if ($actIds === []) {
+            return $items;
+        }
+
+        $codesByAct = $this->postShortcodeRepo->ensureForActIds($actIds);
+        if ($codesByAct === []) {
+            return $items;
+        }
+
+        foreach ($actByItem as $idx => $actId) {
+            $code = $codesByAct[$actId] ?? null;
+            if ($code === null) {
+                continue;
+            }
+            $author = is_array($items[$idx]['author'] ?? null) ? $items[$idx]['author'] : [];
+            $handle = is_string($author['handle'] ?? null) ? $author['handle'] : '';
+            if ($handle === '') {
+                continue;
+            }
+            $links         = is_array($items[$idx]['links'] ?? null) ? $items[$idx]['links'] : [];
+            $links['self'] = CardUrlMap::postUrl($handle, $code);
+            $items[$idx]['links'] = $links;
+        }
         return $items;
     }
 

@@ -217,6 +217,12 @@ require_once BCC_TRUST_PATH . 'includes/database/tables.php';
 // bcc_trust_create_tables() (before dbDelta). Idempotent; no-op on fresh
 // installs and after it has run once.
 require_once BCC_TRUST_PATH . 'includes/database/rename-pull-to-watch.php';
+// One-shot canonical-handle backfill. Defines
+// bcc_trust_backfill_canonical_handles(), called at the end of
+// bcc_trust_create_tables(). Option-guarded (bcc_trust_canonical_handles_
+// backfilled); assigns bcc_handle usermeta to legacy accounts so
+// /u/{handle} and /u/{handle}/post/{code} resolve for every author.
+require_once BCC_TRUST_PATH . 'includes/database/backfill-canonical-handles.php';
 
 // Onchain schema definitions — table-creation functions used by the
 // activation hook and by the content-hash-gated dbDelta re-run below.
