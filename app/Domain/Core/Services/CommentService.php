@@ -644,6 +644,11 @@ final class CommentService
     /**
      * Encode the next-page cursor from the last row of the current page,
      * keyed by the active sort's ordering value.
+     *
+     * @param CommentRow $lastRow The page's final row. `relevance_score`
+     *               is only SELECTed on the `relevant` sort, which is the
+     *               only branch that reads it — the other sorts never
+     *               touch the property, so the shared row type is safe.
      */
     private static function encodeCursor(string $sort, object $lastRow): string
     {
