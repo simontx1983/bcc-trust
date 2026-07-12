@@ -27,6 +27,8 @@ use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Repositories\PostShortcodeRepository;
+use BCC\Trust\Core\Support\CardUrlMap;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -42,13 +44,23 @@ final class BlogService
         // PR-A — chain-tag join read-side. Optional in the signature
         // so the legacy 1-arg constructor still works for tests; the
         // Plugin singleton always supplies the real repo.
-        private readonly ?BlogChainTagRepository $chainTagRepo = null
+        private readonly ?BlogChainTagRepository $chainTagRepo = null,
+        // Post-shortcode permalink sidecar — this surface normalizes
+        // items directly (it does NOT flow through FeedHydrationPipeline),
+        // so it applies the same links.self rewrite itself. Optional for
+        // the same legacy-constructor reason as chainTagRepo.
+        private readonly ?PostShortcodeRepository $shortcodeRepo = null
     ) {
     }
 
     private function chainTags(): BlogChainTagRepository
     {
         return $this->chainTagRepo ?? new BlogChainTagRepository();
+    }
+
+    private function shortcodes(): PostShortcodeRepository
+    {
+        return $this->shortcodeRepo ?? new PostShortcodeRepository();
     }
 
     /**
@@ -96,7 +108,8 @@ final class BlogService
 
         $author = self::hydrateAuthor($userId);
 
-        $items = [];
+        $items      = [];
+        $rowActIds  = [];
         foreach ($rows as $row) {
             $items[] = FeedItemNormalizer::normalize(
                 $row,
@@ -107,6 +120,28 @@ final class BlogService
                 null,  // attachedCard — V1 default
                 []     // permissions — V1 default
             );
+            $rowActIds[] = (int) $row->act_id;
+        }
+
+        // Canonical post permalink — same links.self rewrite the
+        // FeedHydrationPipeline links stage applies on Floor surfaces
+        // (this emitter normalizes directly and never passes through
+        // hydrate(), so it applies the shared composer itself). One
+        // batched ensure per page (§4); items whose code or author
+        // handle is unavailable keep the numeric /post/{act_id} fallback.
+        $handle = is_string($author['handle'] ?? null) ? $author['handle'] : '';
+        if ($handle !== '' && $rowActIds !== []) {
+            $codesByAct = $this->shortcodes()->ensureForActIds($rowActIds);
+            foreach ($items as $i => $item) {
+                $actId = $rowActIds[$i] ?? 0;
+                $code  = $codesByAct[$actId] ?? null;
+                if ($code === null) {
+                    continue;
+                }
+                $links         = is_array($item['links'] ?? null) ? $item['links'] : [];
+                $links['self'] = CardUrlMap::postUrl($handle, $code);
+                $items[$i]['links'] = $links;
+            }
         }
 
         $nextCursor = null;

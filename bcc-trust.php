@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blue Collar Crypto – Trust
  * Description: Unified reputation, dispute, and on-chain signal plugin. Merges bcc-trust-engine, bcc-disputes, and bcc-onchain-signals into a single bounded-context codebase.
- * Version: 1.2.22
+ * Version: 1.2.23
  * Author: Blue Collar Labs LLC
  * Text Domain: bcc-trust
  * Domain Path: /languages
@@ -22,7 +22,7 @@ if (!defined('ABSPATH')) {
 |--------------------------------------------------------------------------
 */
 
-define('BCC_TRUST_VERSION', '1.2.22');
+define('BCC_TRUST_VERSION', '1.2.23');
 define('BCC_TRUST_PATH', plugin_dir_path(__FILE__));
 define('BCC_TRUST_URL', plugin_dir_url(__FILE__));
 define('BCC_TRUST_FILE', __FILE__);
@@ -217,6 +217,12 @@ require_once BCC_TRUST_PATH . 'includes/database/tables.php';
 // bcc_trust_create_tables() (before dbDelta). Idempotent; no-op on fresh
 // installs and after it has run once.
 require_once BCC_TRUST_PATH . 'includes/database/rename-pull-to-watch.php';
+// One-shot canonical-handle backfill. Defines
+// bcc_trust_backfill_canonical_handles(), called at the end of
+// bcc_trust_create_tables(). Option-guarded (bcc_trust_canonical_handles_
+// backfilled); assigns bcc_handle usermeta to legacy accounts so
+// /u/{handle} and /u/{handle}/post/{code} resolve for every author.
+require_once BCC_TRUST_PATH . 'includes/database/backfill-canonical-handles.php';
 
 // Onchain schema definitions — table-creation functions used by the
 // activation hook and by the content-hash-gated dbDelta re-run below.

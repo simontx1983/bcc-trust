@@ -296,6 +296,18 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_attestor_reliability_cache';
     }
 
+    /**
+     * Post-shortcode sidecar — one row per top-level activity, mapping
+     * act_id → the permanent 8-letter permalink code
+     * (`/u/{handle}/post/{code}`). Rows mint lazily on first feed
+     * emission; a code is never rewritten.
+     */
+    public static function postShortcodes(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_post_shortcodes';
+    }
+
     // NOTE: bcc_user_locals removed — Locals membership ledger is PeepSo's
     // peepso_group_members; primary-Local pointer is wp_usermeta.bcc_primary_local_group_id.
     // NOTE: bcc_page_claims removed — page claims merged into bcc_onchain_claims
@@ -343,6 +355,8 @@ final class TableRegistry
             'stokes'             => self::stokes(),
             // Slice 3 — nightly operator-reliability recompute cache
             'attestor_reliability_cache' => self::attestorReliabilityCache(),
+            // Post-shortcode permalink sidecar
+            'post_shortcodes'    => self::postShortcodes(),
         ];
     }
 }
