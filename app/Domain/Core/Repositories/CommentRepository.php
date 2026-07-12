@@ -31,6 +31,8 @@
 
 namespace BCC\Trust\Core\Repositories;
 
+use BCC\Trust\Core\Database\TableRegistry;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -43,7 +45,9 @@ if (!defined('ABSPATH')) {
  *   author_login: string,
  *   author_display_name: string,
  *   body: string,
- *   posted_at: string
+ *   posted_at: string,
+ *   stoke_total: int|numeric-string,
+ *   relevance_score: float|numeric-string
  * }
  * @phpstan-type CommentMetaRow object{
  *   act_id: int|numeric-string,
@@ -80,6 +84,11 @@ final class CommentRepository
                                   p.post_excerpt    AS body,
                                   p.post_date_gmt   AS posted_at';
 
+    /** Sort modes accepted by listByParentPostId — mirrors the §4.13 `sort` param. */
+    public const SORT_NEW      = 'new';
+    public const SORT_TOP      = 'top';
+    public const SORT_RELEVANT = 'relevant';
+
     private static function activitiesTable(): string
     {
         global $wpdb;
@@ -87,8 +96,55 @@ final class CommentRepository
     }
 
     /**
-     * List comments on a parent post in chronological-newest-first
-     * order. Cursor pagination on (post_date_gmt DESC, act_id DESC).
+     * Per-comment stoke count as a correlated subquery. Bounded to the
+     * ≤PER_PAGE_MAX rows the outer query returns, so counting per-row is
+     * cheaper than GROUP-ing the whole stokes table. Both the SELECT
+     * column and the top/relevant cursor predicates reuse this string.
+     */
+    private static function stokeCountExpr(): string
+    {
+        return '(SELECT COUNT(*) FROM ' . TableRegistry::stokes() . ' st WHERE st.act_id = a.act_id)';
+    }
+
+    /** Decimal places the relevance score is rounded to — see relevanceScoreExpr. */
+    private const RELEVANCE_PRECISION = 6;
+
+    /**
+     * "Relevant" v1 score — LEAN heuristic: stoke_count blended with
+     * recency decay (Hacker-News-style gravity). More stokes rank higher;
+     * older comments decay. `+1` keeps a fresh zero-stoke comment ordered
+     * by recency rather than collapsing to zero. The richer blend
+     * (reply_count, author trust-tier, viewer-follows-author) is deferred
+     * — see the Comment-v2 handover Slice 3 + project-deferred-features.
+     *
+     * `GREATEST(age, 0)` clamps the age so a future-dated comment (clock
+     * skew / import) never feeds POW a non-positive base — POW(<=0, 1.5)
+     * is NULL in MySQL, which would drop the row out of the ordering.
+     *
+     * The whole score is ROUNDed to RELEVANCE_PRECISION so the keyset
+     * cursor's `score = %f` tiebreak compares equal values on both sides:
+     * the cursor stores the same rounded number the SELECT emitted, so
+     * tied scores paginate on act_id instead of being skipped/duplicated
+     * by full-double precision drift.
+     */
+    private static function relevanceScoreExpr(): string
+    {
+        return 'ROUND((' . self::stokeCountExpr()
+            . ' + 1) / POW(GREATEST(TIMESTAMPDIFF(HOUR, p.post_date_gmt, UTC_TIMESTAMP()), 0) + 2, 1.5), '
+            . self::RELEVANCE_PRECISION . ')';
+    }
+
+    /**
+     * List comments on a parent post, ordered per `$sort`:
+     *   - new      → post_date_gmt DESC, act_id DESC (chronological)
+     *   - top      → stoke_total DESC, act_id DESC (most-stoked first)
+     *   - relevant → relevance_score DESC, act_id DESC (lean heuristic)
+     *
+     * Each mode keyset-paginates on its own ordering key + act_id tiebreak,
+     * so the cursor stays stable within a sort. `$cursorKey` is the raw
+     * key for the active sort: a MySQL datetime for `new`, an integer
+     * stoke total for `top`, a float score for `relevant` (all passed as
+     * strings and cast in the predicate).
      *
      * `$parentPostId` is the parent activity's `act_external_id`
      * (= parent's wp_posts.ID), which is exactly what
@@ -99,7 +155,8 @@ final class CommentRepository
      */
     public function listByParentPostId(
         int $parentPostId,
-        ?string $cursorTime,
+        string $sort,
+        ?string $cursorKey,
         ?int $cursorActId,
         int $limit
     ): array {
@@ -110,6 +167,8 @@ final class CommentRepository
 
         global $wpdb;
         $activities = self::activitiesTable();
+        $stokeExpr  = self::stokeCountExpr();
+        $scoreExpr  = self::relevanceScoreExpr();
 
         $where  = [
             'a.act_comment_object_id = %d',
@@ -117,21 +176,62 @@ final class CommentRepository
         ];
         $params = [$parentPostId];
 
-        if ($cursorTime !== null && $cursorActId !== null && $cursorActId > 0) {
-            $where[]  = '(p.post_date_gmt < %s OR (p.post_date_gmt = %s AND a.act_id < %d))';
-            $params[] = $cursorTime;
-            $params[] = $cursorTime;
-            $params[] = $cursorActId;
+        $hasCursor = $cursorKey !== null && $cursorActId !== null && $cursorActId > 0;
+
+        // Per-sort ORDER BY (uses SELECT aliases, allowed in ORDER BY) +
+        // the matching keyset predicate (must repeat the expression —
+        // MySQL forbids SELECT aliases in WHERE).
+        switch ($sort) {
+            case self::SORT_TOP:
+                $orderBy = 'stoke_total DESC, a.act_id DESC';
+                if ($hasCursor) {
+                    $where[]  = "({$stokeExpr} < %d OR ({$stokeExpr} = %d AND a.act_id < %d))";
+                    $params[] = (int) $cursorKey;
+                    $params[] = (int) $cursorKey;
+                    $params[] = $cursorActId;
+                }
+                break;
+
+            case self::SORT_RELEVANT:
+                $orderBy = 'relevance_score DESC, a.act_id DESC';
+                if ($hasCursor) {
+                    $where[]  = "({$scoreExpr} < %f OR ({$scoreExpr} = %f AND a.act_id < %d))";
+                    $params[] = (float) $cursorKey;
+                    $params[] = (float) $cursorKey;
+                    $params[] = $cursorActId;
+                }
+                break;
+
+            case self::SORT_NEW:
+            default:
+                $orderBy = 'p.post_date_gmt DESC, a.act_id DESC';
+                if ($hasCursor) {
+                    $where[]  = '(p.post_date_gmt < %s OR (p.post_date_gmt = %s AND a.act_id < %d))';
+                    $params[] = (string) $cursorKey;
+                    $params[] = (string) $cursorKey;
+                    $params[] = $cursorActId;
+                }
+                break;
         }
 
         $params[] = $limit;
 
-        $sql = 'SELECT ' . self::LIST_COLUMNS . '
+        // stoke_total rides every sort (it's the public stoke_count);
+        // relevance_score only the relevant sort reads (ordering + cursor),
+        // so skip its POW/subquery work on new/top.
+        $selectExtra = ',
+                       ' . $stokeExpr . ' AS stoke_total';
+        if ($sort === self::SORT_RELEVANT) {
+            $selectExtra .= ',
+                       ' . $scoreExpr . ' AS relevance_score';
+        }
+
+        $sql = 'SELECT ' . self::LIST_COLUMNS . $selectExtra . '
                   FROM ' . $activities . ' a
                   INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
                   INNER JOIN ' . $wpdb->users . ' u ON u.ID = p.post_author
                  WHERE ' . implode(' AND ', $where) . '
-                 ORDER BY p.post_date_gmt DESC, a.act_id DESC
+                 ORDER BY ' . $orderBy . '
                  LIMIT %d';
 
         /** @phpstan-var list<CommentRow>|null $rows */

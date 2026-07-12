@@ -72,6 +72,12 @@ final class CommentsEndpoint
                             'type'              => 'string',
                             'sanitize_callback' => 'sanitize_text_field',
                         ],
+                        'sort' => [
+                            'required'          => false,
+                            'type'              => 'string',
+                            'enum'              => ['new', 'top', 'relevant'],
+                            'sanitize_callback' => 'sanitize_text_field',
+                        ],
                     ],
                 ],
                 [
@@ -133,7 +139,12 @@ final class CommentsEndpoint
         $cursor = $request->get_param('cursor');
         $cursor = is_string($cursor) ? $cursor : null;
 
-        $result = $this->commentService()->listByFeedId($feedId, $viewerId, $cursor, $limit);
+        // Default sort is `relevant`; the service whitelists + falls back,
+        // so a missing/unknown value is safe here.
+        $sort = $request->get_param('sort');
+        $sort = is_string($sort) ? $sort : 'relevant';
+
+        $result = $this->commentService()->listByFeedId($feedId, $viewerId, $sort, $cursor, $limit);
         if (isset($result['error'])) {
             return ApiResponse::error(
                 $result['error'],
