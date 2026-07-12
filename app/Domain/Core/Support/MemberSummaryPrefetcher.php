@@ -2,10 +2,12 @@
 /**
  * MemberSummaryPrefetcher — shared bounded-batch prefetch helper.
  *
- * Collapses the eleven per-user signal lookups that
+ * Collapses the twelve per-user signal lookups that
  * {@see \BCC\Trust\Core\Services\UserViewService::getSummary()} reads
  * into a single bounded batch keyed on `IN (userIds)`. Without this
- * the per-row hydration N+1's across the page (24 rows × 11 reads).
+ * the per-row hydration N+1's across the page (24 rows × 11 reads,
+ * plus 4 more per row from the rank chip's getLevel fan-out — see the
+ * `levels` key below).
  *
  * Three pre-existing call sites carried this same eleven-key array
  * inline:
@@ -31,6 +33,7 @@ namespace BCC\Trust\Core\Support;
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Repositories\PeepSoPageRepository;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
@@ -50,9 +53,11 @@ final class MemberSummaryPrefetcher
      * Prime the per-user-signal map UserViewService reads on
      * `getSummary($userId, $viewerId, $prefetched)`.
      *
-     * Eleven bounded queries total irrespective of `count($userIds)`.
-     * Solid-reaction id can be null pre-seeder; we skip that batch in
-     * that case and let `getSummary` default `solids_received` to 0.
+     * A bounded set of batch queries total irrespective of
+     * `count($userIds)` (eleven signal batches plus the two inside
+     * getLevelsForUsers). Solid-reaction id can be null pre-seeder; we
+     * skip that batch in that case and let `getSummary` default
+     * `solids_received` to 0.
      *
      * Empty `$userIds` returns each map empty — callers should
      * short-circuit before calling this if they have no users to
@@ -102,6 +107,13 @@ final class MemberSummaryPrefetcher
             'wallets_verified_counts'      => WalletRepository::getVerifiedCountsForUsers($userIds),
             'x_connections'                => (new XRepository())->getConnectionsForUsers($userIds),
             'github_connections'           => (new GitHubRepository())->getConnectionsForUsers($userIds),
+            // Batched level for the rank chip. Without this map getSummary's
+            // rank falls back to autoDerivedRank→getLevel, which costs four
+            // queries PER ROW (two follower COUNTs, votes-cast COUNT,
+            // wallet-links read). getLevelsForUsers shares resolveLevel and
+            // the admin-tunable thresholds with that per-user path, so the
+            // derived rank is identical.
+            'levels'                       => Plugin::instance()->featureAccessService()->getLevelsForUsers($userIds),
         ];
     }
 }

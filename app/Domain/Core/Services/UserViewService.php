@@ -311,6 +311,7 @@ final class UserViewService
      *   wallets_verified_counts?: array<int, int>,
      *   x_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>,
      *   github_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>,
+     *   levels?: array<int, int>,
      *   viewer_attestations?: array<int, array{vouch: object|null, stand_behind: object|null}>
      * }|null $prefetched
      *
@@ -359,9 +360,19 @@ final class UserViewService
         $isSelf  = $userId > 0 && $userId === $viewerId;
         $tier    = $this->reputationRepo->getTier($userId);
         $card    = ReputationTierMap::resolve($tier);
-        $rank    = $this->resolveRank($userId);
         $handle  = self::resolveHandle($user);
         $privacy = self::resolvePrivacy($userId);
+
+        // Rank — prefer the prefetched batched levels map (FeatureAccess-
+        // Service::getLevelsForUsers; same resolveLevel + thresholds as the
+        // per-user chain), fall back to autoDerivedRank→getLevel, which
+        // costs four queries per user (two follower COUNTs, votes-cast
+        // COUNT, wallet-links read).
+        if ($prefetched !== null && isset($prefetched['levels'])) {
+            $rank = $this->rankFromPrefetchedLevel($userId, $prefetched['levels']);
+        } else {
+            $rank = $this->resolveRank($userId);
+        }
 
         $displayName  = $user->display_name !== '' ? $user->display_name : $user->user_login;
         $effectiveName = (!$isSelf && $privacy['real_name_hidden'])
@@ -524,6 +535,20 @@ final class UserViewService
         $derived = $this->rankService->autoDerivedRank($userId);
         $label   = RankCatalog::getLabel($derived) ?? '';
         return ['key' => $derived, 'label' => $label];
+    }
+
+    /**
+     * Rank from a prefetched levels map (FeatureAccessService::
+     * getLevelsForUsers). Users absent from the map resolve to LEVEL_NEW —
+     * the same outcome the per-user path produces for zero counts.
+     *
+     * @param array<int, int> $levels
+     * @return array{key: string, label: string}
+     */
+    private function rankFromPrefetchedLevel(int $userId, array $levels): array
+    {
+        $key = RankService::rankForLevel($levels[$userId] ?? FeatureAccessService::LEVEL_NEW);
+        return ['key' => $key, 'label' => RankCatalog::getLabel($key) ?? ''];
     }
 
     /**
