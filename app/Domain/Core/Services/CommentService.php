@@ -123,9 +123,11 @@ final class CommentService
     public function listByFeedId(
         string $feedId,
         int $viewerId,
+        string $sort,
         ?string $cursor,
         int $limit
     ): array {
+        $sort  = self::normalizeSort($sort);
         $actId = self::parseFeedId($feedId);
         if ($actId === null) {
             return ['error' => 'bcc_invalid_request', 'message' => 'Invalid feed_id.'];
@@ -142,11 +144,12 @@ final class CommentService
             return ['error' => 'bcc_forbidden', 'message' => 'You do not have access to this discussion.'];
         }
 
-        [$cursorTime, $cursorActId] = self::decodeCursor($cursor ?? '');
+        [$cursorKey, $cursorActId] = self::decodeCursor($cursor ?? '', $sort);
 
         $rows = $this->commentRepo->listByParentPostId(
             $parentPostId,
-            $cursorTime,
+            $sort,
+            $cursorKey,
             $cursorActId,
             $limit
         );
@@ -175,10 +178,10 @@ final class CommentService
             ? []
             : $this->attestationService->getViewerVouchStateForAuthors($viewerId, array_keys($authorIds));
 
-        // Batch the page's per-comment stoke state — a comment is itself a
-        // peepso_activities row, so its act_id keys bcc_trust_stokes just
-        // like a post's. Two bounded IN-list reads for the whole page:
-        // public counts + (authed) the viewer's own stoked set.
+        // Per-comment stoke state. The public count now rides inline on
+        // each row (`stoke_total`, computed in the list query so top/
+        // relevant can sort on it), so only the viewer's own stoked set
+        // needs a separate bounded IN-list read (authed only).
         $commentActIds = [];
         foreach ($rows as $row) {
             $cid = (int) $row->act_id;
@@ -186,33 +189,28 @@ final class CommentService
                 $commentActIds[] = $cid;
             }
         }
-        $stokeCounts = $commentActIds === []
-            ? []
-            : $this->stokeRepo->countsByActIds($commentActIds);
         $viewerStoked = ($commentActIds === [] || $viewerId <= 0)
             ? []
             : $this->stokeRepo->viewerStokedActIds($viewerId, $commentActIds);
 
-        $items     = [];
-        $lastTime  = null;
-        $lastActId = null;
+        $items   = [];
+        $lastRow = null;
         foreach ($rows as $row) {
             $aid   = (int) $row->author_id;
             $cid   = (int) $row->act_id;
             $badge = $badgeMap[$aid] ?? null;
             $vouch = $vouchMap[$aid] ?? null;
             $stoke = [
-                'stoke_count'       => $stokeCounts[$cid] ?? 0,
+                'stoke_count'       => (int) $row->stoke_total,
                 'viewer_has_stoked' => $viewerStoked[$cid] ?? false,
             ];
             $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke);
-            $lastTime  = (string) $row->posted_at;
-            $lastActId = (int) $row->act_id;
+            $lastRow = $row;
         }
 
         $nextCursor = null;
-        if (count($rows) === $limit && $lastTime !== null && $lastActId !== null) {
-            $nextCursor = self::encodeCursor($lastTime, $lastActId);
+        if (count($rows) === $limit && $lastRow !== null) {
+            $nextCursor = self::encodeCursor($sort, $lastRow);
         }
 
         return [
@@ -586,10 +584,26 @@ final class CommentService
     // unchanged.
     // ──────────────────────────────────────────────────────────────────
 
+    /** Whitelist the sort param; anything unrecognized falls back to the default (relevant). */
+    private static function normalizeSort(string $sort): string
+    {
+        $sort = strtolower(trim($sort));
+        return in_array($sort, [
+            CommentRepository::SORT_NEW,
+            CommentRepository::SORT_TOP,
+            CommentRepository::SORT_RELEVANT,
+        ], true) ? $sort : CommentRepository::SORT_RELEVANT;
+    }
+
     /**
+     * Decode a cursor into [key, act_id] for the active sort. The key is
+     * the sort's ordering value: an ISO-8601 timestamp for `new` (→ MySQL
+     * UTC datetime), a numeric string for `top`/`relevant` (cast in the
+     * repository predicate).
+     *
      * @return array{0: ?string, 1: ?int}
      */
-    private static function decodeCursor(string $cursor): array
+    private static function decodeCursor(string $cursor, string $sort): array
     {
         if ($cursor === '') {
             return [null, null];
@@ -599,23 +613,58 @@ final class CommentService
             return [null, null];
         }
         $data = json_decode($decoded, true);
-        if (!is_array($data) || !isset($data['t'], $data['id'])) {
+        if (!is_array($data) || !isset($data['id'])) {
             return [null, null];
         }
-        $iso = (string) $data['t'];
-        $ts  = strtotime($iso);
-        if ($ts === false) {
+        // Sort key rides as `k`; legacy chronological cursors used `t`,
+        // still accepted so pages open across the upgrade don't break.
+        $keyRaw = $data['k'] ?? $data['t'] ?? null;
+        if ($keyRaw === null) {
             return [null, null];
         }
-        return [gmdate('Y-m-d H:i:s', $ts), (int) $data['id']];
+        $id = (int) $data['id'];
+
+        if ($sort === CommentRepository::SORT_NEW) {
+            $ts = strtotime((string) $keyRaw);
+            if ($ts === false) {
+                return [null, null];
+            }
+            return [gmdate('Y-m-d H:i:s', $ts), $id];
+        }
+
+        // top / relevant keys are numeric; a malformed/tampered key would
+        // otherwise cast to 0 and silently return a wrong/empty page, so
+        // reject it → first-page reset instead.
+        if (!is_numeric($keyRaw)) {
+            return [null, null];
+        }
+        return [(string) $keyRaw, $id];
     }
 
-    private static function encodeCursor(string $mysqlDatetime, int $actId): string
+    /**
+     * Encode the next-page cursor from the last row of the current page,
+     * keyed by the active sort's ordering value.
+     */
+    private static function encodeCursor(string $sort, object $lastRow): string
     {
-        $ts  = strtotime($mysqlDatetime . ' UTC');
-        $iso = $ts ? gmdate('Y-m-d\TH:i:s\Z', $ts) : '';
+        switch ($sort) {
+            case CommentRepository::SORT_TOP:
+                $key = (string) (int) $lastRow->stoke_total;
+                break;
+            case CommentRepository::SORT_RELEVANT:
+                // Uppercase %F is locale-independent (no comma decimals).
+                // Precision MUST match CommentRepository::RELEVANCE_PRECISION
+                // (the SQL ROUND) so the keyset `score = %f` tiebreak
+                // compares the same value the query ordered on.
+                $key = sprintf('%.6F', (float) $lastRow->relevance_score);
+                break;
+            case CommentRepository::SORT_NEW:
+            default:
+                $key = self::toIso8601((string) $lastRow->posted_at);
+                break;
+        }
 
-        $payload = json_encode(['t' => $iso, 'id' => $actId], JSON_UNESCAPED_SLASHES);
+        $payload = json_encode(['k' => $key, 'id' => (int) $lastRow->act_id], JSON_UNESCAPED_SLASHES);
         return rtrim(strtr(base64_encode((string) $payload), '+/', '-_'), '=');
     }
 
