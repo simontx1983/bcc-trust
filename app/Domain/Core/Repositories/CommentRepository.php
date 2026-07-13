@@ -89,6 +89,16 @@ final class CommentRepository
     public const SORT_TOP      = 'top';
     public const SORT_RELEVANT = 'relevant';
 
+    /**
+     * Post-meta key for a comment's optional attached media (§3.5 `media`
+     * block). Stored as a JSON blob on the comment's OWN wp_post (the
+     * `act_external_id`), so PeepSo's delete (which trashes that wp_post)
+     * takes the media meta with it — no orphan cleanup, no sidecar table.
+     * Written by CommentService::createComment; read here for the list +
+     * single-row hydrate paths.
+     */
+    public const MEDIA_META_KEY = '_bcc_comment_media';
+
     private static function activitiesTable(): string
     {
         global $wpdb;
@@ -391,5 +401,63 @@ final class CommentRepository
             $commentActId
         ));
         return $row ?: null;
+    }
+
+    /**
+     * Batch-read the `MEDIA_META_KEY` JSON blob for a page of comment
+     * wp_posts in ONE query, keyed by comment_post_id. Mirrors the
+     * stoke/badge batch shape so listByFeedId never N+1s the meta read.
+     *
+     * The `$postIds` are comment `act_external_id`s (each comment's own
+     * wp_post.ID), which is what the media meta is stamped on. Rows with
+     * no media meta are simply absent from the map (caller treats absent
+     * as "no media"); malformed JSON is skipped defensively.
+     *
+     * @param list<int> $commentPostIds
+     * @return array<int, array<string, mixed>> comment_post_id => decoded media blob
+     */
+    public function mediaByCommentPostIds(array $commentPostIds): array
+    {
+        if ($commentPostIds === []) {
+            return [];
+        }
+
+        // Filter + dedupe positive ids into a bounded IN(...) clause.
+        $clean = [];
+        foreach ($commentPostIds as $id) {
+            $iid = (int) $id;
+            if ($iid > 0) {
+                $clean[$iid] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $ids = array_keys($clean);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $params       = $ids;
+        $params[]     = self::MEDIA_META_KEY;
+
+        $sql = "SELECT post_id, meta_value
+                  FROM {$wpdb->postmeta}
+                 WHERE post_id IN ({$placeholders})
+                   AND meta_key = %s";
+
+        /** @phpstan-var list<object{post_id: int|numeric-string, meta_value: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params));
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $r) {
+            $decoded = json_decode((string) $r->meta_value, true);
+            if (is_array($decoded) && isset($decoded['kind'])) {
+                $out[(int) $r->post_id] = $decoded;
+            }
+        }
+        return $out;
     }
 }

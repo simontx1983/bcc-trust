@@ -193,6 +193,20 @@ final class CommentService
             ? []
             : $this->stokeRepo->viewerStokedActIds($viewerId, $commentActIds);
 
+        // Batch-load attached media (§3.5) for the page's comment wp_posts
+        // in ONE IN-list read, keyed by comment_post_id (= act_external_id).
+        // Absent from the map → the row carries no media.
+        $commentPostIds = [];
+        foreach ($rows as $row) {
+            $pid = (int) $row->comment_post_id;
+            if ($pid > 0) {
+                $commentPostIds[] = $pid;
+            }
+        }
+        $mediaMap = $commentPostIds === []
+            ? []
+            : $this->commentRepo->mediaByCommentPostIds($commentPostIds);
+
         $items   = [];
         $lastRow = null;
         foreach ($rows as $row) {
@@ -204,7 +218,8 @@ final class CommentService
                 'stoke_count'       => (int) $row->stoke_total,
                 'viewer_has_stoked' => $viewerStoked[$cid] ?? false,
             ];
-            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke);
+            $media = $mediaMap[(int) $row->comment_post_id] ?? null;
+            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke, $media);
             $lastRow = $row;
         }
 
@@ -223,13 +238,26 @@ final class CommentService
     /**
      * Create a comment on the given feed item.
      *
+     * Optional media (§3.5 `media` block) rides as ONE attachment — a
+     * photo XOR a gif, never both. `$attachmentId` is an uploaded WP
+     * attachment (via the shared `POST /blog/cover-image` route) the
+     * author must own; `$gifUrl` is a remote Giphy CDN URL. Photo wins
+     * if both are somehow supplied. The media is layered as a bcc
+     * post-meta sidecar on the comment's own wp_post (single-graph rule;
+     * PeepSo's write path is untouched — it's text-native).
+     *
      * @return array{
      *   ok: true,
      *   comment: array<string, mixed>
      * }|array{error: string, message: string, data?: array<string, mixed>}
      */
-    public function createComment(string $feedId, int $authorId, string $content): array
-    {
+    public function createComment(
+        string $feedId,
+        int $authorId,
+        string $content,
+        ?int $attachmentId = null,
+        ?string $gifUrl = null
+    ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
         }
@@ -295,6 +323,16 @@ final class CommentService
             return ['error' => 'bcc_rate_limited', 'message' => 'Too fast. Wait a moment before commenting again.'];
         }
 
+        // Resolve + validate the optional attachment BEFORE the PeepSo
+        // write so a bad attachment / non-Giphy URL is rejected without
+        // leaving an orphan comment behind. `$media` is the stored blob
+        // (null when no attachment was sent).
+        $mediaResult = $this->resolveMedia($authorId, $attachmentId, $gifUrl);
+        if (isset($mediaResult['error'])) {
+            return $mediaResult;
+        }
+        $media = $mediaResult['media'];
+
         $newCommentPostId = PeepSoCommentWriter::addComment($parentPostId, $authorId, $trimmed, $parentModuleId);
         if ($newCommentPostId <= 0) {
             // PeepSo refused the write — could be:
@@ -330,6 +368,18 @@ final class CommentService
             return ['error' => 'bcc_unavailable', 'message' => 'Comment was saved but could not be confirmed. Refresh to see it.'];
         }
 
+        // Stamp the attachment sidecar on the comment's own wp_post
+        // (single-graph rule). Written after the PeepSo write returns the
+        // comment's wp_post.ID; the batch read in listByFeedId picks it up
+        // on subsequent loads, and we echo it on this create response.
+        if ($media !== null) {
+            update_post_meta(
+                $newCommentPostId,
+                CommentRepository::MEDIA_META_KEY,
+                wp_json_encode($media)
+            );
+        }
+
         // Resolve the new author's badge fields directly — single-row
         // path, so the resolver's singleton helper is the right shape
         // (vs. an array detour that batchers don't need).
@@ -342,7 +392,8 @@ final class CommentService
             $feedId,
             $badge,
             null,
-            ['stoke_count' => 0, 'viewer_has_stoked' => false]
+            ['stoke_count' => 0, 'viewer_has_stoked' => false],
+            $media
         );
 
         // §A3 event — single emission per state change. Subscribers
@@ -487,9 +538,12 @@ final class CommentService
      *               Pre-resolved per-comment stoke state (public count +
      *               the viewer's own toggle). Null → omit both fields, so a
      *               stale frontend keeps rendering the row without a rail.
+     * @param array<string, mixed>|null $media  Stored media sidecar blob
+     *               (`{kind, url, ...}`) or null. Shaped to the §3.5 wire
+     *               `media` block via self::shapeMedia; absent → no media.
      * @return array<string, mixed>
      */
-    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null): array
+    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null, ?array $media = null): array
     {
         $authorId = (int) $row->author_id;
         $authorHandle = (string) $row->author_login;
@@ -552,7 +606,151 @@ final class CommentService
             $shaped['viewer_has_stoked'] = (bool) $stoke['viewer_has_stoked'];
         }
 
+        // Attached media (§3.5) — one photo XOR gif. Additive: absent when
+        // the comment has no attachment (or the stored blob is malformed).
+        if ($media !== null) {
+            $wireMedia = self::shapeMedia($media);
+            if ($wireMedia !== null) {
+                $shaped['media'] = $wireMedia;
+            }
+        }
+
         return $shaped;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Media sidecar — validate on write, shape on read
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Validate + resolve the optional attachment into the storable media
+     * blob. One attachment per comment: a photo (uploaded WP attachment
+     * the author owns) XOR a gif (remote Giphy URL). Photo wins if both
+     * are supplied. Returns `{ok, media}` (media null → no attachment) or
+     * an envelope-ready `{error, message}` on a bad/foreign attachment.
+     *
+     * @return array{ok: true, media: array<string, mixed>|null}|array{error: string, message: string}
+     */
+    private function resolveMedia(int $authorId, ?int $attachmentId, ?string $gifUrl): array
+    {
+        if ($attachmentId !== null && $attachmentId > 0) {
+            return self::resolvePhotoMedia($authorId, $attachmentId);
+        }
+        if ($gifUrl !== null && trim($gifUrl) !== '') {
+            return self::resolveGifMedia(trim($gifUrl));
+        }
+        return ['ok' => true, 'media' => null];
+    }
+
+    /**
+     * Resolve an uploaded attachment into a photo media blob, gated on
+     * author ownership — the same posture as PostsService::createBlog's
+     * cover-image check (`post_author === authorId`). The attachment is
+     * created via the shared `POST /blog/cover-image` route, which stamps
+     * `post_author` to the uploader.
+     *
+     * @return array{ok: true, media: array<string, mixed>}|array{error: string, message: string}
+     */
+    private static function resolvePhotoMedia(int $authorId, int $attachmentId): array
+    {
+        $attachment = get_post($attachmentId);
+        if (!($attachment instanceof \WP_Post) || $attachment->post_type !== 'attachment') {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Attached image not found.'];
+        }
+        if ((int) $attachment->post_author !== $authorId) {
+            return ['error' => 'bcc_forbidden', 'message' => 'You do not own that image.'];
+        }
+        // Must be an image — the upload route only mints images, but an
+        // owned non-image attachment id (PDF, etc.) would otherwise be
+        // accepted and render as a broken <img>. Mirror the cover-image
+        // writer's image-only allowlist.
+        if (!str_starts_with((string) get_post_mime_type($attachmentId), 'image/')) {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Attachment must be an image.'];
+        }
+
+        $url = wp_get_attachment_url($attachmentId);
+        if (!is_string($url) || $url === '') {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Attached image is unavailable.'];
+        }
+
+        $width  = 0;
+        $height = 0;
+        $meta   = wp_get_attachment_metadata($attachmentId);
+        if (is_array($meta)) {
+            if (isset($meta['width']) && is_int($meta['width'])) {
+                $width = $meta['width'];
+            }
+            if (isset($meta['height']) && is_int($meta['height'])) {
+                $height = $meta['height'];
+            }
+        }
+
+        return [
+            'ok'    => true,
+            'media' => [
+                'kind'          => 'photo',
+                'attachment_id' => $attachmentId,
+                'url'           => $url,
+                'width'         => $width,
+                'height'        => $height,
+            ],
+        ];
+    }
+
+    /**
+     * Resolve a remote GIF URL into a gif media blob. Mirrors
+     * bcc-core PeepSoGifWriter's posture: the URL must be an http(s) URL
+     * that contains "giphy.com" (no file staging — the GIF stays on
+     * Giphy's CDN). Any other host is rejected.
+     *
+     * @return array{ok: true, media: array<string, mixed>}|array{error: string, message: string}
+     */
+    private static function resolveGifMedia(string $url): array
+    {
+        // Host-based check (NOT a substring): a substring test would accept
+        // https://evil.com/x?y=giphy.com and render it as an <img> in every
+        // viewer's browser. Require the host to be giphy.com or a subdomain.
+        $isUrl  = filter_var($url, FILTER_VALIDATE_URL) !== false;
+        $scheme = strtolower((string) wp_parse_url($url, PHP_URL_SCHEME));
+        $host   = strtolower((string) wp_parse_url($url, PHP_URL_HOST));
+        $isGiphyHost = $host === 'giphy.com' || str_ends_with($host, '.giphy.com');
+        if (!$isUrl || ($scheme !== 'https' && $scheme !== 'http') || !$isGiphyHost) {
+            return ['error' => 'bcc_invalid_request', 'message' => 'GIF must be a Giphy URL.'];
+        }
+
+        return [
+            'ok'    => true,
+            'media' => [
+                'kind' => 'gif',
+                'url'  => $url,
+            ],
+        ];
+    }
+
+    /**
+     * Shape a stored media blob into the §3.5 wire `media` block. Keeps
+     * only the fields the frontend renders (kind + url, plus photo
+     * dimensions); the internal `attachment_id` is dropped from the wire.
+     * Returns null for a malformed/unknown blob so the row degrades to
+     * no-media rather than emitting a broken block.
+     *
+     * @param array<string, mixed> $media
+     * @return array<string, mixed>|null
+     */
+    private static function shapeMedia(array $media): ?array
+    {
+        $kind = isset($media['kind']) && is_string($media['kind']) ? $media['kind'] : '';
+        $url  = isset($media['url']) && is_string($media['url']) ? $media['url'] : '';
+        if ($url === '' || !in_array($kind, ['photo', 'gif'], true)) {
+            return null;
+        }
+
+        $out = ['kind' => $kind, 'url' => $url];
+        if ($kind === 'photo') {
+            $out['width']  = isset($media['width']) ? (int) $media['width'] : 0;
+            $out['height'] = isset($media['height']) ? (int) $media['height'] : 0;
+        }
+        return $out;
     }
 
     /**

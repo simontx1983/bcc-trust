@@ -100,6 +100,22 @@ final class CommentsEndpoint
                             // double-encode entities and shorten
                             // intent before PeepSo sees it.
                         ],
+                        // §3.5 optional attachment — one photo XOR gif.
+                        // `attachment_id` is an uploaded WP attachment
+                        // (via the shared /blog/cover-image route); the
+                        // service verifies ownership before stamping it.
+                        'attachment_id' => [
+                            'required'          => false,
+                            'type'              => 'integer',
+                            'sanitize_callback' => 'absint',
+                        ],
+                        // Remote Giphy CDN URL. esc_url_raw keeps it a
+                        // valid URL; the service re-validates the host.
+                        'gif_url' => [
+                            'required'          => false,
+                            'type'              => 'string',
+                            'sanitize_callback' => 'esc_url_raw',
+                        ],
                     ],
                 ],
             ]
@@ -171,7 +187,15 @@ final class CommentsEndpoint
         $feedId  = (string) $request->get_param('feed_id');
         $body    = (string) ($request->get_param('body') ?? '');
 
-        $result = $this->commentService()->createComment($feedId, $authorId, $body);
+        // §3.5 optional attachment — one photo XOR gif. absint yields 0
+        // when absent → normalize to null so the service skips media.
+        $attachmentIdRaw = (int) ($request->get_param('attachment_id') ?? 0);
+        $attachmentId    = $attachmentIdRaw > 0 ? $attachmentIdRaw : null;
+
+        $gifUrlRaw = $request->get_param('gif_url');
+        $gifUrl    = is_string($gifUrlRaw) && $gifUrlRaw !== '' ? $gifUrlRaw : null;
+
+        $result = $this->commentService()->createComment($feedId, $authorId, $body, $attachmentId, $gifUrl);
         if (isset($result['error'])) {
             // Forward the optional `data` block — §3.3.12 mention errors
             // ride here with `{user_id}` / `{max}` payloads.
