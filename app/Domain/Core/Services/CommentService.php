@@ -37,6 +37,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\StokeRepository;
+use BCC\Trust\Core\Repositories\UserMiniRepository;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
@@ -101,7 +102,8 @@ final class CommentService
         private readonly MentionOverlayService $mentionOverlay,
         private readonly AuthorBadgeResolver $authorBadgeResolver,
         private readonly AttestationService $attestationService,
-        private readonly StokeRepository $stokeRepo
+        private readonly StokeRepository $stokeRepo,
+        private readonly UserMiniRepository $userMiniRepo
     ) {
     }
 
@@ -178,6 +180,15 @@ final class CommentService
             ? []
             : $this->attestationService->getViewerVouchStateForAuthors($viewerId, array_keys($authorIds));
 
+        // Canonical §B6 handles for the page's authors — ONE bounded
+        // IN-list read (bcc_handle preferred, user_login fallback) so
+        // comment bylines emit the same route-resolvable handle the feed
+        // does. Raw user_login (e.g. PeepSo's `u_`-prefixed logins) can
+        // 404 through the /u/{handle} route patterns.
+        $handleMap = $authorIds === []
+            ? []
+            : $this->resolveHandlesForAuthors(array_keys($authorIds));
+
         // Per-comment stoke state. The public count now rides inline on
         // each row (`stoke_total`, computed in the list query so top/
         // relevant can sort on it), so only the viewer's own stoked set
@@ -219,7 +230,7 @@ final class CommentService
                 'viewer_has_stoked' => $viewerStoked[$cid] ?? false,
             ];
             $media = $mediaMap[(int) $row->comment_post_id] ?? null;
-            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke, $media);
+            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke, $media, $handleMap[$aid] ?? null);
             $lastRow = $row;
         }
 
@@ -384,6 +395,9 @@ final class CommentService
         // path, so the resolver's singleton helper is the right shape
         // (vs. an array detour that batchers don't need).
         $badge  = $this->authorBadgeResolver->resolveForUser($authorId);
+        // Canonical handle for the echo row — same resolution the list
+        // path batches, degenerate single-id case here.
+        $handleMap = $this->resolveHandlesForAuthors([$authorId]);
         // A just-created comment has no stokes yet — emit the zero/false
         // baseline so the response carries the same shape as list rows.
         $shaped = $this->shapeCommentRow(
@@ -393,7 +407,8 @@ final class CommentService
             $badge,
             null,
             ['stoke_count' => 0, 'viewer_has_stoked' => false],
-            $media
+            $media,
+            $handleMap[$authorId] ?? null
         );
 
         // §A3 event — single emission per state change. Subscribers
@@ -541,12 +556,16 @@ final class CommentService
      * @param array<string, mixed>|null $media  Stored media sidecar blob
      *               (`{kind, url, ...}`) or null. Shaped to the §3.5 wire
      *               `media` block via self::shapeMedia; absent → no media.
+     * @param string|null $canonicalHandle  Pre-resolved §B6 canonical handle
+     *               for the author (bcc_handle-first via UserMiniRepository,
+     *               batched by the caller). Null → degrade to the row's raw
+     *               user_login so the byline still renders.
      * @return array<string, mixed>
      */
-    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null, ?array $media = null): array
+    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null, ?array $media = null, ?string $canonicalHandle = null): array
     {
         $authorId = (int) $row->author_id;
-        $authorHandle = (string) $row->author_login;
+        $authorHandle = $canonicalHandle ?? (string) $row->author_login;
         $displayName  = (string) $row->author_display_name;
         $body         = (string) $row->body;
 
@@ -749,6 +768,27 @@ final class CommentService
         if ($kind === 'photo') {
             $out['width']  = isset($media['width']) ? (int) $media['width'] : 0;
             $out['height'] = isset($media['height']) ? (int) $media['height'] : 0;
+        }
+        return $out;
+    }
+
+    /**
+     * Canonical §B6 handle per author id — `bcc_handle` when set,
+     * `user_login` fallback. Same precedence as
+     * MessagesService::resolveUserMinisById and the feed hydrators
+     * (FeedHydrationPipeline / bcc-core ActivityFeedService); SQL lives
+     * in UserMiniRepository per §1. One bounded IN-list read per page.
+     *
+     * @param list<int> $authorIds
+     * @return array<int, string> author user_id => canonical handle
+     */
+    private function resolveHandlesForAuthors(array $authorIds): array
+    {
+        $out = [];
+        foreach ($this->userMiniRepo->getRowsByIds($authorIds) as $uid => $row) {
+            $out[$uid] = $row['handle'] !== null && $row['handle'] !== ''
+                ? $row['handle']
+                : $row['user_login'];
         }
         return $out;
     }

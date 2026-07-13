@@ -571,7 +571,8 @@ final class Plugin
             $this->mentionOverlayService(),
             $this->authorBadgeResolver(),
             $this->attestationService(),
-            $this->stokeRepository()
+            $this->stokeRepository(),
+            $this->userMiniRepository()
         );
     }
 
