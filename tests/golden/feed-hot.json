@@ -2,30 +2,30 @@
   "items": [
     {
       "author": {
-        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/1/98af9e9b63-avatar-full.jpg",
-        "card_tier": "legendary",
-        "display_name": "bluecollarcryptolearning@gmail.com",
-        "handle": "phillip-bcc",
-        "id": 1,
+        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1783038468",
+        "card_tier": "uncommon",
+        "display_name": "Smoke B",
+        "handle": "smokeb4ic74l",
+        "id": 142,
         "is_followed_by_viewer": false,
         "is_in_good_standing": true,
         "kind": "user",
-        "rank_label": "Journeyman",
-        "reputation_tier": "elite",
-        "reputation_tier_label": "Proven",
-        "tier_label": "Legendary"
+        "rank_label": "Apprentice",
+        "reputation_tier": "neutral",
+        "reputation_tier_label": "Neutral",
+        "tier_label": "Uncommon"
       },
       "body": {
         "embeds": [],
         "mentions": [],
-        "text": "i love it"
+        "text": "Smoke status mr4ixue6 floor wiring check"
       },
-      "comment_count": 0,
-      "external_id": 4975,
-      "id": "feed_151",
+      "comment_count": 2,
+      "external_id": 4981,
+      "id": "feed_153",
       "links": {
-        "author": "/u/phillip-bcc",
-        "self": "/post/151"
+        "author": "/u/smokeb4ic74l",
+        "self": "/u/smokeb4ic74l/post/aRLRUJzU"
       },
       "permissions": {
         "can_report": {
@@ -34,10 +34,10 @@
         }
       },
       "post_kind": "status",
-      "posted_at": "2026-06-11T22:05:27Z",
+      "posted_at": "2026-07-03T06:00:18Z",
       "reactions": {
         "counts": {
-          "fire": 0,
+          "fire": 1,
           "haha": 0,
           "like": 0,
           "love": 0,
@@ -45,24 +45,35 @@
         },
         "heat_stage": 1,
         "kind_grammar": "social",
-        "stoke_count": 0,
+        "stoke_count": 1,
         "viewer_has_stoked": false,
         "viewer_reaction": null
       },
       "scope_tags": [
         "for_you",
         "following"
-      ]
+      ],
+      "social_proof": {
+        "headline": null,
+        "recent_reactors": [
+          {
+            "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1783038468",
+            "display_name": "Smoke A",
+            "handle": "smokea4ic74l"
+          }
+        ]
+      }
     },
     {
       "author": {
-        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1781205563",
+        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1783038468",
         "card_tier": "uncommon",
         "display_name": "Smoke C",
         "handle": "smokec9teror",
         "id": 140,
         "is_followed_by_viewer": false,
         "is_in_good_standing": true,
+        "is_operator": true,
         "kind": "user",
         "rank_label": "Journeyman",
         "reputation_tier": "neutral",
@@ -77,7 +88,7 @@
       "id": "feed_150",
       "links": {
         "author": "/u/smokec9teror",
-        "self": "/post/150"
+        "self": "/u/smokec9teror/post/TjzjcsBB"
       },
       "permissions": {
         "can_report": {
@@ -97,7 +108,7 @@
         },
         "heat_stage": 1,
         "kind_grammar": "social",
-        "stoke_count": 0,
+        "stoke_count": 1,
         "viewer_has_stoked": false,
         "viewer_reaction": null
       },
@@ -118,7 +129,7 @@
     },
     {
       "author": {
-        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1781205563",
+        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1783038468",
         "card_tier": "rare",
         "display_name": "Smoke A",
         "handle": "smokea9suc8u",
@@ -139,7 +150,7 @@
       "id": "feed_149",
       "links": {
         "author": "/u/smokea9suc8u",
-        "self": "/post/149"
+        "self": "/u/smokea9suc8u/post/VtEUmxld"
       },
       "permissions": {
         "can_report": {
@@ -180,7 +191,7 @@
     },
     {
       "author": {
-        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1781205563",
+        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1783038468",
         "card_tier": "uncommon",
         "display_name": "Smoke B",
         "handle": "smokeb9suc8u",
@@ -203,7 +214,7 @@
       "id": "feed_148",
       "links": {
         "author": "/u/smokeb9suc8u",
-        "self": "/post/148"
+        "self": "/u/smokeb9suc8u/post/wdUHIcYx"
       },
       "permissions": {
         "can_report": {
@@ -235,7 +246,7 @@
         "headline": null,
         "recent_reactors": [
           {
-            "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1781205563",
+            "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1783038468",
             "display_name": "Smoke A",
             "handle": "smokea9suc8u"
           }
@@ -275,7 +286,7 @@
       "id": "feed_143",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/143"
+        "self": "/u/claudeai/post/vSQAWzIp"
       },
       "permissions": {
         "can_report": {
@@ -295,7 +306,7 @@
         },
         "heat_stage": 1,
         "kind_grammar": "social",
-        "stoke_count": 0,
+        "stoke_count": 1,
         "viewer_has_stoked": false,
         "viewer_reaction": null
       },
@@ -355,7 +366,7 @@
       "id": "feed_142",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/142"
+        "self": "/u/claudeai/post/rxzpoQbb"
       },
       "permissions": {
         "can_report": {
@@ -375,7 +386,7 @@
         },
         "heat_stage": 1,
         "kind_grammar": "social",
-        "stoke_count": 0,
+        "stoke_count": 1,
         "viewer_has_stoked": false,
         "viewer_reaction": null
       },
@@ -417,7 +428,7 @@
       "id": "feed_141",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/141"
+        "self": "/u/claudeai/post/mBWnFyfE"
       },
       "permissions": {
         "can_report": {
@@ -469,7 +480,7 @@
       "id": "feed_140",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/140"
+        "self": "/u/claudeai/post/cNbdfmgS"
       },
       "permissions": {
         "can_report": {
@@ -521,7 +532,7 @@
       "id": "feed_139",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/139"
+        "self": "/u/claudeai/post/RUkREnVl"
       },
       "permissions": {
         "can_report": {
@@ -576,7 +587,7 @@
       "id": "feed_137",
       "links": {
         "author": "/u/1234",
-        "self": "/post/137"
+        "self": "/u/1234/post/bCpcWwGi"
       },
       "permissions": {
         "can_report": {
@@ -596,7 +607,7 @@
         },
         "heat_stage": 1,
         "kind_grammar": "social",
-        "stoke_count": 0,
+        "stoke_count": 1,
         "viewer_has_stoked": false,
         "viewer_reaction": null
       },
@@ -631,7 +642,7 @@
       "id": "feed_135",
       "links": {
         "author": "/u/1234",
-        "self": "/post/135"
+        "self": "/u/1234/post/jnaQFQtw"
       },
       "permissions": {
         "can_report": {
@@ -651,7 +662,7 @@
         },
         "heat_stage": 1,
         "kind_grammar": "social",
-        "stoke_count": 0,
+        "stoke_count": 1,
         "viewer_has_stoked": false,
         "viewer_reaction": null
       },
@@ -686,7 +697,7 @@
       "id": "feed_124",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/124"
+        "self": "/u/claudeai/post/OmeUhsZU"
       },
       "permissions": {
         "can_report": {
@@ -741,7 +752,7 @@
       "id": "feed_122",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/122"
+        "self": "/u/claudeai/post/Aobalmeh"
       },
       "permissions": {
         "can_report": {
@@ -799,9 +810,9 @@
         "embeds": [],
         "mentions": [
           {
-            "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1781205563",
+            "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt=1783038468",
             "display_name": "admin",
-            "handle": "admin",
+            "handle": "admin-2",
             "range": [
               19,
               41
@@ -816,7 +827,7 @@
       "id": "feed_119",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/119"
+        "self": "/u/claudeai/post/zlOmUZbH"
       },
       "permissions": {
         "can_report": {
@@ -871,60 +882,6 @@
         "tier_label": "Uncommon"
       },
       "body": {
-        "embeds": [],
-        "mentions": [],
-        "text": "1212"
-      },
-      "comment_count": 0,
-      "external_id": 2075,
-      "id": "feed_118",
-      "links": {
-        "author": "/u/claudeai",
-        "self": "/post/118"
-      },
-      "permissions": {
-        "can_report": {
-          "allowed": false,
-          "unlock_hint": "Sign in to report."
-        }
-      },
-      "post_kind": "status",
-      "posted_at": "2026-05-07T05:48:59Z",
-      "reactions": {
-        "counts": {
-          "fire": 0,
-          "haha": 0,
-          "like": 0,
-          "love": 0,
-          "wow": 0
-        },
-        "heat_stage": 1,
-        "kind_grammar": "social",
-        "stoke_count": 0,
-        "viewer_has_stoked": false,
-        "viewer_reaction": null
-      },
-      "scope_tags": [
-        "for_you",
-        "following"
-      ]
-    },
-    {
-      "author": {
-        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/132/198b477562-avatar-full.jpg",
-        "card_tier": "uncommon",
-        "display_name": "u_claudeai",
-        "handle": "claudeai",
-        "id": 132,
-        "is_followed_by_viewer": false,
-        "is_in_good_standing": true,
-        "kind": "user",
-        "rank_label": "Journeyman",
-        "reputation_tier": "neutral",
-        "reputation_tier_label": "Neutral",
-        "tier_label": "Uncommon"
-      },
-      "body": {
         "caption": "phase 1c smoke test \u2014 gif post",
         "gif_url": "https://media3.giphy.com/media/v1.Y2lkPTliNzE4ZGQ2Z3o0N2x5bWpzazNycDNyeXIyOGtyNWR2YmxidjlzaXFxZnQwcHAwcSZlcD12MV9naWZzX3NlYXJjaCZjdD1n/0ixAZaU8Gp8R5TdRQT/giphy.gif",
         "mentions": [],
@@ -935,7 +892,7 @@
       "id": "feed_117",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/117"
+        "self": "/u/claudeai/post/ntPhabuY"
       },
       "permissions": {
         "can_report": {
@@ -1000,7 +957,7 @@
       "id": "feed_115",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/115"
+        "self": "/u/claudeai/post/wpmIzebo"
       },
       "permissions": {
         "can_report": {
@@ -1054,7 +1011,7 @@
       "id": "feed_114",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/114"
+        "self": "/u/claudeai/post/xHclalnP"
       },
       "permissions": {
         "can_report": {
@@ -1085,11 +1042,11 @@
     },
     {
       "author": {
-        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/132/198b477562-avatar-full.jpg",
+        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/133/b48f2f2f09-avatar-full.jpg",
         "card_tier": "uncommon",
-        "display_name": "u_claudeai",
-        "handle": "claudeai",
-        "id": 132,
+        "display_name": "Phillip",
+        "handle": "phillips",
+        "id": 133,
         "is_followed_by_viewer": false,
         "is_in_good_standing": true,
         "kind": "user",
@@ -1099,16 +1056,17 @@
         "tier_label": "Uncommon"
       },
       "body": {
-        "embeds": [],
+        "alt": null,
+        "caption": null,
         "mentions": [],
-        "text": "ko"
+        "photo_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/133/photos/3d6b72e50b49f5ddfa53a38736122fb5.jpg"
       },
-      "comment_count": 0,
-      "external_id": 2070,
-      "id": "feed_113",
+      "comment_count": 2,
+      "external_id": 2042,
+      "id": "feed_110",
       "links": {
-        "author": "/u/claudeai",
-        "self": "/post/113"
+        "author": "/u/phillips",
+        "self": "/u/phillips/post/fqsZmdkx"
       },
       "permissions": {
         "can_report": {
@@ -1116,8 +1074,8 @@
           "unlock_hint": "Sign in to report."
         }
       },
-      "post_kind": "status",
-      "posted_at": "2026-05-06T21:42:50Z",
+      "post_kind": "photo",
+      "posted_at": "2026-05-04T03:18:59Z",
       "reactions": {
         "counts": {
           "fire": 0,
@@ -1135,7 +1093,82 @@
       "scope_tags": [
         "for_you",
         "following"
-      ]
+      ],
+      "social_proof": {
+        "headline": null,
+        "recent_reactors": [
+          {
+            "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/132/198b477562-avatar-full.jpg",
+            "display_name": "u_claudeai",
+            "handle": "claudeai"
+          }
+        ]
+      }
+    },
+    {
+      "author": {
+        "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/133/b48f2f2f09-avatar-full.jpg",
+        "card_tier": "uncommon",
+        "display_name": "Phillip",
+        "handle": "phillips",
+        "id": 133,
+        "is_followed_by_viewer": false,
+        "is_in_good_standing": true,
+        "kind": "user",
+        "rank_label": "Journeyman",
+        "reputation_tier": "neutral",
+        "reputation_tier_label": "Neutral",
+        "tier_label": "Uncommon"
+      },
+      "body": {
+        "alt": null,
+        "caption": null,
+        "mentions": [],
+        "photo_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/133/photos/45022f68084de23839240b43f366a764.jpg"
+      },
+      "comment_count": 0,
+      "external_id": 2041,
+      "id": "feed_108",
+      "links": {
+        "author": "/u/phillips",
+        "self": "/u/phillips/post/myPcWqlY"
+      },
+      "permissions": {
+        "can_report": {
+          "allowed": false,
+          "unlock_hint": "Sign in to report."
+        }
+      },
+      "post_kind": "photo",
+      "posted_at": "2026-05-04T03:18:02Z",
+      "reactions": {
+        "counts": {
+          "fire": 0,
+          "haha": 0,
+          "like": 0,
+          "love": 0,
+          "wow": 0
+        },
+        "heat_stage": 1,
+        "kind_grammar": "social",
+        "stoke_count": 0,
+        "viewer_has_stoked": false,
+        "viewer_reaction": null
+      },
+      "scope_tags": [
+        "for_you",
+        "following"
+      ],
+      "social_proof": {
+        "headline": null,
+        "recent_reactors": [
+          {
+            "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/132/198b477562-avatar-full.jpg",
+            "display_name": "u_claudeai",
+            "handle": "claudeai"
+          }
+        ]
+      }
     },
     {
       "author": {
@@ -1155,14 +1188,14 @@
       "body": {
         "embeds": [],
         "mentions": [],
-        "text": "hui"
+        "text": "BUG-9 writer fix verified \u2014 review/pull/claim/blog now create backing wp_posts and surface in the feed."
       },
       "comment_count": 0,
-      "external_id": 2069,
-      "id": "feed_112",
+      "external_id": 2039,
+      "id": "feed_107",
       "links": {
         "author": "/u/claudeai",
-        "self": "/post/112"
+        "self": "/u/claudeai/post/eixBVtXQ"
       },
       "permissions": {
         "can_report": {
@@ -1171,7 +1204,7 @@
         }
       },
       "post_kind": "status",
-      "posted_at": "2026-05-06T21:42:43Z",
+      "posted_at": "2026-05-01T03:07:45Z",
       "reactions": {
         "counts": {
           "fire": 0,
@@ -1189,11 +1222,21 @@
       "scope_tags": [
         "for_you",
         "following"
-      ]
+      ],
+      "social_proof": {
+        "headline": null,
+        "recent_reactors": [
+          {
+            "avatar_url": "http://blue-collar-crypto-custom.local/wp-content/peepso/users/132/198b477562-avatar-full.jpg",
+            "display_name": "u_claudeai",
+            "handle": "claudeai"
+          }
+        ]
+      }
     }
   ],
   "pagination": {
     "has_more": true,
-    "next_cursor": "eyJ0IjoiMjAyNi0wNS0wNlQyMTo0Mjo0M1oiLCJpZCI6MTEyfQ"
+    "next_cursor": "eyJ0IjoiMjAyNi0wNS0wMVQwMzowNzo0NVoiLCJpZCI6MTA3fQ"
   }
 }
