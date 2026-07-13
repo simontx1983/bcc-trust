@@ -116,6 +116,14 @@ final class CommentsEndpoint
                             'type'              => 'string',
                             'sanitize_callback' => 'esc_url_raw',
                         ],
+                        // §3.5 threading — the `comment_<n>` id being replied
+                        // to. The service validates it resolves to a live
+                        // comment on the same parent post before storing it.
+                        'parent_id' => [
+                            'required'          => false,
+                            'type'              => 'string',
+                            'sanitize_callback' => 'sanitize_text_field',
+                        ],
                     ],
                 ],
             ]
@@ -195,7 +203,11 @@ final class CommentsEndpoint
         $gifUrlRaw = $request->get_param('gif_url');
         $gifUrl    = is_string($gifUrlRaw) && $gifUrlRaw !== '' ? $gifUrlRaw : null;
 
-        $result = $this->commentService()->createComment($feedId, $authorId, $body, $attachmentId, $gifUrl);
+        // §3.5 threading — reply target; absent/empty → top-level comment.
+        $parentIdRaw = $request->get_param('parent_id');
+        $parentId    = is_string($parentIdRaw) && $parentIdRaw !== '' ? $parentIdRaw : null;
+
+        $result = $this->commentService()->createComment($feedId, $authorId, $body, $attachmentId, $gifUrl, $parentId);
         if (isset($result['error'])) {
             // Forward the optional `data` block — §3.3.12 mention errors
             // ride here with `{user_id}` / `{max}` payloads.

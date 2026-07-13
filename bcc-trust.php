@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blue Collar Crypto – Trust
  * Description: Unified reputation, dispute, and on-chain signal plugin. Merges bcc-trust-engine, bcc-disputes, and bcc-onchain-signals into a single bounded-context codebase.
- * Version: 1.2.26
+ * Version: 1.2.27
  * Author: Blue Collar Labs LLC
  * Text Domain: bcc-trust
  * Domain Path: /languages

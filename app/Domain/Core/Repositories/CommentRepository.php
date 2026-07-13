@@ -46,6 +46,7 @@ if (!defined('ABSPATH')) {
  *   author_display_name: string,
  *   body: string,
  *   posted_at: string,
+ *   parent_act_id: int|numeric-string|null,
  *   stoke_total: int|numeric-string,
  *   relevance_score: float|numeric-string
  * }
@@ -77,12 +78,13 @@ final class CommentRepository
      * filter chain that fires on post_content rendering.
      */
     private const LIST_COLUMNS = 'a.act_id,
-                                  a.act_external_id AS comment_post_id,
-                                  p.post_author     AS author_id,
-                                  u.user_login      AS author_login,
-                                  u.display_name    AS author_display_name,
-                                  p.post_excerpt    AS body,
-                                  p.post_date_gmt   AS posted_at';
+                                  a.act_external_id     AS comment_post_id,
+                                  p.post_author         AS author_id,
+                                  u.user_login          AS author_login,
+                                  u.display_name        AS author_display_name,
+                                  p.post_excerpt        AS body,
+                                  p.post_date_gmt       AS posted_at,
+                                  pm_parent.meta_value  AS parent_act_id';
 
     /** Sort modes accepted by listByParentPostId — mirrors the §4.13 `sort` param. */
     public const SORT_NEW      = 'new';
@@ -98,6 +100,30 @@ final class CommentRepository
      * single-row hydrate paths.
      */
     public const MEDIA_META_KEY = '_bcc_comment_media';
+
+    /**
+     * Post-meta key for a comment's optional parent link (§3.5 threading,
+     * Slice 2). Stored as the parent comment's numeric `act_id` on the
+     * reply's OWN wp_post (same single-graph sidecar as MEDIA_META_KEY, so
+     * PeepSo's delete trashes it with the comment). Absent → top-level
+     * comment. PeepSo comments are flat natively; the parent link lives in
+     * bcc meta and the frontend threads the flat list client-side.
+     */
+    public const PARENT_META_KEY = '_bcc_parent_comment';
+
+    /**
+     * LEFT JOIN that surfaces a comment's parent link (PARENT_META_KEY) as
+     * the `parent_act_id` column. At most one row matches per comment
+     * (single-valued meta), so it never fans the result out. Shared by the
+     * list + single-row reads so both hydrate `parent_act_id` identically.
+     */
+    private static function parentJoin(): string
+    {
+        global $wpdb;
+        return 'LEFT JOIN ' . $wpdb->postmeta . " pm_parent
+                       ON pm_parent.post_id = a.act_external_id
+                      AND pm_parent.meta_key = '" . self::PARENT_META_KEY . "'";
+    }
 
     private static function activitiesTable(): string
     {
@@ -240,6 +266,7 @@ final class CommentRepository
                   FROM ' . $activities . ' a
                   INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
                   INNER JOIN ' . $wpdb->users . ' u ON u.ID = p.post_author
+                  ' . self::parentJoin() . '
                  WHERE ' . implode(' AND ', $where) . '
                  ORDER BY ' . $orderBy . '
                  LIMIT %d';
@@ -355,6 +382,7 @@ final class CommentRepository
                FROM ' . $activities . ' a
                INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
                INNER JOIN ' . $wpdb->users . ' u ON u.ID = p.post_author
+               ' . self::parentJoin() . '
               WHERE a.act_external_id      = %d
                 AND a.act_comment_object_id > 0
                 AND p.post_status = \'publish\'
@@ -457,6 +485,71 @@ final class CommentRepository
             if (is_array($decoded) && isset($decoded['kind'])) {
                 $out[(int) $r->post_id] = $decoded;
             }
+        }
+        return $out;
+    }
+
+    /**
+     * Count DIRECT published replies to each of the given comment act_ids
+     * in ONE batched read, keyed by parent comment act_id. A reply is a
+     * comment whose PARENT_META_KEY meta = the parent's act_id and whose
+     * OWN wp_post is still published (a trashed reply drops off the count).
+     * Mirrors countsByParentPostIds' shape: entries absent from the map
+     * mean zero replies, so the caller pre-fills its own zero baseline.
+     *
+     * `reply_count` is DIRECT children only (not the whole subtree) — it
+     * drives the frontend's "Follow the thread" drill control once a
+     * branch passes the visual-indent cap.
+     *
+     * @param list<int> $parentActIds
+     * @return array<int, int> parent_comment_act_id => direct reply count
+     */
+    public function replyCountsByParentActIds(array $parentActIds): array
+    {
+        if ($parentActIds === []) {
+            return [];
+        }
+
+        // Filter + dedupe positive ids into a bounded IN(...) clause.
+        $clean = [];
+        foreach ($parentActIds as $id) {
+            $iid = (int) $id;
+            if ($iid > 0) {
+                $clean[$iid] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $ids = array_keys($clean);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $params       = $ids;
+        $params[]     = self::PARENT_META_KEY;
+
+        // meta_value holds the parent's act_id as a digit string; the %d
+        // IN-list compares fine via MySQL's implicit cast, and the meta_key
+        // predicate keeps the scan bounded. The reply's own wp_post must be
+        // published so a trashed/unapproved reply isn't counted.
+        $sql = "SELECT pm.meta_value AS parent_act_id, COUNT(*) AS cnt
+                  FROM {$wpdb->postmeta} pm
+                  INNER JOIN {$wpdb->posts} rp
+                     ON rp.ID = pm.post_id
+                    AND rp.post_status = 'publish'
+                 WHERE pm.meta_value IN ({$placeholders})
+                   AND pm.meta_key = %s
+                 GROUP BY pm.meta_value";
+
+        /** @phpstan-var list<object{parent_act_id: int|numeric-string, cnt: int|numeric-string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params));
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $r) {
+            $out[(int) $r->parent_act_id] = (int) $r->cnt;
         }
         return $out;
     }
