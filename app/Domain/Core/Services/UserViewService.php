@@ -115,9 +115,21 @@ final class UserViewService
      * Build the User view-model. Returns null when the user_id doesn't
      * resolve to a real wp_user.
      *
+     * `$prefetched` (optional) is the shared MemberSummaryPrefetcher /
+     * MemberCardPrefetcher map — MemberProfileComposer primes it once for
+     * the hero card and passes it here so the rank/counts resolutions
+     * reuse the batch instead of re-running their single-user queries.
+     * Same prefer-prefetched-else-fallback semantics as getSummary.
+     *
+     * @param array{
+     *   levels?: array<int, int>,
+     *   reviews_written_counts?: array<int, int>,
+     *   disputes_signed_counts?: array<int, int>,
+     *   solids_received_counts?: array<int, int>
+     * }|null $prefetched
      * @return array<string, mixed>|null
      */
-    public function getUser(int $userId, int $viewerId): ?array
+    public function getUser(int $userId, int $viewerId, ?array $prefetched = null): ?array
     {
         $user = get_userdata($userId);
         if ($user === false) {
@@ -128,11 +140,20 @@ final class UserViewService
 
         $tier         = $this->reputationRepo->getTier($userId);
         $card         = ReputationTierMap::resolve($tier);
-        $rank         = $this->resolveRank($userId);
         $handle       = self::resolveHandle($user);
         $followCounts = PeepSoFollowerRepository::getCounts($userId);
         $locals       = $this->resolveLocals($userId);
         $primaryLocal = $this->resolvePrimaryLocal($userId, $locals);
+
+        // Rank — same prefer-prefetched branch as getSummary (the levels
+        // map shares resolveLevel + thresholds with the per-user chain),
+        // falling back to autoDerivedRank→getLevel, which costs four
+        // queries per call.
+        if ($prefetched !== null && isset($prefetched['levels'])) {
+            $rank = $this->rankFromPrefetchedLevel($userId, $prefetched['levels']);
+        } else {
+            $rank = $this->resolveRank($userId);
+        }
 
         $privacy = self::resolvePrivacy($userId);
 
@@ -169,7 +190,7 @@ final class UserViewService
             'primary_local'       => $primaryLocal,
             'locals'              => $locals,
             'wallets'             => self::resolveWallets($userId, $isSelf),
-            'counts'              => $this->resolveCounts($userId, $followCounts, $isSelf, $privacy),
+            'counts'              => $this->resolveCounts($userId, $followCounts, $isSelf, $privacy, $prefetched),
             'privacy'             => $privacy,
             'permissions'         => $this->resolvePermissions($userId, $viewerId, $isSelf),
             // §K1 Phase A — true when the viewer is currently blocking
@@ -960,6 +981,11 @@ final class UserViewService
      *   real_name_hidden: bool,
      *   email_hidden: bool
      * } $privacy
+     * @param array{
+     *   reviews_written_counts?: array<int, int>,
+     *   disputes_signed_counts?: array<int, int>,
+     *   solids_received_counts?: array<int, int>
+     * }|null $prefetched
      * @return array{
      *   followers: int,
      *   following: int,
@@ -970,14 +996,22 @@ final class UserViewService
      *   solids_received: int
      * }
      */
-    private function resolveCounts(int $userId, array $followCounts, bool $isSelf, array $privacy): array
+    private function resolveCounts(int $userId, array $followCounts, bool $isSelf, array $privacy, ?array $prefetched = null): array
     {
-        $reviewsWritten = (int) $this->voteRepo->countByVoter($userId);
+        // Prefer the shared member batch where a key exists — identical
+        // repository sources (countByVoters / countByReporters /
+        // countReceivedByUsers with the same solid-id gate), single-user
+        // fallbacks otherwise. Same pattern as getSummary's signal blocks.
+        $reviewsWritten = ($prefetched !== null && isset($prefetched['reviews_written_counts']))
+            ? (int) ($prefetched['reviews_written_counts'][$userId] ?? 0)
+            : (int) $this->voteRepo->countByVoter($userId);
         // disputes_signed: disputes this user has FILED, read from the
         // live bcc_disputes table keyed on reporter_id (the filer). For
         // a member, reporter_id = their user id (they own the self-page
         // being defended), so the per-user count is direct.
-        $disputesSigned = DisputeRepository::countByReporter($userId);
+        $disputesSigned = ($prefetched !== null && isset($prefetched['disputes_signed_counts']))
+            ? (int) ($prefetched['disputes_signed_counts'][$userId] ?? 0)
+            : DisputeRepository::countByReporter($userId);
 
         // §C2 single-graph rule: watchlist IS the follow set;
         // watching_size equals the following count by design. Do not
@@ -1009,7 +1043,9 @@ final class UserViewService
             'reviews_written'   => $reviewsWritten,
             'disputes_signed'   => $disputesSigned,
             'solids_given'      => $this->countSolidsGiven($userId),
-            'solids_received'   => $this->countSolidsReceived($userId),
+            'solids_received'   => ($prefetched !== null && isset($prefetched['solids_received_counts']))
+                ? (int) ($prefetched['solids_received_counts'][$userId] ?? 0)
+                : $this->countSolidsReceived($userId),
             // §D6 blog tab count — lifetime published blog posts authored
             // by the user. Sourced from peepso_activities rows where
             // act_module_id='blog' joined against wp_posts for the

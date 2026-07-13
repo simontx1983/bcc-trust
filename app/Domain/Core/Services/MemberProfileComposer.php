@@ -127,7 +127,16 @@ final class MemberProfileComposer
      */
     public function compose(int $userId, int $viewerId): ?array
     {
-        $base = $this->userViewService->getUser($userId, $viewerId);
+        // Prime the shared member batch ONCE, before getUser — the hero
+        // card below needs the same map anyway, and getUser's rank/counts
+        // resolutions (plus buildVerifications) prefer the batched keys
+        // instead of re-running their single-user queries. Priming first
+        // also warms the ReputationRepository request memos, so getUser's
+        // getTier/getScore reads become cache hits. (Phase 7 dedup,
+        // extended to the getUser side 2026-07-13.)
+        $prefetched = MemberCardPrefetcher::primeFor([$userId], $viewerId);
+
+        $base = $this->userViewService->getUser($userId, $viewerId, $prefetched);
         if ($base === null) {
             return null;
         }
@@ -181,16 +190,14 @@ final class MemberProfileComposer
             $base['permissions']['can_report']       = $attestationPerms['can_report'];
         }
 
-        // ── Hero card — the canonical member card. Mirror the members-list
-        //   path: prime a 1-element MemberCardPrefetcher and feed it to
-        //   getMemberCardForList, so the card's getSummary delegation reuses one
-        //   batched fetch instead of re-running the ~11 single-user dossier
-        //   queries getUser() already issued above. Same card, fewer queries
-        //   (Phase 7 dedup; behavior pinned by the /users/:handle golden master).
+        // ── Hero card — the canonical member card. Feed the batch primed
+        //   at the top of compose() to getMemberCardForList, so the card's
+        //   getSummary delegation reuses the same fetch getUser consumed.
+        //   Same card, fewer queries (Phase 7 dedup; behavior pinned by
+        //   the /users/:handle golden master).
         $card = null;
         if ($handle !== '') {
-            $cardPrefetch = MemberCardPrefetcher::primeFor([$userId], $viewerId);
-            $card = $this->cardViewService->getMemberCardForList($userId, $viewerId, $cardPrefetch);
+            $card = $this->cardViewService->getMemberCardForList($userId, $viewerId, $prefetched);
         }
         $base['card'] = $card ?? self::buildPlaceholderCard($userId, $base);
 
@@ -236,7 +243,7 @@ final class MemberProfileComposer
         $walletCount = isset($base['wallets']) && is_array($base['wallets'])
             ? count($base['wallets'])
             : 0;
-        $base['verifications'] = self::buildVerifications($userId, $walletCount);
+        $base['verifications'] = self::buildVerifications($userId, $walletCount, $prefetched);
 
         return $base;
     }
@@ -253,6 +260,10 @@ final class MemberProfileComposer
      * read from the same number. Surfaced on /me/progression as a
      * 4th row in the VERIFIED IDENTITY section per PR-11b.
      *
+     * @param array{
+     *   x_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>,
+     *   github_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>
+     * }|null $prefetched
      * @return array{
      *   x_verified: bool,
      *   x_username: string|null,
@@ -262,14 +273,20 @@ final class MemberProfileComposer
      *   profile_completeness: int
      * }
      */
-    private static function buildVerifications(int $userId, int $walletCount): array
+    private static function buildVerifications(int $userId, int $walletCount, ?array $prefetched = null): array
     {
         $githubVerified = false;
         $githubUsername = null;
         if (class_exists(\BCC\Trust\Core\Repositories\GitHubRepository::class)) {
-            $githubConnections = (new \BCC\Trust\Core\Repositories\GitHubRepository())
-                ->getConnectionsForUsers([$userId]);
-            $githubConnection  = $githubConnections[$userId] ?? null;
+            // Prefer the shared member batch — same repository method the
+            // fallback calls (getConnectionsForUsers), primed once in compose().
+            if ($prefetched !== null && isset($prefetched['github_connections'])) {
+                $githubConnection = $prefetched['github_connections'][$userId] ?? null;
+            } else {
+                $githubConnections = (new \BCC\Trust\Core\Repositories\GitHubRepository())
+                    ->getConnectionsForUsers([$userId]);
+                $githubConnection  = $githubConnections[$userId] ?? null;
+            }
             if (is_array($githubConnection)
                 && isset($githubConnection['verified_at'])
                 && is_string($githubConnection['verified_at'])
@@ -285,9 +302,13 @@ final class MemberProfileComposer
         $xVerified = false;
         $xUsername = null;
         if (class_exists(\BCC\Trust\Core\Repositories\XRepository::class)) {
-            $xConnections = (new \BCC\Trust\Core\Repositories\XRepository())
-                ->getConnectionsForUsers([$userId]);
-            $xConnection  = $xConnections[$userId] ?? null;
+            if ($prefetched !== null && isset($prefetched['x_connections'])) {
+                $xConnection = $prefetched['x_connections'][$userId] ?? null;
+            } else {
+                $xConnections = (new \BCC\Trust\Core\Repositories\XRepository())
+                    ->getConnectionsForUsers([$userId]);
+                $xConnection  = $xConnections[$userId] ?? null;
+            }
             if (is_array($xConnection)
                 && isset($xConnection['verified_at'])
                 && is_string($xConnection['verified_at'])
