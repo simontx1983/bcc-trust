@@ -218,6 +218,14 @@ final class CommentService
             ? []
             : $this->commentRepo->mediaByCommentPostIds($commentPostIds);
 
+        // §3.5 threading — batch the DIRECT-reply count for every comment on
+        // the page in ONE IN-list read (keyed by parent comment act_id).
+        // Absent → zero replies. Drives the frontend's "Follow the thread"
+        // drill control past the visual-indent cap.
+        $replyCountMap = $commentActIds === []
+            ? []
+            : $this->commentRepo->replyCountsByParentActIds($commentActIds);
+
         $items   = [];
         $lastRow = null;
         foreach ($rows as $row) {
@@ -230,7 +238,7 @@ final class CommentService
                 'viewer_has_stoked' => $viewerStoked[$cid] ?? false,
             ];
             $media = $mediaMap[(int) $row->comment_post_id] ?? null;
-            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke, $media, $handleMap[$aid] ?? null);
+            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke, $media, $handleMap[$aid] ?? null, $replyCountMap[$cid] ?? 0);
             $lastRow = $row;
         }
 
@@ -257,6 +265,13 @@ final class CommentService
      * post-meta sidecar on the comment's own wp_post (single-graph rule;
      * PeepSo's write path is untouched — it's text-native).
      *
+     * Optional `$parentId` (§3.5 threading, Slice 2) is the `comment_<n>`
+     * id of the comment being replied to. It's validated to resolve to a
+     * live comment on the SAME parent post, then stored as a bcc post-meta
+     * sidecar (same single-graph pattern as media) — PeepSo comments are
+     * flat, so the parent link lives in bcc meta and the frontend threads
+     * the flat list client-side. Absent/empty → a top-level comment.
+     *
      * @return array{
      *   ok: true,
      *   comment: array<string, mixed>
@@ -267,7 +282,8 @@ final class CommentService
         int $authorId,
         string $content,
         ?int $attachmentId = null,
-        ?string $gifUrl = null
+        ?string $gifUrl = null,
+        ?string $parentId = null
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -344,6 +360,26 @@ final class CommentService
         }
         $media = $mediaResult['media'];
 
+        // §3.5 threading — resolve + validate the optional parent comment
+        // BEFORE the write so a bad/cross-post parent is rejected without
+        // orphaning a comment. The parent must be a live comment on THIS
+        // same parent post; replying across posts or to a deleted comment
+        // is bcc_invalid_request.
+        $parentActId = null;
+        if ($parentId !== null && trim($parentId) !== '') {
+            $parentActId = self::parseCommentId(trim($parentId));
+            if ($parentActId === null) {
+                return ['error' => 'bcc_invalid_request', 'message' => 'Invalid parent comment.'];
+            }
+            $parentMeta = $this->commentRepo->getCommentMeta($parentActId);
+            if ($parentMeta === null) {
+                return ['error' => 'bcc_invalid_request', 'message' => 'The comment you are replying to no longer exists.'];
+            }
+            if ((int) $parentMeta->parent_post_id !== $parentPostId) {
+                return ['error' => 'bcc_invalid_request', 'message' => 'You can only reply within the same discussion.'];
+            }
+        }
+
         $newCommentPostId = PeepSoCommentWriter::addComment($parentPostId, $authorId, $trimmed, $parentModuleId);
         if ($newCommentPostId <= 0) {
             // PeepSo refused the write — could be:
@@ -358,6 +394,18 @@ final class CommentService
                 'author_id'      => $authorId,
             ]);
             return ['error' => 'bcc_unavailable', 'message' => 'Could not post comment. Try again.'];
+        }
+
+        // §3.5 threading — stamp the parent link on the reply's own wp_post
+        // BEFORE resolving the row, so the echoed create response carries
+        // `parent_id` (getCommentRowByPostId reads it via the parent join)
+        // and the optimistic frontend row keeps nesting under its parent.
+        if ($parentActId !== null) {
+            update_post_meta(
+                $newCommentPostId,
+                CommentRepository::PARENT_META_KEY,
+                $parentActId
+            );
         }
 
         // Resolve the freshly-written comment back to its canonical
@@ -408,7 +456,8 @@ final class CommentService
             null,
             ['stoke_count' => 0, 'viewer_has_stoked' => false],
             $media,
-            $handleMap[$authorId] ?? null
+            $handleMap[$authorId] ?? null,
+            0
         );
 
         // §A3 event — single emission per state change. Subscribers
@@ -560,9 +609,15 @@ final class CommentService
      *               for the author (bcc_handle-first via UserMiniRepository,
      *               batched by the caller). Null → degrade to the row's raw
      *               user_login so the byline still renders.
+     * @param int|null $replyCount  §3.5 threading — count of DIRECT replies
+     *               to this comment (batched by the caller; 0 for a just-
+     *               created comment). Null → omit `reply_count` so a stale
+     *               frontend treats it as 0. `parent_id` rides the row
+     *               (`parent_act_id` via the repo's parent join) and is
+     *               always emitted (null for a top-level comment).
      * @return array<string, mixed>
      */
-    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null, ?array $media = null, ?string $canonicalHandle = null): array
+    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null, ?array $media = null, ?string $canonicalHandle = null, ?int $replyCount = null): array
     {
         $authorId = (int) $row->author_id;
         $authorHandle = $canonicalHandle ?? (string) $row->author_login;
@@ -632,6 +687,17 @@ final class CommentService
             if ($wireMedia !== null) {
                 $shaped['media'] = $wireMedia;
             }
+        }
+
+        // §3.5 threading — parent link (always emitted; null for a top-level
+        // comment) + direct-reply count. `parent_act_id` rides the row via
+        // the repository's parent join; reply_count is the batched count.
+        $parentActId = isset($row->parent_act_id) && $row->parent_act_id !== null
+            ? (int) $row->parent_act_id
+            : 0;
+        $shaped['parent_id'] = $parentActId > 0 ? 'comment_' . $parentActId : null;
+        if ($replyCount !== null) {
+            $shaped['reply_count'] = (int) $replyCount;
         }
 
         return $shaped;
