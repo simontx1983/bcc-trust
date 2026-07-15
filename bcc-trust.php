@@ -22,7 +22,7 @@ if (!defined('ABSPATH')) {
 |--------------------------------------------------------------------------
 */
 
-define('BCC_TRUST_VERSION', '1.2.26');
+define('BCC_TRUST_VERSION', '1.2.27');
 define('BCC_TRUST_PATH', plugin_dir_path(__FILE__));
 define('BCC_TRUST_URL', plugin_dir_url(__FILE__));
 define('BCC_TRUST_FILE', __FILE__);
