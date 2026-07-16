@@ -290,7 +290,8 @@ final class CommentService
         }
 
         $trimmed = trim($content);
-        if ($trimmed === '') {
+        $hasMedia = $attachmentId !== null || ($gifUrl !== null && trim($gifUrl) !== '');
+        if ($trimmed === '' && !$hasMedia) {
             return ['error' => 'bcc_invalid_request', 'message' => 'Comment cannot be empty.'];
         }
         if (mb_strlen($trimmed) > self::COMMENT_MAX_LENGTH) {
