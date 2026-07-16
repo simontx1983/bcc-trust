@@ -9,6 +9,7 @@ use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Infrastructure\EdgeCache;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -81,6 +82,10 @@ final class ModerationService
             'notes'  => $notes,
         ]);
 
+        // The suspended flag rides on the member cards in the anon
+        // /members payload — drop the edge copies so it shows promptly.
+        EdgeCache::purge(EdgeCache::TAG_MEMBERS);
+
         echo '<div class="notice notice-success"><p>User suspended. Reason: ' . esc_html($reason) . '</p></div>';
         return ['success' => true, 'message' => 'User suspended. Reason: ' . $reason];
     }
@@ -108,6 +113,10 @@ final class ModerationService
         }
 
         $this->logAction('admin_unsuspend', $userId);
+
+        // Mirror of suspendUser — clear the stale suspended flag from
+        // the edge-cached member directory.
+        EdgeCache::purge(EdgeCache::TAG_MEMBERS);
 
         echo '<div class="notice notice-success"><p>User unsuspended.</p></div>';
         return ['success' => true, 'message' => 'User unsuspended.'];
