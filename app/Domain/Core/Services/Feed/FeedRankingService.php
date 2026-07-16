@@ -489,6 +489,16 @@ final class FeedRankingService
      * Caller passes `null` to bcc-core when this returns `[]` — empty
      * lists short-circuit the SQL exclude branch entirely.
      *
+     * Caching posture (2026-06-18 perf audit P1-A, closed 2026-07-16):
+     *  - the non-open half is generation-cached in bcc-core
+     *    (`PeepSoGroupRepository::getNonOpenGroupIds`, busted by the
+     *    `peepso_group_privacy` post-meta hooks wired in bcc-core.php)
+     *  - the membership half is INTENTIONALLY UNCACHED — see the leak
+     *    invariant on `getUserMemberGroupIds`. Do not memoize this
+     *    method across requests; a request-scoped memo would be dead
+     *    code too (each request calls it at most once per viewer id —
+     *    the authed cold-start double-call uses two DIFFERENT ids).
+     *
      * @return list<int>
      */
     private static function resolveRestrictedGroupIds(int $viewerId): array
