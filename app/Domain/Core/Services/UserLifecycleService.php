@@ -8,6 +8,7 @@ use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Security\IpResolver;
 use BCC\Trust\Core\Support\JwtToken;
+use BCC\Trust\Infrastructure\EdgeCache;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -22,6 +23,14 @@ class UserLifecycleService
 {
     private UserSyncService $syncService;
     private ScoreRepository $scoreRepo;
+
+    /**
+     * Handles captured on `delete_user` (row + meta still present) for
+     * the edge purge on `deleted_user` (row gone — nothing resolvable).
+     *
+     * @var array<int, string>
+     */
+    private array $pendingDeleteHandles = [];
 
     public function __construct(
         UserSyncService $syncService,
@@ -39,6 +48,10 @@ class UserLifecycleService
         add_action('user_register', [$this, 'onUserRegister']);
         add_action('profile_update', [$this, 'onProfileUpdate'], 10, 2);
         add_action('delete_user', [$this, 'onUserDelete']);
+        // Edge purge runs on `deleted_user` (AFTER the wp_users row is
+        // gone) so a request racing the purge can't re-cache the member
+        // list with the user still present.
+        add_action('deleted_user', [$this, 'onUserDeleted']);
 
         // JWT revocation on credential change outside the BCC REST
         // endpoints (audit H-2 residual). WP core reset_password() fires
@@ -137,6 +150,15 @@ class UserLifecycleService
     {
         $plugin = Plugin::instance();
 
+        // Capture the public handle while usermeta still exists — the
+        // deleted_user purge below needs it to target the profile URL.
+        $handle = get_user_meta($userId, 'bcc_handle', true);
+        if (!is_string($handle) || $handle === '') {
+            $user   = get_userdata($userId);
+            $handle = $user instanceof \WP_User ? $user->user_nicename : '';
+        }
+        $this->pendingDeleteHandles[$userId] = $handle;
+
         // Soft-delete votes
         $plugin->voteRepository()->softDeleteAllByVoter($userId);
 
@@ -218,6 +240,25 @@ class UserLifecycleService
 
         // Wallet signals: delegate to onchain-signals via contract.
         \BCC\Trust\Core\Repositories\WalletSignalRepository::deleteForUser($userId);
+    }
+
+    /**
+     * WP `deleted_user` — the wp_users row is gone. Purge the LiteSpeed
+     * edge entries that still show the user: the anon member directory
+     * (tag) and the user's own profile REST URL (best-effort — query
+     * variants fall back to the 15s/ttl_rest bound). Without this, the
+     * edge serves the deleted member until its configured TTL expires;
+     * `wp cache flush` never reaches it.
+     */
+    public function onUserDeleted(int $userId): void
+    {
+        EdgeCache::purge(EdgeCache::TAG_MEMBERS);
+
+        $handle = $this->pendingDeleteHandles[$userId] ?? '';
+        unset($this->pendingDeleteHandles[$userId]);
+        if ($handle !== '') {
+            EdgeCache::purgeUrl(rest_url('bcc/v1/users/' . rawurlencode($handle)));
+        }
     }
 
     /**

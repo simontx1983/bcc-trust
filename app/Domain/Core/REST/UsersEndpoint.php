@@ -34,6 +34,7 @@ use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
 use BCC\Trust\Core\Support\UserSlugResolver;
+use BCC\Trust\Infrastructure\EdgeCache;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -663,6 +664,11 @@ final class UsersEndpoint
         // a fresh signup from showing up promptly.
         $response->header('Cache-Control', 'private, max-age=15');
         $response->header('Vary', 'Authorization, Cookie');
+        // The header above only governs browsers — the anon LiteSpeed
+        // edge tier caches this response under LSCWP's cache-ttl_rest.
+        // Pin the edge TTL to the same 15s and tag the entry so user
+        // delete / suspend can purge it (see EdgeCache).
+        EdgeCache::tag(EdgeCache::TAG_MEMBERS);
 
         return $response;
     }
@@ -690,6 +696,9 @@ final class UsersEndpoint
         ]);
         $resp->header('Cache-Control', 'private, max-age=15');
         $resp->header('Vary', 'Authorization, Cookie');
+        // Same edge posture as the populated branch — the empty payload
+        // is just as cacheable and must expire/purge on the same events.
+        EdgeCache::tag(EdgeCache::TAG_MEMBERS);
         return $resp;
     }
 
