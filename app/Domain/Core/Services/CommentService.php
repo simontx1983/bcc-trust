@@ -381,7 +381,7 @@ final class CommentService
             }
         }
 
-        $newCommentPostId = PeepSoCommentWriter::addComment($parentPostId, $authorId, $trimmed, $parentModuleId);
+        $newCommentPostId = PeepSoCommentWriter::addComment($parentPostId, $authorId, $trimmed, $parentModuleId, $hasMedia);
         if ($newCommentPostId <= 0) {
             // PeepSo refused the write — could be:
             //   - parent's `peepso_disable_comments` meta is set

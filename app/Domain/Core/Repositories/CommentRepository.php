@@ -31,6 +31,7 @@
 
 namespace BCC\Trust\Core\Repositories;
 
+use BCC\Core\PeepSo\PeepSoCommentWriter;
 use BCC\Trust\Core\Database\TableRegistry;
 
 if (!defined('ABSPATH')) {
@@ -129,6 +130,25 @@ final class CommentRepository
     {
         global $wpdb;
         return $wpdb->prefix . self::ACTIVITIES_TABLE_SUFFIX;
+    }
+
+    /**
+     * Strips PeepSoCommentWriter::EMPTY_BODY_PLACEHOLDER (a media-only
+     * comment's stand-in body, see that constant's doc) back to a true
+     * empty string, so it never leaks into the API response as visible
+     * or near-invisible stray content. Plain trim() alone won't touch it
+     * (ZWSP isn't ASCII whitespace) — that's the whole point of using it
+     * as the placeholder — so this has to explicitly strip it first.
+     *
+     * @phpstan-param CommentRow $row
+     * @phpstan-return CommentRow
+     */
+    private static function normalizeBody(object $row): object
+    {
+        if (isset($row->body) && is_string($row->body)) {
+            $row->body = trim(str_replace(PeepSoCommentWriter::EMPTY_BODY_PLACEHOLDER, '', $row->body));
+        }
+        return $row;
     }
 
     /**
@@ -273,7 +293,7 @@ final class CommentRepository
 
         /** @phpstan-var list<CommentRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params));
-        return $rows ?: [];
+        return $rows ? array_map([self::class, 'normalizeBody'], $rows) : [];
     }
 
     /**
@@ -389,7 +409,7 @@ final class CommentRepository
               LIMIT 1',
             $commentPostId
         ));
-        return $row ?: null;
+        return $row ? self::normalizeBody($row) : null;
     }
 
     /**
