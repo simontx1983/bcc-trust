@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\REST;
 
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Security\IpResolver;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 use WP_REST_Request;
@@ -15,8 +16,8 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * IndexerTickEndpoint — signed internal relay for the V2 NFT
- * indexer tick.
+ * IndexerTickEndpoint — signed internal relay for the minute-cadence
+ * jobs: the V2 NFT indexer tick + the anon hot-feed warm.
  *
  * One route:
  *   POST /wp-json/bcc/v1/internal/indexer/tick
@@ -26,11 +27,18 @@ if (!defined('ABSPATH')) {
  *   ({@see NftEthIndexerWorker::CRON_HOOK}). Hostinger Business shared
  *   hosting caps real cron frequency at 5–15 minutes depending on
  *   plan, so the indexer would silently fall behind — new wallet
- *   links would sit unindexed for hours. Vercel Cron supports 1-min
- *   schedules on the free tier and forwards a POST here. WP-Cron stays
+ *   links would sit unindexed for hours. Vercel Cron forwards a POST
+ *   here every minute (requires the Pro plan — Hobby caps cron at
+ *   daily precision). WP-Cron stays
  *   registered as a fallback for local dev and any host that supports
  *   it; the per-chain AdvisoryLock in NftEthIndexerWorker::runForChain
  *   makes duplicate ticks a no-op so running both is safe.
+ *
+ *   The anon hot-feed warm (`bcc_trust_feed_hot_warm`, also a 1-min
+ *   WP-Cron hook) has the same cadence problem, so it rides this tick
+ *   too rather than growing a parallel relay. Warm-before-indexer
+ *   ordering: the warm is sub-second while the indexer may spend its
+ *   full MAX_RUNTIME_SECONDS budget.
  *
  * Auth posture:
  *   - Header `X-Bcc-Internal` is required and compared in constant
@@ -98,7 +106,15 @@ final class IndexerTickEndpoint
             return self::error(401, 'bcc_unauthorized', 'Invalid or missing internal secret.');
         }
 
-        // Step 3: run the tick. Wrapped in try/catch so an exception
+        // Step 3: warm the anon hot-feed payload. CronService::warmHotFeed
+        // never throws (it try/catches and logs internally), so a warm
+        // failure can't block the indexer tick below. Racing the WP-Cron
+        // fallback hook is harmless — same payload, last write wins.
+        $warmStartedAt = microtime(true);
+        Plugin::instance()->cronService()->warmHotFeed();
+        $warmMs = (int) round((microtime(true) - $warmStartedAt) * 1000);
+
+        // Step 4: run the tick. Wrapped in try/catch so an exception
         // surfaces as a structured 5xx rather than a fatal whitescreen
         // to the caller (Vercel logs the response body; we want
         // diagnostic value there).
@@ -121,6 +137,7 @@ final class IndexerTickEndpoint
             'ok'         => true,
             'ran_at'     => gmdate('Y-m-d\TH:i:s\Z'),
             'elapsed_ms' => $elapsedMs,
+            'warm_ms'    => $warmMs,
         ], 200);
         $response->header('Cache-Control', 'no-store');
         return $response;
