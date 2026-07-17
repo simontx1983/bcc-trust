@@ -91,7 +91,11 @@ final class CommentsEndpoint
                             'sanitize_callback' => 'sanitize_text_field',
                         ],
                         'body' => [
-                            'required'          => true,
+                            // §3.5 media-only comments — body may be
+                            // omitted/empty when attachment_id or gif_url
+                            // is set; CommentService::createComment()
+                            // enforces "body OR media" together.
+                            'required'          => false,
                             'type'              => 'string',
                             // No sanitize_text_field here — PeepSo's
                             // add_comment owns content sanitization

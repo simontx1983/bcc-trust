@@ -290,7 +290,8 @@ final class CommentService
         }
 
         $trimmed = trim($content);
-        if ($trimmed === '') {
+        $hasMedia = $attachmentId !== null || ($gifUrl !== null && trim($gifUrl) !== '');
+        if ($trimmed === '' && !$hasMedia) {
             return ['error' => 'bcc_invalid_request', 'message' => 'Comment cannot be empty.'];
         }
         if (mb_strlen($trimmed) > self::COMMENT_MAX_LENGTH) {
@@ -380,7 +381,7 @@ final class CommentService
             }
         }
 
-        $newCommentPostId = PeepSoCommentWriter::addComment($parentPostId, $authorId, $trimmed, $parentModuleId);
+        $newCommentPostId = PeepSoCommentWriter::addComment($parentPostId, $authorId, $trimmed, $parentModuleId, $hasMedia);
         if ($newCommentPostId <= 0) {
             // PeepSo refused the write — could be:
             //   - parent's `peepso_disable_comments` meta is set
