@@ -146,6 +146,9 @@ final class CommentRepository
     private static function normalizeBody(object $row): object
     {
         if (isset($row->body) && is_string($row->body)) {
+            // Runtime rows are stdClass ($wpdb->get_results), so the write is
+            // fine — only the CommentRow object-shape annotation is read-only.
+            /** @phpstan-ignore-next-line assign.propertyReadOnly */
             $row->body = trim(str_replace(PeepSoCommentWriter::EMPTY_BODY_PLACEHOLDER, '', $row->body));
         }
         return $row;
