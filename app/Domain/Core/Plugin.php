@@ -479,7 +479,8 @@ final class Plugin
     {
         return $this->notificationDispatcher ??= new Services\NotificationDispatcher(
             $this->pageOwnerResolver(),
-            $this->pushDispatcher()
+            $this->pushDispatcher(),
+            $this->commentRepository()
         );
     }
 

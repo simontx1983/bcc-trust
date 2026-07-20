@@ -62,17 +62,20 @@
  *   - Coalesced via 5-min per-(recipient, group) transient on bell
  *     and the existing PushDispatcher debounce on push.
  *
- * Comment-received dispatch (V2 retention slice, locked 2026-05-13):
+ * Comment-received dispatch (V2 retention slice, locked 2026-05-13;
+ * reply routing added 2026-07-19):
  *   - onCommentReceived sends a `COMMENT_RECEIVED` bell + push to the
- *     PARENT POST's author when someone comments on their post.
+ *     PARENT POST's author when someone comments on their post, and —
+ *     when the comment is a threaded reply — to the replied-to
+ *     comment's author ("replied to your comment"). Post owner ==
+ *     replied-to author collapses to the reply notification only.
  *   - Wired via a SECOND `bcc_comment_created` subscriber in Plugin.php
  *     at priority 31 (after the mention subscriber at 30). If the
  *     commenter @-tags the post author, BOTH dispatchers fire for the
  *     same recipient — semantically distinct events (mention =
  *     "called out"; comment-received = "your post has activity"),
  *     each independently toggleable in prefs.
- *   - Single-recipient (the post author); no fan-out cost concern,
- *     dispatch is sync.
+ *   - At most two recipients; no fan-out cost concern, dispatch is sync.
  *   - Coalesced via 5-min per-(recipient, post) transient on bell so
  *     a hot post doesn't spam the author; push self-debounces.
  *
@@ -88,6 +91,7 @@ use BCC\Core\Log\Logger;
 use BCC\Core\PeepSo\PeepSoNotificationWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Services\BadgesService;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
@@ -104,6 +108,7 @@ final class NotificationDispatcher
     public function __construct(
         private readonly PageOwnerResolver $pageOwnerResolver,
         private readonly PushDispatcher $pushDispatcher,
+        private readonly CommentRepository $commentRepository,
     ) {
     }
 
@@ -667,28 +672,40 @@ final class NotificationDispatcher
     private const COMMENT_RECEIVED_BELL_WINDOW_SECS = 300;
 
     /**
-     * Notify the parent-post author when someone comments on their post.
-     * Self-skip when the commenter IS the post author.
+     * Notify the right people when a comment lands on a post.
+     *
+     * Top-level comment → the parent-post author ("commented on your
+     * post"). Reply (the new comment carries a PARENT_META_KEY link) →
+     * the replied-to comment's author ("replied to your comment") AND
+     * the post author. When those are the same user, only the reply
+     * notification is sent — never both. Self-skips throughout: nobody
+     * is notified about their own activity.
+     *
+     * A parent link that no longer resolves (comment deleted or
+     * unpublished between write and dispatch) degrades to top-level:
+     * the post owner still hears about the activity.
      *
      * Recipient resolution lives in this method (not the Plugin.php
      * subscriber) so the subscriber stays a thin trigger and the lookup
-     * logic lives in one place alongside the bell-write logic.
+     * logic lives in one place alongside the bell-write logic. The
+     * pure decision table is resolveCommentRecipients (unit-testable
+     * without WP).
      *
      * Bell coalescing: a 5-min per-(recipient, post) transient gates
      * the bell write so a hot post (50 comments in 10 min) doesn't
-     * produce 50 bell rows for the post author. Push always enqueues
-     * — PushDispatcher's own 5-min (recipient, eventType) debounce
-     * coalesces rapid bursts into "N new comments on your post."
+     * produce 50 bell rows for the post author. Recipient-scoped, so
+     * the comment author and post author never share a window. Push
+     * always enqueues — PushDispatcher's own 5-min (recipient,
+     * eventType) debounce coalesces rapid bursts.
      *
-     * If the commenter @-tagged the post author, the mention dispatcher
+     * If the commenter @-tagged a recipient, the mention dispatcher
      * ALSO fires for the same recipient. Both events are sent — they're
      * semantically distinct (mention = "called out"; comment-received
-     * = "your post has activity") and independently toggleable. See
-     * the @see note on dispatchMentionsFor.
+     * = "your post/comment has activity") and independently toggleable.
+     * See the @see note on dispatchMentionsFor.
      */
     public function onCommentReceived(int $commenterId, int $parentActId, int $newCommentPostId): void
     {
-        unset($newCommentPostId);
         if ($commenterId <= 0 || $parentActId <= 0) {
             return;
         }
@@ -709,49 +726,55 @@ final class NotificationDispatcher
                 return;
             }
             $postAuthorId = (int) $parentPost->post_author;
-            if ($postAuthorId <= 0 || $postAuthorId === $commenterId) {
-                // Self-skip: the post author is commenting on their own
-                // post; they obviously know they did it.
+
+            // Threading: a reply stores its parent comment's act_id in
+            // PARENT_META_KEY on its OWN wp_post (the event doesn't
+            // carry it). getCommentMeta's publish-status check is what
+            // implements the degrade-to-top-level rule above.
+            $parentCommentAuthorId = 0;
+            $parentCommentActId    = $newCommentPostId > 0
+                ? (int) get_post_meta($newCommentPostId, CommentRepository::PARENT_META_KEY, true)
+                : 0;
+            if ($parentCommentActId > 0) {
+                $parentComment = $this->commentRepository->getCommentMeta($parentCommentActId);
+                if ($parentComment !== null && isset($parentComment->author_id)) {
+                    $parentCommentAuthorId = (int) $parentComment->author_id;
+                }
+            }
+
+            $recipients = self::resolveCommentRecipients(
+                $commenterId,
+                $postAuthorId,
+                $parentCommentAuthorId
+            );
+            if ($recipients['reply'] <= 0 && $recipients['owner'] <= 0) {
                 return;
             }
 
             $actorHandle = self::resolveHandle($commenterId);
 
-            $transientKey = sprintf(
-                'bcc_comment_received_notified_%d_%d',
-                $postAuthorId,
-                $parentPostId
-            );
-
-            $coalesced = get_transient($transientKey) !== false;
-            if (!$coalesced) {
-                // Set the gate BEFORE the dispatch so a second concurrent
-                // comment for the same (recipient, post) sees the lock
-                // even if the bell write is still in flight.
-                set_transient($transientKey, 1, self::COMMENT_RECEIVED_BELL_WINDOW_SECS);
-
-                $message = sprintf('@%s commented on your post.', $actorHandle);
-
-                $this->dispatch(
+            if ($recipients['reply'] > 0) {
+                $this->notifyCommentRecipient(
                     $commenterId,
-                    $postAuthorId,
-                    $message,
-                    NotificationType::COMMENT_RECEIVED,
-                    $parentPostId,   // external_id → the parent post
-                    $parentActId
+                    $recipients['reply'],
+                    sprintf('@%s replied to your comment.', $actorHandle),
+                    $actorHandle,
+                    $parentPostId,
+                    $parentActId,
+                    true
                 );
             }
-
-            // Push always enqueues — its own 5-min debounce coalesces
-            // rapid bursts into "N new comments on your post." Bell
-            // coalescing is independent of push aggregation; both
-            // align on the same 5-min window so a user sees at most
-            // one bell + one push per post per window.
-            $this->pushDispatcher->enqueue($postAuthorId, 'comment_received', [
-                'actor_handle' => $actorHandle,
-                'post_id'      => $parentPostId,
-                'act_id'       => $parentActId,
-            ]);
+            if ($recipients['owner'] > 0) {
+                $this->notifyCommentRecipient(
+                    $commenterId,
+                    $recipients['owner'],
+                    sprintf('@%s commented on your post.', $actorHandle),
+                    $actorHandle,
+                    $parentPostId,
+                    $parentActId,
+                    false
+                );
+            }
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] comment-received dispatch failed', [
                 'commenter_id'  => $commenterId,
@@ -759,6 +782,88 @@ final class NotificationDispatcher
                 'error'         => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Pure decision table for comment-created recipients. 0 = nobody.
+     *
+     *   reply — the replied-to comment's author, unless it's the
+     *           commenter themselves (self-reply) or unknown (0 =
+     *           top-level comment / unresolvable parent).
+     *   owner — the post author, unless it's the commenter (self-skip)
+     *           or already the reply recipient (a reply to the post
+     *           owner's own comment sends ONLY "replied to your
+     *           comment", never both).
+     *
+     * @return array{reply: int, owner: int}
+     */
+    public static function resolveCommentRecipients(
+        int $commenterId,
+        int $postAuthorId,
+        int $parentCommentAuthorId
+    ): array {
+        $reply = ($parentCommentAuthorId > 0 && $parentCommentAuthorId !== $commenterId)
+            ? $parentCommentAuthorId
+            : 0;
+        $owner = ($postAuthorId > 0 && $postAuthorId !== $commenterId && $postAuthorId !== $reply)
+            ? $postAuthorId
+            : 0;
+        return ['reply' => $reply, 'owner' => $owner];
+    }
+
+    /**
+     * Shared bell + push leg for one comment-created recipient. Both
+     * the "commented on your post" and "replied to your comment"
+     * notifications ride the same COMMENT_RECEIVED type — same pref
+     * toggle, same payload shape, same /?focus=<act_id> deep link —
+     * only the server-rendered message differs (§I1, contract v1.45).
+     */
+    private function notifyCommentRecipient(
+        int $commenterId,
+        int $recipientId,
+        string $message,
+        string $actorHandle,
+        int $parentPostId,
+        int $parentActId,
+        bool $isReply
+    ): void {
+        $transientKey = sprintf(
+            'bcc_comment_received_notified_%d_%d',
+            $recipientId,
+            $parentPostId
+        );
+
+        $coalesced = get_transient($transientKey) !== false;
+        if (!$coalesced) {
+            // Set the gate BEFORE the dispatch so a second concurrent
+            // comment for the same (recipient, post) sees the lock
+            // even if the bell write is still in flight.
+            set_transient($transientKey, 1, self::COMMENT_RECEIVED_BELL_WINDOW_SECS);
+
+            $this->dispatch(
+                $commenterId,
+                $recipientId,
+                $message,
+                NotificationType::COMMENT_RECEIVED,
+                $parentPostId,   // external_id → the parent post
+                $parentActId
+            );
+        }
+
+        // Push always enqueues — its own 5-min debounce coalesces
+        // rapid bursts. Bell coalescing is independent of push
+        // aggregation; both align on the same 5-min window so a user
+        // sees at most one bell + one push per post per window.
+        $payload = [
+            'actor_handle' => $actorHandle,
+            'post_id'      => $parentPostId,
+            'act_id'       => $parentActId,
+        ];
+        if ($isReply) {
+            // PushPayload::forCommentReceived branches its copy on this.
+            $payload['is_reply'] = true;
+        }
+        $this->pushDispatcher->enqueue($recipientId, 'comment_received', $payload);
     }
 
     // ──────────────────────────────────────────────────────────────────

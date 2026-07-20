@@ -217,11 +217,14 @@ final class PushPayload
 
     /**
      * @param array<string, mixed> $first First queued payload — provides
-     *   commenter handle + post act_id for the body + url. Aggregated
+     *   commenter handle + post act_id for the body + url, plus the
+     *   `is_reply` flag (reply-to-your-comment vs comment-on-your-post
+     *   copy; both ride the same comment_received event). Aggregated
      *   bodies (count > 1) drop the actor + render
-     *   "N new comments on your post." Across a 5-min debounce window
-     *   the queue can mix commenters; the singular actor only reads
-     *   correctly when count === 1.
+     *   "N new comments on your post." / "N new replies." Across a
+     *   5-min debounce window the queue can mix commenters (and mix
+     *   replies with top-level comments); the singular actor — and the
+     *   is_reply framing — only read exactly when count === 1.
      * @return array{title: string, body: string, url: string, tag?: string}
      */
     public static function forCommentReceived(int $count, array $first): array
@@ -229,13 +232,22 @@ final class PushPayload
         $actor   = self::stringFrom($first, 'actor_handle');
         $actId   = self::intFrom($first, 'act_id');
         $postId  = self::intFrom($first, 'post_id');
+        $isReply = !empty($first['is_reply']);
 
         $title = 'Blue Collar Crypto';
-        $body  = $count > 1
-            ? sprintf('%d new comments on your post.', $count)
-            : ($actor !== ''
-                ? sprintf('@%s commented on your post.', $actor)
-                : 'New comment on your post.');
+        if ($isReply) {
+            $body = $count > 1
+                ? sprintf('%d new replies.', $count)
+                : ($actor !== ''
+                    ? sprintf('@%s replied to your comment.', $actor)
+                    : 'New reply to your comment.');
+        } else {
+            $body = $count > 1
+                ? sprintf('%d new comments on your post.', $count)
+                : ($actor !== ''
+                    ? sprintf('@%s commented on your post.', $actor)
+                    : 'New comment on your post.');
+        }
 
         $payload = [
             'title' => $title,
