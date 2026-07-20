@@ -18,9 +18,11 @@ declare(strict_types=1);
  *      Keystroke autocomplete is a high-frequency endpoint; the cost
  *      of UserViewService's getSummary call would be wasted bytes.
  *
- *   3. Routing through PeepSoUserSearch (NOT bcc-search's dormant
- *      UserSearchRepository which runs raw `wp_users` LIKE and
- *      bypasses the privacy filter set — see §11 scan report).
+ *   3. Routing through PeepSoUserSearch — the same privacy-aware
+ *      wrapper bcc-search's UserSearchRepository now uses (search#4
+ *      remediation). The two stay separate implementations because the
+ *      mention picker's shape/limits differ (points 1–2), not because
+ *      of any privacy gap in bcc-search.
  *
  * The privacy filter set inherited from PeepSoUserSearch:
  *   - ban filter, profile_acc != PRIVATE, members-only gate when
