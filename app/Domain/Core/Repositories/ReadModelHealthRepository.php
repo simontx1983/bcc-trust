@@ -227,6 +227,10 @@ final class ReadModelHealthRepository
              INNER JOIN {$wpdb->posts} p ON p.ID = rm.page_id
                                           AND p.post_type   = 'peepso-page'
                                           AND p.post_status = 'publish'
+             LEFT JOIN {$wpdb->postmeta} pm_priv ON pm_priv.post_id = p.ID
+                                                 AND pm_priv.meta_key = 'peepso_page_privacy'
+             WHERE (pm_priv.meta_value IS NULL
+                    OR CAST(pm_priv.meta_value AS UNSIGNED) <> 2)
              ORDER BY rm.trust_score DESC, rm.page_id ASC
              LIMIT %d",
             $limit

@@ -156,6 +156,17 @@ final class CardsSearchEndpoint
             ? \BCC\Trust\Onchain\Repositories\ClaimRepository::getVerifiedPagesMap($resultPageIds)
             : [];
 
+        // Prime the WP post + post-meta object caches in ONE batch so the
+        // per-row get_post()/get_post_meta('_bcc_page_type') in buildSuggestion()
+        // are served from cache — bcc-search hydrates via raw $wpdb and never
+        // primes core's caches, so without this each row is an uncached
+        // SELECT. Second arg false skips terms (unused); third true primes
+        // meta (buildSuggestion reads _bcc_page_type). Keeps buildSuggestion
+        // N+1-free.
+        if ($resultPageIds !== []) {
+            _prime_post_caches($resultPageIds, false, true);
+        }
+
         $items = [];
         foreach ($rows as $row) {
             $rowArr = is_array($row) ? $row : (array) $row;
