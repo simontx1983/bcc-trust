@@ -96,9 +96,11 @@ final class UsersEndpoint
         // from /members because keystroke autocomplete needs a tighter
         // privacy filter (no leak of hidden/banned/blocked users), a
         // smaller payload (8 rows × 4 fields), and a higher hit rate.
-        // Routes through PeepSoUserSearch (NOT bcc-search's dormant
-        // UserSearchRepository — that one bypasses the privacy filter
-        // set; see the Phase 1d §11 scan report).
+        // Routes through PeepSoUserSearch — the same privacy-aware
+        // wrapper bcc-search's UserSearchRepository uses (since the
+        // search#4 remediation; an older revision of that repository
+        // ran a privacy-blind wp_users LIKE, which is why this endpoint
+        // deliberately doesn't share code with it).
         register_rest_route(
             self::ROUTE_NAMESPACE,
             '/users/mention-search',
