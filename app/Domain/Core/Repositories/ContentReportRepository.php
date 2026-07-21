@@ -182,12 +182,33 @@ final class ContentReportRepository
     public const REPORTER_IDS_MAX = 50;
 
     /**
-     * Allowed post_kind filter values. Mirrors peepso_activities.act_module_id
-     * strings used by the V1 admin UI.
+     * Allowed post_kind filter values — the V1 admin UI's chip enum.
      *
      * @var list<string>
      */
     private const ALLOWED_POST_KINDS = ['status', 'blog', 'review', 'photo', 'gif'];
+
+    /**
+     * Queue kind → numeric `peepso_activities.act_module_id`.
+     *
+     * `act_module_id` is a SMALLINT — the pre-2026-07-21 filter compared
+     * it against the semantic string ('status'), which never matched, so
+     * every POST KIND chip returned an empty queue. Values must stay in
+     * lockstep with FeedItemNormalizer::MODULE_TO_KIND (bcc-core) and
+     * PeepSoActivityWriter::MODULE_ID_BY_NAME:
+     *   1 = PeepSo status (also GIF posts — discriminated by the
+     *       `peepso_giphy` post-meta, see buildAdminFilterClauses),
+     *   4 = PeepSo photo, 202 = BCC review, 204 = BCC blog.
+     *
+     * @var array<string, int>
+     */
+    private const KIND_TO_MODULE_ID = [
+        'status' => 1,
+        'gif'    => 1,
+        'photo'  => 4,
+        'review' => 202,
+        'blog'   => 204,
+    ];
 
     /**
      * Allowed reason_code filter values. Mirrors the enum the report
@@ -374,8 +395,23 @@ final class ContentReportRepository
             $joinSql .= " LEFT JOIN {$activities} pa
                             ON pa.act_id = r.target_id
                            AND r.target_kind = 'feed_item' ";
-            $conditions[] = 'pa.act_module_id = %s';
-            $params[]     = $postKind;
+            $conditions[] = 'pa.act_module_id = %d';
+            $params[]     = self::KIND_TO_MODULE_ID[$postKind];
+
+            // status and gif share module 1 — a `peepso_giphy` post-meta
+            // on the backing wp_post marks the GIF ones (same layer-2
+            // discrimination as FeedHydrationPipeline / GifRepository).
+            if ($postKind === 'status' || $postKind === 'gif') {
+                $joinSql .= " LEFT JOIN {$wpdb->postmeta} gifmeta
+                                ON gifmeta.post_id  = pa.act_external_id
+                               AND gifmeta.meta_key = %s ";
+                // Join params render before condition params in the
+                // final statement; keep ordering by prepending.
+                array_unshift($params, GifRepository::POST_META_KEY);
+                $conditions[] = $postKind === 'gif'
+                    ? 'gifmeta.meta_id IS NOT NULL'
+                    : 'gifmeta.meta_id IS NULL';
+            }
         }
 
         $sinceMysql = isset($filters['since_mysql']) && is_string($filters['since_mysql']) ? $filters['since_mysql'] : null;

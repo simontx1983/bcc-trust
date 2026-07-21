@@ -40,8 +40,12 @@ final class GifRepository
      * because BCC code shouldn't hard-fail when PeepSo is deactivated
      * — when the class doesn't exist this repo simply returns empty
      * results.
+     *
+     * Public so the admin-queue post_kind filter
+     * (ContentReportRepository) discriminates status vs gif against
+     * the same key instead of re-hardcoding the string.
      */
-    private const POST_META_KEY = 'peepso_giphy';
+    public const POST_META_KEY = 'peepso_giphy';
 
     /**
      * Batch-load Giphy URLs for a list of parent wp_post IDs. Primes

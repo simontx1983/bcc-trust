@@ -24,11 +24,15 @@
 
 namespace BCC\Trust\Core\Services;
 
+use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Log\Logger;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\ContentReportRepository;
+use BCC\Trust\Core\Repositories\GifRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Core\Support\CardUrlMap;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -84,7 +88,9 @@ final class ModerationQueueService
 
     public function __construct(
         private readonly ContentReportRepository $reportRepo,
-        private readonly HiddenActivityRepository $hiddenRepo
+        private readonly HiddenActivityRepository $hiddenRepo,
+        private readonly PostShortcodeRepository $shortcodeRepo,
+        private readonly GifRepository $gifRepo
     ) {
     }
 
@@ -772,8 +778,40 @@ final class ModerationQueueService
             }
         }
 
-        $reporters = self::lookupUsersBulk(array_keys($reporterIds));
         $activities = self::lookupActivitiesBulk(array_keys($actIds));
+
+        // Target-author handles ride the same bulk user lookup as the
+        // reporters — needed to compose the post permalink below.
+        $userIds = $reporterIds;
+        foreach ($activities as $activity) {
+            $authorId = isset($activity->act_user_id) ? (int) $activity->act_user_id : 0;
+            if ($authorId > 0) {
+                $userIds[$authorId] = true;
+            }
+        }
+        $users = self::lookupUsersBulk(array_keys($userIds));
+
+        // Post permalinks: one batched ensureForActIds call (codes mint
+        // lazily, same as FeedHydrationPipeline::hydrateLinks) + the
+        // author handle → CardUrlMap::postUrl, the single LOCKED
+        // permalink composer. Rows whose code or handle can't resolve
+        // keep an empty post_url — degraded beats broken.
+        $codesByAct = $activities === []
+            ? []
+            : $this->shortcodeRepo->ensureForActIds(array_keys($activities));
+
+        // GIF discrimination: status and GIF posts share act_module_id=1;
+        // a `peepso_giphy` post-meta marks the GIF ones (same layer-2
+        // override as FeedHydrationPipeline). One batched read.
+        $statusPostIds = [];
+        foreach ($activities as $activity) {
+            $module = isset($activity->act_module_id) ? (string) $activity->act_module_id : '';
+            $postId = isset($activity->act_external_id) ? (int) $activity->act_external_id : 0;
+            if ($postId > 0 && (FeedItemNormalizer::MODULE_TO_KIND[$module] ?? '') === 'status') {
+                $statusPostIds[] = $postId;
+            }
+        }
+        $gifByPostId = $statusPostIds === [] ? [] : $this->gifRepo->findByPostIds($statusPostIds);
 
         // Hidden-set probe is a single cached call.
         $hiddenSet = [];
@@ -787,6 +825,11 @@ final class ModerationQueueService
             $actId      = (int) $row->target_id;
             $statusInt  = (int) $row->status;
 
+            $activity     = $activities[$actId] ?? null;
+            $authorId     = $activity !== null && isset($activity->act_user_id) ? (int) $activity->act_user_id : 0;
+            $authorHandle = $users[$authorId]['handle'] ?? '';
+            $shortCode    = $codesByAct[$actId] ?? null;
+
             $items[] = [
                 'id'              => (int) $row->id,
                 'status'          => $statusInt,
@@ -794,8 +837,8 @@ final class ModerationQueueService
                 'reason_code'     => (string) $row->reason_code,
                 'comment'         => is_string($row->comment) ? $row->comment : '',
                 'created_at'      => self::toIso8601((string) $row->created_at),
-                'reporter'        => $reporters[$reporterId] ?? self::fallbackUser($reporterId),
-                'target'          => self::shapeTarget($row, $activities[$actId] ?? null),
+                'reporter'        => $users[$reporterId] ?? self::fallbackUser($reporterId),
+                'target'          => self::shapeTarget($row, $activity, $authorHandle, $shortCode, $gifByPostId),
                 'currently_hidden'=> isset($hiddenSet[$actId]),
             ];
         }
@@ -858,21 +901,39 @@ final class ModerationQueueService
     }
 
     /**
+     * Queue post-kind vocabulary: the semantic feed kinds, with the
+     * feed's 'blog_excerpt' collapsed to the queue/endpoint enum value
+     * 'blog'. Kept as a tiny rename map (not a parallel module map) so
+     * FeedItemNormalizer::MODULE_TO_KIND stays the single module→kind
+     * authority.
+     *
+     * @var array<string, string>
+     */
+    private const FEED_KIND_TO_QUEUE_KIND = [
+        'blog_excerpt' => 'blog',
+    ];
+
+    /**
      * @param object{
      *   target_kind: string,
      *   target_id: int|numeric-string
      * } $report
+     * @param array<int, string> $gifByPostId peepso_giphy map (post_id → url)
      * @return array<string, mixed>
      */
     private static function shapeTarget(
         object $report,
-        ?object $activity
+        ?object $activity,
+        string $authorHandle = '',
+        ?string $shortCode = null,
+        array $gifByPostId = []
     ): array {
         $base = [
             'target_kind' => (string) $report->target_kind,
             'target_id'   => (int) $report->target_id,
             'preview'     => '',
             'post_kind'   => null,
+            'post_url'    => '',
             'author_id'   => null,
             'posted_at'   => null,
         ];
@@ -880,25 +941,42 @@ final class ModerationQueueService
             return $base;
         }
 
-        $module = isset($activity->act_module_id) ? (string) $activity->act_module_id : '';
-        $base['post_kind'] = $module;
+        // Semantic kind via the canonical module→kind map (bcc-core's
+        // FeedItemNormalizer) — NOT the raw numeric act_module_id. The
+        // raw id ("1") leaked into the response pre-2026-07-21, which
+        // broke the queue's kind display, preview branch, and the
+        // POST KIND filter chips simultaneously.
+        $module   = isset($activity->act_module_id) ? (string) $activity->act_module_id : '';
+        $feedKind = FeedItemNormalizer::MODULE_TO_KIND[$module] ?? 'status';
+        $postId   = isset($activity->act_external_id) ? (int) $activity->act_external_id : 0;
+
+        // Layer-2 GIF promotion — status and GIF share module 1; the
+        // peepso_giphy post-meta discriminates (same override as
+        // FeedHydrationPipeline).
+        if ($feedKind === 'status' && $postId > 0 && isset($gifByPostId[$postId])) {
+            $feedKind = 'gif';
+        }
+
+        $base['post_kind'] = self::FEED_KIND_TO_QUEUE_KIND[$feedKind] ?? $feedKind;
         $base['author_id'] = isset($activity->act_user_id) ? (int) $activity->act_user_id : null;
         $base['posted_at'] = isset($activity->act_time)
             ? self::toIso8601((string) $activity->act_time)
             : null;
 
-        // Preview text: only available cheaply for status / blog kinds
-        // where the wp_post is the body source. Other kinds get an
-        // empty preview — admin can click through to see the full row.
-        if ($module === 'status' || $module === 'blog') {
-            $postId = isset($activity->act_external_id) ? (int) $activity->act_external_id : 0;
-            if ($postId > 0) {
-                $post = get_post($postId);
-                if ($post instanceof \WP_Post) {
-                    $excerpt = (string) $post->post_excerpt;
-                    $content = (string) $post->post_content;
-                    $base['preview'] = $excerpt !== '' ? $excerpt : self::truncate($content, 240);
-                }
+        if ($authorHandle !== '' && $shortCode !== null && $shortCode !== '') {
+            $base['post_url'] = CardUrlMap::postUrl($authorHandle, $shortCode);
+        }
+
+        // Preview text: available cheaply where the wp_post is the body
+        // source — status, blog, and gif (a status post whose text may
+        // legitimately be empty). Other kinds get an empty preview —
+        // admin can click through via post_url to view in full.
+        if (in_array($feedKind, ['status', 'blog_excerpt', 'gif'], true) && $postId > 0) {
+            $post = get_post($postId);
+            if ($post instanceof \WP_Post) {
+                $excerpt = (string) $post->post_excerpt;
+                $content = (string) $post->post_content;
+                $base['preview'] = $excerpt !== '' ? $excerpt : self::truncate($content, 240);
             }
         }
 

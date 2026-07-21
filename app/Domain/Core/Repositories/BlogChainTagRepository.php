@@ -238,11 +238,15 @@ final class BlogChainTagRepository
     private static function cacheKey(string $suffix): string
     {
         $gen = wp_cache_get(self::CACHE_KEY_GEN, self::CACHE_GROUP);
-        if (!is_int($gen)) {
-            $gen = 0;
-            wp_cache_set(self::CACHE_KEY_GEN, $gen, self::CACHE_GROUP);
+        if (is_numeric($gen)) {
+            // Tolerant read (NOT is_int): persistent backends return
+            // ints as numeric strings cross-process; a strict is_int
+            // reset the generation to 0 on every read and neutralized
+            // bustCache(). See HiddenActivityRepository::getGeneration.
+            return $suffix . ':' . (int) $gen;
         }
-        return $suffix . ':' . $gen;
+        wp_cache_set(self::CACHE_KEY_GEN, 0, self::CACHE_GROUP);
+        return $suffix . ':0';
     }
 
     private static function bustCache(): void

@@ -888,7 +888,9 @@ final class Plugin
     {
         return $this->moderationQueueService ??= new Services\ModerationQueueService(
             $this->contentReportRepository(),
-            $this->hiddenActivityRepository()
+            $this->hiddenActivityRepository(),
+            $this->postShortcodeRepository(),
+            $this->gifRepository()
         );
     }
 
