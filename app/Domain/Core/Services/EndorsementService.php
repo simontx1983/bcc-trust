@@ -331,9 +331,43 @@ class EndorsementService {
         $rm_rows = [];
         if (!empty($card_page_ids)) {
             $rm_rows = \BCC\Trust\Core\Plugin::instance()->pageReadModelRepository()->getByPageIds($card_page_ids);
+            // Prime post caches so the per-row get_permalink() below is a
+            // cache hit rather than one query per entity card.
+            _prime_post_caches($card_page_ids, false, false);
         }
 
-        $scoreRepo = \BCC\Trust\Core\Plugin::instance()->scoreRepository();
+        // Pre-pass: batch the two per-row lookups the loop used to do —
+        // self-page scores (getByPageId → getBatchScoreData) and avatars
+        // for both member and entity owners (per-row get_avatar_url →
+        // one cached bulk resolve).
+        $selfPageIds = [];
+        $memberById  = [];
+        $avatarIds   = [];
+        foreach ($endorsements as $e) {
+            $pid = (int) ($e['page_id'] ?? 0);
+            if ($pid <= 0) {
+                continue;
+            }
+            if (MemberSelfPageService::isSelfPage($pid)) {
+                $selfPageIds[] = $pid;
+                $memberId = MemberSelfPageService::ownerOfSelfPage($pid);
+                $memberById[$pid] = $memberId;
+                if ($memberId > 0) {
+                    $avatarIds[$memberId] = true;
+                }
+            } else {
+                $rm = $rm_rows[$pid] ?? null;
+                if ($rm && $rm->owner_id) {
+                    $avatarIds[(int) $rm->owner_id] = true;
+                }
+            }
+        }
+        $selfScores = $selfPageIds === []
+            ? []
+            : \BCC\Trust\Core\Plugin::instance()->scoreRepository()->getBatchScoreData($selfPageIds);
+        $avatars = $avatarIds === []
+            ? []
+            : \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk(array_keys($avatarIds));
 
         $items = [];
         foreach ($endorsements as $e) {
@@ -345,24 +379,25 @@ class EndorsementService {
             $createdAt = isset($e['created_at']) && is_string($e['created_at']) ? $e['created_at'] : null;
 
             if (MemberSelfPageService::isSelfPage($pid)) {
-                // Member self-page row: snapshot from the self-page score
-                // row + the member's own avatar. No permalink exists.
-                $memberId = MemberSelfPageService::ownerOfSelfPage($pid);
-                $score    = $scoreRepo->getByPageId($pid);
-                $avatar   = $memberId > 0 ? get_avatar_url($memberId, ['size' => 64]) : '';
+                // Member self-page row: snapshot from the batched self-page
+                // score row + the member's own avatar. No permalink exists.
+                $memberId = $memberById[$pid] ?? 0;
+                $score    = $selfScores[$pid] ?? null;
+                $avatar   = $memberId > 0 ? ($avatars[$memberId] ?? '') : '';
 
-                $trustScore = $score ? (int) round($score->getTotalScore()) : null;
-                $tier       = $score ? sanitize_key($score->getReputationTier()) : 'unavailable';
+                $trustScore = $score !== null ? (int) round($score['total_score']) : null;
+                $tier       = $score !== null ? sanitize_key($score['reputation_tier']) : 'unavailable';
                 $pageUrl    = '';
             } else {
                 $rm     = $rm_rows[$pid] ?? null;
                 $avatar = '';
                 if ($rm && $rm->owner_id) {
-                    $avatar = get_avatar_url((int) $rm->owner_id, ['size' => 64]);
+                    $avatar = $avatars[(int) $rm->owner_id] ?? '';
                 }
                 $trustScore = $rm ? (int) round((float) $rm->trust_score) : null;
                 $tier       = $rm ? sanitize_key($rm->reputation_tier ?? 'neutral') : 'unavailable';
-                $pageUrl    = get_permalink($pid) ? esc_url(get_permalink($pid)) : '';
+                $permalink  = get_permalink($pid);
+                $pageUrl    = $permalink ? esc_url($permalink) : '';
             }
 
             $items[] = [
