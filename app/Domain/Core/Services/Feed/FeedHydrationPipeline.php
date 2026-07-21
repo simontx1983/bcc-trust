@@ -1151,8 +1151,22 @@ final class FeedHydrationPipeline
 
         // Build the gated-skip set: external_ids the viewer must NOT
         // see comment counts for. One getMembershipStatus query per
-        // gated item; pages cap at 50 and gated items are a subset,
-        // so the worst-case query count is bounded.
+        // DISTINCT gated group (memoized) rather than per gated item —
+        // a group-heavy page repeats the same (viewer, group) pair across
+        // many items. Pages cap at 50 items; distinct groups are far
+        // fewer, so this collapses up to ~50 sequential uncached SELECTs
+        // to one per group.
+        //
+        // Rejected alternatives (leak-gate correctness): the bulk
+        // findUserMemberships matches gm_user_status LIKE 'member%', which
+        // would silently admit any future member_* status the exact
+        // READ_ALLOWED_STATUSES whitelist rejects — wrong tool for a leak
+        // gate. FeedRankingService's restricted-group set is a different
+        // predicate (non-open minus active memberships, anon posture on
+        // the hot path), not READ_ALLOWED semantics.
+        //
+        // @var array<int, string|null> $statusByGroup  per-distinct-group memo
+        $statusByGroup = [];
         $gatedSkip = [];
         foreach ($items as $item) {
             $groupId = isset($item['group']) && is_array($item['group'])
@@ -1169,7 +1183,12 @@ final class FeedHydrationPipeline
                 $gatedSkip[$eid] = true;
                 continue;
             }
-            $status = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
+            // array_key_exists, not ??: a present null status ("no
+            // membership row") is a valid memoized answer.
+            if (!array_key_exists($groupId, $statusByGroup)) {
+                $statusByGroup[$groupId] = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
+            }
+            $status = $statusByGroup[$groupId];
             if ($status === null
                 || !in_array($status, CommentService::READ_ALLOWED_STATUSES, true)
             ) {
