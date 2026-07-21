@@ -91,9 +91,30 @@ final class NotificationViewService
             $rows = array_slice($rows, 0, $limit);
         }
 
+        // Batch-prime actor identity: the bell is polled frequently and
+        // resolveActor otherwise does get_userdata + get_user_meta +
+        // avatar resolution per row (a full N+1, repeated actors included).
+        $actorIds = [];
+        foreach ($rows as $row) {
+            $fid = isset($row->not_from_user_id) ? (int) $row->not_from_user_id : 0;
+            if ($fid > 0) {
+                $actorIds[$fid] = true;
+            }
+        }
+        $actorsById = [];
+        if ($actorIds !== []) {
+            $ids = array_keys($actorIds);
+            get_users(['include' => $ids]);          // primes the WP user cache (get_userdata hits)
+            update_meta_cache('user', $ids);          // primes bcc_handle reads
+            $avatarById = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk($ids);
+            foreach ($ids as $id) {
+                $actorsById[$id] = self::resolveActor($id, $avatarById[$id] ?? '');
+            }
+        }
+
         $items = [];
         foreach ($rows as $row) {
-            $shape = self::shapeRow($row);
+            $shape = self::shapeRow($row, $actorsById);
             if ($shape !== null) {
                 $items[] = $shape;
             }
@@ -127,9 +148,10 @@ final class NotificationViewService
     // ──────────────────────────────────────────────────────────────────
 
     /**
+     * @param array<int, array{id: int, handle: string, display_name: string, avatar_url: string}> $actorsById
      * @return array<string, mixed>|null
      */
-    private static function shapeRow(object $row): ?array
+    private static function shapeRow(object $row, array $actorsById = []): ?array
     {
         $type = isset($row->not_type) && is_string($row->not_type) ? $row->not_type : '';
         if (!NotificationType::isValid($type)) {
@@ -148,7 +170,7 @@ final class NotificationViewService
             return null;
         }
 
-        $actor = self::resolveActor($fromUserId);
+        $actor = $actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '');
         $link  = self::resolveLink($type, $externalId, $actId, $actor['handle']);
 
         return [
@@ -163,9 +185,11 @@ final class NotificationViewService
     }
 
     /**
+     * @param string $avatarUrl Pre-resolved (bulk) avatar; '' lets callers
+     *                          on the single-actor path pass empty.
      * @return array{id: int, handle: string, display_name: string, avatar_url: string}
      */
-    private static function resolveActor(int $userId): array
+    private static function resolveActor(int $userId, string $avatarUrl): array
     {
         if ($userId <= 0) {
             return [
@@ -189,13 +213,12 @@ final class NotificationViewService
             $handle = $user->user_login;
         }
         $displayName = $user->display_name !== '' ? $user->display_name : $handle;
-        $avatar = get_avatar_url($userId, ['size' => 96]);
 
         return [
             'id'           => $userId,
             'handle'       => $handle,
             'display_name' => $displayName,
-            'avatar_url'   => is_string($avatar) ? $avatar : '',
+            'avatar_url'   => $avatarUrl,
         ];
     }
 

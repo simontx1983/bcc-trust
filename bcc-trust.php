@@ -672,41 +672,11 @@ add_filter('bcc_api_keys_inventory', function (array $inventory): array {
 // latter are fire-once jobs whose "missing" state means "no recent
 // queue activity," not "drift").
 add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
-    $bccTrustHooks = [
-        // Core domain
-        'bcc_trust_daily_cleanup'         => ['interval' => 'daily',                'description' => 'audit-log retention + daily housekeeping'],
-        'bcc_trust_hourly_recalc'         => ['interval' => 'hourly',               'description' => 'page-score recalculation sweep'],
-        'bcc_trust_daily_ml_update'       => ['interval' => 'daily',                'description' => 'fraud-detection ML refresh'],
-        'bcc_trust_daily_graph_update'    => ['interval' => 'daily',                'description' => 'trust-graph rank + vote/endorsement ring detection'],
-        'bcc_trust_daily_vesting'         => ['interval' => 'daily',                'description' => 'vote-weight vesting promotion'],
-        'bcc_trust_process_recalculations'=> ['interval' => 'bcc_five_minutes',     'description' => 'recalc queue worker'],
-        'bcc_trust_daily_maintenance'     => ['interval' => 'daily',                'description' => 'read-model sync safety net'],
-        'bcc_trust_daily_contribution_recovery' => ['interval' => 'daily',          'description' => 'trust recovery through contribution (caution/risky cohort)'],
-        'bcc_trust_weekly_digest'         => ['interval' => 'bcc_weekly',           'description' => 'weekly digest mailer'],
-        'bcc_trust_deferred_rm_sync'      => ['interval' => 'bcc_thirty_seconds',   'description' => 'read-model deferred-rebuild for staleness recovery'],
-        'bcc_trust_divergence_state_sweep'=> ['interval' => 'daily',                'description' => 'divergence-state classification + §J.7 notifications'],
-        'bcc_trust_daily_attestation_decay'=> ['interval' => 'daily',               'description' => 'attestation_bonus decay recompute sweep (Slice E)'],
-        'bcc_attestor_reliability_sweep'  => ['interval' => 'daily',                'description' => 'operator-reliability cache recompute (Slice 3)'],
-        'bcc_trust_feed_hot_warm'         => ['interval' => 'bcc_one_minute',       'description' => 'anon /feed/hot first-page payload warm'],
-        // Onchain domain
-        'bcc_onchain_daily_refresh'       => ['interval' => 'daily',                'description' => 'onchain holdings refresh sweep'],
-        'bcc_onchain_retry_bonus'         => ['interval' => 'hourly',               'description' => 'onchain bonus-application retry'],
-        'bcc_gated_group_provision'       => ['interval' => 'daily',                'description' => 'holder-group provisioning (PeepSo write surface)'],
-        'bcc_gated_group_reconcile_sweep' => ['interval' => 'twicedaily',           'description' => 'holder-group reconcile sweep'],
-        'bcc_gated_group_revoke_sweep'    => ['interval' => 'twicedaily',           'description' => 'holder-group revoke re-verification sweep'],
-        'bcc_nft_eth_indexer_tick'        => ['interval' => 'bcc_one_minute',       'description' => 'NFT EVM indexer per-chain tick'],
-        'bcc_helius_dedupe_sweep'         => ['interval' => 'bcc_five_minutes',     'description' => 'Helius signature replay LRU eviction'],
-        'bcc_helius_subscription_reconcile' => ['interval' => 'twicedaily',         'description' => 'Helius subscription address-list reconcile (covers dropped subscribe/unsubscribe)'],
-        'bcc_nft_enrichment_tick'         => ['interval' => 'bcc_five_minutes',     'description' => 'NFT metadata backfill (name + image_url)'],
-        'bcc_watch_batch_sweep'           => ['interval' => 'bcc_pull_batch_sweep_minute', 'description' => 'WatchBatchAggregator sweep'],
-        // Disputes domain
-        'bcc_disputes_auto_resolve'       => ['interval' => 'daily',                'description' => 'dispute auto-resolve sweep'],
-        // Must match DisputeScheduler::EVENT_RECONCILE. The monitor watched
-        // 'bcc_disputes_reconcile' (the advisory-lock name, not the hook)
-        // until 2026-07-06 — a permanent false MISSING alarm for a job that
-        // was running fine under *_orphans.
-        'bcc_disputes_reconcile_orphans'  => ['interval' => 'bcc_five_minutes',     'description' => 'dispute reconcile (covers cron + AS enqueue failures)'],
-    ];
+    // Single source of truth — shared with bcc_trust_deactivate() and
+    // uninstall.php (see includes/cron-hooks.php). The disputes reconcile
+    // hook must match DisputeScheduler::EVENT_RECONCILE; the monitor
+    // watched the advisory-lock name until 2026-07-06 (false MISSING).
+    $bccTrustHooks = (require __DIR__ . '/includes/cron-hooks.php')['recurring'];
     foreach ($bccTrustHooks as $hook => $meta) {
         $hooks[$hook] = array_merge($meta, ['source' => 'bcc-trust']);
     }
@@ -768,10 +738,10 @@ add_action(
 // │ request after deployment. Removing this block re-opens the     │
 // │ exact same silent-failure mode.                                │
 // │                                                                │
-// │ Cost: three `wp_next_scheduled()` calls per request — each a   │
-// │ lookup against the autoloaded `cron` option, no DB query. The  │
-// │ rare cold path (when something is actually missing) hits       │
-// │ `wp_schedule_event` once per missing hook.                     │
+// │ Cost: one `wp_next_scheduled()` lookup per self-healed hook    │
+// │ per request — each a read of the autoloaded `cron` option, no  │
+// │ DB query. The rare cold path (when something is actually       │
+// │ missing) hits `wp_schedule_event` once per missing hook.       │
 // └────────────────────────────────────────────────────────────────┘
 //
 // This path NEVER unschedules. Cleanup is owned by the plugin's
@@ -2017,41 +1987,16 @@ function bcc_trust_activate() {
 register_deactivation_hook(__FILE__, 'bcc_trust_deactivate');
 
 function bcc_trust_deactivate() {
-    $cron_hooks = [
-        'bcc_trust_daily_cleanup',
-        'bcc_trust_hourly_recalc',
-        'bcc_trust_daily_ml_update',
-        'bcc_trust_daily_graph_update',
-        'bcc_trust_daily_vesting',
-        'bcc_trust_process_recalculations',
-        'bcc_trust_initial_user_sync',
-        'bcc_trust_initial_read_model_sync',
-        'bcc_trust_daily_maintenance',
-        'bcc_trust_deferred_rm_sync',
-        'bcc_trust_daily_attestation_decay', // Slice E
-        'bcc_trust_weekly_slow_ring_scan', // scale-hardening Phase 3
-        // Onchain cron events.
-        'bcc_onchain_daily_refresh',
-        'bcc_onchain_retry_bonus',
-        'bcc_gated_group_provision',
-        'bcc_gated_group_reconcile_sweep',
-        'bcc_gated_group_revoke_sweep',
-        // V2 Phase 1a: NFT indexer tick.
-        \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::CRON_HOOK,
-        // V2 Phase 1b: Helius dedupe-sweep.
-        'bcc_helius_dedupe_sweep',
-        // V2 Phase 1b: Helius subscription reconcile.
-        'bcc_helius_subscription_reconcile',
-        // V2 Phase 1c: NFT enrichment scheduler.
-        \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK,
-        // §C3 watch-batch sweep + legacy hook (release-N drain).
-        'bcc_pull_batch_sweep',
-        'bcc_watch_batch_sweep',
-        // Slice 3: nightly operator-reliability recompute.
-        'bcc_attestor_reliability_sweep',
-        // §F2 anon hot-feed first-page payload warm.
-        'bcc_trust_feed_hot_warm',
-    ];
+    // Single source of truth — clears every drift-tracked recurring hook
+    // plus the fire-once/retired cleanup_only set (includes/cron-hooks.php).
+    // Previously this literal list drifted from the drift-detector
+    // registry (missing divergence_state_sweep / contribution_recovery /
+    // weekly_digest).
+    $cron_lists = require __DIR__ . '/includes/cron-hooks.php';
+    $cron_hooks = array_merge(
+        array_keys($cron_lists['recurring']),
+        $cron_lists['cleanup_only']
+    );
 
     foreach ($cron_hooks as $hook) {
         wp_clear_scheduled_hook($hook);

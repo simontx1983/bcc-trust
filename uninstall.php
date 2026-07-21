@@ -60,28 +60,41 @@ foreach ($transient_patterns as $pattern) {
     );
 }
 
-// 3. Clear all scheduled cron events.
-$cron_hooks = [
-    'bcc_trust_daily_cleanup',
-    'bcc_trust_hourly_recalc',
-    'bcc_trust_daily_ml_update',
-    'bcc_trust_daily_graph_update',
-    'bcc_trust_hourly_graph_update',
-    'bcc_trust_hourly_ring_detection',
-    'bcc_trust_hourly_risk_refresh',
-    'bcc_trust_initial_user_sync',
-    'bcc_trust_daily_vesting',
-    'bcc_trust_process_recalculations',
-    'bcc_trust_backfill_edges',
-    'bcc_trust_archive_activity_event',
-    'bcc_trust_daily_maintenance',
-    'bcc_trust_initial_read_model_sync',
-    'bcc_trust_deferred_rm_sync',
-    'bcc_trust_daily_contribution_recovery',
-];
+// 3. Clear all scheduled cron events. Single source of truth
+//    (includes/cron-hooks.php) — this file runs WITHOUT the plugin
+//    autoloader, but a plain require of a pure-literal file works.
+//    Previously this list drifted badly from the actually-scheduled set
+//    (missing all Onchain + Disputes hooks, divergence sweep, decay,
+//    reliability, feed warm, weekly digest, watch-batch).
+$cron_lists = require __DIR__ . '/includes/cron-hooks.php';
+$cron_hooks = array_merge(
+    array_keys($cron_lists['recurring']),
+    $cron_lists['cleanup_only']
+);
 
 foreach ($cron_hooks as $hook) {
     wp_clear_scheduled_hook($hook);
+}
+
+// Dynamic per-chain hooks (bcc_chain_refresh_*) are registered at
+// runtime — ChainRefreshService clears them on deactivate, but it can't
+// run here (no autoloader), so sweep them by prefix out of the cron array.
+$cron_array = get_option('cron');
+if (is_array($cron_array)) {
+    $dynamic_hooks = [];
+    foreach ($cron_array as $event_hooks) {
+        if (!is_array($event_hooks)) {
+            continue;
+        }
+        foreach (array_keys($event_hooks) as $hook) {
+            if (is_string($hook) && strpos($hook, 'bcc_chain_refresh_') === 0) {
+                $dynamic_hooks[$hook] = true;
+            }
+        }
+    }
+    foreach (array_keys($dynamic_hooks) as $hook) {
+        wp_clear_scheduled_hook($hook);
+    }
 }
 
 // 4. Clean up user meta — both _bcc_* (private keys like _bcc_github_state)

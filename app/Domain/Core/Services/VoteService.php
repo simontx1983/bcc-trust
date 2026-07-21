@@ -22,6 +22,7 @@ namespace BCC\Trust\Core\Services;
 
 use DateTimeImmutable;
 use Exception;
+use BCC\Trust\Core\Exceptions\VoteEligibilityException;
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\AuditLogRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
@@ -202,7 +203,7 @@ class VoteService {
                 'voter_id'  => $voterId,
                 'vote_type' => $voteType,
             ], 'page');
-            throw new Exception('Vote rate limit exceeded.');
+            throw new VoteEligibilityException('Vote rate limit exceeded.');
         }
 
         // ── Real-time coordination blocker ────────────────────────────────────
@@ -435,12 +436,12 @@ class VoteService {
         $voterId = get_current_user_id();
 
         if (!$voterId) {
-            throw new Exception('Authentication required.');
+            throw new VoteEligibilityException('Authentication required.');
         }
 
         $existingVote = $this->voteRepo->get($voterId, $pageId);
         if (!$existingVote) {
-            throw new Exception('No vote found to remove.');
+            throw new VoteEligibilityException('No vote found to remove.');
         }
 
         // Fire pre-mutation snapshot hook so ScoreMutationLogger can capture
@@ -455,7 +456,7 @@ class VoteService {
             // Step 1: acquire lock on ALL vote rows for this voter+page (FOR UPDATE)
             $lockedVotes = $this->voteRepo->lockAllForUpdate($voterId, $pageId);
             if (empty($lockedVotes)) {
-                throw new Exception('Vote row not found during removal.');
+                throw new VoteEligibilityException('Vote row not found during removal.');
             }
 
             // Step 2: reverse score delta for each category (after vote locks are held)
@@ -579,7 +580,7 @@ class VoteService {
 
         // Hard floor: account must be at least 24 hours old.
         if ($accountDays < 1) {
-            throw new Exception('Account must be at least 24 hours old before voting.');
+            throw new VoteEligibilityException('Account must be at least 24 hours old before voting.');
         }
 
         // Device fingerprint shared by multiple accounts?
@@ -591,7 +592,7 @@ class VoteService {
                 'shared_fp_count' => $userCount,
                 'account_days'    => round($accountDays, 1),
             ], 'page');
-            throw new Exception('Vote blocked: device fingerprint associated with multiple accounts.');
+            throw new VoteEligibilityException('Vote blocked: device fingerprint associated with multiple accounts.');
         }
 
         // IP reuse check.
@@ -605,7 +606,7 @@ class VoteService {
                     'ip_user_count' => $ipUserCount,
                     'account_days'  => round($accountDays, 1),
                 ], 'page');
-                throw new Exception('Vote blocked: IP address associated with multiple accounts.');
+                throw new VoteEligibilityException('Vote blocked: IP address associated with multiple accounts.');
             }
         }
     }
@@ -656,7 +657,7 @@ class VoteService {
                 'recent_voters' => count($recentVoters),
                 'threshold'     => $fanInThreshold,
             ], 'page');
-            throw new Exception(
+            throw new VoteEligibilityException(
                 'This page is receiving an unusually high number of votes. Please try again shortly.'
             );
         }
@@ -716,7 +717,7 @@ class VoteService {
                     'page_id' => $pageId,
                 ]);
             }
-            throw new \Exception('Service temporarily unavailable. Please try again.');
+            throw new VoteEligibilityException('Service temporarily unavailable. Please try again.');
         }
 
         // Threshold: 25 votes per page in 5 min is abnormal. Stress mode cuts
@@ -743,7 +744,7 @@ class VoteService {
                     'threshold'   => $threshold,
                     'stress_mode' => $inStress,
                 ], 'page', $voterId);
-                throw new \Exception(
+                throw new VoteEligibilityException(
                     'This page is experiencing unusual voting activity. Please try again later.'
                 );
             }

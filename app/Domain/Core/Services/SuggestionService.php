@@ -233,6 +233,11 @@ final class SuggestionService
         }
 
         // ── 2 (exclusions). Security-sensitive: applied to the pool. ───
+        // Prime user meta for the whole pool before the privacy filter —
+        // isPrivacyOptedOut reads per-candidate user meta, which would be
+        // one uncached query each on a cold cache (the pool can run to
+        // hundreds). One update_meta_cache collapses it.
+        update_meta_cache('user', array_keys($pool));
         $exclude = $this->buildExclusionSet($viewerId, $following);
         foreach (array_keys($pool) as $cid) {
             if (isset($exclude[$cid]) || $this->isPrivacyOptedOut($cid)) {
@@ -427,6 +432,10 @@ final class SuggestionService
         }
 
         $candidates = self::stableShuffle($candidates, $viewerId);
+
+        // Prime meta before the per-candidate privacy read (same N+1 as
+        // the main pool filter above).
+        update_meta_cache('user', $candidates);
 
         $out = [];
         foreach ($candidates as $cid) {

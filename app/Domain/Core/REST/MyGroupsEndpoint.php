@@ -137,6 +137,15 @@ final class MyGroupsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Rate-limit FIRST (throttle-before-credentials rule): the cheap
+        // fail-closed counter rejects floods before the suspension gate's
+        // permission read. Lower than the holder group bucket since this
+        // surface doesn't gate behind an NFT check and a flood could
+        // create more peepso_group_user rows faster.
+        if (!\BCC\Core\Security\Throttle::allow('group_join:' . $userId, 10, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
         // Suspended/banned accounts must not walk back into a community.
         // The join lands members via the trusted PeepSoGroupWriter door
         // (bypassing PeepSo's own UI approval), so the suspension gate has
@@ -145,13 +154,6 @@ final class MyGroupsEndpoint
         // [audit M — group-rejoin]
         if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
             return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
-        }
-
-        // Per-user rate limit on plain group joins. Lower than the holder
-        // group bucket since this surface doesn't gate behind an NFT check
-        // and a flood could create more peepso_group_user rows faster.
-        if (!\BCC\Core\Security\Throttle::allow('group_join:' . $userId, 10, 60)) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $groupId = (int) $request->get_param('id');
@@ -337,6 +339,17 @@ final class MyGroupsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Rate-limit FIRST (throttle-before-credentials rule): the cheap
+        // fail-closed counter rejects floods before the suspension gate's
+        // permission read.
+        if (!\BCC\Core\Security\Throttle::allow('group_create:' . $userId, 5, 3600)) {
+            return ApiResponse::error(
+                'bcc_rate_limited',
+                'You\'ve created enough communities for now. Try again in an hour.',
+                429
+            );
+        }
+
         // Suspended accounts must not create communities — creation is a
         // heavier membership write than join (the creator lands as
         // member_owner of a brand-new group), so it gets the same gate as
@@ -344,14 +357,6 @@ final class MyGroupsEndpoint
         // regardless of role. [audit M — group-rejoin]
         if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
             return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
-        }
-
-        if (!\BCC\Core\Security\Throttle::allow('group_create:' . $userId, 5, 3600)) {
-            return ApiResponse::error(
-                'bcc_rate_limited',
-                'You\'ve created enough communities for now. Try again in an hour.',
-                429
-            );
         }
 
         $name         = trim((string) $request->get_param('name'));

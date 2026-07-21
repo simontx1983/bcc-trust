@@ -189,6 +189,13 @@ final class CommentService
             ? []
             : $this->resolveHandlesForAuthors(array_keys($authorIds));
 
+        // Avatars: one cached bulk resolve for the whole page instead of a
+        // per-comment get_avatar_url (which recomputes PeepSo's per-user
+        // resolution every request and misses the avatar-change bust hook).
+        $avatarMap = $authorIds === []
+            ? []
+            : \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk(array_keys($authorIds));
+
         // Per-comment stoke state. The public count now rides inline on
         // each row (`stoke_total`, computed in the list query so top/
         // relevant can sort on it), so only the viewer's own stoked set
@@ -238,7 +245,7 @@ final class CommentService
                 'viewer_has_stoked' => $viewerStoked[$cid] ?? false,
             ];
             $media = $mediaMap[(int) $row->comment_post_id] ?? null;
-            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke, $media, $handleMap[$aid] ?? null, $replyCountMap[$cid] ?? 0);
+            $items[] = $this->shapeCommentRow($row, $viewerId, $feedId, $badge, $vouch, $stoke, $media, $handleMap[$aid] ?? null, $replyCountMap[$cid] ?? 0, $avatarMap[$aid] ?? null);
             $lastRow = $row;
         }
 
@@ -618,7 +625,7 @@ final class CommentService
      *               always emitted (null for a top-level comment).
      * @return array<string, mixed>
      */
-    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null, ?array $media = null, ?string $canonicalHandle = null, ?int $replyCount = null): array
+    private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null, ?array $media = null, ?string $canonicalHandle = null, ?int $replyCount = null, ?string $avatarUrl = null): array
     {
         $authorId = (int) $row->author_id;
         $authorHandle = $canonicalHandle ?? (string) $row->author_login;
@@ -629,7 +636,9 @@ final class CommentService
             'id'           => $authorId,
             'handle'       => $authorHandle,
             'display_name' => $displayName !== '' ? $displayName : $authorHandle,
-            'avatar_url'   => self::resolveAvatarUrl($authorId),
+            // Prefer the page's bulk-resolved avatar; the single-comment
+            // echo path passes null and falls back to the cached seam.
+            'avatar_url'   => $avatarUrl ?? self::resolveAvatarUrl($authorId),
         ];
         if ($badge !== null) {
             // Server-resolved per §A2; the frontend never derives
@@ -861,17 +870,17 @@ final class CommentService
     }
 
     /**
-     * Avatar URL for a user. Reuses WP's get_avatar_url (which is
-     * filterable by other plugins, so PeepSo's avatar override
-     * applies automatically). Returns empty string when unresolvable.
+     * Avatar URL for a single user (echo-row / single-comment path).
+     * Routes through the cached PeepSoMediaCache seam — object-cached and
+     * invalidated by the avatar-change bust hook, unlike raw
+     * get_avatar_url. The list path bulk-resolves and passes the value in.
      */
     private static function resolveAvatarUrl(int $userId): string
     {
         if ($userId <= 0) {
             return '';
         }
-        $url = get_avatar_url($userId, ['size' => 96]);
-        return is_string($url) ? $url : '';
+        return \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);
     }
 
     private static function toIso8601(string $mysqlDatetime): string

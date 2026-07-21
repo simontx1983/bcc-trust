@@ -530,28 +530,30 @@ final class MessagesService
      * Compose user-mini view-models for the inbox / thread surfaces.
      * SQL lives in UserMiniRepository (per §1 — Service layer must
      * not touch $wpdb directly); this method decorates the rows with
-     * the avatar URL (a computed value via WP's filterable
-     * `get_avatar_url`) and resolves the handle fallback.
+     * the avatar URL and resolves the handle fallback. Avatars resolve
+     * through the cached PeepSoMediaCache seam (one wp_cache_get_multiple
+     * round-trip for the whole page, and it honors the avatar-change
+     * bust hook) rather than raw per-row get_avatar_url.
      *
      * @param list<int> $userIds
      * @return array<int, array{id: int, handle: string, display_name: string, avatar_url: string}>
      */
     private function resolveUserMinisById(array $userIds): array
     {
-        $rows = $this->userMiniRepo->getRowsByIds($userIds);
+        $rows    = $this->userMiniRepo->getRowsByIds($userIds);
+        $avatars = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk(array_keys($rows));
         $out = [];
         foreach ($rows as $uid => $row) {
             $handle  = $row['handle'] !== null && $row['handle'] !== ''
                 ? $row['handle']
                 : $row['user_login'];
             $display = $row['display_name'];
-            $avatar  = get_avatar_url($uid, ['size' => 96]);
 
             $out[$uid] = [
                 'id'           => $uid,
                 'handle'       => $handle,
                 'display_name' => $display !== '' ? $display : $handle,
-                'avatar_url'   => is_string($avatar) ? $avatar : '',
+                'avatar_url'   => $avatars[$uid] ?? '',
             ];
         }
         return $out;
