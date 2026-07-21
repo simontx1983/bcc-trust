@@ -364,6 +364,52 @@ final class PasswordAuthController
             );
         }
 
+        // ── Test-account 2FA bypass (non-production only) ──────────────
+        // Lets an allowlisted test account skip the email OTP for manual /
+        // automated (Playwright) QA. Guarded three independent ways so it
+        // can never weaken a real login:
+        //   1. Hard-refuses on production via wp_get_environment_type() even
+        //      if the constant is mistakenly defined there.
+        //   2. Inert unless BCC_2FA_BYPASS_ACCOUNTS is defined in wp-config
+        //      (a comma-separated identifier allowlist). Undefined/empty =
+        //      the feature does not exist. That constant is both the on/off
+        //      switch AND the allowlist.
+        //   3. Scoped to that allowlist — the typed identifier OR the
+        //      resolved handle must match; never "any account".
+        // The password was already verified above; this skips only the
+        // second factor, returning the same JWT payload as /auth/2fa/verify.
+        // To yank the feature entirely, delete this block + its helper.
+        if (
+            wp_get_environment_type() !== 'production'
+            && defined('BCC_2FA_BYPASS_ACCOUNTS')
+            && $this->identifierIsBypassAllowed($identifier, $handle)
+        ) {
+            wp_set_current_user($userId);
+            wp_set_auth_cookie($userId, true);
+
+            $token = JwtToken::encode($userId, $handle);
+
+            Logger::audit('user_login', [
+                'user_id' => $userId,
+                'handle'  => $handle,
+                'via'     => '2fa_bypass',
+            ]);
+
+            do_action('bcc_user_login', $userId);
+
+            $response = ApiResponse::ok([
+                'user_id'          => $userId,
+                'handle'           => $handle,
+                'token'            => $token,
+                'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
+                'token_type'       => 'Bearer',
+                'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+            ]);
+            $response->header('Cache-Control', 'no-store');
+
+            return $response;
+        }
+
         // 2FA gate — generate a challenge token + OTP, email the code,
         // and return a 2fa_required response. The client must complete
         // /auth/2fa/verify to receive the actual JWT.
@@ -387,6 +433,39 @@ final class PasswordAuthController
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+
+    /**
+     * Non-production test-account allowlist check for the 2FA bypass.
+     *
+     * BCC_2FA_BYPASS_ACCOUNTS is a comma-separated list of identifiers
+     * (emails and/or handles; a leading '@' is optional). A login matches
+     * if either the typed identifier or the account's resolved handle is on
+     * the list. Comparison is case-insensitive and '@'-insensitive so
+     * "tester", "@tester", and "Tester" all match a "tester" entry. An
+     * empty/whitespace constant matches nothing (feature stays off).
+     */
+    private function identifierIsBypassAllowed(string $identifier, string $handle): bool
+    {
+        $raw = (string) constant('BCC_2FA_BYPASS_ACCOUNTS');
+        if (trim($raw) === '') {
+            return false;
+        }
+
+        $needleId     = strtolower(ltrim(trim($identifier), '@'));
+        $needleHandle = strtolower(ltrim(trim($handle), '@'));
+
+        foreach (explode(',', $raw) as $entry) {
+            $allowed = strtolower(ltrim(trim($entry), '@'));
+            if ($allowed === '') {
+                continue;
+            }
+            if ($allowed === $needleId || $allowed === $needleHandle) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
