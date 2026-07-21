@@ -190,68 +190,6 @@ class DeviceFingerprintRepository {
         ) );
     }
 
-    /**
-     * Get total record count.
-     */
-    public function getTotalCount(): int {
-        global $wpdb;
-        return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$this->table}" );
-    }
-
-    /**
-     * Get distinct user count.
-     */
-    public function getDistinctUserCount(): int {
-        global $wpdb;
-        return (int) $wpdb->get_var( "SELECT COUNT(DISTINCT user_id) FROM {$this->table}" );
-    }
-
-    /**
-     * Get distinct fingerprint count.
-     */
-    public function getDistinctFingerprintCount(): int {
-        global $wpdb;
-        return (int) $wpdb->get_var( "SELECT COUNT(DISTINCT fingerprint) FROM {$this->table}" );
-    }
-
-    /**
-     * Count records with automation score above a threshold.
-     */
-    public function countAboveAutomationScore( int $threshold ): int {
-        global $wpdb;
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table} WHERE automation_score > %d",
-            $threshold
-        ) );
-    }
-
-    /**
-     * Count records by risk level.
-     */
-    public function countByRiskLevel( string $riskLevel ): int {
-        global $wpdb;
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table} WHERE risk_level = %s",
-            $riskLevel
-        ) );
-    }
-
-    /**
-     * Count fingerprints shared by at least $minUsers distinct users.
-     */
-    public function countSharedFingerprints( int $minUsers ): int {
-        global $wpdb;
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM (
-                SELECT fingerprint, COUNT(DISTINCT user_id) as user_count
-                FROM {$this->table}
-                GROUP BY fingerprint
-                HAVING user_count >= %d
-            ) AS shared",
-            $minUsers
-        ) );
-    }
-
     // -------------------------------------------------------------------------
     // Write methods
     // -------------------------------------------------------------------------

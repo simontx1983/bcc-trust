@@ -61,43 +61,6 @@ class AuditLogRepository {
     }
 
     /**
-     * Get suspicious activity within the last N hours.
-     *
-     * @param int $hours  Lookback window in hours.
-     * @param int $limit  Maximum rows to return.
-     * @return object[]
-     * @phpstan-return list<object{
-     *   id: int|numeric-string,
-     *   user_id: int|numeric-string,
-     *   action: string,
-     *   target_type: string,
-     *   target_id: int|numeric-string,
-     *   ip_address: string|null,
-     *   created_at: string
-     * }>
-     */
-    public function getSuspiciousActivity( int $hours = 24, int $limit = 100 ): array {
-        global $wpdb;
-
-        return $wpdb->get_results( $wpdb->prepare(
-            "SELECT id, user_id, action, target_type, target_id, ip_address, created_at
-             FROM {$this->table}
-             WHERE (
-                action LIKE 'suspicious%%'
-                OR action LIKE 'fraud%%'
-                OR action LIKE 'flag%%'
-                OR action LIKE 'automation%%'
-                OR action LIKE 'vote_ring%%'
-             )
-             AND created_at > (UTC_TIMESTAMP() - INTERVAL %d HOUR)
-             ORDER BY created_at DESC
-             LIMIT %d",
-            $hours,
-            $limit
-        ) );
-    }
-
-    /**
      * Insert a new audit log entry.
      *
      * @param array<string, mixed> $data    Column => value pairs.

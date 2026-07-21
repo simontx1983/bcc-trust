@@ -578,35 +578,6 @@ class FraudDetector {
     }
 
     /**
-     * Get fraud statistics for dashboard from user_info table
-     *
-     * @return array<string, mixed>
-     */
-    public static function getStats(): array {
-
-        $stats = self::userInfoRepo()->getFraudStats(
-            BCC_TRUST_FRAUD_CRITICAL,
-            BCC_TRUST_FRAUD_HIGH,
-            BCC_TRUST_FRAUD_MEDIUM,
-            BCC_TRUST_FRAUD_LOW
-        );
-
-        return [
-            'total_users' => (int) ($stats->total_users ?? 0),
-            'average_fraud_score' => round((float) ($stats->avg_fraud_score ?? 0), 1),
-            'risk_distribution' => [
-                'critical' => (int) ($stats->critical_risk ?? 0),
-                'high' => (int) ($stats->high_risk ?? 0),
-                'medium' => (int) ($stats->medium_risk ?? 0),
-                'low' => (int) ($stats->low_risk ?? 0),
-                'minimal' => (int) ($stats->minimal_risk ?? 0)
-            ],
-            'suspended_users' => (int) ($stats->suspended_users ?? 0),
-            'last_updated' => current_time('mysql')
-        ];
-    }
-
-    /**
      * Detect one-directional fan-in vote coordination on a page.
      *
      * Catches the blind spot where N accounts all vote on the same target

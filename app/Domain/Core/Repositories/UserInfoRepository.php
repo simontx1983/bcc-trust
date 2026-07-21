@@ -839,46 +839,6 @@ class UserInfoRepository {
     }
     
     /**
-     * Get high risk users using config threshold
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    public function getHighRiskUsers(?int $threshold = null, int $limit = 100): array {
-        global $wpdb;
-        
-        $threshold = $threshold ?? $this->fraudHigh;
-        
-        $results = $wpdb->get_results($wpdb->prepare("
-            SELECT ui.id, ui.user_id, ui.user_login, ui.registered, ui.usr_last_activity, ui.usr_views, ui.usr_likes, ui.usr_role, ui.fraud_score, ui.peak_fraud_score, ui.trust_rank, ui.risk_level, ui.is_suspended, ui.is_verified, ui.votes_cast, ui.endorsements_given, ui.automation_score, ui.behavior_score, ui.device_fraud_probability, ui.signals_updated_at, ui.pages_owned, ui.groups_owned, ui.posts_created, ui.comments_made, ui.last_login, ui.last_ip_address, ui.device_fingerprint, ui.fraud_triggers, ui.page_ids_owned, ui.reputation_tier, ui.created_at, ui.updated_at, u.display_name, u.user_email
-            FROM {$this->table} ui
-            JOIN {$wpdb->users} u ON ui.user_id = u.ID
-            WHERE ui.fraud_score >= %d
-            ORDER BY ui.fraud_score DESC
-            LIMIT %d
-        ", $threshold, $limit));
-
-        $users = [];
-        foreach ($results as $row) {
-            $triggers = $row->fraud_triggers ? json_decode($row->fraud_triggers, true) : [];
-            $users[] = [
-                'id' => $row->user_id,
-                'name' => $row->display_name,
-                'email' => $row->user_email,
-                'fraud_score' => $row->fraud_score,
-                'risk_level' => $row->risk_level ?: $this->getRiskLevel($row->user_id),
-                'reputation_tier' => $row->reputation_tier ?? 'neutral',
-                'triggers' => is_array($triggers) ? $triggers : [],
-                'suspended' => (bool) $row->is_suspended,
-                'automation_score' => $row->automation_score,
-                'behavior_score' => $row->behavior_score,
-                'votes_cast' => $row->votes_cast
-            ];
-        }
-        
-        return $users;
-    }
-    
-    /**
      * Count verified users
      */
     public function countVerified(): int {
@@ -1171,37 +1131,6 @@ class UserInfoRepository {
             'medium_risk'    => $mediumRisk,
             'low_risk'       => $lowRisk,
         ];
-    }
-
-    /**
-     * Get fraud statistics for the dashboard.
-     *
-     * @param int $criticalThreshold
-     * @param int $highThreshold
-     * @param int $mediumThreshold
-     * @param int $lowThreshold
-     * @return object|null
-     */
-    public function getFraudStats( int $criticalThreshold, int $highThreshold, int $mediumThreshold, int $lowThreshold ): ?object {
-        global $wpdb;
-
-        return $wpdb->get_row( $wpdb->prepare(
-            "SELECT
-                COUNT(*) as total_users,
-                AVG(fraud_score) as avg_fraud_score,
-                SUM(CASE WHEN fraud_score >= %d THEN 1 ELSE 0 END) as critical_risk,
-                SUM(CASE WHEN fraud_score >= %d AND fraud_score < %d THEN 1 ELSE 0 END) as high_risk,
-                SUM(CASE WHEN fraud_score >= %d AND fraud_score < %d THEN 1 ELSE 0 END) as medium_risk,
-                SUM(CASE WHEN fraud_score >= %d AND fraud_score < %d THEN 1 ELSE 0 END) as low_risk,
-                SUM(CASE WHEN fraud_score < %d THEN 1 ELSE 0 END) as minimal_risk,
-                SUM(CASE WHEN is_suspended = 1 THEN 1 ELSE 0 END) as suspended_users
-             FROM {$this->table}",
-            $criticalThreshold,
-            $highThreshold, $criticalThreshold,
-            $mediumThreshold, $highThreshold,
-            $lowThreshold, $mediumThreshold,
-            $lowThreshold
-        ) );
     }
 
     /**
