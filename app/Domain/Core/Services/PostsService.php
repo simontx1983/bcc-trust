@@ -406,15 +406,26 @@ final class PostsService
         try {
             $result = $this->voteService->castPageVote($pageId, $voteType);
             $voteId = (int) ($result['vote_id'] ?? 0);
-        } catch (Exception $e) {
-            // VoteService throws on rate limit / fraud / coordination
-            // gates; surface as bcc_forbidden so the UI shows the
-            // server message rather than a generic 500.
+        } catch (\BCC\Trust\Core\Exceptions\VoteEligibilityException $e) {
+            // Eligibility/gate rejection with an operator-authored,
+            // user-safe message (rate limit / fraud / coordination) —
+            // safe to forward verbatim.
             return [
                 'error'   => 'bcc_forbidden',
                 'message' => $e->getMessage() !== ''
                     ? $e->getMessage()
                     : 'Review could not be cast.',
+            ];
+        } catch (Exception $e) {
+            // Unexpected runtime failure — never forward the internal
+            // message to the client (γ-leak). Log it, return a generic.
+            \BCC\Core\Log\Logger::error('[PostsService] castPageVote failed', [
+                'page_id' => $pageId,
+                'error'   => $e->getMessage(),
+            ]);
+            return [
+                'error'   => 'bcc_forbidden',
+                'message' => 'Review could not be cast.',
             ];
         }
 
@@ -473,12 +484,23 @@ final class PostsService
 
         try {
             $this->voteService->removePageVote($pageId);
-        } catch (Exception $e) {
+        } catch (\BCC\Trust\Core\Exceptions\VoteEligibilityException $e) {
+            // Operator-authored, user-safe gate message — forward verbatim.
             return [
                 'error'   => 'bcc_unavailable',
                 'message' => $e->getMessage() !== ''
                     ? $e->getMessage()
                     : 'Could not remove your review.',
+            ];
+        } catch (Exception $e) {
+            // Unexpected runtime failure — never forward internals.
+            \BCC\Core\Log\Logger::error('[PostsService] removePageVote failed', [
+                'page_id' => $pageId,
+                'error'   => $e->getMessage(),
+            ]);
+            return [
+                'error'   => 'bcc_unavailable',
+                'message' => 'Could not remove your review.',
             ];
         }
 
