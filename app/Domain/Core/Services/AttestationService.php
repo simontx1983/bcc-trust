@@ -1383,8 +1383,8 @@ final class AttestationService
             $displayName = (string) $user->user_login;
         }
 
-        $avatarRaw = get_avatar_url($userId);
-        $avatarUrl = is_string($avatarRaw) ? $avatarRaw : '';
+        // Cached seam (honors the avatar-change bust hook), not raw get_avatar_url.
+        $avatarUrl = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);
 
         $score = (int) round($reputationRepo->getScore($userId));
 

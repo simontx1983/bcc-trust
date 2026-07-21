@@ -526,14 +526,15 @@ final class BlogService
 
         $handleRaw = get_user_meta($userId, 'bcc_handle', true);
         $handle    = is_string($handleRaw) && $handleRaw !== '' ? $handleRaw : $user->user_login;
-        $avatarUrl = get_avatar_url($userId);
+        // Cached seam (honors the avatar-change bust hook), not raw get_avatar_url.
+        $avatarUrl = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);
 
         return [
             'kind'                  => 'user',
             'id'                    => $userId,
             'handle'                => $handle,
             'display_name'          => $user->display_name !== '' ? $user->display_name : $user->user_login,
-            'avatar_url'            => is_string($avatarUrl) ? $avatarUrl : '',
+            'avatar_url'            => $avatarUrl,
             // Trust-derived fields — leave as conservative defaults.
             // The blog tab is a per-user surface; the profile header
             // already shows the canonical card with proper trust state.

@@ -171,8 +171,10 @@ final class MentionOverlayService
             $displayName = (string) $user->user_login;
         }
 
-        $avatarUrlRaw = get_avatar_url($userId, ['size' => 96]);
-        $avatarUrl    = is_string($avatarUrlRaw) ? $avatarUrlRaw : '';
+        // Cached seam (honors the avatar-change bust hook; the media
+        // cache also collapses repeat mentions of the same user within
+        // the request).
+        $avatarUrl = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);
 
         return [
             'user_id'      => $userId,

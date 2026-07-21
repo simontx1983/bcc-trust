@@ -115,10 +115,12 @@ final class MentionSearchService
 
         // Prime usermeta cache once for handle lookups.
         update_meta_cache('user', $userIds);
+        // One cached bulk avatar resolve for the whole result set.
+        $avatars = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk($userIds);
 
         $out = [];
         foreach ($userIds as $userId) {
-            $candidate = self::projectCandidate($userId);
+            $candidate = self::projectCandidate($userId, $avatars[$userId] ?? '');
             if ($candidate !== null) {
                 $out[] = $candidate;
             }
@@ -129,7 +131,7 @@ final class MentionSearchService
     /**
      * @return array{user_id: int, handle: string, display_name: string, avatar_url: string}|null
      */
-    private static function projectCandidate(int $userId): ?array
+    private static function projectCandidate(int $userId, string $avatarUrl): ?array
     {
         $user = get_user_by('id', $userId);
         if (!$user instanceof \WP_User) {
@@ -145,9 +147,6 @@ final class MentionSearchService
         if ($displayName === '') {
             $displayName = (string) $user->user_login;
         }
-
-        $avatarUrlRaw = get_avatar_url($userId, ['size' => 96]);
-        $avatarUrl    = is_string($avatarUrlRaw) ? $avatarUrlRaw : '';
 
         return [
             'user_id'      => $userId,

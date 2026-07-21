@@ -61,13 +61,23 @@ final class MyBlocksService
 
         $rows = PeepSoBlockRepository::listForBlocker($blockerId, $perPage, $offset);
 
+        $blockedIds = [];
+        foreach ($rows as $row) {
+            $uid = (int) $row->blk_blocked_id;
+            if ($uid > 0) {
+                $blockedIds[] = $uid;
+            }
+        }
+        // One cached bulk avatar resolve for the page.
+        $avatars = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk($blockedIds);
+
         $items = [];
         foreach ($rows as $row) {
             $userId = (int) $row->blk_blocked_id;
             if ($userId <= 0) {
                 continue;
             }
-            $items[] = self::shapeRow($userId, $row);
+            $items[] = self::shapeRow($userId, $row, $avatars[$userId] ?? '');
         }
 
         return [
@@ -96,7 +106,7 @@ final class MyBlocksService
      *   profile_url: string
      * }
      */
-    private static function shapeRow(int $userId, object $row): array
+    private static function shapeRow(int $userId, object $row, string $avatarUrl): array
     {
         // Prefer bcc_handle, fall back to user_login. Same precedence
         // UserViewService uses everywhere else.
@@ -109,13 +119,11 @@ final class MyBlocksService
             ? $row->display_name
             : (is_string($row->user_login) ? $row->user_login : '');
 
-        $avatarUrl = get_avatar_url($userId);
-
         return [
             'user_id'      => $userId,
             'handle'       => $handle,
             'display_name' => $displayName,
-            'avatar_url'   => is_string($avatarUrl) ? $avatarUrl : '',
+            'avatar_url'   => $avatarUrl,
             'profile_url'  => $handle !== '' ? '/u/' . $handle : '',
         ];
     }
