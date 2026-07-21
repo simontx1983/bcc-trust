@@ -199,11 +199,19 @@ final class HiddenActivityRepository
     public static function getGeneration(): int
     {
         $gen = wp_cache_get(self::CACHE_KEY_GEN, self::CACHE_GROUP);
-        if (!is_int($gen)) {
-            $gen = 0;
-            wp_cache_set(self::CACHE_KEY_GEN, $gen, self::CACHE_GROUP);
+        if (is_numeric($gen)) {
+            // Tolerant read (NOT is_int): persistent object-cache
+            // backends return integers as numeric strings on
+            // cross-process reads (maybe_serialize(0) === "0"). A
+            // strict is_int check here treated every cross-process
+            // read as "uninitialized" and reset the generation to 0 —
+            // permanently undoing every bustCache() increment, so
+            // hide/unhide never invalidated downstream caches. Same
+            // tolerant shape as CollectionSignalRepository::generation().
+            return (int) $gen;
         }
-        return $gen;
+        wp_cache_set(self::CACHE_KEY_GEN, 0, self::CACHE_GROUP);
+        return 0;
     }
 
     private static function cacheGenerationKey(): string
