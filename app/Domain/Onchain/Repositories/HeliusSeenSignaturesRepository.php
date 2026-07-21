@@ -78,6 +78,43 @@ final class HeliusSeenSignaturesRepository
     }
 
     /**
+     * Delete signatures that were marked during a delivery whose single
+     * batch ingest then failed — reopening dedup so Helius's redelivery
+     * (or a manual replay) can re-process them. Without this, an ingest
+     * failure after markSeen permanently loses the batch: Solana has no
+     * polling walker, and a Helius resend would be refused as a replay.
+     *
+     * Bounded: callers pass at most one delivery's signatures. The cached
+     * `bcc_helius_dedupe_size` option drifts high by the deleted count
+     * until the next sweep recomputes it — the same bounded drift the
+     * sweep already absorbs.
+     *
+     * @param list<string> $signatures
+     * @return int|null Rows deleted, or null on DB error (caller must log loudly).
+     */
+    public static function deleteSignatures(array $signatures): ?int
+    {
+        $sigs = array_values(array_unique(array_filter(
+            $signatures,
+            static fn(string $s): bool => $s !== '' && mb_strlen($s) <= 96
+        )));
+        if ($sigs === []) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table        = self::table();
+        $placeholders = implode(',', array_fill(0, count($sigs), '%s'));
+
+        $result = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$table} WHERE signature IN ({$placeholders})",
+            ...$sigs
+        ));
+
+        return is_int($result) ? $result : null;
+    }
+
+    /**
      * Sweep old + overflow rows. Called by `bcc_helius_dedupe_sweep`
      * cron every 5 minutes.
      *
