@@ -657,10 +657,14 @@ class DisputeRepository
         // Atomic dispute limit check: count recent disputes FOR UPDATE to
         // prevent race where two concurrent requests both read count=2.
         $pageId = (int) $disputeData['page_id'];
+        // UTC_TIMESTAMP() (not NOW()): created_at is now written in UTC on
+        // insert (see below), so this 30-day window must compare on the
+        // same clock. NOW() is the MySQL session tz (time_zone=SYSTEM),
+        // which skews the window by the server's UTC offset.
         $recentCount = (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$disputeTable}
              WHERE page_id = %d
-               AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+               AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)
              FOR UPDATE",
             $pageId
         ));
@@ -751,6 +755,13 @@ class DisputeRepository
             }
         }
 
+        // created_at written explicitly in UTC. The column DEFAULT is
+        // CURRENT_TIMESTAMP (MySQL session tz, time_zone=SYSTEM), but every
+        // reader compares it against UTC cutoffs — the 30-day rate window
+        // above, the 7-day auto-resolve TTL (getExpiredDisputes), recent-
+        // activity, and reporter-rate reads. Writing UTC here puts the
+        // column on the one clock they all use. Mirrors
+        // UserReportRepository's created_at handling.
         $wpdb->insert($disputeTable, [
             'vote_id'      => $disputeData['vote_id'],
             'page_id'      => $disputeData['page_id'],
@@ -760,7 +771,8 @@ class DisputeRepository
             'evidence_url' => $disputeData['evidence_url'],
             'status'       => $disputeData['status'],
             'panel_size'   => $disputeData['panel_size'],
-        ], ['%d', '%d', '%d', '%d', '%s', '%s', '%s', '%d']);
+            'created_at'   => gmdate('Y-m-d H:i:s'),
+        ], ['%d', '%d', '%d', '%d', '%s', '%s', '%s', '%d', '%s']);
 
         $dispute_id = $wpdb->insert_id;
 
