@@ -174,46 +174,6 @@ class FraudAnalysisRepository {
     }
     
     /**
-     * Get users with high fraud scores
-     *
-     * @param int $threshold
-     * @param int $limit
-     * @return object[]
-     * @phpstan-return list<FraudAnalysisJoinRow>
-     */
-    public function getHighRiskUsers(int $threshold = BCC_TRUST_FRAUD_HIGH, int $limit = 100): array {
-        global $wpdb;
-        
-        $results = $wpdb->get_results($wpdb->prepare(
-            "SELECT fa.id, fa.user_id, fa.fraud_score, fa.risk_level, fa.confidence, fa.triggers, fa.details, fa.analyzed_at, fa.expires_at, u.display_name, u.user_email,
-                    (SELECT COUNT(*) FROM {$this->table} f2
-                     WHERE f2.user_id = fa.user_id
-                     AND f2.analyzed_at > DATE_SUB(NOW(), INTERVAL 30 DAY)) as recent_analyses
-             FROM {$this->table} fa
-             INNER JOIN (
-                 SELECT user_id, MAX(analyzed_at) as max_analyzed
-                 FROM {$this->table}
-                 WHERE fraud_score >= %d
-                 GROUP BY user_id
-             ) latest ON fa.user_id = latest.user_id AND fa.analyzed_at = latest.max_analyzed
-             LEFT JOIN {$wpdb->users} u ON fa.user_id = u.ID
-             ORDER BY fa.fraud_score DESC
-             LIMIT %d",
-            $threshold,
-            $limit
-        ));
-        
-        // Decode JSON fields
-        foreach ($results as &$row) {
-            $row->triggers = json_decode($row->triggers, true);
-            $row->details = !empty($row->details) ? json_decode($row->details, true) : [];
-            $row->recent_analyses = (int) ($row->recent_analyses ?? 0);
-        }
-        
-        return $results;
-    }
-    
-    /**
      * Delete old analyses using config constant
      * 
      * @return int Number of rows deleted

@@ -23,7 +23,7 @@ if (!defined('ABSPATH')) {
  *   bcc-trust/v1 also accepts the older { success: true, data: ... }
  *   envelope emitted directly via WP_REST_Response by several
  *   trust-era handlers (TrustRestController, XController,
- *   GitHubController, AdminStatsController, UserStatusController).
+ *   GitHubController, UserStatusController).
  *   The frontend's bcc-trust-client.ts isTrustEnvelope() understands
  *   that shape; this wrapper recognizes it in isAlreadyEnveloped()
  *   so the response is not nest-wrapped into
@@ -211,7 +211,7 @@ final class Envelope
         //
         // Predates the canonical { data, _meta } shape. Several handlers
         // (TrustRestController, XController, GitHubController,
-        // AdminStatsController, UserStatusController) historically emit
+        // UserStatusController) historically emit
         // this directly via WP_REST_Response. Recognize so wrap() does
         // not nest-wrap into { data: { success: true, data: ... }, _meta }
         // — which is the live regression this patch fixes (see commit log

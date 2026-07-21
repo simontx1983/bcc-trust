@@ -64,58 +64,14 @@ class TrustRestController {
             'permission_callback' => [self::class, 'permission_check'],
         ]);
 
-        // ======================================================
-        // ADMIN ENDPOINTS (for admin.js)
-        // Delegated to AdminStatsController
-        // ======================================================
-
-        register_rest_route('bcc-trust/v1', '/fraud/stats', [
-            'methods'             => 'GET',
-            'callback'            => [AdminStatsController::class, 'get_fraud_stats'],
-            'permission_callback' => [AdminStatsController::class, 'admin_permission_check']
-        ]);
-
-        register_rest_route('bcc-trust/v1', '/users/high-risk', [
-            'methods'             => 'GET',
-            'callback'            => [AdminStatsController::class, 'get_high_risk_users'],
-            'permission_callback' => [AdminStatsController::class, 'admin_permission_check']
-        ]);
-
-        register_rest_route('bcc-trust/v1', '/activity/fraud', [
-            'methods'             => 'GET',
-            'callback'            => [AdminStatsController::class, 'get_fraud_activity'],
-            'permission_callback' => [AdminStatsController::class, 'admin_permission_check']
-        ]);
-
-        register_rest_route('bcc-trust/v1', '/stats/trust-trend', [
-            'methods'             => 'GET',
-            'callback'            => [AdminStatsController::class, 'get_trust_trend'],
-            'permission_callback' => [AdminStatsController::class, 'admin_permission_check']
-        ]);
-
-        register_rest_route('bcc-trust/v1', '/stats/risk-distribution', [
-            'methods'             => 'GET',
-            'callback'            => [AdminStatsController::class, 'get_risk_distribution'],
-            'permission_callback' => [AdminStatsController::class, 'admin_permission_check']
-        ]);
-
-        register_rest_route('bcc-trust/v1', '/stats/fraud-trend', [
-            'methods'             => 'GET',
-            'callback'            => [AdminStatsController::class, 'get_fraud_trend'],
-            'permission_callback' => [AdminStatsController::class, 'admin_permission_check']
-        ]);
-
-        register_rest_route('bcc-trust/v1', '/stats/devices', [
-            'methods'             => 'GET',
-            'callback'            => [AdminStatsController::class, 'get_device_stats'],
-            'permission_callback' => [AdminStatsController::class, 'admin_permission_check']
-        ]);
-
-        register_rest_route('bcc-trust/v1', '/analyze-user/(?P<id>\d+)', [
-            'methods'             => 'POST',
-            'callback'            => [AdminStatsController::class, 'analyze_user'],
-            'permission_callback' => [AdminStatsController::class, 'admin_permission_check'],
-        ]);
+        // Removed 2026-07-21 (admin-audit dead-endpoint cleanup): the
+        // eight AdminStatsController routes (/fraud/stats,
+        // /users/high-risk, /activity/fraud, /stats/*, /analyze-user).
+        // Their only consumer was admin.js fetch code targeting DOM the
+        // server-rendered Trust Engine dashboard tabs no longer emit —
+        // verified live: zero bcc-trust/v1 XHRs across every cluster/
+        // sub-tab. The fraud surface itself lives on in the wp-admin
+        // tabs (server-side via AdminDashboardRepository).
     }
 
     public static function permission_check(): bool {

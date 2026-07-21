@@ -1016,36 +1016,4 @@ class DeviceFingerprinter {
         return $this->fpRepo->deleteOlderThan($cutoff);
     }
     
-    /**
-     * Get statistics about fingerprints
-     *
-     * @return array<string, mixed>
-     */
-    public static function getStats(): array {
-        $repo = new DeviceFingerprintRepository();
-
-        $total              = $repo->getTotalCount();
-        $uniqueUsers        = $repo->getDistinctUserCount();
-        $uniqueFingerprints = $repo->getDistinctFingerprintCount();
-        $automated          = $repo->countAboveAutomationScore(BCC_TRUST_AUTOMATION_MEDIUM);
-        $highRisk           = $repo->countByRiskLevel('high');
-        $sharedDevices      = $repo->countSharedFingerprints(BCC_TRUST_RING_MIN_SIZE);
-        $multiAccountDevices = $repo->countSharedFingerprints(2);
-
-        return [
-            'total_records'         => $total,
-            'unique_users'          => $uniqueUsers,
-            'unique_fingerprints'   => $uniqueFingerprints,
-            'automated_detected'    => $automated,
-            'high_risk'             => $highRisk,
-            'shared_devices'        => $sharedDevices,
-            'multi_account_devices' => $multiAccountDevices,
-            'sharing_ratio'         => $uniqueUsers > 0 ? round($sharedDevices / $uniqueUsers * 100, 2) . '%' : '0%',
-            'thresholds'            => [
-                'automation_high'   => BCC_TRUST_AUTOMATION_HIGH,
-                'automation_medium' => BCC_TRUST_AUTOMATION_MEDIUM,
-                'ring_min_size'     => BCC_TRUST_RING_MIN_SIZE,
-            ],
-        ];
-    }
 }

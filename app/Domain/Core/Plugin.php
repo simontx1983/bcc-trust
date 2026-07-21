@@ -10,7 +10,6 @@ use BCC\Trust\Core\Controllers\GitHubController;
 use BCC\Trust\Core\Controllers\TrustRestController;
 use BCC\Trust\Core\Controllers\UserStatusController;
 use BCC\Trust\Core\Controllers\XController;
-use BCC\Trust\Core\Controllers\AdminStatsController;
 use BCC\Trust\Core\Repositories\EdgeRepository;
 use BCC\Trust\Core\Repositories\FraudAnalysisRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
@@ -1142,8 +1141,7 @@ final class Plugin
         // ────────────────────────────────────────────────────────────────
 
         // Core trust routes — TrustRestController registers all routes
-        // including those that delegate to UserStatusController and
-        // AdminStatsController.
+        // including those that delegate to UserStatusController.
         TrustRestController::register_routes();
 
         // GitHub OAuth + verification

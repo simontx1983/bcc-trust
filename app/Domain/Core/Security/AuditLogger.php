@@ -151,24 +151,6 @@ class AuditLogger {
     }
 
     /**
-     * Get suspicious activity
-     *
-     * @return object[]
-     * @phpstan-return list<object{
-     *   id: int|numeric-string,
-     *   user_id: int|numeric-string,
-     *   action: string,
-     *   target_type: string,
-     *   target_id: int|numeric-string,
-     *   ip_address: string|null,
-     *   created_at: string
-     * }>
-     */
-    public static function getSuspiciousActivity(int $hours = 24, int $limit = 100): array {
-        return self::getRepo()->getSuspiciousActivity($hours, $limit);
-    }
-
-    /**
      * Spoof-proof IP detection.
      *
      * Delegates to IpResolver which:

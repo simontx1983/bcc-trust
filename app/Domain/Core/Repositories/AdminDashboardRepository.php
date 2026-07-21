@@ -703,49 +703,6 @@ class AdminDashboardRepository
         ];
     }
 
-    /**
-     * Get daily average trust score trend for the last N days.
-     *
-     * @return list<object>
-     * @phpstan-return list<object{date: string, avg_score: float|numeric-string|null}>
-     */
-    public function getTrustTrend(int $days = 30): array
-    {
-        global $wpdb;
-        $table = TableRegistry::scores();
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT DATE(last_calculated_at) as date, AVG(total_score) as avg_score
-             FROM {$table}
-             WHERE last_calculated_at > DATE_SUB(NOW(), INTERVAL %d DAY)
-             GROUP BY DATE(last_calculated_at)
-             ORDER BY date ASC",
-            $days
-        )) ?: [];
-    }
-
-    /**
-     * Get daily fraud/suspicious activity count trend for the last N days.
-     *
-     * @return list<object>
-     * @phpstan-return list<object{date: string, count: int|numeric-string}>
-     */
-    public function getFraudTrend(int $days = 30): array
-    {
-        global $wpdb;
-        $table = TableRegistry::activity();
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT DATE(created_at) as date, COUNT(*) as count
-             FROM {$table}
-             WHERE (action LIKE 'fraud%%' OR action LIKE 'suspicious%%' OR action LIKE 'flag%%')
-               AND created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
-             GROUP BY DATE(created_at)
-             ORDER BY date ASC",
-            $days
-        )) ?: [];
-    }
-
     // ─────────────────────────────────────────────────────────────
     // Moderation — Single User Detail (moderation-user.php)
     // ─────────────────────────────────────────────────────────────
