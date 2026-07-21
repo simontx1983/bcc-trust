@@ -12,9 +12,24 @@
  *   user_meta    array<int,array> get_user_meta($uid, $key, true) map
  *   bypass_args  list<bool>       records $allowAdminBypass per gate call
  *   repo_reached bool             set when GatedGroupRepository is queried
+ *   throttled    bool             true → Throttle::allow() returns false (429)
+ *   throttle_calls list<array{string,int,int}> records [key, limit, window]
  */
 
 declare(strict_types=1);
+
+namespace BCC\Core\Security {
+    if (!class_exists(Throttle::class, false)) {
+        class Throttle
+        {
+            public static function allow(string $key, int $limit, int $window, ?string $bucketKey = null): bool
+            {
+                $GLOBALS['__bcc_susp_fixture']['throttle_calls'][] = [$key, $limit, $window];
+                return empty($GLOBALS['__bcc_susp_fixture']['throttled']);
+            }
+        }
+    }
+}
 
 namespace BCC\Core\Permissions {
     if (!class_exists(Permissions::class, false)) {

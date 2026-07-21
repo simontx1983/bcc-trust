@@ -48,10 +48,12 @@ final class SuspensionGateParityTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/../Stubs/suspension-gate-stubs.php';
         $GLOBALS['__bcc_susp_fixture'] = [
-            'user_id'     => 7,
-            'suspended'   => true,
-            'user_meta'   => [],
-            'bypass_args' => [],
+            'user_id'        => 7,
+            'suspended'      => true,
+            'user_meta'      => [],
+            'bypass_args'    => [],
+            'throttled'      => false,
+            'throttle_calls' => [],
         ];
     }
 
@@ -92,6 +94,66 @@ final class SuspensionGateParityTest extends TestCase
     {
         $response = self::endpoint(MyGroupsEndpoint::class)->postCreate(new \WP_REST_Request());
         self::assertSuspendedRejection($response);
+    }
+
+    // ── Throttle-before-credentials ordering ────────────────────────────
+    //
+    // The rate limiter must run BEFORE the suspension gate: with BOTH
+    // throttled and suspended, the response must be 429 (throttle won) and
+    // the suspension permission read must never have been reached.
+
+    private static function assertThrottledBeforeSuspension(\WP_REST_Response $response): void
+    {
+        self::assertSame(429, $response->get_status());
+        $data = $response->get_data();
+        self::assertIsArray($data);
+        self::assertSame('bcc_rate_limited', $data['error']['code'] ?? null);
+        // Throttle evaluated first…
+        self::assertNotSame([], $GLOBALS['__bcc_susp_fixture']['throttle_calls']);
+        // …and the suspension gate was never reached.
+        self::assertSame([], $GLOBALS['__bcc_susp_fixture']['bypass_args']);
+    }
+
+    public function testLocalsJoinThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        $response = self::endpoint(LocalsEndpoint::class)->join(new \WP_REST_Request());
+        self::assertThrottledBeforeSuspension($response);
+    }
+
+    public function testHolderGroupJoinThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        $response = self::endpoint(HolderGroupsEndpoint::class)->postJoin(new \WP_REST_Request());
+        self::assertThrottledBeforeSuspension($response);
+    }
+
+    public function testGroupJoinThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        $response = self::endpoint(MyGroupsEndpoint::class)->postJoin(new \WP_REST_Request());
+        self::assertThrottledBeforeSuspension($response);
+    }
+
+    public function testGroupCreateThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        $response = self::endpoint(MyGroupsEndpoint::class)->postCreate(new \WP_REST_Request());
+        self::assertThrottledBeforeSuspension($response);
+    }
+
+    public function testHolderGroupListThrottledBeforeRepositoryRead(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled']   = true;
+        $GLOBALS['__bcc_susp_fixture']['suspended']   = false;
+        $response = self::endpoint(HolderGroupsEndpoint::class)->getList(new \WP_REST_Request());
+
+        self::assertSame(429, $response->get_status());
+        $data = $response->get_data();
+        self::assertIsArray($data);
+        self::assertSame('bcc_rate_limited', $data['error']['code'] ?? null);
+        // The gated-group repository must never be reached under throttle.
+        self::assertArrayNotHasKey('repo_reached', $GLOBALS['__bcc_susp_fixture']);
     }
 
     public function testReconcileSkipsSuspendedUserBeforeAnyRepositoryRead(): void

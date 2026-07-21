@@ -126,6 +126,14 @@ final class HolderGroupsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Per-viewer throttle: this read fans out to per-config chain
+        // lookups plus a batched holdings RPC (HoldingsService::ownsAnyMany),
+        // so a hostile refresh loop must not get to hammer the provider
+        // path. Same posture and bucket as CollectionStancesEndpoint::getPanel.
+        if (!\BCC\Core\Security\Throttle::allow('holder_groups_list:' . $userId, 20, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
         $configs = GatedGroupRepository::listAllGatedGroupConfigs();
         if ($configs === []) {
             $response = ApiResponse::ok([
@@ -235,6 +243,18 @@ final class HolderGroupsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Rate-limit FIRST (throttle-before-credentials rule): the cheap
+        // fail-closed counter must reject floods before the suspension
+        // gate's permission read runs, or an authed flood pays a DB-backed
+        // suspension lookup per request. The gate service already does
+        // eligibility / opt-out / chain / balance checks, but each call
+        // touches the holdings RPC — so unbounded retry by a buggy client
+        // amplifies upstream load. Per-user bucket prevents one viewer from
+        // flooding without affecting others.
+        if (!\BCC\Core\Security\Throttle::allow('holder_group_join:' . $userId, 10, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
         // Suspended accounts must not walk back into a community — holding
         // the NFT is the eligibility gate, not an override of moderation.
         // The join lands members via the trusted PeepSoGroupWriter door
@@ -245,15 +265,6 @@ final class HolderGroupsEndpoint
         // MyGroupsEndpoint::postJoin [audit M — group-rejoin].
         if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
             return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
-        }
-
-        // Rate-limit the trusted-backend join door. The gate service already
-        // does eligibility / opt-out / chain / balance checks, but each call
-        // touches the holdings RPC — so unbounded retry by a buggy client
-        // amplifies upstream load. Per-user bucket prevents one viewer from
-        // flooding without affecting others.
-        if (!\BCC\Core\Security\Throttle::allow('holder_group_join:' . $userId, 10, 60)) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $groupId = (int) $request->get_param('id');
