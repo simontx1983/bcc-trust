@@ -106,6 +106,17 @@ final class MyNotificationPrefsEndpoint
         $partial = self::buildPartial($request);
 
         if ($partial === []) {
+            // Rollout compatibility: a body that addressed prefs but only
+            // carried retired/unknown keys (e.g. an older frontend build
+            // toggling the retired `bcc_endorse` row against this backend)
+            // is a harmless no-op, not an error — return current prefs so
+            // the client's read-back stays consistent. 422 is reserved for
+            // bodies that carried no pref fields at all.
+            if (self::addressedPrefFields($request)) {
+                $resp = ApiResponse::ok(NotificationPrefs::readAll($userId));
+                $resp->header('Cache-Control', 'no-store');
+                return $resp;
+            }
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'No notification keys provided.',
@@ -131,6 +142,20 @@ final class MyNotificationPrefsEndpoint
         $resp = ApiResponse::ok(NotificationPrefs::readAll($userId));
         $resp->header('Cache-Control', 'no-store');
         return $resp;
+    }
+
+    /**
+     * True when the PATCH body contained any of the pref containers at
+     * all (`email_digest`, a `bell` object, a `push` object) — even if
+     * every key inside them was unknown/retired. Distinguishes "client
+     * tried to set prefs we no longer have" (no-op 200) from "client
+     * sent no pref fields" (422).
+     */
+    private static function addressedPrefFields(WP_REST_Request $request): bool
+    {
+        return $request->get_param('email_digest') !== null
+            || is_array($request->get_param('bell'))
+            || is_array($request->get_param('push'));
     }
 
     /**

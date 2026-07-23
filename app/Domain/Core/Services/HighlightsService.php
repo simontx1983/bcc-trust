@@ -634,8 +634,8 @@ final class HighlightsService
             $body     = 'Panel duty closed. The outcome is on the record.';
         } elseif ($eventType === 'endorsement_added') {
             $category = 'watched_endorsement';
-            $title    = sprintf('%s received an endorsement.', $pageTitle);
-            $body     = 'Someone vested their reputation on this work.';
+            $title    = sprintf('%s received a vouch.', $pageTitle);
+            $body     = 'Someone put their name behind this work.';
         } elseif ($eventType === 'vote_cast' && $delta !== null && abs($delta) >= 0.05) {
             if ($delta > 0) {
                 $category = 'watched_score_up';

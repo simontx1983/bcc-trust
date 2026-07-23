@@ -186,10 +186,14 @@ final class ScoreMutationLogger
                 return $actorId
                     ? sprintf('Vote by user #%d', $actorId)
                     : 'Vote change';
+            // `reason` is member-facing: it surfaces verbatim in
+            // progression.trust_score_recent_changes (§N11) via
+            // UserViewService. Vouch vocabulary per the v1.50
+            // endorse→vouch display convergence.
             case 'endorsement_added':
-                return sprintf('Endorsement by user #%d', $actorId);
+                return sprintf('Vouch by user #%d', $actorId);
             case 'endorsement_removed':
-                return sprintf('Endorsement revoked by user #%d', $actorId);
+                return sprintf('Vouch revoked by user #%d', $actorId);
             case 'recalculation':
                 return 'Periodic score recalculation';
             default:

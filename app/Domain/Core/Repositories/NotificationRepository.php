@@ -106,6 +106,12 @@ final class NotificationRepository
      * not_read) covering index would be ideal but we don't own this
      * table's schema. Bounded by the user's notification volume,
      * which is small in practice.
+     *
+     * Scoped to `not_type IN (NotificationType::ALL)`: rows of retired
+     * types (`bcc_card_pulled`, `bcc_endorse`, …) are dropped by the
+     * read-side validation in NotificationViewService::shapeRow, so
+     * counting them here would show a badge for rows the list never
+     * renders — a phantom-unread badge the user can't clear row-by-row.
      */
     public function countUnreadForUser(int $userId): int
     {
@@ -115,12 +121,16 @@ final class NotificationRepository
         global $wpdb;
         $table = $this->table();
 
+        $types        = \BCC\Trust\Core\Support\NotificationType::ALL;
+        $placeholders = implode(',', array_fill(0, count($types), '%s'));
+
         $sql = "SELECT COUNT(*) FROM `{$table}`"
             . " WHERE `not_user_id` = %d"
             . " AND `not_module_id` = %d"
-            . " AND `not_read` = 0";
+            . " AND `not_read` = 0"
+            . " AND `not_type` IN ({$placeholders})";
         $count = $wpdb->get_var(
-            $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID)
+            $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, ...$types)
         );
         return $count !== null ? (int) $count : 0;
     }
@@ -201,17 +211,23 @@ final class NotificationRepository
         global $wpdb;
         $table = $this->table();
 
+        // Same valid-type scope as countUnreadForUser — the digest must
+        // not resurrect rows of retired types the bell list won't show.
+        $types        = \BCC\Trust\Core\Support\NotificationType::ALL;
+        $placeholders = implode(',', array_fill(0, count($types), '%s'));
+
         $sql = "SELECT " . self::COLUMNS . " FROM `{$table}`"
             . " WHERE `not_user_id` = %d"
             . " AND `not_module_id` = %d"
             . " AND `not_read` = 0"
+            . " AND `not_type` IN ({$placeholders})"
             . " AND `not_timestamp` >= %s"
             . " ORDER BY `not_timestamp` ASC"
             . " LIMIT %d";
 
         /** @var list<object>|null $rows */
         $rows = $wpdb->get_results(
-            $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, $sinceMysql, $limit)
+            $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, ...array_merge($types, [$sinceMysql, $limit]))
         );
         return is_array($rows) ? $rows : [];
     }
