@@ -60,6 +60,7 @@ namespace BCC\Trust\Core\Support;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
@@ -127,6 +128,7 @@ final class MemberCardPrefetcher
             $map['dispute_active_counts']      = [];
             $map['attestation_active_counts']  = [];
             $map['attestation_revoked_counts'] = [];
+            $map['viewer_votes']               = [];
         } else {
             $selfPageIds = [];
             foreach ($idList as $userId) {
@@ -135,6 +137,14 @@ final class MemberCardPrefetcher
             $map['dispute_active_counts']      = DisputeRepository::countActiveDisputesForPages($selfPageIds);
             $map['attestation_active_counts']  = $attestationRepo->countActiveByTargets('user_profile', $idList);
             $map['attestation_revoked_counts'] = $attestationRepo->countRevokedByTargets('user_profile', $idList);
+            // v1.49 viewer_has_reviewed batch — one bounded IN() over
+            // the page's self-page ids. Same map key + keying the
+            // page-card path reads (viewer_votes[pageId] => true), so
+            // CardViewService's member branch consumes it verbatim.
+            // Empty for anon viewers (read side short-circuits false).
+            $map['viewer_votes'] = $viewerId > 0
+                ? (new VoteRepository())->getVotedPageIdsForVoter($viewerId, $selfPageIds)
+                : [];
         }
 
         return $map;

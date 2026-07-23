@@ -437,7 +437,14 @@ final class MemberProfileComposer
             'flags'               => isset($base['flags']) && is_array($base['flags']) ? $base['flags'] : [],
             'is_claimed'          => true,
             'claim_target'        => null,
+            // Degraded-path placeholder: no viewer id reaches this
+            // builder, so viewer_has_reviewed stays honestly false and
+            // permissions stay card_unavailable. review_target_id is
+            // viewer-independent (deterministic self-page id), so it IS
+            // real here — the remove affordance keeps working even when
+            // the live card resolver fails.
             'viewer_has_reviewed' => false,
+            'review_target_id'    => MemberSelfPageService::selfPageId($userId),
             'crest'               => [
                 'initials'         => self::initials($name),
                 'monogram_color'   => '#1a0f3e',
@@ -882,7 +889,12 @@ final class MemberProfileComposer
 
         return [
             ['key' => 'watching', 'label' => 'Watching', 'count' => (int) ($counts['watching_size'] ?? 0), 'hidden' => $watchHidden],
-            ['key' => 'reviews',  'label' => 'Reviews',  'count' => (int) ($counts['reviews_written'] ?? 0),  'hidden' => $hideFor('reviews_hidden')],
+            // v1.49 tab split: `reviews` = reviews RECEIVED (matches
+            // the tab's content since the v1.48 received/written split;
+            // public, so never privacy-hidden), `written` = authored
+            // (still governed by reviews_hidden).
+            ['key' => 'reviews',  'label' => 'Reviews',  'count' => (int) ($counts['reviews_received'] ?? 0), 'hidden' => false],
+            ['key' => 'written',  'label' => 'Written',  'count' => (int) ($counts['reviews_written'] ?? 0),  'hidden' => $hideFor('reviews_hidden')],
             ['key' => 'activity', 'label' => 'Activity', 'count' => 0,                                         'hidden' => false],
             ['key' => 'disputes', 'label' => 'Disputes', 'count' => (int) ($counts['disputes_signed'] ?? 0),  'hidden' => $hideFor('disputes_hidden')],
             ['key' => 'network',  'label' => 'Network',  'count' => (int) ($counts['following'] ?? 0),        'hidden' => $hideFor('delegations_hidden')],

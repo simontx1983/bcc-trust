@@ -587,6 +587,19 @@ final class CardViewService
             }
         }
 
+        // Member reviews are votes on the deterministic self-page.
+        // Same prefetch-or-single split as the page-card path (the
+        // MemberCardPrefetcher viewer_votes map is keyed by self-page
+        // id, matching PageCardPrefetcher's page-id keying).
+        $selfPageId = MemberSelfPageService::selfPageId($userId);
+        if ($viewerId <= 0) {
+            $viewerHasReviewed = false;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_votes'])) {
+            $viewerHasReviewed = isset($prefetched['viewer_votes'][$selfPageId]);
+        } else {
+            $viewerHasReviewed = $this->voteService->hasUserVotedPage($selfPageId, $viewerId);
+        }
+
         return [
             'id'                  => $userId,
             'name'                => $user->display_name !== '' ? $user->display_name : $user->user_login,
@@ -610,6 +623,15 @@ final class CardViewService
             // target page cards only.
             'viewer_has_endorsed' => false,
             'endorse_unlock_hint' => null,
+            // v1.49 — REAL on member cards now (was undeclared/false):
+            // has the viewer reviewed this member (vote on the
+            // self-page)? Drives the REMOVE-YOUR-REVIEW branch.
+            'viewer_has_reviewed' => $viewerHasReviewed,
+            // v1.49 — the self-page id member reviews live on. This is
+            // the id the FE passes to DELETE /me/reviews/:id; the FE
+            // must never derive ID_BASE itself (§L5). The WRITE path
+            // keeps target_kind=user_profile + target_user_id.
+            'review_target_id'    => $selfPageId,
             // §J.6 viewer_attestation — present on member cards now
             // that attestations land on user_profile target_kind per
             // §J.1. Anon viewers get null per the §4.20 contract.
