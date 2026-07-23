@@ -84,7 +84,7 @@ class EndorsementService {
      */
     public function getEndorseEligibility(int $viewerId, int $pageId): array {
         if ($viewerId <= 0) {
-            return ['allowed' => false, 'unlock_hint' => 'Sign in to endorse.', 'reason_code' => 'auth_required'];
+            return ['allowed' => false, 'unlock_hint' => 'Sign in to vouch.', 'reason_code' => 'auth_required'];
         }
 
         // Self-endorse blocked except in BCC_TRUST_TEST_MODE.
@@ -92,7 +92,7 @@ class EndorsementService {
         if (!$testMode) {
             $pageOwnerId = PeepSoPageResolver::getOwnerId($pageId);
             if ($pageOwnerId === $viewerId) {
-                return ['allowed' => false, 'unlock_hint' => "You can't endorse your own page.", 'reason_code' => 'self_action_blocked'];
+                return ['allowed' => false, 'unlock_hint' => "You can't vouch for your own page.", 'reason_code' => 'self_action_blocked'];
             }
         }
 
@@ -132,7 +132,7 @@ class EndorsementService {
         if (!$canVouch['allowed']) {
             return [
                 'allowed' => false,
-                'unlock_hint' => 'Reach Neutral standing to endorse.',
+                'unlock_hint' => 'Reach Neutral standing to vouch.',
                 'reason_code' => 'tier_too_low',
             ];
         }
@@ -193,7 +193,7 @@ class EndorsementService {
                 if ($ownerId === $viewerId) {
                     $out[$pageId] = [
                         'allowed' => false,
-                        'unlock_hint' => "You can't endorse your own page.",
+                        'unlock_hint' => "You can't vouch for your own page.",
                         'reason_code' => 'self_action_blocked',
                     ];
                     continue;

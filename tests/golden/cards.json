@@ -27,7 +27,7 @@
         "monogram_color": "#1a0f3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "coinbase01-cosmos-wvh5ne",
@@ -138,7 +138,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -176,7 +176,7 @@
         "monogram_color": "#1a0f3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "blacksmith-node",
@@ -277,7 +277,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -315,7 +315,7 @@
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "foundry",
@@ -416,7 +416,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -454,7 +454,7 @@
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "welder-studio",
@@ -555,7 +555,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -597,7 +597,7 @@
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "upbit-staking-cosmos-wdgw30",
@@ -708,7 +708,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -750,7 +750,7 @@
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "kiln-cosmos-mkeqee",
@@ -861,7 +861,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -903,7 +903,7 @@
         "monogram_color": "#0f3e2a"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "cosmostation-cosmos-sluffn",
@@ -1014,7 +1014,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -1056,7 +1056,7 @@
         "monogram_color": "#0f3e2a"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "kraken01-cosmos-e0meuw",
@@ -1167,7 +1167,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -1209,7 +1209,7 @@
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "everstake-cosmos-6eete3",
@@ -1320,7 +1320,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -1362,7 +1362,7 @@
         "monogram_color": "#3e1a0f"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "ledger-by-chorus-one-cosmos-rucvtm",
@@ -1473,7 +1473,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -1515,7 +1515,7 @@
         "monogram_color": "#0f3e2a"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "dokiacapital-cosmos-ju5zzy",
@@ -1626,7 +1626,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -1668,7 +1668,7 @@
         "monogram_color": "#3e0f1a"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "binance-node-cosmos-rh7w5s",
@@ -1779,7 +1779,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -1821,7 +1821,7 @@
         "monogram_color": "#1a0f3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "blockdaemon-cosmos-5mpakx",
@@ -1932,7 +1932,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -1974,7 +1974,7 @@
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "allnodes-cosmos-3vp77d",
@@ -2085,7 +2085,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -2127,7 +2127,7 @@
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "figment-cosmos-dn6m9d",
@@ -2238,7 +2238,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -2280,7 +2280,7 @@
         "monogram_color": "#1a0f3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "sg-1-cosmos-vrj90c",
@@ -2391,7 +2391,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -2433,7 +2433,7 @@
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "bitwise-onchain-solutions-cosmos-e02707",
@@ -2544,7 +2544,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -2586,7 +2586,7 @@
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "cloudbyte-cosmos-yh8m5v",
@@ -2697,7 +2697,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -2739,7 +2739,7 @@
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "%f0%9f%90%a0stake-fish-cosmos-2lcnj0",
@@ -2850,7 +2850,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -2892,7 +2892,7 @@
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "informal-systems-cosmos-lu9qdv",
@@ -3003,7 +3003,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -3045,7 +3045,7 @@
         "monogram_color": "#0f3e2a"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "nansen-stake-to-stack-points-cosmos-num5xr",
@@ -3156,7 +3156,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -3198,7 +3198,7 @@
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "p2p-org-cosmos-734g4w",
@@ -3309,7 +3309,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -3351,7 +3351,7 @@
         "monogram_color": "#3e0f1a"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "game-cosmos-gfnp42",
@@ -3462,7 +3462,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }
@@ -3504,7 +3504,7 @@
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
-      "endorse_unlock_hint": "Sign in to endorse.",
+      "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
       "foreman_insignia": false,
       "handle": "keplr-cosmos-fp9md2",
@@ -3615,7 +3615,7 @@
         {
           "format": "count",
           "key": "endorsements",
-          "label": "Endorsements",
+          "label": "Vouches",
           "raw": 0,
           "value": "0"
         }

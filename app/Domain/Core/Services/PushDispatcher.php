@@ -303,7 +303,6 @@ final class PushDispatcher
     {
         return match ($eventType) {
             'review'                              => PushPayload::forReview($count, $first),
-            'endorse'                             => PushPayload::forEndorse($count, $first),
             'dispute_outcome'                     => PushPayload::forDisputeOutcome($count, $first),
             'panelist_selected'                   => PushPayload::forPanelistSelected($count, $first),
             'mention'                             => PushPayload::forMention($count, $first),

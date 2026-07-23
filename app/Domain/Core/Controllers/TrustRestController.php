@@ -119,7 +119,7 @@ class TrustRestController {
             $context = $request->get_param('context') ?? 'general';
             $allowedContexts = ['general'];
             if (!in_array($context, $allowedContexts, true)) {
-                return self::errorWithCode('bcc_invalid_request', 'Invalid endorsement context.', 400);
+                return self::errorWithCode('bcc_invalid_request', 'Invalid vouch context.', 400);
             }
             $reasonRaw = $request->get_param('reason');
             $reason    = is_string($reasonRaw) ? $reasonRaw : null;
@@ -133,7 +133,7 @@ class TrustRestController {
             // non-entity pages (member self-pages, unrecognized types).
             $targetKind = \BCC\Trust\Core\Services\AttestationService::targetKindForPage($pageId);
             if ($targetKind === null) {
-                return self::errorWithCode('bcc_invalid_request', 'This page cannot be endorsed.', 400);
+                return self::errorWithCode('bcc_invalid_request', 'This page cannot be vouched for.', 400);
             }
 
             $plugin = \BCC\Trust\Core\Plugin::instance();
@@ -197,7 +197,7 @@ class TrustRestController {
 
             $targetKind = \BCC\Trust\Core\Services\AttestationService::targetKindForPage($pageId);
             if ($targetKind === null) {
-                return self::errorWithCode('bcc_invalid_request', 'This page cannot be endorsed.', 400);
+                return self::errorWithCode('bcc_invalid_request', 'This page cannot be vouched for.', 400);
             }
 
             $plugin = \BCC\Trust\Core\Plugin::instance();
