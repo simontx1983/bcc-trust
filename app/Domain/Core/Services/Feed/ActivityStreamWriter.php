@@ -90,8 +90,17 @@ final class ActivityStreamWriter
         string $moduleId,
         int $sidecarId
     ): int {
+        // post_type = PeepSo's canonical CPT slug `peepso-post` (11
+        // chars). wp_posts.post_type is varchar(20); the fabricated
+        // `peepso-activity-status` (22 chars) this helper originally
+        // used fails WP 6.7+'s strict length validation, so EVERY
+        // review/watch_batch/page_claim backing post silently failed
+        // (db_insert_error → return 0 → no feed row). Same fix as
+        // PeepSoStatusWriter::createSelfBlogPost — module
+        // discrimination lives in the META_MODULE post_meta, not the
+        // post_type.
         $postId = wp_insert_post([
-            'post_type'    => 'peepso-activity-status',
+            'post_type'    => 'peepso-post',
             'post_status'  => 'publish',
             'post_author'  => $authorId,
             'post_title'   => sprintf('%s-%d-%d', $moduleId, $authorId, $sidecarId),
@@ -327,7 +336,7 @@ final class ActivityStreamWriter
     /**
      * Subscriber for bcc_blog_post_created (§D6).
      *
-     * The wp_post (post_type=peepso-activity-status) was written by
+     * The wp_post (post_type=peepso-post) was written by
      * PeepSoStatusWriter::createSelfBlogPost — post_excerpt holds the
      * Floor teaser, post_content holds the full body. This subscriber
      * adds the peepso_activities row that surfaces it in feeds.
