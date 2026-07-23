@@ -379,6 +379,19 @@ final class PasswordAuthController
         // The password was already verified above; this skips only the
         // second factor, returning the same JWT payload as /auth/2fa/verify.
         // To yank the feature entirely, delete this block + its helper.
+        //
+        // Belt-and-suspenders: the env-type check below already refuses the
+        // bypass on production, but if the allowlist constant is somehow
+        // defined on a prod box (e.g. a staging wp-config copied to prod),
+        // surface that misconfiguration loudly so an operator removes it —
+        // don't let a fail-safe default hide a config that shouldn't exist.
+        if (defined('BCC_2FA_BYPASS_ACCOUNTS') && wp_get_environment_type() === 'production') {
+            Logger::warning(
+                '[PasswordAuthController] BCC_2FA_BYPASS_ACCOUNTS is defined on a PRODUCTION environment — the 2FA bypass is refused, but remove the constant from wp-config on prod.',
+                ['user_id' => $userId]
+            );
+        }
+
         if (
             wp_get_environment_type() !== 'production'
             && defined('BCC_2FA_BYPASS_ACCOUNTS')
