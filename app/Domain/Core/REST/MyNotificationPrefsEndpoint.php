@@ -106,13 +106,15 @@ final class MyNotificationPrefsEndpoint
         $partial = self::buildPartial($request);
 
         if ($partial === []) {
-            // Rollout compatibility: a body that addressed prefs but only
-            // carried retired/unknown keys (e.g. an older frontend build
+            // Rollout compatibility: a body whose pref keys are ALL on the
+            // explicit retired-key allowlist (an older frontend build
             // toggling the retired `bcc_endorse` row against this backend)
             // is a harmless no-op, not an error — return current prefs so
-            // the client's read-back stays consistent. 422 is reserved for
-            // bodies that carried no pref fields at all.
-            if (self::addressedPrefFields($request)) {
+            // the client's read-back stays consistent. Anything else that
+            // yielded an empty partial (no pref fields at all, misspelled
+            // or arbitrary unknown keys) stays a 422 so client bugs remain
+            // visible instead of silently "succeeding".
+            if (self::onlyRetiredKeysSubmitted($request)) {
                 $resp = ApiResponse::ok(NotificationPrefs::readAll($userId));
                 $resp->header('Cache-Control', 'no-store');
                 return $resp;
@@ -145,17 +147,60 @@ final class MyNotificationPrefsEndpoint
     }
 
     /**
-     * True when the PATCH body contained any of the pref containers at
-     * all (`email_digest`, a `bell` object, a `push` object) — even if
-     * every key inside them was unknown/retired. Distinguishes "client
-     * tried to set prefs we no longer have" (no-op 200) from "client
-     * sent no pref fields" (422).
+     * Pref keys retired by the v1.50 endorse convergence that an older
+     * frontend build may still submit. The no-op-200 compatibility path
+     * below accepts EXACTLY these — nothing else.
      */
-    private static function addressedPrefFields(WP_REST_Request $request): bool
+    private const RETIRED_BELL_KEYS       = ['bcc_endorse'];
+    private const RETIRED_PUSH_EVENT_KEYS = ['endorse'];
+
+    /**
+     * Only called on the empty-partial path (buildPartial recognized
+     * nothing), so every key found here is by definition unrecognized.
+     * Returns true when at least one key was submitted AND every
+     * submitted key is on the explicit retired-key allowlist. A
+     * misspelled live key (`bcc_reviw`), arbitrary garbage, or an
+     * unknown `push` field therefore still 422s.
+     */
+    private static function onlyRetiredKeysSubmitted(WP_REST_Request $request): bool
     {
-        return $request->get_param('email_digest') !== null
-            || is_array($request->get_param('bell'))
-            || is_array($request->get_param('push'));
+        $submitted = 0;
+        $retired   = 0;
+
+        $bellRaw = $request->get_param('bell');
+        if (is_array($bellRaw)) {
+            foreach (array_keys($bellRaw) as $key) {
+                $submitted++;
+                if (in_array((string) $key, self::RETIRED_BELL_KEYS, true)) {
+                    $retired++;
+                }
+            }
+        }
+
+        $pushRaw = $request->get_param('push');
+        if (is_array($pushRaw)) {
+            foreach (array_keys($pushRaw) as $key) {
+                if ($key === 'enabled') {
+                    continue; // recognized key — can't occur on this path
+                }
+                if ($key === 'events') {
+                    if (is_array($pushRaw['events'])) {
+                        foreach (array_keys($pushRaw['events']) as $eventKey) {
+                            $submitted++;
+                            if (in_array((string) $eventKey, self::RETIRED_PUSH_EVENT_KEYS, true)) {
+                                $retired++;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // Unknown top-level push field — counts as submitted,
+                // never as retired.
+                $submitted++;
+            }
+        }
+
+        return $submitted > 0 && $submitted === $retired;
     }
 
     /**

@@ -62,6 +62,15 @@ final class NotificationRepository
      * exclusive (the row matching $beforeId is NOT included; pass 0
      * to start from the top).
      *
+     * Scoped to `not_type IN (NotificationType::ALL)` at the SQL
+     * boundary — BEFORE LIMIT — so rows of retired types
+     * (`bcc_card_pulled`, `bcc_endorse`, …) can't consume page slots.
+     * Post-query filtering alone (shapeRow → null) produced short
+     * pages, and a page whose raw rows were ALL retired returned
+     * `items: []` with `has_more: true` but a null cursor — a
+     * pagination dead-end hiding every older valid row. shapeRow's
+     * validation stays as defense-in-depth for corrupt rows.
+     *
      * @return list<object>
      */
     public function findForUser(int $userId, int $limit, int $beforeId): array
@@ -74,26 +83,31 @@ final class NotificationRepository
         global $wpdb;
         $table = $this->table();
 
+        $types        = \BCC\Trust\Core\Support\NotificationType::ALL;
+        $placeholders = implode(',', array_fill(0, count($types), '%s'));
+
         if ($beforeId > 0) {
             $sql = "SELECT " . self::COLUMNS . " FROM `{$table}`"
                 . " WHERE `not_user_id` = %d"
                 . " AND `not_module_id` = %d"
                 . " AND `not_id` < %d"
+                . " AND `not_type` IN ({$placeholders})"
                 . " ORDER BY `not_id` DESC"
                 . " LIMIT %d";
             /** @var list<object>|null $rows */
             $rows = $wpdb->get_results(
-                $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, $beforeId, $limit)
+                $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, $beforeId, ...array_merge($types, [$limit]))
             );
         } else {
             $sql = "SELECT " . self::COLUMNS . " FROM `{$table}`"
                 . " WHERE `not_user_id` = %d"
                 . " AND `not_module_id` = %d"
+                . " AND `not_type` IN ({$placeholders})"
                 . " ORDER BY `not_id` DESC"
                 . " LIMIT %d";
             /** @var list<object>|null $rows */
             $rows = $wpdb->get_results(
-                $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, $limit)
+                $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, ...array_merge($types, [$limit]))
             );
         }
 

@@ -13,14 +13,16 @@ use PHPUnit\Framework\TestCase;
  * Regression net for retired bell types (v1.50 endorse retirement; same
  * class as the pull→watch rename's `bcc_card_pulled` leftovers).
  *
- * The bell list drops rows whose not_type is no longer in
- * NotificationType::ALL (NotificationViewService::shapeRow → null), so
- * the unread COUNT and the digest read must apply the same scope — or a
- * historical row of a retired type becomes a phantom: the badge says 1,
- * the list shows nothing, and the row can't be cleared row-by-row.
- * Seeds real rows and proves both scoped readers skip retired types
- * while findForUser (the raw feed the view service filters itself)
- * still returns them unchanged.
+ * All three readers are scoped to `not_type IN (NotificationType::ALL)`
+ * at the SQL boundary. Post-query filtering alone (shapeRow → null)
+ * was not enough on the LIST path: rows of retired types consumed
+ * LIMIT slots before the filter ran, producing short pages — and a
+ * page whose raw rows were ALL retired returned `items: []` with
+ * `has_more: true` but a null cursor, a pagination dead-end that hid
+ * every older valid notification. On the COUNT path they inflated the
+ * badge for rows the list never renders. Seeds real rows, interleaved
+ * and read/unread, and proves pages stay full, cursors advance, and
+ * counts match what renders.
  */
 #[Group('integration')]
 #[CoversClass(NotificationRepository::class)]
@@ -52,7 +54,7 @@ final class NotificationLegacyTypeIntegrationTest extends TestCase
         $GLOBALS['wpdb']->query('TRUNCATE TABLE `wp_peepso_notifications`');
     }
 
-    private function seed(int $userId, string $type, string $ts = '2026-07-20 12:00:00'): void
+    private function seed(int $userId, string $type, int $read = 0): void
     {
         $GLOBALS['wpdb']->query(
             $GLOBALS['wpdb']->prepare(
@@ -66,10 +68,16 @@ final class NotificationLegacyTypeIntegrationTest extends TestCase
                 0,
                 $type,
                 'msg: ' . $type,
-                $ts,
-                0
+                '2026-07-20 12:00:00',
+                $read
             )
         );
+    }
+
+    /** @param list<object> $rows @return list<string> */
+    private static function types(array $rows): array
+    {
+        return array_map(static fn(object $r): string => (string) $r->not_type, $rows);
     }
 
     public function testRetiredTypesDoNotInflateUnreadBadge(): void
@@ -95,15 +103,42 @@ final class NotificationLegacyTypeIntegrationTest extends TestCase
         self::assertSame('bcc_review', $rows[0]->not_type);
     }
 
-    public function testRawListStillReturnsLegacyRowsForViewSideFiltering(): void
+    /**
+     * The full pagination matrix: retired rows interleaved with valid
+     * ones (insertion order = not_id order; list reads newest-first).
+     * Retired rows — unread AND read — must never consume page slots,
+     * shorten pages, or stall the cursor.
+     */
+    public function testRetiredRowsCannotEatPageSlotsOrStallPagination(): void
     {
         $repo = new NotificationRepository();
 
-        $this->seed(42, 'bcc_review');
-        $this->seed(42, 'bcc_endorse');
+        $this->seed(42, 'bcc_review');            // oldest valid
+        $this->seed(42, 'bcc_endorse');           // retired, unread
+        $this->seed(42, 'bcc_rank_up');           // valid
+        $this->seed(42, 'bcc_card_pulled');       // retired, unread
+        $this->seed(42, 'bcc_endorse', 1);        // retired, READ
+        $this->seed(42, 'bcc_welcome');           // newest valid
+        $this->seed(42, 'bcc_card_pulled');       // retired — newest raw rows…
+        $this->seed(42, 'bcc_endorse');           // …form an all-retired head
 
-        // findForUser stays deliberately unfiltered — the view service's
-        // shapeRow drops invalid types itself; that contract is unchanged.
-        self::assertCount(2, $repo->findForUser(42, 10, 0));
+        // First raw page would be entirely retired without the SQL
+        // predicate; with it, even limit=1 returns a valid row.
+        $solo = $repo->findForUser(42, 1, 0);
+        self::assertSame(['bcc_welcome'], self::types($solo), 'all-retired head must not yield an empty page');
+
+        // Full first page: exactly the two newest VALID rows.
+        $page1 = $repo->findForUser(42, 2, 0);
+        self::assertSame(['bcc_welcome', 'bcc_rank_up'], self::types($page1), 'retired rows must not consume page slots');
+
+        // Second page via the exclusive cursor reaches the valid row
+        // that sits beyond several retired ones.
+        $cursor = (int) $page1[1]->not_id;
+        $page2  = $repo->findForUser(42, 2, $cursor);
+        self::assertSame(['bcc_review'], self::types($page2), 'cursor page must surface valid rows past retired ones');
+
+        // And the badge agrees with what actually renders: 3 unread
+        // valid rows (review, rank_up, welcome).
+        self::assertSame(3, $repo->countUnreadForUser(42));
     }
 }

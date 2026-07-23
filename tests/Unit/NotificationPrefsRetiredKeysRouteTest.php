@@ -92,6 +92,40 @@ final class NotificationPrefsRetiredKeysRouteTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_prefs_meta']);
     }
 
+    public function testMisspelledLiveKeyStays422(): void
+    {
+        // A typo'd LIVE key is a client bug, not a retired key — it must
+        // not silently "succeed" through the compatibility path.
+        $r = $this->patch(['bell' => ['bcc_reviw' => false]]);
+        self::assertSame(422, $r->get_status());
+    }
+
+    public function testArbitraryUnknownKeysStay422(): void
+    {
+        $r = $this->patch(['bell' => ['totally_made_up' => true]]);
+        self::assertSame(422, $r->get_status());
+
+        $r = $this->patch(['push' => ['events' => ['made_up_event' => true]]]);
+        self::assertSame(422, $r->get_status());
+
+        $r = $this->patch(['push' => ['unknown_field' => true]]);
+        self::assertSame(422, $r->get_status());
+    }
+
+    public function testRetiredMixedWithUnknownStays422(): void
+    {
+        // One retired + one garbage key: the allowlist requires EVERY
+        // submitted key to be retired.
+        $r = $this->patch(['bell' => ['bcc_endorse' => false, 'garbage' => true]]);
+        self::assertSame(422, $r->get_status());
+    }
+
+    public function testEmptyPrefContainersStay422(): void
+    {
+        $r = $this->patch(['bell' => []]);
+        self::assertSame(422, $r->get_status());
+    }
+
     public function testStaleStoredRetiredMetaDoesNotLeakIntoReads(): void
     {
         // A user who toggled the endorse pref on an older build still has
