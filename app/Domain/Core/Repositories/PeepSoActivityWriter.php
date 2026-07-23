@@ -102,8 +102,9 @@ final class PeepSoActivityWriter
      * wp_posts on `act_external_id` to derive the actor (post_author),
      * timestamp (post_date_gmt), and active state (post_status). For
      * BCC modules, `ActivityStreamWriter` creates a backing wp_post
-     * (post_type = 'peepso-activity-status') and stores the sidecar
-     * row id in post_meta — see that file for the canonical flow.
+     * (post_type = 'peepso-post', discriminated by the META_MODULE
+     * post_meta) and stores the sidecar row id in post_meta — see
+     * that file for the canonical flow.
      *
      * peepso_activities columns written: act_owner_id, act_module_id,
      * act_external_id, act_access. The historical schema BCC was
