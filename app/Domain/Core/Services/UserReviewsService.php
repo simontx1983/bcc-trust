@@ -24,6 +24,7 @@
 
 namespace BCC\Trust\Core\Services;
 
+use BCC\Trust\Core\Repositories\UserMiniRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\PrivacySettings;
 
@@ -59,7 +60,8 @@ final class UserReviewsService
     ];
 
     public function __construct(
-        private readonly VoteRepository $voteRepository
+        private readonly VoteRepository $voteRepository,
+        private readonly UserMiniRepository $userMiniRepository
     ) {
     }
 
@@ -111,10 +113,24 @@ final class UserReviewsService
 
         $rows = $this->voteRepository->findByVoterPaginated($userId, $perPage, $offset);
 
+        // Member self-page targets have no wp_posts row (the LEFT JOIN
+        // columns come back NULL) — batch-resolve their owners' display
+        // name + bcc_handle in one UserMiniRepository read.
+        $memberIds = [];
+        foreach ($rows as $row) {
+            $pid = (int) $row->page_id;
+            if (MemberSelfPageService::isSelfPage($pid)) {
+                $memberIds[MemberSelfPageService::ownerOfSelfPage($pid)] = true;
+            }
+        }
+        $members = $memberIds === []
+            ? []
+            : $this->userMiniRepository->getRowsByIds(array_keys($memberIds));
+
         $items = [];
         $now   = time();
         foreach ($rows as $row) {
-            $items[] = self::shapeReview($row, $now);
+            $items[] = self::shapeReview($row, $now, $members);
         }
 
         return [
@@ -141,6 +157,7 @@ final class UserReviewsService
      *   page_name: string|null,
      *   page_type: string|null
      * } $row
+     * @param array<int, array{id: int, user_login: string, display_name: string, handle: string|null}> $members
      * @return array{
      *   id: int,
      *   grade: string,
@@ -151,7 +168,7 @@ final class UserReviewsService
      *   posted_at_label: string
      * }
      */
-    private static function shapeReview(object $row, int $now): array
+    private static function shapeReview(object $row, int $now, array $members): array
     {
         $voteType = (int) $row->vote_type;
         $grade    = self::VOTE_TYPE_TO_GRADE[$voteType] ?? 'B';
@@ -163,6 +180,23 @@ final class UserReviewsService
         if ($body === '') {
             $reason = $row->reason;
             $body = is_string($reason) ? trim($reason) : '';
+        }
+
+        // Member-target rows: the subject is a person, not a page. Only
+        // bcc_handle is safe to project publicly — '' when unset (the
+        // panel suppresses the @-link), never user_login.
+        $pageId = (int) $row->page_id;
+        if (MemberSelfPageService::isSelfPage($pageId)) {
+            $member = $members[MemberSelfPageService::ownerOfSelfPage($pageId)] ?? null;
+            return [
+                'id'              => (int) $row->id,
+                'grade'           => $grade,
+                'subject'         => $member !== null ? $member['display_name'] : '',
+                'subject_handle'  => $member !== null && $member['handle'] !== null ? $member['handle'] : '',
+                'text'            => $body,
+                'scope_label'     => 'MEMBER',
+                'posted_at_label' => self::relativeLabel((string) $row->created_at, $now),
+            ];
         }
 
         $subjectTitle = is_string($row->page_title) ? $row->page_title : '';
