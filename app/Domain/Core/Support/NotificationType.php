@@ -20,7 +20,6 @@
  *   - REVIEW         — review on a page you own
  *   - CARD_WATCHED   — someone watched (followed) your validator/etc
  *   - RANK_UP        — you earned a new rank
- *   - ENDORSE        — someone endorsed a page you own (V1.5 follow-up)
  *   - WELCOME        — first-touch system notification on signup
  *                     (V2 Phase 2 retention slice — proves the bell
  *                     channel works within seconds of opting in;
@@ -63,7 +62,6 @@ final class NotificationType
     public const REVIEW                           = 'bcc_review';
     public const CARD_WATCHED                     = 'bcc_card_watched';
     public const RANK_UP                          = 'bcc_rank_up';
-    public const ENDORSE                          = 'bcc_endorse';
     public const WELCOME                          = 'bcc_welcome';
     public const MENTION                          = 'bcc_mention';
     public const LOCAL_POST                       = 'bcc_local_post';
@@ -115,7 +113,6 @@ final class NotificationType
         self::REVIEW,
         self::CARD_WATCHED,
         self::RANK_UP,
-        self::ENDORSE,
         self::WELCOME,
         self::MENTION,
         self::LOCAL_POST,

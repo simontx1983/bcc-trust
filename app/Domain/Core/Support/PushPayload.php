@@ -65,36 +65,6 @@ final class PushPayload
     }
 
     /**
-     * @param array<string, mixed> $first
-     * @return array{title: string, body: string, url: string, tag?: string}
-     */
-    public static function forEndorse(int $count, array $first): array
-    {
-        $actor    = self::stringFrom($first, 'actor_handle');
-        $pageId   = self::intFrom($first, 'page_id');
-        $pageName = self::stringFrom($first, 'page_name');
-
-        $title = $pageName !== '' ? $pageName : 'Blue Collar Crypto';
-        $body  = $count > 1
-            ? ($pageName !== ''
-                ? sprintf('%d new endorsements on %s.', $count, $pageName)
-                : sprintf('%d new endorsements on your page.', $count))
-            : ($actor !== ''
-                ? sprintf('@%s endorsed your page.', $actor)
-                : 'New endorsement on your page.');
-
-        $payload = [
-            'title' => $title,
-            'body'  => $body,
-            'url'   => $pageId > 0 ? self::pageUrl($pageId) : '/',
-        ];
-        if ($pageId > 0) {
-            $payload['tag'] = 'bcc-endorse-' . $pageId;
-        }
-        return $payload;
-    }
-
-    /**
      * Dispute outcomes don't aggregate naturally — each dispute is
      * a distinct decision. We still respect the count, but the
      * "2 dispute outcomes" wording feels right since the user is the

@@ -325,10 +325,10 @@ final class CardViewService
             // "WRITE A REVIEW" → "REMOVE YOUR REVIEW" CTA swap.
             // Always false for anonymous viewers.
             'viewer_has_reviewed' => $viewerHasReviewed,
-            // §V1.5 — true when the current viewer has already endorsed
+            // §V1.5 — true when the current viewer has already vouched for
             // this page (= holds an active vouch attestation on it).
-            // Drives the EndorseButton's "ENDORSE" → "REMOVE
-            // ENDORSEMENT" CTA swap. Always false for anonymous viewers.
+            // Drives the entity-page vouch button's idle → "REMOVE" CTA
+            // swap. Always false for anonymous viewers.
             'viewer_has_endorsed' => $viewerHasEndorsed,
             // §V1.5 — server-rendered "why is endorse disabled?" copy.
             // Null when can_endorse is true; non-null + human-readable
@@ -1377,7 +1377,7 @@ final class CardViewService
             ['key' => 'trust',        'label' => 'Trust',        'value' => (string) $trustScore, 'raw' => $trustScore,  'format' => 'score'],
             ['key' => 'followers',    'label' => 'Followers',    'value' => (string) $followers,  'raw' => $followers,    'format' => 'count'],
             ['key' => 'reviews',      'label' => 'Reviews',      'value' => (string) $reviews,    'raw' => $reviews,      'format' => 'count'],
-            ['key' => 'endorsements', 'label' => 'Endorsements', 'value' => (string) $endorsements, 'raw' => $endorsements, 'format' => 'count'],
+            ['key' => 'endorsements', 'label' => 'Vouches', 'value' => (string) $endorsements, 'raw' => $endorsements, 'format' => 'count'],
         ];
     }
 

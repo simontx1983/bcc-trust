@@ -13,14 +13,12 @@
  *       "bcc_reaction":    bool,
  *       "bcc_review":      bool,
  *       "bcc_card_watched": bool,
- *       "bcc_rank_up":     bool,
- *       "bcc_endorse":     bool
+ *       "bcc_rank_up":     bool
  *     },
  *     "push": {
  *       "enabled": bool,
  *       "events": {
  *         "review":            bool,
- *         "endorse":           bool,
  *         "dispute_outcome":   bool,
  *         "panelist_selected": bool
  *       }

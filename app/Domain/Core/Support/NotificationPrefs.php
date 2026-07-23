@@ -47,7 +47,6 @@ final class NotificationPrefs
         NotificationType::REVIEW,
         NotificationType::CARD_WATCHED,
         NotificationType::RANK_UP,
-        NotificationType::ENDORSE,
         NotificationType::WELCOME,
         NotificationType::MENTION,
         NotificationType::LOCAL_POST,
@@ -70,7 +69,6 @@ final class NotificationPrefs
      */
     public const PUSH_TYPES = [
         'review',
-        'endorse',
         'dispute_outcome',
         'panelist_selected',
         'mention',
@@ -102,7 +100,6 @@ final class NotificationPrefs
         'bell_bcc_review'                                    => true,
         'bell_bcc_card_watched'                              => true,
         'bell_bcc_rank_up'                                   => true,
-        'bell_bcc_endorse'                                   => true,
         'bell_bcc_welcome'                                   => true,
         'bell_bcc_mention'                                   => true,
         'bell_bcc_local_post'                                => true,
@@ -115,7 +112,6 @@ final class NotificationPrefs
         'bell_bcc_holder_community_live'                     => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,
-        'push_event_endorse'                                 => true,
         'push_event_dispute_outcome'                         => true,
         'push_event_panelist_selected'                       => true,
         'push_event_mention'                                 => true,
