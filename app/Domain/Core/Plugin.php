@@ -1245,6 +1245,10 @@ final class Plugin
         // and the onboarding-complete flag flip.
         \BCC\Trust\Core\REST\OnboardingEndpoint::register();
 
+        // Site-wide tour engine — GET/POST /me/tours-seen, the server
+        // half of the frontend's localStorage∪server "seen" union.
+        \BCC\Trust\Core\REST\MeToursSeenEndpoint::register();
+
         // V1 contract: §D5 reaction set/remove — POST /reactions and
         // DELETE /reactions/:feed_id. Routes through PeepSoReactionWriter
         // (single-graph rule); response shape matches FeedItem.reactions
