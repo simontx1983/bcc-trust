@@ -12,7 +12,9 @@
 
 namespace BCC\Trust\Core\Services\Feed;
 
+use BCC\Trust\Core\Repositories\UserMiniRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Support\PageTypeMap;
 
 if (!defined('ABSPATH')) {
@@ -22,7 +24,8 @@ if (!defined('ABSPATH')) {
 final class ReviewBodyHydrator
 {
     public function __construct(
-        private readonly VoteRepository $voteRepo
+        private readonly VoteRepository $voteRepo,
+        private readonly UserMiniRepository $userMiniRepo
     ) {
     }
 
@@ -33,10 +36,10 @@ final class ReviewBodyHydrator
      *   {
      *     grade:        'trust' | 'neutral' | 'caution',  // symbolic, not vote_type int
      *     text:         string,                           // the explanation column
-     *     page_id:      int,                              // target peepso-page id
-     *     page_handle:  string,                           // target page slug
+     *     page_id:      int,                              // target peepso-page id (or member self-page id)
+     *     page_handle:  string,                           // target page slug (members: bcc_handle, '' when unset)
      *     page_name:    string,                           // target page display name
-     *     page_kind:    'validator'|'project'|'creator'|'',// drives /v|/p|/c link prefix
+     *     page_kind:    'validator'|'project'|'creator'|'member'|'', // drives /v|/p|/c|/u link prefix
      *   }
      *
      * Two queries: votes by id (bulk) + posts by id (WP's get_posts
@@ -59,11 +62,26 @@ final class ReviewBodyHydrator
 
         // Bulk-resolve target page handles. WP's get_posts caches
         // per-process, so per-id lookups are fine after this prime.
-        $pageIds = [];
+        // Member self-page ids (≥ MemberSelfPageService::ID_BASE) have
+        // no backing wp_post — those resolve to the owning member's
+        // display name + bcc_handle via one batched UserMiniRepository
+        // read instead.
+        $pageIds   = [];
+        $memberIds = [];
         foreach ($votes as $vote) {
-            $pageIds[(int) ($vote->page_id ?? 0)] = true;
+            $pid = (int) ($vote->page_id ?? 0);
+            if ($pid <= 0) {
+                continue;
+            }
+            if (MemberSelfPageService::isSelfPage($pid)) {
+                $memberIds[MemberSelfPageService::ownerOfSelfPage($pid)] = true;
+            } else {
+                $pageIds[$pid] = true;
+            }
         }
-        unset($pageIds[0]);
+        $members = $memberIds === []
+            ? []
+            : $this->userMiniRepo->getRowsByIds(array_keys($memberIds));
         $pages = [];
         if ($pageIds !== []) {
             /** @var list<\WP_Post> $rows */
@@ -86,7 +104,24 @@ final class ReviewBodyHydrator
             $voteType   = (int) ($vote->vote_type ?? 0);
             $explanation = (string) ($vote->explanation ?? '');
             $pageId     = (int) ($vote->page_id ?? 0);
-            $page       = $pages[$pageId] ?? null;
+
+            if (MemberSelfPageService::isSelfPage($pageId)) {
+                $member = $members[MemberSelfPageService::ownerOfSelfPage($pageId)] ?? null;
+                // Only bcc_handle is safe to project publicly — when the
+                // member has none, emit '' and the frontend suppresses
+                // the link (never fall back to user_login).
+                $bodies[$voteId] = [
+                    'grade'       => self::voteTypeToGrade($voteType),
+                    'text'        => $explanation,
+                    'page_id'     => $pageId,
+                    'page_handle' => $member !== null && $member['handle'] !== null ? $member['handle'] : '',
+                    'page_name'   => $member !== null ? $member['display_name'] : '',
+                    'page_kind'   => 'member',
+                ];
+                continue;
+            }
+
+            $page = $pages[$pageId] ?? null;
 
             $pageKind = '';
             if ($page !== null) {

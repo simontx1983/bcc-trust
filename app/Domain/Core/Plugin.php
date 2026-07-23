@@ -695,7 +695,8 @@ final class Plugin
     public function reviewBodyHydrator(): Services\Feed\ReviewBodyHydrator
     {
         return $this->reviewBodyHydrator ??= new Services\Feed\ReviewBodyHydrator(
-            $this->voteRepository()
+            $this->voteRepository(),
+            $this->userMiniRepository()
         );
     }
 
@@ -824,7 +825,8 @@ final class Plugin
     public function userReviewsService(): Services\UserReviewsService
     {
         return $this->userReviewsService ??= new Services\UserReviewsService(
-            $this->voteRepository()
+            $this->voteRepository(),
+            $this->userMiniRepository()
         );
     }
 

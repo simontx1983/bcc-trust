@@ -15,8 +15,11 @@
  * any `page_id` above ID_BASE is, unambiguously, member `(page_id - ID_BASE)`'s
  * self-page. `selfPageId(u) = ID_BASE + u`; `ownerOfSelfPage(p) = p - ID_BASE`.
  *
- * Sub-slice 1a (this file): provisioning + owner-resolution only — inert until
- * the tier-read cutover (1c) and direct-reviews (slice 2) wire it in.
+ * Fully wired: tier reads (ScoreRepository/ReputationRepository), direct
+ * member reviews (PostsEndpoint kind=review target_kind=user_profile →
+ * write; CardReviewsEndpoint target_kind=user_profile → read), attestation
+ * synthesis, endorsements, and dispute adjudication all route through this
+ * id bridge.
  *
  * @package BCC\Trust\Core\Services
  * @since V1 (2026-06-23)

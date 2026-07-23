@@ -3,13 +3,22 @@
  * CardReviewsEndpoint — handles
  *   GET /bcc/v1/entities/{target_kind}/{target_id}/reviews
  *
- * Reviews-tab data plane for entity profiles (/v, /p, /c). Mirrors the
- * shape of `/users/{handle}/reviews` but filters by `votes.page_id`
- * instead of `votes.voter_user_id` — i.e. "reviews filed against this
- * entity" rather than "reviews this user wrote."
+ * Reviews-tab data plane for entity profiles (/v, /p, /c) AND member
+ * profiles (/u — target_kind=user_profile). Mirrors the shape of
+ * `/users/{handle}/reviews` but filters by `votes.page_id` instead of
+ * `votes.voter_user_id` — i.e. "reviews filed against this target"
+ * rather than "reviews this user wrote."
  *
- * Auth-OPTIONAL: anonymous viewers read entity reviews. Reviews are a
+ * For `user_profile`, target_id is the RAW user id; it translates to
+ * the member's self-page (MemberSelfPageService::selfPageId) where
+ * member-review votes live — same bridge the write path uses
+ * (PostsEndpoint kind=review + target_kind=user_profile).
+ *
+ * Auth-OPTIONAL: anonymous viewers read reviews. Reviews are a
  * trust-evaluation signal viewers need regardless of session state.
+ * Received member reviews are deliberately PUBLIC — the subject's
+ * `reviews_hidden` privacy flag governs only the written list on
+ * `/users/{handle}/reviews` (Phillip, 2026-07-22).
  *
  * Cache: matches `EntityAttestationsEndpoint` (the sibling by-target
  * read) — anon gets `public, max-age=30`; authed gets
@@ -32,6 +41,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\CardReviewsService;
+use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -46,9 +56,10 @@ final class CardReviewsEndpoint
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
     /**
-     * The three entity-card kinds. `user_profile` is intentionally
-     * excluded — the /users/{handle}/reviews endpoint already serves
-     * that target.
+     * The three entity-card kinds plus member profiles. For
+     * `user_profile`, target_id is the raw user id (translated to the
+     * self-page in list()); `/users/{handle}/reviews` is the DIFFERENT
+     * direction — reviews the user wrote.
      *
      * @var list<string>
      */
@@ -56,6 +67,7 @@ final class CardReviewsEndpoint
         'validator_card',
         'project_card',
         'creator_card',
+        'user_profile',
     ];
 
     public static function register(): void
@@ -118,12 +130,18 @@ final class CardReviewsEndpoint
             ));
         }
 
+        // Member reviews live on the deterministic self-page id, never
+        // the raw user id (same translation as CardViewService).
+        $pageId = $targetKind === 'user_profile'
+            ? MemberSelfPageService::selfPageId($targetId)
+            : $targetId;
+
         $page    = (int) $request->get_param('page');
         $perPage = (int) $request->get_param('per_page');
         $viewer  = get_current_user_id();
 
         $data = (new CardReviewsService(Plugin::instance()->voteRepository()))
-            ->getReviews($targetId, $viewer, $page, $perPage);
+            ->getReviews($pageId, $viewer, $page, $perPage);
 
         $response = ApiResponse::ok($data);
         if ($viewer > 0) {

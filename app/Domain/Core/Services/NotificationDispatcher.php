@@ -181,10 +181,19 @@ final class NotificationDispatcher
             }
 
             $actorHandle = self::resolveHandle($authorId);
-            $pageName    = self::resolvePageName($pageId);
-            $message     = $pageName !== ''
-                ? sprintf('@%s reviewed %s.', $actorHandle, $pageName)
-                : sprintf('@%s reviewed your page.', $actorHandle);
+            // Member self-pages have no wp_post to name — and the
+            // recipient IS the reviewed member (PageOwnerResolver), so
+            // second person reads correctly. Push payload gets
+            // page_name='' and degrades to its generic branch.
+            if (MemberSelfPageService::isSelfPage($pageId)) {
+                $pageName = '';
+                $message  = sprintf('@%s reviewed your profile.', $actorHandle);
+            } else {
+                $pageName = self::resolvePageName($pageId);
+                $message  = $pageName !== ''
+                    ? sprintf('@%s reviewed %s.', $actorHandle, $pageName)
+                    : sprintf('@%s reviewed your page.', $actorHandle);
+            }
 
             $this->dispatch(
                 $authorId,
