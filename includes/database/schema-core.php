@@ -53,6 +53,7 @@ function bcc_trust_create_core_tables() {
         KEY idx_page_recent (page_id, status, created_at),
         KEY idx_page_voter (page_id, voter_user_id, status),
         KEY idx_voter_history (voter_user_id, created_at),
+        KEY idx_voter_status_date (voter_user_id, status, created_at),
         KEY idx_created (created_at),
         KEY idx_ip_lookup (ip_address, created_at),
         KEY idx_page_score (page_id, status, weight),
