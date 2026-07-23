@@ -995,6 +995,9 @@ final class UserViewService
      *   solids_given: int,
      *   solids_received: int
      * }
+     *
+     * (Plus reviews_received + blog_posts_written — see the return
+     * block; the phpstan shape above narrows only the legacy keys.)
      */
     private function resolveCounts(int $userId, array $followCounts, bool $isSelf, array $privacy, ?array $prefetched = null): array
     {
@@ -1041,6 +1044,13 @@ final class UserViewService
             'following'         => $followCounts['following'],
             'watching_size'     => $watchingSize,
             'reviews_written'   => $reviewsWritten,
+            // v1.49 — reviews RECEIVED: votes filed on the member's
+            // self-page (what the /u Reviews tab lists since v1.48).
+            // Public by decision (2026-07-22) — deliberately NOT zeroed
+            // under reviews_hidden, which governs the written list only.
+            'reviews_received'  => (int) $this->voteRepo->countByPageId(
+                MemberSelfPageService::selfPageId($userId)
+            ),
             'disputes_signed'   => $disputesSigned,
             'solids_given'      => $this->countSolidsGiven($userId),
             'solids_received'   => ($prefetched !== null && isset($prefetched['solids_received_counts']))
