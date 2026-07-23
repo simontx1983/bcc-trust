@@ -125,6 +125,30 @@ final class MyGroupsEndpoint
                 ],
             ]
         );
+
+        // Owner control: toggle whether ordinary members of a
+        // closed/secret group may set visibility='public_all' (syndicate
+        // to the global feed). Owner/site-admin only — enforced in
+        // GroupsService::setPublicAllMembersPolicy. No effect on open
+        // groups (members may already syndicate there).
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/me/groups/(?P<id>\d+)/post-policy',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'postPostPolicy'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'id' => ['required' => true, 'sanitize_callback' => 'absint'],
+                    // Whether ordinary members may choose public_all in a
+                    // closed/secret group. WP coerces "1"/"true"/true.
+                    'public_all_members' => [
+                        'required' => true,
+                        'type'     => 'boolean',
+                    ],
+                ],
+            ]
+        );
     }
 
     /**
@@ -484,5 +508,49 @@ final class MyGroupsEndpoint
         ]);
         $response->set_status(201);
         return $response;
+    }
+
+    /**
+     * POST /me/groups/{id}/post-policy — owner/site-admin toggle for
+     * whether ordinary members of a closed/secret group may set
+     * visibility='public_all' (syndicate to the global feed).
+     *
+     * The authorization (owner or manage_options) + existence checks live
+     * in GroupsService::setPublicAllMembersPolicy; this handler only maps
+     * the resulting envelope to an HTTP status. Idempotent boolean set.
+     *
+     * @param WP_REST_Request<array<string, mixed>> $request
+     */
+    public function postPostPolicy(WP_REST_Request $request): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        if (!\BCC\Core\Security\Throttle::allow('group_post_policy:' . $userId, 20, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
+        $groupId = (int) $request->get_param('id');
+        $enabled = (bool) $request->get_param('public_all_members');
+
+        $result = Plugin::instance()->groupsService()->setPublicAllMembersPolicy(
+            $userId,
+            $groupId,
+            $enabled
+        );
+
+        if (isset($result['error'])) {
+            $code   = (string) $result['error'];
+            $status = match ($code) {
+                'bcc_not_found'         => 404,
+                'bcc_permission_denied' => 403,
+                default                 => 400,
+            };
+            return ApiResponse::error($code, (string) ($result['message'] ?? ''), $status);
+        }
+
+        return ApiResponse::ok($result);
     }
 }
