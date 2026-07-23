@@ -18,7 +18,13 @@
  *                               the expected default).
  *       · Closed / Secret     → ALLOW iff the group owner opted ordinary
  *                               members in.
- *       · Unknown privacy     → DENY (restrictive default).
+ *
+ * Privacy is the exhaustive `PeepSoPrivacy` enum (open/closed/secret) — there
+ * is no "unknown privacy" branch at this layer. Note the resolver
+ * ({@see \BCC\Trust\Core\ValueObjects\PeepSoPrivacy::fromGroupPostId})
+ * collapses absent/corrupt `peepso_group_privacy` meta to Open, so a group
+ * with missing privacy meta is treated as Open here. PeepSo + `createPlainGroup`
+ * always set privacy at creation, so this is a theoretical edge, not a live path.
  *
  * Pure by construction — no WordPress, PeepSo, or singleton access — so
  * the full authorization matrix is unit-testable without stubs. The

@@ -249,12 +249,17 @@ final class MyProfileEndpoint
         }
 
         // PeepSoUser::move_avatar_file() handles resize + multi-size
-        // generation; finalize_move_avatar_file() commits with a fresh
-        // hash and fires `peepso_user_after_change_avatar`.
-        // $add_to_stream = false: an avatar change is a profile update, not
-        // a feed post — PeepSo was auto-creating an activity-stream entry
-        // for every avatar swap (same class of bug as the old
-        // comment-posted-as-a-normal-post issue).
+        // generation; finalize_move_avatar_file(false) commits without adding
+        // an activity-stream entry — an avatar change is a profile update, not
+        // a feed post (PeepSo otherwise auto-posts every avatar swap; same
+        // class of bug as the old comment-posted-as-a-normal-post issue).
+        //
+        // CAVEAT: passing false ALSO suppresses PeepSo's
+        // `peepso_user_after_change_avatar` action (it is gated by the same
+        // $add_to_stream flag — peepso/classes/user.php:1393). That action is
+        // what UserLifecycleService listens on to credit the `complete_profile`
+        // quest, so we must emit the quest signal directly below or an avatar
+        // upload silently stops counting toward the quest.
         try {
             $peepso->move_avatar_file($file['tmp_name'], true);
             $peepso->finalize_move_avatar_file(false);
@@ -269,6 +274,12 @@ final class MyProfileEndpoint
                 500
             );
         }
+
+        // Re-evaluate the complete_profile quest. See the CAVEAT above:
+        // PeepSo's avatar hook doesn't fire under finalize(false), so fire the
+        // canonical quest signal here (idempotent — QuestService no-ops if
+        // already credited) so uploading an avatar still completes the quest.
+        do_action('bcc_trust_quest_signal', $userId, 'complete_profile');
 
         return self::userResponse($userId);
     }

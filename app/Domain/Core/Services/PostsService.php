@@ -1941,6 +1941,23 @@ final class PostsService
             ];
         }
 
+        // Active membership admits `member_readonly` (a muted member may READ
+        // the group), but read-only means "read but not contribute" — gate
+        // authoring on the posting-capable set. (Free: the membership status
+        // was just memoized by resolveGroupAccess above.)
+        if (!$groupsService->viewerCanAuthorInGroup($authorId, $groupId)) {
+            $message = (string) apply_filters(
+                'bcc_group_post_readonly',
+                'Your access to this group is read-only.',
+                $authorId,
+                $groupId
+            );
+            return [
+                'error'   => 'bcc_permission_denied',
+                'message' => $message,
+            ];
+        }
+
         // public_all syndicates to everyone — gate WHO may choose it.
         if ($visibility === self::VISIBILITY_PUBLIC_ALL
             && !$groupsService->canUsePublicAll($authorId, $groupId)
