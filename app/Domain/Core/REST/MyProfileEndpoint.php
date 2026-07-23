@@ -251,9 +251,13 @@ final class MyProfileEndpoint
         // PeepSoUser::move_avatar_file() handles resize + multi-size
         // generation; finalize_move_avatar_file() commits with a fresh
         // hash and fires `peepso_user_after_change_avatar`.
+        // $add_to_stream = false: an avatar change is a profile update, not
+        // a feed post — PeepSo was auto-creating an activity-stream entry
+        // for every avatar swap (same class of bug as the old
+        // comment-posted-as-a-normal-post issue).
         try {
             $peepso->move_avatar_file($file['tmp_name'], true);
-            $peepso->finalize_move_avatar_file(true);
+            $peepso->finalize_move_avatar_file(false);
         } catch (\Throwable $e) {
             \BCC\Core\Log\Logger::error('[MyProfileEndpoint] avatar upload failed', [
                 'user_id' => $userId,
@@ -325,8 +329,9 @@ final class MyProfileEndpoint
 
         // move_cover_file() resizes + writes + updates user_meta in one
         // call; no separate finalize step needed.
+        // $add_to_stream = false — same rationale as uploadAvatar() above.
         try {
-            $peepso->move_cover_file($file['tmp_name'], true);
+            $peepso->move_cover_file($file['tmp_name'], false);
         } catch (\Throwable $e) {
             \BCC\Core\Log\Logger::error('[MyProfileEndpoint] cover upload failed', [
                 'user_id' => $userId,
