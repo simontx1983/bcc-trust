@@ -135,6 +135,23 @@ final class PostsEndpoint
                     // active membership (403). Status / blog kinds both
                     // observe this; review kind ignores it (reviews are
                     // page-scoped, not wall-scoped).
+                    //
+                    // ONE-ORIGIN INVARIANT: a post targets zero-or-one
+                    // group. The guarantee is SCALAR COERCION, not
+                    // validation-rejection: empirically WP forwards a
+                    // non-scalar group_id (`group_id[]=1&2`, object,
+                    // "abc") to the handler rather than 400-ing it, but
+                    // `absint` here + `(int)` in the handler collapse ANY
+                    // shape to a single non-negative scalar (array → 1,
+                    // non-numeric → 0, negative → 0). The service then
+                    // treats <= 0 as the Floor path. A single int cannot
+                    // name two groups, and PeepSoStatusWriter stamps
+                    // exactly one `peepso_group_id`; `public_all` only sets
+                    // `_bcc_post_visibility`, never a second group stream.
+                    // Keep `type: integer` + `absint` — they ARE the
+                    // collapse. (Adding an is_array reject here would be
+                    // dead code: absint runs first, so the handler never
+                    // sees a non-scalar.)
                     'group_id' => [
                         'required'          => false,
                         'type'              => 'integer',

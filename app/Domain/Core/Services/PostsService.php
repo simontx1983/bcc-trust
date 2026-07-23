@@ -62,6 +62,14 @@ final class PostsService
     private const VISIBILITY_DEFAULT = 'members_only';
 
     /**
+     * The visibility that syndicates a group post to the global /
+     * anonymous feed. Setting it is authorization-gated per group (see
+     * {@see gateGroupPost} → GroupsService::canUsePublicAll); the other
+     * two values stay within the group's own audience.
+     */
+    private const VISIBILITY_PUBLIC_ALL = 'public_all';
+
+    /**
      * §D2 — review bodies allow long-form text. The cap is generous
      * but bounded so the textarea + DB column stay reasonable;
      * `bcc_trust_votes.explanation` is `TEXT` (64KB), well above
@@ -237,7 +245,7 @@ final class PostsService
         // group existence. Returns null on success (allowed); an error
         // envelope on failure.
         if ($groupId > 0) {
-            $gateError = self::gateGroupPost($authorId, $groupId);
+            $gateError = self::gateGroupPost($authorId, $groupId, $visibility);
             if ($gateError !== null) {
                 return $gateError;
             }
@@ -1569,7 +1577,7 @@ final class PostsService
         // Group-wall validation runs BEFORE caption / throttle / file
         // gates — same ordering as createStatus.
         if ($groupId > 0) {
-            $gateError = self::gateGroupPost($authorId, $groupId);
+            $gateError = self::gateGroupPost($authorId, $groupId, $visibility);
             if ($gateError !== null) {
                 return $gateError;
             }
@@ -1684,7 +1692,7 @@ final class PostsService
         // Group-wall validation runs BEFORE caption / throttle / URL
         // gates — same ordering as createStatus / createPhotoPost.
         if ($groupId > 0) {
-            $gateError = self::gateGroupPost($authorId, $groupId);
+            $gateError = self::gateGroupPost($authorId, $groupId, $visibility);
             if ($gateError !== null) {
                 return $gateError;
             }
@@ -1897,11 +1905,20 @@ final class PostsService
      * Returns null when the gate passes; an error envelope when it
      * doesn't (so the caller can `return $err` directly).
      *
+     * `$visibility` is the already-normalized per-post visibility. When it
+     * is `public_all` the author must additionally be authorized to
+     * syndicate to the global feed — a rank-and-file member of a
+     * closed/secret group is REJECTED (not silently down-clamped) so the
+     * boundary is unambiguous and a direct REST call cannot bypass it.
+     * See GroupsService::canUsePublicAll / {@see PublicAllPolicy}.
+     *
      * @return array{error: string, message: string}|null
      */
-    private static function gateGroupPost(int $authorId, int $groupId): ?array
+    private static function gateGroupPost(int $authorId, int $groupId, string $visibility): ?array
     {
-        $access = Plugin::instance()->groupsService()->resolveGroupAccess($authorId, $groupId);
+        $groupsService = Plugin::instance()->groupsService();
+
+        $access = $groupsService->resolveGroupAccess($authorId, $groupId);
         if ($access === null) {
             // Group does not exist OR is secret-and-viewer-not-a-member.
             // Single error message — defense-in-depth, no existence leak.
@@ -1915,6 +1932,22 @@ final class PostsService
             $message = (string) apply_filters(
                 'bcc_group_post_membership_required',
                 'Join the group to post here.',
+                $authorId,
+                $groupId
+            );
+            return [
+                'error'   => 'bcc_permission_denied',
+                'message' => $message,
+            ];
+        }
+
+        // public_all syndicates to everyone — gate WHO may choose it.
+        if ($visibility === self::VISIBILITY_PUBLIC_ALL
+            && !$groupsService->canUsePublicAll($authorId, $groupId)
+        ) {
+            $message = (string) apply_filters(
+                'bcc_group_public_all_denied',
+                'You do not have permission to post this publicly in this group.',
                 $authorId,
                 $groupId
             );

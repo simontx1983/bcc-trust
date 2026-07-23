@@ -511,7 +511,8 @@ final class Plugin
     public function groupsService(): Services\GroupsService
     {
         return $this->groupsService ??= new Services\GroupsService(
-            $this->reputationRepository()
+            $this->reputationRepository(),
+            $this->groupContextResolver()
         );
     }
 

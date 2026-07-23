@@ -44,7 +44,9 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\GroupPostPolicyRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Support\PublicAllPolicy;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
@@ -65,7 +67,8 @@ final class GroupsService
     private const DESCRIPTION_LIMIT = 200;
 
     public function __construct(
-        private readonly ReputationRepository $reputationRepo
+        private readonly ReputationRepository $reputationRepo,
+        private readonly GroupContextResolver $groupContextResolver
     ) {
     }
 
@@ -108,6 +111,9 @@ final class GroupsService
      *   },
      *   feed_visible: bool,
      *   members_visible: bool,
+     *   can_use_public_all: bool,
+     *   can_manage_public_all_policy: bool,
+     *   public_all_members_enabled: bool,
      *   chain_tag: string|null,
      *   trust_min: int|null,
      *   links: array{self: string},
@@ -126,7 +132,7 @@ final class GroupsService
         }
 
         $groupId = (int) $row->id;
-        $ctx     = Plugin::instance()->groupContextResolver()->forGroup($groupId);
+        $ctx     = $this->groupContextResolver->forGroup($groupId);
         if ($ctx === null) {
             // Resolver returned null: post exists but isn't a peepso-group
             // (post-type mismatch). Safe to 404 — the row shape is wrong.
@@ -190,6 +196,27 @@ final class GroupsService
         $feedVisible    = $permissions['can_read_feed']['allowed'];
         $membersVisible = $this->resolveMembersVisible($ctx, $isMember);
 
+        // Public-all fields for the group composer + owner control:
+        //  - `can_use_public_all` (per-viewer) gates the composer's "PUBLIC"
+        //    option. Only members author here, so the query is skipped for
+        //    non-members (false).
+        //  - `can_manage_public_all_policy` (per-viewer) reveals the owner
+        //    control (owner/manager/site-admin — moderator excluded), via the
+        //    canonical GroupsService::canManagePublicAllPolicy (no role logic
+        //    re-derived here). Secret-non-members never reach this code (§S
+        //    gate above 404s them).
+        //  - `public_all_members_enabled` is the raw group opt-in. MINIMUM
+        //    EXPOSURE: only actionable by managers (to render the toggle
+        //    state), so it reflects the real value only when the viewer can
+        //    manage it; every other viewer sees `false` (no config disclosure
+        //    to ordinary/anon viewers). `can_use_public_all` already tells an
+        //    ordinary member whether they may syndicate.
+        $canUsePublicAll         = $isMember && $this->canUsePublicAll($viewerId, $groupId);
+        $canManagePublicAll      = $this->canManagePublicAllPolicy($viewerId, $groupId);
+        $publicAllMembersEnabled = $canManagePublicAll
+            ? GroupPostPolicyRepository::publicAllMembersEnabled($groupId)
+            : false;
+
         // Chain-tag resolution: reads from either `_bcc_gate_chain_id`
         // (NFT) or `_bcc_chain_tag` (plain). Locals + legacy untagged
         // groups return null — the FE renders no chip in that case.
@@ -239,6 +266,9 @@ final class GroupsService
             'permissions'       => $permissions,
             'feed_visible'      => $feedVisible,
             'members_visible'   => $membersVisible,
+            'can_use_public_all'           => $canUsePublicAll,
+            'can_manage_public_all_policy' => $canManagePublicAll,
+            'public_all_members_enabled'   => $publicAllMembersEnabled,
             // Same key vocabulary as the create-response on POST /me/groups
             // (MyGroupsEndpoint::postCreate) — `trust_min` is the canonical
             // signal that the group is reputation-gated (privacy === "open"
@@ -323,7 +353,7 @@ final class GroupsService
             return null;
         }
 
-        $ctx = Plugin::instance()->groupContextResolver()->forGroup($groupId);
+        $ctx = $this->groupContextResolver->forGroup($groupId);
         if ($ctx === null) {
             return null;
         }
@@ -375,6 +405,117 @@ final class GroupsService
         }
         $status = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
         return $status === 'member_owner';
+    }
+
+    /**
+     * May this author set `visibility='public_all'` on a post in this
+     * group — i.e. syndicate it to the global / anonymous feed?
+     *
+     * Resolves the group privacy, the author's PeepSo role, and the
+     * group's ordinary-member opt-in, then delegates the decision to the
+     * canonical {@see PublicAllPolicy::canSyndicate}. This is the
+     * AUTHORITATIVE backend gate: PostsService::gateGroupPost calls it
+     * before every status/photo/gif writer, so a direct REST call cannot
+     * bypass it. It is also surfaced read-only on the group-detail
+     * `can_use_public_all` flag so the composer can hide the option a
+     * member isn't allowed to use.
+     *
+     * Cost: one indexed membership lookup + one cached post-meta read;
+     * the GroupContext is request-memoized by GroupContextResolver.
+     */
+    public function canUsePublicAll(int $authorId, int $groupId): bool
+    {
+        if ($authorId <= 0 || $groupId <= 0) {
+            return false;
+        }
+
+        $ctx = $this->groupContextResolver->forGroup($groupId);
+        if ($ctx === null) {
+            return false;
+        }
+
+        $status = PeepSoGroupRepository::getMembershipStatus($authorId, $groupId);
+
+        return PublicAllPolicy::canSyndicate(
+            $ctx->privacy,
+            $status,
+            GroupPostPolicyRepository::publicAllMembersEnabled($groupId)
+        );
+    }
+
+    /**
+     * Canonical authorization: may this actor CHANGE the group-wide
+     * `_bcc_group_public_all_members` opt-in?
+     *
+     * Distinct from {@see canUsePublicAll} (may I set `public_all` on MY
+     * OWN post): a `member_moderator` may *use* `public_all` on their own
+     * post but may **not** flip the group-wide policy. The management set
+     * is therefore narrower than the use set:
+     *
+     *   MAY manage: `member_owner`, `member_manager`, site admin (`manage_options`).
+     *   MAY NOT:    `member_moderator`, ordinary member, readonly/pending/
+     *               banned, non-member, anonymous.
+     *
+     * This is the single source of truth for the write route AND the
+     * group-detail `can_manage_public_all_policy` flag — the response shaper
+     * must not re-derive the role logic. Existence / secret-visibility is
+     * the caller's gate ({@see setPublicAllMembersPolicy} via
+     * `resolveGroupAccess`; {@see getGroup} via its §S secret-gate), so this
+     * method never leaks existence on its own.
+     */
+    public function canManagePublicAllPolicy(int $actorId, int $groupId): bool
+    {
+        if ($actorId <= 0 || $groupId <= 0) {
+            return false;
+        }
+
+        // Site admins manage any group they can resolve (caller-gated).
+        if (user_can($actorId, 'manage_options')) {
+            return true;
+        }
+
+        $status = PeepSoGroupRepository::getMembershipStatus($actorId, $groupId);
+        return $status === 'member_owner' || $status === 'member_manager';
+    }
+
+    /**
+     * Owner/manager/admin control: enable or disable ordinary-member
+     * `public_all` syndication for a closed/secret group (the
+     * {@see PublicAllPolicy} opt-in). No-op on open groups where members
+     * may already syndicate, but the flag is still stored so the setting
+     * round-trips.
+     *
+     * Authorization is the canonical {@see canManagePublicAllPolicy}
+     * (owner / manager / site admin — moderator excluded). Existence uses
+     * {@see resolveGroupAccess} so a secret group never leaks to a
+     * non-member (404, indistinguishable from missing). Returns the new
+     * state on success; an error envelope otherwise (same shape the post
+     * gates return, so the endpoint can `return $result`).
+     *
+     * @return array{ok: true, public_all_members_enabled: bool}|array{error: string, message: string}
+     */
+    public function setPublicAllMembersPolicy(int $actorId, int $groupId, bool $enabled): array
+    {
+        if ($actorId <= 0 || $groupId <= 0) {
+            return ['error' => 'bcc_invalid_request', 'message' => 'A valid group is required.'];
+        }
+
+        // Existence + secret-gate: null = missing OR secret-and-not-a-member.
+        // Same 404 both ways — never leaks a secret group's existence.
+        if ($this->resolveGroupAccess($actorId, $groupId) === null) {
+            return ['error' => 'bcc_not_found', 'message' => 'Group not found.'];
+        }
+
+        if (!$this->canManagePublicAllPolicy($actorId, $groupId)) {
+            return [
+                'error'   => 'bcc_permission_denied',
+                'message' => 'Only the group owner or a manager can change this setting.',
+            ];
+        }
+
+        GroupPostPolicyRepository::setPublicAllMembers($groupId, $enabled);
+
+        return ['ok' => true, 'public_all_members_enabled' => $enabled];
     }
 
     /**
