@@ -93,9 +93,16 @@ final class MeToursSeenEndpoint
 
         $tourId = trim((string) $request->get_param('tour_id'));
         if ($tourId === '' || preg_match(self::TOUR_ID_PATTERN, $tourId) !== 1) {
-            return ApiResponse::error('bcc_invalid_request', 'Invalid tour_id.', 422);
+            // 400 (not 422) — the canonical status for bcc_invalid_request and
+            // what docs/api-contract-v1.md §4.7.9 documents.
+            return ApiResponse::error('bcc_invalid_request', 'Invalid tour_id.', 400);
         }
 
+        // Non-atomic read-modify-write: two near-simultaneous POSTs could each
+        // read the same set and clobber the other's add (last write wins).
+        // Left as-is by design — the frontend's `useToursSeen` unions this with
+        // localStorage and re-POSTs on the next visit, so a dropped id self-heals
+        // and "seen" is a low-stakes UX flag, not authoritative state.
         $seen = self::readSeen($userId);
         if (!in_array($tourId, $seen, true) && count($seen) < self::MAX_SEEN) {
             $seen[] = $tourId;
