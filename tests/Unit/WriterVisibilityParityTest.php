@@ -152,4 +152,19 @@ final class WriterVisibilityParityTest extends TestCase
         self::assertCount(1, $calls, "{$kind}: writer invoked once");
         self::assertSame(0, $calls[0]['group_id'], "{$kind}: no group origin");
     }
+
+    #[DataProvider('kinds')]
+    public function testReadonlyMemberCannotAuthorAnyVisibility(string $kind): void
+    {
+        // A muted (member_readonly) member is an active member (READ set) so
+        // the membership gate passes, but read-only means "read, not post" —
+        // rejected before the writer for EVERY visibility, no side effect.
+        $this->registerGroup(700, false, [7 => 'member_readonly']);
+
+        foreach (['members_only', 'public_group', 'public_all'] as $vis) {
+            $result = $this->invoke($kind, 7, 700, $vis);
+            self::assertSame('bcc_permission_denied', $result['error'] ?? null, "{$kind}/{$vis}: readonly rejected");
+        }
+        self::assertCount(0, $this->writerCalls($kind), "{$kind}: writer never invoked for a readonly author");
+    }
 }

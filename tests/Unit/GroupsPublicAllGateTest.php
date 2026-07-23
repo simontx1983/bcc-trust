@@ -129,6 +129,33 @@ final class GroupsPublicAllGateTest extends TestCase
         self::assertTrue(GroupPostPolicyRepository::publicAllMembersEnabled(400));
     }
 
+    // ── viewerCanAuthorInGroup (posting-capable gate; readonly excluded) ──
+
+    public function testViewerCanAuthorMatrix(): void
+    {
+        $this->registerGroup(800, self::OPEN, false, [
+            1 => 'member_owner',
+            2 => 'member_manager',
+            3 => 'member_moderator',
+            4 => 'member',
+            5 => 'member_readonly',
+            6 => 'pending_admin',
+            7 => 'banned',
+        ]);
+        $svc = $this->service();
+        // Posting-capable:
+        self::assertTrue($svc->viewerCanAuthorInGroup(1, 800), 'owner');
+        self::assertTrue($svc->viewerCanAuthorInGroup(2, 800), 'manager');
+        self::assertTrue($svc->viewerCanAuthorInGroup(3, 800), 'moderator');
+        self::assertTrue($svc->viewerCanAuthorInGroup(4, 800), 'member');
+        // Not posting-capable — a muted member may READ but not author:
+        self::assertFalse($svc->viewerCanAuthorInGroup(5, 800), 'readonly');
+        self::assertFalse($svc->viewerCanAuthorInGroup(6, 800), 'pending');
+        self::assertFalse($svc->viewerCanAuthorInGroup(7, 800), 'banned');
+        self::assertFalse($svc->viewerCanAuthorInGroup(9, 800), 'non-member');
+        self::assertFalse($svc->viewerCanAuthorInGroup(0, 800), 'anon');
+    }
+
     // ── canManagePublicAllPolicy (the canonical management authz) ──────
     //
     // Distinct from canUsePublicAll: a moderator MAY use public_all on

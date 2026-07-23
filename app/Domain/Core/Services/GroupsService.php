@@ -73,6 +73,17 @@ final class GroupsService
     }
 
     /**
+     * Per-request memo for `getMembershipStatus` keyed by "viewer:group".
+     * A single group-detail render asks the same (viewer, group) up to five
+     * times (active-member, owner, can-use, can-manage, author gates); this
+     * collapses those to one indexed lookup. GroupsService never mutates
+     * membership, so within a request the value can't go stale.
+     *
+     * @var array<string, string|null>
+     */
+    private array $membershipStatusCache = [];
+
+    /**
      * Server-pinned copy for the NFT-gate unlock hint surfaced on
      * permissions.can_join.unlock_hint when a non-holder views an
      * NFT-gated group. Mirrors UserGroupsEndpoint's standard copy so
@@ -369,6 +380,39 @@ final class GroupsService
     }
 
     /**
+     * Request-memoized {@see PeepSoGroupRepository::getMembershipStatus}.
+     *
+     * @return string|null the raw PeepSo status, or null if no membership row.
+     */
+    private function membershipStatus(int $viewerId, int $groupId): ?string
+    {
+        if ($viewerId <= 0 || $groupId <= 0) {
+            return null;
+        }
+        $key = $viewerId . ':' . $groupId;
+        if (!array_key_exists($key, $this->membershipStatusCache)) {
+            $this->membershipStatusCache[$key] = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
+        }
+        return $this->membershipStatusCache[$key];
+    }
+
+    /**
+     * May this viewer AUTHOR a post in the group (any visibility)?
+     *
+     * Active membership (the READ set) admits `member_readonly`, but PeepSo's
+     * read-only role is "read but not contribute" — a muted member may see the
+     * group feed yet must not post. Authoring is therefore gated on the
+     * posting-capable set (owner/manager/moderator/member; readonly excluded) —
+     * the same set {@see PublicAllPolicy} uses for its `public_all` sub-gate.
+     */
+    public function viewerCanAuthorInGroup(int $viewerId, int $groupId): bool
+    {
+        $status = $this->membershipStatus($viewerId, $groupId);
+        return $status !== null
+            && in_array($status, PublicAllPolicy::POSTING_CAPABLE_STATUSES, true);
+    }
+
+    /**
      * Has the viewer an active membership row in the group? Wraps
      * PeepSoGroupRepository::getMembershipStatus + the canonical
      * READ_ALLOWED_STATUSES set so the gate matches the comment-count
@@ -380,7 +424,7 @@ final class GroupsService
             return false;
         }
 
-        $status = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
+        $status = $this->membershipStatus($viewerId, $groupId);
         if ($status === null) {
             return false;
         }
@@ -403,7 +447,7 @@ final class GroupsService
         if ($viewerId <= 0 || $groupId <= 0) {
             return false;
         }
-        $status = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
+        $status = $this->membershipStatus($viewerId, $groupId);
         return $status === 'member_owner';
     }
 
@@ -434,7 +478,7 @@ final class GroupsService
             return false;
         }
 
-        $status = PeepSoGroupRepository::getMembershipStatus($authorId, $groupId);
+        $status = $this->membershipStatus($authorId, $groupId);
 
         return PublicAllPolicy::canSyndicate(
             $ctx->privacy,
@@ -474,7 +518,7 @@ final class GroupsService
             return true;
         }
 
-        $status = PeepSoGroupRepository::getMembershipStatus($actorId, $groupId);
+        $status = $this->membershipStatus($actorId, $groupId);
         return $status === 'member_owner' || $status === 'member_manager';
     }
 
