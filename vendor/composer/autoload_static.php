@@ -361,6 +361,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\Mentions\\MentionPolicy' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Mentions/MentionPolicy.php',
         'BCC\\Trust\\Core\\Services\\Mentions\\MentionSearchService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Mentions/MentionSearchService.php',
         'BCC\\Trust\\Core\\Services\\MessagesService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/MessagesService.php',
+        'BCC\\Trust\\Core\\Services\\MessagingPolicy' => __DIR__ . '/../..' . '/app/Domain/Core/Services/MessagingPolicy.php',
         'BCC\\Trust\\Core\\Services\\MetaDisputeFilerEligibility' => __DIR__ . '/../..' . '/app/Domain/Core/Services/MetaDisputeFilerEligibility.php',
         'BCC\\Trust\\Core\\Services\\ModerationQueueService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/ModerationQueueService.php',
         'BCC\\Trust\\Core\\Services\\MyBlocksService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/MyBlocksService.php',

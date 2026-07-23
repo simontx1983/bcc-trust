@@ -199,6 +199,8 @@ if (!class_exists('PeepSoUser')) {
         public function get_peepso_user(): array { return []; }
         /** @param array<string, mixed> $data */
         public function update_peepso_user(array $data): bool { return true; }
+        /** peepso_users.usr_role: user|member|moderator|admin|ban|register */
+        public function get_user_role(): string { return 'member'; }
     }
 }
 
