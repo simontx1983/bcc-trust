@@ -104,10 +104,11 @@ final class GroupContextResolver {
 
     private function resolveType(string $kind): GroupType {
         return match ($kind) {
-            'holders' => GroupType::Nft,
-            'local'   => GroupType::Local,
-            'system'  => GroupType::System,
-            default   => GroupType::User,
+            'holders'    => GroupType::Nft,
+            'delegators' => GroupType::Validator,
+            'local'      => GroupType::Local,
+            'system'     => GroupType::System,
+            default      => GroupType::User,
         };
     }
 
@@ -119,12 +120,23 @@ final class GroupContextResolver {
             $collectionId = (int) get_post_meta($groupId, '_bcc_gate_collection_id', true);
             return $collectionId > 0 ? ['collection', $collectionId] : ['collection', null];
         }
+        if ($type === GroupType::Validator) {
+            // FK into wp_bcc_onchain_validators.id — written by
+            // ValidatorGroupProvisioningService alongside the gate meta.
+            $validatorId = (int) get_post_meta($groupId, '_bcc_gate_validator_id', true);
+            return $validatorId > 0 ? ['validator', $validatorId] : ['validator', null];
+        }
         // Locals / System / User: no formal source pointer in PR 1.
         // PR 3 (resolver migration) wires Locals → 'page' source.
         return [null, null];
     }
 
     private function resolveVerification(GroupType $type): ?GroupVerification {
-        return $type === GroupType::Nft ? GroupVerification::onChain() : null;
+        // Validator/delegator communities reuse the on_chain badge — the
+        // gate is delegation-verified against the live LCD, same trust
+        // grammar as the NFT holder gate.
+        return ($type === GroupType::Nft || $type === GroupType::Validator)
+            ? GroupVerification::onChain()
+            : null;
     }
 }
