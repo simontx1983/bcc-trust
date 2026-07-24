@@ -44,6 +44,7 @@ return [
         'bcc_onchain_daily_refresh'             => ['interval' => 'daily',                        'description' => 'onchain holdings refresh sweep'],
         'bcc_onchain_retry_bonus'               => ['interval' => 'hourly',                       'description' => 'onchain bonus-application retry'],
         'bcc_gated_group_provision'             => ['interval' => 'daily',                        'description' => 'holder-group + delegator-community provisioning (PeepSo write surface)'],
+        'bcc_hall_provision'                    => ['interval' => 'daily',                        'description' => 'one-open-Hall-per-chain provisioning (PeepSo write surface)'],
         'bcc_gated_group_reconcile_sweep'       => ['interval' => 'twicedaily',                   'description' => 'holder-group reconcile sweep'],
         'bcc_gated_group_revoke_sweep'          => ['interval' => 'twicedaily',                   'description' => 'holder-group + delegator-community revoke re-verification sweeps'],
         'bcc_nft_eth_indexer_tick'              => ['interval' => 'bcc_one_minute',               'description' => 'NFT EVM indexer per-chain tick'],

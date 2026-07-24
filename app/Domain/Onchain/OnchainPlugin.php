@@ -48,6 +48,12 @@ final class OnchainPlugin
         return $this->gatedGroupProvisioningService ??= new GatedGroupProvisioningService();
     }
 
+    private ?\BCC\Trust\Onchain\Services\HallProvisioningService $hallProvisioningService = null;
+    public function hallProvisioningService(): \BCC\Trust\Onchain\Services\HallProvisioningService
+    {
+        return $this->hallProvisioningService ??= new \BCC\Trust\Onchain\Services\HallProvisioningService();
+    }
+
     // ── Validator/delegator communities ────────────────────────────────
 
     private ?\BCC\Trust\Onchain\Services\DelegationEligibilityService $delegationEligibilityService = null;

@@ -53,6 +53,7 @@ final class HolderGroupsPage
     private const NONCE_SWEEP      = 'bcc_holder_groups_run_sweep';
     private const NONCE_USER       = 'bcc_holder_groups_reconcile_user';
     private const NONCE_VALIDATOR  = 'bcc_validator_groups_provision';
+    private const NONCE_HALL       = 'bcc_hall_groups_provision';
 
     public static function register_page(): void
     {
@@ -71,6 +72,7 @@ final class HolderGroupsPage
         add_action('admin_post_bcc_holder_groups_run_sweep',       [self::class, 'handle_run_sweep']);
         add_action('admin_post_bcc_holder_groups_reconcile_user',  [self::class, 'handle_reconcile_user']);
         add_action('admin_post_bcc_validator_groups_provision',    [self::class, 'handle_provision_validator_groups']);
+        add_action('admin_post_bcc_hall_groups_provision',         [self::class, 'handle_provision_halls']);
     }
 
     // ────────────────────────────────────────────────────────────
@@ -212,6 +214,44 @@ final class HolderGroupsPage
         exit;
     }
 
+    /**
+     * Run the Hall provisioning sweep now — the manual twin of the daily
+     * `bcc_hall_provision` tick.
+     *
+     * PeepSo write-surface posture: this introduces NO new
+     * PeepSoGroupWriter::join call site. Provisioning CREATES groups
+     * (PeepSoGroup constructor, which assigns the first admin as
+     * member_owner); it never lands a third party as a member. Membership
+     * is a member action gated by HallsService.
+     */
+    public static function handle_provision_halls(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized.'));
+        }
+        check_admin_referer(self::NONCE_HALL);
+
+        $result = OnchainPlugin::instance()
+            ->hallProvisioningService()
+            ->provisionAll();
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Hall provisioning (manual)', [
+            'created'  => $result['created'],
+            'skipped'  => $result['skipped'],
+            'errors'   => count($result['errors']),
+            'operator' => get_current_user_id(),
+        ]);
+
+        wp_safe_redirect(add_query_arg([
+            'page'    => self::PAGE_SLUG,
+            'op'      => 'hall',
+            'created' => (int) $result['created'],
+            'skipped' => (int) $result['skipped'],
+            'errors'  => count($result['errors']),
+        ], admin_url('admin.php')));
+        exit;
+    }
+
     // ────────────────────────────────────────────────────────────
     // Render
     // ────────────────────────────────────────────────────────────
@@ -230,6 +270,7 @@ final class HolderGroupsPage
         self::renderRunSweep();
         self::renderReconcileUser();
         self::renderValidatorGroups();
+        self::renderHalls();
 
         echo '</div>';
     }
@@ -265,6 +306,24 @@ final class HolderGroupsPage
             printf(
                 '<div class="notice notice-%1$s is-dismissible"><p>'
                 . '<strong>Delegator-community provisioning complete.</strong> '
+                . 'Created %2$d, skipped %3$d, %4$d error(s).%5$s</p></div>',
+                $errors > 0 ? 'warning' : 'success',
+                $created,
+                $skipped,
+                $errors,
+                $errors > 0 ? ' See the bcc-trust log for details.' : ''
+            );
+            return;
+        }
+
+        if ($op === 'hall') {
+            $created = isset($_GET['created']) ? (int) $_GET['created'] : 0;
+            $skipped = isset($_GET['skipped']) ? (int) $_GET['skipped'] : 0;
+            $errors  = isset($_GET['errors'])  ? (int) $_GET['errors']  : 0;
+
+            printf(
+                '<div class="notice notice-%1$s is-dismissible"><p>'
+                . '<strong>Hall provisioning complete.</strong> '
                 . 'Created %2$d, skipped %3$d, %4$d error(s).%5$s</p></div>',
                 $errors > 0 ? 'warning' : 'success',
                 $created,
@@ -406,6 +465,33 @@ final class HolderGroupsPage
         echo '<input type="hidden" name="action" value="bcc_validator_groups_provision">';
         wp_nonce_field(self::NONCE_VALIDATOR);
         echo '<button type="submit" class="button">Provision now</button>';
+        echo '</form>';
+    }
+
+    private static function renderHalls(): void
+    {
+        $hallCount = count(
+            \BCC\Trust\Onchain\Repositories\HallRepository::listAllHallIds()
+        );
+
+        echo '<hr style="margin:32px 0;">';
+        echo '<h2>Halls</h2>';
+        echo '<p style="color:#666;">One <strong>open</strong> union Hall per active chain '
+            . '(e.g. "Cosmos Hall"), owned by the first admin. Provisioning runs on the daily '
+            . '<code>bcc_hall_provision</code> tick; this button backfills any missing Halls now. '
+            . 'It never adds members — a Hall is joinable by anyone via the members-facing floor.</p>';
+
+        echo '<table class="widefat striped" style="max-width:560px;"><tbody>';
+        printf(
+            '<tr><th style="width:280px;">Halls provisioned</th><td>%s</td></tr>',
+            esc_html(number_format($hallCount))
+        );
+        echo '</tbody></table>';
+
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:12px;">';
+        echo '<input type="hidden" name="action" value="bcc_hall_groups_provision">';
+        wp_nonce_field(self::NONCE_HALL);
+        echo '<button type="submit" class="button">Provision Halls now</button>';
         echo '</form>';
     }
 
