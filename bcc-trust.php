@@ -247,6 +247,9 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
 // validator page; the pre-claim backlog belongs to first activation
 // only, transfers never replay it).
 require_once BCC_TRUST_PATH . 'includes/database/schema-validator-msg-activation.php';
+// Validator messaging — durable pre-claim message queue (messages to a
+// never-claimed validator, released to its first verified operator).
+require_once BCC_TRUST_PATH . 'includes/database/schema-validator-msg-queue.php';
 // V2 Phase 1a — confirmation-gated NFT indexer
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-holdings.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-pieces.php';
@@ -335,6 +338,7 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_claims_table();
     // Validator messaging first-activation record
     bcc_create_validator_msg_activation_table();
+    bcc_create_validator_msg_queue_table();
     // V2 Phase 1a NFT indexer
     bcc_onchain_create_nft_holdings_table();
     bcc_onchain_create_chain_checkpoints_table();
