@@ -23,8 +23,12 @@ if (!defined('ABSPATH')) {
  *
  *  - GET    /wallets                       — list current user's wallets
  *  - DELETE /wallets/{id}                  — unlink (idempotent)
- *  - GET    /wallets/project/{post_id}     — wallets on a project page
  *  - GET    /chains                        — enabled-chain catalog
+ *
+ * Wallet connections are PRIVATE ACCOUNT DATA: every surviving wallet
+ * route is scoped to `get_current_user_id()`. There is deliberately no
+ * route that returns another user's wallet links in any form — see
+ * docs/wallet-privacy-policy.md.
  *
  * Wallet linking + signature verification for credential auth lives in
  * \BCC\Trust\Core\REST\AuthEndpoint (§4.1: /auth/nonce, /auth/wallet-link,
@@ -70,13 +74,22 @@ class WalletController
             ],
         ]);
 
-        register_rest_route('bcc/v1', '/wallets/project/(?P<post_id>\d+)', [
-            'methods'             => \WP_REST_Server::READABLE,
-            'callback'            => [__CLASS__, 'rest_project_wallets'],
-            'permission_callback' => function () {
-                return is_user_logged_in() && \BCC\Core\Permissions\Permissions::is_not_suspended();
-            },
-        ]);
+        // GET /wallets/project/{post_id} — REMOVED 2026-07-23 (privacy).
+        //
+        // The route read `WHERE post_id = %d LIMIT 200` with NO user
+        // scoping. `\d+` matched `0`, and no write path in the codebase
+        // ever sets a non-zero `post_id` (WalletAuthController passes a
+        // literal 0), so EVERY row in bcc_wallet_links had post_id = 0.
+        // `/wallets/project/0` therefore returned 200 arbitrary members'
+        // wallet links to any logged-in user — and full `wallet_address`
+        // values to any admin — through a route that read as
+        // project-scoped but was not.
+        //
+        // It had no frontend consumer, and the 2026-06-18 hardening audit
+        // already listed it for deletion under the no-unused-code policy.
+        // Wallet connections are own-account-only; the surviving surface
+        // is the session-scoped GET /wallets.
+        // See docs/wallet-privacy-policy.md.
 
         register_rest_route('bcc/v1', '/chains', [
             'methods'             => \WP_REST_Server::READABLE,
@@ -216,37 +229,6 @@ class WalletController
         ]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
-    }
-
-    public static function rest_project_wallets(\WP_REST_Request $req): \WP_REST_Response
-    {
-        if (!\BCC\Core\Security\Throttle::allow('project_wallets', 30, 60)) {
-            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
-        }
-
-        $post_id = (int) $req->get_param('post_id');
-        $wallets = WalletRepository::getForProject($post_id);
-
-        // Ownership check: only the post author or admins see full wallet addresses.
-        $current_user = get_current_user_id();
-        $post         = get_post($post_id);
-        $is_owner     = $post && (int) $post->post_author === $current_user;
-        $is_admin     = current_user_can('manage_options');
-
-        if (!$is_owner && !$is_admin) {
-            // Strip wallet_address for non-owners.
-            return rest_ensure_response(array_map(
-                /** @param WalletWithChain $w */
-                static function (object $w): array {
-                    $fields = self::projectWalletFields($w);
-                    unset($fields['wallet_address']);
-                    return $fields;
-                },
-                $wallets
-            ));
-        }
-
-        return rest_ensure_response(array_map([self::class, 'projectWalletFields'], $wallets));
     }
 
     /**

@@ -114,6 +114,7 @@ final class GroupsService
      *   verification: array{kind: string, label: string}|null,
      *   activity: array{posts_last_7d: int, last_activity_at: string|null, heat: string, heat_label: string},
      *   collection_stats: array<string, mixed>|null,
+     *   validator_stats: array<string, mixed>|null,
      *   viewer_membership: array{is_member: bool, joined_at: string|null}|null,
      *   permissions: array{
      *     can_join: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
@@ -187,11 +188,22 @@ final class GroupsService
                 $this->resolveNftEnrichment($ctx, $viewerId, $isMember);
         }
 
+        // Validator/delegator communities carry `validator_stats` instead
+        // of `collection_stats` — nullable, so every other kind (and an
+        // un-indexed validator) emits null and the FE renders nothing.
+        $validatorStats = null;
+        if ($ctx->type === GroupType::Validator) {
+            $validatorStats = $this->resolveValidatorEnrichment($ctx);
+        }
+
         // BCC trust-gate read. Meta value is the canonical threshold
         // (25/50/75) the create flow locked at the moment of creation.
         // Plain-group only — NFT/Local groups use other gate paths.
         $trustGateMin = 0;
-        if ($ctx->type !== GroupType::Nft && $ctx->type !== GroupType::Local) {
+        if ($ctx->type !== GroupType::Nft
+            && $ctx->type !== GroupType::Local
+            && $ctx->type !== GroupType::Validator
+        ) {
             $trustGateMin = (int) get_post_meta($groupId, '_bcc_trust_gate_min', true);
         }
 
@@ -273,6 +285,7 @@ final class GroupsService
             'verification'      => $ctx->verification?->toApiResponse(),
             'activity'          => $activity,
             'collection_stats'  => $collectionStats,
+            'validator_stats'   => $validatorStats,
             'viewer_membership' => $viewerMembership,
             'permissions'       => $permissions,
             'feed_visible'      => $feedVisible,
@@ -684,6 +697,31 @@ final class GroupsService
     }
 
     /**
+     * Resolve the `validator_stats` block for a delegator community.
+     *
+     * Composition is delegated to
+     * {@see \BCC\Trust\Onchain\REST\ValidatorGroupsEndpoint::composeValidatorStats}
+     * — the SINGLE source for this wire shape — so the detail surface,
+     * the discovery list, and the /me/validator-groups buckets can never
+     * drift from each other.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function resolveValidatorEnrichment(GroupContext $ctx): ?array
+    {
+        $configs = \BCC\Trust\Onchain\Repositories\ValidatorGroupRepository::findManyByGroupIds([$ctx->groupId]);
+        $config  = $configs[$ctx->groupId] ?? null;
+        if ($config === null) {
+            return null;
+        }
+
+        $rows = \BCC\Trust\Onchain\Repositories\ValidatorRepository::findCommunityStatsByIds([$config->validatorId]);
+        $row  = $rows[$config->validatorId] ?? null;
+
+        return \BCC\Trust\Onchain\REST\ValidatorGroupsEndpoint::composeValidatorStats($row, $config->minStake);
+    }
+
+    /**
      * Build the {can_join, can_leave, can_read_feed} block.
      *
      * Mirrors `UserGroupsEndpoint::canJoin` for the join branch (single
@@ -752,6 +790,20 @@ final class GroupsService
             return [
                 'allowed'     => false,
                 'unlock_hint' => self::nftUnlockHint(),
+                'reason_code' => 'not_eligible',
+            ];
+        }
+
+        // Delegator communities are stored `closed`, so without this
+        // branch they'd surface the "request to join" copy — wrong: there
+        // is no approval queue, the gate is on-chain delegation. Live
+        // eligibility is not computed here (an LCD call per detail render);
+        // the FE's join button does the canonical round-trip via
+        // /me/validator-groups, mirroring the holder-group posture above.
+        if ($ctx->type === GroupType::Validator) {
+            return [
+                'allowed'     => false,
+                'unlock_hint' => 'Delegate to this validator to join its community.',
                 'reason_code' => 'not_eligible',
             ];
         }

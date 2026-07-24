@@ -22,6 +22,7 @@ namespace {
         {
             public int $ID = 0;
             public string $post_type = 'peepso-group';
+            public string $post_title = '';
         }
     }
 }
@@ -37,6 +38,7 @@ namespace BCC\Trust\Core\Services {
             $post = new \WP_Post();
             $post->ID = (int) $id;
             $post->post_type = (string) ($fixture['post_type'] ?? 'peepso-group');
+            $post->post_title = (string) ($fixture['title'] ?? '');
             return $post;
         }
     }

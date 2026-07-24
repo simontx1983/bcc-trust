@@ -31,6 +31,7 @@ namespace {
         {
             public int $ID = 0;
             public string $post_type = 'peepso-group';
+            public string $post_title = '';
         }
     }
 

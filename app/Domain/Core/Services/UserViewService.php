@@ -223,45 +223,65 @@ final class UserViewService
     }
 
     /**
-     * Fail-closed egress safety net for §3.1 wallet.address. The primary
-     * defense is the `$isSelf` gate inside `resolveWallets()`. This filter
-     * runs after the full payload is assembled and strips `address` from
-     * any wallet entry when the viewer is not the profile owner — and
-     * logs the violation as a P0 contract break so a future regression
-     * is loud rather than silent.
+     * Fail-closed egress safety net for the §3.1 `wallets` block.
+     *
+     * ALLOWLIST, not denylist. The previous implementation stripped one
+     * hard-coded key (`address`) and passed everything else through —
+     * which is why `address_short` leaked to every non-self viewer for
+     * the entire life of the endpoint without a single log line. A
+     * denylist can only ever catch the leaks someone already thought of.
+     *
+     * The rule this enforces is absolute and needs no field vocabulary:
+     * **for a non-self viewer the only legal value of `wallets` is `[]`.**
+     * Any non-empty array at this point is a P0 privacy violation
+     * regardless of which keys it carries, so a future field added
+     * upstream is caught by default instead of shipping silently.
+     *
+     * The violation log deliberately records only the KEY NAMES and the
+     * entry count — never a value. Logging the offending address (even
+     * truncated) to report an address leak would be the same leak with
+     * extra steps.
+     *
+     * See docs/wallet-privacy-policy.md.
      *
      * @param array<string, mixed> $payload
      * @return array<string, mixed>
      */
     private static function enforceWalletPrivacyAtEgress(array $payload, bool $isSelf): array
     {
+        // Own account data — the owner is entitled to their own wallets.
         if ($isSelf) {
             return $payload;
         }
         if (!isset($payload['wallets']) || !is_array($payload['wallets'])) {
             return $payload;
         }
+        if ($payload['wallets'] === []) {
+            return $payload;
+        }
 
-        $leaked    = false;
-        $sanitized = [];
+        // Non-self viewer with a non-empty wallets block. Collect the key
+        // names only, so the alert is actionable without being a leak.
+        $offendingKeys = [];
         foreach ($payload['wallets'] as $wallet) {
-            if (is_array($wallet) && array_key_exists('address', $wallet)) {
-                unset($wallet['address']);
-                $leaked = true;
+            if (is_array($wallet)) {
+                foreach (array_keys($wallet) as $key) {
+                    $offendingKeys[(string) $key] = true;
+                }
             }
-            $sanitized[] = $wallet;
         }
 
-        if ($leaked) {
-            \BCC\Core\Log\Logger::error(
-                '[UserViewService] CONTRACT VIOLATION: wallet.address leaked to non-self viewer; stripped at egress',
-                [
-                    'profile_user_id' => isset($payload['id']) ? (int) $payload['id'] : 0,
-                ]
-            );
-        }
+        \BCC\Core\Log\Logger::error(
+            '[UserViewService] P0 PRIVACY VIOLATION: non-empty wallets block for non-self viewer; forced to [] at egress',
+            [
+                'profile_user_id' => isset($payload['id']) ? (int) $payload['id'] : 0,
+                'entry_count'     => count($payload['wallets']),
+                // Key names only. Never a value.
+                'offending_keys'  => implode(',', array_keys($offendingKeys)),
+            ]
+        );
 
-        $payload['wallets'] = $sanitized;
+        $payload['wallets'] = [];
         return $payload;
     }
 
@@ -737,20 +757,32 @@ final class UserViewService
     }
 
     /**
-     * Verified wallet links for the user, slim-projected for the
-     * view-model. Unverified wallets are intentionally excluded —
-     * the surface should only show wallets the user has proven
-     * control of via signature.
+     * Verified wallet links for the user — OWN-ACCOUNT ONLY.
      *
-     * §3.1 wallet shape. Full `address` is OWN-PROFILE ONLY — for non-
-     * self viewers we emit `address_short` only (the masked display
-     * form). Without this gate, `GET /bcc/v1/users/:handle` would leak
-     * every member's full wallet addresses to every authenticated
-     * viewer.
+     * Wallet connections are private account data. A viewer who is not
+     * the wallet owner receives an EMPTY LIST — not a full address, not
+     * a shortened one, not a hash, not an ENS name, and not the
+     * wallet-link `id` (a stable cross-user join key that made
+     * enumeration possible even without an address).
+     *
+     * The only wallet signal permitted to cross a member boundary is the
+     * non-identifying `verifications.wallets_verified` count, which
+     * MemberProfileComposer sources directly from
+     * WalletRepository::getVerifiedCountsForUsers() — never by counting
+     * this array.
+     *
+     * Fail-closed by construction: `$isSelf` is false whenever the viewer
+     * is anonymous, unresolved, or a different user, so every uncertain
+     * identity lands on the empty branch.
+     *
+     * Unverified wallets remain excluded even for the owner — the surface
+     * only shows wallets proven via signature.
+     *
+     * See docs/wallet-privacy-policy.md.
      *
      * @return list<array{
      *   id: int,
-     *   address?: string,
+     *   address: string,
      *   address_short: string,
      *   chain_slug: string,
      *   chain_name: string,
@@ -760,7 +792,7 @@ final class UserViewService
      */
     private static function resolveWallets(int $userId, bool $isSelf): array
     {
-        if ($userId <= 0) {
+        if ($userId <= 0 || !$isSelf) {
             return [];
         }
 
@@ -768,18 +800,15 @@ final class UserViewService
         $items = [];
         foreach ($rows as $row) {
             $address = (string) $row->wallet_address;
-            $item = [
+            $items[] = [
                 'id'            => (int) $row->id,
+                'address'       => $address,
                 'address_short' => WalletAddressValidator::shorten($address),
                 'chain_slug'    => (string) $row->chain_slug,
                 'chain_name'    => (string) $row->chain_name,
                 'is_primary'    => ((int) $row->is_primary) === 1,
                 'verified_at'   => self::toIso8601((string) ($row->verified_at ?? '')),
             ];
-            if ($isSelf) {
-                $item['address'] = $address;
-            }
-            $items[] = $item;
         }
         return $items;
     }

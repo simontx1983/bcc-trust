@@ -1428,6 +1428,16 @@ final class Plugin
         // PeepSoGroupWriter lands eligible holders directly as `member`.
         \BCC\Trust\Onchain\REST\HolderGroupsEndpoint::register();
 
+        // Communities V1: validator/delegator communities — one
+        // auto-provisioned community per claimed validator.
+        //   GET         /me/validator-groups            — joined + eligible_to_join + opted_out
+        //   POST        /me/validator-groups/{id}/join  — delegation-verified join
+        //   POST|DELETE /me/validator-groups/{id}/leave — leave + record TTL'd opt-out
+        // Closed-group privacy + server-side LIVE delegation gate
+        // (fail-closed on an LCD outage); PeepSoGroupWriter lands
+        // verified delegators directly as `member`.
+        \BCC\Trust\Onchain\REST\ValidatorGroupsEndpoint::register();
+
         // Collection stances — the airdrop-proof demand + scam signals:
         //   GET    /me/collection-stances/panel — held collections + state
         //   POST   /me/collection-stances       — waitlist|spam (holder-gated)
