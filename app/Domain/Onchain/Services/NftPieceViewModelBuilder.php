@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Services;
 
-use BCC\Trust\Core\Support\WalletAddressValidator;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Fetchers\EvmFetcher;
@@ -53,18 +52,10 @@ if (!defined('ABSPATH')) {
  *     image_url_thumb: string|null,
  *     attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>,
  *     owner: array{
- *         wallet_address: string,
- *         address_short: string,
- *         balance: int,
- *         is_linked: bool,
- *         user: array{id: int, handle: string, display_name: string, avatar_url: string}|null
+ *         is_linked: bool
  *     }|null,
  *     owners_count: int,
- *     owners: list<array{
- *         wallet_address: string,
- *         address_short: string,
- *         balance: int
- *     }>,
+ *     owners: list<array{}>,
  *     marketplace_links: list<array{name: string, url: string}>,
  *     mint_link: string|null,
  *     permissions: \stdClass,
@@ -531,11 +522,20 @@ final class NftPieceViewModelBuilder
     }
 
     /**
-     * Resolve dominant owner + extras for §3.7. Returns
+     * Resolve dominant owner + holder count for §3.7. Returns
      * `[null, [], 0]` when nothing is known (cold-cache, freshly
      * minted, indexer behind).
      *
-     * @return array{0: array{wallet_address: string, address_short: string, balance: int, is_linked: bool, user: array{id: int, handle: string, display_name: string, avatar_url: string}|null}|null, 1: list<array{wallet_address: string, address_short: string, balance: int}>, 2: int}
+     * PRIVACY: element 1 (`owners[]`) is now ALWAYS `[]`. Every field it
+     * used to carry — `wallet_address`, `address_short`, `balance` — is a
+     * wallet identifier or a holding amount bound to one, and this route
+     * is anonymous. The aggregate `owners_count` (element 2) survives
+     * because a bare holder count cannot be used to reconstruct a
+     * member↔wallet or member↔holding relationship.
+     *
+     * See docs/wallet-privacy-policy.md.
+     *
+     * @return array{0: array{is_linked: bool}|null, 1: list<array{}>, 2: int}
      */
     private static function resolveOwners(
         int $chainId,
@@ -554,24 +554,16 @@ final class NftPieceViewModelBuilder
         }
 
         $first = array_shift($rows);
-        $dominant = self::buildDominantOwner($chainId, (string) $first->wallet_address, (int) $first->balance);
+        $dominant = self::buildDominantOwner($chainId, (string) $first->wallet_address);
 
-        // For ERC-721 / CW-721 / SPL the contract spec says
-        // `owners[]` is empty (single holder lives only on `owner`).
-        // ERC-1155 fans out the rest.
-        $extraOwners = [];
+        // ERC-1155 used to fan the remaining holders out into `owners[]`
+        // as {wallet_address, address_short, balance}. All three are
+        // forbidden on a public surface, so the list is gone — we now
+        // only COUNT the extra holders to keep `owners_count` accurate.
+        // The count is an aggregate and identifies nobody.
+        $extraOwnerCount = 0;
         if (self::isMultiHolderStandard($tokenStandard)) {
-            foreach ($rows as $row) {
-                if (count($extraOwners) >= self::OWNERS_LIST_CAP) {
-                    break;
-                }
-                $addr = (string) $row->wallet_address;
-                $extraOwners[] = [
-                    'wallet_address' => $addr,
-                    'address_short'  => WalletAddressValidator::shorten($addr),
-                    'balance'        => (int) $row->balance,
-                ];
-            }
+            $extraOwnerCount = min(count($rows), self::OWNERS_LIST_CAP);
         }
 
         // owners_count: ERC-721 / CW-721 / SPL → always 1 when known.
@@ -581,10 +573,10 @@ final class NftPieceViewModelBuilder
         // COUNT(*) query that the V2 Phase 6 endpoint deliberately
         // avoids for latency budget).
         $ownersCount = self::isMultiHolderStandard($tokenStandard)
-            ? 1 + count($extraOwners) // dominant + extras observed
+            ? 1 + $extraOwnerCount // dominant + extras observed
             : 1;
 
-        return [$dominant, $extraOwners, $ownersCount];
+        return [$dominant, [], $ownersCount];
     }
 
     /**
@@ -594,12 +586,13 @@ final class NftPieceViewModelBuilder
      * 1 (when the call returns) or 0 (on transport failure / unknown
      * token).
      *
-     * Wallet → user enrichment uses the same WalletRepository path
-     * as ETH/SOL — Cosmos bech32 addresses go through the existing
-     * `findUserIdByAddress` lookup. Not-yet-linked Cosmos wallets
-     * surface as `owner.is_linked = false, owner.user = null`.
+     * Wallet → user resolution uses the same WalletRepository path as
+     * ETH/SOL — Cosmos bech32 addresses go through the existing
+     * `findUserIdByAddress` lookup. That lookup now feeds ONLY the
+     * `is_linked` boolean; no identity is emitted. Not-yet-linked
+     * Cosmos wallets surface as `owner.is_linked = false`.
      *
-     * @return array{0: array{wallet_address: string, address_short: string, balance: int, is_linked: bool, user: array{id: int, handle: string, display_name: string, avatar_url: string}|null}|null, 1: list<array{wallet_address: string, address_short: string, balance: int}>, 2: int}
+     * @return array{0: array{is_linked: bool}|null, 1: list<array{}>, 2: int}
      */
     private static function resolveCosmosOwner(
         ?CosmosFetcher $fetcher,
@@ -614,63 +607,52 @@ final class NftPieceViewModelBuilder
         if ($owner === null) {
             return [null, [], 0];
         }
-        $dominant = self::buildDominantOwner($chainId, $owner['wallet_address'], 1);
+        $dominant = self::buildDominantOwner($chainId, $owner['wallet_address']);
         return [$dominant, [], 1];
     }
 
     /**
      * Compose the `owner` block for §3.7.
      *
-     * @return array{
-     *     wallet_address: string,
-     *     address_short: string,
-     *     balance: int,
-     *     is_linked: bool,
-     *     user: array{id: int, handle: string, display_name: string, avatar_url: string}|null
-     * }
+     * PRIVACY — this route is anonymous (`permission_callback` is
+     * `__return_true`), so everything here is world-readable.
+     *
+     * Removed, permanently:
+     *   - `wallet_address` / `address_short` — a wallet identifier is
+     *     never disclosed to anyone but its owner, in any form.
+     *   - `balance` — a holding amount bound to that wallet.
+     *   - `user{id,handle,display_name,avatar_url}` — this was the worst
+     *     of it. Resolving the holder's BCC identity from a PRIVATE
+     *     wallet link published a member↔holding join that the member
+     *     never consented to. Verifying a wallet is not consent to
+     *     broadcast what it holds; holdings require the explicit opt-in
+     *     NFT showcase.
+     *
+     * What survives is `is_linked` — "some BCC member holds this" — which
+     * names nobody and cannot be resolved back to a member. The lookup
+     * stays server-side purely to compute that boolean.
+     *
+     * Note this was also an ENUMERATION primitive: walking token IDs of
+     * any indexed collection yielded a wallet→member table.
+     *
+     * See docs/wallet-privacy-policy.md.
+     *
+     * @return array{is_linked: bool}
      */
-    private static function buildDominantOwner(int $chainId, string $walletAddress, int $balance): array
+    private static function buildDominantOwner(int $chainId, string $walletAddress): array
     {
         $userId = WalletRepository::findUserIdByAddress($chainId, $walletAddress);
-        $user   = $userId > 0 ? self::resolveUserSummary($userId) : null;
 
         return [
-            'wallet_address' => $walletAddress,
-            'address_short'  => WalletAddressValidator::shorten($walletAddress),
-            'balance'        => $balance,
-            'is_linked'      => $user !== null,
-            'user'           => $user,
+            'is_linked' => $userId > 0,
         ];
     }
 
-    /**
-     * Resolve the user summary (id, handle, display_name, avatar_url)
-     * for §3.7 owner enrichment. Uses WP core helpers + the existing
-     * bcc_handle user_meta pattern. Returns null for users that no
-     * longer exist (defensive; should never happen given the wallet
-     * link is enforced by FK in spirit).
-     *
-     * @return array{id: int, handle: string, display_name: string, avatar_url: string}|null
-     */
-    private static function resolveUserSummary(int $userId): ?array
-    {
-        $user = get_userdata($userId);
-        if (!($user instanceof \WP_User)) {
-            return null;
-        }
-        $handleRaw = get_user_meta($userId, 'bcc_handle', true);
-        $handle    = is_string($handleRaw) ? $handleRaw : '';
-
-        $avatarRaw = get_avatar_url($userId);
-        $avatarUrl = is_string($avatarRaw) ? $avatarRaw : '';
-
-        return [
-            'id'           => $userId,
-            'handle'       => $handle,
-            'display_name' => (string) $user->display_name,
-            'avatar_url'   => $avatarUrl,
-        ];
-    }
+    // resolveUserSummary() removed 2026-07-23. It resolved a holder's BCC
+    // identity (id / handle / display_name / avatar_url) from a private
+    // wallet link and published it on an anonymous endpoint. Nothing may
+    // reintroduce a wallet→member identity lookup on a public surface;
+    // see docs/wallet-privacy-policy.md.
 
     private static function isMultiHolderStandard(?string $tokenStandard): bool
     {

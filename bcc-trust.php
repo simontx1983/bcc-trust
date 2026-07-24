@@ -223,6 +223,13 @@ require_once BCC_TRUST_PATH . 'includes/database/rename-pull-to-watch.php';
 // backfilled); assigns bcc_handle usermeta to legacy accounts so
 // /u/{handle} and /u/{handle}/post/{code} resolve for every author.
 require_once BCC_TRUST_PATH . 'includes/database/backfill-canonical-handles.php';
+// One-shot wallet placeholder-email backfill. Defines
+// bcc_trust_backfill_wallet_placeholder_emails(), called at the end of
+// bcc_trust_create_tables(). Option-guarded (bcc_trust_wallet_placeholder_
+// emails_backfilled); rewrites pre-2026-07-23 md5(address)-derived
+// placeholder emails to salt-keyed tokens, closing the Gravatar
+// member↔wallet oracle (docs/wallet-privacy-policy.md).
+require_once BCC_TRUST_PATH . 'includes/database/backfill-wallet-placeholder-emails.php';
 
 // Onchain schema definitions — table-creation functions used by the
 // activation hook and by the content-hash-gated dbDelta re-run below.

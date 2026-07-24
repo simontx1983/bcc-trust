@@ -1083,8 +1083,25 @@ final class CardViewService
      * PageCardPrefetcher batch — replaces the findAllByPageId query
      * (same rows, same chain-name-ASC order).
      *
+     * PRIVACY: `operator_address` was removed 2026-07-23. Validator rows
+     * are keyed to a wallet link (`onchain_validators.wallet_link_id`),
+     * and `ClaimService::matchValidatorWallet` matches the operator
+     * address against the CLAIMANT'S VERIFIED WALLET. So on a claimed
+     * page this field published an on-chain address provably bound to a
+     * named member — a member↔wallet join on an anonymous surface. A
+     * Cosmos `valoper` also converts trivially to the operator's account
+     * address, and the frontend was rendering it truncated, which is a
+     * shortened wallet address by another name.
+     *
+     * Replaced by the derived, non-identifying `operator_verified`: "we
+     * hold a verified on-chain operator identity for this chain." It
+     * supports the same UI affordance (which chains this operator runs
+     * on) without disclosing an address.
+     *
+     * See docs/wallet-privacy-policy.md.
+     *
      * @phpstan-param list<ValidatorCardRow>|null $validatorRows
-     * @return list<array{slug: string, name: string, operator_address: string}>|null
+     * @return list<array{slug: string, name: string, operator_verified: bool}>|null
      */
     private static function resolveChains(string $kind, int $pageId, ?array $validatorRows = null): ?array
     {
@@ -1101,9 +1118,10 @@ final class CardViewService
         $out = [];
         foreach ($rows as $row) {
             $out[] = [
-                'slug'             => (string) $row->chain_slug,
-                'name'             => (string) $row->chain_name,
-                'operator_address' => (string) $row->operator_address,
+                'slug'              => (string) $row->chain_slug,
+                'name'              => (string) $row->chain_name,
+                // Derived boolean only — never the address itself.
+                'operator_verified' => ((string) $row->operator_address) !== '',
             ];
         }
         return $out;

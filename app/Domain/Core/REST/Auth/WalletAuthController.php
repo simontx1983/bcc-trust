@@ -631,7 +631,25 @@ final class WalletAuthController
                 return ApiResponse::error('bcc_invalid_request', 'Email is not a valid format.', 400);
             }
         } else {
-            $email = AuthSupport::placeholderEmailForWallet($walletAddress);
+            // Placeholder derivation keys on wp_salt('auth'). If the salt
+            // is unreadable it throws — and we fail closed HERE, which is
+            // BEFORE the nonce is consumed (just below) and BEFORE any WP
+            // user is minted (further below). So a misconfigured salt can
+            // never leave a half-created account or a spent nonce behind.
+            // Logs the chain only, never the address.
+            try {
+                $email = AuthSupport::placeholderEmailForWallet($walletAddress);
+            } catch (\RuntimeException $e) {
+                Logger::error(
+                    '[bcc-trust] wallet-signup: cannot mint placeholder email (auth salt unavailable)',
+                    ['chain' => (string) $chain->slug]
+                );
+                return ApiResponse::error(
+                    'bcc_internal_error',
+                    'Account creation is temporarily unavailable. Please try again later.',
+                    500
+                );
+            }
         }
 
         // Point of no return for the nonce: atomic consume + verify.

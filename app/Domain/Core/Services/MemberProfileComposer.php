@@ -34,6 +34,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Onchain\Repositories\WalletRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -204,8 +205,27 @@ final class MemberProfileComposer
         // ── Standing (Good Standing ribbon).
         $base['standing'] = self::buildStanding($base);
 
+        // ── Verified-wallet COUNT. Sourced from the repository, never by
+        //   counting `$base['wallets']` — that array is own-account-only
+        //   and is `[]` for every non-self viewer (see
+        //   UserViewService::resolveWallets and
+        //   docs/wallet-privacy-policy.md). Counting it would silently
+        //   report "0 verified wallets" to every visitor.
+        //
+        //   This count is the ONLY wallet signal permitted to cross a
+        //   member boundary: it is non-identifying and cannot be used to
+        //   reconstruct a member↔wallet relationship. Same prefetch-first
+        //   pattern as UserViewService::getSummary — `$prefetched` here is
+        //   the local primeFor() result (always present), so we branch on
+        //   the key rather than on nullability.
+        if (isset($prefetched['wallets_verified_counts'])) {
+            $walletCount = $prefetched['wallets_verified_counts'][$userId] ?? 0;
+        } else {
+            $walletCount = WalletRepository::getVerifiedCountsForUsers([$userId])[$userId] ?? 0;
+        }
+
         // ── Identity strip facts.
-        $base['identity_meta'] = self::buildIdentityMeta($base);
+        $base['identity_meta'] = self::buildIdentityMeta($base, $walletCount);
 
         // ── Stats strip.
         $base['stats'] = self::buildStats($base);
@@ -238,11 +258,10 @@ final class MemberProfileComposer
         //   consumed by the §3.1 verified panel on /u/[handle]. Same
         //   shape as the parallel block in UserViewService::getProfile
         //   so the contract is stable across surfaces. wallets_verified
-        //   counts the already-resolved `wallets` array; github + x
-        //   resolve via per-user repo lookups (cheap; single user).
-        $walletCount = isset($base['wallets']) && is_array($base['wallets'])
-            ? count($base['wallets'])
-            : 0;
+        //   uses the repository-sourced `$walletCount` resolved above —
+        //   NOT count($base['wallets']), which is own-account-only and
+        //   empty for visitors. github + x resolve via per-user repo
+        //   lookups (cheap; single user).
         $base['verifications'] = self::buildVerifications($userId, $walletCount, $prefetched);
 
         return $base;
@@ -542,9 +561,11 @@ final class MemberProfileComposer
 
     /**
      * @param array<string, mixed> $base
+     * @param int $walletCount Repository-sourced verified-wallet count.
+     *                         Non-identifying; safe for every viewer.
      * @return list<array{label: string, value: string}>
      */
-    private static function buildIdentityMeta(array $base): array
+    private static function buildIdentityMeta(array $base, int $walletCount): array
     {
         $items = [];
 
@@ -560,14 +581,15 @@ final class MemberProfileComposer
             $items[] = ['label' => 'Primary Local', 'value' => $primaryLocal['name']];
         }
 
-        $wallets = isset($base['wallets']) && is_array($base['wallets']) ? $base['wallets'] : [];
-        if (count($wallets) > 0) {
+        // Repository-sourced count, passed in by compose(). Deliberately
+        // NOT count($base['wallets']) — that array is own-account-only
+        // and empty for non-self viewers, which would hide the chip from
+        // exactly the audience it exists for. The count is non-
+        // identifying; the array is not. See docs/wallet-privacy-policy.md.
+        if ($walletCount > 0) {
             $items[] = [
                 'label' => 'Wallets',
-                'value' => sprintf(
-                    '%d linked',
-                    count($wallets)
-                ),
+                'value' => sprintf('%d linked', $walletCount),
             ];
         }
 

@@ -201,6 +201,14 @@ function bcc_trust_create_tables() {
         bcc_trust_backfill_canonical_handles();
     }
 
+    // One-shot wallet placeholder-email backfill — rewrites pre-2026-07-23
+    // md5(address)-derived placeholder emails to salt-keyed tokens, closing
+    // the Gravatar member↔wallet oracle. Option-guarded internally; required
+    // from bcc-trust.php next to backfill-canonical-handles.php.
+    if (function_exists('bcc_trust_backfill_wallet_placeholder_emails')) {
+        bcc_trust_backfill_wallet_placeholder_emails();
+    }
+
     // §D5 reaction seeding — idempotent insert of the three custom
     // reactions (Solid / Vouch / Stand behind) as peepso_reaction_user
     // CPT posts. Re-running is safe; missing kinds get inserted,
