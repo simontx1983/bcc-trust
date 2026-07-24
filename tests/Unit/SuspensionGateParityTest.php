@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Tests\Unit;
 
-use BCC\Trust\Core\REST\LocalsEndpoint;
+use BCC\Trust\Core\REST\HallsEndpoint;
 use BCC\Trust\Core\REST\MyGroupsEndpoint;
 use BCC\Trust\Onchain\REST\HolderGroupsEndpoint;
 use BCC\Trust\Onchain\Services\NftGroupGateService;
@@ -21,7 +21,7 @@ use ReflectionClass;
  * suite pins the SAME gate on the sibling membership-write doors that were
  * still open afterwards:
  *
- *   - POST /me/locals/{id}/membership   (LocalsEndpoint::join)
+ *   - POST /me/halls/{id}/membership    (HallsEndpoint::join)
  *   - POST /me/holder-groups/{id}/join  (HolderGroupsEndpoint::postJoin)
  *   - POST /me/groups                   (MyGroupsEndpoint::postCreate)
  *   - NftGroupGateService::reconcileForUser (cron auto-join — the server
@@ -78,9 +78,9 @@ final class SuspensionGateParityTest extends TestCase
         self::assertSame([false], $GLOBALS['__bcc_susp_fixture']['bypass_args']);
     }
 
-    public function testLocalsJoinRejectsSuspendedUser(): void
+    public function testHallsJoinRejectsSuspendedUser(): void
     {
-        $response = self::endpoint(LocalsEndpoint::class)->join(new \WP_REST_Request());
+        $response = self::endpoint(HallsEndpoint::class)->join(new \WP_REST_Request());
         self::assertSuspendedRejection($response);
     }
 
@@ -114,10 +114,10 @@ final class SuspensionGateParityTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_susp_fixture']['bypass_args']);
     }
 
-    public function testLocalsJoinThrottleRunsBeforeSuspension(): void
+    public function testHallsJoinThrottleRunsBeforeSuspension(): void
     {
         $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
-        $response = self::endpoint(LocalsEndpoint::class)->join(new \WP_REST_Request());
+        $response = self::endpoint(HallsEndpoint::class)->join(new \WP_REST_Request());
         self::assertThrottledBeforeSuspension($response);
     }
 

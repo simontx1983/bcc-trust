@@ -101,7 +101,7 @@
         "project": 0,
         "validator": 0
       },
-      "primary_local": null,
+      "primary_hall": null,
       "verifications": {
         "github_username": null,
         "github_verified": false,
@@ -250,47 +250,41 @@
     "watching": "/u/phillipcosmos/watching"
   },
   "live_shift": [],
-  "locals": [
+  "halls": [
     {
       "id": 4982,
       "is_primary": false,
       "name": "Holders: Kosmic Quest - 1st Edition",
-      "number": null,
       "slug": "holders-kosmic-quest-1st-edition"
     },
     {
       "id": 4988,
       "is_primary": false,
       "name": "Holders: Gelotto Birthday: 3",
-      "number": null,
       "slug": "holders-gelotto-birthday-3"
     },
     {
       "id": 4987,
       "is_primary": false,
       "name": "Holders: Gelotto",
-      "number": null,
       "slug": "holders-gelotto"
     },
     {
       "id": 4984,
       "is_primary": false,
       "name": "Holders: Kosmic Quest - Game Core",
-      "number": null,
       "slug": "holders-kosmic-quest-game-core"
     },
     {
       "id": 2066,
       "is_primary": false,
       "name": "Holders: Crypto Dungeon",
-      "number": null,
       "slug": "holders-crypto-dungeon"
     },
     {
       "id": 2062,
       "is_primary": false,
       "name": "Holders: MIAMIGOS",
-      "number": null,
       "slug": "holders-miamigos"
     }
   ],
@@ -324,7 +318,7 @@
       "unlock_hint": "Sign in to vouch for operators."
     }
   },
-  "primary_local": null,
+  "primary_hall": null,
   "privacy": {
     "delegations_hidden": false,
     "disputes_hidden": false,
