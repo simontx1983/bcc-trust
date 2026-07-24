@@ -31,18 +31,23 @@
  * an "your email changed" notice to the OLD address, which here is the
  * dead placeholder — pointless mail, and a flood into Mailpit on local.
  *
- * Idempotent: option-guarded, and the derivation is deterministic per
- * user, so a re-run is a no-op UPDATE (same token → same email).
+ * Idempotent: the derivation is deterministic per user, so a re-run is a
+ * no-op UPDATE (same token → same email). The completion option is owned by
+ * the migration runner, not this function.
  *
- * Fail-safe: aborts (without setting the done-flag) if wp_salt('auth')
- * is empty, and skips — without setting the done-flag — any row whose
- * UPDATE errors or whose target email already exists (uniqueness). A
- * partial run therefore stays RETRYABLE: the next activation/upgrade
- * re-enters, skips the rows already on the new form, and finishes the
- * rest. The done-flag is set only after a fully clean pass.
+ * Status contract (this function processes one bounded batch and RETURNS):
+ *   - empty wp_salt('auth')            → INCOMPLETE (fail closed, retryable)
+ *   - a row's UPDATE errors            → INCOMPLETE
+ *   - a target email already exists    → INCOMPLETE (uniqueness collision)
+ *   - batch cap hit with rows remaining→ INCOMPLETE (resume next request)
+ *   - eligible set fully drained clean → COMPLETE
+ * The runner marks the migration complete only on COMPLETE, so a partial
+ * run stays RETRYABLE (already-rewritten rows are skipped by the equality
+ * check, so the retry is cheap).
  *
- * Registration mirrors backfill-canonical-handles.php — required from
- * bcc-trust.php, invoked inside bcc_trust_create_tables().
+ * Invoked by the migration runner on plugins_loaded (independent of the
+ * schema-version gate); the schema-install path routes through the same
+ * runner. See includes/database/migration-runner.php.
  *
  * @package BCC_Trust
  * @subpackage Database
@@ -55,23 +60,25 @@ if (!defined('ABSPATH')) {
 
 if (!function_exists('bcc_trust_backfill_wallet_placeholder_emails')) {
 
-    function bcc_trust_backfill_wallet_placeholder_emails(): void
+    function bcc_trust_backfill_wallet_placeholder_emails(): string
     {
-        if (get_option('bcc_trust_wallet_placeholder_emails_backfilled')) {
-            return;
-        }
+        // No self-guard on the completion option here: the migration runner
+        // owns guarding, locking, and completion (see
+        // includes/database/migration-runner.php). This function's contract
+        // is to process one bounded batch and RETURN a status — it never
+        // sets the done-option itself.
 
         $salt = (string) wp_salt('auth');
         if ($salt === '') {
             // Fail closed and stay RETRYABLE: without keying material we
             // can only produce guessable or nondeterministic tokens, so we
-            // rewrite nothing and do NOT set the done-flag. The next
-            // activation/upgrade re-enters and completes once the salt is
-            // readable. (Same fail-closed stance as the signup path.)
+            // rewrite nothing and report INCOMPLETE. The next request
+            // re-enters and completes once the salt is readable. (Same
+            // fail-closed stance as the signup path.)
             \BCC\Core\Log\Logger::warning(
                 '[bcc-trust] wallet placeholder-email backfill: wp_salt(auth) empty — skipping, will retry'
             );
-            return;
+            return BCC_TRUST_MIGRATION_INCOMPLETE;
         }
 
         global $wpdb;
@@ -84,10 +91,15 @@ if (!function_exists('bcc_trust_backfill_wallet_placeholder_emails')) {
         $maxIterations = 50;
         $rewritten     = 0;
         // Any per-row problem (DB error or a uniqueness collision) flips
-        // this. The done-flag is set ONLY on a fully clean pass, so a
+        // this. Completion is reported ONLY on a fully clean pass, so a
         // partial failure leaves the migration retryable instead of
         // silently marking itself complete with rows still on the old form.
         $hadFailure = false;
+        // True once a short/empty batch proves the eligible set is fully
+        // drained. If the loop instead exits by hitting $maxIterations with
+        // full batches throughout, rows may still remain — we must NOT
+        // report complete in that case.
+        $drained = false;
 
         // OFFSET paging, not match-set-shrinking paging: a rewritten email
         // is STILL on the placeholder domain, so it keeps matching the
@@ -111,6 +123,7 @@ if (!function_exists('bcc_trust_backfill_wallet_placeholder_emails')) {
             ]);
 
             if ($users === []) {
+                $drained = true;
                 break;
             }
 
@@ -175,27 +188,40 @@ if (!function_exists('bcc_trust_backfill_wallet_placeholder_emails')) {
             }
 
             if (count($users) < $batchSize) {
+                $drained = true;
                 break;
             }
         }
 
         if ($hadFailure) {
-            // Leave the done-flag UNSET so a later run retries the rows
-            // that failed (already-migrated rows are skipped by the
-            // equality check above, so the retry is cheap and idempotent).
+            // Stay INCOMPLETE so a later run retries the rows that failed
+            // (already-migrated rows are skipped by the equality check above,
+            // so the retry is cheap and idempotent).
             \BCC\Core\Log\Logger::warning(
                 '[bcc-trust] Wallet placeholder-email backfill incomplete — will retry on next run',
                 ['rewritten' => $rewritten]
             );
-            return;
+            return BCC_TRUST_MIGRATION_INCOMPLETE;
         }
 
-        update_option('bcc_trust_wallet_placeholder_emails_backfilled', time(), false);
+        if (!$drained) {
+            // Hit the per-request batch cap with full batches throughout, so
+            // rows may still remain. Progress is persisted (rewritten rows
+            // keep their new email and are skipped next time), so the next
+            // request resumes and eventually drains. Reporting complete here
+            // would falsely mark the migration done with rows unprocessed.
+            \BCC\Core\Log\Logger::info(
+                '[bcc-trust] Wallet placeholder-email backfill: batch cap reached, more remain — will resume',
+                ['rewritten' => $rewritten]
+            );
+            return BCC_TRUST_MIGRATION_INCOMPLETE;
+        }
 
         \BCC\Core\Log\Logger::info(
             '[bcc-trust] Wallet placeholder-email backfill complete',
             ['rewritten' => $rewritten]
         );
+        return BCC_TRUST_MIGRATION_COMPLETE;
     }
 
     /**
