@@ -710,9 +710,9 @@ final class CardViewService
      * renders `tier_label` verbatim instead of deriving from `type`.
      */
     private const COMMUNITY_TIER_LABEL_BY_TYPE = [
-        'nft'    => 'HOLDERS GROUP',
+        'nft'    => 'HOLDER COMMUNITY',
         'local'  => 'LOCAL CHAPTER',
-        'system' => 'SYSTEM GROUP',
+        'system' => 'SYSTEM COMMUNITY',
         'user'   => 'COMMUNITY',
     ];
 
