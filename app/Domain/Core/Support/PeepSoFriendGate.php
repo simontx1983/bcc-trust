@@ -54,4 +54,35 @@ final class PeepSoFriendGate
         $model = \PeepSoFriendsModel::get_instance();
         return $model->are_friends($a, $b) === true;
     }
+
+    /**
+     * Batch sibling of areFriends — the viewer's whole friend set as an
+     * O(1) lookup map, for eligibility passes that would otherwise call
+     * areFriends once per candidate (card lists resolve up to 50 page
+     * operators per request).
+     *
+     * Same friend graph, same guards. PeepSo MayFly-caches
+     * `get_friends_ids`, so repeat calls in a request are cheap; fetch
+     * it lazily (only when a friends_only recipient actually appears).
+     *
+     * @return array<int, true> keyed by friend user id
+     */
+    public static function friendIdsOf(int $userId): array
+    {
+        if ($userId <= 0 || !class_exists('PeepSoFriendsModel')) {
+            return [];
+        }
+        $ids = \PeepSoFriendsModel::get_instance()->get_friends_ids($userId);
+        if (!is_array($ids)) {
+            return [];
+        }
+        $out = [];
+        foreach ($ids as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $out[$id] = true;
+            }
+        }
+        return $out;
+    }
 }

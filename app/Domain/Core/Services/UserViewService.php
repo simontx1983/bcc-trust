@@ -1145,12 +1145,14 @@ final class UserViewService
         $isAuthed = $viewerId > 0;
         $isOther  = $isAuthed && !$isSelf;
 
-        // can_message — cheap presence check on PeepSoChatModel (the
-        // recipient may have toggled chat off in their settings). The
-        // friends-only / mutual-block / rate-limit gates run on the
-        // POST itself; this surface only decides whether to render the
-        // "Message" button at all.
-        $canMessage = $isOther && self::recipientChatEnabled($userId);
+        // can_message — the SAME evaluator the send path uses
+        // (MessagesService's single messaging policy), so the rendered
+        // button and the POST agree on every permanent rule. It used to
+        // be a bare chat-enabled probe, which meant a friends-only or
+        // mutually-blocked recipient rendered an enabled "Message"
+        // button that always 403'd/404'd on submit. Transient state
+        // (the rate limit) stays POST-only by design.
+        $canMessagePerm = MessagesService::canMessage($viewerId, $userId);
 
         // §J.6 attestation gates — same resolver as entity cards.
         // getViewerActionPermissions ships {allowed, unlock_hint} for
@@ -1162,27 +1164,16 @@ final class UserViewService
 
         return [
             'can_follow'       => ['allowed' => $isOther,    'unlock_hint' => null],
-            'can_message'      => ['allowed' => $canMessage, 'unlock_hint' => null],
+            'can_message'      => [
+                'allowed'     => $canMessagePerm['allowed'],
+                'unlock_hint' => $canMessagePerm['unlock_hint'],
+            ],
             'can_block'        => ['allowed' => $isOther,    'unlock_hint' => null],
             'can_edit_profile' => ['allowed' => $isSelf,     'unlock_hint' => null],
             'can_vouch'        => $attestationPerms['can_vouch'],
             'can_stand_behind' => $attestationPerms['can_stand_behind'],
             'can_report'       => $attestationPerms['can_report'],
         ];
-    }
-
-    /**
-     * `peepso_chat_enabled` user_meta gate. Defensive when the
-     * peepso-messages plugin is missing — return false (UI hides the
-     * button rather than rendering a "Message" affordance that always
-     * 503s).
-     */
-    private static function recipientChatEnabled(int $userId): bool
-    {
-        if ($userId <= 0 || !class_exists('PeepSoChatModel')) {
-            return false;
-        }
-        return (bool) \PeepSoChatModel::chat_enabled($userId);
     }
 
     /**

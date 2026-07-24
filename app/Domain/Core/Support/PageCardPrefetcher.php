@@ -32,8 +32,10 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\MessagesService;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
@@ -66,7 +68,10 @@ if (!defined('ABSPATH')) {
  *   attestation_revoked_counts: array<int, int>,
  *   validator_rows: array<int, list<ValidatorCardRow>>,
  *   validator_logos: array<int, string>,
- *   page_entities: array<int, array{entity_type: string, entity_id: int}>
+ *   page_entities: array<int, array{entity_type: string, entity_id: int}>,
+ *   page_operators: array<int, array{state: string, user_id: int|null}>,
+ *   page_activations: array<int, true>,
+ *   message_eligibility: array<int, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>
  * }
  */
 final class PageCardPrefetcher
@@ -131,6 +136,9 @@ final class PageCardPrefetcher
             'validator_rows'             => [],
             'validator_logos'            => [],
             'page_entities'              => [],
+            'page_operators'             => [],
+            'page_activations'           => [],
+            'message_eligibility'        => [],
         ];
         if ($pageIds === []) {
             return $empty;
@@ -233,6 +241,20 @@ final class PageCardPrefetcher
 
         $pageEntities = WalletRepository::resolveEntitiesForPages($pageIds);
 
+        // ── 3.5 Validator messaging (viewer-independent half) ───────
+        // Deterministic operator resolution + first-activation presence
+        // for the validator pages on this page of results. Two flat
+        // queries; unclaimed/never-activated pages cost nothing extra
+        // downstream. Skipped entirely when the surface is disarmed.
+        $pageOperators   = [];
+        $pageActivations = [];
+        if ($validatorPageIds !== [] && MessagesService::validatorMessagingEnabled()) {
+            $pageOperators = ClaimRepository::resolveVerifiedOperatorForPages($validatorPageIds);
+            foreach (ValidatorMsgActivationRepository::getByPageIds($validatorPageIds) as $activatedPageId => $_row) {
+                $pageActivations[$activatedPageId] = true;
+            }
+        }
+
         // ── 4. Viewer-keyed batches (skipped entirely for anon) ─────
         $viewerClaims       = [];
         $viewerVotes        = [];
@@ -257,6 +279,31 @@ final class PageCardPrefetcher
                 ->getEndorseEligibilityForPages($viewerId, $pageIds);
         }
 
+        // Viewer-keyed messaging eligibility, keyed BACK to page ids.
+        // One canMessageMany call over the distinct resolved operators
+        // (sender gates resolve once, one blocked-set query, friends
+        // fetched lazily) — flat regardless of per_page. Anon gets the
+        // empty map per the bundle convention; CardViewService's
+        // per-card fallback short-circuits with zero queries.
+        $messageEligibility = [];
+        if ($viewerId > 0 && $pageOperators !== []) {
+            $operatorIds = [];
+            foreach ($pageOperators as $resolution) {
+                if ($resolution['user_id'] !== null) {
+                    $operatorIds[$resolution['user_id']] = true;
+                }
+            }
+            if ($operatorIds !== []) {
+                $byUser = MessagesService::canMessageMany($viewerId, array_keys($operatorIds));
+                foreach ($pageOperators as $opPageId => $resolution) {
+                    $operatorId = $resolution['user_id'];
+                    if ($operatorId !== null && isset($byUser[$operatorId])) {
+                        $messageEligibility[$opPageId] = $byUser[$operatorId];
+                    }
+                }
+            }
+        }
+
         return [
             'read_models'                => $readModels,
             'claimed_pages'              => $claimedPages,
@@ -270,6 +317,9 @@ final class PageCardPrefetcher
             'validator_rows'             => $validatorRows,
             'validator_logos'            => $validatorLogos,
             'page_entities'              => $pageEntities,
+            'page_operators'             => $pageOperators,
+            'page_activations'           => $pageActivations,
+            'message_eligibility'        => $messageEligibility,
         ];
     }
 }

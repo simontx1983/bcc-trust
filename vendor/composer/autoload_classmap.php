@@ -381,6 +381,7 @@ return array(
     'BCC\\Trust\\Onchain\\Repositories\\OnchainCircuitBreakerRepository' => $baseDir . '/app/Domain/Onchain/Repositories/OnchainCircuitBreakerRepository.php',
     'BCC\\Trust\\Onchain\\Repositories\\SignalRepository' => $baseDir . '/app/Domain/Onchain/Repositories/SignalRepository.php',
     'BCC\\Trust\\Onchain\\Repositories\\ValidatorMsgActivationRepository' => $baseDir . '/app/Domain/Onchain/Repositories/ValidatorMsgActivationRepository.php',
+    'BCC\\Trust\\Onchain\\Repositories\\ValidatorMsgQueueRepository' => $baseDir . '/app/Domain/Onchain/Repositories/ValidatorMsgQueueRepository.php',
     'BCC\\Trust\\Onchain\\Repositories\\ValidatorRepository' => $baseDir . '/app/Domain/Onchain/Repositories/ValidatorRepository.php',
     'BCC\\Trust\\Onchain\\Repositories\\WalletRepository' => $baseDir . '/app/Domain/Onchain/Repositories/WalletRepository.php',
     'BCC\\Trust\\Onchain\\Services\\BonusRetryService' => $baseDir . '/app/Domain/Onchain/Services/BonusRetryService.php',

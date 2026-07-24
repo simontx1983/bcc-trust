@@ -43,6 +43,7 @@ use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
@@ -252,6 +253,12 @@ final class CardViewService
             $endorseEligibility = $this->endorsementService->getEndorseEligibility($viewerId, $pageId);
         }
 
+        // Validator messaging — server-owned destination state + the
+        // viewer's can_message permission, resolved together from ONE
+        // operator resolution so the button and the send path cannot
+        // disagree.
+        $messagingState = self::resolvePageMessagingState($kind, $pageId, $viewerId, $prefetched);
+
         // §J.6 viewer_attestation — present only for authed viewers.
         // Maps the card kind to the locked target_kind set per §J.1.
         // Always null for anon (the service returns null on viewerId<=0).
@@ -381,13 +388,21 @@ final class CardViewService
                 self::resolvePageAvatarUrl($pageId, $validatorRows, $validatorLogo)
             ),
             'stats'               => self::buildPageStats($trustScore, $rm),
+            // Where a message to this entity would GO — the frontend
+            // must not infer claim lifecycle from is_claimed (which
+            // cannot tell never-claimed from previously-claimed).
+            // `unavailable` deliberately collapses the
+            // previously-claimed and AMBIGUOUS states so the wire never
+            // reveals that competing claims exist.
+            'messaging'           => $messagingState['messaging'],
             'permissions'         => $this->resolvePagePermissions(
                 $viewerId,
                 $isClaimedByViewer,
                 $endorseEligibility,
                 (int) $post->post_author,
                 $cardTargetKind,
-                $pageId
+                $pageId,
+                $messagingState['can_message']
             ),
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
@@ -651,6 +666,10 @@ final class CardViewService
             // shape uniformity with entity cards (matches is_claimed above).
             'is_claim_verified'   => false,
             'claim_target'        => null,
+            // Entity-addressed messaging is validator-only at V1;
+            // members are messaged directly through the DM surface.
+            // Emitted for shape uniformity.
+            'messaging'           => ['destination' => 'none', 'operator' => null],
             'crest'               => self::buildCrest(
                 (string) $user->display_name ?: $user->user_login,
                 'tier',
@@ -799,6 +818,8 @@ final class CardViewService
             // for shape uniformity (mirrors is_claimed above).
             'is_claim_verified'   => false,
             'claim_target'        => null,
+            // Entity-addressed messaging is validator-only at V1.
+            'messaging'           => ['destination' => 'none', 'operator' => null],
             'onchain_signals'     => null,
             'member_dossier'      => null,
             // The community-only back-face block. collection_stats is
@@ -1414,11 +1435,8 @@ final class CardViewService
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * @param array{allowed: bool, unlock_hint: string|null, reason_code: string|null} $endorseEligibility
-     * @return array<string, Permission>
-     */
-    /**
      * @param array<string, mixed> $endorseEligibility
+     * @param array{allowed: bool, unlock_hint: string|null, reason_code: string|null} $canMessage
      * @return array<string, mixed>
      */
     private function resolvePagePermissions(
@@ -1427,7 +1445,8 @@ final class CardViewService
         array $endorseEligibility,
         int $pageOwnerUserId,
         ?string $targetKind,
-        int $targetId
+        int $targetId,
+        array $canMessage = ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'not_applicable']
     ): array {
         // §J.6 attestation permissions: the service handles both anon
         // (returns "Sign in to <verb>." aspirational copy across all
@@ -1446,7 +1465,14 @@ final class CardViewService
         if ($viewerId <= 0) {
             // Legacy permissions stay in their existing locked shape;
             // attestation fields use the service's anon copy.
-            return array_merge(self::lockedPagePermissions(), $attestationFields);
+            // can_message rides along so an anon viewer on a
+            // messageable validator still sees the sign-in path (and
+            // `not_applicable` — hidden — everywhere else).
+            return array_merge(
+                self::lockedPagePermissions(),
+                $attestationFields,
+                ['can_message' => $canMessage]
+            );
         }
 
         return array_merge(
@@ -1473,6 +1499,11 @@ final class CardViewService
                 'can_post_as_entity' => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
                 'can_edit_bio'       => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
                 'can_edit_image'     => $viewerIsClaimer ? self::allow() : self::deny(null, 'not_claimer'),
+                // Mirrors the DM write gates exactly (MessagesService's
+                // single policy evaluator) against the page's resolved
+                // operator, or the queue-mode gates when the validator
+                // has never been claimed.
+                'can_message'        => $canMessage,
             ],
             // §J.6 Trust Attestation Layer permissions. Tier-gated +
             // self-target-prevented. The shapes are
@@ -1481,6 +1512,145 @@ final class CardViewService
             // unlock_hint for the AttestationActionCluster's render).
             $attestationFields
         );
+    }
+
+    /**
+     * Validator messaging: resolve WHERE a message to this page would
+     * go, plus the viewer's can_message permission — from ONE operator
+     * resolution so the rendered button and the send path can never
+     * disagree.
+     *
+     * destination:
+     *   none        — not a validator page, or the surface is disarmed
+     *   operator    — exactly one verified operator; live DM
+     *   queue       — never claimed; message is durably queued for the
+     *                 FIRST verified operator
+     *   unavailable — previously claimed but currently unclaimed, OR
+     *                 AMBIGUOUS (>1 verified operator). Deliberately
+     *                 ONE value for both: the wire must not reveal that
+     *                 competing claims exist, and no claimant identity
+     *                 is ever emitted for them.
+     *
+     * @param array<string, mixed>|null $prefetched
+     * @return array{
+     *     messaging: array{destination: string, operator: array{handle: string, name: string}|null},
+     *     can_message: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     * }
+     */
+    private static function resolvePageMessagingState(
+        string $kind,
+        int $pageId,
+        int $viewerId,
+        ?array $prefetched
+    ): array {
+        $none = [
+            'messaging'   => ['destination' => 'none', 'operator' => null],
+            'can_message' => self::deny(null, 'not_applicable'),
+        ];
+
+        // V1 scope: validator pages only. Project/creator claim
+        // semantics need a separate audit before they accept messages.
+        if ($kind !== 'validator' || !MessagesService::validatorMessagingEnabled()) {
+            return $none;
+        }
+
+        /** @var array{state: string, user_id: int|null} $resolution */
+        $resolution = ($prefetched !== null && isset($prefetched['page_operators']))
+            ? ($prefetched['page_operators'][$pageId]
+                ?? ['state' => ClaimRepository::OPERATOR_UNCLAIMED, 'user_id' => null])
+            : ClaimRepository::resolveVerifiedOperatorForPage($pageId);
+
+        if ($resolution['state'] === ClaimRepository::OPERATOR_AMBIGUOUS) {
+            return [
+                'messaging'   => ['destination' => 'unavailable', 'operator' => null],
+                'can_message' => self::deny(null, 'not_applicable'),
+            ];
+        }
+
+        if ($resolution['state'] === ClaimRepository::OPERATOR_RESOLVED && $resolution['user_id'] !== null) {
+            $operatorId = $resolution['user_id'];
+            $perm = ($prefetched !== null && isset($prefetched['message_eligibility']))
+                ? ($prefetched['message_eligibility'][$pageId]
+                    ?? MessagesService::canMessage($viewerId, $operatorId))
+                : MessagesService::canMessage($viewerId, $operatorId);
+
+            return [
+                'messaging'   => [
+                    'destination' => 'operator',
+                    // Claimer identity is already public surface (the
+                    // claim transfers page authorship and the discovery
+                    // read exposes claimer names).
+                    'operator'    => self::buildOperatorMini($operatorId),
+                ],
+                'can_message' => $perm,
+            ];
+        }
+
+        // UNCLAIMED. Queue only when this page has NEVER been
+        // activated — a previously activated page that is currently
+        // unclaimed does not reopen the first-claim backlog.
+        $activated = ($prefetched !== null && isset($prefetched['page_activations']))
+            ? (bool) ($prefetched['page_activations'][$pageId] ?? false)
+            : ValidatorMsgActivationRepository::getByPageId($pageId) !== null;
+
+        if ($activated) {
+            return [
+                'messaging'   => ['destination' => 'unavailable', 'operator' => null],
+                'can_message' => self::deny(null, 'not_applicable'),
+            ];
+        }
+
+        return [
+            'messaging'   => ['destination' => 'queue', 'operator' => null],
+            'can_message' => self::queueModeEligibility($viewerId),
+        ];
+    }
+
+    /**
+     * Queue-mode eligibility: there is no recipient yet, so only the
+     * SENDER-side permanent rules apply. Per-sender caps and throttles
+     * are transient POST-time conditions and stay off the read path
+     * (same principle as endorse eligibility).
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    private static function queueModeEligibility(int $viewerId): array
+    {
+        if ($viewerId <= 0) {
+            return self::deny('Sign in to send a message.', 'auth_required');
+        }
+        // Reuse the write path's own sender rules — canMessage against
+        // a non-existent recipient would shield as unavailable, so ask
+        // it about the sender only, via the same helpers.
+        $selfCheck = MessagesService::canMessage($viewerId, $viewerId);
+        if (($selfCheck['reason_code'] ?? null) === 'sender_restricted') {
+            return self::deny(null, 'sender_restricted');
+        }
+        if (($selfCheck['reason_code'] ?? null) === 'sender_chat_disabled') {
+            return self::deny($selfCheck['unlock_hint'], 'sender_chat_disabled');
+        }
+        return self::allow();
+    }
+
+    /**
+     * @return array{handle: string, name: string}|null
+     */
+    private static function buildOperatorMini(int $userId): ?array
+    {
+        $user = get_userdata($userId);
+        if ($user === false) {
+            return null;
+        }
+        $handle = (string) get_user_meta($userId, 'bcc_handle', true);
+        if ($handle === '') {
+            $handle = (string) $user->user_login;
+        }
+        $name = (string) $user->display_name;
+
+        return [
+            'handle' => $handle,
+            'name'   => $name !== '' ? $name : $handle,
+        ];
     }
 
     /**
@@ -1543,6 +1713,10 @@ final class CardViewService
                 // only. Members are followed/reviewed via different surfaces.
                 'can_endorse'        => self::deny(null, 'not_applicable'),
                 'can_post_as_entity' => self::deny(null, 'not_applicable'),
+                // Entity-addressed messaging is validator-only at V1 —
+                // members are messaged through the DM surface itself
+                // (the profile view-model carries the live gate).
+                'can_message'        => self::deny(null, 'not_applicable'),
                 'can_edit_bio'       => $isSelf ? self::allow() : self::deny(null, 'not_owner'),
                 // Page-image editing applies to claimed validator/project/
                 // creator pages; member self-avatars use /me/profile/avatar.
