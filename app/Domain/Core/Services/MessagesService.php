@@ -15,12 +15,20 @@
  *     conversation list + thread participants)
  *
  * Privacy gates (server-enforced — frontend never decides):
- *   1. Sender's `peepso_chat_enabled` user_meta — false → bcc_forbidden
- *   2. Recipient's `peepso_chat_enabled` user_meta — false → bcc_forbidden
- *   3. Recipient's `peepso_chat_friends_only` AND PeepSoFriendsModel::are_friends
+ *   1. Sender not suspended (Permissions::is_not_suspended, no admin
+ *      bypass) and not PeepSo-banned (usr_role 'ban') → bcc_fraud_locked
+ *   2. Sender's `peepso_chat_enabled` user_meta — false → bcc_forbidden
+ *   3. Recipient's `peepso_chat_enabled` user_meta — false → bcc_forbidden
+ *   4. Recipient's `peepso_chat_friends_only` AND PeepSoFriendsModel::are_friends
  *      returns false → bcc_forbidden
- *   4. PeepSoBlockRepository::isMutuallyBlocked(sender, recipient) →
+ *   5. PeepSoBlockRepository::isMutuallyBlocked(sender, recipient) →
  *      bcc_not_found (404, info-leak shielded; never reveals the block)
+ *
+ * Recipient-facing gates 3–5 are applied by the ONE policy evaluator
+ * (`evaluatePolicy`) under a named MessagingPolicy context — the
+ * conversation-start path and the reply peer re-check both consume it,
+ * so the rules cannot drift between paths. See MessagingPolicy for the
+ * full context matrix (NORMAL_DM vs VALIDATOR_FIRST_CLAIM_RELEASE).
  *
  * Per-write rate limit:
  *   30 messages per 5 minutes per sender across all conversations
@@ -289,6 +297,17 @@ final class MessagesService
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
         }
 
+        // Suspension / ban gate — permanent authorization rule, so it
+        // runs before any content handling, mirroring every other BCC
+        // mutating surface (endorse, disputes, locals join). No admin
+        // bypass: a suspended admin gets no free pass on participant
+        // paths. bcc_fraud_locked matches the TrustRestController
+        // suspension mapping.
+        $restricted = self::senderRestricted($viewerId);
+        if ($restricted !== null) {
+            return $restricted;
+        }
+
         $body = trim($body);
         if ($body === '') {
             return ['error' => 'bcc_invalid_request', 'message' => 'Message cannot be empty.'];
@@ -342,23 +361,14 @@ final class MessagesService
             return ['error' => 'bcc_not_found', 'message' => 'Recipient not found.'];
         }
 
-        // Mutual-block 404 (info-leak shield).
-        if (PeepSoBlockRepository::isMutuallyBlocked($viewerId, $recipientId)) {
-            return ['error' => 'bcc_not_found', 'message' => 'Recipient not found.'];
-        }
-
-        // Recipient-side gates.
-        if (!self::chatEnabled($recipientId)) {
-            return [
-                'error'   => 'bcc_forbidden',
-                'message' => 'This member has direct messages turned off.',
-            ];
-        }
-        if (self::chatFriendsOnly($recipientId) && !PeepSoFriendGate::areFriends($viewerId, $recipientId)) {
-            return [
-                'error'   => 'bcc_forbidden',
-                'message' => 'This member only accepts messages from friends.',
-            ];
+        $gate = self::evaluatePolicy(
+            MessagingPolicy::NORMAL_DM,
+            $viewerId,
+            $recipientId,
+            'Recipient not found.'
+        );
+        if ($gate !== null) {
+            return ['error' => $gate['error'], 'message' => $gate['message']];
         }
 
         $result = PeepSoMessageWriter::sendNewMessage($viewerId, $recipientId, $body);
@@ -390,23 +400,20 @@ final class MessagesService
         // For 1-on-1 conversations, re-check the privacy gate against
         // the peer at send time (a peer may have flipped their
         // chat_enabled / chat_friends_only since the last message).
+        // Same evaluator as the start path — replies always run
+        // NORMAL_DM (a first-claim backlog delivery never creates an
+        // ongoing exemption; see MessagingPolicy).
         $participants = PeepSoMessageRepository::getParticipantUserIds($rootMsgId);
         $peerId = self::resolvePeerId($participants, $viewerId, count($participants) > 2);
         if ($peerId !== null) {
-            if (PeepSoBlockRepository::isMutuallyBlocked($viewerId, $peerId)) {
-                return ['error' => 'bcc_not_found', 'message' => 'Conversation not found.'];
-            }
-            if (!self::chatEnabled($peerId)) {
-                return [
-                    'error'   => 'bcc_forbidden',
-                    'message' => 'This member has direct messages turned off.',
-                ];
-            }
-            if (self::chatFriendsOnly($peerId) && !PeepSoFriendGate::areFriends($viewerId, $peerId)) {
-                return [
-                    'error'   => 'bcc_forbidden',
-                    'message' => 'This member only accepts messages from friends.',
-                ];
+            $gate = self::evaluatePolicy(
+                MessagingPolicy::NORMAL_DM,
+                $viewerId,
+                $peerId,
+                'Conversation not found.'
+            );
+            if ($gate !== null) {
+                return ['error' => $gate['error'], 'message' => $gate['message']];
             }
         }
 
@@ -457,6 +464,108 @@ final class MessagesService
             return 0;
         }
         return PeepSoMessageRepository::getUnreadConversationCountForUser($viewerId);
+    }
+
+    // ── Policy evaluator ────────────────────────────────────────────────
+
+    /**
+     * THE recipient-facing gate evaluator — the only place the mutual
+     * block / recipient chat_enabled / friends_only rules live. Both
+     * write paths (conversation start + reply peer re-check) and the
+     * card-read eligibility consume it, keyed by a MessagingPolicy
+     * context, so read and write can never drift.
+     *
+     * Returns null when every gate passes. On a denial:
+     *   - `error` / `message` — the wire error for write paths.
+     *     `$shieldMessage` parameterizes the mutual-block 404 copy
+     *     because the two call sites shield with different nouns
+     *     ('Recipient not found.' vs 'Conversation not found.').
+     *   - `gate` — the INTERNAL gate identifier (`mutual_block` /
+     *     `recipient_chat_disabled` / `friends_only`). Server-side
+     *     only (queue suppression reasons, logs); never on the wire.
+     *   - `reason_code` / `unlock_hint` — the wire-safe read-model
+     *     shape. Block and chat-off deliberately emit the IDENTICAL
+     *     (`messaging_unavailable`, null) pair so the §4.19 info-leak
+     *     shield holds on card reads too.
+     *
+     * Under VALIDATOR_FIRST_CLAIM_RELEASE the two preference gates
+     * (recipient chat_enabled, friends_only) are bypassed — the
+     * mutual-block safety rule always runs. See MessagingPolicy.
+     *
+     * @return array{
+     *     error: string,
+     *     message: string,
+     *     gate: string,
+     *     reason_code: string,
+     *     unlock_hint: string|null
+     * }|null
+     */
+    private static function evaluatePolicy(
+        string $context,
+        int $senderId,
+        int $recipientId,
+        string $shieldMessage = 'Recipient not found.'
+    ): ?array {
+        // Mutual-block shield — enforced in EVERY context (404, never
+        // reveals the block).
+        if (PeepSoBlockRepository::isMutuallyBlocked($senderId, $recipientId)) {
+            return [
+                'error'       => 'bcc_not_found',
+                'message'     => $shieldMessage,
+                'gate'        => 'mutual_block',
+                'reason_code' => 'messaging_unavailable',
+                'unlock_hint' => null,
+            ];
+        }
+
+        if ($context === MessagingPolicy::VALIDATOR_FIRST_CLAIM_RELEASE) {
+            // Preference gates bypassed for the one-time backlog
+            // release only.
+            return null;
+        }
+
+        if (!self::chatEnabled($recipientId)) {
+            return [
+                'error'       => 'bcc_forbidden',
+                'message'     => 'This member has direct messages turned off.',
+                'gate'        => 'recipient_chat_disabled',
+                'reason_code' => 'messaging_unavailable',
+                'unlock_hint' => null,
+            ];
+        }
+        if (self::chatFriendsOnly($recipientId) && !PeepSoFriendGate::areFriends($senderId, $recipientId)) {
+            return [
+                'error'       => 'bcc_forbidden',
+                'message'     => 'This member only accepts messages from friends.',
+                'gate'        => 'friends_only',
+                'reason_code' => 'friends_only',
+                'unlock_hint' => 'This member only accepts messages from friends.',
+            ];
+        }
+        return null;
+    }
+
+    /**
+     * §7 policy matrix: suspended or PeepSo-banned senders cannot send
+     * DMs in ANY context. Suspension resolves through the cross-plugin
+     * Permissions seam (60s-cached, fail-closed via NullTrustReadService);
+     * the PeepSo ban check mirrors the usr_role='ban' state PeepSo's
+     * own writers refuse.
+     *
+     * @return array{error: string, message: string}|null
+     */
+    private static function senderRestricted(int $viewerId): ?array
+    {
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($viewerId, false)) {
+            return ['error' => 'bcc_fraud_locked', 'message' => 'Your account is currently restricted.'];
+        }
+        if (class_exists('PeepSoUser')) {
+            $role = \PeepSoUser::get_instance($viewerId)->get_user_role();
+            if ($role === 'ban') {
+                return ['error' => 'bcc_fraud_locked', 'message' => 'Your account is currently restricted.'];
+            }
+        }
+        return null;
     }
 
     // ── Privacy primitives ──────────────────────────────────────────────

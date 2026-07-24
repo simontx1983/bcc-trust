@@ -294,6 +294,7 @@ final class MessagesEndpoint
         return match ($code) {
             'bcc_unauthorized'    => 401,
             'bcc_forbidden'       => 403,
+            'bcc_fraud_locked'    => 403,
             'bcc_not_found'       => 404,
             'bcc_invalid_request' => 400,
             'bcc_rate_limited'    => 429,

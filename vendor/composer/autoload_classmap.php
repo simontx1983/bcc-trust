@@ -217,6 +217,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\Mentions\\MentionPolicy' => $baseDir . '/app/Domain/Core/Services/Mentions/MentionPolicy.php',
     'BCC\\Trust\\Core\\Services\\Mentions\\MentionSearchService' => $baseDir . '/app/Domain/Core/Services/Mentions/MentionSearchService.php',
     'BCC\\Trust\\Core\\Services\\MessagesService' => $baseDir . '/app/Domain/Core/Services/MessagesService.php',
+    'BCC\\Trust\\Core\\Services\\MessagingPolicy' => $baseDir . '/app/Domain/Core/Services/MessagingPolicy.php',
     'BCC\\Trust\\Core\\Services\\MetaDisputeFilerEligibility' => $baseDir . '/app/Domain/Core/Services/MetaDisputeFilerEligibility.php',
     'BCC\\Trust\\Core\\Services\\ModerationQueueService' => $baseDir . '/app/Domain/Core/Services/ModerationQueueService.php',
     'BCC\\Trust\\Core\\Services\\MyBlocksService' => $baseDir . '/app/Domain/Core/Services/MyBlocksService.php',
