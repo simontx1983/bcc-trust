@@ -5,13 +5,19 @@
  * Cross-kind discovery list. Sort key (per plan):
  *   verified DESC, heat_score DESC, member_count DESC
  *
- * Verified groups (those with `_bcc_group_kind = 'holders'`) rank
- * above non-verified — but active verified groups beat sleepy ones,
- * so a "verified but dead" community doesn't dominate the discovery
- * surface.
+ * Verified groups rank above non-verified — but active verified groups
+ * beat sleepy ones, so a "verified but dead" community doesn't dominate
+ * the discovery surface.
+ *
+ * The verified set is `_bcc_group_kind IN ('holders','delegators')`:
+ * both carry GroupVerification::onChain() from GroupContextResolver, so
+ * the `verified=1` filter and the `sort_verified` key widened to
+ * delegator communities automatically when that arm landed. Wire value
+ * of `verification.kind` stays `on_chain` for both — the badge is one
+ * vocabulary, not one per gate.
  *
  * Filters:
- *   ?verified=1 → only on-chain verified groups
+ *   ?verified=1 → only on-chain verified groups (holders + delegators)
  *   ?page / ?page_size → standard pagination (default 20, max 50)
  *
  * Privacy: secret groups never appear here regardless of viewer.
@@ -167,6 +173,12 @@ final class GroupsDiscoveryEndpoint
         // CANDIDATE_LIMIT above.
         $enrichmentByGroup = $this->resolveCollectionEnrichment($orderedIds);
 
+        // Validator/delegator communities carry `validator_stats` instead
+        // of `collection_stats`. Two batched lookups (gate configs +
+        // validator projection), no N+1; empty map when the candidate
+        // pool has no delegator communities.
+        $validatorStatsByGroup = $this->resolveValidatorEnrichment($orderedIds);
+
         // Chain + trust enrichment — both surfaces want them on the card
         // (chain chip alongside the kind label; trust threshold replaces
         // the OPEN privacy chip when set). Bulk-resolve to avoid N+1:
@@ -205,6 +217,7 @@ final class GroupsDiscoveryEndpoint
                 'activity'          => $heat,
                 'image_url'         => $enrichment['image_url'] ?? null,
                 'collection_stats'  => $enrichment['stats'] ?? null,
+                'validator_stats'   => $validatorStatsByGroup[$groupId] ?? null,
                 'description'       => $description,
                 'chain_tag'         => $chainSlugByGroup[$groupId] ?? null,
                 'trust_min'         => $trustMinByGroup[$groupId] ?? null,
@@ -278,6 +291,7 @@ final class GroupsDiscoveryEndpoint
                 $row['activity'],
                 $row['image_url'],
                 $row['collection_stats'],
+                $row['validator_stats'],
                 $row['description'],
                 $row['chain_tag'],
                 $row['trust_min'],
@@ -321,6 +335,7 @@ final class GroupsDiscoveryEndpoint
      * @param object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}|null $display
      * @param array{posts_last_7d: int, last_activity_at: string|null, heat: string, heat_label: string} $activity
      * @param array<string, mixed>|null $stats
+     * @param array<string, mixed>|null $validatorStats
      * @param array<string, mixed> $card
      * @return array<string, mixed>
      */
@@ -330,6 +345,7 @@ final class GroupsDiscoveryEndpoint
         array $activity,
         ?string $imageUrl,
         ?array $stats,
+        ?array $validatorStats,
         ?string $description,
         ?string $chainTag,
         ?int $trustMin,
@@ -346,6 +362,7 @@ final class GroupsDiscoveryEndpoint
             'description'      => $description,
             'image_url'        => $imageUrl,
             'collection_stats' => $stats,
+            'validator_stats'  => $validatorStats,
             'activity'         => $activity,
             // Same key vocabulary as CreatePlainGroupResponse + the detail
             // view-model — single contract shape across all surfaces.
@@ -539,6 +556,49 @@ final class GroupsDiscoveryEndpoint
         }
 
         return $enrichmentByGroup;
+    }
+
+    /**
+     * Resolve `validator_stats` per delegator community in the candidate
+     * pool. Two batched lookups (gate configs + the validator projection),
+     * no N+1 — mirrors resolveCollectionEnrichment's shape. Non-validator
+     * groups yield nothing; the caller falls back to null.
+     *
+     * Composition is delegated to
+     * {@see \BCC\Trust\Onchain\REST\ValidatorGroupsEndpoint::composeValidatorStats}
+     * so this block can never drift from the detail + buckets surfaces.
+     *
+     * @param list<int> $groupIds
+     * @return array<int, array<string, mixed>>
+     */
+    private function resolveValidatorEnrichment(array $groupIds): array
+    {
+        if ($groupIds === []) {
+            return [];
+        }
+
+        $configs = \BCC\Trust\Onchain\Repositories\ValidatorGroupRepository::findManyByGroupIds($groupIds);
+        if ($configs === []) {
+            return [];
+        }
+
+        $validatorIds = [];
+        foreach ($configs as $cfg) {
+            $validatorIds[] = $cfg->validatorId;
+        }
+        $rows = \BCC\Trust\Onchain\Repositories\ValidatorRepository::findCommunityStatsByIds($validatorIds);
+
+        $out = [];
+        foreach ($configs as $groupId => $cfg) {
+            $block = \BCC\Trust\Onchain\REST\ValidatorGroupsEndpoint::composeValidatorStats(
+                $rows[$cfg->validatorId] ?? null,
+                $cfg->minStake
+            );
+            if ($block !== null) {
+                $out[$groupId] = $block;
+            }
+        }
+        return $out;
     }
 
     private static function distributionPct(?int $holders, ?int $supply): ?int

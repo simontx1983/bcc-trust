@@ -42,7 +42,25 @@ final class NftPieceEndpoint
     /** Chain slugs accepted by the V2 Phase 6 surface. */
     private const SUPPORTED_CHAIN_SLUGS = ['ethereum', 'solana', 'cosmos'];
 
-    /** §4.17 cache windows per chain class. */
+    /**
+     * §4.17 cache windows per chain class.
+     *
+     * These are SHARED-cacheable (no `private`), which is only safe
+     * because this response is viewer-INVARIANT: identical bytes for
+     * anonymous and for every authenticated caller. `permissions` is a
+     * fixed `{}` and there is no per-viewer field.
+     *
+     * That invariant used to be violated: the payload carried the
+     * holder's `wallet_address` and resolved BCC identity, which meant a
+     * member↔wallet join sat in every intermediary and in the LiteSpeed
+     * edge tier for up to 30 minutes. The wallet data is gone (see
+     * NftPieceViewModelBuilder::buildDominantOwner), so the invariant
+     * now holds.
+     *
+     * If you ever add a field that varies by viewer, this must become
+     * `private` — a shared cache has no concept of who asked.
+     * See docs/wallet-privacy-policy.md.
+     */
     private const CACHE_INDEXED = 'max-age=300, stale-while-revalidate=1800';
     private const CACHE_COSMOS  = 'max-age=60, stale-while-revalidate=600';
 

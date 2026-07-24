@@ -45,11 +45,13 @@ final class LocalsJoinGateTest extends TestCase
      * @param int    $id      group post id
      * @param string $kind    `_bcc_group_kind` meta (holders|local|system|'' )
      * @param int    $privacy `peepso_group_privacy` meta (0 open, 1 closed, 2 secret)
+     * @param string $title   group post_title (drives the Locals title-prefix fallback)
      */
-    private function registerGroup(int $id, string $kind, int $privacy): void
+    private function registerGroup(int $id, string $kind, int $privacy, string $title = ''): void
     {
         $GLOBALS['__bcc_locals_gate_fixture'][$id] = [
             'post_type' => 'peepso-group',
+            'title'     => $title,
             'meta'      => [
                 '_bcc_group_kind'      => $kind,
                 'peepso_group_privacy' => (string) $privacy,
@@ -90,6 +92,34 @@ final class LocalsJoinGateTest extends TestCase
         $this->registerGroup(601, 'local', 2);
         $result = $this->service()->joinLocal(7, 601);
         self::assertSame('bcc_forbidden', $result['error'] ?? null);
+    }
+
+    public function testTitlePrefixedLocalWithoutMetaResolvesAsLocal(): void
+    {
+        // Real Locals carry no `_bcc_group_kind` meta (nothing writes
+        // 'local'); the resolver's title-prefix fallback must classify
+        // them Local. A CLOSED one reaching the privacy check (forbidden,
+        // not not_found) proves the type check passed.
+        $this->registerGroup(700, '', 1, 'Local 412 Cosmos Blacksmiths');
+        $result = $this->service()->joinLocal(7, 700);
+        self::assertSame('bcc_forbidden', $result['error'] ?? null, 'title-prefixed Local must pass the type gate');
+    }
+
+    public function testHoldersTitleWithoutMetaDoesNotTriggerFallback(): void
+    {
+        // The fallback fires ONLY for the canonical `Local ` prefix.
+        $this->registerGroup(701, '', 1, 'Holders: Bad Kids');
+        $result = $this->service()->joinLocal(7, 701);
+        self::assertSame('bcc_not_found', $result['error'] ?? null);
+    }
+
+    public function testMetaKindWinsOverLocalTitle(): void
+    {
+        // Meta, when present, is authoritative — a holders-tagged group
+        // with a misleading Local title stays Nft (rejected here).
+        $this->registerGroup(702, 'holders', 0, 'Local 99 Impostor');
+        $result = $this->service()->joinLocal(7, 702);
+        self::assertSame('bcc_not_found', $result['error'] ?? null);
     }
 
     public function testUnknownGroupIsRejectedAsNotFound(): void
