@@ -51,7 +51,6 @@ use BCC\Trust\Core\Repositories\SuspensionRepository;
 use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Onchain\Repositories\DelegationRepository;
-use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -205,29 +204,30 @@ final class SuggestionService
             ];
         }
 
-        // Shared validator backing — resolve monikers in one batch.
+        // Shared validator backing.
+        //
+        // PRIVACY: the label used to name the shared validator ("Backs
+        // Blacksmith Node too"), resolved via getMonikersByAddresses.
+        // Naming the validator asserted "this named member delegates to
+        // this named validator" — and validator delegator sets are public
+        // on-chain, so that narrows the member's wallet to one published
+        // delegator list. That is a member↔holding join reconstructable
+        // from a client-accessible surface, which the policy forbids.
+        //
+        // The moniker lookup is gone entirely (not just the label): the
+        // signal now degrades to the non-identifying form the empty-
+        // moniker branch already produced. Ranking is unchanged — the
+        // score contribution never depended on the name.
+        //
+        // See docs/wallet-privacy-policy.md.
         if ($coValidator !== []) {
-            $pairs = [];
-            foreach ($coValidator as $info) {
-                $pairs[] = [
-                    'chain_id'         => $info['chain_id'],
-                    'operator_address' => $info['validator_address'],
-                ];
-            }
-            $monikers = ValidatorRepository::getMonikersByAddresses($pairs);
-
             foreach ($coValidator as $cid => $info) {
                 $touch($cid);
                 $contribution = self::W_VALIDATOR * $info['shared_count'];
-                $key          = $info['chain_id'] . ':' . $info['validator_address'];
-                $moniker      = $monikers[$key] ?? '';
                 $pool[$cid]['score'] += $contribution;
                 $pool[$cid]['signals']['co_validator'] = [
                     'contribution' => $contribution,
-                    'label'        => sprintf(
-                        'Backs %s too',
-                        $moniker !== '' ? $moniker : 'the same validator'
-                    ),
+                    'label'        => 'Backs the same validator',
                 ];
             }
         }

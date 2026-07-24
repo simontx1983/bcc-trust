@@ -403,10 +403,41 @@ final class AuthSupport
 
     /**
      * Deterministic placeholder email for a wallet-signup with no
-     * caller-supplied email. WP requires a unique user_email; the hash
-     * suffix keeps the address stable per wallet so a retry of the
-     * same wallet collides with itself rather than leaking unique
-     * placeholders across the wp_users table.
+     * caller-supplied email. WP requires a unique user_email; the token
+     * keeps the address stable per wallet so a retry of the same wallet
+     * collides with its own orphaned row rather than sprinkling unique
+     * placeholders across wp_users.
+     *
+     * PRIVACY — the token is an HMAC keyed on `wp_salt('auth')`, NOT a
+     * bare hash of the address. The previous form was
+     * `substr(md5(strtolower($address)), 0, 16)`, which is a *guessable*
+     * function of the wallet: Gravatar publishes `md5(user_email)` on
+     * every avatar URL, so an attacker with a candidate address could
+     * recompute the placeholder, hash it, and confirm which member owns
+     * that wallet — a member↔wallet oracle. Keying on the site salt
+     * (which the attacker does not know) closes that oracle while
+     * preserving determinism-per-wallet. Existing pre-fix accounts are
+     * repaired by includes/database/backfill-wallet-placeholder-emails.php.
+     * See docs/wallet-privacy-policy.md.
+     *
+     * Determinism now depends on salt stability. If the site salt is
+     * rotated between a partial-failure signup and its retry, the retry
+     * produces a different placeholder and won't collide with the
+     * orphaned row — the only cost is a stray subscriber with no wallet
+     * link (no security impact; the wallet itself is still single-linked
+     * by the wallet_links UNIQUE, and the primary orphan guard is the
+     * wp_delete_user rollback in the signup handler, not this email).
+     * Salt rotation is rare and manual; the trade against closing the
+     * oracle is overwhelmingly worth it.
+     *
+     * FAILS CLOSED on an empty salt by THROWING — the caller converts it
+     * to an internal error before any user row or nonce is consumed.
+     * Emitting a random token instead would give the account a
+     * nondeterministic identity (breaking retry idempotency) and mask a
+     * real misconfiguration; a bare hash of the address would reopen the
+     * oracle. Neither is acceptable, so we refuse. `wp_salt()`
+     * auto-generates and persists salts, so an empty return is a genuine
+     * "salts unreadable/undefined" signal, not a normal condition.
      *
      * Domain is AccountRecoveryService::PLACEHOLDER_EMAIL_DOMAIN
      * (`noreply.bcc.local`) — the single source of truth that
@@ -414,10 +445,19 @@ final class AuthSupport
      * real recovery email from a synthetic one. `noreply` makes the
      * no-mail intent explicit; `.local` keeps it firmly out of any
      * real-MX collision class.
+     *
+     * @throws \RuntimeException when wp_salt('auth') is empty.
      */
     public static function placeholderEmailForWallet(string $walletAddress): string
     {
-        return 'wallet-' . substr(md5(strtolower($walletAddress)), 0, 16)
+        $salt = (string) wp_salt('auth');
+        if ($salt === '') {
+            throw new \RuntimeException(
+                'wp_salt(auth) is empty; refusing to mint a wallet placeholder email.'
+            );
+        }
+
+        return 'wallet-' . substr(hash_hmac('sha256', strtolower($walletAddress), $salt), 0, 16)
             . '@' . \BCC\Trust\Core\Services\AccountRecoveryService::PLACEHOLDER_EMAIL_DOMAIN;
     }
 
