@@ -534,13 +534,21 @@ final class MessagesService
     }
 
     /**
-     * Operator kill-switch — disarms the whole validator-messaging
+     * Operator kill-switch — arms/disarms the whole validator-messaging
      * surface (submissions + card destinations + worker) without a
-     * deploy. Default ON; queued rows are never dropped while off.
+     * deploy. Queued rows are never dropped while off.
+     *
+     * Default OFF (ship-dark): the verified-operator uniqueness
+     * constraint (scripts/claims-verified-operator-constraint.php) is a
+     * MANDATORY rollout gate. The feature must stay dark on any
+     * environment until an operator has run the duplicate audit clean
+     * AND applied the constraint there, then flips this option on. This
+     * prevents an auto-deploy from enabling messaging on staging/prod
+     * before its DB backstop against a second verified operator exists.
      */
     public static function validatorMessagingEnabled(): bool
     {
-        return (bool) get_option('bcc_validator_messaging_enabled', true);
+        return (bool) get_option('bcc_validator_messaging_enabled', false);
     }
 
     /**
