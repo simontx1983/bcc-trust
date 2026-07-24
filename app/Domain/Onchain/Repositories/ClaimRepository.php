@@ -70,6 +70,19 @@ class ClaimRepository {
     private const COLUMNS = 'id, user_id, entity_type, entity_id, wallet_address,
                  chain_id, claim_role, status, verified_at, created_at';
 
+    /** Operator-resolution states (validator-messaging routing). */
+    public const OPERATOR_UNCLAIMED = 'UNCLAIMED';
+    public const OPERATOR_RESOLVED  = 'RESOLVED';
+    public const OPERATOR_AMBIGUOUS = 'AMBIGUOUS';
+
+    /**
+     * In-request dedup for the ambiguous-operator audit row (the
+     * degradation metric still counts every observation).
+     *
+     * @var array<int, true>
+     */
+    private static array $ambiguousAudited = [];
+
     public static function table(): string {
         return \BCC\Core\DB\DB::table('onchain_claims');
     }
@@ -499,6 +512,130 @@ class ClaimRepository {
         ));
 
         return $found !== null;
+    }
+
+    /**
+     * Deterministic verified-OPERATOR resolution for VALIDATOR pages —
+     * the routing source for the validator-messaging surface. Unlike
+     * getPrimaryClaimsByPageIds (display names, first-row-wins,
+     * operator OR creator, both entity legs), this resolver:
+     *
+     *   - considers the validator leg ONLY (project/creator pages are
+     *     out of messaging scope until their claim semantics get a
+     *     separate audit);
+     *   - filters claim_role = 'operator' strictly;
+     *   - NEVER picks a row when more than one distinct verified
+     *     operator exists — that state is AMBIGUOUS and every caller
+     *     fails closed. Private messages are never routed from
+     *     unordered SQL output.
+     *
+     * States per page:
+     *   UNCLAIMED — zero verified operator claims resolve to the page
+     *               (absent from the returned map; use the `??
+     *               UNCLAIMED` default)
+     *   RESOLVED  — exactly one distinct operator user (user_id set)
+     *   AMBIGUOUS — >1 distinct operator users (user_id null; fires a
+     *               validator_messaging/ambiguous_operator degradation
+     *               metric per observation + one audit row per page
+     *               per request)
+     *
+     * The trailing ORDER BY only stabilizes scan output for humans —
+     * correctness never depends on row order because ambiguity is
+     * detected, not resolved. Bounded: IN-list capped at 100 (list
+     * pages cap at 50), indexed point joins per row.
+     *
+     * @param int[] $pageIds
+     * @return array<int, array{state: string, user_id: int|null}>
+     */
+    public static function resolveVerifiedOperatorForPages(array $pageIds): array {
+        if ($pageIds === []) {
+            return [];
+        }
+        $unique = [];
+        foreach ($pageIds as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $unique[$id] = true;
+            }
+        }
+        if ($unique === []) {
+            return [];
+        }
+        $ids = array_slice(array_keys($unique), 0, 100);
+
+        global $wpdb;
+        $table      = self::table();
+        $validators = \BCC\Core\DB\DB::table('onchain_validators');
+        $wallets    = \BCC\Core\DB\DB::table('wallet_links');
+        $ph         = implode(',', array_fill(0, count($ids), '%d'));
+
+        /** @var list<object{page_id: string, user_id: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT w.post_id AS page_id, cl.user_id
+             FROM {$table} cl
+             JOIN {$validators} v ON v.id = cl.entity_id AND cl.entity_type = 'validator'
+             JOIN {$wallets} w ON w.id = v.wallet_link_id
+             WHERE w.post_id IN ({$ph})
+               AND cl.status = 'verified' AND cl.claim_role = 'operator'
+             ORDER BY w.post_id, cl.user_id",
+            ...$ids
+        ));
+
+        /** @var array<int, array<int, true>> $byPage */
+        $byPage = [];
+        foreach ($rows ?: [] as $row) {
+            $byPage[(int) $row->page_id][(int) $row->user_id] = true;
+        }
+
+        $out = [];
+        foreach ($byPage as $pageId => $userSet) {
+            if (count($userSet) === 1) {
+                $out[$pageId] = [
+                    'state'   => self::OPERATOR_RESOLVED,
+                    'user_id' => array_key_first($userSet),
+                ];
+                continue;
+            }
+            $out[$pageId] = ['state' => self::OPERATOR_AMBIGUOUS, 'user_id' => null];
+            self::recordAmbiguousOperator($pageId, count($userSet));
+        }
+        return $out;
+    }
+
+    /**
+     * Point variant of resolveVerifiedOperatorForPages.
+     *
+     * @return array{state: string, user_id: int|null}
+     */
+    public static function resolveVerifiedOperatorForPage(int $pageId): array {
+        if ($pageId <= 0) {
+            return ['state' => self::OPERATOR_UNCLAIMED, 'user_id' => null];
+        }
+        $map = static::resolveVerifiedOperatorForPages([$pageId]);
+        return $map[$pageId] ?? ['state' => self::OPERATOR_UNCLAIMED, 'user_id' => null];
+    }
+
+    /**
+     * AMBIGUOUS observation plumbing: the degradation metric counts
+     * every observation (any occurrence is an incident — DB state the
+     * app-level claim exclusivity should make impossible); the audit
+     * row is deduped per page per request so card lists cannot spam
+     * bcc_trust_activity. Meta carries the claim COUNT only — never
+     * claimant user ids (identity non-exposure) and never bodies.
+     */
+    private static function recordAmbiguousOperator(int $pageId, int $claimUserCount): void {
+        \BCC\Core\Observability\DegradationMetrics::record('validator_messaging', 'ambiguous_operator');
+        if (isset(self::$ambiguousAudited[$pageId])) {
+            return;
+        }
+        self::$ambiguousAudited[$pageId] = true;
+        \BCC\Trust\Core\Security\AuditLogger::log(
+            'validator_operator_ambiguous',
+            $pageId,
+            ['claim_user_count' => $claimUserCount],
+            'page',
+            null
+        );
     }
 
     /**
