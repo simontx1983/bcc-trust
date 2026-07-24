@@ -507,7 +507,64 @@ add_action('bcc_gated_group_provision', function () {
     if ($result['created'] > 0 || !empty($result['errors'])) {
         \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group provisioning sweep', $result);
     }
+
+    // Validator/delegator communities ride the SAME daily hook (no new
+    // cron registration — deliberate). The `bcc_page_claimed` subscriber
+    // provisions on the claim event; this backfill covers claims that
+    // predate the feature and any missed event. Idempotent. Isolated in
+    // its own try so a validator-side failure can't abort the holder
+    // sweep's already-recorded result.
+    try {
+        $validatorResult = \BCC\Trust\Onchain\OnchainPlugin::instance()
+            ->validatorGroupProvisioningService()
+            ->provisionAll();
+
+        if ($validatorResult['created'] > 0 || !empty($validatorResult['errors'])) {
+            \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning sweep', $validatorResult);
+        }
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::warning('[bcc-trust] Delegator-community provisioning sweep failed', [
+            'error' => $e->getMessage(),
+        ]);
+    }
 });
+
+// Validator/delegator communities — provision on the platform-facing
+// claim event. `bcc_page_claimed` fires only after claim verification
+// (wallet-signature proof), so the claim itself is the arming act: no
+// delegator-count floor. Filtered to validator-operator claims; the
+// operator becomes the group OWNER (moderation has an owner, and the
+// owner is exempt from the gate + revoke by existing guards).
+// Idempotent — re-firing finds the existing group and no-ops.
+add_action('bcc_page_claimed', function ($userId, $pageId, $entityType, $entityId, $role): void {
+    if ((string) $entityType !== 'validator' || (string) $role !== 'operator') {
+        return;
+    }
+
+    try {
+        $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
+            ->validatorGroupProvisioningService()
+            ->provisionForClaim((int) $userId, (int) $entityId);
+
+        if ($result['status'] === 'created' || $result['status'] === 'error') {
+            \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning (claim event)', [
+                'user_id'      => (int) $userId,
+                'validator_id' => (int) $entityId,
+                'status'       => $result['status'],
+                'group_id'     => $result['group_id'],
+                'message'      => $result['message'],
+            ]);
+        }
+    } catch (\Throwable $e) {
+        // Never let community provisioning break the claim flow — the
+        // daily backfill retries.
+        \BCC\Core\Log\Logger::warning('[bcc-trust] Delegator-community provisioning (claim event) failed', [
+            'user_id'      => (int) $userId,
+            'validator_id' => (int) $entityId,
+            'error'        => $e->getMessage(),
+        ]);
+    }
+}, 30, 5);
 
 // V2 (PR 4): NFT-gated holder groups — reconcile sweep for users who
 // opted into auto-join via `bcc_auto_join_eligible_groups` user_meta.
@@ -956,6 +1013,25 @@ add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, functio
             'error' => $e->getMessage(),
         ]);
     }
+
+    // Validator/delegator communities ride the SAME twicedaily hook with
+    // their OWN rotation cursor (no new cron registration — deliberate).
+    // Same three-outcome discipline: INELIGIBLE → leave + audit, UNKNOWN
+    // → skip (never revoke on an LCD hiccup), owners never revoked, and
+    // NO opt-out is written (re-delegate = instant re-qualify).
+    // Separate try so one sweep's failure can't suppress the other.
+    try {
+        $validatorStats = \BCC\Trust\Onchain\OnchainPlugin::instance()
+            ->validatorGroupRevokeService()
+            ->sweep();
+        if ($validatorStats['revoked'] > 0 || $validatorStats['skipped_unknown'] > 0) {
+            \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community revoke sweep', $validatorStats);
+        }
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::warning('[bcc-trust] Delegator-community revoke sweep failed', [
+            'error' => $e->getMessage(),
+        ]);
+    }
 });
 
 // V2: when PeepSo evicts a user from a group via mod action, record a
@@ -992,7 +1068,10 @@ add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     if (\BCC\Trust\Onchain\Services\NftGroupRevokeService::$systemRevokeInProgress) {
         // Path 2: our automated re-verification revoke. NOT a mod
         // eviction — skip the permanent opt-out so the user can rejoin
-        // the instant they re-acquire the gating NFT.
+        // the instant they re-acquire the gating NFT (or re-delegate).
+        // ValidatorGroupRevokeService sets this SAME flag around its own
+        // leave() calls, so delegator communities get identical
+        // protection from the permanent-opt-out trap.
         return;
     }
     if ($userId === get_current_user_id()) {
@@ -1001,10 +1080,16 @@ add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
         // Skip here to avoid double-writing the opt-out timestamp.
         return;
     }
-    // Path 3: mod-initiated eviction via the PeepSo UI.
-    $config = \BCC\Trust\Onchain\Repositories\GatedGroupRepository::getGateConfig($groupId);
-    if ($config === null) {
-        return; // Not a holder group.
+    // Path 3: mod-initiated eviction via the PeepSo UI. Applies to BOTH
+    // gated kinds — the opt-out map is group-id-keyed and kind-agnostic,
+    // so a delegator community evicting a member must stick exactly like
+    // a holder group does (otherwise the next join re-admits a banned
+    // user the moment they still delegate).
+    $isGatedGroup =
+        \BCC\Trust\Onchain\Repositories\GatedGroupRepository::getGateConfig($groupId) !== null
+        || \BCC\Trust\Onchain\Repositories\ValidatorGroupRepository::getGateConfig($groupId) !== null;
+    if (!$isGatedGroup) {
+        return; // Neither a holder group nor a delegator community.
     }
     \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->nftGroupGateService()
