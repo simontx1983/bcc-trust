@@ -306,7 +306,7 @@ final class PushDispatcher
             'dispute_outcome'                     => PushPayload::forDisputeOutcome($count, $first),
             'panelist_selected'                   => PushPayload::forPanelistSelected($count, $first),
             'mention'                             => PushPayload::forMention($count, $first),
-            'local_post'                          => PushPayload::forLocalPost($count, $first),
+            'hall_post'                           => PushPayload::forHallPost($count, $first),
             'comment_received'                    => PushPayload::forCommentReceived($count, $first),
             'attestation_vouch_received'          => PushPayload::forAttestationVouchReceived($count, $first),
             'attestation_stand_behind_received'   => PushPayload::forAttestationStandBehindReceived($count, $first),
