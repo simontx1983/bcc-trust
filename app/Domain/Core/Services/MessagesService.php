@@ -193,6 +193,100 @@ final class MessagesService
         ];
     }
 
+    // ── Queued (pre-claim) ───────────────────────────────────────────────
+
+    /**
+     * The viewer's own PENDING queued validator messages — the "Queued"
+     * tab of /messages. These are messages addressed to a validator
+     * that has no verified operator yet; they are NOT conversations
+     * (there is no one to converse with), so they never appear in the
+     * inbox. When the validator is first claimed, the backlog delivers
+     * and each becomes a real thread (in both inboxes); at that point
+     * it leaves this list.
+     *
+     * Sender-visible only: a viewer sees ONLY their own queued rows,
+     * and only the pending ones (delivered → moved to inbox;
+     * suppressed/failed → not surfaced, so no suppression reason can
+     * leak). The body is the viewer's own message, so echoing it back
+     * is safe.
+     *
+     * @return array{
+     *     items: list<array<string, mixed>>,
+     *     pagination: array{page: int, per_page: int, total: int, total_pages: int}
+     * }|array{error: string, message: string}
+     */
+    public function listQueuedForSender(int $viewerId, int $page, int $perPage): array
+    {
+        if ($viewerId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        $page    = max(1, $page);
+        $perPage = max(1, min($perPage, self::INBOX_PER_PAGE_MAX));
+        $offset  = ($page - 1) * $perPage;
+
+        $total = ValidatorMsgQueueRepository::countPendingBySender($viewerId);
+        $rows  = $total > 0
+            ? ValidatorMsgQueueRepository::findPendingBySender($viewerId, $perPage, $offset)
+            : [];
+
+        $emptyPagination = [
+            'page'        => $page,
+            'per_page'    => $perPage,
+            'total'       => $total,
+            'total_pages' => max(1, (int) ceil(max(1, $total) / $perPage)),
+        ];
+        if ($rows === []) {
+            return ['items' => [], 'pagination' => $emptyPagination];
+        }
+
+        // Prime the target page posts (title/slug/thumbnail) in one pass.
+        $pageIds = array_values(array_unique(array_map(
+            static fn (object $r): int => (int) $r->page_id,
+            $rows
+        )));
+        _prime_post_caches($pageIds, false, true);
+
+        $items = [];
+        foreach ($rows as $r) {
+            $pageId = (int) $r->page_id;
+            $post   = get_post($pageId);
+            $name   = $post instanceof \WP_Post && $post->post_title !== ''
+                ? $post->post_title
+                : 'Unknown validator';
+            $slug   = $post instanceof \WP_Post ? (string) $post->post_name : '';
+            $avatar = $post instanceof \WP_Post
+                ? (string) (get_the_post_thumbnail_url($pageId, 'thumbnail') ?: '')
+                : '';
+
+            $items[] = [
+                'id'             => (int) $r->id,
+                'validator'      => [
+                    'page_id'    => $pageId,
+                    'name'       => $name,
+                    'slug'       => $slug,
+                    'avatar_url' => $avatar,
+                ],
+                'preview'        => self::previewBody((string) $r->body),
+                // The sender only needs one honest state — the queue's
+                // internal queued/retryable/processing distinctions are
+                // all "waiting for the validator to be claimed".
+                'delivery_state' => self::DELIVERY_STATE_AWAITING_OPERATOR,
+                'created_at'     => self::isoFromMysql((string) $r->created_at),
+            ];
+        }
+
+        return [
+            'items'      => $items,
+            'pagination' => [
+                'page'        => $page,
+                'per_page'    => $perPage,
+                'total'       => $total,
+                'total_pages' => max(1, (int) ceil($total / $perPage)),
+            ],
+        ];
+    }
+
     // ── Thread ───────────────────────────────────────────────────────────
 
     /**

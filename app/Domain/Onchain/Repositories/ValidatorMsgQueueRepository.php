@@ -169,6 +169,58 @@ class ValidatorMsgQueueRepository {
     }
 
     /**
+     * A sender's own PENDING queued messages — powers the
+     * /me/queued-messages "Queued" tab. Pending = queued | retryable |
+     * processing (not yet terminal). Delivered rows become real
+     * conversations and appear in the normal inbox; suppressed/failed
+     * rows are deliberately NOT surfaced to the sender (a suppression
+     * reason could leak, e.g. a block). Newest first, bounded.
+     *
+     * Uses idx_sender_created (sender_user_id, created_at).
+     *
+     * @return list<QueueRow>
+     */
+    public static function findPendingBySender(int $senderId, int $limit, int $offset): array {
+        if ($senderId <= 0) {
+            return [];
+        }
+        global $wpdb;
+        $table   = self::table();
+        $columns = self::COLUMNS;
+        $limit   = max(1, min($limit, 50));
+        $offset  = max(0, $offset);
+
+        /** @var list<QueueRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT {$columns} FROM {$table}
+              WHERE sender_user_id = %d
+                AND status IN ('queued', 'processing', 'retryable')
+              ORDER BY created_at DESC, id DESC
+              LIMIT %d OFFSET %d",
+            $senderId,
+            $limit,
+            $offset
+        ));
+        return $rows ?: [];
+    }
+
+    /** Count of a sender's pending queued messages (for pagination). */
+    public static function countPendingBySender(int $senderId): int {
+        if ($senderId <= 0) {
+            return 0;
+        }
+        global $wpdb;
+        $table = self::table();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table}
+              WHERE sender_user_id = %d
+                AND status IN ('queued', 'processing', 'retryable')",
+            $senderId
+        ));
+    }
+
+    /**
      * Deliverable rows for a page, oldest-first per sender so a single
      * sender's messages land in the order they were written.
      * Bounded by $limit (worker batch size).
