@@ -236,6 +236,10 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
 // demand + scam signals behind the Verify Collections queue.
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-signals.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
+// Validator messaging — durable first-activation record (one row per
+// validator page; the pre-claim backlog belongs to first activation
+// only, transfers never replay it).
+require_once BCC_TRUST_PATH . 'includes/database/schema-validator-msg-activation.php';
 // V2 Phase 1a — confirmation-gated NFT indexer
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-holdings.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-pieces.php';
@@ -322,6 +326,8 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
+    // Validator messaging first-activation record
+    bcc_create_validator_msg_activation_table();
     // V2 Phase 1a NFT indexer
     bcc_onchain_create_nft_holdings_table();
     bcc_onchain_create_chain_checkpoints_table();
