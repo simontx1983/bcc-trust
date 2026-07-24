@@ -140,6 +140,20 @@ final class MessagesEndpoint
                 'permission_callback' => '__return_true',
             ]
         );
+
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/me/queued-messages',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'listQueued'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'page'     => ['required' => false, 'type' => 'integer', 'sanitize_callback' => 'absint'],
+                    'per_page' => ['required' => false, 'type' => 'integer', 'sanitize_callback' => 'absint'],
+                ],
+            ]
+        );
     }
 
     public function listInbox(WP_REST_Request $request): WP_REST_Response
@@ -153,6 +167,27 @@ final class MessagesEndpoint
         $perPage = (int) ($request->get_param('per_page') ?? MessagesService::INBOX_PER_PAGE_DEFAULT);
 
         $result = $this->service()->listInbox($viewerId, $page, $perPage);
+        if (isset($result['error'])) {
+            return self::errorFromResult($result);
+        }
+
+        return self::ok([
+            'items'      => $result['items'],
+            'pagination' => $result['pagination'],
+        ]);
+    }
+
+    public function listQueued(WP_REST_Request $request): WP_REST_Response
+    {
+        $viewerId = (int) get_current_user_id();
+        if ($viewerId <= 0) {
+            return self::unauth();
+        }
+
+        $page    = (int) ($request->get_param('page') ?? 1);
+        $perPage = (int) ($request->get_param('per_page') ?? MessagesService::INBOX_PER_PAGE_DEFAULT);
+
+        $result = $this->service()->listQueuedForSender($viewerId, $page, $perPage);
         if (isset($result['error'])) {
             return self::errorFromResult($result);
         }
