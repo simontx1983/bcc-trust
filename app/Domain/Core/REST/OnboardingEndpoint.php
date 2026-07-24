@@ -63,14 +63,15 @@ final class OnboardingEndpoint
 
     /**
      * Allowlist of home-chain identifiers accepted on POST /me/onboarding/complete.
-     * Mirrors LocalsService::CHAIN_KEYWORDS (the chains the read side knows
-     * how to filter Locals by). Values are lowercased and trimmed before
-     * the allowlist check; stored verbatim.
+     * Independent allowlist of home-chain slugs. The read side filters
+     * Halls by the `_bcc_chain_tag` chain-id meta (ChainRepository), so
+     * this list stands on its own. Values are lowercased and trimmed
+     * before the allowlist check; stored verbatim.
      *
      * V1 wizard surfaces five (cosmos, osmosis, injective, ethereum, solana)
-     * but the storage allowlist mirrors the broader LocalsService set so a
-     * settings-page change can swap to polkadot/thorchain/near later
-     * without a backend migration.
+     * but the storage allowlist keeps the broader set so a settings-page
+     * change can swap to polkadot/thorchain/near later without a backend
+     * migration.
      *
      * @var list<string>
      */

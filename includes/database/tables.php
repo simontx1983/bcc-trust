@@ -52,9 +52,9 @@ require_once __DIR__ . '/schema-attestor-reliability-cache.php';
 // Post-shortcode permalink sidecar — act_id → 8-letter code behind
 // /u/{handle}/post/{code}. Includes a one-time option-guarded dev backfill.
 require_once __DIR__ . '/schema-post-shortcodes.php';
-// NOTE: bcc_user_locals removed — Locals membership lives in PeepSo's
-// peepso_group_members (single graph rule); primary-Local pointer in
-// wp_usermeta.bcc_primary_local_group_id.
+// NOTE: bcc_user_locals removed — Halls membership lives in PeepSo's
+// peepso_group_members (single graph rule); primary-Hall pointer in
+// wp_usermeta.bcc_primary_hall_group_id.
 // NOTE: bcc_page_claims merged into bcc_onchain_claims — page claims
 // use entity_type='page'; recovery_pending column added to onchain_claims.
 

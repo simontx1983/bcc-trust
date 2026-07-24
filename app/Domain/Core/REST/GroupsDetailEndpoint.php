@@ -39,7 +39,7 @@ final class GroupsDetailEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
-    /** Slug pattern — matches LocalsEndpoint's bound. PeepSo post_name. */
+    /** Slug pattern — matches HallsEndpoint's bound. PeepSo post_name. */
     private const SLUG_PATTERN = '[a-z0-9][a-z0-9-]{0,99}';
 
     private const DEFAULT_FEED_LIMIT = 20;

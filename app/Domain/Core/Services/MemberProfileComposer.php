@@ -574,11 +574,11 @@ final class MemberProfileComposer
             $items[] = ['label' => 'Joined', 'value' => self::formatJoinedDate($joinedAt)];
         }
 
-        $primaryLocal = isset($base['primary_local']) && is_array($base['primary_local'])
-            ? $base['primary_local']
+        $primaryHall = isset($base['primary_hall']) && is_array($base['primary_hall'])
+            ? $base['primary_hall']
             : null;
-        if ($primaryLocal !== null && isset($primaryLocal['name']) && is_string($primaryLocal['name'])) {
-            $items[] = ['label' => 'Primary Local', 'value' => $primaryLocal['name']];
+        if ($primaryHall !== null && isset($primaryHall['name']) && is_string($primaryHall['name'])) {
+            $items[] = ['label' => 'Home Hall', 'value' => $primaryHall['name']];
         }
 
         // Repository-sourced count, passed in by compose(). Deliberately

@@ -2,7 +2,7 @@
 /**
  * Cold-start bridge surface — civic map, not a recommendation engine.
  *
- * This service composes three blocks (locals + recent operators + hot
+ * This service composes three blocks (halls + recent operators + hot
  * posts) for the home-feed empty state. It exists so a cold-start
  * viewer sees "the room is still here," NOT to maximize engagement.
  *
@@ -13,7 +13,7 @@
  *     follower count, review volume, engagement count, or any other
  *     ranking metric. Recency is the only honest order.
  *
- *   - Bounded: 3 locals, 4 operators, 2 hot posts. No pagination,
+ *   - Bounded: 3 halls, 4 operators, 2 hot posts. No pagination,
  *     no "load more." This is a bridge surface, not a browser.
  *
  *   - Stable-random operator selection seeded by (viewer_user_id, date).
@@ -52,6 +52,7 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Services\Feed\FeedRankingService;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -60,7 +61,7 @@ if (!defined('ABSPATH')) {
 final class FeedColdStartService
 {
     /** Bounded counts — see class doctype. Do NOT widen. */
-    private const LOCALS_LIMIT          = 3;
+    private const HALLS_LIMIT           = 3;
     private const OPERATORS_LIMIT       = 4;
     private const OPERATORS_CANDIDATES  = 12; // wider pool for stable-random shuffle
     private const OPERATORS_WINDOW_DAYS = 7;
@@ -106,13 +107,13 @@ final class FeedColdStartService
     /**
      * Compose the three-block cold-start payload for a viewer.
      *
-     * `$viewerId === null` (or 0) → anon caller. The Locals block is NOT
+     * `$viewerId === null` (or 0) → anon caller. The Halls block is NOT
      * filtered by chain alignment (no usermeta to read); operators
      * block stable-random seed uses the date alone, so all anon viewers
      * see the same 4 operators on a given UTC day.
      *
      * @return array{
-     *   locals: list<array{slug:string,name:string,chain_slug:?string,member_count:int}>,
+     *   halls: list<array{slug:string,name:string,chain_slug:?string,member_count:int}>,
      *   recent_operators: list<array{handle:string,display_name:string,avatar_url:string,card_tier:?string,tier_label:?string,rank_label:string,recent_action:string,link:string}>,
      *   hot_posts: list<array<string, mixed>>
      * }
@@ -122,39 +123,46 @@ final class FeedColdStartService
         $viewerIdInt = ($viewerId !== null && $viewerId > 0) ? $viewerId : 0;
 
         return [
-            'locals'           => $this->composeLocals($viewerIdInt),
+            'halls'            => $this->composeHalls($viewerIdInt),
             'recent_operators' => $this->composeOperators($viewerIdInt),
             'hot_posts'        => $this->composeHotPosts(),
         ];
     }
 
     /**
-     * Locals block — 3 entries.
+     * Halls block — 3 entries.
      *
      * Chain-alignment: when the viewer has `bcc_home_chain` usermeta set
-     * (written by OnboardingEndpoint on the §B4 wizard), prefer locals
+     * (written by OnboardingEndpoint on the §B4 wizard), prefer the Hall
      * for that chain. Anon viewers and authed-without-chain see the
-     * default order (post_title ASC, matching /locals).
+     * default order (post_title ASC, matching /halls).
      *
      * Returns < 3 entries gracefully (the FE collapses missing entries).
      *
      * @return list<array{slug:string,name:string,chain_slug:?string,member_count:int}>
      */
-    private function composeLocals(int $viewerId): array
+    private function composeHalls(int $viewerId): array
     {
-        $chain = $this->resolveHomeChain($viewerId);
-        $rows  = PeepSoGroupRepository::listLocals($chain, 0, self::LOCALS_LIMIT);
+        // Resolve the viewer's home-chain slug to a numeric chain id for
+        // the meta-based Hall filter. An unknown/absent slug → null → the
+        // default (all-chains) Hall ordering.
+        $chainSlug = $this->resolveHomeChain($viewerId);
+        $chainId   = $chainSlug !== null ? ChainRepository::resolveIdAnyState($chainSlug) : null;
+
+        $rows = PeepSoGroupRepository::listHalls($chainId, 0, self::HALLS_LIMIT);
+
+        $groupIds   = array_map(static fn($r) => (int) $r->id, $rows);
+        $chainByGroup = $groupIds === [] ? [] : ChainRepository::resolveSlugsForGroups($groupIds);
 
         $out = [];
         foreach ($rows as $row) {
-            // Reuse LocalsService::parseChain — single source of truth
-            // for "which chain does this Local belong to" so the cold-
-            // start surface and the /locals directory can never diverge.
-            $chainSlug = LocalsService::parseChain($row->post_title);
+            // Chain slug comes from the Hall's `_bcc_chain_tag` meta via
+            // ChainRepository — the canonical source, shared with /halls,
+            // so the cold-start surface and directory can never diverge.
             $out[] = [
                 'slug'         => (string) $row->post_name,
                 'name'         => (string) $row->post_title,
-                'chain_slug'   => $chainSlug,
+                'chain_slug'   => $chainByGroup[(int) $row->id] ?? null,
                 'member_count' => (int) $row->member_count,
             ];
         }
@@ -370,7 +378,7 @@ final class FeedColdStartService
 
         return [
             'follower_counts'              => \BCC\Core\Repositories\PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
-            'primary_locals'               => PeepSoGroupRepository::getPrimaryLocalForUsers($userIds),
+            'primary_halls'                => PeepSoGroupRepository::getPrimaryHallForUsers($userIds),
             'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
             'owned_pages_by_type'          => \BCC\Core\Repositories\PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
             'endorsements_received_counts' => (new \BCC\Trust\Core\Repositories\AttestationRepository())

@@ -9,7 +9,7 @@ declare(strict_types=1);
  *
  *   1. A tighter privacy gate. The directory grid runs through
  *      UserViewService::getSummary which composes follower counts /
- *      primary_local / owned_pages_by_type / type-counts. The mention
+ *      primary_hall / owned_pages_by_type / type-counts. The mention
  *      picker MUST NOT leak more than {id, handle, display_name,
  *      avatar_url} — a leaner shape is also a smaller scrape surface
  *      (no follower counts, no group affiliation, no rep tier).
