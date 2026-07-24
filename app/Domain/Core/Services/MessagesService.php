@@ -698,14 +698,11 @@ final class MessagesService
         if ($viewerId === $recipientId) {
             return self::eligibilityDeny(null, 'self_action_blocked');
         }
-        if (self::senderRestricted($viewerId) !== null) {
-            return self::eligibilityDeny(null, 'sender_restricted');
-        }
-        if (!self::chatEnabled($viewerId)) {
-            return self::eligibilityDeny(
-                'Turn on direct messages in your settings to send messages.',
-                'sender_chat_disabled'
-            );
+        // Sender-side permanent rules — shared with the batch path and
+        // the queue-mode card read so all three agree.
+        $senderGate = self::senderMessagingGate($viewerId);
+        if ($senderGate !== null) {
+            return $senderGate;
         }
         if (!self::userExists($recipientId)) {
             return self::eligibilityDeny(null, 'messaging_unavailable');
@@ -716,6 +713,53 @@ final class MessagesService
             return self::eligibilityDeny($gate['unlock_hint'], $gate['reason_code']);
         }
         return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+    }
+
+    /**
+     * The sender-side PERMANENT eligibility rules, recipient-independent:
+     * a suspended/banned sender, or one who has turned their own DMs
+     * off, cannot start ANY conversation. Returns a deny entry, or null
+     * when the sender may message.
+     *
+     * The ONE source for these two rules — canMessage, canMessageMany,
+     * and senderEligibility (the queue-mode card read, where no
+     * recipient exists yet) all consume it, so the rendered button and
+     * the send path cannot disagree. Transient state (rate limit,
+     * per-sender caps) is deliberately excluded — it is POST-time only.
+     *
+     * @return array{allowed: false, unlock_hint: string|null, reason_code: string}|null
+     */
+    private static function senderMessagingGate(int $viewerId): ?array
+    {
+        if (self::senderRestricted($viewerId) !== null) {
+            return self::eligibilityDeny(null, 'sender_restricted');
+        }
+        if (!self::chatEnabled($viewerId)) {
+            return self::eligibilityDeny(
+                'Turn on direct messages in your settings to send messages.',
+                'sender_chat_disabled'
+            );
+        }
+        return null;
+    }
+
+    /**
+     * Sender-only eligibility for the QUEUE-mode card read: a
+     * never-claimed validator has no operator yet, so only the
+     * sender's own permanent rules apply. Mirrors the sender gates
+     * canMessage runs before it looks at a recipient — via the shared
+     * senderMessagingGate, NOT by probing canMessage($viewer,$viewer)
+     * (which returns self_action_blocked before the sender gates run).
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    public static function senderEligibility(int $viewerId): array
+    {
+        if ($viewerId <= 0) {
+            return self::eligibilityDeny('Sign in to send a message.', 'auth_required');
+        }
+        return self::senderMessagingGate($viewerId)
+            ?? ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
     }
 
     /**
@@ -744,19 +788,13 @@ final class MessagesService
         $ids = array_keys($ids);
 
         // Anon / restricted / chat-off senders deny uniformly with zero
-        // per-recipient work.
+        // per-recipient work — via the SAME sender gate canMessage uses.
         if ($viewerId <= 0) {
-            $hint = 'Sign in to send a message.';
-            return array_fill_keys($ids, self::eligibilityDeny($hint, 'auth_required'));
+            return array_fill_keys($ids, self::eligibilityDeny('Sign in to send a message.', 'auth_required'));
         }
-        if (self::senderRestricted($viewerId) !== null) {
-            return array_fill_keys($ids, self::eligibilityDeny(null, 'sender_restricted'));
-        }
-        if (!self::chatEnabled($viewerId)) {
-            return array_fill_keys($ids, self::eligibilityDeny(
-                'Turn on direct messages in your settings to send messages.',
-                'sender_chat_disabled'
-            ));
+        $senderGate = self::senderMessagingGate($viewerId);
+        if ($senderGate !== null) {
+            return array_fill_keys($ids, $senderGate);
         }
 
         // Prime recipient usermeta so chatEnabled/chatFriendsOnly are

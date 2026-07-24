@@ -1602,34 +1602,8 @@ final class CardViewService
 
         return [
             'messaging'   => ['destination' => 'queue', 'operator' => null],
-            'can_message' => self::queueModeEligibility($viewerId),
+            'can_message' => MessagesService::senderEligibility($viewerId),
         ];
-    }
-
-    /**
-     * Queue-mode eligibility: there is no recipient yet, so only the
-     * SENDER-side permanent rules apply. Per-sender caps and throttles
-     * are transient POST-time conditions and stay off the read path
-     * (same principle as endorse eligibility).
-     *
-     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
-     */
-    private static function queueModeEligibility(int $viewerId): array
-    {
-        if ($viewerId <= 0) {
-            return self::deny('Sign in to send a message.', 'auth_required');
-        }
-        // Reuse the write path's own sender rules — canMessage against
-        // a non-existent recipient would shield as unavailable, so ask
-        // it about the sender only, via the same helpers.
-        $selfCheck = MessagesService::canMessage($viewerId, $viewerId);
-        if (($selfCheck['reason_code'] ?? null) === 'sender_restricted') {
-            return self::deny(null, 'sender_restricted');
-        }
-        if (($selfCheck['reason_code'] ?? null) === 'sender_chat_disabled') {
-            return self::deny($selfCheck['unlock_hint'], 'sender_chat_disabled');
-        }
-        return self::allow();
     }
 
     /**
