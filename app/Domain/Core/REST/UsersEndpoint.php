@@ -670,7 +670,22 @@ final class UsersEndpoint
         // edge tier caches this response under LSCWP's cache-ttl_rest.
         // Pin the edge TTL to the same 15s and tag the entry so user
         // delete / suspend can purge it (see EdgeCache).
-        EdgeCache::tag(EdgeCache::TAG_MEMBERS);
+        //
+        // ANONYMOUS REQUESTS ONLY. This payload is viewer-varying —
+        // getMemberCardByUserId emits viewer_attestation,
+        // viewer_has_reviewed and permissions derived from $viewerId —
+        // but LiteSpeed's REST cache key varies on Cookie, NOT on
+        // Authorization, and the frontend client sends
+        // `credentials: "omit"`, so every authenticated request looks
+        // cookie-less to the edge and lands in the SAME bucket as
+        // anonymous traffic. Tagging an authenticated response therefore
+        // published one viewer's personalised payload to everyone for the
+        // TTL. `Vary: Authorization` does not save us: the REST tier is
+        // governed by cache-ttl_rest, not the response header.
+        // See docs/wallet-privacy-policy.md (cache boundary).
+        if (get_current_user_id() === 0) {
+            EdgeCache::tag(EdgeCache::TAG_MEMBERS);
+        }
 
         return $response;
     }
@@ -699,8 +714,12 @@ final class UsersEndpoint
         $resp->header('Cache-Control', 'private, max-age=15');
         $resp->header('Vary', 'Authorization, Cookie');
         // Same edge posture as the populated branch — the empty payload
-        // is just as cacheable and must expire/purge on the same events.
-        EdgeCache::tag(EdgeCache::TAG_MEMBERS);
+        // is just as cacheable and must expire/purge on the same events,
+        // and is likewise tagged for ANONYMOUS requests only (the
+        // populated branch explains why).
+        if (get_current_user_id() === 0) {
+            EdgeCache::tag(EdgeCache::TAG_MEMBERS);
+        }
         return $resp;
     }
 

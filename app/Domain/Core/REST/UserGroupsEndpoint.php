@@ -333,9 +333,9 @@ final class UserGroupsEndpoint
             GroupType::Validator->value => 'Validator Delegators',
             GroupType::Local->value     => 'Local',
             GroupType::System->value    => 'System',
-            GroupType::User->value      => 'Group',
+            GroupType::User->value      => 'Community',
         ];
-        $label = $defaults[$type->value] ?? 'Group';
+        $label = $defaults[$type->value] ?? 'Community';
 
         /** @var string $filtered */
         $filtered = apply_filters('bcc_group_type_label', $label, $type->value);

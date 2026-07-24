@@ -51,6 +51,16 @@ final class GroupContextResolver {
         }
 
         $kind = (string) get_post_meta($groupId, '_bcc_group_kind', true);
+        if ($kind === '' && str_starts_with($post->post_title, 'Local ')) {
+            // Canonical V1 Locals discriminator is the title prefix
+            // (bcc-core PeepSoGroupRepository::LOCAL_TITLE_PATTERN,
+            // `Local %`) — nothing writes `_bcc_group_kind='local'` yet,
+            // so without this fallback a real Local resolves as User:
+            // its /me/locals join 404s (LocalsService requires
+            // GroupType::Local) while the plain-groups door would accept
+            // it, bypassing Local semantics. Meta, when present, wins.
+            $kind = 'local';
+        }
         $type = $this->resolveType($kind);
 
         [$sourceKind, $sourceId] = $this->resolveSource($groupId, $type);
