@@ -401,6 +401,62 @@ class ValidatorMsgQueueRepository {
     }
 
     /**
+     * Operator recovery: return a parked row to the retry pool.
+     * Accepts failed_terminal (the manual-recovery case) and
+     * retryable (re-arm an inflight backoff). Never resurrects a
+     * delivered or suppressed row — those are terminal by design, and
+     * the CLI additionally proves via the idempotency key that no
+     * message landed before calling this.
+     */
+    public static function requeueForRetry(int $rowId): bool {
+        if ($rowId <= 0) {
+            return false;
+        }
+        global $wpdb;
+        $table = self::table();
+
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET status = 'retryable',
+                    next_retry_at = UTC_TIMESTAMP(),
+                    attempt_count = 0,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = UTC_TIMESTAMP()
+              WHERE id = %d AND status IN ('failed_terminal', 'retryable')",
+            $rowId
+        ));
+        return $wpdb->rows_affected === 1;
+    }
+
+    /**
+     * Operator moderation: terminally suppress a non-delivered row
+     * without leasing it. reason_code is a machine code only.
+     */
+    public static function suppressAdministratively(int $rowId, string $reasonCode): bool {
+        if ($rowId <= 0 || $reasonCode === '') {
+            return false;
+        }
+        global $wpdb;
+        $table = self::table();
+
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET status = 'suppressed',
+                    suppressed_at = UTC_TIMESTAMP(),
+                    reason_code = %s,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = UTC_TIMESTAMP()
+              WHERE id = %d
+                AND status IN ('queued', 'retryable', 'failed_terminal')",
+            substr($reasonCode, 0, 40),
+            $rowId
+        ));
+        return $wpdb->rows_affected === 1;
+    }
+
+    /**
      * @return QueueRow|null
      */
     public static function findById(int $rowId): ?object {
