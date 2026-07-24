@@ -649,6 +649,15 @@ add_filter(
     [\BCC\Trust\Core\Services\RetentionHealthSnapshot::class, 'contribute']
 );
 
+// Validator-messaging queue gauge: pending depth, oldest pending age,
+// and failed_terminal count. Aggregates only — never message content.
+// Complements the validator_messaging degradation counters (which are
+// event-shaped) with the "is the backlog draining?" state.
+add_filter(
+    'bcc_system_health',
+    [\BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker::class, 'contributeHealth']
+);
+
 // Operator OS v1 Phase 3: contribute the Read Model panel to
 // bcc-core's DeveloperPage. Renders coverage / drift / dirty-queue
 // state from ReadModelHealthRepository — no new domain logic.
@@ -823,6 +832,10 @@ add_action(
 add_action('plugins_loaded', static function (): void {
     \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::register();
     \BCC\Trust\Onchain\Services\NftEnrichmentService::register();
+    // Validator-messaging backlog delivery + its recovery sweep. Same
+    // self-healing shape: registering from plugins_loaded means a hook
+    // added by an update schedules itself without a reactivation.
+    \BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker::register();
 
     // Helius dedupe sweep has no host service class (its handler is the
     // inline closure above) so its schedule is inlined here. Same shape
@@ -1896,6 +1909,13 @@ if (defined('WP_CLI') && WP_CLI) {
     \WP_CLI::add_command(
         'bcc-trust activity',
         \BCC\Trust\Core\CLI\BackfillActivityModuleIdsCommand::class
+    );
+    // Validator message queue: inspect + recover the pre-claim backlog
+    // (status / drain / retry / suppress). `retry` proves via the row's
+    // idempotency key that no message landed before re-sending.
+    \WP_CLI::add_command(
+        'bcc-trust vmq',
+        \BCC\Trust\Onchain\CLI\ValidatorMsgQueueCommand::class
     );
 }
 

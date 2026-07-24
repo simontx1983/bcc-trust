@@ -763,6 +763,27 @@ final class MessagesService
     }
 
     /**
+     * The recipient-side gate for a one-time first-claim backlog
+     * delivery: under VALIDATOR_FIRST_CLAIM_RELEASE the operator's
+     * chat_enabled and friends_only are bypassed, but a mutual block
+     * still shields. True when the message must be suppressed for a
+     * block.
+     *
+     * The delivery worker calls THIS rather than checking the block
+     * itself, so what "the one-time bypass" enforces lives in exactly
+     * one place (the policy evaluator) — the worker and the policy
+     * definition cannot drift on it.
+     */
+    public static function firstClaimReleaseBlocked(int $senderId, int $operatorId): bool
+    {
+        return self::evaluatePolicy(
+            MessagingPolicy::VALIDATOR_FIRST_CLAIM_RELEASE,
+            $senderId,
+            $operatorId
+        ) !== null;
+    }
+
+    /**
      * Batch sibling of canMessage for list paths. Flat query cost
      * regardless of N: the sender-side gates resolve once, recipient
      * usermeta is primed in one round trip, blocks are one query, and

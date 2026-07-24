@@ -401,6 +401,62 @@ class ValidatorMsgQueueRepository {
     }
 
     /**
+     * Operator recovery: return a parked row to the retry pool.
+     * Accepts failed_terminal (the manual-recovery case) and
+     * retryable (re-arm an inflight backoff). Never resurrects a
+     * delivered or suppressed row — those are terminal by design, and
+     * the CLI additionally proves via the idempotency key that no
+     * message landed before calling this.
+     */
+    public static function requeueForRetry(int $rowId): bool {
+        if ($rowId <= 0) {
+            return false;
+        }
+        global $wpdb;
+        $table = self::table();
+
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET status = 'retryable',
+                    next_retry_at = UTC_TIMESTAMP(),
+                    attempt_count = 0,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = UTC_TIMESTAMP()
+              WHERE id = %d AND status IN ('failed_terminal', 'retryable')",
+            $rowId
+        ));
+        return $wpdb->rows_affected === 1;
+    }
+
+    /**
+     * Operator moderation: terminally suppress a non-delivered row
+     * without leasing it. reason_code is a machine code only.
+     */
+    public static function suppressAdministratively(int $rowId, string $reasonCode): bool {
+        if ($rowId <= 0 || $reasonCode === '') {
+            return false;
+        }
+        global $wpdb;
+        $table = self::table();
+
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET status = 'suppressed',
+                    suppressed_at = UTC_TIMESTAMP(),
+                    reason_code = %s,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = UTC_TIMESTAMP()
+              WHERE id = %d
+                AND status IN ('queued', 'retryable', 'failed_terminal')",
+            substr($reasonCode, 0, 40),
+            $rowId
+        ));
+        return $wpdb->rows_affected === 1;
+    }
+
+    /**
      * @return QueueRow|null
      */
     public static function findById(int $rowId): ?object {
@@ -449,18 +505,29 @@ class ValidatorMsgQueueRepository {
 
     /**
      * Operational counters for /system/health + `wp bcc-trust vmq
-     * status`. Aggregate, no bodies.
+     * status`. Aggregate, no bodies. Distinguishes every terminal
+     * state (delivered / suppressed / failed_terminal) from pending so
+     * an operator can see, e.g., a suppression spike (blocked / banned
+     * / deleted senders) without reading raw SQL.
      *
-     * @return array{pending: int, failed_terminal: int, oldest_pending_age_seconds: int}
+     * @return array{
+     *     pending: int,
+     *     delivered: int,
+     *     suppressed: int,
+     *     failed_terminal: int,
+     *     oldest_pending_age_seconds: int
+     * }
      */
     public static function healthCounters(): array {
         global $wpdb;
         $table = self::table();
 
-        /** @var object{pending: string|null, failed_terminal: string|null, oldest: string|null}|null $row */
+        /** @var object{pending: string|null, delivered: string|null, suppressed: string|null, failed_terminal: string|null, oldest: string|null}|null $row */
         $row = $wpdb->get_row(
             "SELECT
                 SUM(status IN ('queued','processing','retryable')) AS pending,
+                SUM(status = 'delivered') AS delivered,
+                SUM(status = 'suppressed') AS suppressed,
                 SUM(status = 'failed_terminal') AS failed_terminal,
                 MIN(CASE WHEN status IN ('queued','processing','retryable') THEN created_at END) AS oldest
              FROM {$table}"
@@ -473,6 +540,8 @@ class ValidatorMsgQueueRepository {
 
         return [
             'pending'                    => $row !== null ? (int) $row->pending : 0,
+            'delivered'                  => $row !== null ? (int) $row->delivered : 0,
+            'suppressed'                 => $row !== null ? (int) $row->suppressed : 0,
             'failed_terminal'            => $row !== null ? (int) $row->failed_terminal : 0,
             'oldest_pending_age_seconds' => $oldestAge,
         ];
