@@ -46,8 +46,10 @@ class ValidatorMsgQueueCommand
     {
         $counters = ValidatorMsgQueueRepository::healthCounters();
         \WP_CLI::log(sprintf(
-            'pending=%d  failed_terminal=%d  oldest_pending_age=%ds',
+            'pending=%d  delivered=%d  suppressed=%d  failed_terminal=%d  oldest_pending_age=%ds',
             $counters['pending'],
+            $counters['delivered'],
+            $counters['suppressed'],
             $counters['failed_terminal'],
             $counters['oldest_pending_age_seconds']
         ));

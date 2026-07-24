@@ -241,10 +241,25 @@ final class ValidatorMsgQueueWorker
         }
 
         // Safety rules that survive the preference bypass. Each maps to
-        // a terminal suppression — visible, never a silent drop.
+        // a terminal suppression — a VISIBLE operational state, never a
+        // silent drop: it is audited (below), counted in the health
+        // gauge (healthCounters), and printed by `wp bcc-trust vmq
+        // status`. Suppression is correct policy enforcement, not a
+        // subsystem degradation, so it carries an AUDIT row (forensic,
+        // reason-code only — never the body) rather than a
+        // DegradationMetrics event (which would false-alarm whenever
+        // anyone is legitimately blocked).
         $suppressReason = self::resolveSuppression($senderId, $operatorId, (string) $row->body);
         if ($suppressReason !== null) {
-            ValidatorMsgQueueRepository::markSuppressed($rowId, $leaseToken, $suppressReason);
+            if (ValidatorMsgQueueRepository::markSuppressed($rowId, $leaseToken, $suppressReason)) {
+                AuditLogger::log(
+                    'vmq_suppressed',
+                    $rowId,
+                    ['reason' => $suppressReason],
+                    'vmq_row',
+                    null
+                );
+            }
             return;
         }
 
@@ -311,8 +326,14 @@ final class ValidatorMsgQueueWorker
      * FIRST_CLAIM_RELEASE safety rules. Returns a machine reason code
      * when the row must be suppressed, or null to proceed.
      *
-     * Bypassed for this release: operator chat_enabled + friends_only.
-     * NOT bypassed: anything below.
+     * The recipient-side release policy (bypass operator chat_enabled +
+     * friends_only, but STILL shield a mutual block) is delegated to
+     * MessagesService's single policy evaluator via
+     * firstClaimReleaseBlocked — so the delivery worker and the policy
+     * definition cannot drift on what "the one-time bypass" means. The
+     * sender-side and content rules below are delivery-time specific
+     * (they have no recipient-context equivalent in the DM send gates)
+     * and are checked here.
      */
     private static function resolveSuppression(int $senderId, int $operatorId, string $body): ?string
     {
@@ -328,7 +349,10 @@ final class ValidatorMsgQueueWorker
         if (class_exists('PeepSoUser') && \PeepSoUser::get_instance($senderId)->get_user_role() === 'ban') {
             return 'sender_banned';
         }
-        if (\BCC\Core\Repositories\PeepSoBlockRepository::isMutuallyBlocked($senderId, $operatorId)) {
+        // Recipient-side gate under the one-time release: chat_enabled +
+        // friends_only bypassed, mutual block still shields. Single-
+        // sourced through the policy evaluator (VALIDATOR_FIRST_CLAIM_RELEASE).
+        if (MessagesService::firstClaimReleaseBlocked($senderId, $operatorId)) {
             return 'mutual_block';
         }
         $trimmed = trim($body);

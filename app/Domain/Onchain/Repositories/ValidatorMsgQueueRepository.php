@@ -505,18 +505,29 @@ class ValidatorMsgQueueRepository {
 
     /**
      * Operational counters for /system/health + `wp bcc-trust vmq
-     * status`. Aggregate, no bodies.
+     * status`. Aggregate, no bodies. Distinguishes every terminal
+     * state (delivered / suppressed / failed_terminal) from pending so
+     * an operator can see, e.g., a suppression spike (blocked / banned
+     * / deleted senders) without reading raw SQL.
      *
-     * @return array{pending: int, failed_terminal: int, oldest_pending_age_seconds: int}
+     * @return array{
+     *     pending: int,
+     *     delivered: int,
+     *     suppressed: int,
+     *     failed_terminal: int,
+     *     oldest_pending_age_seconds: int
+     * }
      */
     public static function healthCounters(): array {
         global $wpdb;
         $table = self::table();
 
-        /** @var object{pending: string|null, failed_terminal: string|null, oldest: string|null}|null $row */
+        /** @var object{pending: string|null, delivered: string|null, suppressed: string|null, failed_terminal: string|null, oldest: string|null}|null $row */
         $row = $wpdb->get_row(
             "SELECT
                 SUM(status IN ('queued','processing','retryable')) AS pending,
+                SUM(status = 'delivered') AS delivered,
+                SUM(status = 'suppressed') AS suppressed,
                 SUM(status = 'failed_terminal') AS failed_terminal,
                 MIN(CASE WHEN status IN ('queued','processing','retryable') THEN created_at END) AS oldest
              FROM {$table}"
@@ -529,6 +540,8 @@ class ValidatorMsgQueueRepository {
 
         return [
             'pending'                    => $row !== null ? (int) $row->pending : 0,
+            'delivered'                  => $row !== null ? (int) $row->delivered : 0,
+            'suppressed'                 => $row !== null ? (int) $row->suppressed : 0,
             'failed_terminal'            => $row !== null ? (int) $row->failed_terminal : 0,
             'oldest_pending_age_seconds' => $oldestAge,
         ];
