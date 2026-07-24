@@ -52,6 +52,7 @@ final class HolderGroupsPage
     private const SWEEP_BATCH_SIZE = 20;
     private const NONCE_SWEEP      = 'bcc_holder_groups_run_sweep';
     private const NONCE_USER       = 'bcc_holder_groups_reconcile_user';
+    private const NONCE_VALIDATOR  = 'bcc_validator_groups_provision';
 
     public static function register_page(): void
     {
@@ -69,6 +70,7 @@ final class HolderGroupsPage
     {
         add_action('admin_post_bcc_holder_groups_run_sweep',       [self::class, 'handle_run_sweep']);
         add_action('admin_post_bcc_holder_groups_reconcile_user',  [self::class, 'handle_reconcile_user']);
+        add_action('admin_post_bcc_validator_groups_provision',    [self::class, 'handle_provision_validator_groups']);
     }
 
     // ────────────────────────────────────────────────────────────
@@ -172,6 +174,44 @@ final class HolderGroupsPage
         exit;
     }
 
+    /**
+     * Run the delegator-community provisioning backfill now — the manual
+     * twin of the daily `bcc_gated_group_provision` tick.
+     *
+     * PeepSo write-surface posture: this introduces NO new
+     * PeepSoGroupWriter::join call site. Provisioning CREATES groups
+     * (PeepSoGroup constructor, which assigns the operator as
+     * member_owner); it never lands a third party as a member, and
+     * every membership still has to pass ValidatorGroupGateService.
+     */
+    public static function handle_provision_validator_groups(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized.'));
+        }
+        check_admin_referer(self::NONCE_VALIDATOR);
+
+        $result = OnchainPlugin::instance()
+            ->validatorGroupProvisioningService()
+            ->provisionAll();
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning (manual)', [
+            'created'  => $result['created'],
+            'skipped'  => $result['skipped'],
+            'errors'   => count($result['errors']),
+            'operator' => get_current_user_id(),
+        ]);
+
+        wp_safe_redirect(add_query_arg([
+            'page'    => self::PAGE_SLUG,
+            'op'      => 'validator',
+            'created' => (int) $result['created'],
+            'skipped' => (int) $result['skipped'],
+            'errors'  => count($result['errors']),
+        ], admin_url('admin.php')));
+        exit;
+    }
+
     // ────────────────────────────────────────────────────────────
     // Render
     // ────────────────────────────────────────────────────────────
@@ -189,6 +229,7 @@ final class HolderGroupsPage
         self::renderState();
         self::renderRunSweep();
         self::renderReconcileUser();
+        self::renderValidatorGroups();
 
         echo '</div>';
     }
@@ -212,6 +253,24 @@ final class HolderGroupsPage
                 (int) $considered,
                 (int) $touched,
                 (int) $joined
+            );
+            return;
+        }
+
+        if ($op === 'validator') {
+            $created = isset($_GET['created']) ? (int) $_GET['created'] : 0;
+            $skipped = isset($_GET['skipped']) ? (int) $_GET['skipped'] : 0;
+            $errors  = isset($_GET['errors'])  ? (int) $_GET['errors']  : 0;
+
+            printf(
+                '<div class="notice notice-%1$s is-dismissible"><p>'
+                . '<strong>Delegator-community provisioning complete.</strong> '
+                . 'Created %2$d, skipped %3$d, %4$d error(s).%5$s</p></div>',
+                $errors > 0 ? 'warning' : 'success',
+                $created,
+                $skipped,
+                $errors,
+                $errors > 0 ? ' See the bcc-trust log for details.' : ''
             );
             return;
         }
@@ -319,6 +378,34 @@ final class HolderGroupsPage
             . '<input type="number" min="1" step="1" name="user_id" required style="width:120px;">'
             . '</label>';
         echo '<button type="submit" class="button">Reconcile</button>';
+        echo '</form>';
+    }
+
+    private static function renderValidatorGroups(): void
+    {
+        $groupCount = count(
+            \BCC\Trust\Onchain\Repositories\ValidatorGroupRepository::listAllValidatorGroupIds()
+        );
+
+        echo '<hr style="margin:32px 0;">';
+        echo '<h2>Delegator communities</h2>';
+        echo '<p style="color:#666;">One closed community per <strong>claimed validator</strong>, owned by the '
+            . 'claiming operator. Provisioning normally happens on the <code>bcc_page_claimed</code> event; the '
+            . 'daily <code>bcc_gated_group_provision</code> tick backfills anything missed. Membership is gated on '
+            . 'a <strong>live delegation check</strong> — this button never adds members, it only creates missing '
+            . 'communities.</p>';
+
+        echo '<table class="widefat striped" style="max-width:560px;"><tbody>';
+        printf(
+            '<tr><th style="width:280px;">Delegator communities provisioned</th><td>%s</td></tr>',
+            esc_html(number_format($groupCount))
+        );
+        echo '</tbody></table>';
+
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:12px;">';
+        echo '<input type="hidden" name="action" value="bcc_validator_groups_provision">';
+        wp_nonce_field(self::NONCE_VALIDATOR);
+        echo '<button type="submit" class="button">Provision now</button>';
         echo '</form>';
     }
 

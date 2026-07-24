@@ -710,10 +710,11 @@ final class CardViewService
      * renders `tier_label` verbatim instead of deriving from `type`.
      */
     private const COMMUNITY_TIER_LABEL_BY_TYPE = [
-        'nft'    => 'HOLDERS GROUP',
-        'local'  => 'LOCAL CHAPTER',
-        'system' => 'SYSTEM GROUP',
-        'user'   => 'COMMUNITY',
+        'nft'       => 'HOLDER COMMUNITY',
+        'validator' => 'DELEGATOR COMMUNITY',
+        'local'     => 'LOCAL CHAPTER',
+        'system'    => 'SYSTEM COMMUNITY',
+        'user'      => 'COMMUNITY',
     ];
 
     /**
@@ -760,10 +761,11 @@ final class CardViewService
         // Defensive: membership is only meaningful for authed viewers.
         $viewerIsMember = $viewerId > 0 && $groupData['viewer_is_member'];
 
-        // NFT groups with a resolved chain get the chain-keyed band
-        // (same crest grammar page cards will use in V1.5); everything
-        // else gets the tier band at the fixed "common" tier.
-        if ($type === 'nft' && $chainTag !== null && $chainTag !== '') {
+        // NFT + validator/delegator groups with a resolved chain get the
+        // chain-keyed band (same crest grammar page cards will use in
+        // V1.5); everything else gets the tier band at the fixed
+        // "common" tier.
+        if (($type === 'nft' || $type === 'validator') && $chainTag !== null && $chainTag !== '') {
             $backgroundKind  = 'chain';
             $backgroundValue = $chainTag;
         } else {
@@ -1083,8 +1085,25 @@ final class CardViewService
      * PageCardPrefetcher batch — replaces the findAllByPageId query
      * (same rows, same chain-name-ASC order).
      *
+     * PRIVACY: `operator_address` was removed 2026-07-23. Validator rows
+     * are keyed to a wallet link (`onchain_validators.wallet_link_id`),
+     * and `ClaimService::matchValidatorWallet` matches the operator
+     * address against the CLAIMANT'S VERIFIED WALLET. So on a claimed
+     * page this field published an on-chain address provably bound to a
+     * named member — a member↔wallet join on an anonymous surface. A
+     * Cosmos `valoper` also converts trivially to the operator's account
+     * address, and the frontend was rendering it truncated, which is a
+     * shortened wallet address by another name.
+     *
+     * Replaced by the derived, non-identifying `operator_verified`: "we
+     * hold a verified on-chain operator identity for this chain." It
+     * supports the same UI affordance (which chains this operator runs
+     * on) without disclosing an address.
+     *
+     * See docs/wallet-privacy-policy.md.
+     *
      * @phpstan-param list<ValidatorCardRow>|null $validatorRows
-     * @return list<array{slug: string, name: string, operator_address: string}>|null
+     * @return list<array{slug: string, name: string, operator_verified: bool}>|null
      */
     private static function resolveChains(string $kind, int $pageId, ?array $validatorRows = null): ?array
     {
@@ -1101,9 +1120,10 @@ final class CardViewService
         $out = [];
         foreach ($rows as $row) {
             $out[] = [
-                'slug'             => (string) $row->chain_slug,
-                'name'             => (string) $row->chain_name,
-                'operator_address' => (string) $row->operator_address,
+                'slug'              => (string) $row->chain_slug,
+                'name'              => (string) $row->chain_name,
+                // Derived boolean only — never the address itself.
+                'operator_verified' => ((string) $row->operator_address) !== '',
             ];
         }
         return $out;

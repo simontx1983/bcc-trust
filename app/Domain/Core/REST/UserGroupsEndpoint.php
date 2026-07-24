@@ -313,9 +313,10 @@ final class UserGroupsEndpoint
     private function routeKeyForType(GroupType $type): string
     {
         return match ($type) {
-            GroupType::Nft   => 'holder-groups',
-            GroupType::Local => 'locals',
-            default          => 'groups',
+            GroupType::Nft       => 'holder-groups',
+            GroupType::Validator => 'validator-groups',
+            GroupType::Local     => 'locals',
+            default              => 'groups',
         };
     }
 
@@ -328,12 +329,13 @@ final class UserGroupsEndpoint
     private static function typeLabel(GroupType $type): string
     {
         $defaults = [
-            GroupType::Nft->value    => 'On-Chain Holders',
-            GroupType::Local->value  => 'Local',
-            GroupType::System->value => 'System',
-            GroupType::User->value   => 'Group',
+            GroupType::Nft->value       => 'On-Chain Holders',
+            GroupType::Validator->value => 'Validator Delegators',
+            GroupType::Local->value     => 'Local',
+            GroupType::System->value    => 'System',
+            GroupType::User->value      => 'Community',
         ];
-        $label = $defaults[$type->value] ?? 'Group';
+        $label = $defaults[$type->value] ?? 'Community';
 
         /** @var string $filtered */
         $filtered = apply_filters('bcc_group_type_label', $label, $type->value);
@@ -366,6 +368,21 @@ final class UserGroupsEndpoint
             return [
                 'allowed'     => false,
                 'unlock_hint' => 'Hold an NFT from this collection to join.',
+                'reason_code' => 'not_eligible',
+            ];
+        }
+
+        // Delegator communities are stored `closed`, so without this branch
+        // they'd fall through to the "request to join" copy below — wrong:
+        // there is no approval queue, the gate is on-chain delegation.
+        // Live eligibility is deliberately NOT computed here (it would cost
+        // an LCD call per profile render); the FE does the canonical
+        // round-trip via /me/validator-groups, same posture as the holder
+        // tab. Copy mirrors ValidatorGroupsEndpoint's server-pinned hint.
+        if ($ctx->type === GroupType::Validator) {
+            return [
+                'allowed'     => false,
+                'unlock_hint' => 'Delegate to this validator to join its community.',
                 'reason_code' => 'not_eligible',
             ];
         }

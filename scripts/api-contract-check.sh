@@ -229,14 +229,22 @@ t2_check() {
 
 # ── Tier 2 — wallet privacy regression tests (§3.1) ──────────────────────────
 #
-# The most dangerous regression in the User view-model is `wallets[].address`
-# leaking to non-self viewers. These two tests close the gap that a generic
-# envelope/shape check can't catch — they verify the FIELD-LEVEL privacy
-# gate by asserting on which keys appear (or don't) per viewer relationship.
+# Wallet connections are PRIVATE ACCOUNT DATA (docs/wallet-privacy-policy.md).
+# A non-owner — anonymous or authenticated — must receive `wallets: []`. Not a
+# masked address, not a wallet-link id, nothing.
+#
+# THESE ASSERTIONS ARE ALLOWLISTS ON PURPOSE. The previous version of this
+# check asserted only `'address' not in w`, so when `address_short` shipped to
+# every viewer for the life of the endpoint, CI certified it as PASSING. A
+# denylist can only catch the leak someone already thought of; an exact
+# key-set comparison catches the next one too.
 #
 # Setup: BCC_BEARER_TOKEN authenticates as $BCC_SAMPLE_SELF_HANDLE (User A).
 #        $BCC_SAMPLE_HANDLE is some OTHER user (User B).
 # Skipped when env vars missing or both handles match.
+
+# Exact key set permitted on an OWN-account wallet entry.
+readonly SELF_WALLET_KEYS="{'id','address','address_short','chain_slug','chain_name','is_primary','verified_at'}"
 
 t2_wallet_privacy() {
     local self_handle="${BCC_SAMPLE_SELF_HANDLE:-}"
@@ -263,16 +271,16 @@ t2_wallet_privacy() {
     elif jcheck "$BODY" "len(d.get('data', {}).get('wallets', [])) == 0"; then
         # Empty wallets — gate is technically untested. Warn, don't fail.
         skip "wallet privacy: own profile" "self user has no wallets configured; positive gate untested"
-    elif ! jcheck "$BODY" "all('address' in w for w in d['data']['wallets'])"; then
+    elif ! jcheck "$BODY" "all(set(w.keys()) == ${SELF_WALLET_KEYS} for w in d['data']['wallets'])"; then
         T2_FAIL=$((T2_FAIL + 1))
-        T2_FAILS+=("wallet privacy POSITIVE FAIL: 'address' missing on own-profile wallets")
-        bad "wallet privacy: own profile" "address missing on self"
+        T2_FAILS+=("wallet privacy POSITIVE FAIL: own-profile wallet entry does not match the exact allowed key set ${SELF_WALLET_KEYS}")
+        bad "wallet privacy: own profile" "own-account wallet shape drifted"
     else
         T2_PASS=$((T2_PASS + 1))
-        ok "wallet privacy: own profile includes \`address\`"
+        ok "wallet privacy: own profile carries exactly the allowed wallet keys"
     fi
 
-    # ─ Negative: other profile MUST NOT include `address` (CVE-class) ───────
+    # ─ Negative 1: AUTHENTICATED STRANGER must get an EMPTY wallets array ───
     local response_other
     response_other=$(fetch "/wp-json/bcc/v1/users/${other_handle}" auth)
     split_response "$response_other"
@@ -281,13 +289,43 @@ t2_wallet_privacy() {
         T2_FAIL=$((T2_FAIL + 1))
         T2_FAILS+=("wallet privacy negative: HTTP $STATUS for other profile (/users/${other_handle})")
         bad "wallet privacy: other profile" "HTTP $STATUS"
-    elif ! jcheck "$BODY" "all('address' not in w for w in d.get('data', {}).get('wallets', []))"; then
+    elif ! jcheck "$BODY" "d.get('data', {}).get('wallets', []) == []"; then
         T2_FAIL=$((T2_FAIL + 1))
-        T2_FAILS+=("wallet privacy NEGATIVE FAIL: 'address' LEAKED to non-self viewer (/users/${other_handle})")
-        bad "wallet privacy: other profile" "address LEAKED — privacy gate broken"
+        T2_FAILS+=("wallet privacy NEGATIVE FAIL: non-empty wallets[] for an authenticated stranger (/users/${other_handle}) — ANY entry is a leak, whatever keys it carries")
+        bad "wallet privacy: other profile" "wallets[] NOT EMPTY — privacy gate broken"
     else
         T2_PASS=$((T2_PASS + 1))
-        ok "wallet privacy: other profile omits \`address\`"
+        ok "wallet privacy: authenticated stranger gets empty \`wallets\`"
+    fi
+
+    # ─ Negative 2: ANONYMOUS must get an EMPTY wallets array ────────────────
+    #   Distinct from the authenticated case: it exercises the viewer-id==0
+    #   path, which is where "fail closed on absent identity" actually lands.
+    local response_anon
+    response_anon=$(fetch "/wp-json/bcc/v1/users/${other_handle}")
+    split_response "$response_anon"
+
+    if [[ "$STATUS" != "200" ]]; then
+        skip "wallet privacy: anonymous" "HTTP $STATUS anonymously for /users/${other_handle}"
+    elif ! jcheck "$BODY" "d.get('data', {}).get('wallets', []) == []"; then
+        T2_FAIL=$((T2_FAIL + 1))
+        T2_FAILS+=("wallet privacy NEGATIVE FAIL: non-empty wallets[] for an ANONYMOUS viewer (/users/${other_handle})")
+        bad "wallet privacy: anonymous" "wallets[] NOT EMPTY — privacy gate broken"
+    else
+        T2_PASS=$((T2_PASS + 1))
+        ok "wallet privacy: anonymous viewer gets empty \`wallets\`"
+    fi
+
+    # ─ Positive 2: the derived signal must SURVIVE the lockdown ─────────────
+    #   wallets_verified is repository-sourced, not counted from wallets[].
+    #   If this regresses to 0-for-everyone, the badge silently dies.
+    if jcheck "$BODY" "isinstance(d.get('data', {}).get('verifications', {}).get('wallets_verified'), int)"; then
+        T2_PASS=$((T2_PASS + 1))
+        ok "wallet privacy: \`verifications.wallets_verified\` still present for non-self"
+    else
+        T2_FAIL=$((T2_FAIL + 1))
+        T2_FAILS+=("wallet privacy FAIL: verifications.wallets_verified missing/non-int for non-self viewer — the derived signal was collateral damage")
+        bad "wallet privacy: derived signal" "wallets_verified missing for non-self"
     fi
 }
 

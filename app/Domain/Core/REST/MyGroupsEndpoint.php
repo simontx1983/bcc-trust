@@ -186,12 +186,18 @@ final class MyGroupsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Group not found.', 404);
         }
 
-        // Holder groups + Locals route through their own endpoints; reject
-        // here so the frontend doesn't accidentally call the wrong path.
-        if ($context->type === GroupType::Nft || $context->type === GroupType::Local) {
+        // Holder groups, Locals, and delegator communities route through
+        // their own endpoints; reject here so the frontend doesn't
+        // accidentally call the wrong path — AND so the plain-join door
+        // can never bypass the delegation gate (this endpoint would land
+        // membership via PeepSoGroupWriter without any on-chain check).
+        if ($context->type === GroupType::Nft
+            || $context->type === GroupType::Local
+            || $context->type === GroupType::Validator
+        ) {
             return ApiResponse::error(
                 'bcc_invalid_request',
-                'This community has its own join endpoint. Use /me/holder-groups or /me/locals.',
+                'This community has its own join endpoint. Use /me/holder-groups, /me/locals, or /me/validator-groups.',
                 400
             );
         }
@@ -296,12 +302,16 @@ final class MyGroupsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Group not found.', 404);
         }
 
-        // Holder groups need to record an opt-out; Locals have their own
-        // leave behavior. Route through this endpoint only for plain user/system groups.
-        if ($context->type === GroupType::Nft || $context->type === GroupType::Local) {
+        // Holder + delegator groups need to record an opt-out; Locals have
+        // their own leave behavior. Route through this endpoint only for
+        // plain user/system groups.
+        if ($context->type === GroupType::Nft
+            || $context->type === GroupType::Local
+            || $context->type === GroupType::Validator
+        ) {
             return ApiResponse::error(
                 'bcc_invalid_request',
-                'This community has its own leave endpoint. Use /me/holder-groups or /me/locals.',
+                'This community has its own leave endpoint. Use /me/holder-groups, /me/locals, or /me/validator-groups.',
                 400
             );
         }
