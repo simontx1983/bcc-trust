@@ -224,12 +224,20 @@ require_once BCC_TRUST_PATH . 'includes/database/rename-pull-to-watch.php';
 // /u/{handle} and /u/{handle}/post/{code} resolve for every author.
 require_once BCC_TRUST_PATH . 'includes/database/backfill-canonical-handles.php';
 // One-shot wallet placeholder-email backfill. Defines
-// bcc_trust_backfill_wallet_placeholder_emails(), called at the end of
-// bcc_trust_create_tables(). Option-guarded (bcc_trust_wallet_placeholder_
-// emails_backfilled); rewrites pre-2026-07-23 md5(address)-derived
-// placeholder emails to salt-keyed tokens, closing the Gravatar
-// member↔wallet oracle (docs/wallet-privacy-policy.md).
+// bcc_trust_backfill_wallet_placeholder_emails(); rewrites pre-2026-07-23
+// md5(address)-derived placeholder emails to salt-keyed tokens, closing the
+// Gravatar member↔wallet oracle (docs/wallet-privacy-policy.md). Invoked by
+// the migration runner below (and, for compatibility, the schema path).
 require_once BCC_TRUST_PATH . 'includes/database/backfill-wallet-placeholder-emails.php';
+// Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
+// and its registry, and runs the two backfills above on the ordinary
+// plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
+// files-only deploy triggers them (the schema gate alone would not).
+// Registered on plugins_loaded at priority 20 (after the schema gate).
+require_once BCC_TRUST_PATH . 'includes/database/migration-runner.php';
+// accepted_args = 0: this callback takes no hook argument. (The runner is
+// also defensively tolerant of WP passing one — see its signature.)
+add_action('plugins_loaded', 'bcc_trust_run_pending_migrations', 20, 0);
 
 // Onchain schema definitions — table-creation functions used by the
 // activation hook and by the content-hash-gated dbDelta re-run below.
