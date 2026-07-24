@@ -710,10 +710,11 @@ final class CardViewService
      * renders `tier_label` verbatim instead of deriving from `type`.
      */
     private const COMMUNITY_TIER_LABEL_BY_TYPE = [
-        'nft'    => 'HOLDER COMMUNITY',
-        'local'  => 'LOCAL CHAPTER',
-        'system' => 'SYSTEM COMMUNITY',
-        'user'   => 'COMMUNITY',
+        'nft'       => 'HOLDER COMMUNITY',
+        'validator' => 'DELEGATOR COMMUNITY',
+        'local'     => 'LOCAL CHAPTER',
+        'system'    => 'SYSTEM COMMUNITY',
+        'user'      => 'COMMUNITY',
     ];
 
     /**
@@ -760,10 +761,11 @@ final class CardViewService
         // Defensive: membership is only meaningful for authed viewers.
         $viewerIsMember = $viewerId > 0 && $groupData['viewer_is_member'];
 
-        // NFT groups with a resolved chain get the chain-keyed band
-        // (same crest grammar page cards will use in V1.5); everything
-        // else gets the tier band at the fixed "common" tier.
-        if ($type === 'nft' && $chainTag !== null && $chainTag !== '') {
+        // NFT + validator/delegator groups with a resolved chain get the
+        // chain-keyed band (same crest grammar page cards will use in
+        // V1.5); everything else gets the tier band at the fixed
+        // "common" tier.
+        if (($type === 'nft' || $type === 'validator') && $chainTag !== null && $chainTag !== '') {
             $backgroundKind  = 'chain';
             $backgroundValue = $chainTag;
         } else {

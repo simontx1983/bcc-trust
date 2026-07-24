@@ -1122,15 +1122,45 @@ class CosmosFetcher implements FetcherInterface
      * One paginated LCD call. Capped at 500 entries — well above any realistic
      * delegator's validator count, and the LCD endpoint's own page cap.
      *
+     * Legacy shape: collapses transport failures to []. Callers that must
+     * distinguish "no delegations" from "could not check" (the delegator-
+     * community gate, which fails CLOSED on UNKNOWN) use
+     * {@see fetch_delegations_result} instead.
+     *
      * @return array<int, array{validator_address: string, shares: string|null, amount: float|null}>
      */
     public function fetch_delegations(string $delegatorAddress): array
+    {
+        return $this->fetch_delegations_result($delegatorAddress) ?? [];
+    }
+
+    /**
+     * Nullable variant of {@see fetch_delegations}: preserves the
+     * transport-failure signal instead of collapsing it to [].
+     *
+     *   - null → LCD unreachable / non-200 / unparseable (UNKNOWN —
+     *            the caller must NOT read this as "no delegations").
+     *   - []   → the LCD answered and the account delegates to nothing.
+     *   - rows → the account's live delegation set.
+     *
+     * This distinction is load-bearing for ValidatorGroupGateService /
+     * ValidatorGroupRevokeService: an LCD hiccup must fail-closed a join
+     * (503, retry) and must NEVER trigger a revoke.
+     *
+     * @return array<int, array{validator_address: string, shares: string|null, amount: float|null}>|null
+     */
+    public function fetch_delegations_result(string $delegatorAddress): ?array
     {
         $response = $this->lcdGet("/cosmos/staking/v1beta1/delegations/{$delegatorAddress}", [
             'pagination.limit' => 500,
         ]);
 
-        if (!$response || empty($response['delegation_responses'])) {
+        if ($response === null) {
+            // Transport failure — preserve UNKNOWN.
+            return null;
+        }
+
+        if (empty($response['delegation_responses'])) {
             return [];
         }
 

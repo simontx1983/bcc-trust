@@ -1640,6 +1640,109 @@ final class ValidatorRepository
     }
 
     /**
+     * Batch projection powering the `validator_stats` block on delegator-
+     * community surfaces (§4.7.6 buckets list, §4.7.4 discovery items,
+     * §4.7.5 detail). One query resolves, per validator id: the display
+     * stats (moniker / status / commission / stake / delegators), the
+     * chain's native token (for min_stake_display), and the backing
+     * peepso-page slug (for the validator_page link).
+     *
+     * Page-slug resolution mirrors findFirstByPageId's two-path
+     * semantics in ONE query via two LEFT JOIN legs: the wallet-link
+     * page wins; the `_bcc_onchain_validator_id` placeholder meta page
+     * is the fallback (COALESCE order). CAST on the meta side per the
+     * collation note on findMissingPlaceholderPage.
+     *
+     * Bounded (§4): caller-deduped IN-list (candidate pool ≤ 500),
+     * LIMIT 500; first row per validator wins (dup placeholder meta is
+     * pathological).
+     *
+     * @param list<int> $validatorIds
+     * @return array<int, object{
+     *     validator_id: int,
+     *     moniker: string|null,
+     *     status: string|null,
+     *     commission_rate: string|null,
+     *     total_stake: string|null,
+     *     delegator_count: string|null,
+     *     native_token: string|null,
+     *     page_slug: string|null
+     * }>
+     */
+    public static function findCommunityStatsByIds(array $validatorIds): array
+    {
+        $ids = [];
+        foreach ($validatorIds as $id) {
+            $intId = (int) $id;
+            if ($intId > 0) {
+                $ids[$intId] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $idList = array_keys($ids);
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+        $chains  = ChainRepository::table();
+        $ph      = implode(',', array_fill(0, count($idList), '%d'));
+
+        /**
+         * @var list<object{
+         *     validator_id: numeric-string,
+         *     moniker: string|null,
+         *     status: string|null,
+         *     commission_rate: string|null,
+         *     total_stake: string|null,
+         *     delegator_count: string|null,
+         *     native_token: string|null,
+         *     page_slug: string|null
+         * }>|null $rows
+         */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT v.id AS validator_id, v.moniker, v.status, v.commission_rate,
+                    v.total_stake, v.delegator_count,
+                    c.native_token,
+                    COALESCE(p_wallet.post_name, p_meta.post_name) AS page_slug
+               FROM {$table} v
+               JOIN {$chains} c ON c.id = v.chain_id
+               LEFT JOIN {$wallets} w        ON w.id = v.wallet_link_id
+               LEFT JOIN {$wpdb->posts} p_wallet
+                      ON p_wallet.ID = w.post_id
+                     AND p_wallet.post_status = 'publish'
+               LEFT JOIN {$wpdb->postmeta} pm
+                      ON pm.meta_key = '_bcc_onchain_validator_id'
+                     AND CAST(pm.meta_value AS UNSIGNED) = v.id
+               LEFT JOIN {$wpdb->posts} p_meta
+                      ON p_meta.ID = pm.post_id
+                     AND p_meta.post_status = 'publish'
+              WHERE v.id IN ({$ph})
+              LIMIT 500",
+            ...$idList
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $vid = (int) $row->validator_id;
+            if ($vid > 0 && !isset($out[$vid])) {
+                $out[$vid] = (object) [
+                    'validator_id'    => $vid,
+                    'moniker'         => $row->moniker,
+                    'status'          => $row->status,
+                    'commission_rate' => $row->commission_rate,
+                    'total_stake'     => $row->total_stake,
+                    'delegator_count' => $row->delegator_count,
+                    'native_token'    => $row->native_token,
+                    'page_slug'       => $row->page_slug,
+                ];
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Resolve a peepso-page id from its placeholder-validator post_meta link.
      * Used by ValidatorPageMinter to dedupe re-runs without scanning postmeta
      * a second time.
