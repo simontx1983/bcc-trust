@@ -1,23 +1,27 @@
 <?php
 /**
- * Locals Service — composes the GET /bcc/v1/locals view-model per
- * §E3 of the V1 plan and §4.7 of the API contract.
+ * Halls Service — composes the GET /bcc/v1/halls view-model per §4.7 of
+ * the API contract.
+ *
+ * A Hall is an auto-provisioned, one-per-chain, open-membership union
+ * hall (system-created by HallProvisioningService). It replaced the
+ * retired member-less numbered-chapter "Local" model — no title parsing,
+ * no chapter numbers; the discriminator is the `_bcc_group_kind='hall'`
+ * post-meta and chain association is the `_bcc_chain_tag` meta (resolved
+ * to a slug via ChainRepository).
  *
  * Single-graph rule (LOCKED): PeepSo's peepso_group_members IS the
  * membership ledger. BCC stores ONLY ONE piece of per-user state
- * about Locals:
+ * about Halls:
  *
- *     wp_usermeta.bcc_primary_local_group_id (int)
+ *     wp_usermeta.bcc_primary_hall_group_id (int)
  *
  * Membership existence + joined_at come from peepso_group_members
  * (read via PeepSoGroupRepository::findUserMemberships). is_primary is
  * derived by comparing the iterated group_id against the user's
- * bcc_primary_local_group_id pointer. There is NO bcc_user_locals
- * table; the prior parallel ledger violated the single-graph rule
- * and was removed.
+ * bcc_primary_hall_group_id pointer. There is NO bcc_user_halls table.
  *
  * @package BCC\Trust\Core\Services
- * @since V1 (2026-04)
  */
 
 namespace BCC\Trust\Core\Services;
@@ -26,27 +30,24 @@ use BCC\Core\PeepSo\PeepSoGroupWriter;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-final class LocalsService
+final class HallsService
 {
     private const MAX_PAGE_SIZE = 50;
 
     /**
-     * wp_usermeta key for the viewer's primary-Local pointer (§E3 single-
-     * graph rule — the ONLY per-user Locals state BCC stores; membership
-     * lives in PeepSo's peepso_group_members ledger).
+     * wp_usermeta key for the viewer's primary-Hall pointer (single-graph
+     * rule — the ONLY per-user Halls state BCC stores; membership lives in
+     * PeepSo's peepso_group_members ledger). Paired-coupling with
+     * bcc-core PeepSoGroupRepository::PRIMARY_HALL_META_KEY — change in
+     * lockstep.
      */
-    private const META_PRIMARY_GROUP = 'bcc_primary_local_group_id';
-
-    /** @var list<string> */
-    private const CHAIN_KEYWORDS = [
-        'cosmos', 'osmosis', 'injective', 'ethereum', 'solana',
-        'polkadot', 'thorchain', 'near',
-    ];
+    private const META_PRIMARY_GROUP = 'bcc_primary_hall_group_id';
 
     private GroupContextResolver $groupContext;
 
@@ -56,14 +57,13 @@ final class LocalsService
     }
 
     /**
-     * Render the /locals response payload.
+     * Render the /halls response payload.
      *
      * @return array{
      *   items: list<array{
      *     id: int,
      *     slug: string,
      *     name: string,
-     *     number: int|null,
      *     chain: string|null,
      *     member_count: int,
      *     viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
@@ -72,18 +72,30 @@ final class LocalsService
      *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
      * }
      */
-    public function getLocals(int $viewerId, int $page, int $pageSize, ?string $chain): array
+    public function getHalls(int $viewerId, int $page, int $pageSize, ?string $chain): array
     {
         $page     = max(1, $page);
         $pageSize = max(1, min(self::MAX_PAGE_SIZE, $pageSize));
         $offset   = ($page - 1) * $pageSize;
 
-        $rows  = PeepSoGroupRepository::listLocals($chain, $offset, $pageSize);
-        $total = PeepSoGroupRepository::countLocals($chain);
+        // Resolve the optional chain-slug filter to a numeric chain id.
+        // A requested-but-unknown chain yields an empty page rather than
+        // silently ignoring the filter and listing every Hall.
+        $chainId = null;
+        if ($chain !== null) {
+            $chainId = ChainRepository::resolveIdAnyState($chain);
+            if ($chainId === null) {
+                return $this->emptyPage($page, $pageSize);
+            }
+        }
+
+        $rows  = PeepSoGroupRepository::listHalls($chainId, $offset, $pageSize);
+        $total = PeepSoGroupRepository::countHalls($chainId);
 
         $groupIds       = array_map(static fn($r) => (int) $r->id, $rows);
         $myMemberships  = $this->loadViewerMemberships($viewerId, $groupIds);
         $primaryGroupId = $this->loadPrimaryGroupId($viewerId);
+        $chainSlugs     = $groupIds === [] ? [] : ChainRepository::resolveSlugsForGroups($groupIds);
 
         $items = [];
         foreach ($rows as $row) {
@@ -92,8 +104,7 @@ final class LocalsService
                 'id'                => $groupId,
                 'slug'              => $row->post_name,
                 'name'              => $row->post_title,
-                'number'            => self::parseNumber($row->post_title),
-                'chain'             => self::parseChain($row->post_title),
+                'chain'             => $chainSlugs[$groupId] ?? null,
                 'member_count'      => (int) $row->member_count,
                 'viewer_membership' => $this->renderViewerMembership(
                     $viewerId,
@@ -101,7 +112,7 @@ final class LocalsService
                     $myMemberships[$groupId] ?? null,
                     $primaryGroupId
                 ),
-                'links'             => ['self' => '/locals/' . $row->post_name],
+                'links'             => ['self' => '/halls/' . $row->post_name],
             ];
         }
 
@@ -119,7 +130,34 @@ final class LocalsService
     }
 
     /**
-     * Render the /locals/:slug single-item payload.
+     * @return array{
+     *   items: list<array{
+     *     id: int,
+     *     slug: string,
+     *     name: string,
+     *     chain: string|null,
+     *     member_count: int,
+     *     viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
+     *     links: array{self: string}
+     *   }>,
+     *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
+     * }
+     */
+    private function emptyPage(int $page, int $pageSize): array
+    {
+        return [
+            'items'      => [],
+            'pagination' => [
+                'page'        => $page,
+                'page_size'   => $pageSize,
+                'total'       => 0,
+                'total_pages' => 0,
+            ],
+        ];
+    }
+
+    /**
+     * Render the /halls/:slug single-item payload.
      *
      * Same item shape as the directory's `items[]` entries — the
      * detail page can reuse the identical client-side renderer. A
@@ -130,16 +168,15 @@ final class LocalsService
      *   id: int,
      *   slug: string,
      *   name: string,
-     *   number: int|null,
      *   chain: string|null,
      *   member_count: int,
      *   viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
      *   links: array{self: string}
      * }|null
      */
-    public function getLocal(int $viewerId, string $slug): ?array
+    public function getHall(int $viewerId, string $slug): ?array
     {
-        $row = PeepSoGroupRepository::findOneBySlug($slug);
+        $row = PeepSoGroupRepository::findHallBySlug($slug);
         if ($row === null) {
             return null;
         }
@@ -147,13 +184,13 @@ final class LocalsService
         $groupId        = (int) $row->id;
         $myMemberships  = $this->loadViewerMemberships($viewerId, [$groupId]);
         $primaryGroupId = $this->loadPrimaryGroupId($viewerId);
+        $chainSlugs     = ChainRepository::resolveSlugsForGroups([$groupId]);
 
         return [
             'id'                => $groupId,
             'slug'              => $row->post_name,
             'name'              => $row->post_title,
-            'number'            => self::parseNumber($row->post_title),
-            'chain'             => self::parseChain($row->post_title),
+            'chain'             => $chainSlugs[$groupId] ?? null,
             'member_count'      => (int) $row->member_count,
             'viewer_membership' => $this->renderViewerMembership(
                 $viewerId,
@@ -161,12 +198,12 @@ final class LocalsService
                 $myMemberships[$groupId] ?? null,
                 $primaryGroupId
             ),
-            'links'             => ['self' => '/locals/' . $row->post_name],
+            'links'             => ['self' => '/halls/' . $row->post_name],
         ];
     }
 
     /**
-     * Mark a group as the viewer's primary Local. Gated on actual
+     * Mark a group as the viewer's primary Hall. Gated on actual
      * membership — non-members get `bcc_forbidden` so the §N7 client
      * UI can render a clear "Join first" disabled state without the
      * server silently no-op'ing the write.
@@ -181,7 +218,7 @@ final class LocalsService
      *   viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}
      * }|array{error: string, message: string}
      */
-    public function setPrimaryLocal(int $viewerId, int $groupId): array
+    public function setPrimaryHall(int $viewerId, int $groupId): array
     {
         if ($viewerId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -193,7 +230,7 @@ final class LocalsService
         $myMemberships = $this->loadViewerMemberships($viewerId, [$groupId]);
         $row = $myMemberships[$groupId] ?? null;
         if ($row === null) {
-            return ['error' => 'bcc_forbidden', 'message' => 'Join the Local before setting it as primary.'];
+            return ['error' => 'bcc_forbidden', 'message' => 'Join the Hall before setting it as your home Hall.'];
         }
 
         update_user_meta($viewerId, self::META_PRIMARY_GROUP, $groupId);
@@ -210,12 +247,12 @@ final class LocalsService
     }
 
     /**
-     * Clear the viewer's primary-Local pointer. Idempotent — clearing
+     * Clear the viewer's primary-Hall pointer. Idempotent — clearing
      * an already-empty pointer is a successful no-op.
      *
      * @return array{ok: true, group_id: null}|array{error: string, message: string}
      */
-    public function clearPrimaryLocal(int $viewerId): array
+    public function clearPrimaryHall(int $viewerId): array
     {
         if ($viewerId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -235,7 +272,7 @@ final class LocalsService
      * Pre-checks (in order):
      *   - viewer authed                   → bcc_unauthorized
      *   - groupId > 0                     → bcc_invalid_request
-     *   - group exists AND is a Local     → bcc_not_found
+     *   - group exists AND is a Hall      → bcc_not_found
      *   - already a member                → idempotent success
      *
      * Delegates the actual write to PeepSoGroupWriter::join (single-graph
@@ -249,7 +286,7 @@ final class LocalsService
      *   viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}
      * }|array{error: string, message: string}
      */
-    public function joinLocal(int $viewerId, int $groupId): array
+    public function joinHall(int $viewerId, int $groupId): array
     {
         if ($viewerId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -262,15 +299,15 @@ final class LocalsService
         // user as `member` unconditionally — it bypasses PeepSo's UI approval
         // (see PeepSoGroupWriter docblock), so without a server-side gate any
         // peepso-group id, including a closed/secret or NFT-gated holder group,
-        // could be joined through this door. Locals are open by definition;
+        // could be joined through this door. Halls are open by definition;
         // NFT and plain groups have their own gated endpoints
         // (/me/holder-groups, /me/groups) and MUST NOT be joinable here.
         $context = $this->groupContext->forGroup($groupId);
-        if ($context === null || $context->type !== GroupType::Local) {
-            return ['error' => 'bcc_not_found', 'message' => 'Local not found.'];
+        if ($context === null || $context->type !== GroupType::Hall) {
+            return ['error' => 'bcc_not_found', 'message' => 'Hall not found.'];
         }
         if ($context->privacy !== PeepSoPrivacy::Open) {
-            return ['error' => 'bcc_forbidden', 'message' => 'This Local does not accept open membership.'];
+            return ['error' => 'bcc_forbidden', 'message' => 'This Hall does not accept open membership.'];
         }
 
         $existing = $this->loadViewerMemberships($viewerId, [$groupId]);
@@ -299,7 +336,7 @@ final class LocalsService
         $after = $this->loadViewerMemberships($viewerId, [$groupId]);
         $row   = $after[$groupId] ?? null;
         if ($row === null) {
-            // The group was gated to an open Local above, so member_join
+            // The group was gated to an open Hall above, so member_join
             // always yields an active `member` row. A null here means the
             // PeepSo write silently failed — surface as unavailable.
             return ['error' => 'bcc_unavailable', 'message' => 'Group membership service is unavailable.'];
@@ -319,8 +356,8 @@ final class LocalsService
     /**
      * Remove the viewer from $groupId via PeepSo's canonical write path.
      *
-     * Atomic primary cleanup: if the user is leaving their primary Local,
-     * we clear `bcc_primary_local_group_id` BEFORE removing the membership
+     * Atomic primary cleanup: if the user is leaving their primary Hall,
+     * we clear `bcc_primary_hall_group_id` BEFORE removing the membership
      * so the pointer never dangles. Idempotent — leaving when not a
      * member returns success with the non-member shape.
      *
@@ -331,7 +368,7 @@ final class LocalsService
      *   viewer_membership: array{is_member: false, is_primary: false, joined_at: null}
      * }|array{error: string, message: string}
      */
-    public function leaveLocal(int $viewerId, int $groupId): array
+    public function leaveHall(int $viewerId, int $groupId): array
     {
         if ($viewerId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -339,8 +376,8 @@ final class LocalsService
         if ($groupId <= 0) {
             return ['error' => 'bcc_invalid_request', 'message' => 'Invalid group id.'];
         }
-        if (PeepSoGroupRepository::findOneById($groupId) === null) {
-            return ['error' => 'bcc_not_found', 'message' => 'Local not found.'];
+        if (PeepSoGroupRepository::findHallById($groupId) === null) {
+            return ['error' => 'bcc_not_found', 'message' => 'Hall not found.'];
         }
 
         $wasPrimary = $this->loadPrimaryGroupId($viewerId) === $groupId;
@@ -389,7 +426,7 @@ final class LocalsService
     }
 
     /**
-     * Read the viewer's primary-Local pointer from user-meta. Returns
+     * Read the viewer's primary-Hall pointer from user-meta. Returns
      * null when unset, zero, or non-numeric.
      */
     private function loadPrimaryGroupId(int $viewerId): ?int
@@ -437,33 +474,6 @@ final class LocalsService
             'is_primary' => $primaryGroupId === $groupId,
             'joined_at'  => self::toIso8601($row->joined_at),
         ];
-    }
-
-    private static function parseNumber(string $title): ?int
-    {
-        if (preg_match('/^Local\s+(\d+)\b/u', $title, $matches) === 1) {
-            return (int) $matches[1];
-        }
-        return null;
-    }
-
-    /**
-     * Extract a chain slug from a Local's post title using
-     * {@see CHAIN_KEYWORDS}. Public so the cold-start surface
-     * (FeedColdStartService) can reuse the SAME chain detection that
-     * /locals uses — keeping a single source of truth for "which Locals
-     * count as Cosmos / Solana / etc." Returns null when the title
-     * doesn't match any known chain keyword.
-     */
-    public static function parseChain(string $title): ?string
-    {
-        $lower = strtolower($title);
-        foreach (self::CHAIN_KEYWORDS as $chain) {
-            if (str_contains($lower, $chain)) {
-                return $chain;
-            }
-        }
-        return null;
     }
 
     private static function toIso8601(string $mysqlDatetime): ?string

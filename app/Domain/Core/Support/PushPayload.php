@@ -145,42 +145,42 @@ final class PushPayload
 
     /**
      * @param array<string, mixed> $first First queued payload — provides
-     *   actor handle, group_id, Local name, and slug for the body + url.
+     *   actor handle, group_id, Hall name, and slug for the body + url.
      *   Aggregated bodies (count > 1) drop the actor + surface
-     *   "N new posts in {Local}." because the queue can mix authors
+     *   "N new posts in {Hall}." because the queue can mix authors
      *   (a single 5-min debounce window can include posts from
-     *   multiple authors in the same Local).
+     *   multiple authors in the same Hall).
      * @return array{title: string, body: string, url: string, tag?: string}
      */
-    public static function forLocalPost(int $count, array $first): array
+    public static function forHallPost(int $count, array $first): array
     {
-        $actor     = self::stringFrom($first, 'actor_handle');
-        $groupId   = self::intFrom($first, 'group_id');
-        $localName = self::stringFrom($first, 'local_name');
-        $localSlug = self::stringFrom($first, 'local_slug');
+        $actor    = self::stringFrom($first, 'actor_handle');
+        $groupId  = self::intFrom($first, 'group_id');
+        $hallName = self::stringFrom($first, 'hall_name');
+        $hallSlug = self::stringFrom($first, 'hall_slug');
 
-        $title = $localName !== '' ? $localName : 'Blue Collar Crypto';
+        $title = $hallName !== '' ? $hallName : 'Blue Collar Crypto';
         $body  = $count > 1
-            ? ($localName !== ''
-                ? sprintf('%d new posts in %s.', $count, $localName)
-                : sprintf('%d new posts in your Local.', $count))
+            ? ($hallName !== ''
+                ? sprintf('%d new posts in %s.', $count, $hallName)
+                : sprintf('%d new posts in your Hall.', $count))
             : ($actor !== ''
-                ? ($localName !== ''
-                    ? sprintf('@%s posted in %s.', $actor, $localName)
-                    : sprintf('@%s posted in your Local.', $actor))
-                : 'New post in your Local.');
+                ? ($hallName !== ''
+                    ? sprintf('@%s posted in %s.', $actor, $hallName)
+                    : sprintf('@%s posted in your Hall.', $actor))
+                : 'New post in your Hall.');
 
         $payload = [
             'title' => $title,
             'body'  => $body,
-            'url'   => $localSlug !== ''
-                ? '/locals/' . $localSlug
-                : '/locals',
+            'url'   => $hallSlug !== ''
+                ? '/halls/' . $hallSlug
+                : '/halls',
         ];
         if ($groupId > 0) {
-            // Per-Local OS-level tag — multiple Locals push concurrently
+            // Per-Hall OS-level tag — multiple Halls push concurrently
             // without collapsing into each other on the OS shell.
-            $payload['tag'] = 'bcc-local-post-' . $groupId;
+            $payload['tag'] = 'bcc-hall-post-' . $groupId;
         }
         return $payload;
     }

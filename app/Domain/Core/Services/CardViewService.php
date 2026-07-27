@@ -549,7 +549,7 @@ final class CardViewService
     /**
      * Build the member Card view-model keyed by user id. Resolves the
      * full member dossier (rank_label, verifications, engagement,
-     * owned_pages_by_type, primary_local) by delegating to
+     * owned_pages_by_type, primary_hall) by delegating to
      * UserViewService::getSummary once — the SAME resolution the
      * MemberSummary surfaces use, so there is no parallel dossier query.
      *
@@ -709,7 +709,7 @@ final class CardViewService
                 'verifications'       => $summary['verifications'],
                 'engagement'          => $summary['engagement'],
                 'owned_pages_by_type' => $summary['owned_pages_by_type'],
-                'primary_local'       => $summary['primary_local'],
+                'primary_hall'        => $summary['primary_hall'],
             ],
             // community_dossier is community-only — always null on
             // member cards (mirror of member_dossier on the other kinds).
@@ -731,7 +731,7 @@ final class CardViewService
     private const COMMUNITY_TIER_LABEL_BY_TYPE = [
         'nft'       => 'HOLDER COMMUNITY',
         'validator' => 'DELEGATOR COMMUNITY',
-        'local'     => 'LOCAL CHAPTER',
+        'hall'      => 'CHAIN HALL',
         'system'    => 'SYSTEM COMMUNITY',
         'user'      => 'COMMUNITY',
     ];

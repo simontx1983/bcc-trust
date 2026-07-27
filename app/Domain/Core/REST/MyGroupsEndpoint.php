@@ -1,12 +1,12 @@
 <?php
 /**
  * MyGroupsEndpoint — handles /bcc/v1/me/groups for plain (non-gated,
- * non-Local) user/system PeepSo groups.
+ * non-Hall) user/system PeepSo groups.
  *
  *   POST /me/groups/{id}/join     — join an open group
  *   POST /me/groups/{id}/leave    — leave any group I'm a member of
  *
- * Holder groups use /me/holder-groups; Locals use /me/locals — both
+ * Holder groups use /me/holder-groups; Halls use /me/halls — both
  * have their own gate/policy. This endpoint is for the residual case:
  * plain peepso-groups (created by users via PeepSo's UI) where the
  * frontend wants a uniform action URL on the profile Groups tab.
@@ -186,18 +186,18 @@ final class MyGroupsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Group not found.', 404);
         }
 
-        // Holder groups, Locals, and delegator communities route through
+        // Holder groups, Halls, and delegator communities route through
         // their own endpoints; reject here so the frontend doesn't
         // accidentally call the wrong path — AND so the plain-join door
         // can never bypass the delegation gate (this endpoint would land
         // membership via PeepSoGroupWriter without any on-chain check).
         if ($context->type === GroupType::Nft
-            || $context->type === GroupType::Local
+            || $context->type === GroupType::Hall
             || $context->type === GroupType::Validator
         ) {
             return ApiResponse::error(
                 'bcc_invalid_request',
-                'This community has its own join endpoint. Use /me/holder-groups, /me/locals, or /me/validator-groups.',
+                'This community has its own join endpoint. Use /me/holder-groups, /me/halls, or /me/validator-groups.',
                 400
             );
         }
@@ -258,7 +258,7 @@ final class MyGroupsEndpoint
         // Honor the writer's verdict: false = PeepSo absent OR an existing
         // banned membership row (the writer refuses to flip a group-level
         // ban back to member). Fail closed with the same surface
-        // LocalsService::joinLocal uses — never report a join that did
+        // HallsService::joinHall uses — never report a join that did
         // not happen.
         if (!\BCC\Core\PeepSo\PeepSoGroupWriter::join($userId, $groupId)) {
             return ApiResponse::error('bcc_unavailable', 'Group membership service is unavailable.', 503);
@@ -302,16 +302,16 @@ final class MyGroupsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Group not found.', 404);
         }
 
-        // Holder + delegator groups need to record an opt-out; Locals have
+        // Holder + delegator groups need to record an opt-out; Halls have
         // their own leave behavior. Route through this endpoint only for
         // plain user/system groups.
         if ($context->type === GroupType::Nft
-            || $context->type === GroupType::Local
+            || $context->type === GroupType::Hall
             || $context->type === GroupType::Validator
         ) {
             return ApiResponse::error(
                 'bcc_invalid_request',
-                'This community has its own leave endpoint. Use /me/holder-groups, /me/locals, or /me/validator-groups.',
+                'This community has its own leave endpoint. Use /me/holder-groups, /me/halls, or /me/validator-groups.',
                 400
             );
         }
@@ -356,9 +356,9 @@ final class MyGroupsEndpoint
      * V1: name + optional description + privacy=open|closed only.
      * Secret groups are excluded from the open-create surface (they'd
      * never appear in /communities discovery — the user creating one
-     * via this endpoint would lose their own group). Holder + Locals
+     * via this endpoint would lose their own group). Holder + Halls
      * have separate create paths (admin-driven for holder groups via
-     * GatedGroupProvisioningService; Locals are infra-managed).
+     * GatedGroupProvisioningService; Halls are infra-managed).
      *
      * Rate-limited (5 per hour per user) to prevent abuse — group
      * creation is a heavier write than join/leave (wp_posts + many

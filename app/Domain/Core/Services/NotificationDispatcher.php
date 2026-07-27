@@ -45,17 +45,17 @@
  *     unique-by-first-occurrence ids, so three `@bob` tokens in one
  *     post produce exactly one bell row for Bob.
  *
- * Primary-Local post dispatch (V2 retention slice, locked 2026-05-11):
- *   - dispatchPrimaryLocalPostFor + onPostInPrimaryLocal fan out
- *     `LOCAL_POST` bell + push events to every user whose
- *     `bcc_primary_local_group_id` matches the post's group_id.
+ * Primary-Hall post dispatch (V2 retention slice, locked 2026-05-11):
+ *   - dispatchPrimaryHallPostFor + onPostInPrimaryHall fan out
+ *     `HALL_POST` bell + push events to every user whose
+ *     `bcc_primary_hall_group_id` matches the post's group_id.
  *   - Wired via a SECOND `bcc_post_created` subscriber in Plugin.php
  *     at priority 31 (after the mention subscriber at 30) — both
  *     events can fire for the same post (intentional independence;
- *     mention = "you were called out", local-post = "activity in
- *     your Local"). Mention and Local-post each carry their own
+ *     mention = "you were called out", hall-post = "activity in
+ *     your Hall"). Mention and Hall-post each carry their own
  *     pref toggle.
- *   - Always async via AsyncDispatcher — a popular Local could fan
+ *   - Always async via AsyncDispatcher — a popular Hall could fan
  *     out to thousands of recipients; sync would blow the §L1 300ms
  *     request budget. The originating post-create returns
  *     immediately; the async worker handles the dispatcher loop.
@@ -508,33 +508,33 @@ final class NotificationDispatcher
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // bcc_primary_local_post_fanout (async) — primary-Local post dispatch
+    // bcc_primary_hall_post_fanout (async) — primary-Hall post dispatch
     // ──────────────────────────────────────────────────────────────────
 
     /** 5-min per-(recipient, group) bell-coalescing window. */
-    private const LOCAL_POST_BELL_WINDOW_SECS = 300;
+    private const HALL_POST_BELL_WINDOW_SECS = 300;
 
-    /** Recipient hard cap per fan-out — revisit when a real Local crosses ~500. */
-    private const LOCAL_POST_RECIPIENT_CAP = 1000;
+    /** Recipient hard cap per fan-out — revisit when a real Hall crosses ~500. */
+    private const HALL_POST_RECIPIENT_CAP = 1000;
 
     /**
-     * Fan out a "new post in your primary Local" event to every user
-     * whose `bcc_primary_local_group_id` user_meta points at this group.
-     * Called from the `bcc_primary_local_post_fanout` async worker
-     * (Plugin.php) — Plugin.php pre-gates that the group is a Local
+     * Fan out a "new post in your primary Hall" event to every user
+     * whose `bcc_primary_hall_group_id` user_meta points at this group.
+     * Called from the `bcc_primary_hall_post_fanout` async worker
+     * (Plugin.php) — Plugin.php pre-gates that the group is a Hall
      * before enqueueing, so the orchestrator can trust the caller most
-     * of the time but re-verifies (defense in depth — a Local could be
+     * of the time but re-verifies (defense in depth — a Hall could be
      * deleted between enqueue and worker pickup).
      *
-     * Recipient cap of LOCAL_POST_RECIPIENT_CAP prevents a runaway
-     * "Local with 50k members" from blowing the worker. Today no Local
+     * Recipient cap of HALL_POST_RECIPIENT_CAP prevents a runaway
+     * "Hall with 50k members" from blowing the worker. Today no Hall
      * approaches this; cursor pagination across multiple async jobs is
      * the future move when one does.
      *
      * Wrapped in try/catch so a single bad recipient never aborts the
      * batch and never bubbles to the async worker.
      */
-    public function dispatchPrimaryLocalPostFor(
+    public function dispatchPrimaryHallPostFor(
         int $authorId,
         int $postId,
         int $actId,
@@ -544,20 +544,20 @@ final class NotificationDispatcher
             return;
         }
         try {
-            // Re-verify the group is still a Local. PeepSoGroupRepository::
-            // findOneById applies the `post_title LIKE 'Local %'` filter,
-            // so a null return means it was deleted, renamed off-prefix,
-            // or never was a Local. Either way: don't dispatch.
-            $group = PeepSoGroupRepository::findOneById($groupId);
+            // Re-verify the group is still a Hall. PeepSoGroupRepository::
+            // findHallById applies the `_bcc_group_kind='hall'` meta filter,
+            // so a null return means it was deleted, un-marked, or never
+            // was a Hall. Either way: don't dispatch.
+            $group = PeepSoGroupRepository::findHallById($groupId);
             if ($group === null) {
                 return;
             }
-            $localName = isset($group->post_title) ? (string) $group->post_title : '';
-            $localSlug = isset($group->post_name)  ? (string) $group->post_name  : '';
+            $hallName = isset($group->post_title) ? (string) $group->post_title : '';
+            $hallSlug = isset($group->post_name)  ? (string) $group->post_name  : '';
 
-            $recipients = PeepSoGroupRepository::findUsersByPrimaryLocal(
+            $recipients = PeepSoGroupRepository::findUsersByPrimaryHall(
                 $groupId,
-                self::LOCAL_POST_RECIPIENT_CAP
+                self::HALL_POST_RECIPIENT_CAP
             );
             if ($recipients === []) {
                 return;
@@ -566,19 +566,19 @@ final class NotificationDispatcher
             $authorHandle = self::resolveHandle($authorId);
 
             foreach ($recipients as $recipientId) {
-                $this->onPostInPrimaryLocal(
+                $this->onPostInPrimaryHall(
                     $authorId,
                     $recipientId,
                     $postId,
                     $actId,
                     $groupId,
                     $authorHandle,
-                    $localName,
-                    $localSlug
+                    $hallName,
+                    $hallSlug
                 );
             }
         } catch (\Throwable $e) {
-            Logger::warning('[NotificationDispatcher] local-post orchestrator failed', [
+            Logger::warning('[NotificationDispatcher] hall-post orchestrator failed', [
                 'author_id' => $authorId,
                 'post_id'   => $postId,
                 'group_id'  => $groupId,
@@ -588,7 +588,7 @@ final class NotificationDispatcher
     }
 
     /**
-     * Dispatch a single primary-Local post bell + push. Mirrors
+     * Dispatch a single primary-Hall post bell + push. Mirrors
      * onReactionAdded shape — self-skip, per-recipient error log,
      * shared dispatch() helper for bell write, PushDispatcher::enqueue
      * for push.
@@ -605,15 +605,15 @@ final class NotificationDispatcher
      * Marked public so it can be exercised by unit tests; the
      * orchestrator above is the canonical entry point in production.
      */
-    public function onPostInPrimaryLocal(
+    public function onPostInPrimaryHall(
         int $authorId,
         int $recipientId,
         int $postId,
         int $actId,
         int $groupId,
         string $authorHandle,
-        string $localName,
-        string $localSlug
+        string $hallName,
+        string $hallSlug
     ): void {
         if ($authorId <= 0 || $recipientId <= 0 || $groupId <= 0) {
             return;
@@ -625,7 +625,7 @@ final class NotificationDispatcher
         }
         try {
             $transientKey = sprintf(
-                'bcc_local_post_notified_%d_%d',
+                'bcc_hall_post_notified_%d_%d',
                 $recipientId,
                 $groupId
             );
@@ -635,36 +635,36 @@ final class NotificationDispatcher
                 // Set the gate BEFORE the dispatch so a second concurrent
                 // post for the same (recipient, group) sees the lock
                 // even if the bell write is still in flight.
-                set_transient($transientKey, 1, self::LOCAL_POST_BELL_WINDOW_SECS);
+                set_transient($transientKey, 1, self::HALL_POST_BELL_WINDOW_SECS);
 
-                $message = $localName !== ''
-                    ? sprintf('@%s posted in %s.', $authorHandle, $localName)
-                    : sprintf('@%s posted in your Local.', $authorHandle);
+                $message = $hallName !== ''
+                    ? sprintf('@%s posted in %s.', $authorHandle, $hallName)
+                    : sprintf('@%s posted in your Hall.', $authorHandle);
 
                 $this->dispatch(
                     $authorId,
                     $recipientId,
                     $message,
-                    NotificationType::LOCAL_POST,
-                    $groupId,   // external_id → the Local group
+                    NotificationType::HALL_POST,
+                    $groupId,   // external_id → the Hall group
                     $actId
                 );
             }
 
             // Push always enqueues — its own 5-min debounce coalesces
-            // rapid bursts into "N new posts in {Local}." The bell
+            // rapid bursts into "N new posts in {Hall}." The bell
             // coalescing is independent of push aggregation; both align
             // on the same 5-min window so a user sees at most one bell +
-            // one push per Local per window.
-            $this->pushDispatcher->enqueue($recipientId, 'local_post', [
+            // one push per Hall per window.
+            $this->pushDispatcher->enqueue($recipientId, 'hall_post', [
                 'actor_handle' => $authorHandle,
                 'group_id'     => $groupId,
-                'local_name'   => $localName,
-                'local_slug'   => $localSlug,
+                'hall_name'    => $hallName,
+                'hall_slug'    => $hallSlug,
                 'act_id'       => $actId,
             ]);
         } catch (\Throwable $e) {
-            Logger::warning('[NotificationDispatcher] local-post dispatch failed', [
+            Logger::warning('[NotificationDispatcher] hall-post dispatch failed', [
                 'author_id'    => $authorId,
                 'recipient_id' => $recipientId,
                 'group_id'     => $groupId,
@@ -677,7 +677,7 @@ final class NotificationDispatcher
     // bcc_comment_created (sync) — comment-on-your-post dispatch
     // ──────────────────────────────────────────────────────────────────
 
-    /** 5-min per-(recipient, post) bell-coalescing window — matches LOCAL_POST. */
+    /** 5-min per-(recipient, post) bell-coalescing window — matches HALL_POST. */
     private const COMMENT_RECEIVED_BELL_WINDOW_SECS = 300;
 
     /**

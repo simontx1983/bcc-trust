@@ -29,8 +29,8 @@
  *                     dedup'd to one bell row per (post, mentioner,
  *                     mentionee) by MentionExtractor::extractUserIds'
  *                     unique-id contract).
- *   - LOCAL_POST     — someone posted in the Local you've designated
- *                     as your primary (`bcc_primary_local_group_id`).
+ *   - HALL_POST      — someone posted in the Hall you've designated
+ *                     as your primary (`bcc_primary_hall_group_id`).
  *                     Fan-out to all primary-members; async via
  *                     AsyncDispatcher; bell coalesced to one row per
  *                     (recipient, group) per 5-min window via
@@ -64,7 +64,7 @@ final class NotificationType
     public const RANK_UP                          = 'bcc_rank_up';
     public const WELCOME                          = 'bcc_welcome';
     public const MENTION                          = 'bcc_mention';
-    public const LOCAL_POST                       = 'bcc_local_post';
+    public const HALL_POST                        = 'bcc_hall_post';
     public const COMMENT_RECEIVED                 = 'bcc_comment_received';
 
     /**
@@ -115,7 +115,7 @@ final class NotificationType
         self::RANK_UP,
         self::WELCOME,
         self::MENTION,
-        self::LOCAL_POST,
+        self::HALL_POST,
         self::COMMENT_RECEIVED,
         self::ATTESTATION_VOUCH_RECEIVED,
         self::ATTESTATION_STAND_BEHIND_RECEIVED,

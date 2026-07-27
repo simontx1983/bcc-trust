@@ -128,7 +128,7 @@ final class GroupMembersEndpoint
         }
 
         // Sentinel → 403. Service-level error envelope (matches
-        // LocalsService's join/leave convention).
+        // HallsService's join/leave convention).
         if (isset($result['error'])) {
             $code   = (string) $result['error'];
             $msg    = isset($result['message']) ? (string) $result['message'] : '';

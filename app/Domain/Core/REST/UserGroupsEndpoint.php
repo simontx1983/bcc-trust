@@ -3,7 +3,7 @@
  * UserGroupsEndpoint — handles GET /bcc/v1/users/{slug}/groups.
  *
  * Cross-kind list of all PeepSo groups the target user is an active
- * member of: holder groups, Locals, plain user groups, and system
+ * member of: holder groups, Halls, plain user groups, and system
  * groups all flow through the same shape via GroupContextResolver.
  *
  * Privacy filtering (server-authoritative):
@@ -193,7 +193,7 @@ final class UserGroupsEndpoint
      *      not once per group.
      *
      * Returns a map keyed by group_id of (eligible: bool, balance: int).
-     * Plain/Local/System groups are absent from the map.
+     * Plain/Hall/System groups are absent from the map.
      *
      * @param array<int, GroupContext> $contexts
      * @return array<int, array{eligible: bool, min_balance: int, balance: int}>
@@ -315,7 +315,7 @@ final class UserGroupsEndpoint
         return match ($type) {
             GroupType::Nft       => 'holder-groups',
             GroupType::Validator => 'validator-groups',
-            GroupType::Local     => 'locals',
+            GroupType::Hall      => 'halls',
             default              => 'groups',
         };
     }
@@ -331,7 +331,7 @@ final class UserGroupsEndpoint
         $defaults = [
             GroupType::Nft->value       => 'On-Chain Holders',
             GroupType::Validator->value => 'Validator Delegators',
-            GroupType::Local->value     => 'Local',
+            GroupType::Hall->value      => 'Hall',
             GroupType::System->value    => 'System',
             GroupType::User->value      => 'Community',
         ];

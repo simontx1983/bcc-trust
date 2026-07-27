@@ -183,7 +183,7 @@ final class FeedHydrationPipeline
      *
      *   group: {
      *     id: int,
-     *     type: 'nft' | 'local' | 'system' | 'user',
+     *     type: 'nft' | 'hall' | 'system' | 'user',
      *     verification: { kind: 'on_chain', label: 'On-Chain Verified' } | null
      *   }
      *

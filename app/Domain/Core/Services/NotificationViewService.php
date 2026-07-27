@@ -22,9 +22,9 @@
  *                       PARENT post's act_id so the user lands on the
  *                       post on the floor — the FE has no comment-anchor
  *                       consumer in V1.
- *   - LOCAL_POST     → `/locals/<slug>` resolved from `external_id`
- *                       (the Local's group_id). Falls back to
- *                       `/locals` if the group is no longer a Local
+ *   - HALL_POST      → `/halls/<slug>` resolved from `external_id`
+ *                       (the Hall's group_id). Falls back to
+ *                       `/halls` if the group is no longer a Hall
  *                       (deleted, renamed off-prefix).
  *   - COMMENT_RECEIVED → `/?focus=<act_id>` (jump to the floor focused
  *                       on the parent post that received the comment;
@@ -239,12 +239,12 @@ final class NotificationViewService
             // PARENT post's act_id so this lands on the post; the FE
             // has no comment-anchor consumer in V1.
             NotificationType::MENTION     => $actId > 0 ? '/?focus=' . $actId : '/',
-            // LOCAL_POST: bell row's external_id is the Local's group_id.
-            // Deep-link to /locals/{slug} so the user lands on the Local
+            // HALL_POST: bell row's external_id is the Hall's group_id.
+            // Deep-link to /halls/{slug} so the user lands on the Hall
             // detail page (where they'll see the new post in the feed
-            // section). Falls back to /locals (the directory) if the
+            // section). Falls back to /halls (the directory) if the
             // group is no longer resolvable.
-            NotificationType::LOCAL_POST  => self::resolveLocalLink($externalId),
+            NotificationType::HALL_POST   => self::resolveHallLink($externalId),
             // COMMENT_RECEIVED: bell row's act_id is the parent post's
             // activity row; mirrors REACTION + MENTION shape. The FE
             // has no comment-anchor consumer in V1.
@@ -263,24 +263,24 @@ final class NotificationViewService
     }
 
     /**
-     * Resolve the deep-link for a LOCAL_POST bell row. `external_id` is
-     * the Local's group_id; we look up the slug via the shared
-     * PeepSoGroupRepository (which automatically filters by Local
-     * title-pattern — null means "not a Local anymore" or "deleted").
-     * Falls back to /locals on any resolution failure so the bell row
+     * Resolve the deep-link for a HALL_POST bell row. `external_id` is
+     * the Hall's group_id; we look up the slug via the shared
+     * PeepSoGroupRepository (which automatically filters by the hall-kind
+     * meta — null means "not a Hall anymore" or "deleted").
+     * Falls back to /halls on any resolution failure so the bell row
      * never produces a 404 URL.
      */
-    private static function resolveLocalLink(int $groupId): string
+    private static function resolveHallLink(int $groupId): string
     {
         if ($groupId <= 0) {
-            return '/locals';
+            return '/halls';
         }
-        $group = PeepSoGroupRepository::findOneById($groupId);
+        $group = PeepSoGroupRepository::findHallById($groupId);
         if ($group === null) {
-            return '/locals';
+            return '/halls';
         }
         $slug = isset($group->post_name) ? (string) $group->post_name : '';
-        return $slug !== '' ? '/locals/' . $slug : '/locals';
+        return $slug !== '' ? '/halls/' . $slug : '/halls';
     }
 
     private static function resolvePageLink(int $pageId): string

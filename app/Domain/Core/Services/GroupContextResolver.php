@@ -51,16 +51,6 @@ final class GroupContextResolver {
         }
 
         $kind = (string) get_post_meta($groupId, '_bcc_group_kind', true);
-        if ($kind === '' && str_starts_with($post->post_title, 'Local ')) {
-            // Canonical V1 Locals discriminator is the title prefix
-            // (bcc-core PeepSoGroupRepository::LOCAL_TITLE_PATTERN,
-            // `Local %`) — nothing writes `_bcc_group_kind='local'` yet,
-            // so without this fallback a real Local resolves as User:
-            // its /me/locals join 404s (LocalsService requires
-            // GroupType::Local) while the plain-groups door would accept
-            // it, bypassing Local semantics. Meta, when present, wins.
-            $kind = 'local';
-        }
         $type = $this->resolveType($kind);
 
         [$sourceKind, $sourceId] = $this->resolveSource($groupId, $type);
@@ -116,7 +106,7 @@ final class GroupContextResolver {
         return match ($kind) {
             'holders'    => GroupType::Nft,
             'delegators' => GroupType::Validator,
-            'local'      => GroupType::Local,
+            'hall'       => GroupType::Hall,
             'system'     => GroupType::System,
             default      => GroupType::User,
         };
@@ -136,8 +126,9 @@ final class GroupContextResolver {
             $validatorId = (int) get_post_meta($groupId, '_bcc_gate_validator_id', true);
             return $validatorId > 0 ? ['validator', $validatorId] : ['validator', null];
         }
-        // Locals / System / User: no formal source pointer in PR 1.
-        // PR 3 (resolver migration) wires Locals → 'page' source.
+        // Halls / System / User: no formal source pointer. A Hall's
+        // chain association lives in the `_bcc_chain_tag` meta, resolved
+        // on demand via ChainRepository rather than carried here.
         return [null, null];
     }
 

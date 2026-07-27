@@ -16,7 +16,7 @@
  *                          followed back (PeepSoFollowerRepository)
  *        - 2nd-degree    : friends-of-friends + mutual-follow counts
  *                          (PeepSoFollowerRepository::getSecondDegreeCandidates)
- *        - co-membership : shared Locals / holder communities
+ *        - co-membership : shared Halls / holder communities
  *                          (PeepSoGroupRepository::getCoMembersOfGroups)
  *        - co-validator  : shared validator backing
  *                          (DelegationRepository::getSharedValidatorBackers)
@@ -63,8 +63,8 @@ final class SuggestionService
     private const W_RECIP     = 3.0;
     /** Per mutual follow, capped at MUTUAL_CAP. */
     private const W_MUTUAL    = 2.0;
-    /** Per shared Local membership. */
-    private const W_LOCAL     = 2.0;
+    /** Per shared Hall membership. */
+    private const W_HALL      = 2.0;
     /** Per shared validator backed. */
     private const W_VALIDATOR = 2.5;
     /** Per shared NFT holder community. */
@@ -135,7 +135,7 @@ final class SuggestionService
             }
         }
 
-        // Classify shared groups (Local vs holder community) once.
+        // Classify shared groups (Hall vs holder community) once.
         $sharedGroupIds = [];
         foreach ($coMembers as $info) {
             $sharedGroupIds[$info['shared_group_id']] = true;
@@ -143,6 +143,12 @@ final class SuggestionService
         $groupInfo = $sharedGroupIds === []
             ? []
             : PeepSoGroupRepository::findManyByIds(array_keys($sharedGroupIds));
+        // Warm the post-meta cache for the shared groups in one round-trip
+        // so looksLikeHall() reads the `_bcc_group_kind` marker off the
+        // warm cache rather than an N+1 of get_post_meta() calls.
+        if ($sharedGroupIds !== []) {
+            update_meta_cache('post', array_keys($sharedGroupIds));
+        }
 
         // ── 2/3. Build the candidate set with per-signal contributions ──
         /** @var array<int, array{score: float, signals: array<string, array{contribution: float, label: string}>}> $pool */
@@ -183,18 +189,18 @@ final class SuggestionService
             ];
         }
 
-        // Shared Locals / holder communities.
+        // Shared Halls / holder communities.
         foreach ($coMembers as $cid => $info) {
             $touch($cid);
             $sharedGroup = $groupInfo[$info['shared_group_id']] ?? null;
             $groupName   = $sharedGroup !== null ? (string) $sharedGroup->post_title : '';
-            $isLocal     = $groupName !== '' && self::looksLikeLocal($groupName);
+            $isHall      = self::looksLikeHall($info['shared_group_id']);
 
-            $weight       = $isLocal ? self::W_LOCAL : self::W_NFT;
+            $weight       = $isHall ? self::W_HALL : self::W_NFT;
             $contribution = $weight * $info['shared_count'];
-            $code         = $isLocal ? 'co_local' : 'co_nft_community';
-            $label        = $isLocal
-                ? sprintf('In %s with you', $groupName !== '' ? $groupName : 'a Local')
+            $code         = $isHall ? 'co_hall' : 'co_nft_community';
+            $label        = $isHall
+                ? sprintf('In %s with you', $groupName !== '' ? $groupName : 'a Hall')
                 : sprintf('In %s with you', $groupName !== '' ? $groupName : 'a community');
 
             $pool[$cid]['score'] += $contribution;
@@ -326,7 +332,7 @@ final class SuggestionService
             'follows_you'      => 5,
             'mutual_follows'   => 4,
             'co_validator'     => 3,
-            'co_local'         => 2,
+            'co_hall'          => 2,
             'co_nft_community' => 1,
         ];
 
@@ -455,13 +461,16 @@ final class SuggestionService
     }
 
     /**
-     * Is this group title a BCC Local? Mirrors the §E3 naming
-     * convention PeepSoGroupRepository filters on ('Local %'). A
-     * non-Local shared group is treated as a holder community.
+     * Is this group a BCC Hall? Reads the `_bcc_group_kind='hall'`
+     * post-meta marker (the canonical discriminator PeepSoGroupRepository
+     * filters on) rather than parsing the title. Callers warm the
+     * post-meta cache for the shared-group set first so this stays off
+     * the N+1 path. A non-Hall shared group is treated as a holder
+     * community.
      */
-    private static function looksLikeLocal(string $title): bool
+    private static function looksLikeHall(int $groupId): bool
     {
-        return preg_match('/^Local\b/u', $title) === 1;
+        return (string) get_post_meta($groupId, '_bcc_group_kind', true) === 'hall';
     }
 
     /**

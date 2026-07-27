@@ -554,6 +554,19 @@ add_action('bcc_gated_group_provision', function () {
     }
 });
 
+// Halls — daily provisioning sweep. Iterates the active chain registry
+// and creates one OPEN PeepSo group ("{Chain} Hall") per chain that
+// doesn't have one yet. Idempotent — re-running creates no duplicates.
+add_action('bcc_hall_provision', function () {
+    $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
+        ->hallProvisioningService()
+        ->provisionAll();
+
+    if ($result['created'] > 0 || !empty($result['errors'])) {
+        \BCC\Core\Log\Logger::info('[bcc-trust] Hall provisioning sweep', $result);
+    }
+});
+
 // Validator/delegator communities — provision on the platform-facing
 // claim event. `bcc_page_claimed` fires only after claim verification
 // (wallet-signature proof), so the claim itself is the arming act: no
@@ -906,6 +919,9 @@ add_action('plugins_loaded', static function (): void {
     // additive; mirrors the activation-side schedule exactly.
     if (!wp_next_scheduled('bcc_gated_group_provision')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_gated_group_provision');
+    }
+    if (!wp_next_scheduled('bcc_hall_provision')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_hall_provision');
     }
     if (!wp_next_scheduled('bcc_gated_group_reconcile_sweep')) {
         wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
@@ -1995,6 +2011,9 @@ function bcc_trust_activate() {
     }
     if (!wp_next_scheduled('bcc_gated_group_provision')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_gated_group_provision');
+    }
+    if (!wp_next_scheduled('bcc_hall_provision')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_hall_provision');
     }
     if (!wp_next_scheduled('bcc_gated_group_reconcile_sweep')) {
         // Twicedaily × 20 users per tick = 40 users/day capacity, well

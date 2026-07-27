@@ -21,7 +21,7 @@
  *
  * Composition:
  *   1. {@see GroupsService::resolveGroupAccess} — ctx + isMember + 404
- *      decision. Cross-kind (nft / local / system / user).
+ *      decision. Cross-kind (nft / hall / system / user).
  *   2. Layer the members-specific 403 policy on top: non-members of
  *      anything except `open` get a forbidden return.
  *   3. {@see PeepSoGroupRepository::listGroupMembers} +
@@ -69,7 +69,7 @@ final class GroupMembersService
      *   - {error: 'bcc_permission_denied', message:..}  → 403 with hint
      *   - {items: [...], pagination: {...}}             → 200 OK payload
      *
-     * The error-sentinel matches LocalsService's join/leave convention
+     * The error-sentinel matches HallsService's join/leave convention
      * so the endpoint can mechanically map result.error → status code.
      *
      * @return array{items: list<array<string, mixed>>, pagination: array{offset: int, limit: int, total: int, has_more: bool}}|array{error: string, message: string}|null

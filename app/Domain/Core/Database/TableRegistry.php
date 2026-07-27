@@ -308,8 +308,8 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_post_shortcodes';
     }
 
-    // NOTE: bcc_user_locals removed — Locals membership ledger is PeepSo's
-    // peepso_group_members; primary-Local pointer is wp_usermeta.bcc_primary_local_group_id.
+    // NOTE: bcc_user_locals removed — Halls membership ledger is PeepSo's
+    // peepso_group_members; primary-Hall pointer is wp_usermeta.bcc_primary_hall_group_id.
     // NOTE: bcc_page_claims removed — page claims merged into bcc_onchain_claims
     // (entity_type='page'); recovery_pending lives there.
 

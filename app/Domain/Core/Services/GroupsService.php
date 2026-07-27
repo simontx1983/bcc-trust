@@ -3,12 +3,12 @@
  * Groups Service — composes the cross-kind /bcc/v1/groups/{slug}
  * single-group view-model per §A2 + the group-detail page plan.
  *
- * Sibling to {@see LocalsService} but cross-kind (nft / local / system /
- * user). The Locals service stays Local-only because it owns the
- * primary-Local pointer state; this service is the read-only seam for
+ * Sibling to {@see HallsService} but cross-kind (nft / hall / system /
+ * user). The Halls service stays Hall-only because it owns the
+ * primary-Hall pointer state; this service is the read-only seam for
  * "any group, any kind."
  *
- * Composition (verbatim from the LocalsService recipe, generalized
+ * Composition (verbatim from the HallsService recipe, generalized
  * across kinds):
  *
  *   1. PeepSoGroupRepository::findGroupBySlug → display row
@@ -177,7 +177,7 @@ final class GroupsService
         $viewerMembership = $this->renderViewerMembership($viewerId, $groupId);
 
         // NFT enrichment is collection-driven; only NFT-type groups carry
-        // image_url + collection_stats. Plain (Local / system / user)
+        // image_url + collection_stats. Plain (Hall / system / user)
         // groups return null for both — the frontend falls back to the
         // initials cover used on /communities.
         $imageUrl        = null;
@@ -198,10 +198,10 @@ final class GroupsService
 
         // BCC trust-gate read. Meta value is the canonical threshold
         // (25/50/75) the create flow locked at the moment of creation.
-        // Plain-group only — NFT/Local groups use other gate paths.
+        // Plain-group only — NFT/Hall groups use other gate paths.
         $trustGateMin = 0;
         if ($ctx->type !== GroupType::Nft
-            && $ctx->type !== GroupType::Local
+            && $ctx->type !== GroupType::Hall
             && $ctx->type !== GroupType::Validator
         ) {
             $trustGateMin = (int) get_post_meta($groupId, '_bcc_trust_gate_min', true);
@@ -241,7 +241,7 @@ final class GroupsService
             : false;
 
         // Chain-tag resolution: reads from either `_bcc_gate_chain_id`
-        // (NFT) or `_bcc_chain_tag` (plain). Locals + legacy untagged
+        // (NFT) or `_bcc_chain_tag` (plain). Halls + legacy untagged
         // groups return null — the FE renders no chip in that case.
         $chainMap = \BCC\Core\ServiceLocator::resolveChainRead()->resolveSlugsForGroups([$groupId]);
         $chainTag = $chainMap[$groupId] ?? null;
@@ -577,7 +577,7 @@ final class GroupsService
 
     /**
      * Three states per the contract §4.7 viewer_membership block (cross-
-     * kind shape — no `is_primary` because that's Local-only):
+     * kind shape — no `is_primary` because that's Hall-only):
      *   - viewer anon                       → null
      *   - viewer authed, not active member  → {is_member: false, joined_at: null}
      *   - viewer authed, active member      → {is_member: true, joined_at: <iso>}
@@ -726,7 +726,7 @@ final class GroupsService
      *
      * Mirrors `UserGroupsEndpoint::canJoin` for the join branch (single
      * source of truth for the per-kind copy) and adds the read-feed
-     * branch the detail page needs (Locals discovery doesn't carry one).
+     * branch the detail page needs (Halls discovery doesn't carry one).
      *
      * @return array{
      *   can_join: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},

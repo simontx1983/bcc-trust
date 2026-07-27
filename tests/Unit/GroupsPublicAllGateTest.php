@@ -24,7 +24,7 @@ use PHPUnit\Framework\TestCase;
  * owner-toggle rejects everyone but the owner/admin.
  *
  * GroupsService is constructed directly with the REAL GroupContextResolver
- * (the same injection LocalsService uses) so no Plugin singleton is needed;
+ * (the same injection HallsService uses) so no Plugin singleton is needed;
  * WP functions + PeepSoGroupRepository + ReputationRepository are stubbed at
  * their FQNs.
  */

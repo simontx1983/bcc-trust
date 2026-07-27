@@ -142,8 +142,8 @@ final class UserViewService
         $card         = ReputationTierMap::resolve($tier);
         $handle       = self::resolveHandle($user);
         $followCounts = PeepSoFollowerRepository::getCounts($userId);
-        $locals       = $this->resolveLocals($userId);
-        $primaryLocal = $this->resolvePrimaryLocal($userId, $locals);
+        $halls        = $this->resolveHalls($userId);
+        $primaryHall  = $this->resolvePrimaryHall($userId, $halls);
 
         // Rank — same prefer-prefetched branch as getSummary (the levels
         // map shares resolveLevel + thresholds with the per-user chain),
@@ -187,8 +187,8 @@ final class UserViewService
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
             'bio'                 => self::resolveBio($user),
-            'primary_local'       => $primaryLocal,
-            'locals'              => $locals,
+            'primary_hall'        => $primaryHall,
+            'halls'               => $halls,
             'wallets'             => self::resolveWallets($userId, $isSelf),
             'counts'              => $this->resolveCounts($userId, $followCounts, $isSelf, $privacy, $prefetched),
             'privacy'             => $privacy,
@@ -305,12 +305,12 @@ final class UserViewService
      * tier as a color/border treatment rather than rendering the
      * tier_label as a duplicate word next to the rank_label.
      *
-     * `trust_score`, `followers_count`, `primary_local`, and
+     * `trust_score`, `followers_count`, `primary_hall`, and
      * `owned_pages_count` populate the directory card with social-proof
      * signals (the directory was previously sparse — handle + chips
      * only — and couldn't carry "is this a real operator" weight).
      * Where single-user resolvers exist (trust score is per-request
-     * memoized; followers/primary_local/owned_pages have single-user
+     * memoized; followers/primary_hall/owned_pages have single-user
      * fallbacks) `getSummary` will resolve these per-row when called
      * outside a list path.
      *
@@ -320,7 +320,8 @@ final class UserViewService
      * primary-local lookup, page-owner count, plus the trust-score
      * row), N+1ing across the page. The prefetch path collapses those
      * to one batched SQL each (~4 queries total per page-load
-     * regardless of `per_page`).
+     * regardless of `per_page`). Note: the field named `primary_hall`
+     * still reads the (renamed) primary-Hall prefetch bucket.
      *
      * `owned_pages_by_type` carries a per-canonical-type breakdown of
      * the user's PeepSo page ownership (validator/project/nft/dao),
@@ -342,7 +343,7 @@ final class UserViewService
      *
      * @param array{
      *   follower_counts?: array<int, int>,
-     *   primary_locals?: array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>,
+     *   primary_halls?: array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>,
      *   owned_pages_counts?: array<int, int>,
      *   owned_pages_by_type?: array<int, array{validator: int, project: int, nft: int, dao: int}>,
      *   endorsements_received_counts?: array<int, int>,
@@ -373,7 +374,7 @@ final class UserViewService
      *   flags: list<string>,
      *   trust_score: int,
      *   followers_count: int,
-     *   primary_local: array{id: int, slug: string, name: string, number: int|null}|null,
+     *   primary_hall: array{id: int, slug: string, name: string}|null,
      *   owned_pages_count: int,
      *   owned_pages_by_type: array{validator: int, project: int, nft: int, dao: int},
      *   verifications: array{
@@ -429,23 +430,21 @@ final class UserViewService
             $followersCount = PeepSoFollowerRepository::getCounts($userId)['followers'];
         }
 
-        // Primary Local — same prefer-prefetched pattern. The prefetch
-        // delivers the raw group post info; we run the same shape
-        // builder (parseLocalNumber etc.) in both paths so the wire
-        // format is identical.
-        if ($prefetched !== null && array_key_exists('primary_locals', $prefetched)) {
-            $primaryLocalInfo = $prefetched['primary_locals'][$userId] ?? null;
-            $primaryLocal     = $primaryLocalInfo === null
+        // Primary Hall — same prefer-prefetched pattern. The prefetch
+        // delivers the raw group post info; we build the same wire shape
+        // in both paths so the format is identical.
+        if ($prefetched !== null && array_key_exists('primary_halls', $prefetched)) {
+            $primaryHallInfo = $prefetched['primary_halls'][$userId] ?? null;
+            $primaryHall     = $primaryHallInfo === null
                 ? null
                 : [
-                    'id'     => (int) $primaryLocalInfo->id,
-                    'slug'   => $primaryLocalInfo->post_name,
-                    'name'   => $primaryLocalInfo->post_title,
-                    'number' => self::parseLocalNumber($primaryLocalInfo->post_title),
+                    'id'   => (int) $primaryHallInfo->id,
+                    'slug' => $primaryHallInfo->post_name,
+                    'name' => $primaryHallInfo->post_title,
                 ];
         } else {
-            $locals       = $this->resolveLocals($userId);
-            $primaryLocal = $this->resolvePrimaryLocal($userId, $locals);
+            $halls       = $this->resolveHalls($userId);
+            $primaryHall = $this->resolvePrimaryHall($userId, $halls);
         }
 
         // Owned-pages count — `member_owner` rows in
@@ -545,7 +544,7 @@ final class UserViewService
             'flags'               => self::resolveFlags($userId),
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
             'followers_count'     => $followersCount,
-            'primary_local'       => $primaryLocal,
+            'primary_hall'        => $primaryHall,
             'owned_pages_count'   => $ownedPagesCount,
             'owned_pages_by_type' => $ownedPagesByType,
             'verifications'       => [
@@ -894,13 +893,17 @@ final class UserViewService
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Locals
+    // Halls
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * @return list<array{id: int, slug: string, name: string, number: int|null, is_primary: bool}>
+     * The member's group memberships, primary-Hall flagged. Preserves the
+     * pre-rename all-member-groups listing behaviour (this is the "groups
+     * I'm in" surface); the `is_primary` flag marks the home Hall.
+     *
+     * @return list<array{id: int, slug: string, name: string, is_primary: bool}>
      */
-    private function resolveLocals(int $userId): array
+    private function resolveHalls(int $userId): array
     {
         if ($userId <= 0) {
             return [];
@@ -930,7 +933,6 @@ final class UserViewService
                 'id'         => $groupId,
                 'slug'       => $info->post_name,
                 'name'       => $info->post_title,
-                'number'     => self::parseLocalNumber($info->post_title),
                 'is_primary' => $primaryGroupId === $groupId,
             ];
         }
@@ -945,26 +947,25 @@ final class UserViewService
         // Delegates to the canonical bcc-core repo helper; the
         // active-membership filter (`gm_user_status LIKE 'member%'`)
         // and the LIMIT 200 cap are owned there. A user is realistically
-        // in 1–3 Locals + a few holder groups, well under the cap.
+        // in 1–3 Halls + a few holder groups, well under the cap.
         return \BCC\Core\Repositories\PeepSoGroupRepository::getUserMemberGroupIds($userId);
     }
 
     /**
-     * @param list<array{id: int, slug: string, name: string, number: int|null, is_primary: bool}> $locals
-     * @return array{id: int, slug: string, name: string, number: int|null}|null
+     * @param list<array{id: int, slug: string, name: string, is_primary: bool}> $halls
+     * @return array{id: int, slug: string, name: string}|null
      */
-    private function resolvePrimaryLocal(int $userId, array $locals): ?array
+    private function resolvePrimaryHall(int $userId, array $halls): ?array
     {
         if ($userId <= 0) {
             return null;
         }
-        foreach ($locals as $local) {
-            if ($local['is_primary']) {
+        foreach ($halls as $hall) {
+            if ($hall['is_primary']) {
                 return [
-                    'id'     => $local['id'],
-                    'slug'   => $local['slug'],
-                    'name'   => $local['name'],
-                    'number' => $local['number'],
+                    'id'   => $hall['id'],
+                    'slug' => $hall['slug'],
+                    'name' => $hall['name'],
                 ];
             }
         }
@@ -973,20 +974,12 @@ final class UserViewService
 
     private static function loadPrimaryGroupId(int $userId): ?int
     {
-        $value = get_user_meta($userId, 'bcc_primary_local_group_id', true);
+        $value = get_user_meta($userId, 'bcc_primary_hall_group_id', true);
         if (!is_numeric($value)) {
             return null;
         }
         $intVal = (int) $value;
         return $intVal > 0 ? $intVal : null;
-    }
-
-    private static function parseLocalNumber(string $title): ?int
-    {
-        if (preg_match('/^Local\s+(\d+)\b/u', $title, $matches) === 1) {
-            return (int) $matches[1];
-        }
-        return null;
     }
 
     // ──────────────────────────────────────────────────────────────────

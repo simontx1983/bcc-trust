@@ -94,7 +94,7 @@ final class MemberSummaryPrefetcher
 
         return [
             'follower_counts'              => PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
-            'primary_locals'               => PeepSoGroupRepository::getPrimaryLocalForUsers($userIds),
+            'primary_halls'                => PeepSoGroupRepository::getPrimaryHallForUsers($userIds),
             'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
             'owned_pages_by_type'          => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),
             // Attestation-backed since the endorsements-table retirement:

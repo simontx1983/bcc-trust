@@ -1,28 +1,27 @@
 <?php
 /**
- * Locals Endpoint
+ * Halls Endpoint
  *
  * Routes:
- *   - GET    /bcc/v1/locals                    — paginated catalog (§4.7)
- *   - GET    /bcc/v1/locals/(?P<slug>...)      — single Local detail
- *   - POST   /bcc/v1/me/locals/(?P<id>\d+)/primary    — set viewer's primary
- *   - DELETE /bcc/v1/me/locals/primary                — clear viewer's primary
- *   - POST   /bcc/v1/me/locals/(?P<id>\d+)/membership — join the Local
- *   - DELETE /bcc/v1/me/locals/(?P<id>\d+)/membership — leave the Local
+ *   - GET    /bcc/v1/halls                     — paginated catalog (§4.7)
+ *   - GET    /bcc/v1/halls/(?P<slug>...)       — single Hall detail
+ *   - POST   /bcc/v1/me/halls/(?P<id>\d+)/primary    — set viewer's home Hall
+ *   - DELETE /bcc/v1/me/halls/primary                — clear viewer's home Hall
+ *   - POST   /bcc/v1/me/halls/(?P<id>\d+)/membership — join the Hall
+ *   - DELETE /bcc/v1/me/halls/(?P<id>\d+)/membership — leave the Hall
  *
  * Per contract §4.7. Read endpoints accept anonymous OR bearer auth;
  * mutation endpoints require auth and 401 anonymously. Set-primary is
  * gated on actual membership (returns bcc_forbidden if the user isn't
  * already a member of the group). Join/leave delegate to PeepSo's
  * canonical group write API via PeepSoGroupWriter (§C2 single-graph
- * rule); leaving the primary Local atomically clears the primary
+ * rule); leaving the primary Hall atomically clears the primary
  * pointer.
  *
  * Pagination: offset envelope (page / page_size / total / total_pages)
- * per §1.5 — Locals is a directory, not a time-ordered feed.
+ * per §1.5 — Halls is a directory, not a time-ordered feed.
  *
  * @package BCC\Trust\Core\REST
- * @since V1 (2026-04)
  */
 
 namespace BCC\Trust\Core\REST;
@@ -37,10 +36,10 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-final class LocalsEndpoint
+final class HallsEndpoint
 {
     private const ROUTE_NAMESPACE   = 'bcc/v1';
-    private const ROUTE_PATH        = '/locals';
+    private const ROUTE_PATH        = '/halls';
     private const DEFAULT_PAGE_SIZE = 20;
     private const MAX_PAGE_SIZE     = 50;
 
@@ -81,7 +80,7 @@ final class LocalsEndpoint
 
         register_rest_route(
             self::ROUTE_NAMESPACE,
-            '/locals/(?P<slug>' . self::SLUG_PATTERN . ')',
+            '/halls/(?P<slug>' . self::SLUG_PATTERN . ')',
             [
                 'methods'             => WP_REST_Server::READABLE,
                 'callback'            => [$instance, 'showBySlug'],
@@ -98,7 +97,7 @@ final class LocalsEndpoint
 
         register_rest_route(
             self::ROUTE_NAMESPACE,
-            '/me/locals/(?P<id>\d+)/primary',
+            '/me/halls/(?P<id>\d+)/primary',
             [
                 'methods'             => WP_REST_Server::CREATABLE,
                 'callback'            => [$instance, 'setPrimary'],
@@ -115,7 +114,7 @@ final class LocalsEndpoint
 
         register_rest_route(
             self::ROUTE_NAMESPACE,
-            '/me/locals/primary',
+            '/me/halls/primary',
             [
                 'methods'             => WP_REST_Server::DELETABLE,
                 'callback'            => [$instance, 'clearPrimary'],
@@ -125,7 +124,7 @@ final class LocalsEndpoint
 
         register_rest_route(
             self::ROUTE_NAMESPACE,
-            '/me/locals/(?P<id>\d+)/membership',
+            '/me/halls/(?P<id>\d+)/membership',
             [
                 [
                     'methods'             => WP_REST_Server::CREATABLE,
@@ -170,7 +169,7 @@ final class LocalsEndpoint
             $pageSize = self::DEFAULT_PAGE_SIZE;
         }
 
-        $payload = Plugin::instance()->localsService()->getLocals(
+        $payload = Plugin::instance()->hallsService()->getHalls(
             $viewerId,
             $page,
             $pageSize,
@@ -191,10 +190,10 @@ final class LocalsEndpoint
         }
 
         $viewerId = get_current_user_id();
-        $payload  = Plugin::instance()->localsService()->getLocal($viewerId, $slug);
+        $payload  = Plugin::instance()->hallsService()->getHall($viewerId, $slug);
 
         if ($payload === null) {
-            return ApiResponse::error('bcc_not_found', 'Local not found.', 404);
+            return ApiResponse::error('bcc_not_found', 'Hall not found.', 404);
         }
 
         $response = ApiResponse::ok($payload);
@@ -215,7 +214,7 @@ final class LocalsEndpoint
         }
 
         $groupId = (int) $request->get_param('id');
-        $result  = Plugin::instance()->localsService()->setPrimaryLocal($viewerId, $groupId);
+        $result  = Plugin::instance()->hallsService()->setPrimaryHall($viewerId, $groupId);
 
         if (isset($result['error'])) {
             $code   = (string) $result['error'];
@@ -242,7 +241,7 @@ final class LocalsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        $result = Plugin::instance()->localsService()->clearPrimaryLocal($viewerId);
+        $result = Plugin::instance()->hallsService()->clearPrimaryHall($viewerId);
 
         if (isset($result['error'])) {
             $code = (string) $result['error'];
@@ -266,14 +265,14 @@ final class LocalsEndpoint
         // permission read. Parity with the plain-group join bucket
         // (MyGroupsEndpoint) so this membership-write door can't be used
         // to spray peepso_group_user rows.
-        if (!\BCC\Core\Security\Throttle::allow('local_join:' . $viewerId, 10, 60)) {
+        if (!\BCC\Core\Security\Throttle::allow('hall_join:' . $viewerId, 10, 60)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         // Suspended accounts must not walk back into a community. The join
         // lands members via the trusted PeepSoGroupWriter door (bypassing
         // PeepSo's own UI approval), so the suspension gate has to be
-        // enforced HERE — LocalsService gates type/privacy but never
+        // enforced HERE — HallsService gates type/privacy but never
         // suspension. Admin bypass off: a suspended account is blocked
         // regardless of role. Parity with MyGroupsEndpoint::postJoin
         // [audit M — group-rejoin].
@@ -282,7 +281,7 @@ final class LocalsEndpoint
         }
 
         $groupId = (int) $request->get_param('id');
-        $result  = Plugin::instance()->localsService()->joinLocal($viewerId, $groupId);
+        $result  = Plugin::instance()->hallsService()->joinHall($viewerId, $groupId);
 
         if (isset($result['error'])) {
             $code   = (string) $result['error'];
@@ -303,7 +302,7 @@ final class LocalsEndpoint
         }
 
         $groupId = (int) $request->get_param('id');
-        $result  = Plugin::instance()->localsService()->leaveLocal($viewerId, $groupId);
+        $result  = Plugin::instance()->hallsService()->leaveHall($viewerId, $groupId);
 
         if (isset($result['error'])) {
             $code   = (string) $result['error'];

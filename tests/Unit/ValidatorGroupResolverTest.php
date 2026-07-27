@@ -18,12 +18,12 @@ use PHPUnit\Framework\TestCase;
  * to its own join endpoint (MyGroupsEndpoint rejects the kind), renders
  * the DELEGATOR COMMUNITY kicker, and marks it on-chain verified. A
  * regression here silently downgrades a gated community to GroupType::User
- * — which is exactly the Locals split-brain bug class, where the plain
+ * — which is exactly the Halls split-brain bug class, where the plain
  * join door would accept a group whose gate lives elsewhere.
  *
  * ## Isolation
- * Runs in its own subprocess; setUp() pulls in tests/Stubs/locals-gate-stubs.php
- * (shared with LocalsJoinGateTest) which defines the WordPress functions the
+ * Runs in its own subprocess; setUp() pulls in tests/Stubs/halls-gate-stubs.php
+ * (shared with HallsJoinGateTest) which defines the WordPress functions the
  * REAL GroupContextResolver + PeepSoPrivacy call, backed by a per-test
  * fixture. The main process is untouched.
  */
@@ -34,8 +34,8 @@ final class ValidatorGroupResolverTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        require_once __DIR__ . '/../Stubs/locals-gate-stubs.php';
-        $GLOBALS['__bcc_locals_gate_fixture'] = [];
+        require_once __DIR__ . '/../Stubs/halls-gate-stubs.php';
+        $GLOBALS['__bcc_halls_gate_fixture'] = [];
     }
 
     /**
@@ -43,7 +43,7 @@ final class ValidatorGroupResolverTest extends TestCase
      */
     private function registerGroup(int $id, string $kind, int $privacy = 1, array $extraMeta = []): void
     {
-        $GLOBALS['__bcc_locals_gate_fixture'][$id] = [
+        $GLOBALS['__bcc_halls_gate_fixture'][$id] = [
             'post_type' => 'peepso-group',
             'meta'      => array_merge([
                 '_bcc_group_kind'      => $kind,

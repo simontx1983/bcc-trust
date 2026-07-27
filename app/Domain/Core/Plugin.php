@@ -137,10 +137,10 @@ final class Plugin
         return $this->watchMetaRepository ??= new Repositories\WatchMetaRepository();
     }
 
-    // NOTE: UserLocalRepository removed — Locals membership reads from
+    // NOTE: UserLocalRepository removed — Halls membership reads from
     // PeepSo's peepso_group_members directly via PeepSoGroupRepository
-    // (single graph rule). LocalsService composes membership view-models
-    // from PeepSo + the bcc_primary_local_group_id user-meta pointer.
+    // (single graph rule). HallsService composes membership view-models
+    // from PeepSo + the bcc_primary_hall_group_id user-meta pointer.
     //
     // NOTE: PageClaimRepository removed — page claims merged into the
     // existing onchain ClaimRepository (entity_type='page'); the
@@ -440,7 +440,7 @@ final class Plugin
     /**
      * §O1.2 first-action celebrations — one-shot Heavy stashing on first
      * post / first review / first blog. See FirstActionListener docstring
-     * for the deferred kinds (first_watcher, first_local_joined, etc.).
+     * for the deferred kinds (first_watcher, first_hall_joined, etc.).
      */
     private ?Services\FirstActionListener $firstActionListener = null;
     public function firstActionListener(): Services\FirstActionListener
@@ -499,10 +499,10 @@ final class Plugin
         );
     }
 
-    private ?Services\LocalsService $localsService = null;
-    public function localsService(): Services\LocalsService
+    private ?Services\HallsService $hallsService = null;
+    public function hallsService(): Services\HallsService
     {
-        return $this->localsService ??= new Services\LocalsService(
+        return $this->hallsService ??= new Services\HallsService(
             $this->groupContextResolver()
         );
     }
@@ -977,7 +977,7 @@ final class Plugin
     public function feedColdStartService(): Services\FeedColdStartService
     {
         // Cold-start bridge surface (home-feed empty state). Composes
-        // locals + recently-active operators + hot posts without
+        // halls + recently-active operators + hot posts without
         // duplicating any primitive — reuses UserViewService for
         // operator hydration and FeedRankingService for the hot block.
         // See Services/FeedColdStartService.php doctype for the
@@ -1171,8 +1171,8 @@ final class Plugin
         // V1 contract: rank catalog + viewer's current rank (§4.8)
         \BCC\Trust\Core\REST\RanksEndpoint::register();
 
-        // V1 contract: paginated Locals catalog + viewer membership (§4.7)
-        \BCC\Trust\Core\REST\LocalsEndpoint::register();
+        // V1 contract: paginated Halls catalog + viewer membership (§4.7)
+        \BCC\Trust\Core\REST\HallsEndpoint::register();
 
         // V1 contract: per-user 52-week shift-log activity grid (§4.4)
         \BCC\Trust\Core\REST\UsersEndpoint::register();
@@ -1188,13 +1188,13 @@ final class Plugin
 
         // V1.25 contract: personalized who-to-follow recommender
         // (GET /suggestions/users). Auth-required; AFFINITY-only scoring
-        // (reciprocity / mutual follows / shared Locals + communities /
+        // (reciprocity / mutual follows / shared Halls + communities /
         // shared validator backing) — NEVER ranked by trust or follower
         // count. Reputation is exclusion-only. See SuggestionService.
         \BCC\Trust\Core\REST\SuggestionsEndpoint::register();
 
         // Sprint 3 cold-start bridge surface — GET /feed/cold-start.
-        // Composes three blocks for the home-feed empty state (locals +
+        // Composes three blocks for the home-feed empty state (halls +
         // recently-active operators + hot posts). Auth-permissive; anon
         // viewers get the same shape minus chain-alignment personalization.
         // See Services/FeedColdStartService.php doctype for the load-
@@ -1516,9 +1516,9 @@ final class Plugin
         // hydrates each row via UserViewService::getSummary.
         \BCC\Trust\Core\REST\UserFollowsEndpoint::register();
 
-        // V2: Plain (non-gated, non-Local) group join/leave for the
-        // residual case. Holder groups → /me/holder-groups; Locals →
-        // /me/locals; this endpoint covers user/system groups.
+        // V2: Plain (non-gated, non-Hall) group join/leave for the
+        // residual case. Holder groups → /me/holder-groups; Halls →
+        // /me/halls; this endpoint covers user/system groups.
         \BCC\Trust\Core\REST\MyGroupsEndpoint::register();
 
         // V2: Group discovery surface — verified-first, then heat-aware
@@ -1932,7 +1932,7 @@ final class Plugin
         // One-shot stashings for first_post / first_review / first_blog.
         // Each is gated by a dedicated user_meta flag so they fire at
         // most once per user lifetime. See FirstActionListener docstring
-        // for the deferred kinds (first_watcher, first_local_joined,
+        // for the deferred kinds (first_watcher, first_hall_joined,
         // first_reply_received) — those need hook changes or owner-of-
         // target lookups not available with the current actor-only
         // signatures.
@@ -2318,28 +2318,28 @@ final class Plugin
             );
         }, 31, 4);
 
-        // §I1 V2 — primary-Local post fan-out. Second bcc_post_created
+        // §I1 V2 — primary-Hall post fan-out. Second bcc_post_created
         // subscriber at priority 31 so it runs AFTER the mention
         // dispatcher (priority 30). Pre-gates the post on
-        // (group_id > 0) AND (group is a Local) before paying the
-        // async-enqueue cost — non-Local posts (NFT-gated holder groups,
+        // (group_id > 0) AND (group is a Hall) before paying the
+        // async-enqueue cost — non-Hall posts (NFT-gated holder groups,
         // plain user groups, system groups, personal-wall posts) never
         // touch the dispatcher. Always async via AsyncDispatcher because
-        // a popular Local could fan out to thousands of recipients;
+        // a popular Hall could fan out to thousands of recipients;
         // sync would blow the §L1 300ms request budget.
         add_action('bcc_post_created', function (int $authorId, int $postId, int $actId): void {
             $groupId = (int) get_post_meta($postId, 'peepso_group_id', true);
             if ($groupId <= 0) {
                 return;
             }
-            // Pre-gate: is this group actually a Local? PeepSoGroupRepository's
-            // findOneById applies `post_title LIKE 'Local %'` automatically.
-            $group = \BCC\Core\Repositories\PeepSoGroupRepository::findOneById($groupId);
+            // Pre-gate: is this group actually a Hall? PeepSoGroupRepository's
+            // findHallById applies the `_bcc_group_kind='hall'` meta filter.
+            $group = \BCC\Core\Repositories\PeepSoGroupRepository::findHallById($groupId);
             if ($group === null) {
                 return;
             }
             \BCC\Core\Cron\AsyncDispatcher::enqueueAsync(
-                'bcc_primary_local_post_fanout',
+                'bcc_primary_hall_post_fanout',
                 [$authorId, $postId, $actId, $groupId]
             );
         }, 31, 3);
@@ -2347,8 +2347,8 @@ final class Plugin
         // Async worker — invoked by the Action Scheduler / wp-cron
         // event scheduled above. Hands off to the dispatcher orchestrator
         // which resolves the recipient set + per-recipient bell + push.
-        add_action('bcc_primary_local_post_fanout', function (int $authorId, int $postId, int $actId, int $groupId): void {
-            $this->notificationDispatcher()->dispatchPrimaryLocalPostFor(
+        add_action('bcc_primary_hall_post_fanout', function (int $authorId, int $postId, int $actId, int $groupId): void {
+            $this->notificationDispatcher()->dispatchPrimaryHallPostFor(
                 $authorId,
                 $postId,
                 $actId,
