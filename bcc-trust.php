@@ -224,12 +224,20 @@ require_once BCC_TRUST_PATH . 'includes/database/rename-pull-to-watch.php';
 // /u/{handle} and /u/{handle}/post/{code} resolve for every author.
 require_once BCC_TRUST_PATH . 'includes/database/backfill-canonical-handles.php';
 // One-shot wallet placeholder-email backfill. Defines
-// bcc_trust_backfill_wallet_placeholder_emails(), called at the end of
-// bcc_trust_create_tables(). Option-guarded (bcc_trust_wallet_placeholder_
-// emails_backfilled); rewrites pre-2026-07-23 md5(address)-derived
-// placeholder emails to salt-keyed tokens, closing the Gravatar
-// member↔wallet oracle (docs/wallet-privacy-policy.md).
+// bcc_trust_backfill_wallet_placeholder_emails(); rewrites pre-2026-07-23
+// md5(address)-derived placeholder emails to salt-keyed tokens, closing the
+// Gravatar member↔wallet oracle (docs/wallet-privacy-policy.md). Invoked by
+// the migration runner below (and, for compatibility, the schema path).
 require_once BCC_TRUST_PATH . 'includes/database/backfill-wallet-placeholder-emails.php';
+// Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
+// and its registry, and runs the two backfills above on the ordinary
+// plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
+// files-only deploy triggers them (the schema gate alone would not).
+// Registered on plugins_loaded at priority 20 (after the schema gate).
+require_once BCC_TRUST_PATH . 'includes/database/migration-runner.php';
+// accepted_args = 0: this callback takes no hook argument. (The runner is
+// also defensively tolerant of WP passing one — see its signature.)
+add_action('plugins_loaded', 'bcc_trust_run_pending_migrations', 20, 0);
 
 // Onchain schema definitions — table-creation functions used by the
 // activation hook and by the content-hash-gated dbDelta re-run below.
@@ -243,6 +251,13 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
 // demand + scam signals behind the Verify Collections queue.
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-signals.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
+// Validator messaging — durable first-activation record (one row per
+// validator page; the pre-claim backlog belongs to first activation
+// only, transfers never replay it).
+require_once BCC_TRUST_PATH . 'includes/database/schema-validator-msg-activation.php';
+// Validator messaging — durable pre-claim message queue (messages to a
+// never-claimed validator, released to its first verified operator).
+require_once BCC_TRUST_PATH . 'includes/database/schema-validator-msg-queue.php';
 // V2 Phase 1a — confirmation-gated NFT indexer
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-holdings.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-pieces.php';
@@ -329,6 +344,9 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
+    // Validator messaging first-activation record
+    bcc_create_validator_msg_activation_table();
+    bcc_create_validator_msg_queue_table();
     // V2 Phase 1a NFT indexer
     bcc_onchain_create_nft_holdings_table();
     bcc_onchain_create_chain_checkpoints_table();
@@ -652,6 +670,15 @@ add_filter(
     [\BCC\Trust\Core\Services\RetentionHealthSnapshot::class, 'contribute']
 );
 
+// Validator-messaging queue gauge: pending depth, oldest pending age,
+// and failed_terminal count. Aggregates only — never message content.
+// Complements the validator_messaging degradation counters (which are
+// event-shaped) with the "is the backlog draining?" state.
+add_filter(
+    'bcc_system_health',
+    [\BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker::class, 'contributeHealth']
+);
+
 // Operator OS v1 Phase 3: contribute the Read Model panel to
 // bcc-core's DeveloperPage. Renders coverage / drift / dirty-queue
 // state from ReadModelHealthRepository — no new domain logic.
@@ -826,6 +853,10 @@ add_action(
 add_action('plugins_loaded', static function (): void {
     \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::register();
     \BCC\Trust\Onchain\Services\NftEnrichmentService::register();
+    // Validator-messaging backlog delivery + its recovery sweep. Same
+    // self-healing shape: registering from plugins_loaded means a hook
+    // added by an update schedules itself without a reactivation.
+    \BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker::register();
 
     // Helius dedupe sweep has no host service class (its handler is the
     // inline closure above) so its schedule is inlined here. Same shape
@@ -1902,6 +1933,13 @@ if (defined('WP_CLI') && WP_CLI) {
     \WP_CLI::add_command(
         'bcc-trust activity',
         \BCC\Trust\Core\CLI\BackfillActivityModuleIdsCommand::class
+    );
+    // Validator message queue: inspect + recover the pre-claim backlog
+    // (status / drain / retry / suppress). `retry` proves via the row's
+    // idempotency key that no message landed before re-sending.
+    \WP_CLI::add_command(
+        'bcc-trust vmq',
+        \BCC\Trust\Onchain\CLI\ValidatorMsgQueueCommand::class
     );
 }
 

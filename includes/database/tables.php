@@ -193,20 +193,17 @@ function bcc_trust_create_tables() {
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Post shortcodes table created', []);
     }
 
-    // One-shot canonical-handle backfill — assigns bcc_handle usermeta to
-    // legacy accounts so /u/{handle} (and the new /u/{handle}/post/{code}
-    // permalinks) resolve for every author. Option-guarded internally;
-    // required from bcc-trust.php next to rename-pull-to-watch.php.
-    if (function_exists('bcc_trust_backfill_canonical_handles')) {
-        bcc_trust_backfill_canonical_handles();
-    }
-
-    // One-shot wallet placeholder-email backfill — rewrites pre-2026-07-23
-    // md5(address)-derived placeholder emails to salt-keyed tokens, closing
-    // the Gravatar member↔wallet oracle. Option-guarded internally; required
-    // from bcc-trust.php next to backfill-canonical-handles.php.
-    if (function_exists('bcc_trust_backfill_wallet_placeholder_emails')) {
-        bcc_trust_backfill_wallet_placeholder_emails();
+    // Data backfills (canonical handles + wallet placeholder-emails) run
+    // through the shared migration runner, NOT by calling each backfill
+    // directly. This makes the schema-install path and the runtime
+    // plugins_loaded path use one idempotent implementation and one
+    // per-migration lock, so they cannot race or double-mark completion.
+    // The runner is normally what fires these (independent of
+    // BCC_TRUST_SCHEMA_VERSION); invoking it here means a schema bump also
+    // drains any pending migration in the same pass. See
+    // includes/database/migration-runner.php.
+    if (function_exists('bcc_trust_run_pending_migrations')) {
+        bcc_trust_run_pending_migrations();
     }
 
     // §D5 reaction seeding — idempotent insert of the three custom

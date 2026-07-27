@@ -1778,6 +1778,31 @@ final class Plugin
             }
         }, 10, 5);
 
+        // Validator messaging first-activation. Priority 30 — after the
+        // activity writer (10) and PeepSoIntegration's authorship
+        // transfer (20). Does four bounded things (resolve, atomic
+        // activation insert, schedule the job, return); the queue drain
+        // itself runs in a background worker, never in the claim
+        // request. Swallowed like its sibling subscribers: a claim must
+        // never fail because backlog scheduling did.
+        add_action('bcc_page_claimed', static function (int $userId, int $pageId, string $entityType, int $entityId, string $role): void {
+            try {
+                \BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker::onPageClaimed(
+                    $userId,
+                    $pageId,
+                    $entityType,
+                    $entityId
+                );
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] validator_messaging activation failed', [
+                    'page_id'   => $pageId,
+                    'entity_id' => $entityId,
+                    'error'     => $e->getMessage(),
+                ]);
+                \BCC\Core\Observability\DegradationMetrics::record('validator_messaging', 'schedule_failed');
+            }
+        }, 30, 5);
+
         add_action('bcc_review_published', function (int $authorId, int $pageId, int $voteId, string $explanation): void {
             try {
                 $this->activityStreamWriter()->handleReviewPublished(

@@ -68,8 +68,17 @@ final class MessagesEndpoint
                     'callback'            => [$instance, 'startConversation'],
                     'permission_callback' => '__return_true',
                     'args' => [
+                        // recipient_id XOR page_id — exactly one is
+                        // required, enforced in the handler so we can
+                        // return a clear message for both the
+                        // neither-supplied and both-supplied cases.
                         'recipient_id' => [
-                            'required'          => true,
+                            'required'          => false,
+                            'type'              => 'integer',
+                            'sanitize_callback' => 'absint',
+                        ],
+                        'page_id' => [
+                            'required'          => false,
                             'type'              => 'integer',
                             'sanitize_callback' => 'absint',
                         ],
@@ -131,6 +140,20 @@ final class MessagesEndpoint
                 'permission_callback' => '__return_true',
             ]
         );
+
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/me/queued-messages',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'listQueued'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'page'     => ['required' => false, 'type' => 'integer', 'sanitize_callback' => 'absint'],
+                    'per_page' => ['required' => false, 'type' => 'integer', 'sanitize_callback' => 'absint'],
+                ],
+            ]
+        );
     }
 
     public function listInbox(WP_REST_Request $request): WP_REST_Response
@@ -154,6 +177,27 @@ final class MessagesEndpoint
         ]);
     }
 
+    public function listQueued(WP_REST_Request $request): WP_REST_Response
+    {
+        $viewerId = (int) get_current_user_id();
+        if ($viewerId <= 0) {
+            return self::unauth();
+        }
+
+        $page    = (int) ($request->get_param('page') ?? 1);
+        $perPage = (int) ($request->get_param('per_page') ?? MessagesService::INBOX_PER_PAGE_DEFAULT);
+
+        $result = $this->service()->listQueuedForSender($viewerId, $page, $perPage);
+        if (isset($result['error'])) {
+            return self::errorFromResult($result);
+        }
+
+        return self::ok([
+            'items'      => $result['items'],
+            'pagination' => $result['pagination'],
+        ]);
+    }
+
     public function startConversation(WP_REST_Request $request): WP_REST_Response
     {
         $viewerId = (int) get_current_user_id();
@@ -162,9 +206,23 @@ final class MessagesEndpoint
         }
 
         $recipientId = (int) ($request->get_param('recipient_id') ?? 0);
+        $pageId      = (int) ($request->get_param('page_id') ?? 0);
         $body        = (string) ($request->get_param('body') ?? '');
 
-        $result = $this->service()->sendMessage($viewerId, $recipientId, null, $body);
+        if ($recipientId > 0 && $pageId > 0) {
+            return self::errorFromResult([
+                'error'   => 'bcc_invalid_request',
+                'message' => 'Provide recipient_id or page_id, not both.',
+            ]);
+        }
+
+        // Entity-addressed send: the service re-resolves the page's
+        // destination (live operator / queue / unavailable) on every
+        // submission — the client never decides.
+        $result = $pageId > 0
+            ? $this->service()->sendMessageToPage($viewerId, $pageId, $body)
+            : $this->service()->sendMessage($viewerId, $recipientId, null, $body);
+
         if (isset($result['error'])) {
             return self::errorFromResult($result);
         }
@@ -297,6 +355,13 @@ final class MessagesEndpoint
             'bcc_fraud_locked'    => 403,
             'bcc_not_found'       => 404,
             'bcc_invalid_request' => 400,
+            // Validator-page conflict states: the page cannot accept a
+            // message in its current claim state, or its queue is at
+            // capacity. 409 (not 400) — the request is well-formed;
+            // the resource state refuses it.
+            'bcc_messaging_unavailable' => 409,
+            'bcc_queue_full'      => 409,
+            'bcc_queue_limit'     => 409,
             'bcc_rate_limited'    => 429,
             'bcc_unavailable'     => 503,
             'bcc_internal_error'  => 500,

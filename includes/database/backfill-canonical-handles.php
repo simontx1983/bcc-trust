@@ -31,10 +31,18 @@
  * write). Deliberately does NOT write META_HANDLE_LAST_CHANGED — initial
  * assignment must not arm the §B6 rename cooldown, matching signup.
  *
- * Idempotent: option-guarded (bcc_trust_canonical_handles_backfilled)
- * AND the per-user query only selects users still missing the meta.
- * Registration mirrors rename-pull-to-watch.php — required from
- * bcc-trust.php, invoked inside bcc_trust_create_tables().
+ * Idempotent: the per-user query only selects users still missing the meta,
+ * so a re-run re-processes only the remainder. The completion option is
+ * owned by the migration runner, not this function.
+ *
+ * Status contract: processes one bounded batch and RETURNS INCOMPLETE if the
+ * batch cap was hit with users remaining, or if any user could not be
+ * assigned a handle (retryable); COMPLETE only when the eligible set fully
+ * drains with every user assigned.
+ *
+ * Invoked by the migration runner on plugins_loaded (independent of the
+ * schema-version gate); the schema-install path routes through the same
+ * runner. See includes/database/migration-runner.php.
  *
  * @package BCC_Trust
  * @subpackage Database
@@ -47,11 +55,12 @@ if (!defined('ABSPATH')) {
 
 if (!function_exists('bcc_trust_backfill_canonical_handles')) {
 
-    function bcc_trust_backfill_canonical_handles(): void
+    function bcc_trust_backfill_canonical_handles(): string
     {
-        if (get_option('bcc_trust_canonical_handles_backfilled')) {
-            return;
-        }
+        // No self-guard / self-complete: the migration runner owns guarding,
+        // locking, and completion (see includes/database/migration-runner.php).
+        // Contract: process one bounded batch and RETURN a status; never set
+        // the done-option here.
 
         $handleService = new \BCC\Trust\Core\Services\HandleService();
 
@@ -61,6 +70,10 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
         /** @var list<int> $skipped user_ids we failed to assign — excluded
          *                 from re-selection so the loop always progresses */
         $skipped = [];
+        // True once a short/empty batch proves the eligible set is drained.
+        // If instead the loop exits by hitting $maxIterations with full
+        // batches throughout, more users remain and we must not report done.
+        $drained = false;
 
         for ($i = 0; $i < $maxIterations; $i++) {
             /** @var list<int|string> $userIds */
@@ -87,6 +100,7 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
             ]);
 
             if ($userIds === []) {
+                $drained = true;
                 break;
             }
 
@@ -108,16 +122,37 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
             }
 
             if (count($userIds) < $batchSize) {
+                $drained = true;
                 break;
             }
         }
 
-        update_option('bcc_trust_canonical_handles_backfilled', time(), false);
+        if (!$drained) {
+            // Hit the per-request batch cap with full batches throughout —
+            // more users remain. Assigned handles are persisted (the query
+            // excludes them next time), so the next request resumes.
+            \BCC\Core\Log\Logger::info('[bcc-trust] Canonical-handle backfill: batch cap reached, more remain — will resume', [
+                'assigned' => $assignedCount,
+            ]);
+            return BCC_TRUST_MIGRATION_INCOMPLETE;
+        }
+
+        if ($skipped !== []) {
+            // Some users could not be assigned a handle this pass (suffix
+            // budget exhausted — in practice never, since 'member-{id}' is
+            // unique by construction). Stay retryable rather than falsely
+            // completing with route-dead accounts still missing a handle.
+            \BCC\Core\Log\Logger::warning('[bcc-trust] Canonical-handle backfill incomplete — some users unassignable, will retry', [
+                'assigned' => $assignedCount,
+                'skipped'  => count($skipped),
+            ]);
+            return BCC_TRUST_MIGRATION_INCOMPLETE;
+        }
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Canonical-handle backfill complete', [
             'assigned' => $assignedCount,
-            'skipped'  => count($skipped),
         ]);
+        return BCC_TRUST_MIGRATION_COMPLETE;
     }
 
     /**

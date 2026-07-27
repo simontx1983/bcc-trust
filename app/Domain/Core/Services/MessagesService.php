@@ -51,6 +51,7 @@ use BCC\Core\Repositories\PeepSoMessageRepository;
 use BCC\Trust\Core\Repositories\UserMiniRepository;
 use BCC\Trust\Core\Services\BadgesService;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
+use BCC\Trust\Onchain\Repositories\ValidatorMsgQueueRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -72,6 +73,22 @@ final class MessagesService
     /** Burst-seatbelt rate limit: 30 messages per 5 minutes per sender. */
     public const RATE_LIMIT_PER_WINDOW = 30;
     public const RATE_LIMIT_WINDOW_SECONDS = 300;
+
+    /**
+     * Pre-claim queue backpressure. Accepted messages never expire and
+     * are never silently dropped, so these caps are the ONLY
+     * backpressure — both surface as truthful 409s rather than a
+     * silent discard.
+     *   - per sender per page: enough to say anything legitimate,
+     *     while stopping one account from monologue-flooding a future
+     *     operator's day-one inbox. Slots free as messages deliver.
+     *   - per page: a validator's whole pending backlog.
+     */
+    public const QUEUE_MAX_PENDING_PER_SENDER_PER_PAGE = 3;
+    public const QUEUE_MAX_PENDING_PER_PAGE = 500;
+
+    /** delivery_state reported for an accepted pre-claim message. */
+    public const DELIVERY_STATE_AWAITING_OPERATOR = 'awaiting_first_verified_operator';
 
     /** Inbox / thread / preview defaults. */
     public const INBOX_PER_PAGE_DEFAULT = 20;
@@ -162,6 +179,100 @@ final class MessagesService
                 'last_activity'  => $r['last_activity'] !== null
                     ? self::isoFromMysql((string) $r['last_activity'])
                     : self::isoFromMysql((string) $r['last_msg_posted_at']),
+            ];
+        }
+
+        return [
+            'items'      => $items,
+            'pagination' => [
+                'page'        => $page,
+                'per_page'    => $perPage,
+                'total'       => $total,
+                'total_pages' => max(1, (int) ceil($total / $perPage)),
+            ],
+        ];
+    }
+
+    // ── Queued (pre-claim) ───────────────────────────────────────────────
+
+    /**
+     * The viewer's own PENDING queued validator messages — the "Queued"
+     * tab of /messages. These are messages addressed to a validator
+     * that has no verified operator yet; they are NOT conversations
+     * (there is no one to converse with), so they never appear in the
+     * inbox. When the validator is first claimed, the backlog delivers
+     * and each becomes a real thread (in both inboxes); at that point
+     * it leaves this list.
+     *
+     * Sender-visible only: a viewer sees ONLY their own queued rows,
+     * and only the pending ones (delivered → moved to inbox;
+     * suppressed/failed → not surfaced, so no suppression reason can
+     * leak). The body is the viewer's own message, so echoing it back
+     * is safe.
+     *
+     * @return array{
+     *     items: list<array<string, mixed>>,
+     *     pagination: array{page: int, per_page: int, total: int, total_pages: int}
+     * }|array{error: string, message: string}
+     */
+    public function listQueuedForSender(int $viewerId, int $page, int $perPage): array
+    {
+        if ($viewerId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        $page    = max(1, $page);
+        $perPage = max(1, min($perPage, self::INBOX_PER_PAGE_MAX));
+        $offset  = ($page - 1) * $perPage;
+
+        $total = ValidatorMsgQueueRepository::countPendingBySender($viewerId);
+        $rows  = $total > 0
+            ? ValidatorMsgQueueRepository::findPendingBySender($viewerId, $perPage, $offset)
+            : [];
+
+        $emptyPagination = [
+            'page'        => $page,
+            'per_page'    => $perPage,
+            'total'       => $total,
+            'total_pages' => max(1, (int) ceil(max(1, $total) / $perPage)),
+        ];
+        if ($rows === []) {
+            return ['items' => [], 'pagination' => $emptyPagination];
+        }
+
+        // Prime the target page posts (title/slug/thumbnail) in one pass.
+        $pageIds = array_values(array_unique(array_map(
+            static fn (object $r): int => (int) $r->page_id,
+            $rows
+        )));
+        _prime_post_caches($pageIds, false, true);
+
+        $items = [];
+        foreach ($rows as $r) {
+            $pageId = (int) $r->page_id;
+            $post   = get_post($pageId);
+            $name   = $post instanceof \WP_Post && $post->post_title !== ''
+                ? $post->post_title
+                : 'Unknown validator';
+            $slug   = $post instanceof \WP_Post ? (string) $post->post_name : '';
+            $avatar = $post instanceof \WP_Post
+                ? (string) (get_the_post_thumbnail_url($pageId, 'thumbnail') ?: '')
+                : '';
+
+            $items[] = [
+                'id'             => (int) $r->id,
+                'validator'      => [
+                    'page_id'    => $pageId,
+                    'name'       => $name,
+                    'slug'       => $slug,
+                    'avatar_url' => $avatar,
+                ],
+                'preview'        => self::previewBody((string) $r->body),
+                // The sender only needs one honest state — the queue's
+                // internal queued/retryable/processing distinctions are
+                // all "waiting for the validator to be claimed".
+                'delivery_state' => self::DELIVERY_STATE_AWAITING_OPERATOR,
+                'created_at'     => self::isoFromMysql((string) $r->created_at),
             ];
         }
 
@@ -351,6 +462,189 @@ final class MessagesService
         return $this->sendToRecipient($viewerId, $recipientId, $body);
     }
 
+    // ── Validator pages (entity-addressed messages) ─────────────────────
+
+    /**
+     * Send to a VALIDATOR PAGE rather than a user.
+     *
+     * The server re-resolves the page's destination on EVERY submission
+     * (the frontend never decides):
+     *   - claimed by exactly one verified operator → an ordinary
+     *     NORMAL_DM to that operator, via the unchanged sendMessage
+     *     path (so it inherits every gate, the writer and badge bumps).
+     *   - never claimed → the message is durably QUEUED against the
+     *     page and delivered to its FIRST verified operator when the
+     *     page is claimed. No fake conversation, no fabricated
+     *     recipient, no conversation id.
+     *   - previously claimed but currently unclaimed, or AMBIGUOUS
+     *     (more than one verified operator) → fail closed with a
+     *     generic unavailable state. The first-claim queue is never
+     *     reopened, and competing claimants are never revealed.
+     *
+     * @return array{conversation_id: int, message_id: int, is_new_conversation: bool}
+     *         |array{queued: true, page_id: int, accepted_at: string, delivery_state: string}
+     *         |array{error: string, message: string}
+     */
+    public function sendMessageToPage(int $viewerId, int $pageId, string $body): array
+    {
+        if ($viewerId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+        if (!self::validatorMessagingEnabled()) {
+            return self::messagingUnavailable();
+        }
+
+        // Must be a published page post.
+        $post = $pageId > 0 ? get_post($pageId) : null;
+        if (!$post instanceof \WP_Post || $post->post_type !== 'peepso-page' || $post->post_status !== 'publish') {
+            return ['error' => 'bcc_not_found', 'message' => 'Page not found.'];
+        }
+
+        // V1 scope: validator pages only. Project/creator claim
+        // semantics need their own audit before they accept messages.
+        if (\BCC\Trust\Onchain\Repositories\ValidatorRepository::findFirstByPageId($pageId) === null) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => 'Messaging is not available for this page.',
+            ];
+        }
+
+        $resolution = \BCC\Trust\Onchain\Repositories\ClaimRepository::resolveVerifiedOperatorForPage($pageId);
+
+        if ($resolution['state'] === \BCC\Trust\Onchain\Repositories\ClaimRepository::OPERATOR_RESOLVED
+            && $resolution['user_id'] !== null) {
+            // Live send under ordinary DM rules.
+            return $this->sendMessage($viewerId, $resolution['user_id'], null, $body);
+        }
+
+        if ($resolution['state'] === \BCC\Trust\Onchain\Repositories\ClaimRepository::OPERATOR_AMBIGUOUS) {
+            // Fail closed. The metric + audit row already fired inside
+            // the resolver; the caller learns nothing about the claims.
+            return self::messagingUnavailable();
+        }
+
+        // UNCLAIMED — queue only when this page has NEVER been
+        // activated. A previously activated page that is currently
+        // unclaimed must not reopen the first-claim backlog.
+        if (\BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository::getByPageId($pageId) !== null) {
+            return self::messagingUnavailable();
+        }
+
+        return $this->enqueueForPage($viewerId, $pageId, $body);
+    }
+
+    /**
+     * Submission gates for the queue path. Mirrors the sender-side
+     * rules of sendMessage (there is no recipient yet, so the
+     * recipient-facing policy runs later, at delivery time). Nothing
+     * accepted here is ever silently dropped: once this returns
+     * `queued`, the row is durable until delivered, suppressed by an
+     * explicit safety rule, or parked as a visible failure.
+     *
+     * @return array{queued: true, page_id: int, accepted_at: string, delivery_state: string}
+     *         |array{error: string, message: string}
+     */
+    private function enqueueForPage(int $viewerId, int $pageId, string $body): array
+    {
+        $restricted = self::senderRestricted($viewerId);
+        if ($restricted !== null) {
+            return $restricted;
+        }
+
+        $body = trim($body);
+        if ($body === '') {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Message cannot be empty.'];
+        }
+        if (mb_strlen($body) > self::MESSAGE_BODY_MAX_LENGTH) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => sprintf('Message is too long (max %d characters).', self::MESSAGE_BODY_MAX_LENGTH),
+            ];
+        }
+
+        // Shared throttle budget: PeepSo sends AND queue inserts count
+        // against the same 30/5min window, so the queue can't be used
+        // as a rate-limit escape hatch.
+        $recent = PeepSoMessageRepository::countRecentByAuthor($viewerId, self::RATE_LIMIT_WINDOW_SECONDS)
+            + ValidatorMsgQueueRepository::countRecentBySender($viewerId, self::RATE_LIMIT_WINDOW_SECONDS);
+        if ($recent >= self::RATE_LIMIT_PER_WINDOW) {
+            return [
+                'error'   => 'bcc_rate_limited',
+                'message' => 'You\'re sending messages too fast. Take a breath and try again in a moment.',
+            ];
+        }
+
+        if (!self::chatEnabled($viewerId)) {
+            return [
+                'error'   => 'bcc_forbidden',
+                'message' => 'Messaging is disabled in your account settings.',
+            ];
+        }
+
+        // Backpressure. Truthful errors — a rejected message is never
+        // promised delivery.
+        if (ValidatorMsgQueueRepository::countPendingForPageBySender($pageId, $viewerId)
+            >= self::QUEUE_MAX_PENDING_PER_SENDER_PER_PAGE) {
+            return [
+                'error'   => 'bcc_queue_limit',
+                'message' => 'You already have the maximum queued messages for this validator.',
+            ];
+        }
+        if (ValidatorMsgQueueRepository::countPendingForPage($pageId) >= self::QUEUE_MAX_PENDING_PER_PAGE) {
+            return [
+                'error'   => 'bcc_queue_full',
+                'message' => 'This validator\'s message queue is full.',
+            ];
+        }
+
+        $rowId = ValidatorMsgQueueRepository::enqueue($pageId, $viewerId, $body);
+        if ($rowId <= 0) {
+            return ['error' => 'bcc_unavailable', 'message' => 'Could not queue your message.'];
+        }
+
+        return [
+            'queued'         => true,
+            'page_id'        => $pageId,
+            'accepted_at'    => gmdate('Y-m-d\TH:i:s\Z'),
+            'delivery_state' => self::DELIVERY_STATE_AWAITING_OPERATOR,
+        ];
+    }
+
+    /**
+     * The single generic "can't message this page right now" response.
+     * Deliberately identical for the previously-claimed-now-unclaimed
+     * state, the AMBIGUOUS state, and the kill-switch — the wire must
+     * not distinguish them (no claimant identities, no hint that
+     * competing claims exist).
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function messagingUnavailable(): array
+    {
+        return [
+            'error'   => 'bcc_messaging_unavailable',
+            'message' => 'Messaging for this page is temporarily unavailable.',
+        ];
+    }
+
+    /**
+     * Operator kill-switch — arms/disarms the whole validator-messaging
+     * surface (submissions + card destinations + worker) without a
+     * deploy. Queued rows are never dropped while off.
+     *
+     * Default OFF (ship-dark): the verified-operator uniqueness
+     * constraint (scripts/claims-verified-operator-constraint.php) is a
+     * MANDATORY rollout gate. The feature must stay dark on any
+     * environment until an operator has run the duplicate audit clean
+     * AND applied the constraint there, then flips this option on. This
+     * prevents an auto-deploy from enabling messaging on staging/prod
+     * before its DB backstop against a second verified operator exists.
+     */
+    public static function validatorMessagingEnabled(): bool
+    {
+        return (bool) get_option('bcc_validator_messaging_enabled', false);
+    }
+
     /**
      * @return array{conversation_id: int, message_id: int, is_new_conversation: bool}|array{error: string, message: string}
      */
@@ -464,6 +758,203 @@ final class MessagesService
             return 0;
         }
         return PeepSoMessageRepository::getUnreadConversationCountForUser($viewerId);
+    }
+
+    // ── Read eligibility (card view-models) ─────────────────────────────
+
+    /**
+     * Read-side mirror of the send gates — "would a DM to this
+     * recipient be accepted right now?" — in the card permission shape
+     * {allowed, unlock_hint, reason_code}.
+     *
+     * Consumes the SAME evaluatePolicy the write paths use, so read and
+     * write cannot disagree on any PERMANENT rule. The transient rate
+     * limit is deliberately excluded (it is a POST-time condition, not
+     * an eligibility fact; mirrors how endorse eligibility excludes
+     * transient state).
+     *
+     * Static because every gate it needs is static — this keeps the
+     * single-source guarantee available to CardViewService,
+     * UserViewService and PageCardPrefetcher without threading an
+     * instance through their constructors.
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    public static function canMessage(int $viewerId, int $recipientId): array
+    {
+        if ($recipientId <= 0) {
+            return self::eligibilityDeny(null, 'not_applicable');
+        }
+        if ($viewerId <= 0) {
+            // Anon: aspirational copy, zero queries (§N7 visible path).
+            return self::eligibilityDeny('Sign in to send a message.', 'auth_required');
+        }
+        if ($viewerId === $recipientId) {
+            return self::eligibilityDeny(null, 'self_action_blocked');
+        }
+        // Sender-side permanent rules — shared with the batch path and
+        // the queue-mode card read so all three agree.
+        $senderGate = self::senderMessagingGate($viewerId);
+        if ($senderGate !== null) {
+            return $senderGate;
+        }
+        if (!self::userExists($recipientId)) {
+            return self::eligibilityDeny(null, 'messaging_unavailable');
+        }
+
+        $gate = self::evaluatePolicy(MessagingPolicy::NORMAL_DM, $viewerId, $recipientId);
+        if ($gate !== null) {
+            return self::eligibilityDeny($gate['unlock_hint'], $gate['reason_code']);
+        }
+        return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+    }
+
+    /**
+     * The sender-side PERMANENT eligibility rules, recipient-independent:
+     * a suspended/banned sender, or one who has turned their own DMs
+     * off, cannot start ANY conversation. Returns a deny entry, or null
+     * when the sender may message.
+     *
+     * The ONE source for these two rules — canMessage, canMessageMany,
+     * and senderEligibility (the queue-mode card read, where no
+     * recipient exists yet) all consume it, so the rendered button and
+     * the send path cannot disagree. Transient state (rate limit,
+     * per-sender caps) is deliberately excluded — it is POST-time only.
+     *
+     * @return array{allowed: false, unlock_hint: string|null, reason_code: string}|null
+     */
+    private static function senderMessagingGate(int $viewerId): ?array
+    {
+        if (self::senderRestricted($viewerId) !== null) {
+            return self::eligibilityDeny(null, 'sender_restricted');
+        }
+        if (!self::chatEnabled($viewerId)) {
+            return self::eligibilityDeny(
+                'Turn on direct messages in your settings to send messages.',
+                'sender_chat_disabled'
+            );
+        }
+        return null;
+    }
+
+    /**
+     * Sender-only eligibility for the QUEUE-mode card read: a
+     * never-claimed validator has no operator yet, so only the
+     * sender's own permanent rules apply. Mirrors the sender gates
+     * canMessage runs before it looks at a recipient — via the shared
+     * senderMessagingGate, NOT by probing canMessage($viewer,$viewer)
+     * (which returns self_action_blocked before the sender gates run).
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    public static function senderEligibility(int $viewerId): array
+    {
+        if ($viewerId <= 0) {
+            return self::eligibilityDeny('Sign in to send a message.', 'auth_required');
+        }
+        return self::senderMessagingGate($viewerId)
+            ?? ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+    }
+
+    /**
+     * The recipient-side gate for a one-time first-claim backlog
+     * delivery: under VALIDATOR_FIRST_CLAIM_RELEASE the operator's
+     * chat_enabled and friends_only are bypassed, but a mutual block
+     * still shields. True when the message must be suppressed for a
+     * block.
+     *
+     * The delivery worker calls THIS rather than checking the block
+     * itself, so what "the one-time bypass" enforces lives in exactly
+     * one place (the policy evaluator) — the worker and the policy
+     * definition cannot drift on it.
+     */
+    public static function firstClaimReleaseBlocked(int $senderId, int $operatorId): bool
+    {
+        return self::evaluatePolicy(
+            MessagingPolicy::VALIDATOR_FIRST_CLAIM_RELEASE,
+            $senderId,
+            $operatorId
+        ) !== null;
+    }
+
+    /**
+     * Batch sibling of canMessage for list paths. Flat query cost
+     * regardless of N: the sender-side gates resolve once, recipient
+     * usermeta is primed in one round trip, blocks are one query, and
+     * the viewer's friend set is fetched at most once (lazily, only if
+     * a friends_only recipient appears).
+     *
+     * @param list<int> $recipientIds
+     * @return array<int, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>
+     *         keyed by recipient user id
+     */
+    public static function canMessageMany(int $viewerId, array $recipientIds): array
+    {
+        $ids = [];
+        foreach ($recipientIds as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $ids[$id] = true;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $ids = array_keys($ids);
+
+        // Anon / restricted / chat-off senders deny uniformly with zero
+        // per-recipient work — via the SAME sender gate canMessage uses.
+        if ($viewerId <= 0) {
+            return array_fill_keys($ids, self::eligibilityDeny('Sign in to send a message.', 'auth_required'));
+        }
+        $senderGate = self::senderMessagingGate($viewerId);
+        if ($senderGate !== null) {
+            return array_fill_keys($ids, $senderGate);
+        }
+
+        // Prime recipient usermeta so chatEnabled/chatFriendsOnly are
+        // cache hits (same trick PageCardPrefetcher uses for owners).
+        cache_users($ids);
+        $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSet($viewerId, $ids);
+
+        /** @var array<int, true>|null $friendIds lazily fetched */
+        $friendIds = null;
+
+        $out = [];
+        foreach ($ids as $recipientId) {
+            if ($recipientId === $viewerId) {
+                $out[$recipientId] = self::eligibilityDeny(null, 'self_action_blocked');
+                continue;
+            }
+            // Block and recipient-chat-off intentionally share one
+            // payload — the §4.19 info-leak shield holds on reads too.
+            if (isset($blocked[$recipientId]) || !self::userExists($recipientId) || !self::chatEnabled($recipientId)) {
+                $out[$recipientId] = self::eligibilityDeny(null, 'messaging_unavailable');
+                continue;
+            }
+            if (self::chatFriendsOnly($recipientId)) {
+                if ($friendIds === null) {
+                    $friendIds = PeepSoFriendGate::friendIdsOf($viewerId);
+                }
+                if (!isset($friendIds[$recipientId])) {
+                    $out[$recipientId] = self::eligibilityDeny(
+                        'This member only accepts messages from friends.',
+                        'friends_only'
+                    );
+                    continue;
+                }
+            }
+            $out[$recipientId] = ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+        }
+        return $out;
+    }
+
+    /**
+     * @return array{allowed: false, unlock_hint: string|null, reason_code: string}
+     */
+    private static function eligibilityDeny(?string $unlockHint, string $reasonCode): array
+    {
+        return ['allowed' => false, 'unlock_hint' => $unlockHint, 'reason_code' => $reasonCode];
     }
 
     // ── Policy evaluator ────────────────────────────────────────────────
