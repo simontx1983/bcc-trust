@@ -12,7 +12,7 @@
  * The frontend's AuthorBadge MUST NOT manufacture a tier→label mapping;
  * this resolver IS that mapping.
  *
- * `reputation_tier` is REQUIRED on every author surface (contract v1.56).
+ * `reputation_tier` is REQUIRED on every author surface (contract v1.57).
  * It used to be optional, which is precisely why RankChip fell back to the
  * retired `card_tier` and, since risky had no card_tier, lost the ability to
  * render a risky author at all. Never make it optional again.

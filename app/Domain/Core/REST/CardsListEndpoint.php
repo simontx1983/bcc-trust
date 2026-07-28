@@ -16,7 +16,7 @@
  *   - kind   (validator|project|creator)  — translates to legacy
  *                                            page_type via PageTypeMap
  *   - tier   (elite|trusted|neutral|      — reputation tier, verbatim
- *             caution|risky)                 (v1.56: no translation)
+ *             caution|risky)                 (v1.57: no translation)
  *   - sort   (trust|newest|endorsements|  — passed through verbatim;
  *             followers|self_stake)         PageDiscoveryService validates.
  *                                           `self_stake` is validator-only.
@@ -79,7 +79,7 @@ final class CardsListEndpoint
      * (PageDiscoveryService internal). Risky is intentionally absent —
      * Accepted values for the `tier` filter — the reputation tiers, directly.
      *
-     * v1.56: this was a rarity→reputation translation table
+     * v1.57: this was a rarity→reputation translation table
      * (legendary→elite, …). Two things changed with the retirement. The
      * client now speaks the same vocabulary the engine does, so there is no
      * translation step to drift; and `risky` became FILTERABLE. It was
@@ -223,7 +223,7 @@ final class CardsListEndpoint
             $types = [PageTypeMap::KIND_TO_PAGE_TYPE[$kindParam]];
         }
 
-        // ── tier filter validation (no translation since v1.56) ────────
+        // ── tier filter validation (no translation since v1.57) ────────
         $reputationTier = '';
         if ($tierParam !== '') {
             if (!in_array($tierParam, self::ALLOWED_TIERS, true)) {

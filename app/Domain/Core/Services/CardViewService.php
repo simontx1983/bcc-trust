@@ -309,7 +309,7 @@ final class CardViewService
             'bio'                 => self::resolvePageBio($post),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
-            // v1.56: entity cards now carry the SAME trust vocabulary as
+            // v1.57: entity cards now carry the SAME trust vocabulary as
             // members. They used to emit rarity words here and a null
             // reputation_tier_label, which is why a `risky` entity rendered
             // with no tier tag at all.
@@ -380,7 +380,7 @@ final class CardViewService
             'community_dossier'   => null,
             // V1: tier-keyed coloring for entity cards (chain-keyed lands
             // alongside §K3 chain-wiring in V1.5). `background_value` per
-            // §2.9 is the reputation_tier slug as of v1.56; falls back to
+            // §2.9 is the reputation_tier slug as of v1.57; falls back to
             // 'neutral' on the edge case where the read-model hasn't
             // projected yet.
             'crest'               => self::buildCrest(
@@ -625,7 +625,7 @@ final class CardViewService
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
             // The member trust chip (Risky…Elite) — the sole tier vocabulary
-            // since v1.56.
+            // since v1.57.
             'reputation_tier_label' => $summary['reputation_tier_label'],
             // Real (level-derived) rank label now — resolved once via
             // getSummary's RankService path (no longer a hard-stubbed null).
@@ -806,7 +806,7 @@ final class CardViewService
             'trust_score'         => 0,
             'reputation_tier'     => 'neutral',
             'reputation_tier_label' => null,
-            // The group-type kicker. Until v1.56 this rode on `tier_label`,
+            // The group-type kicker. Until v1.57 this rode on `tier_label`,
             // overloading a trust field to carry a category word — the FE
             // rendered it verbatim so it worked, but it meant "tier_label"
             // named two unrelated things depending on card_kind. Now its own

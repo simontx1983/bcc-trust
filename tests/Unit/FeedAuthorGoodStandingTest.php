@@ -49,7 +49,7 @@ final class FeedAuthorGoodStandingTest extends TestCase
      */
     private function badgeForTier(string $tier): array
     {
-        // Mirrors AuthorBadgeResolver's real output shape (contract v1.56 —
+        // Mirrors AuthorBadgeResolver's real output shape (contract v1.57 —
         // the retired card_tier/tier_label keys are deliberately absent).
         return [
             'reputation_tier'       => $tier,
@@ -131,7 +131,7 @@ final class FeedAuthorGoodStandingTest extends TestCase
         self::assertSame('Trusted', $out['reputation_tier_label']);
         self::assertSame('Apprentice', $out['rank_label']);
 
-        // card_tier / tier_label are RETIRED (contract v1.56) — assert they
+        // card_tier / tier_label are RETIRED (contract v1.57) — assert they
         // are GONE, not merely changed. A copy-through helper that silently
         // reintroduced them would otherwise pass unnoticed.
         self::assertArrayNotHasKey('card_tier', $out);
