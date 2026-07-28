@@ -125,11 +125,18 @@ class ValidatorMsgQueueCommand
             return;
         }
 
-        // Same readiness preflight the worker uses. Under WP-CLI PeepSo's
-        // Chat writer is not booted, so delivery here would silently fail
-        // every row. Refuse loudly (non-zero exit) without leasing rows,
-        // consuming attempts, or creating anything — do NOT print
-        // "complete" for a pass that delivered nothing.
+        // Run the same worker path the cron uses. In an unsupported context
+        // (WP-CLI, where PeepSo's Chat writer is not booted) handleDeliver
+        // safely no-ops — it leases no row and consumes no attempt — AND
+        // emits the distinct `delivery_context_unsupported` health signal
+        // (cooldown-throttled). Routing through it means a `vmq drain`
+        // misused as a delivery runner is OBSERVABLE, not silent, and the
+        // signal has a single source of truth (the worker).
+        ValidatorMsgQueueWorker::handleDeliver($pageId);
+
+        // Then fail loudly if this context cannot actually deliver, rather
+        // than printing a hollow "complete" for a pass that delivered nothing
+        // (the row/attempt state is unchanged — see handleDeliver's preflight).
         if (!PeepSoMessageWriter::isReady()) {
             \WP_CLI::error(
                 'PeepSo Chat is not available in the WP-CLI context, so validator-message '
@@ -142,7 +149,6 @@ class ValidatorMsgQueueCommand
             return; // WP_CLI::error halts with a non-zero exit code.
         }
 
-        ValidatorMsgQueueWorker::handleDeliver($pageId);
         \WP_CLI::success(sprintf(
             'Delivery pass complete for page %d. Pending now: %d',
             $pageId,
