@@ -15,7 +15,7 @@
  *     (e.g., 'dao' page_type).
  *
  * Stubs still in place:
- *   - card_tier_at_watch → null when no bcc_watch_meta row exists yet
+ *   - reputation_tier_at_watch → null when no bcc_watch_meta row exists yet
  *   - batch_id           → always null in V1.0 (Phase 3 batching is V2)
  *   - watched_at         → null when no bcc_watch_meta row exists yet
  *
@@ -62,7 +62,7 @@ final class WatchingService
     // Frontend URL prefix moved to CardUrlMap (single source of truth
     // shared with CardViewService — see §C2 watching-Phase-1 corrections).
     //
-    // §C1 reputation tier ↔ card_tier ↔ display label mapping is in
+    // Reputation tier → display label mapping is in
     // ReputationTierMap (Support/) — shared with CardViewService,
     // UserViewService, TierUpgradeListener, CardsSearchEndpoint.
 
@@ -84,8 +84,8 @@ final class WatchingService
      *     is_resolved: bool,
      *     card_id: int,
      *     card_handle: string,
-     *     card_tier_at_watch: string|null,
-     *     tier_label_at_watch: string|null,
+     *     reputation_tier_at_watch: string|null,
+     *     reputation_tier_label_at_watch: string|null,
      *     batch_id: string|null,
      *     watched_at: string|null,
      *     is_legacy: bool,
@@ -203,8 +203,8 @@ final class WatchingService
      *   card_handle: string,
      *   card_slug: string|null,
      *   page_id: int|null,
-     *   card_tier_at_watch: string|null,
-     *   tier_label_at_watch: string|null,
+     *   reputation_tier_at_watch: string|null,
+     *   reputation_tier_label_at_watch: string|null,
      *   batch_id: string|null,
      *   watched_at: string|null,
      *   is_legacy: bool,
@@ -298,13 +298,16 @@ final class WatchingService
         //  the frontend uses card_id as a stable React key anchored
         //  to the underlying follow relationship, not the page.
         // ────────────────────────────────────────────────────────────
-        // bcc_watch_meta.tier_at_watch stores card_tier values
-        // (legendary/rare/uncommon/common/null) per resolveCardTierForUser
-        // — never reputation_tier. Emitted under the canonical
-        // card_tier_at_watch field name; tier_label_at_watch is the
-        // pre-rendered display string per §A2.
-        $cardTierAtWatch = $row->tier_at_watch;
-        $tierLabelAtWatch = ReputationTierMap::toCardTierLabel($cardTierAtWatch);
+        // bcc_watch_meta.tier_at_watch stores REPUTATION tier values
+        // (risky/caution/neutral/trusted/elite) as of v1.56 — it previously
+        // stored the retired card rarity slugs, and `watch_tier_vocabulary_v1`
+        // rewrote the historical rows. Emitted under the
+        // reputation_tier_at_watch field name; the label is pre-rendered
+        // per §A2.
+        $tierAtWatch      = $row->tier_at_watch;
+        $tierLabelAtWatch = $tierAtWatch !== null && $tierAtWatch !== ''
+            ? ReputationTierMap::toReputationTierLabel((string) $tierAtWatch)
+            : null;
 
         return [
             'follow_id'           => (int) $row->follow_id,
@@ -320,8 +323,8 @@ final class WatchingService
             'card_handle'         => $handle,
             'card_slug'           => $slug,
             'page_id'             => $pageInfo !== null ? (int) $pageInfo->page_id : null,
-            'card_tier_at_watch'  => $cardTierAtWatch,
-            'tier_label_at_watch' => $tierLabelAtWatch,
+            'reputation_tier_at_watch'       => $tierAtWatch,
+            'reputation_tier_label_at_watch' => $tierLabelAtWatch,
             'batch_id'            => $row->batch_id,
             'watched_at'          => $watchedAt,
             'is_legacy'           => $isLegacy,
@@ -365,8 +368,8 @@ final class WatchingService
      *   card_handle: string,
      *   card_slug: string|null,
      *   page_id: int|null,
-     *   card_tier_at_watch: string|null,
-     *   tier_label_at_watch: string|null,
+     *   reputation_tier_at_watch: string|null,
+     *   reputation_tier_label_at_watch: string|null,
      *   batch_id: string|null,
      *   watched_at: string|null,
      *   is_legacy: bool,
@@ -385,7 +388,7 @@ final class WatchingService
         $cardApiUrl = CardUrlMap::cardApiUrl($cardKind, $identifier);
 
         $tierAtWatch = $row->tier_at_watch;
-        $tierLabel   = ReputationTierMap::toCardTierLabel($tierAtWatch);
+        $tierLabel   = $tierAtWatch !== null && $tierAtWatch !== '' ? ReputationTierMap::toReputationTierLabel((string) $tierAtWatch) : null;
 
         $createdAt = self::toIso8601($row->created_at);
 
@@ -405,8 +408,8 @@ final class WatchingService
             'card_handle'         => $slug ?? (string) $pageId,
             'card_slug'           => $slug,
             'page_id'             => $pageId,
-            'card_tier_at_watch'  => $tierAtWatch,
-            'tier_label_at_watch' => $tierLabel,
+            'reputation_tier_at_watch'       => $tierAtWatch,
+            'reputation_tier_label_at_watch' => $tierLabel,
             'batch_id'            => null,
             'watched_at'          => $createdAt !== '' ? $createdAt : null,
             // Page-follows are always a real watch moment — never legacy
@@ -462,8 +465,8 @@ final class WatchingService
 
         // tier_at_watch for placeholders: read from the page's read-model
         // row when present; null otherwise. Matches the existing
-        // resolveCardTierForUser pattern but page-scoped.
-        $tierAtWatch = $this->resolveCardTierForPage($targetId);
+        // resolveTierForUser pattern but page-scoped.
+        $tierAtWatch = $this->resolveTierForPage($targetId);
 
         $result = $this->pageFollowRepo->insertOrFind($viewerId, $targetId, $targetKind, $tierAtWatch);
         if ($result['id'] === 0) {
@@ -487,11 +490,14 @@ final class WatchingService
     }
 
     /**
-     * Map a placeholder page's current read-model tier to a card_tier
-     * for tier_at_watch. Returns null when the read-model row hasn't
-     * projected yet — same null semantics buildItem already handles.
+     * A placeholder page's current read-model reputation tier, for
+     * tier_at_watch. Returns null when the read-model row hasn't projected
+     * yet — same null semantics buildItem already handles.
+     *
+     * Since v1.56 this is a pass-through rather than a mapping: the column
+     * stores the reputation tier directly.
      */
-    private function resolveCardTierForPage(int $pageId): ?string
+    private function resolveTierForPage(int $pageId): ?string
     {
         $tier = \BCC\Trust\Core\Plugin::instance()
             ->pageReadModelRepository()
@@ -500,7 +506,7 @@ final class WatchingService
         if ($tier === null || $tier === '') {
             return null;
         }
-        return ReputationTierMap::toCardTier($tier);
+        return $tier;
     }
 
     /**
@@ -589,11 +595,10 @@ final class WatchingService
 
         if (!$alreadyWatching) {
             // First-time watch: write the sidecar with the followee's
-            // current card_tier preserved. tier_at_watch is the
-            // *card_tier* (legendary/rare/...) per the schema docblock,
-            // not the reputation_tier — map at write time.
-            $cardTier = self::resolveCardTierForUser($followeeId);
-            $this->watchMetaRepo->insert($followId, $cardTier, null /* batch_id — owned by WatchBatchAggregator */);
+            // current reputation_tier preserved (v1.56 — the column used to
+            // hold the retired card rarity slug, which lost `risky` entirely).
+            $tierAtWatch = $this->resolveTierForUser($followeeId);
+            $this->watchMetaRepo->insert($followId, $tierAtWatch, null /* batch_id — owned by WatchBatchAggregator */);
             // Canonical watch event — subscribers attach here.
             do_action('bcc_card_watched', $viewerId, $followId, $targetKind, $targetId);
         }
@@ -698,11 +703,14 @@ final class WatchingService
     }
 
     /**
-     * Map the followee's current reputation_tier → card_tier per §C1.
-     * Returns null for risky tier (entity hidden from card UI per §C1).
+     * The followee's current reputation tier, snapshotted at watch time.
+     *
+     * Was a reputation_tier → card_tier mapping until v1.56, which meant a
+     * risky followee snapshotted as NULL and their watch tile rendered with
+     * no tier at all. All five tiers now round-trip.
      */
-    private function resolveCardTierForUser(int $userId): ?string
+    private function resolveTierForUser(int $userId): string
     {
-        return ReputationTierMap::toCardTier($this->reputationRepo->getTier($userId));
+        return $this->reputationRepo->getTier($userId);
     }
 }

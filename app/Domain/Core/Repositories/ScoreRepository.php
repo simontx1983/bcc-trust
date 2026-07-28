@@ -44,13 +44,35 @@ if (!defined('ABSPATH')) {
  *   last_calculated_at: string,
  *   fraud_metadata: string|null,
  *   recalculate_required: int|numeric-string,
- *   recalc_failures: int|numeric-string
+ *   recalc_failures: int|numeric-string,
+ *   elite_eligible?: int|numeric-string,
+ *   elite_eligible_at?: string|null
  * }
  */
 class ScoreRepository {
 
     /** Explicit column list for bcc_trust_scores table. */
     private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, contribution_bonus, penalty_adjustment, attestation_bonus, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
+
+    /** §J.12 gate columns — appended only once dbDelta has added them. */
+    private const ELITE_GATE_COLUMNS = 'elite_eligible, elite_eligible_at';
+
+    /**
+     * The explicit column list for reads (§2 — never `SELECT *`).
+     *
+     * Drops the §J.12 gate columns while plugin code is running ahead of its
+     * schema; selecting a column that does not exist fails the whole read,
+     * which would take down every score lookup during the migration window.
+     * PageScore::fromDatabaseRow already treats them as absent-and-optional,
+     * so the row degrades to "never evaluated" (grandfathered) rather than
+     * erroring.
+     */
+    private static function columns(): string
+    {
+        return self::eliteGateAvailable()
+            ? self::COLUMNS . ', ' . self::ELITE_GATE_COLUMNS
+            : self::COLUMNS;
+    }
 
     private string $table;
 
@@ -103,7 +125,7 @@ class ScoreRepository {
         if ($categoryId !== null) {
             $row = $wpdb->get_row(
                 $wpdb->prepare(
-                    "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE page_id = %d AND category_id = %d",
+                    "SELECT " . self::columns() . " FROM {$this->table} WHERE page_id = %d AND category_id = %d",
                     $pageId,
                     $categoryId
                 )
@@ -111,7 +133,7 @@ class ScoreRepository {
         } else {
             $row = $wpdb->get_row(
                 $wpdb->prepare(
-                    "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE page_id = %d LIMIT 1",
+                    "SELECT " . self::columns() . " FROM {$this->table} WHERE page_id = %d LIMIT 1",
                     $pageId
                 )
             );
@@ -337,6 +359,7 @@ class ScoreRepository {
                 case 'vote_count':
                 case 'unique_voters':
                 case 'endorsement_count':
+                case 'elite_eligible':
                     $formats[] = '%d';
                     break;
                 case 'total_score':
@@ -376,7 +399,7 @@ class ScoreRepository {
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         $row = $wpdb->get_row(
             $wpdb->prepare(
-                "SELECT " . self::COLUMNS . " FROM {$this->table}
+                "SELECT " . self::columns() . " FROM {$this->table}
                  WHERE page_id     = %d
                    AND category_id = %d
                  FOR UPDATE",
@@ -448,7 +471,7 @@ class ScoreRepository {
         // total_score (the cron recalc would otherwise be the only fixer). The
         // self-page facade reads reputation_tier directly, so it must track the
         // score immediately — same rule Stage 1 applied to the bonus writers.
-        $tierSql = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $tierSql = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql, null, self::eliteGateAvailable());
         $result = $wpdb->query(
             $wpdb->prepare(
                 "INSERT INTO {$this->table}
@@ -537,7 +560,7 @@ class ScoreRepository {
         // contribution_bonus + penalty_adjustment (harmless on entity pages
         // where both are 0, but wrong on member self-pages that carry them).
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql, null, self::eliteGateAvailable());
         $result = $wpdb->query(
             $wpdb->prepare(
                 "UPDATE {$this->table}
@@ -742,7 +765,7 @@ class ScoreRepository {
         // positive_score / negative_score hold their post-GREATEST values
         // by the time these expressions evaluate.
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql, null, self::eliteGateAvailable());
 
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         $result = $wpdb->query(
@@ -868,7 +891,7 @@ class ScoreRepository {
         $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
         $results = $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT " . self::COLUMNS . " FROM {$this->table}
+                "SELECT " . self::columns() . " FROM {$this->table}
                  WHERE page_id IN ({$placeholders})",
                 $pageIds
             )
@@ -977,7 +1000,7 @@ class ScoreRepository {
         global $wpdb;
 
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql, null, self::eliteGateAvailable());
         $now           = current_time('mysql');
 
         $wpdb->get_results($wpdb->prepare(
@@ -1031,7 +1054,7 @@ class ScoreRepository {
         global $wpdb;
 
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql, null, self::eliteGateAvailable());
         $now           = current_time('mysql');
 
         $wpdb->get_results($wpdb->prepare(
@@ -1110,7 +1133,7 @@ class ScoreRepository {
         global $wpdb;
 
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql, null, self::eliteGateAvailable());
         $now           = current_time('mysql');
 
         $wpdb->get_results($wpdb->prepare(
@@ -1172,7 +1195,7 @@ class ScoreRepository {
 
         global $wpdb;
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql, null, self::eliteGateAvailable());
         $now           = current_time('mysql');
 
         // positive/negative are SET before total_score/reputation_tier so the
@@ -1829,7 +1852,7 @@ class ScoreRepository {
         global $wpdb;
 
         return $wpdb->get_row($wpdb->prepare(
-            "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE page_id = %d",
+            "SELECT " . self::columns() . " FROM {$this->table} WHERE page_id = %d",
             $pageId
         ));
     }
@@ -2169,7 +2192,7 @@ class ScoreRepository {
         }
 
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
-        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql);
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql, null, self::eliteGateAvailable());
         $roundedValue  = round($value, 2);
         $now           = current_time('mysql');
 
@@ -2219,6 +2242,166 @@ class ScoreRepository {
             return true;
         }
         return false;
+    }
+
+    /**
+     * Is the §J.12 elite-eligibility gate usable on THIS database?
+     *
+     * False while plugin code is running ahead of its schema — the window
+     * documented on TableRegistry::columnExists(). Callers use it to drop the
+     * gate from their SQL rather than fail the write.
+     *
+     * Cheap: one SHOW COLUMNS per request at worst, nothing once the positive
+     * answer is object-cached, and never per-write — each write reads the
+     * memoized boolean once while building its statement.
+     */
+    public static function eliteGateAvailable(): bool
+    {
+        return \BCC\Trust\Core\Database\TableRegistry::columnExists(
+            \BCC\Trust\Core\Database\TableRegistry::scores(),
+            'elite_eligible'
+        );
+    }
+
+    /**
+     * Persist the §J.12 elite-eligibility gate for a page.
+     *
+     * Writes to ALL category rows (`WHERE page_id = %d`, no category filter),
+     * matching applyPenalty / applyAttestationBonus. Eligibility is a
+     * page-level property; scoping this to category_id = 0 would let the
+     * per-category rows resolve a different tier from the same gate.
+     *
+     * Stamping `elite_eligible_at` also retires that row from the grandfather
+     * clause in TrustScoreService::tierSql() — an unevaluated row counts as
+     * eligible so that deploying the column is not itself a mass demotion.
+     *
+     * Does NOT recompute reputation_tier: flipping the flag only changes what
+     * the NEXT write computes. Callers that need the tier to reflect the new
+     * gate immediately must follow with refreshTier().
+     *
+     * @param string $nowMysql UTC 'Y-m-d H:i:s' evaluation timestamp.
+     * @return bool True when at least one row was updated.
+     */
+    public function setEliteEligibility(int $pageId, bool $eligible, string $nowMysql): bool
+    {
+        global $wpdb;
+
+        // Schema not migrated yet — report FAILURE rather than claim a write
+        // that did not happen. Callers (EliteEligibilityService, the backfill)
+        // treat false as "retry later", so the gate is populated by the first
+        // evaluation after dbDelta lands instead of being silently skipped.
+        if (!self::eliteGateAvailable()) {
+            return false;
+        }
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET elite_eligible    = %d,
+                 elite_eligible_at = %s
+             WHERE page_id = %d",
+            $eligible ? 1 : 0,
+            $nowMysql,
+            $pageId
+        ));
+
+        if ($result === false) {
+            return false;
+        }
+
+        if ($result > 0) {
+            $this->invalidateCache($pageId);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Recompute total_score + reputation_tier in place, without changing any
+     * score component.
+     *
+     * Exists because a gate DOWNGRADE is otherwise invisible: setting
+     * elite_eligible to 0 changes what the tier CASE would produce, but no
+     * write happens until something else touches the row, so a dormant page
+     * stays elite indefinitely. This is the eligibility sweep's write
+     * primitive.
+     *
+     * @return bool True when a row was updated.
+     */
+    public function refreshTier(int $pageId): bool
+    {
+        global $wpdb;
+
+        $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
+        $tierSql       = \BCC\Trust\Core\Services\TrustScoreService::tierSql($totalScoreSql, null, self::eliteGateAvailable());
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+             SET total_score        = {$totalScoreSql},
+                 reputation_tier    = {$tierSql},
+                 last_calculated_at = %s
+             WHERE page_id = %d",
+            current_time('mysql'),
+            $pageId
+        ));
+
+        if ($result === false) {
+            return false;
+        }
+
+        if ($result > 0) {
+            $this->mirrorSelfPageTierToUserInfo($pageId);
+            $this->invalidateCache($pageId);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Work-list for the nightly elite-eligibility sweep.
+     *
+     * Only rows at or above the elite score threshold are worth evaluating —
+     * below it the gate cannot change the tier, so evaluating them would burn
+     * the whole sweep budget on pages whose answer is irrelevant. Ordered by
+     * staleness (never-evaluated first) so the backfill and the steady-state
+     * sweep share one query shape.
+     *
+     * @param string $staleBefore UTC 'Y-m-d H:i:s'; rows evaluated before this
+     *                            (or never) are returned.
+     * @return int[] Distinct page IDs.
+     */
+    public function listPagesForEliteSweep(int $minScore, string $staleBefore, int $limit, int $offset = 0): array
+    {
+        global $wpdb;
+
+        // Pre-migration the staleness column does not exist, so there is
+        // nothing to sweep and the query itself would be invalid. An empty
+        // work-list makes the sweep a clean no-op until dbDelta lands.
+        if (!self::eliteGateAvailable()) {
+            return [];
+        }
+
+        $limit  = max(1, min(1000, $limit));
+        $offset = max(0, $offset);
+
+        /** @var list<int|numeric-string>|null $rows */
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT page_id
+             FROM {$this->table}
+             WHERE total_score >= %d
+               AND (elite_eligible_at IS NULL OR elite_eligible_at < %s)
+             ORDER BY page_id ASC
+             LIMIT %d OFFSET %d",
+            $minScore,
+            $staleBefore,
+            $limit,
+            $offset
+        ));
+
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        return array_map('intval', $rows);
     }
 
     /**

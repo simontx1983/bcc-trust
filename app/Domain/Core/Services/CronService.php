@@ -553,6 +553,86 @@ class CronService
     }
 
     /**
+     * §J.12 — nightly elite-eligibility gate recompute.
+     *
+     * Event subscriptions cover attestation casts/revokes and dispute
+     * resolutions, but two gate inputs change with no event to hang off:
+     * a member CROSSING the tenure threshold, and an upheld dispute AGEING
+     * OUT of the trailing window. Both are silent state changes that only a
+     * sweep can notice.
+     *
+     * Scoped to pages at or above the elite score threshold. Below it the gate
+     * cannot alter the tier, so evaluating those rows would burn the entire
+     * budget producing no observable change.
+     */
+    public function sweepEliteEligibility(): void
+    {
+        if (!$this->acquireLock('bcc_cron_elite_eligibility_lock', DAY_IN_SECONDS)) {
+            return;
+        }
+
+        $plugin  = Plugin::instance();
+        $service = $plugin->eliteEligibilityService();
+        $scores  = $plugin->scoreRepository();
+
+        $batchSize = 200;
+        $deadline  = time() + 300;
+        $minScore  = defined('BCC_TRUST_TIER_ELITE') ? (int) BCC_TRUST_TIER_ELITE : 80;
+
+        // Re-evaluate anything not looked at in the last ~23h, so a daily
+        // cadence never skips a row because the sweep drifted a few minutes.
+        $staleBefore = gmdate('Y-m-d H:i:s', time() - (23 * HOUR_IN_SECONDS));
+
+        $processed = 0;
+        $failed    = 0;
+        $offset    = 0;
+
+        try {
+            do {
+                $pageIds = $scores->listPagesForEliteSweep($minScore, $staleBefore, $batchSize, $offset);
+                if ($pageIds === []) {
+                    break;
+                }
+
+                foreach ($pageIds as $pageId) {
+                    try {
+                        $service->recomputeFor($pageId);
+                        $processed++;
+                    } catch (\Throwable $e) {
+                        $failed++;
+                        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                            \BCC\Core\Log\Logger::warning(
+                                '[bcc-trust] elite eligibility sweep: per-page recompute failed',
+                                ['page_id' => $pageId, 'error' => $e->getMessage()]
+                            );
+                        }
+                    }
+                }
+
+                // No cursor: recomputeFor() stamps elite_eligible_at, which
+                // removes the row from the work-list query. Paging by offset
+                // would then SKIP rows as the result set shrinks beneath us,
+                // so the offset stays at 0 and each pass re-queries the
+                // remaining stale set.
+                if (count($pageIds) < $batchSize) {
+                    break;
+                }
+
+                if (time() >= $deadline) {
+                    break; // remaining rows are still stale; next tick picks them up.
+                }
+            } while (true);
+
+            \BCC\Core\Log\Logger::info('[bcc-trust] Elite eligibility sweep complete', [
+                'processed' => $processed,
+                'failed'    => $failed,
+            ]);
+        } finally {
+            $this->releaseLock('bcc_cron_elite_eligibility_lock');
+        }
+    }
+
+    /**
      * Recompute + upsert one attestor's reliability cache row.
      *
      * Reads the existing cache row to resolve the week-over-week baseline:
@@ -889,6 +969,7 @@ class CronService
             'bcc_trust_weekly_slow_ring_scan'  => 'bcc_weekly',       // scale-hardening: slow endorsement-ring detection
             'bcc_trust_daily_contribution_recovery' => 'daily',      // trust recovery through contribution
             'bcc_attestor_reliability_sweep'   => 'daily',           // Slice 3: nightly operator-reliability recompute
+            'bcc_trust_elite_eligibility_sweep' => 'daily',          // §J.12: nightly elite-gate recompute
             'bcc_trust_feed_hot_warm'          => 'bcc_one_minute',  // anon /feed/hot first-page payload warm
         ];
 

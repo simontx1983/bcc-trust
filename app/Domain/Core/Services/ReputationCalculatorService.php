@@ -25,7 +25,7 @@ class ReputationCalculatorService {
      * contribution+consistency bonus under the Rule-2 ceiling.
      *
      * Pure — unit-testable. The ceiling means contribution alone can lift a
-     * user toward Neutral but never into Trusted/Proven: it only applies
+     * user toward Neutral but never into Trusted/Elite: it only applies
      * while the *genuine* score is below Trusted, so a user who has
      * independently earned Trusted keeps their full score.
      *

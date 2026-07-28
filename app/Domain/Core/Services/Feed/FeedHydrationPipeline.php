@@ -601,14 +601,14 @@ final class FeedHydrationPipeline
 
     /**
      * Overlay rank-chip fields on every author block: reputation_tier,
-     * reputation_tier_label, card_tier, tier_label, rank_label, and the
+     * reputation_tier_label, rank_label, and the
      * honest tier-derived is_in_good_standing. The rank_label is now
      * level-derived (not tier-derived); reputation_tier_label is the
      * honest member trust chip. Server-resolved per §A2 so the frontend's
-     * AuthorBadge never derives card_tier from reputation_tier client-side.
+     * AuthorBadge never derives a tier label client-side.
      *
      * This bcc-trust layer is where the chip fields appear — bcc-core's
-     * ActivityFeedService::hydrateAuthors emits card_tier:null /
+     * ActivityFeedService::hydrateAuthors emits reputation_tier:null /
      * rank_label:null / is_in_good_standing:true SENTINELS (it can't see
      * the trust read model) and this hydrator overwrites them with real
      * values. The is_in_good_standing sentinel is a shape-stable `true`;
@@ -673,15 +673,15 @@ final class FeedHydrationPipeline
      * truth); do NOT inline the good-standing tier list here.
      *
      * @param array<string, mixed> $author
-     * @param array{reputation_tier: string, reputation_tier_label: string, card_tier: string|null, tier_label: string|null, rank_label: string} $badge
+     * @param array{reputation_tier: string, reputation_tier_label: string, rank_label: string} $badge
      * @return array<string, mixed>
      */
     private static function applyAuthorRankBadge(array $author, array $badge): array
     {
         $author['reputation_tier']       = $badge['reputation_tier'];
         $author['reputation_tier_label'] = $badge['reputation_tier_label'];
-        $author['card_tier']             = $badge['card_tier'];
-        $author['tier_label']            = $badge['tier_label'];
+
+
         $author['rank_label']            = $badge['rank_label'];
         $author['is_in_good_standing']   = UserViewService::isInGoodStanding($badge['reputation_tier']);
         return $author;

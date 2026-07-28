@@ -34,6 +34,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
 if (!defined('ABSPATH')) {
@@ -437,8 +438,9 @@ final class MemberProfileComposer
         $tier = isset($base['reputation_tier']) && is_string($base['reputation_tier'])
             ? $base['reputation_tier']
             : 'neutral';
-        $cardTier = isset($base['card_tier']) ? $base['card_tier'] : null;
-        $tierLabel = isset($base['tier_label']) ? $base['tier_label'] : null;
+        $tierLabel = isset($base['reputation_tier_label']) && is_string($base['reputation_tier_label'])
+            ? $base['reputation_tier_label']
+            : ReputationTierMap::toReputationTierLabel($tier);
         $rankLabel = isset($base['rank_label']) ? $base['rank_label'] : null;
         $trustScore = isset($base['trust_score']) ? (int) $base['trust_score'] : 0;
 
@@ -448,9 +450,8 @@ final class MemberProfileComposer
             'handle'              => $handle,
             'card_kind'           => 'member',
             'trust_score'         => $trustScore,
-            'reputation_tier'     => $tier,
-            'card_tier'           => $cardTier,
-            'tier_label'          => $tierLabel,
+            'reputation_tier'       => $tier,
+            'reputation_tier_label' => $tierLabel,
             'rank_label'          => $rankLabel,
             'is_in_good_standing' => isset($base['is_in_good_standing']) && $base['is_in_good_standing'] === true,
             'flags'               => isset($base['flags']) && is_array($base['flags']) ? $base['flags'] : [],
@@ -468,7 +469,7 @@ final class MemberProfileComposer
                 'initials'         => self::initials($name),
                 'monogram_color'   => '#1a0f3e',
                 'background_kind'  => 'tier',
-                'background_value' => $cardTier ?? 'common',
+                'background_value' => $tier,
                 'image_url'        => null,
             ],
             'stats'               => [],

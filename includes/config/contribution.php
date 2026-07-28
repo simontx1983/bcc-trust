@@ -17,7 +17,7 @@
  *
  * Anti-abuse rules these constants encode:
  *   R1 — reactions feed ONLY this capped/ceiling'd bonus, never genuine trust.
- *   R2 — BCC_CONTRIB_CEILING (< Trusted) means contribution alone can't reach Trusted/Proven.
+ *   R2 — BCC_CONTRIB_CEILING (< Trusted) means contribution alone can't reach Trusted/Elite.
  *   R3 — rolling windows + per-window caps reward consistency over spikes.
  *   R4 — engagement received is weighted by the engager's tier (BCC_TRUST_WEIGHT_* reused).
  *

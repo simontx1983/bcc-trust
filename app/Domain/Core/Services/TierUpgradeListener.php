@@ -15,10 +15,10 @@
  *
  * Tier ladder (order, low → high): risky · caution · neutral · trusted · elite.
  *
- * The celebration label is keyed on card_tier (per §N11 — "Your card is
- * now Rare"), which is itself a §C1 mapping over reputation_tier:
- *   risky → no card    caution → Common    neutral → Uncommon
- *   trusted → Rare     elite → Legendary
+ * The celebration label is keyed on the reputation tier label (v1.56 —
+ * "Your standing is now Trusted"). It was previously keyed on the retired
+ * card rarity ("Your card is now Rare"), which could not render at all for
+ * a tier with no rarity slot.
  *
  * Seed-quietly invariant: the very first event with no recorded
  * last-seen tier seeds it WITHOUT a celebration. Existing trusted users
@@ -147,15 +147,17 @@ final class TierUpgradeListener
 
     /**
      * §A2 server-rendered toast headline. Falls back to a generic line
-     * if the new tier has no card mapping (risky — should never be an
-     * upgrade target, but defense in depth keeps the toast firing).
+     * if the tier is unrecognized (defense in depth keeps the toast firing).
      */
     private static function buildUpgradeLabel(string $tier): string
     {
-        $label = ReputationTierMap::toCardTierLabel(ReputationTierMap::toCardTier($tier));
-        if ($label === null) {
+        if (!isset(ReputationTierMap::TIER_LABEL[$tier])) {
             return 'Your standing improved.';
         }
-        return sprintf('Your card is now %s.', $label);
+        // v1.56: "Your card is now Rare" became "Your standing is now
+        // Trusted". The rarity phrasing was retired along with the
+        // vocabulary — and it never fired for the bottom tier at all,
+        // because risky had no card mapping to render.
+        return sprintf('Your standing is now %s.', ReputationTierMap::toReputationTierLabel($tier));
     }
 }

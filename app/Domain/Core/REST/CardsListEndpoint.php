@@ -15,8 +15,8 @@
  * V1 filter set (per §G2 launch checklist):
  *   - kind   (validator|project|creator)  — translates to legacy
  *                                            page_type via PageTypeMap
- *   - tier   (legendary|rare|uncommon|    — translates to reputation
- *             common)                       tier via the §C1 mapping
+ *   - tier   (elite|trusted|neutral|      — reputation tier, verbatim
+ *             caution|risky)                 (v1.56: no translation)
  *   - sort   (trust|newest|endorsements|  — passed through verbatim;
  *             followers|self_stake)         PageDiscoveryService validates.
  *                                           `self_stake` is validator-only.
@@ -77,17 +77,19 @@ final class CardsListEndpoint
     /**
      * Card-tier (frontend canonical, per §C1) → reputation tier
      * (PageDiscoveryService internal). Risky is intentionally absent —
-     * risky pages don't surface in card UI per §C1, so a client cannot
-     * filter for them.
+     * Accepted values for the `tier` filter — the reputation tiers, directly.
      *
-     * @var array<string, string>
+     * v1.56: this was a rarity→reputation translation table
+     * (legendary→elite, …). Two things changed with the retirement. The
+     * client now speaks the same vocabulary the engine does, so there is no
+     * translation step to drift; and `risky` became FILTERABLE. It was
+     * previously unreachable — it had no rarity slug, so no client could ask
+     * for it — which meant the one cohort an operator most needs to review
+     * was the one the directory could not show them.
+     *
+     * @var list<string>
      */
-    private const CARD_TIER_TO_REPUTATION = [
-        'legendary' => 'elite',
-        'rare'      => 'trusted',
-        'uncommon'  => 'neutral',
-        'common'    => 'caution',
-    ];
+    private const ALLOWED_TIERS = ['elite', 'trusted', 'neutral', 'caution', 'risky'];
 
     /** @var list<string> */
     private const ALLOWED_KINDS = ['validator', 'project', 'creator'];
@@ -221,17 +223,17 @@ final class CardsListEndpoint
             $types = [PageTypeMap::KIND_TO_PAGE_TYPE[$kindParam]];
         }
 
-        // ── card-tier → reputation tier translation ────────────────────
+        // ── tier filter validation (no translation since v1.56) ────────
         $reputationTier = '';
         if ($tierParam !== '') {
-            if (!array_key_exists($tierParam, self::CARD_TIER_TO_REPUTATION)) {
+            if (!in_array($tierParam, self::ALLOWED_TIERS, true)) {
                 return ApiResponse::error(
                     'bcc_invalid_request',
-                    'tier must be legendary, rare, uncommon, or common.',
+                    'tier must be elite, trusted, neutral, caution, or risky.',
                     400
                 );
             }
-            $reputationTier = self::CARD_TIER_TO_REPUTATION[$tierParam];
+            $reputationTier = $tierParam;
         }
 
         // ── sort validation (defaults to 'trust' inside DiscoveryService

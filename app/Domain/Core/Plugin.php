@@ -363,6 +363,15 @@ final class Plugin
         );
     }
 
+    private ?Services\EliteEligibilityService $eliteEligibilityService = null;
+    public function eliteEligibilityService(): Services\EliteEligibilityService
+    {
+        return $this->eliteEligibilityService ??= new Services\EliteEligibilityService(
+            $this->scoreRepository(),
+            $this->attestationRepository()
+        );
+    }
+
     private ?TrustReadService $trustReadService = null;
     public function trustReadService(): TrustReadService
     {
@@ -1211,7 +1220,7 @@ final class Plugin
 
         // V1 contract: §G1 global autocomplete. Thin wrapper over
         // bcc-search that maps results to canonical SearchSuggestions
-        // (card_kind, card_tier, headless route prefix) per §A2.
+        // (card_kind, reputation_tier, headless route prefix) per §A2.
         \BCC\Trust\Core\REST\CardsSearchEndpoint::register();
 
         // V1 contract: §I1 notifications. List + unread-count + mark-read.
@@ -2152,6 +2161,76 @@ final class Plugin
         add_action('bcc_attestation_created', $bcc_attestation_score_recompute, 25, 4);
         add_action('bcc_attestation_revoked', $bcc_attestation_score_recompute, 25, 4);
         add_action('bcc_attestation_reaffirmed', $bcc_attestation_score_recompute, 25, 4);
+
+        // §J.12 elite-eligibility gate — recompute on the events that change
+        // its DISTINCT-ATTESTOR input. Priority 20, ahead of the synthesis
+        // subscriber at 25, so the flag is already fresh when synthesis
+        // rewrites reputation_tier a moment later. (Tenure crossings and
+        // dispute-window expiry have no event; the nightly sweep owns those.)
+        //
+        // Same isolation contract as synthesis above: per-event try/catch,
+        // surfaces as an `elite_eligibility` DegradationMetric, never throws
+        // into the event chain.
+        $bcc_elite_eligibility_recompute = function (
+            int $attestorId,
+            int $attestationId,
+            string $targetKind,
+            int $targetId
+        ): void {
+            try {
+                $pageId = $targetKind === 'user_profile'
+                    ? $this->memberSelfPageService()->ensureSelfPage($targetId)
+                    : $targetId;
+                if ($pageId > 0) {
+                    $this->eliteEligibilityService()->recomputeFor($pageId);
+                }
+            } catch (\Throwable $e) {
+                \BCC\Core\Observability\DegradationMetrics::record('elite_eligibility', 'event_recompute_failed');
+                \BCC\Core\Log\Logger::error('elite eligibility recompute failed', [
+                    'target_kind' => $targetKind,
+                    'target_id'   => $targetId,
+                    'error'       => $e->getMessage(),
+                ]);
+            }
+        };
+        add_action('bcc_attestation_created', $bcc_elite_eligibility_recompute, 20, 4);
+        add_action('bcc_attestation_revoked', $bcc_elite_eligibility_recompute, 20, 4);
+        add_action('bcc_attestation_reaffirmed', $bcc_elite_eligibility_recompute, 20, 4);
+
+        // A resolved dispute changes the clean-record input. Note the gate
+        // reads the DISPUTED page (payload page_id), not the reporter.
+        add_action('bcc.domain.dispute_resolved', function ($payload): void {
+            if (!is_array($payload)) {
+                return;
+            }
+            $pageId = isset($payload['page_id']) ? (int) $payload['page_id'] : 0;
+            if ($pageId <= 0) {
+                return;
+            }
+            try {
+                $this->eliteEligibilityService()->recomputeFor($pageId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Observability\DegradationMetrics::record('elite_eligibility', 'dispute_recompute_failed');
+                \BCC\Core\Log\Logger::error('elite eligibility recompute failed after dispute', [
+                    'page_id' => $pageId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }, 20, 1);
+
+        // §J.12 — a gate flip is a tier-relevant event, but TierUpgradeListener
+        // only fires on ACTIVITY. Without this, someone made eligible by the
+        // nightly sweep would not see the promotion until their next post.
+        add_action('bcc_elite_eligibility_changed', function (int $ownerId, int $pageId, bool $eligible): void {
+            if (!$eligible || $ownerId <= 0) {
+                return;
+            }
+            try {
+                $this->tierUpgradeListener()->onActivityEvent($ownerId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Observability\DegradationMetrics::record('elite_eligibility', 'tier_celebration_failed');
+            }
+        }, 25, 3);
 
         // §I1 V2 Trust Attestation Layer — bell + push dispatch for
         // attestation lifecycle events. Fired by AttestationService::cast

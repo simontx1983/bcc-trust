@@ -165,19 +165,32 @@ function bcc_trust_render_moderation() {
 // ──────────────────────────────────────────────
 
 /**
- * Map a numeric trust score (0–100) to tier name, then return its info array.
+ * Resolve the display info array for a page's tier.
+ *
+ * Prefers the STORED reputation_tier when the caller has it. Since the §J.12
+ * elite gate, a tier can no longer be derived from a score alone — `elite`
+ * additionally requires the cross-table eligibility flag and a native-conduct
+ * floor, neither of which is visible from a bare number. Re-deriving here
+ * would show `Elite` in the admin table for a page the engine has gated down
+ * to `Trusted`.
+ *
+ * The score-only fallback remains for callers whose query genuinely has no
+ * tier column; it is an APPROXIMATION that assumes the gate passes, and will
+ * over-report elite. Pass $stored_tier wherever it is available.
+ *
  * Delegates to \BCC\Trust\Core\Support\Formatting::tierInfo( $tier_name ).
  *
- * @param  int|float $score
+ * @param  int|float   $score
+ * @param  string|null $stored_tier The row's reputation_tier column, if present.
  * @return array{label:string, color:string, icon:string}
  */
-function bcc_trust_get_tier_info_from_score( $score ): array {
+function bcc_trust_get_tier_info_from_score( $score, ?string $stored_tier = null ): array {
+    if ( is_string( $stored_tier ) && $stored_tier !== '' ) {
+        return \BCC\Trust\Core\Support\Formatting::tierInfo( $stored_tier );
+    }
+
     $score = (float) $score;
-    if ( $score >= BCC_TRUST_TIER_ELITE )   $name = 'elite';
-    elseif ( $score >= BCC_TRUST_TIER_TRUSTED ) $name = 'trusted';
-    elseif ( $score >= BCC_TRUST_TIER_NEUTRAL ) $name = 'neutral';
-    elseif ( $score >= BCC_TRUST_TIER_CAUTION ) $name = 'caution';
-    else                                         $name = 'risky';
+    $name  = \BCC\Trust\Core\Services\TrustScoreService::tierFor( $score, $score, true );
 
     return \BCC\Trust\Core\Support\Formatting::tierInfo( $name );
 }

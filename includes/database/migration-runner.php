@@ -103,6 +103,16 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_wallet_placeholder_emails_backfilled',
                 'callback'    => 'bcc_trust_backfill_wallet_placeholder_emails',
             ],
+            [
+                'id'          => 'elite_eligibility_backfill_v1',
+                'done_option' => 'bcc_trust_elite_eligibility_backfilled',
+                'callback'    => 'bcc_trust_backfill_elite_eligibility',
+            ],
+            [
+                'id'          => 'watch_tier_vocabulary_v1',
+                'done_option' => 'bcc_trust_watch_tier_vocabulary_migrated',
+                'callback'    => 'bcc_trust_backfill_watch_tier_vocabulary',
+            ],
         ];
     }
 

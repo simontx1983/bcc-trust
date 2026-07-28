@@ -60,7 +60,7 @@ function bcc_trust_render_pages_tab() {
             </thead>
             <tbody>
                 <?php foreach ( $pages as $i => $page ) :
-                    $tier_info = bcc_trust_get_tier_info_from_score( $page->total_score ?? 0 );
+                    $tier_info = bcc_trust_get_tier_info_from_score( $page->total_score ?? 0, $page->reputation_tier ?? null );
                     $pid       = (int) $page->page_id;
                     $cpt       = $cpt_map[ $pid ] ?? null;
                     $page_url  = bcc_trust_get_peepso_page_url( $pid );
@@ -140,7 +140,7 @@ function bcc_trust_render_all_pages_tab() {
             <tbody>
                 <?php foreach ( $pages as $page ) :
                     $score     = $page->total_score ?? null;
-                    $tier_info = $score !== null ? bcc_trust_get_tier_info_from_score( $score ) : [ 'label' => 'Unscored', 'color' => '#999' ];
+                    $tier_info = $score !== null ? bcc_trust_get_tier_info_from_score( $score, $page->reputation_tier ?? null ) : [ 'label' => 'Unscored', 'color' => '#999' ];
                     $pid       = (int) $page->ID;
                     $cpt       = $cpt_map[ $pid ] ?? null;
                     $page_url  = bcc_trust_get_peepso_page_url( $pid );

@@ -52,6 +52,7 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Services\Feed\FeedRankingService;
+use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 
 if (!defined('ABSPATH')) {
@@ -114,7 +115,7 @@ final class FeedColdStartService
      *
      * @return array{
      *   halls: list<array{slug:string,name:string,chain_slug:?string,member_count:int}>,
-     *   recent_operators: list<array{handle:string,display_name:string,avatar_url:string,card_tier:?string,tier_label:?string,rank_label:string,recent_action:string,link:string}>,
+     *   recent_operators: list<array{handle:string,display_name:string,avatar_url:string,reputation_tier:string,reputation_tier_label:string,rank_label:string,recent_action:string,link:string}>,
      *   hot_posts: list<array<string, mixed>>
      * }
      */
@@ -195,7 +196,7 @@ final class FeedColdStartService
      * ordering. Anon viewers share the per-day seed (viewerId=0 is the
      * constant input for that branch).
      *
-     * @return list<array{handle:string,display_name:string,avatar_url:string,card_tier:?string,tier_label:?string,rank_label:string,recent_action:string,link:string}>
+     * @return list<array{handle:string,display_name:string,avatar_url:string,reputation_tier:string,reputation_tier_label:string,rank_label:string,recent_action:string,link:string}>
      */
     private function composeOperators(int $viewerId): array
     {
@@ -240,7 +241,7 @@ final class FeedColdStartService
      * field (§A2) — the frontend renders the strings verbatim.
      *
      * @param array<string, mixed> $summary
-     * @return array{handle:string,display_name:string,avatar_url:string,card_tier:?string,tier_label:?string,rank_label:string,recent_action:string,link:string}
+     * @return array{handle:string,display_name:string,avatar_url:string,reputation_tier:string,reputation_tier_label:string,rank_label:string,recent_action:string,link:string}
      */
     private static function projectOperatorRow(array $summary, string $recentAction): array
     {
@@ -253,12 +254,12 @@ final class FeedColdStartService
             'avatar_url'    => is_string($summary['avatar_url'] ?? null)
                 ? (string) $summary['avatar_url']
                 : '',
-            'card_tier'     => isset($summary['card_tier']) && is_string($summary['card_tier'])
-                ? (string) $summary['card_tier']
-                : null,
-            'tier_label'    => isset($summary['tier_label']) && is_string($summary['tier_label'])
-                ? (string) $summary['tier_label']
-                : null,
+            'reputation_tier' => isset($summary['reputation_tier']) && is_string($summary['reputation_tier'])
+                ? (string) $summary['reputation_tier']
+                : 'neutral',
+            'reputation_tier_label' => isset($summary['reputation_tier_label']) && is_string($summary['reputation_tier_label'])
+                ? (string) $summary['reputation_tier_label']
+                : ReputationTierMap::toReputationTierLabel('neutral'),
             'rank_label'    => is_string($summary['rank_label'] ?? null)
                 ? (string) $summary['rank_label']
                 : '',

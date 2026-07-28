@@ -49,11 +49,11 @@ final class FeedAuthorGoodStandingTest extends TestCase
      */
     private function badgeForTier(string $tier): array
     {
+        // Mirrors AuthorBadgeResolver's real output shape (contract v1.56 —
+        // the retired card_tier/tier_label keys are deliberately absent).
         return [
             'reputation_tier'       => $tier,
-            'reputation_tier_label' => 'label',
-            'card_tier'             => 'common',
-            'tier_label'            => 'Common',
+            'reputation_tier_label' => \BCC\Trust\Core\Support\ReputationTierMap::toReputationTierLabel($tier),
             'rank_label'            => 'Apprentice',
         ];
     }
@@ -128,8 +128,13 @@ final class FeedAuthorGoodStandingTest extends TestCase
     {
         $out = $this->apply(['id' => 9], $this->badgeForTier('trusted'));
         self::assertSame('trusted', $out['reputation_tier']);
-        self::assertSame('common', $out['card_tier']);
-        self::assertSame('Common', $out['tier_label']);
+        self::assertSame('Trusted', $out['reputation_tier_label']);
         self::assertSame('Apprentice', $out['rank_label']);
+
+        // card_tier / tier_label are RETIRED (contract v1.56) — assert they
+        // are GONE, not merely changed. A copy-through helper that silently
+        // reintroduced them would otherwise pass unnoticed.
+        self::assertArrayNotHasKey('card_tier', $out);
+        self::assertArrayNotHasKey('tier_label', $out);
     }
 }

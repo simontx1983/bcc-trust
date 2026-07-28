@@ -972,6 +972,53 @@ class DisputeRepository
     }
 
     /**
+     * Count disputes UPHELD against this page that resolved within a trailing
+     * window. The §J.12 elite gate's clean-record condition.
+     *
+     * POLARITY — read before touching this query. "Upheld" is not a status
+     * value; it is DisputeStatus::REJECTED. A dispute contests a negative mark
+     * against a page, so a REJECTED dispute means the contest FAILED and the
+     * negative mark STANDS — bad for the page. ACCEPTED, DISMISSED and
+     * TIMEOUT_NO_QUORUM all mean the page was vindicated. Filtering on
+     * 'accepted' here, or inventing an 'upheld' literal, inverts the gate and
+     * blocks exactly the wrong population. Canonical statement of this
+     * direction: AttestationOutcomeClassifier::disputeOutcomeFor().
+     *
+     * SUBJECT — keyed on page_id, the DISPUTED page. Note that
+     * DisputeAdjudicator::rejectVoteDispute applies its -5 penalty to the
+     * REPORTER's self-page, which is a different subject entirely; do not
+     * reuse that path's identifier here.
+     *
+     * Uncached: a moving `since` boundary makes caching counterproductive,
+     * same rationale as countByReporterSince.
+     *
+     * @param string $sinceMysqlUtc UTC 'Y-m-d H:i:s' window start.
+     */
+    public static function countUpheldSince(int $pageId, string $sinceMysqlUtc): int
+    {
+        if ($pageId <= 0 || $sinceMysqlUtc === '') {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::disputes_table();
+
+        $raw = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table}
+              WHERE page_id = %d
+                AND status = %s
+                AND resolved_at IS NOT NULL
+                AND resolved_at >= %s
+              LIMIT 5000",
+            $pageId,
+            DisputeStatus::REJECTED,
+            $sinceMysqlUtc
+        ));
+
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
      * Count disputes filed by this reporter since a MySQL DATETIME
      * boundary. Powers the §O3 living-header today-line ("today: 1
      * dispute opened") and the watching summary. Replaces the retired

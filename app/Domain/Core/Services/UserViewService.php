@@ -139,7 +139,6 @@ final class UserViewService
         $isSelf = $userId > 0 && $userId === $viewerId;
 
         $tier         = $this->reputationRepo->getTier($userId);
-        $card         = ReputationTierMap::resolve($tier);
         $handle       = self::resolveHandle($user);
         $followCounts = PeepSoFollowerRepository::getCounts($userId);
         $halls        = $this->resolveHalls($userId);
@@ -176,11 +175,11 @@ final class UserViewService
             'is_self'             => $isSelf,
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
             'reputation_tier'     => $tier,
-            // Honest member trust chip (Risky…Proven) — distinct from the
-            // entity-card rarity words in card_tier/tier_label.
+            // The member trust chip (Risky…Elite), rendered verbatim per §A2.
+            // Sole tier vocabulary since v1.56 — the retired rarity words had
+            // no slot for `risky` at all, so the most safety-relevant state in
+            // the system was invisible wherever they were used.
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel($tier),
-            'card_tier'           => $card['key'],
-            'tier_label'          => $card['label'],
             'rank'                => $rank['key'],
             'rank_label'          => $rank['label'],
             'current_rank_label'  => $rank['label'],
@@ -299,11 +298,11 @@ final class UserViewService
      *
      * Returns null when $userId doesn't resolve to a real wp_user.
      *
-     * `card_tier` mirrors the §C1 slug already exposed by `getUser`
+     * `reputation_tier` mirrors the slug already exposed by `getUser`
      * (full /users/:handle payload). Surfaced here so list-shaped UIs
      * (members directory rows, member cards in feeds) can encode the
      * tier as a color/border treatment rather than rendering the
-     * tier_label as a duplicate word next to the rank_label.
+     * label as a duplicate word next to the rank_label.
      *
      * `trust_score`, `followers_count`, `primary_hall`, and
      * `owned_pages_count` populate the directory card with social-proof
@@ -366,8 +365,6 @@ final class UserViewService
      *   joined_at: string,
      *   reputation_tier: string,
      *   reputation_tier_label: string,
-     *   card_tier: string|null,
-     *   tier_label: string|null,
      *   rank_label: string,
      *   current_rank_label: string,
      *   is_in_good_standing: bool,
@@ -401,7 +398,6 @@ final class UserViewService
 
         $isSelf  = $userId > 0 && $userId === $viewerId;
         $tier    = $this->reputationRepo->getTier($userId);
-        $card    = ReputationTierMap::resolve($tier);
         $handle  = self::resolveHandle($user);
         $privacy = self::resolvePrivacy($userId);
 
@@ -536,8 +532,6 @@ final class UserViewService
             'joined_at'           => self::toIso8601((string) $user->user_registered),
             'reputation_tier'       => $tier,
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel($tier),
-            'card_tier'           => $card['key'],
-            'tier_label'          => $card['label'],
             'rank_label'          => $rank['label'],
             'current_rank_label'  => $rank['label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
