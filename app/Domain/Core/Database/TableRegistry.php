@@ -29,6 +29,9 @@ final class TableRegistry
     /** @var array<string, bool> Request-scoped memo (positive AND negative). */
     private static array $existsMemo = [];
 
+    /** @var array<string, bool> Request-scoped memo, keyed "table.column". */
+    private static array $columnMemo = [];
+
     /**
      * Table-existence check: static memo → wp_cache (1h) → SHOW TABLES.
      *
@@ -66,6 +69,68 @@ final class TableRegistry
     }
 
     /**
+     * Column-existence check — same caching contract as {@see exists()}.
+     *
+     * Exists because plugin CODE can run against an OLD SCHEMA. The
+     * schema-version gate gets a `GET_LOCK`; when a concurrent request
+     * already holds it the gate returns early and that request
+     * "proceeds un-migrated" (bcc-trust.php, schema-migration hook). During a
+     * deploy under traffic that is every request until the winner finishes.
+     * Ordering cannot close it — REST/cron already run after the gate — so
+     * writers that reference a newly-added column must ask first.
+     *
+     * Cost: one SHOW COLUMNS per (table, column) per request at worst, and
+     * zero once the positive answer is in the object cache. NOT once per
+     * write — callers hold the boolean for the duration of their statement.
+     *
+     * Only POSITIVE results are cached cross-request, exactly as exists()
+     * does: a `false` stays request-scoped, so a column added moments ago is
+     * visible to the very next request and a negative can never poison the
+     * cache. Installers additionally call flushExistenceCache(), which drops
+     * the request-scoped memo too — so a migration completing mid-request is
+     * picked up by the same request.
+     *
+     * Fails SAFE: any DB error returns false, which makes callers degrade to
+     * the pre-migration behaviour rather than emit SQL against a column that
+     * may not be there.
+     */
+    public static function columnExists(string $table, string $column): bool
+    {
+        $key = $table . '.' . $column;
+
+        if (isset(self::$columnMemo[$key])) {
+            return self::$columnMemo[$key];
+        }
+
+        $cached = wp_cache_get('col_' . $key, self::EXISTS_CACHE_GROUP);
+        if ($cached === '1') {
+            self::$columnMemo[$key] = true;
+            return true;
+        }
+
+        global $wpdb;
+
+        // Suppress errors around the probe: a missing TABLE (fresh install,
+        // mid-activation) must read as "column absent", not surface a DB
+        // error to the caller mid-score-write.
+        $suppressed = $wpdb->suppress_errors(true);
+        $found      = $wpdb->get_var($wpdb->prepare(
+            "SHOW COLUMNS FROM `{$table}` LIKE %s",
+            $column
+        ));
+        $wpdb->suppress_errors($suppressed);
+
+        $exists = is_string($found) && $found === $column;
+
+        self::$columnMemo[$key] = $exists;
+        if ($exists) {
+            wp_cache_set('col_' . $key, '1', self::EXISTS_CACHE_GROUP, self::EXISTS_CACHE_TTL);
+        }
+
+        return $exists;
+    }
+
+    /**
      * Drop all cached existence answers. Called by the installers
      * (bcc_trust_create_tables, bcc_onchain_ensure_schema) after they
      * run, so anything cached mid-install is re-probed.
@@ -80,6 +145,13 @@ final class TableRegistry
             wp_cache_delete('exists_' . $table, self::EXISTS_CACHE_GROUP);
         }
         self::$existsMemo = [];
+
+        // Column answers too — a dbDelta that just ADDED a column must not
+        // leave a stale `false` memoized for the rest of this request.
+        foreach (array_keys(self::$columnMemo) as $key) {
+            wp_cache_delete('col_' . $key, self::EXISTS_CACHE_GROUP);
+        }
+        self::$columnMemo = [];
     }
 
     public static function votes(): string

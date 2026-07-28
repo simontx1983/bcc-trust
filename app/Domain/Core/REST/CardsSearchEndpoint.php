@@ -12,8 +12,8 @@
  * Why we wrap instead of consuming bcc-search directly from the
  * frontend:
  *   - bcc-search returns `tier: 'elite'` (reputation tier).
- *     §A2 forbids the frontend from mapping reputation_tier →
- *     card_tier. The mapping must happen server-side.
+ *     §A2 forbids the frontend from mapping a tier onto a display
+ *     label. The mapping must happen server-side.
  *   - bcc-search returns `category_slug: 'builder'` (legacy page_type).
  *     The §C1 contract speaks `card_kind: 'project'`. Same rule.
  *   - bcc-search returns the WordPress permalink in `page_url`. The
@@ -195,8 +195,8 @@ final class CardsSearchEndpoint
      *   name: string,
      *   handle: string,
      *   card_kind: string,
-     *   card_tier: string|null,
-     *   tier_label: string|null,
+     *   reputation_tier: string,
+     *   reputation_tier_label: string,
      *   trust_score: int|null,
      *   is_verified: bool,
      *   is_claim_verified: bool,
@@ -241,8 +241,7 @@ final class CardsSearchEndpoint
         }
 
         $tier = isset($row['tier']) && is_string($row['tier']) ? $row['tier'] : '';
-        $cardTier = ReputationTierMap::toCardTier($tier);
-        $tierLabel = ReputationTierMap::toCardTierLabel($cardTier);
+        $rep  = ReputationTierMap::resolveReputation($tier);
 
         $trustScore = isset($row['trust_score']) && is_numeric($row['trust_score'])
             ? (int) $row['trust_score']
@@ -260,8 +259,8 @@ final class CardsSearchEndpoint
             'name'                => $name,
             'handle'              => $handle,
             'card_kind'           => $kind,
-            'card_tier'           => $cardTier,
-            'tier_label'          => $tierLabel,
+            'reputation_tier'       => $rep['reputation_tier'],
+            'reputation_tier_label' => $rep['reputation_tier_label'],
             'trust_score'         => $trustScore,
             'is_verified'         => $isVerified,
             'is_claim_verified'   => $isClaimVerified,

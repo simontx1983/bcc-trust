@@ -94,13 +94,16 @@ function bcc_trust_create_core_tables() {
         fraud_metadata TEXT NULL,
         recalculate_required TINYINT(1) NOT NULL DEFAULT 0,
         recalc_failures INT UNSIGNED NOT NULL DEFAULT 0,
+        elite_eligible TINYINT(1) NOT NULL DEFAULT 0,
+        elite_eligible_at DATETIME NULL,
         PRIMARY KEY (page_id, category_id),
         KEY idx_owner_scores (page_owner_id, total_score),
         KEY idx_tier_lookup (reputation_tier, total_score),
         KEY idx_confidence (confidence_score),
         KEY idx_recalculate (recalculate_required, last_calculated_at),
         KEY idx_cat_score (category_id, positive_score, total_score),
-        KEY idx_recalc_failures (recalc_failures, recalculate_required)
+        KEY idx_recalc_failures (recalc_failures, recalculate_required),
+        KEY idx_elite_sweep (elite_eligible_at, total_score)
     ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);

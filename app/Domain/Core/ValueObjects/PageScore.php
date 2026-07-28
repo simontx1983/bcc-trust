@@ -33,6 +33,20 @@ class PageScore {
     private float $contributionBonus;
     private float $penaltyAdjustment;
     private float $attestationBonus;
+    /**
+     * Raw §J.12 elite-gate columns, carried read-only.
+     *
+     * Deliberately NOT part of toDatabaseArray(): like contribution_bonus,
+     * penalty_adjustment and attestation_bonus, these are owned by a dedicated
+     * write path (EliteEligibilityService) and must survive a vote recalc
+     * rather than be rewritten by one. They are threaded through the VO only
+     * so the recalc can feed TrustScoreService::tierFor() the same gate the
+     * SQL ladder sees.
+     *
+     * @var int|string|bool|null
+     */
+    private $eliteEligible;
+    private ?string $eliteEligibleAt;
     private ?DateTimeImmutable $lastVoteAt;
     private DateTimeImmutable $lastCalculatedAt;
     /** @var array<string, mixed>|null */
@@ -118,7 +132,9 @@ class PageScore {
         float $onchainBonus = 0.0,
         float $contributionBonus = 0.0,
         float $penaltyAdjustment = 0.0,
-        float $attestationBonus = 0.0
+        float $attestationBonus = 0.0,
+        int|string|bool|null $eliteEligible = null,
+        ?string $eliteEligibleAt = null
     ) {
         // Set pageId first (needed by validateCounts logging)
         $this->pageId = $pageId;
@@ -144,6 +160,8 @@ class PageScore {
         $this->contributionBonus = $contributionBonus;
         $this->penaltyAdjustment = $penaltyAdjustment;
         $this->attestationBonus = $attestationBonus;
+        $this->eliteEligible = $eliteEligible;
+        $this->eliteEligibleAt = $eliteEligibleAt;
         $this->lastVoteAt = $lastVoteAt;
         $this->lastCalculatedAt = $lastCalculatedAt ?? new DateTimeImmutable();
         $this->fraudMetadata = $fraudMetadata;
@@ -325,6 +343,25 @@ class PageScore {
         return $this->attestationBonus;
     }
 
+    /**
+     * The RESOLVED §J.12 elite gate — true when this page passes the
+     * cross-table eligibility checks, or has never been evaluated (the
+     * grandfather case, so shipping the column is not a mass demotion).
+     *
+     * Delegates to TrustScoreService so PHP and SQL cannot disagree about
+     * what an unevaluated row means.
+     */
+    public function isEliteEligible(): bool {
+        return \BCC\Trust\Core\Services\TrustScoreService::resolveEliteEligible(
+            $this->eliteEligible,
+            $this->eliteEligibleAt
+        );
+    }
+
+    public function getEliteEligibleAt(): ?string {
+        return $this->eliteEligibleAt;
+    }
+
     public function getLastVoteAt(): ?DateTimeImmutable {
         return $this->lastVoteAt;
     }
@@ -455,7 +492,9 @@ class PageScore {
      *   onchain_bonus?: float|numeric-string|null,
      *   contribution_bonus?: float|numeric-string|null,
      *   penalty_adjustment?: float|numeric-string|null,
-     *   attestation_bonus?: float|numeric-string|null
+     *   attestation_bonus?: float|numeric-string|null,
+     *   elite_eligible?: int|numeric-string|bool|null,
+     *   elite_eligible_at?: string|null
      * } $row
      */
     public static function fromDatabaseRow(object $row): self {
@@ -476,7 +515,9 @@ class PageScore {
             (float) ($row->onchain_bonus ?? 0.0),
             (float) ($row->contribution_bonus ?? 0.0),
             (float) ($row->penalty_adjustment ?? 0.0),
-            (float) ($row->attestation_bonus ?? 0.0)
+            (float) ($row->attestation_bonus ?? 0.0),
+            $row->elite_eligible ?? null,
+            isset($row->elite_eligible_at) ? (string) $row->elite_eligible_at : null
         );
     }
     

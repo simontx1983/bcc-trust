@@ -1376,6 +1376,67 @@ final class AttestationRepository
     }
 
     /**
+     * Count DISTINCT active attestors backing a single target across one or
+     * more target_kinds.
+     *
+     * The §J.12 elite gate's anti-ring condition. Three deliberate
+     * differences from its siblings:
+     *
+     *  - vs {@see countActiveVouchesForTarget} — counts distinct PEOPLE, not
+     *    rows, and does not filter on kind. One attestor holding both a vouch
+     *    and a stand_behind on the same target is one backer, not two; the
+     *    unique key is (attestor, target_kind, target_id, kind), so a
+     *    row-count would over-report exactly the concentration this gate
+     *    exists to detect.
+     *  - vs {@see countDistinctAttestorsOnTargetSince} — no `since` window and
+     *    no excluded user. Eligibility asks about the standing backer set, not
+     *    about recent activity relative to one observer.
+     *  - vs AttestationScoreSynthesis's in-memory `$sources` set — that one is
+     *    built only from rows surviving a `weight > 0` filter, which couples
+     *    the headcount to decay semantics. A backer whose weight has decayed
+     *    to zero is still a distinct backer. Do not substitute one for the
+     *    other.
+     *
+     * @param list<string> $targetKinds Subset of TARGET_KINDS.
+     */
+    public function countDistinctActiveAttestorsForTarget(array $targetKinds, int $targetId): int
+    {
+        if ($targetId <= 0) {
+            return 0;
+        }
+        $kinds = [];
+        foreach ($targetKinds as $kind) {
+            if (is_string($kind) && in_array($kind, self::TARGET_KINDS, true)) {
+                $kinds[$kind] = true;
+            }
+        }
+        if ($kinds === []) {
+            return 0;
+        }
+        $kindList = array_keys($kinds);
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+
+        $placeholders = implode(',', array_fill(0, count($kindList), '%s'));
+        $sql = "SELECT COUNT(DISTINCT attestor_user_id) FROM `{$table}`"
+            . " WHERE target_kind IN ({$placeholders})"
+            . ' AND target_id = %d'
+            . ' AND revoked_at IS NULL'
+            . ' LIMIT 10000';
+
+        /** @phpstan-ignore-next-line argument.type */
+        $prepared = $wpdb->prepare($sql, ...array_merge($kindList, [$targetId]));
+        if (!is_string($prepared)) {
+            return 0;
+        }
+
+        $raw = $wpdb->get_var($prepared);
+        return is_numeric($raw) ? (int) $raw : 0;
+    }
+
+    /**
      * Count active VOUCH attestations against a single target across one
      * or more target_kinds in a single bounded round-trip. Powers the
      * `endorsement_count` denorm refresh (VoteService::recalculateFromVotes

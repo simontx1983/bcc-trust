@@ -1,20 +1,44 @@
 <?php
 /**
  * ReputationTierMap — single source of truth for the §C1 reputation
- * tier → card_tier → display-label chain.
+ * tier → display-label mapping.
  *
- * §C1 mapping (locked):
- *   elite   → legendary
- *   trusted → rare
- *   neutral → uncommon
- *   caution → common
- *   risky   → null   (entity hidden from card UI per §C1)
+ * ## The rarity vocabulary is RETIRED (contract v1.56)
  *
- * Before this class existed, the same mapping was duplicated verbatim
- * across UserViewService, CardViewService, WatchingService,
- * TierUpgradeListener, and CardsSearchEndpoint. A drift between any two
- * would silently mis-tier a card on one surface relative to another —
- * a P1 contract break. All five now resolve through here.
+ * This class used to carry a second mapping onto collectible-rarity words
+ * (elite→Legendary, trusted→Rare, neutral→Uncommon, caution→Common,
+ * risky→null). That mapping and its `card_tier` field are gone. Do not
+ * reintroduce them. The reasons, in ascending order of severity:
+ *
+ *  1. The ordinal was inverted. `neutral` is the STARTING tier — every
+ *     member begins there, and ReputationRepository::getTier() defaults to
+ *     it — so by population it is the common case, yet it read as
+ *     "Uncommon". `caution` has to be actively fallen into, making it
+ *     rarer, yet it read as "Common".
+ *  2. Rarity words describe a denominator we are deliberately trying to
+ *     move. If the platform works, most members end up trusted or better,
+ *     at which point calling trusted "Rare" is simply false — our own
+ *     success would break our vocabulary.
+ *  3. Rarity words are positive-coded: rare reads as desirable. Labelling a
+ *     `caution` member "Common" told them their card was unremarkable when
+ *     the tier means something has gone wrong. Worse, the rarity palette
+ *     rendered that warning in NEUTRAL GREY (--bcc-tier-common #6b6e72)
+ *     while the trust ramp has caution in warning yellow. The card did not
+ *     merely mislabel the signal, it desaturated it.
+ *  4. `risky` had no rarity slot at all, so the single most safety-relevant
+ *     state in the system rendered as NO TAG on the card and, because
+ *     RankChip was keyed on card_tier too, as a neutral grey dot
+ *     everywhere else. The most important thing to show was invisible.
+ *
+ * TIER_LABEL below was always the honest vocabulary — it predates the
+ * retirement and already covered all five tiers. It is now the only one.
+ *
+ * ## Why this class still exists
+ *
+ * Before it, the mapping was duplicated verbatim across UserViewService,
+ * CardViewService, WatchingService, TierUpgradeListener and
+ * CardsSearchEndpoint. A drift between any two silently mis-labelled a
+ * member on one surface relative to another — a P1 contract break.
  *
  * @package BCC\Trust\Core\Support
  * @since V1
@@ -29,39 +53,18 @@ if (!defined('ABSPATH')) {
 final class ReputationTierMap
 {
     /**
-     * Reputation tier → card_tier. Null for `risky` (entity hidden
-     * from card UI per §C1).
+     * Reputation tier → user-facing label. Pre-rendered server-side per §A2
+     * — the frontend never templates a label from the slug.
      *
-     * @var array<string, string|null>
-     */
-    public const TIER_TO_CARD = [
-        'elite'   => 'legendary',
-        'trusted' => 'rare',
-        'neutral' => 'uncommon',
-        'caution' => 'common',
-        'risky'   => null,
-    ];
-
-    /**
-     * card_tier → user-facing label. Pre-rendered server-side per §A2 —
-     * frontend never templates a tier label from the slug.
+     * Covers all five tiers, `risky` included: every surface that shows a
+     * tier can now show every tier, which was not true under the retired
+     * rarity mapping.
      *
-     * @var array<string, string>
-     */
-    public const CARD_TIER_LABEL = [
-        'legendary' => 'Legendary',
-        'rare'      => 'Rare',
-        'uncommon'  => 'Uncommon',
-        'common'    => 'Common',
-    ];
-
-    /**
-     * Reputation tier → **honest member trust-tier label** — the chip a
-     * human reads (`reputation_tier_label`), distinct from the entity-card
-     * *rarity* words above. A *caution* member must not read as "Common";
-     * *neutral* (the start) must not read as "Uncommon". The internal key
-     * `elite` is labelled "Proven". Covers all five tiers incl. `risky`
-     * (which has no card rarity). See docs/glossary.md §6.
+     * The top band reads "Elite" (owner decision, 2026-07-28). The machine
+     * identifier stays `elite` — label and key are deliberately the same
+     * word here, so there is no mapping to drift. "Proven" was considered
+     * and rejected; do not reintroduce it as an alternate label.
+     * See docs/glossary.md §6.
      *
      * @var array<string, string>
      */
@@ -70,50 +73,22 @@ final class ReputationTierMap
         'caution' => 'Caution',
         'neutral' => 'Neutral',
         'trusted' => 'Trusted',
-        'elite'   => 'Proven',
+        'elite'   => 'Elite',
     ];
 
     /**
-     * Map a reputation tier to its card_tier slug. Returns null for
-     * `risky` and for any unknown tier value.
-     */
-    public static function toCardTier(string $tier): ?string
-    {
-        return self::TIER_TO_CARD[$tier] ?? null;
-    }
-
-    /**
-     * Map a card_tier slug to its display label. Accepts null
-     * (returns null) so callers with optional card_tier values can
-     * pipe through without a guard.
-     */
-    public static function toCardTierLabel(?string $cardTier): ?string
-    {
-        if ($cardTier === null) {
-            return null;
-        }
-        return self::CARD_TIER_LABEL[$cardTier] ?? null;
-    }
-
-    /**
-     * Resolve both card_tier slug and label from a reputation tier in
-     * one call. Convenience for view-model builders that need both.
+     * The canonical tier ordering, lowest to highest. Exposed so callers
+     * that need to compare or sort tiers do not hand-roll an ordinal map.
      *
-     * @return array{key: string|null, label: string|null}
+     * @var list<string>
      */
-    public static function resolve(string $tier): array
-    {
-        $key   = self::toCardTier($tier);
-        $label = self::toCardTierLabel($key);
-        return ['key' => $key, 'label' => $label];
-    }
+    public const TIER_ORDER = ['risky', 'caution', 'neutral', 'trusted', 'elite'];
 
     /**
-     * Map a reputation tier to its **honest trust-tier label** (the
-     * member chip). Unknown tiers fall back to "Neutral" — mirroring
-     * ReputationRepository::getTier()'s neutral default, so a brand-new
-     * or missing-row member reads as a plain neutral member rather than
-     * an unlabelled one.
+     * Map a reputation tier to its display label. Unknown tiers fall back
+     * to "Neutral" — mirroring ReputationRepository::getTier()'s neutral
+     * default, so a brand-new or missing-row member reads as a plain
+     * neutral member rather than an unlabelled one.
      */
     public static function toReputationTierLabel(string $tier): string
     {
@@ -121,25 +96,22 @@ final class ReputationTierMap
     }
 
     /**
-     * Resolve the full member identity-chip tier block in one call:
-     * the entity-card rarity (`card_tier`/`tier_label`, may be null for
-     * risky) AND the honest member trust label (`reputation_tier_label`).
-     * View-model builders for member surfaces use this so the two
-     * vocabularies never drift apart.
+     * Resolve the member identity-chip tier block in one call.
      *
-     * @return array{
-     *   card_tier: string|null,
-     *   tier_label: string|null,
-     *   reputation_tier_label: string
-     * }
+     * Retained (rather than folded into toReputationTierLabel) because
+     * view-model builders assemble a block, and keeping one call site per
+     * builder is what stopped the mapping drifting across surfaces in the
+     * first place.
+     *
+     * @return array{reputation_tier: string, reputation_tier_label: string}
      */
     public static function resolveReputation(string $tier): array
     {
-        $card = self::resolve($tier);
+        $known = isset(self::TIER_LABEL[$tier]) ? $tier : 'neutral';
+
         return [
-            'card_tier'             => $card['key'],
-            'tier_label'            => $card['label'],
-            'reputation_tier_label' => self::toReputationTierLabel($tier),
+            'reputation_tier'       => $known,
+            'reputation_tier_label' => self::toReputationTierLabel($known),
         ];
     }
 }

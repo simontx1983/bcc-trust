@@ -155,7 +155,7 @@ function bcc_trust_render_page_list() {
                 <?php else: ?>
                     <?php foreach ( $pages as $pg ): ?>
                         <?php
-                        $tier_info = bcc_trust_get_tier_info_from_score( $pg->trust_score );
+                        $tier_info = bcc_trust_get_tier_info_from_score( $pg->trust_score, $pg->reputation_tier ?? null );
                         $flag_count = (int) $pg->flag_count;
                         ?>
                         <tr>

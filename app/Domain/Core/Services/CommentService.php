@@ -156,7 +156,7 @@ final class CommentService
             $limit
         );
 
-        // Batch-resolve author badge fields (card_tier, tier_label,
+        // Batch-resolve author badge fields (reputation_tier,
         // rank_label, reputation_tier) for every author on the page in
         // ONE query — avoids N+1 inside shapeCommentRow when a page
         // has up to PER_PAGE_MAX=50 comments. The map is empty when
@@ -582,7 +582,7 @@ final class CommentService
      * field on the response is server-resolved.
      *
      * `$badge` carries the pre-resolved rank-chip fields per author
-     * (reputation_tier, card_tier, tier_label, rank_label). Sprint 1
+     * (reputation_tier, reputation_tier_label, rank_label). Sprint 1
      * cohesion: comment rows now light the same AuthorBadge chip the
      * feed surfaces show. The fields are emitted on `author` when
      * `$badge` is non-null; missing-badge rows (resolver lookup
@@ -599,8 +599,8 @@ final class CommentService
      * @param array{
      *   reputation_tier: string,
      *   reputation_tier_label: string,
-     *   card_tier: string|null,
-     *   tier_label: string|null,
+     *   reputation_tier: string,
+
      *   rank_label: string,
      * }|null $badge  Pre-resolved badge fields (see AuthorBadgeResolver).
      * @param array{viewer_attestation: array<string, mixed>, can_vouch: array{allowed: bool, unlock_hint: string|null}}|null $vouch
@@ -642,11 +642,11 @@ final class CommentService
         ];
         if ($badge !== null) {
             // Server-resolved per §A2; the frontend never derives
-            // card_tier from reputation_tier client-side.
+            // a tier label from reputation_tier client-side.
             $author['reputation_tier']       = $badge['reputation_tier'];
             $author['reputation_tier_label'] = $badge['reputation_tier_label'];
-            $author['card_tier']             = $badge['card_tier'];
-            $author['tier_label']            = $badge['tier_label'];
+
+
             // rank_label is `''` (empty string) when RankCatalog
             // doesn't resolve a label — the FE AuthorBadge treats
             // empty as "no chip"; keep as nullable-string equivalent

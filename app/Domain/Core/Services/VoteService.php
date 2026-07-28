@@ -1452,8 +1452,23 @@ class VoteService {
             $attestationBonus
         );
 
+        // §J.12: the native score (conduct excluding onchain_bonus) and the
+        // elite-eligibility gate are BOTH required to resolve the tier. Both
+        // are carried from the existing row — this path never computes or
+        // rewrites them, it only reads them so the tier it writes agrees with
+        // the one tierSql() would have written.
+        $nativeScore = \BCC\Trust\Core\Services\TrustScoreService::computeNative(
+            $positive,
+            $negative,
+            $contributionBonus,
+            $penaltyAdjustment,
+            $attestationBonus
+        );
+        $eliteEligible   = $existing ? $existing->isEliteEligible() : true;
+        $eliteEligibleAt = $existing ? $existing->getEliteEligibleAt() : null;
+
         $confidenceScore = $this->calculateConfidenceScore($voteCount, $uniqueVoters, $matureUniqueVoters, $positive, $negative);
-        $tier            = $this->determineTier($totalScore);
+        $tier            = $this->determineTier($totalScore, $nativeScore, $eliteEligible);
 
         return new PageScore(
             $pageId, $ownerId, $totalScore, $positive, $negative,
@@ -1465,7 +1480,9 @@ class VoteService {
             $onchainBonus,
             $contributionBonus,
             $penaltyAdjustment,
-            $attestationBonus
+            $attestationBonus,
+            $eliteEligible ? 1 : 0,
+            $eliteEligibleAt
         );
     }
 
@@ -1515,12 +1532,17 @@ class VoteService {
         return min(1.0, round($volumeConf * 0.5 + $diverseConf * 0.3 + $balanceConf * 0.2, 2));
     }
 
-    private function determineTier(float $score): string {
-        if ($score >= BCC_TRUST_TIER_ELITE)   return 'elite';
-        if ($score >= BCC_TRUST_TIER_TRUSTED)  return 'trusted';
-        if ($score >= BCC_TRUST_TIER_NEUTRAL)  return 'neutral';
-        if ($score >= BCC_TRUST_TIER_CAUTION)  return 'caution';
-        return 'risky';
+    /**
+     * Thin delegate to the canonical ladder. Was a local copy until the §J.12
+     * elite gate landed — and it was the P0 in that change: this path runs on
+     * the 5-minute recalculation queue, the hourly recalc, and synchronously
+     * after every dispute resolution, so a gate applied only in tierSql() was
+     * reverted here within five minutes of every demotion.
+     *
+     * @param bool $eliteEligible Resolved gate from the existing score row.
+     */
+    private function determineTier(float $score, float $nativeScore, bool $eliteEligible): string {
+        return \BCC\Trust\Core\Services\TrustScoreService::tierFor($score, $nativeScore, $eliteEligible);
     }
 
 }

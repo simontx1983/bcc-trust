@@ -517,7 +517,7 @@ final class BlogService
                 'handle'                => '',
                 'display_name'          => '',
                 'avatar_url'            => '',
-                'card_tier'             => null,
+                'reputation_tier'       => null,
                 'rank_label'            => null,
                 'is_in_good_standing'   => true,
                 'is_followed_by_viewer' => false,
@@ -538,7 +538,7 @@ final class BlogService
             // Trust-derived fields — leave as conservative defaults.
             // The blog tab is a per-user surface; the profile header
             // already shows the canonical card with proper trust state.
-            'card_tier'             => null,
+            'reputation_tier'       => null,
             'rank_label'            => null,
             'is_in_good_standing'   => true,
             'is_followed_by_viewer' => false,

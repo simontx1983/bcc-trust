@@ -68,7 +68,7 @@ class WatchMetaRepository
      * Insert a watch-meta row. Returns true on success, false if the row
      * already exists (PK collision) or on DB error.
      *
-     * tier_at_watch is the card_tier at the moment of watch (preserves
+     * tier_at_watch is the reputation_tier at the moment of watch (preserves
      * historical narrative even when the entity's current tier changes).
      * batch_id is null on first insert and assigned later by the
      * BatchAggregatorService when the batch closes (per §C3).

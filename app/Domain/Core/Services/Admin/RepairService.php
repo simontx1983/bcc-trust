@@ -5,6 +5,7 @@ namespace BCC\Trust\Core\Services\Admin;
 use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\PeepSoPageResolver;
+use BCC\Trust\Core\Services\TrustScoreService;
 use BCC\Trust\Core\ValueObjects\PageScore;
 use BCC\Core\Log\Logger;
 
@@ -210,10 +211,6 @@ final class RepairService
         ];
 
         $maxConfidenceVotes = BCC_TRUST_MAX_CONFIDENCE_VOTES;
-        $eliteThreshold     = BCC_TRUST_TIER_ELITE;
-        $trustedThreshold   = BCC_TRUST_TIER_TRUSTED;
-        $neutralThreshold   = BCC_TRUST_TIER_NEUTRAL;
-        $cautionThreshold   = BCC_TRUST_TIER_CAUTION;
 
         $offset = 0;
         $batchSize = 1000;
@@ -244,7 +241,21 @@ final class RepairService
                 $diversityConfidence = $uniqueVoters / max(1, $voteCount);
                 $confidence          = ($volumeConfidence * 0.6) + ($diversityConfidence * 0.4);
 
-                $tier = $this->determineTier($total_score, $eliteThreshold, $trustedThreshold, $neutralThreshold, $cautionThreshold);
+                // §J.12: repair must reproduce the SAME tier the canonical
+                // ladder would write, gate included — otherwise a repair run
+                // silently re-mints elites that the gate demoted.
+                $nativeScore = TrustScoreService::computeNative(
+                    $voteCount > 0 ? $positiveScore : 0.0,
+                    $voteCount > 0 ? $negativeScore : 0.0
+                );
+                $tier = $this->determineTier(
+                    $total_score,
+                    $nativeScore,
+                    TrustScoreService::resolveEliteEligible(
+                        $existing->elite_eligible ?? null,
+                        isset($existing->elite_eligible_at) ? (string) $existing->elite_eligible_at : null
+                    )
+                );
 
                 $scoreRepo->updateCalculatedScore($page_id, [
                     'total_score'        => $total_score,
@@ -469,10 +480,6 @@ final class RepairService
         ];
 
         $maxConfidenceVotes = BCC_TRUST_MAX_CONFIDENCE_VOTES;
-        $eliteThreshold     = BCC_TRUST_TIER_ELITE;
-        $trustedThreshold   = BCC_TRUST_TIER_TRUSTED;
-        $neutralThreshold   = BCC_TRUST_TIER_NEUTRAL;
-        $cautionThreshold   = BCC_TRUST_TIER_CAUTION;
 
         // STEP 1: Create missing page scores
         $missing_pages = $scoreRepo->getMissingPages();
@@ -540,7 +547,21 @@ final class RepairService
                 $diversityConfidence = $uniqueVoters / max(1, $voteCount);
                 $confidence          = ($volumeConfidence * 0.6) + ($diversityConfidence * 0.4);
 
-                $tier = $this->determineTier($total_score, $eliteThreshold, $trustedThreshold, $neutralThreshold, $cautionThreshold);
+                // §J.12: repair must reproduce the SAME tier the canonical
+                // ladder would write, gate included — otherwise a repair run
+                // silently re-mints elites that the gate demoted.
+                $nativeScore = TrustScoreService::computeNative(
+                    $voteCount > 0 ? $positiveScore : 0.0,
+                    $voteCount > 0 ? $negativeScore : 0.0
+                );
+                $tier = $this->determineTier(
+                    $total_score,
+                    $nativeScore,
+                    TrustScoreService::resolveEliteEligible(
+                        $existing->elite_eligible ?? null,
+                        isset($existing->elite_eligible_at) ? (string) $existing->elite_eligible_at : null
+                    )
+                );
 
                 $scoreRepo->updateCalculatedScore($page_id, [
                     'total_score'        => $total_score,
@@ -652,21 +673,13 @@ final class RepairService
 
     /**
      * Determine reputation tier from a total score.
+     *
+     * Thin delegate to the canonical ladder — was a local copy with the
+     * thresholds passed in as arguments until the §J.12 elite gate made the
+     * ladder more than a score comparison.
      */
-    private function determineTier(float $score, int $elite, int $trusted, int $neutral, int $caution): string
+    private function determineTier(float $score, float $nativeScore, bool $eliteEligible): string
     {
-        if ($score >= $elite) {
-            return 'elite';
-        }
-        if ($score >= $trusted) {
-            return 'trusted';
-        }
-        if ($score >= $neutral) {
-            return 'neutral';
-        }
-        if ($score >= $caution) {
-            return 'caution';
-        }
-        return 'risky';
+        return TrustScoreService::tierFor($score, $nativeScore, $eliteEligible);
     }
 }

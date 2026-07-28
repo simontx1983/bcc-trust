@@ -213,7 +213,7 @@ final class CardViewService
         // a high-tier public score before sustained trust is earned.
         // Entity-only; user-account scores are not capped.
         $trustScore  = $this->newEntityVelocityCap->cap($pageId, $trustScore);
-        $card        = ReputationTierMap::resolve($tier);
+        $rep         = ReputationTierMap::resolveReputation($tier);
 
         $name   = (string) $post->post_title;
         $handle = (string) $post->post_name;
@@ -309,10 +309,11 @@ final class CardViewService
             'bio'                 => self::resolvePageBio($post),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
-            // Entity cards use card_tier rarity, not the member trust chip.
-            'reputation_tier_label' => null,
-            'card_tier'           => $card['key'],
-            'tier_label'          => $card['label'],
+            // v1.56: entity cards now carry the SAME trust vocabulary as
+            // members. They used to emit rarity words here and a null
+            // reputation_tier_label, which is why a `risky` entity rendered
+            // with no tier tag at all.
+            'reputation_tier_label' => $rep['reputation_tier_label'],
             // Rank is member-only — but the fields are ALWAYS emitted
             // (nullable) per the contract, so the frontend can render
             // without a kind check.
@@ -379,12 +380,13 @@ final class CardViewService
             'community_dossier'   => null,
             // V1: tier-keyed coloring for entity cards (chain-keyed lands
             // alongside §K3 chain-wiring in V1.5). `background_value` per
-            // §2.9 is the card_tier slug; falls back to 'common' on the
-            // edge case where the read-model hasn't projected yet.
+            // §2.9 is the reputation_tier slug as of v1.56; falls back to
+            // 'neutral' on the edge case where the read-model hasn't
+            // projected yet.
             'crest'               => self::buildCrest(
                 $name,
                 'tier',
-                $card['key'] ?? 'common',
+                $rep['reputation_tier'],
                 self::resolvePageAvatarUrl($pageId, $validatorRows, $validatorLogo)
             ),
             'stats'               => self::buildPageStats($trustScore, $rm),
@@ -584,7 +586,6 @@ final class CardViewService
 
         $tier        = $this->reputationRepo->getTier($userId);
         $trustScore  = (int) round($this->reputationRepo->getScore($userId));
-        $card        = ReputationTierMap::resolve($tier);
         $resolvedHandle = self::resolveMemberHandle($user);
         // §J.6 viewer_attestation on member cards. Member card
         // target_kind is `user_profile` per §J.1. Anon viewers get
@@ -623,10 +624,9 @@ final class CardViewService
             'bio'                 => self::resolveMemberBio($user),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
-            // Honest member trust chip (Risky…Proven), distinct from card_tier rarity.
+            // The member trust chip (Risky…Elite) — the sole tier vocabulary
+            // since v1.56.
             'reputation_tier_label' => $summary['reputation_tier_label'],
-            'card_tier'           => $card['key'],
-            'tier_label'          => $card['label'],
             // Real (level-derived) rank label now — resolved once via
             // getSummary's RankService path (no longer a hard-stubbed null).
             'rank_label'          => $summary['rank_label'],
@@ -673,7 +673,7 @@ final class CardViewService
             'crest'               => self::buildCrest(
                 (string) $user->display_name ?: $user->user_login,
                 'tier',
-                $card['key'] ?? 'common',
+                $tier,
                 self::resolveMemberAvatarUrl($userId)
             ),
             'stats'               => $this->buildMemberStats(
@@ -725,10 +725,10 @@ final class CardViewService
 
     /**
      * Server-owned kicker copy per group type. Mirrors (and supersedes,
-     * per §L5) the frontend GroupCard's KICKER_BY_TYPE map — the FE now
-     * renders `tier_label` verbatim instead of deriving from `type`.
+     * per §L5) the frontend GroupCard's KICKER_BY_TYPE map — the FE
+     * renders `kicker` verbatim instead of deriving from `type`.
      */
-    private const COMMUNITY_TIER_LABEL_BY_TYPE = [
+    private const COMMUNITY_KICKER_BY_TYPE = [
         'nft'       => 'HOLDER COMMUNITY',
         'validator' => 'DELEGATOR COMMUNITY',
         'hall'      => 'CHAIN HALL',
@@ -747,7 +747,7 @@ final class CardViewService
      * Shape rules (locked, contract §3.2.4):
      *   - trust fields are shape-stable placeholders — communities have
      *     no trust system (trust_score 0 / reputation_tier "neutral" /
-     *     card_tier "common"); tier_label carries the group-type kicker.
+     *     reputation_tier "neutral"); `kicker` carries the group-type word.
      *   - crest: chain-keyed background for NFT groups with a chain_tag,
      *     tier-keyed "common" otherwise; image_url = collection cover
      *     (nullable → FE monogram fallback).
@@ -789,7 +789,9 @@ final class CardViewService
             $backgroundValue = $chainTag;
         } else {
             $backgroundKind  = 'tier';
-            $backgroundValue = 'common';
+            // Communities have no trust system; 'neutral' is the shape-stable
+            // placeholder (was 'common' under the retired rarity palette).
+            $backgroundValue = 'neutral';
         }
 
         return [
@@ -804,8 +806,13 @@ final class CardViewService
             'trust_score'         => 0,
             'reputation_tier'     => 'neutral',
             'reputation_tier_label' => null,
-            'card_tier'           => 'common',
-            'tier_label'          => self::COMMUNITY_TIER_LABEL_BY_TYPE[$type] ?? 'COMMUNITY',
+            // The group-type kicker. Until v1.56 this rode on `tier_label`,
+            // overloading a trust field to carry a category word — the FE
+            // rendered it verbatim so it worked, but it meant "tier_label"
+            // named two unrelated things depending on card_kind. Now its own
+            // field, and `card_tier: 'common'` (a pure color key, never a
+            // rarity claim) is gone with the rest of the rarity vocabulary.
+            'kicker'              => self::COMMUNITY_KICKER_BY_TYPE[$type] ?? 'COMMUNITY',
             'rank_label'          => null,
             'current_rank_label'  => null,
             'is_in_good_standing' => true,
@@ -1354,7 +1361,7 @@ final class CardViewService
     /**
      * Build the §2.9 Crest view-model. `background_kind` is one of
      * `chain` / `tier` / `solid`; `background_value` is a chain slug,
-     * card_tier, or hex string respectively. `image_url` is null when
+     * reputation_tier, or hex string respectively. `image_url` is null when
      * the entity has no custom crest image — frontend falls back to
      * `initials + monogram_color` inside the hex.
      *

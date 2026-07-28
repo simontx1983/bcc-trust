@@ -7,6 +7,7 @@ use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\SuspensionRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\TrustScoreService;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Infrastructure\EdgeCache;
@@ -233,22 +234,28 @@ final class ModerationService
             return ['success' => false, 'message' => 'Override reason is required.'];
         }
 
-        // Determine tier from new score
-        $tier = 'risky';
-        if ($newScore >= BCC_TRUST_TIER_ELITE) {
-            $tier = 'elite';
-        } elseif ($newScore >= BCC_TRUST_TIER_TRUSTED) {
-            $tier = 'trusted';
-        } elseif ($newScore >= BCC_TRUST_TIER_NEUTRAL) {
-            $tier = 'neutral';
-        } elseif ($newScore >= BCC_TRUST_TIER_CAUTION) {
-            $tier = 'caution';
-        }
+        // Determine tier from new score, via the canonical ladder.
+        //
+        // §J.12: an admin override is explicit fiat, so it is evaluated as a
+        // STICKY GRANT — the native-conduct floor and the eligibility gate are
+        // both satisfied by the admin's decision (there are no score
+        // components to measure here; the admin is setting total_score
+        // directly). The flag is then persisted below so the nightly
+        // eligibility sweep does not silently revert the override, which
+        // would otherwise present as an admin action that "didn't take".
+        $tier = TrustScoreService::tierFor((float) $newScore, (float) $newScore, true);
 
         // Collect affected page IDs before the UPDATE (for read model sync).
         $affectedPageIds = $this->scoreRepository->getPageIdsByOwner($userId);
 
         $updated = $this->scoreRepository->overrideScoreByOwner($userId, (float) $newScore, $tier);
+
+        if ($tier === 'elite') {
+            $now = gmdate('Y-m-d H:i:s');
+            foreach ($affectedPageIds as $pid) {
+                $this->scoreRepository->setEliteEligibility((int) $pid, true, $now);
+            }
+        }
 
         // Sync read model for all affected pages.
         foreach ($affectedPageIds as $pid) {

@@ -229,6 +229,8 @@ require_once BCC_TRUST_PATH . 'includes/database/backfill-canonical-handles.php'
 // Gravatar member↔wallet oracle (docs/wallet-privacy-policy.md). Invoked by
 // the migration runner below (and, for compatibility, the schema path).
 require_once BCC_TRUST_PATH . 'includes/database/backfill-wallet-placeholder-emails.php';
+require_once BCC_TRUST_PATH . 'includes/database/backfill-elite-eligibility.php';
+require_once BCC_TRUST_PATH . 'includes/database/backfill-watch-tier-vocabulary.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
@@ -492,6 +494,12 @@ add_action('bcc_trust_process_recalculations', function () {
 // so the /me/reliability + standing read paths serve cache-first.
 add_action('bcc_attestor_reliability_sweep', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->sweepAttestorReliability();
+});
+// §J.12: nightly elite-eligibility gate recompute. Catches the two gate
+// inputs that change with no event to subscribe to — tenure crossings and
+// upheld disputes ageing out of the trailing window.
+add_action('bcc_trust_elite_eligibility_sweep', function () {
+    \BCC\Trust\Core\Plugin::instance()->cronService()->sweepEliteEligibility();
 });
 // §F2 hot-feed warm: minutely rebuild of the anonymous /feed/hot
 // first-page payload so cold anonymous hits serve from the object
@@ -901,6 +909,15 @@ add_action('plugins_loaded', static function (): void {
     // the attestation-decay sweep. Guarded + additive; mirrors scheduleAll().
     if (!wp_next_scheduled('bcc_attestor_reliability_sweep')) {
         wp_schedule_event(time() + 4 * HOUR_IN_SECONDS, 'daily', 'bcc_attestor_reliability_sweep');
+    }
+
+    // §J.12 — nightly elite-eligibility recompute self-heal. NEW hook; same
+    // silent-drift class as the two above. Offset 5h so it trails the
+    // reliability sweep (4h) and the attestation decay sweep (3h): the gate
+    // reads attestation state, so evaluating before decay has settled would
+    // just be re-run tomorrow. Guarded + additive; mirrors scheduleAll().
+    if (!wp_next_scheduled('bcc_trust_elite_eligibility_sweep')) {
+        wp_schedule_event(time() + 5 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_elite_eligibility_sweep');
     }
 
     // Holder-group revoke (re-verification) sweep self-heal. This hook is
@@ -2044,6 +2061,12 @@ function bcc_trust_activate() {
     // plugins_loaded; DO NOT remove the activation-side schedule as "redundant."
     if (!wp_next_scheduled('bcc_trust_daily_attestation_decay')) {
         wp_schedule_event(time() + 3 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_daily_attestation_decay');
+    }
+
+    // §J.12 — daily elite-eligibility gate recompute (activation fast path).
+    // Self-heal mirror at plugins_loaded; DO NOT remove either as "redundant."
+    if (!wp_next_scheduled('bcc_trust_elite_eligibility_sweep')) {
+        wp_schedule_event(time() + 5 * HOUR_IN_SECONDS, 'daily', 'bcc_trust_elite_eligibility_sweep');
     }
 
     // V2 Phase 1 NFT cron schedules (activation fast path).

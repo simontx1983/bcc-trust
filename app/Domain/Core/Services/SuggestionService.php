@@ -50,6 +50,7 @@ use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\SuspensionRepository;
 use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
 use BCC\Trust\Core\Support\PrivacySettings;
+use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\DelegationRepository;
 
 if (!defined('ABSPATH')) {
@@ -101,8 +102,8 @@ final class SuggestionService
      *   handle: string,
      *   display_name: string,
      *   avatar_url: string,
-     *   card_tier: string|null,
-     *   tier_label: string|null,
+     *   reputation_tier: string,
+     *   reputation_tier_label: string,
      *   rank_label: string,
      *   is_in_good_standing: bool,
      *   suggestion_reason: array{code: string, label: string}|null
@@ -302,8 +303,10 @@ final class SuggestionService
                 'handle'              => (string) $summary['handle'],
                 'display_name'        => (string) $summary['display_name'],
                 'avatar_url'          => (string) $summary['avatar_url'],
-                'card_tier'           => is_string($summary['card_tier']) ? $summary['card_tier'] : null,
-                'tier_label'          => is_string($summary['tier_label']) ? $summary['tier_label'] : null,
+                'reputation_tier'       => is_string($summary['reputation_tier']) ? $summary['reputation_tier'] : 'neutral',
+                'reputation_tier_label' => is_string($summary['reputation_tier_label'])
+                    ? $summary['reputation_tier_label']
+                    : ReputationTierMap::toReputationTierLabel('neutral'),
                 'rank_label'          => (string) $summary['rank_label'],
                 'is_in_good_standing' => (bool) $summary['is_in_good_standing'],
                 'suggestion_reason'   => $reasonByUser[$cid] ?? null,

@@ -8,7 +8,7 @@
  *
  *   {
  *     total: int,                           // collection size
- *     tier_distribution: {                  // §C1 card_tier rollup
+ *     tier_distribution: {                  // reputation_tier rollup
  *       legendary: { count: int, percent: int },
  *       rare:      { count: int, percent: int },
  *       uncommon:  { count: int, percent: int },

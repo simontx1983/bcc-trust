@@ -697,7 +697,15 @@ class BehavioralAnalyzer {
             $avgScore = array_sum($pageScores) / count($pageScores);
             $metrics['avg_page_score_voted'] = $avgScore;
 
-            // If they only vote for very high or very low pages
+            // If they only vote for very high or very low pages.
+            //
+            // These constants are used here as SCORE-BAND boundaries, not as a
+            // tier resolution — the question is "does this voter only touch
+            // extreme-scoring pages", which is a property of the number. Do
+            // NOT rewrite this through TrustScoreService::tierFor(): since the
+            // §J.12 gate, a page can sit above the elite threshold while being
+            // tiered `trusted`, and that distinction is irrelevant (and
+            // misleading) to this heuristic.
             if ($avgScore > BCC_TRUST_TIER_ELITE || $avgScore < BCC_TRUST_TIER_CAUTION) {
                 $suspicious = true;
                 $weight += 15;

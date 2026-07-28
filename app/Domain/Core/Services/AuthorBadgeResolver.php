@@ -1,7 +1,7 @@
 <?php
 /**
  * AuthorBadgeResolver — batched composer for the rank-chip fields
- * (reputation_tier, card_tier, tier_label, rank_label) on per-page
+ * (reputation_tier, reputation_tier_label, rank_label) on per-page
  * author surfaces.
  *
  * Used by:
@@ -9,14 +9,18 @@
  *   - CommentService::shapeCommentRow (comments drawer)
  *
  * §A2 / §J.6 contract — every field returned here is server-resolved.
- * The frontend's AuthorBadge MUST NOT manufacture a reputation→
- * card_tier mapping; this resolver IS that mapping.
+ * The frontend's AuthorBadge MUST NOT manufacture a tier→label mapping;
+ * this resolver IS that mapping.
+ *
+ * `reputation_tier` is REQUIRED on every author surface (contract v1.56).
+ * It used to be optional, which is precisely why RankChip fell back to the
+ * retired `card_tier` and, since risky had no card_tier, lost the ability to
+ * render a risky author at all. Never make it optional again.
  *
  * Field semantics (canonical, shared across surfaces — do not
  * duplicate the mapping elsewhere):
- *   - card_tier + tier_label   → ReputationTierMap::resolve($tier) (entity rarity)
- *   - reputation_tier_label    → ReputationTierMap::toReputationTierLabel($tier) (honest member chip)
- *   - rank_label               → RankService::rankForLevel($level) → RankCatalog::getLabel()
+ *   - reputation_tier + reputation_tier_label → ReputationTierMap::resolveReputation($tier)
+ *   - rank_label                              → RankService::rankForLevel($level) → RankCatalog::getLabel()
  *
  * **Rank is level-derived, not tier-derived** (the three-axes identity
  * model — see RankService). Tier supplies the trust chip; the
@@ -66,8 +70,6 @@ final class AuthorBadgeResolver
      * @return array<int, array{
      *   reputation_tier: string,
      *   reputation_tier_label: string,
-     *   card_tier: string|null,
-     *   tier_label: string|null,
      *   rank_label: string,
      * }>
      */
@@ -104,10 +106,8 @@ final class AuthorBadgeResolver
             $rankLabel = RankCatalog::getLabel(RankService::rankForLevel($level)) ?? '';
 
             $out[$uid] = [
-                'reputation_tier'       => $tier,
+                'reputation_tier'       => $rep['reputation_tier'],
                 'reputation_tier_label' => $rep['reputation_tier_label'],
-                'card_tier'             => $rep['card_tier'],
-                'tier_label'            => $rep['tier_label'],
                 'rank_label'            => $rankLabel,
             ];
         }
@@ -123,8 +123,6 @@ final class AuthorBadgeResolver
      * @return array{
      *   reputation_tier: string,
      *   reputation_tier_label: string,
-     *   card_tier: string|null,
-     *   tier_label: string|null,
      *   rank_label: string,
      * }
      */
@@ -136,10 +134,6 @@ final class AuthorBadgeResolver
             // omits the badge when handed an empty payload.
             'reputation_tier'       => 'neutral',
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel('neutral'),
-            'card_tier'             => ReputationTierMap::toCardTier('neutral'),
-            'tier_label'            => ReputationTierMap::toCardTierLabel(
-                ReputationTierMap::toCardTier('neutral')
-            ),
             'rank_label'            => RankCatalog::getLabel(
                 RankService::rankForLevel(FeatureAccessService::LEVEL_NEW)
             ) ?? '',
