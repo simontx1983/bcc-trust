@@ -37,6 +37,17 @@
  * stored generated columns + unique), do not improvise — the approved
  * fallback (app-level enforcement + hourly reconcile sweep) needs
  * separate sign-off.
+ *
+ * AUDIT ↔ CONSTRAINT EQUIVALENCE: the duplicate audit counts verified
+ * operator claim ROWS per entity (`COUNT(*) > 1`), which is exactly the
+ * set the UNIQUE key on `verified_operator_slot` rejects — the slot is
+ * non-NULL and identical for every verified operator row of an entity,
+ * so any two such rows collide regardless of user_id. Counting rows (not
+ * DISTINCT user_id) means the audit stands on its own: it flags even two
+ * verified-operator rows for the SAME user+entity, so it does not depend
+ * on the separate `uq_user_entity` key continuing to exist. If a future
+ * schema change drops that key, this audit still catches every row set
+ * the `apply` ALTER would fail on, preserving fail-before-apply.
  */
 
 if (!defined('ABSPATH')) {
@@ -70,9 +81,14 @@ $columnExists = (int) $wpdb->get_var($wpdb->prepare(
 )) > 0;
 echo 'Constraint column present: ' . ($columnExists ? 'YES (nothing to do)' : 'no') . "\n";
 
-// ── 1. Duplicate audit — >1 distinct verified operator per entity ──
+// ── 1. Duplicate audit — >1 verified operator claim ROW per entity ──
+//      COUNT(*), not COUNT(DISTINCT user_id): the UNIQUE key rejects any
+//      two verified-operator rows of an entity (same slot) regardless of
+//      user, so the audit must count rows to mirror the constraint and
+//      not lean on `uq_user_entity`. See the docblock's AUDIT ↔ CONSTRAINT
+//      EQUIVALENCE note.
 $dupes = $wpdb->get_results(
-    "SELECT entity_type, entity_id, COUNT(DISTINCT user_id) AS c,
+    "SELECT entity_type, entity_id, COUNT(*) AS c,
             GROUP_CONCAT(id ORDER BY id) AS claim_ids
        FROM {$claims}
       WHERE status = 'verified' AND claim_role = 'operator'
@@ -82,7 +98,7 @@ $dupes = $wpdb->get_results(
 if ($dupes) {
     echo "DUPLICATES (" . count($dupes) . ") — remediate manually (prefer status='superseded'; never DELETE), then re-run:\n";
     foreach ($dupes as $d) {
-        echo "  {$d->entity_type}:{$d->entity_id} — {$d->c} distinct operators, claim ids [{$d->claim_ids}]\n";
+        echo "  {$d->entity_type}:{$d->entity_id} — {$d->c} verified operator claim rows, claim ids [{$d->claim_ids}]\n";
     }
 } else {
     echo "Duplicate audit: CLEAN\n";
