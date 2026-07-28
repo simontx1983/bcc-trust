@@ -3,7 +3,7 @@
  * Trust Attestation Layer schema — §J wire contract + Phase 1 plan §5.1.
  *
  * The bcc_trust_attestations table is the canonical store for V1
- * Layer-1 attestations (Vouch + Stand Behind). Disputes live in a
+ * Layer-1 attestations (Vouch + Back). Disputes live in a
  * separate table because they carry stake + panel mechanics that
  * don't fit this shape.
  *

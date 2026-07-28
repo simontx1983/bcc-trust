@@ -101,7 +101,7 @@ define('BCC_RELIABILITY_KIND_VOUCH', 1.0);
 define('BCC_RELIABILITY_KIND_STAND_BEHIND', 1.5);
 
 // Early-read multiplier (stand_behind ONLY; vouch always 1.0), keyed on the
-// attestation's attestation_order_in_target. Being first to stand behind a
+// attestation's attestation_order_in_target. Being first to back a
 // target that later earns consensus is the strongest reliability signal;
 // piling on after the crowd is the weakest. Tiers by order:
 //   1st → EARLY_1ST, 2nd–5th → EARLY_2_5, 6th–20th → EARLY_6_20, 21st+ → EARLY_21PLUS.
@@ -131,7 +131,7 @@ define('BCC_RELIABILITY_EARLY_PROTECT_FIRST', 5);
 define('BCC_RELIABILITY_TREND_EPSILON', 0.02);
 
 // ─────────────────────────────────────────────────────────────────────────
-// Slice 4 — Stand-Behind slot graduation (§J.1) + Early Read sub-tracks
+// Slice 4 — Backing slot graduation (§J.1) + Early Read sub-tracks
 // (§J.3.2.1) + proper pre-consensus band.
 // ─────────────────────────────────────────────────────────────────────────
 

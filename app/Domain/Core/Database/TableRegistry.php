@@ -250,7 +250,7 @@ final class TableRegistry
     }
 
     // V2 Trust Attestation Layer: §J wire contract.
-    // Stores Layer-1 attestations (Vouch + Stand Behind). Disputes
+    // Stores Layer-1 attestations (Vouch + Back). Disputes
     // live separately (stake + panel mechanics don't fit this shape).
     // Generalized successor to the retired bcc_trust_endorsements table
     // per the §J.11 "endorse collapses into vouch" migration.

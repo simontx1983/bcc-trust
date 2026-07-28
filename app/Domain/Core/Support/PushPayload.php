@@ -240,7 +240,7 @@ final class PushPayload
      * V2 Trust Attestation Layer events. Four discrete builders so
      * each event reads with its own copy. Aggregated bodies (count > 1)
      * drop the actor + render "N new vouches" / "N new operators
-     * standing behind you" / "N reaffirmed" / "N revoked" — debounce
+     * backing you" / "N reaffirmed" / "N revoked" — debounce
      * windows are per-(recipient, event), so each builder only mixes
      * within one event type.
      *
@@ -291,10 +291,10 @@ final class PushPayload
 
         $title = 'Blue Collar Crypto';
         $body  = $count > 1
-            ? sprintf('%d operators are standing behind you.', $count)
+            ? sprintf('%d operators are backing you.', $count)
             : ($actor !== ''
-                ? sprintf('@%s is standing behind you.', $actor)
-                : 'Someone is standing behind you.');
+                ? sprintf('@%s is backing you.', $actor)
+                : 'Someone is backing you.');
 
         return [
             'title' => $title,

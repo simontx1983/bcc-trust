@@ -207,7 +207,7 @@ function bcc_trust_create_tables() {
     }
 
     // §D5 reaction seeding — idempotent insert of the three custom
-    // reactions (Solid / Vouch / Stand behind) as peepso_reaction_user
+    // reactions (Solid / Vouch / Back) as peepso_reaction_user
     // CPT posts. Re-running is safe; missing kinds get inserted,
     // present kinds are left alone.
     if (class_exists('\\BCC\\Trust\\Core\\Services\\Reactions\\ReactionSeeder')) {

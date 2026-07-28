@@ -96,7 +96,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -235,7 +235,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -374,7 +374,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -513,7 +513,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -666,7 +666,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -819,7 +819,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -972,7 +972,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -1125,7 +1125,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -1278,7 +1278,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -1431,7 +1431,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -1584,7 +1584,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -1737,7 +1737,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -1890,7 +1890,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -2043,7 +2043,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -2196,7 +2196,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -2349,7 +2349,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -2502,7 +2502,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -2655,7 +2655,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -2808,7 +2808,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -2961,7 +2961,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -3114,7 +3114,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -3267,7 +3267,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -3420,7 +3420,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,
@@ -3573,7 +3573,7 @@
         "can_stand_behind": {
           "allowed": false,
           "reason_code": null,
-          "unlock_hint": "Sign in to stand behind operators."
+          "unlock_hint": "Sign in to back operators."
         },
         "can_vouch": {
           "allowed": false,

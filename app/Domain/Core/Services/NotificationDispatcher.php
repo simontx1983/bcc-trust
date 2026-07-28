@@ -921,7 +921,7 @@ final class NotificationDispatcher
             $actorHandle = self::resolveHandle($attestorId);
             $message     = $kind === 'vouch'
                 ? sprintf('@%s vouched for you.', $actorHandle)
-                : sprintf('@%s is standing behind you.', $actorHandle);
+                : sprintf('@%s is backing you.', $actorHandle);
             $type        = $kind === 'vouch'
                 ? NotificationType::ATTESTATION_VOUCH_RECEIVED
                 : NotificationType::ATTESTATION_STAND_BEHIND_RECEIVED;
@@ -989,7 +989,7 @@ final class NotificationDispatcher
         try {
             $actorHandle = self::resolveHandle($attestorId);
             $message     = $kind === 'stand_behind'
-                ? sprintf('@%s is no longer standing behind you.', $actorHandle)
+                ? sprintf('@%s is no longer backing you.', $actorHandle)
                 : sprintf('@%s revoked their vouch.', $actorHandle);
 
             $this->dispatch(
@@ -1046,7 +1046,7 @@ final class NotificationDispatcher
         try {
             $actorHandle = self::resolveHandle($attestorId);
             $message     = $kind === 'stand_behind'
-                ? sprintf('@%s reaffirmed standing behind you.', $actorHandle)
+                ? sprintf('@%s reaffirmed backing you.', $actorHandle)
                 : sprintf('@%s reaffirmed their vouch.', $actorHandle);
 
             $this->dispatch(
