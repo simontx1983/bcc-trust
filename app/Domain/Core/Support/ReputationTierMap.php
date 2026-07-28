@@ -3,7 +3,7 @@
  * ReputationTierMap — single source of truth for the §C1 reputation
  * tier → display-label mapping.
  *
- * ## The rarity vocabulary is RETIRED (contract v1.56)
+ * ## The rarity vocabulary is RETIRED (contract v1.57)
  *
  * This class used to carry a second mapping onto collectible-rarity words
  * (elite→Legendary, trusted→Rare, neutral→Uncommon, caution→Common,

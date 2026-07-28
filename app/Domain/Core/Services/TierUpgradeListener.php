@@ -15,7 +15,7 @@
  *
  * Tier ladder (order, low → high): risky · caution · neutral · trusted · elite.
  *
- * The celebration label is keyed on the reputation tier label (v1.56 —
+ * The celebration label is keyed on the reputation tier label (v1.57 —
  * "Your standing is now Trusted"). It was previously keyed on the retired
  * card rarity ("Your card is now Rare"), which could not render at all for
  * a tier with no rarity slot.
@@ -154,7 +154,7 @@ final class TierUpgradeListener
         if (!isset(ReputationTierMap::TIER_LABEL[$tier])) {
             return 'Your standing improved.';
         }
-        // v1.56: "Your card is now Rare" became "Your standing is now
+        // v1.57: "Your card is now Rare" became "Your standing is now
         // Trusted". The rarity phrasing was retired along with the
         // vocabulary — and it never fired for the bottom tier at all,
         // because risky had no card mapping to render.

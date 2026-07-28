@@ -299,7 +299,7 @@ final class WatchingService
         //  to the underlying follow relationship, not the page.
         // ────────────────────────────────────────────────────────────
         // bcc_watch_meta.tier_at_watch stores REPUTATION tier values
-        // (risky/caution/neutral/trusted/elite) as of v1.56 — it previously
+        // (risky/caution/neutral/trusted/elite) as of v1.57 — it previously
         // stored the retired card rarity slugs, and `watch_tier_vocabulary_v1`
         // rewrote the historical rows. Emitted under the
         // reputation_tier_at_watch field name; the label is pre-rendered
@@ -494,7 +494,7 @@ final class WatchingService
      * tier_at_watch. Returns null when the read-model row hasn't projected
      * yet — same null semantics buildItem already handles.
      *
-     * Since v1.56 this is a pass-through rather than a mapping: the column
+     * Since v1.57 this is a pass-through rather than a mapping: the column
      * stores the reputation tier directly.
      */
     private function resolveTierForPage(int $pageId): ?string
@@ -595,7 +595,7 @@ final class WatchingService
 
         if (!$alreadyWatching) {
             // First-time watch: write the sidecar with the followee's
-            // current reputation_tier preserved (v1.56 — the column used to
+            // current reputation_tier preserved (v1.57 — the column used to
             // hold the retired card rarity slug, which lost `risky` entirely).
             $tierAtWatch = $this->resolveTierForUser($followeeId);
             $this->watchMetaRepo->insert($followId, $tierAtWatch, null /* batch_id — owned by WatchBatchAggregator */);
@@ -705,7 +705,7 @@ final class WatchingService
     /**
      * The followee's current reputation tier, snapshotted at watch time.
      *
-     * Was a reputation_tier → card_tier mapping until v1.56, which meant a
+     * Was a reputation_tier → card_tier mapping until v1.57, which meant a
      * risky followee snapshotted as NULL and their watch tile rendered with
      * no tier at all. All five tiers now round-trip.
      */

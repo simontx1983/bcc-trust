@@ -1,10 +1,10 @@
 <?php
 /**
  * One-shot backfill — rewrite historical `tier_at_watch` snapshots from the
- * retired card-rarity vocabulary to reputation tiers (contract v1.56).
+ * retired card-rarity vocabulary to reputation tiers (contract v1.57).
  *
  * `bcc_watch_meta.tier_at_watch` and `bcc_page_follows.tier_at_watch` store
- * the followee's tier AS OF the moment of the watch. Until v1.56 the value
+ * the followee's tier AS OF the moment of the watch. Until v1.57 the value
  * written was the card RARITY slug (legendary/rare/uncommon/common), not the
  * reputation tier. WatchingService now writes and reads reputation tiers, so
  * without this migration every pre-existing row would render its label
@@ -34,7 +34,7 @@
  *
  * @package BCC_Trust
  * @subpackage Database
- * @since contract v1.56 (rarity vocabulary retirement)
+ * @since contract v1.57 (rarity vocabulary retirement)
  */
 
 if (!defined('ABSPATH')) {

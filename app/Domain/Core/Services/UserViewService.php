@@ -176,7 +176,7 @@ final class UserViewService
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
             'reputation_tier'     => $tier,
             // The member trust chip (Risky…Elite), rendered verbatim per §A2.
-            // Sole tier vocabulary since v1.56 — the retired rarity words had
+            // Sole tier vocabulary since v1.57 — the retired rarity words had
             // no slot for `risky` at all, so the most safety-relevant state in
             // the system was invisible wherever they were used.
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel($tier),
