@@ -16,7 +16,7 @@
  *     1:1 so cross-stack searches stay easy.
  *
  * V1 type catalogue (per §I2 launch checklist):
- *   - REACTION       — Solid/Vouch/Stand-behind on your post
+ *   - REACTION       — Solid/Vouch/Back on your post
  *   - REVIEW         — review on a page you own
  *   - CARD_WATCHED   — someone watched (followed) your validator/etc
  *   - RANK_UP        — you earned a new rank

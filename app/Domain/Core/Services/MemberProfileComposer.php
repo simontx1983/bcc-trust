@@ -91,7 +91,7 @@ final class MemberProfileComposer
     private const BREAKDOWN_DEFINITIONS = [
         ['key' => 'pulls',     'label' => 'Pulls',     'description' => 'Cards added to the watchlist.', 'tone' => 'verified'],
         ['key' => 'reviews',   'label' => 'Reviews',   'description' => 'Long-form reviews on pages.', 'tone' => 'ink'],
-        ['key' => 'reactions', 'label' => 'Reactions', 'description' => 'Solids, vouches, stand-behinds.', 'tone' => 'safety'],
+        ['key' => 'reactions', 'label' => 'Reactions', 'description' => 'Solids, vouches, backings.', 'tone' => 'safety'],
         ['key' => 'disputes',  'label' => 'Disputes',  'description' => 'Disputes signed.', 'tone' => 'weld'],
         ['key' => 'posts',     'label' => 'Posts',     'description' => 'Status posts on the Floor.', 'tone' => 'ink'],
     ];
@@ -162,7 +162,7 @@ final class MemberProfileComposer
         // ── §J.6 viewer_attestation — does the viewer currently have a
         //   vouch / stand_behind cast against THIS operator? Drives the
         //   FE AttestationActionCluster's cast-state copy ("VOUCHED" /
-        //   "STANDING BEHIND") and Stand Behind slot availability.
+        //   "BACKING") and Backing slot availability.
         //   Profile-scoped attestations target_kind=user_profile per
         //   §J.1. Anon viewers get null (service returns null for
         //   viewerId<=0); the FE treats undefined and null identically

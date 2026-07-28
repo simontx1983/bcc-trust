@@ -527,8 +527,8 @@ final class AttestationRepository
      *
      *   |{ users U : attestor → U active AND U → target active }|
      *
-     * In words: "how many of the operators I've vouched/stand-behind
-     * on have also vouched/stand-behind on this target?" Drives the
+     * In words: "how many of the operators I've vouched/backed
+     * on have also vouched/backed on this target?" Drives the
      * `CohortOverlapDampener` numerator.
      *
      * Self-join across two row sets via the `target_id = attestor_user_id`

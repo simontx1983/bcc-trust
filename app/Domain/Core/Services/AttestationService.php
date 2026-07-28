@@ -68,7 +68,7 @@ final class AttestationService
      * Reputation tiers that satisfy the "good standing" gate. Sourced
      * from UserViewService::GOOD_STANDING_TIERS per the §G2 single-
      * source-of-truth rule — duplicated here as a class constant only
-     * for clarity. Vouch / Stand Behind / Report all gate on this set.
+     * for clarity. Vouch / Back / Report all gate on this set.
      *
      * @var list<string>
      */
@@ -83,7 +83,7 @@ final class AttestationService
     private const TRUSTED_PLUS_TIERS = ['trusted', 'elite'];
 
     /**
-     * §J.1 Stand Behind bandwidth model — concurrent active-attestation
+     * §J.1 Backing bandwidth model — concurrent active-attestation
      * slots per attestor tier. Graduated bonus slots (§J.1 long-term
      * graph health refinements) ship in Slice E; V1 returns 0 for
      * `graduated`, so effective_total === baseline here.
@@ -157,7 +157,7 @@ final class AttestationService
      * Composers call this to populate the FE's
      * `MemberProfile.viewer_attestation` / `Card.viewer_attestation`
      * field. The FE's AttestationActionCluster reads this to render
-     * cast states ("VOUCHED" / "STANDING BEHIND") on the action
+     * cast states ("VOUCHED" / "BACKING") on the action
      * buttons.
      *
      * Anon viewers (viewerUserId === 0) get null returned —
@@ -241,11 +241,10 @@ final class AttestationService
      * Tier gates: anon → "Sign in to <verb>." Below threshold →
      * "Reach <Tier> standing to <verb>." Threshold reached → allowed.
      *
-     * Stand Behind in Phase 1 Slice B uses the same gate as Vouch.
+     * Backing in Phase 1 Slice B uses the same gate as Vouch.
      * Bandwidth slot enforcement lands in Slice C alongside mutation
-     * endpoints; until then, eligible operators see plain "STAND
-     * BEHIND" rather than the "STAND BEHIND · N OF M" allocation
-     * indicator.
+     * endpoints; until then, eligible operators see plain "BACK"
+     * rather than the "BACK · N OF M" allocation indicator.
      *
      * This method emits can_vouch + can_stand_behind + can_report only.
      * The sole person-level negative action is can_report; vote-disputes
@@ -297,7 +296,7 @@ final class AttestationService
                 ],
                 'can_stand_behind' => [
                     'allowed'     => false,
-                    'unlock_hint' => 'Sign in to stand behind operators.',
+                    'unlock_hint' => 'Sign in to back operators.',
                 ],
                 'can_report' => [
                     'allowed'     => false,
@@ -334,7 +333,7 @@ final class AttestationService
                 ],
                 'can_stand_behind' => [
                     'allowed'     => false,
-                    'unlock_hint' => 'Reach Neutral standing to stand behind operators.',
+                    'unlock_hint' => 'Reach Neutral standing to back operators.',
                 ],
                 'can_report' => [
                     'allowed'     => false,
@@ -343,10 +342,10 @@ final class AttestationService
             ];
         }
 
-        // All gates pass for Phase 1 Slice B. Stand Behind slot
+        // All gates pass for Phase 1 Slice B. Backing slot
         // enforcement lands in Slice C; for now, eligible operators
-        // see plain STAND BEHIND (the FE's allocation indicator
-        // "STAND BEHIND · N OF M" stays plain "STAND BEHIND" when
+        // see plain BACK (the FE's allocation indicator
+        // "BACK · N OF M" stays plain "BACK" when
         // the slot fields aren't yet supplied).
         $allowed = ['allowed' => true, 'unlock_hint' => null];
         return [
@@ -547,7 +546,7 @@ final class AttestationService
         if (!in_array($attestorTier, self::NEUTRAL_PLUS_TIERS, true)) {
             $verb = $kind === 'vouch'
                 ? 'vouch'
-                : 'stand behind operators';
+                : 'back operators';
             $hint = sprintf('Reach Neutral standing to %s.', $verb);
             throw new AttestationException(
                 AttestationException::CODE_INELIGIBLE,
@@ -1004,7 +1003,7 @@ final class AttestationService
 
     /**
      * Throw `bcc_attestation_bandwidth_exhausted` when the attestor has
-     * no Stand Behind slot available. Caller (cast()) is responsible
+     * no Backing slot available. Caller (cast()) is responsible
      * for being inside the per-attestor advisory lock — that's what
      * makes "count_used vs. limit" a serializable read.
      *
@@ -1030,9 +1029,9 @@ final class AttestationService
         $holders = $this->buildSlotHolders($attestorUserId);
 
         $message = $total === 0
-            ? 'Reach Neutral standing to stand behind operators.'
+            ? 'Reach Neutral standing to back operators.'
             : sprintf(
-                "You're standing behind your maximum of %d operators. Free a slot by revoking one to add another.",
+                "You're backing your maximum of %d operators. Free a slot by revoking one to add another.",
                 $total
             );
 
@@ -1049,7 +1048,7 @@ final class AttestationService
     }
 
     /**
-     * Read the active Stand Behind rows for an attestor, shaped for
+     * Read the active Backing rows for an attestor, shaped for
      * the §J.2 `slot_holders[]` picker. Bounded by the §J.1 tier max
      * (Elite=7, plus future graduated cap → 10); reads at most that
      * many rows via AttestationRepository::listActiveStandBehindByAttestor.

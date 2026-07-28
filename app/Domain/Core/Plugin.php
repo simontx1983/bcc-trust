@@ -1451,7 +1451,7 @@ final class Plugin
         //   DELETE /me/attestations/{id}         — revoke (soft-delete)
         //   POST   /me/attestations/{id}/reaffirm — refresh decay baseline
         // Locked §4.20 §J wire contract. Idempotent on
-        // (attestor, target_kind, target_id, kind); Stand Behind
+        // (attestor, target_kind, target_id, kind); Backing
         // bandwidth slot enforcement per §J.1 (Elite 7 / Trusted 5 /
         // Neutral 3 / Caution+Risky 0). Audit + notification + cache
         // invalidation gated on real state transitions per §I1

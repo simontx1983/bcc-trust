@@ -80,7 +80,7 @@ final class ContestedStateExplainer
             'headline' => 'Pattern of withdrawn reads.',
             'body' =>
                 "More operators have withdrawn attestations on you than currently "
-                . "stand behind their call. The floor reads this as a pattern, not "
+                . "back their call. The floor reads this as a pattern, not "
                 . "a verdict. The state changes as new evidence accrues.",
         ],
         DivergenceStateClassifier::STATE_POLARIZING => [

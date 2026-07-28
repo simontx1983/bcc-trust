@@ -347,7 +347,7 @@ final class CardViewService
             // null identically per the §4.20 contract). The FE's
             // AttestationActionCluster reads the inner vouch /
             // stand_behind slots to render cast state ("VOUCHED" /
-            // "STANDING BEHIND") on the action buttons. The
+            // "BACKING") on the action buttons. The
             // viewer_has_endorsed boolean above is DERIVED from this
             // field's vouch slot (single source since the endorsements-
             // table retirement).
