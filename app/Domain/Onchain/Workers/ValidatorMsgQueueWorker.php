@@ -59,7 +59,9 @@ namespace BCC\Trust\Onchain\Workers;
 
 use BCC\Core\Cron\AsyncDispatcher;
 use BCC\Core\DB\AdvisoryLock;
+use BCC\Core\Log\Logger;
 use BCC\Core\Observability\DegradationMetrics;
+use BCC\Core\PeepSo\PeepSoMessageWriter;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\MessagesService;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
@@ -93,6 +95,18 @@ final class ValidatorMsgQueueWorker
 
     /** Pages inspected per sweep pass. */
     private const SWEEP_PAGE_LIMIT = 20;
+
+    /**
+     * Cooldown (seconds) between `delivery_context_unsupported` signals so
+     * a misconfigured, frequently-firing WP-CLI cron cannot flood the log
+     * or the degradation counter. 5 min still lets the counter accumulate
+     * well past the alert threshold within an alert window, so a sustained
+     * misconfiguration stays loud without spamming.
+     */
+    private const CTX_UNSUPPORTED_COOLDOWN_SECONDS = 300;
+
+    /** Transient key backing the cooldown above. */
+    private const CTX_UNSUPPORTED_COOLDOWN_KEY = 'bcc_vmq_ctx_unsupported_cooldown';
 
     /**
      * Registered from plugins_loaded so a cron hook added by an update
@@ -160,6 +174,20 @@ final class ValidatorMsgQueueWorker
             return;
         }
 
+        // Execution-context preflight — BEFORE the lock, the activation
+        // state change, and any row lease. If PeepSo's Chat writer is not
+        // available in THIS context (canonically WP-CLI, where PeepSo
+        // disables itself), delivery cannot run: bail without touching a
+        // single row so the queue stays intact and the normal HTTP Action
+        // Scheduler / WP-Cron runner delivers it later. This is a context
+        // condition, not a per-message failure — it must NOT lease rows,
+        // consume attempts, or advance backoff. See
+        // PeepSoMessageWriter::isReady().
+        if (!PeepSoMessageWriter::isReady()) {
+            self::reportUnsupportedContext();
+            return;
+        }
+
         // One worker per page: preserves per-sender ordering and stops
         // cron overlap from interleaving batches. Non-blocking — a
         // second worker simply lets the holder finish.
@@ -222,6 +250,41 @@ final class ValidatorMsgQueueWorker
         } finally {
             AdvisoryLock::release($lockKey);
         }
+    }
+
+    /**
+     * Emit the loud-but-throttled "delivery ran in an unsupported
+     * execution context" signal. Records the distinct degradation event
+     * and a SANITIZED warning (execution-context flags only — never a
+     * body, token, address, email, or identity) so the condition is
+     * visible on the health surface and in logs, while a transient
+     * cooldown stops a frequently-firing CLI cron from flooding either.
+     */
+    private static function reportUnsupportedContext(): void
+    {
+        if (function_exists('get_transient') && get_transient(self::CTX_UNSUPPORTED_COOLDOWN_KEY)) {
+            return;
+        }
+        if (function_exists('set_transient')) {
+            set_transient(
+                self::CTX_UNSUPPORTED_COOLDOWN_KEY,
+                1,
+                self::CTX_UNSUPPORTED_COOLDOWN_SECONDS
+            );
+        }
+
+        DegradationMetrics::record('validator_messaging', 'delivery_context_unsupported');
+        Logger::warning(
+            '[bcc-trust] validator-message delivery skipped: PeepSo Chat writer is not '
+            . 'available in this execution context (PeepSo disables itself under WP-CLI). '
+            . 'Queue delivery must run via the HTTP Action Scheduler / WP-Cron runner; no '
+            . 'rows were touched and the backlog remains recoverable.',
+            [
+                'sapi'       => php_sapi_name(),
+                'wp_cli'     => defined('WP_CLI') && constant('WP_CLI'),
+                'doing_cron' => function_exists('wp_doing_cron') && wp_doing_cron(),
+            ]
+        );
     }
 
     /**

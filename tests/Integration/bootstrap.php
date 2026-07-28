@@ -95,16 +95,22 @@ if (!function_exists('get_option')) {
     /** @param mixed $default @return mixed */
     function get_option(string $key, $default = false)
     {
-        return $default;
+        // Round-trips update_option (an empty store still returns $default,
+        // so this stays backward-compatible with tests that never set it).
+        return $GLOBALS['__bcc_test_options'][$key] ?? $default;
     }
     /** @param mixed $value */
     function update_option(string $key, $value, $autoload = null): bool
     {
+        $GLOBALS['__bcc_test_options'][$key] = $value;
         return true;
     }
     /** @param mixed $value */
     function add_option(string $key, $value = '', $deprecated = '', $autoload = 'yes'): bool
     {
+        if (!isset($GLOBALS['__bcc_test_options'][$key])) {
+            $GLOBALS['__bcc_test_options'][$key] = $value;
+        }
         return true;
     }
     function sanitize_text_field(string $s): string
@@ -217,6 +223,23 @@ bcc_trust_create_core_tables();
 // Their table-name helpers resolve via bcc-core's DB::table(); CI checks
 // out bcc-core adjacent to this plugin (see .github/workflows/ci.yml), and
 // local dev has it at the same relative path.
+// PSR-4 autoload for bcc-core (BCC\Core\*) from the adjacent checkout. The
+// harness used to manually require only DB.php; the validator-message queue
+// worker/repos pull in more bcc-core classes (DegradationMetrics, AdvisoryLock,
+// AsyncDispatcher, PeepSoMessageWriter). Registered AFTER the Logger stub above
+// so the stub wins (class_exists short-circuits before this autoloader runs).
+spl_autoload_register(static function (string $class): void {
+    $prefix = 'BCC\\Core\\';
+    if (strncmp($class, $prefix, strlen($prefix)) !== 0) {
+        return;
+    }
+    $rel  = str_replace('\\', '/', substr($class, strlen($prefix)));
+    $file = dirname(__DIR__, 2) . '/../bcc-core/src/' . $rel . '.php';
+    if (is_file($file)) {
+        require_once $file;
+    }
+});
+
 if (!class_exists(\BCC\Core\DB\DB::class)) {
     require_once dirname(__DIR__, 2) . '/../bcc-core/src/DB/DB.php';
 }
@@ -235,3 +258,47 @@ bcc_onchain_create_wallet_links_table();
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-holdings.php';
 bcc_onchain_create_nft_holdings_table();
+
+// ── Stubs the validator-message-queue worker/repo need ──────────────────────
+if (!function_exists('wp_generate_uuid4')) {
+    // Deterministic unique id — tests need uniqueness, not randomness.
+    function wp_generate_uuid4(): string
+    {
+        static $n = 0;
+        $n++;
+        return sprintf('%08x-0000-4000-8000-%012x', $n, $n);
+    }
+}
+// Transient stubs backing the worker's unsupported-context cooldown. Static
+// array with an expiry timestamp so cooldown behaviour is actually exercised.
+if (!function_exists('get_transient')) {
+    function get_transient(string $key)
+    {
+        $store = $GLOBALS['__bcc_test_transients'] ?? [];
+        if (!isset($store[$key])) {
+            return false;
+        }
+        [$value, $expiresAt] = $store[$key];
+        if ($expiresAt !== 0 && $expiresAt < time()) {
+            unset($GLOBALS['__bcc_test_transients'][$key]);
+            return false;
+        }
+        return $value;
+    }
+    function set_transient(string $key, $value, int $ttl = 0): bool
+    {
+        $GLOBALS['__bcc_test_transients'][$key] = [$value, $ttl > 0 ? time() + $ttl : 0];
+        return true;
+    }
+    function delete_transient(string $key): bool
+    {
+        unset($GLOBALS['__bcc_test_transients'][$key]);
+        return true;
+    }
+}
+
+// ── validator-message queue + activation tables ─────────────────────────────
+require_once dirname(__DIR__, 2) . '/includes/database/schema-validator-msg-queue.php';
+bcc_create_validator_msg_queue_table();
+require_once dirname(__DIR__, 2) . '/includes/database/schema-validator-msg-activation.php';
+bcc_create_validator_msg_activation_table();

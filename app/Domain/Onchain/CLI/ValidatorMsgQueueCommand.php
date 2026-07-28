@@ -16,6 +16,7 @@
 
 namespace BCC\Trust\Onchain\CLI;
 
+use BCC\Core\PeepSo\PeepSoMessageWriter;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgQueueRepository;
 use BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker;
@@ -96,6 +97,14 @@ class ValidatorMsgQueueCommand
      * Run a bounded delivery pass for one page now (same code path the
      * cron uses — leases, transactions and idempotency all apply).
      *
+     * NOTE: this CANNOT actually deliver under WP-CLI. PeepSo disables its
+     * Chat module in the CLI SAPI, so its message writer is unavailable
+     * here; real delivery only runs through the HTTP Action Scheduler /
+     * WP-Cron runner. When run in an unsupported context this command
+     * fails loudly (non-zero exit) and mutates nothing, rather than
+     * reporting a hollow "complete". Use `vmq status` (read-only) to
+     * inspect the queue from the CLI.
+     *
      * ## OPTIONS
      *
      * <page_id>
@@ -115,6 +124,24 @@ class ValidatorMsgQueueCommand
             \WP_CLI::error('A positive page_id is required.');
             return;
         }
+
+        // Same readiness preflight the worker uses. Under WP-CLI PeepSo's
+        // Chat writer is not booted, so delivery here would silently fail
+        // every row. Refuse loudly (non-zero exit) without leasing rows,
+        // consuming attempts, or creating anything — do NOT print
+        // "complete" for a pass that delivered nothing.
+        if (!PeepSoMessageWriter::isReady()) {
+            \WP_CLI::error(
+                'PeepSo Chat is not available in the WP-CLI context, so validator-message '
+                . 'delivery cannot run here (PeepSo disables its messaging module under '
+                . 'WP-CLI). No rows were modified. Delivery must run through the supported '
+                . 'HTTP Action Scheduler / WP-Cron runner; do not use `wp cron event run` or '
+                . '`wp action-scheduler run` as the delivery runner. `vmq status` (read-only) '
+                . 'still works from the CLI.'
+            );
+            return; // WP_CLI::error halts with a non-zero exit code.
+        }
+
         ValidatorMsgQueueWorker::handleDeliver($pageId);
         \WP_CLI::success(sprintf(
             'Delivery pass complete for page %d. Pending now: %d',
