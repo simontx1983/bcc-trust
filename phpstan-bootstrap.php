@@ -51,6 +51,7 @@ if (!defined('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS')) { define('BCC_DISPUTES_MAX_REO
 $configDir = __DIR__ . '/includes/config/';
 $configs = [
     'tiers.php',
+    'ranks.php',
     'scoring.php',
     'contribution.php',
     'trust-weights.php',

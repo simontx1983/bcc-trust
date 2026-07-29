@@ -90,25 +90,48 @@ final class FeatureAccessService
      * (must satisfy all). LEVEL_VETERAN reqs are layered on top of
      * LEVEL_ACTIVE reqs (cumulative).
      *
-     * Callers should never read this constant directly — go through
-     * getLevelThresholds() so admin overrides apply.
+     * Callers should never call this directly — go through
+     * getLevelThresholds() so admin overrides apply. Full resolution
+     * order is: constant (includes/config/ranks.php) → filter →
+     * wp_options('bcc_level_thresholds').
      *
-     * @var array<int, array{label: string, pulls?: int, reviews_written?: int, account_age_days?: int}>
+     * The `label` values are LEVEL labels, exposed on the wire as
+     * `level_label` / `next_level_label`. They are NOT the rank labels
+     * from RankCatalog, despite "Veteran" appearing in both — Rank and
+     * level are separate axes and the contract keeps them separate, so
+     * these stay inline rather than reading the rank constants.
+     *
+     * The inline numeric fallbacks cover load orders where the config
+     * file has not been required yet (early bootstrap, unit tests).
+     *
+     * @return array<int, array{label: string, pulls?: int, reviews_written?: int, account_age_days?: int}>
      */
-    private const DEFAULT_THRESHOLDS = [
-        self::LEVEL_NEW => [
-            'label' => 'New',
-        ],
-        self::LEVEL_ACTIVE => [
-            'label' => 'Active',
-            'pulls' => 5,
-        ],
-        self::LEVEL_VETERAN => [
-            'label'           => 'Veteran',
-            'reviews_written' => 3,
-            'account_age_days'     => 30,
-        ],
-    ];
+    private static function defaultThresholds(): array
+    {
+        return [
+            self::LEVEL_NEW => [
+                'label' => 'New',
+            ],
+            self::LEVEL_ACTIVE => [
+                'label' => 'Active',
+                'pulls' => (int) apply_filters(
+                    'bcc_trust_rank_pulls_required',
+                    defined('BCC_TRUST_RANK_PULLS_REQUIRED') ? BCC_TRUST_RANK_PULLS_REQUIRED : 5
+                ),
+            ],
+            self::LEVEL_VETERAN => [
+                'label'           => 'Veteran',
+                'reviews_written' => (int) apply_filters(
+                    'bcc_trust_rank_reviews_required',
+                    defined('BCC_TRUST_RANK_REVIEWS_REQUIRED') ? BCC_TRUST_RANK_REVIEWS_REQUIRED : 3
+                ),
+                'account_age_days' => (int) apply_filters(
+                    'bcc_trust_rank_account_age_days_required',
+                    defined('BCC_TRUST_RANK_ACCOUNT_AGE_DAYS_REQUIRED') ? BCC_TRUST_RANK_ACCOUNT_AGE_DAYS_REQUIRED : 30
+                ),
+            ],
+        ];
+    }
 
     /**
      * Per §2.6, these are the canonical feature keys. Each maps to its
@@ -358,20 +381,30 @@ final class FeatureAccessService
      * Admin-tunable thresholds. Reads wp_options('bcc_level_thresholds')
      * and merges over the defaults so partial overrides are safe.
      *
+     * NOTE: nothing in this codebase WRITES `bcc_level_thresholds` — no
+     * admin UI, no CLI, no seed. Today it is settable only by hand
+     * (`wp option update`). The defaults come from
+     * includes/config/ranks.php, which is the intended tuning surface.
+     * If a UI is ever added, note the is_int checks below: a form
+     * posting "5" as a string would be silently ignored, so any writer
+     * must cast before saving.
+     *
      * @return array<int, array{label: string, pulls?: int, reviews_written?: int, account_age_days?: int}>
      */
     public function getLevelThresholds(): array
     {
+        $defaults = self::defaultThresholds();
+
         $stored = get_option('bcc_level_thresholds', []);
         if (!is_array($stored) || $stored === []) {
-            return self::DEFAULT_THRESHOLDS;
+            return $defaults;
         }
 
         // Build the typed result explicitly per-field so PHPStan can verify
         // each shape entry. array_merge would widen each array element to
         // `mixed` and break the declared return type.
         $result = [];
-        foreach (self::DEFAULT_THRESHOLDS as $lvl => $base) {
+        foreach ($defaults as $lvl => $base) {
             $override = $stored[$lvl] ?? null;
             if (!is_array($override)) {
                 $result[$lvl] = $base;

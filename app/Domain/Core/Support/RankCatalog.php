@@ -19,6 +19,13 @@
  * other code path — the /ranks endpoint, admin tools — reads from
  * here. NEVER inline rank lists elsewhere.
  *
+ * The label and description STRINGS now live in
+ * includes/config/ranks.php so a rename is a config edit rather than a
+ * class edit; the slugs, order and auto_assigned flags stay here because
+ * they are wire values (and `bcc_last_seen_rank` persists a slug per
+ * user). This class remains the only reader of those constants — the
+ * catalog shape and its lookup semantics are unchanged.
+ *
  * @package BCC\Trust\Core\Support
  * @since V1 (2026-04)
  */
@@ -41,31 +48,56 @@ final class RankCatalog
      * auto-assigned (derived from feature-access level); there is no
      * auto-conferred rank above Veteran.
      *
-     * @var list<array{key: string, label: string, description: string, auto_assigned: bool, order: int}>
+     * Labels and descriptions come from includes/config/ranks.php. The
+     * inline fallbacks cover load orders where that file has not been
+     * required yet (early bootstrap, unit tests) — the same posture
+     * TrustScoreService::threshold() takes for the tier constants.
+     * Deliberately NOT filterable: see the "labels are config, not
+     * filters" note in ranks.php.
+     *
+     * @return list<array{key: string, label: string, description: string, auto_assigned: bool, order: int}>
      */
-    private const CATALOG = [
-        [
-            'key'           => self::RANK_APPRENTICE,
-            'label'         => 'Apprentice',
-            'description'   => 'New on the floor.',
-            'auto_assigned' => true,
-            'order'         => 1,
-        ],
-        [
-            'key'           => self::RANK_JOURNEYMAN,
-            'label'         => 'Journeyman',
-            'description'   => 'Earned the basics.',
-            'auto_assigned' => true,
-            'order'         => 2,
-        ],
-        [
-            'key'           => self::RANK_VETERAN,
-            'label'         => 'Veteran',
-            'description'   => 'Been on the floor a while.',
-            'auto_assigned' => true,
-            'order'         => 3,
-        ],
-    ];
+    private static function catalog(): array
+    {
+        return [
+            [
+                'key'           => self::RANK_APPRENTICE,
+                'label'         => self::text('BCC_TRUST_RANK_LABEL_APPRENTICE', 'Apprentice'),
+                'description'   => self::text('BCC_TRUST_RANK_DESC_APPRENTICE', 'New on the floor.'),
+                'auto_assigned' => true,
+                'order'         => 1,
+            ],
+            [
+                'key'           => self::RANK_JOURNEYMAN,
+                'label'         => self::text('BCC_TRUST_RANK_LABEL_JOURNEYMAN', 'Journeyman'),
+                'description'   => self::text('BCC_TRUST_RANK_DESC_JOURNEYMAN', 'Earned the basics.'),
+                'auto_assigned' => true,
+                'order'         => 2,
+            ],
+            [
+                'key'           => self::RANK_VETERAN,
+                'label'         => self::text('BCC_TRUST_RANK_LABEL_VETERAN', 'Veteran'),
+                'description'   => self::text('BCC_TRUST_RANK_DESC_VETERAN', 'Been on the floor a while.'),
+                'auto_assigned' => true,
+                'order'         => 3,
+            ],
+        ];
+    }
+
+    /**
+     * Resolve a config string constant with a hardcoded fallback. An
+     * empty or non-string override falls back too, so a malformed
+     * config edit degrades to the shipped label rather than rendering a
+     * blank chip.
+     */
+    private static function text(string $constant, string $default): string
+    {
+        if (!defined($constant)) {
+            return $default;
+        }
+        $value = constant($constant);
+        return is_string($value) && $value !== '' ? $value : $default;
+    }
 
     /**
      * The full catalog, shaped for the /ranks endpoint response.
@@ -74,7 +106,7 @@ final class RankCatalog
      */
     public static function all(): array
     {
-        return self::CATALOG;
+        return self::catalog();
     }
 
     /**
@@ -82,7 +114,7 @@ final class RankCatalog
      */
     public static function isValid(string $key): bool
     {
-        foreach (self::CATALOG as $rank) {
+        foreach (self::catalog() as $rank) {
             if ($rank['key'] === $key) {
                 return true;
             }
@@ -95,7 +127,7 @@ final class RankCatalog
      */
     public static function getLabel(string $key): ?string
     {
-        foreach (self::CATALOG as $rank) {
+        foreach (self::catalog() as $rank) {
             if ($rank['key'] === $key) {
                 return $rank['label'];
             }
@@ -112,7 +144,7 @@ final class RankCatalog
      */
     public static function orderOf(string $key): ?int
     {
-        foreach (self::CATALOG as $rank) {
+        foreach (self::catalog() as $rank) {
             if ($rank['key'] === $key) {
                 return $rank['order'];
             }
@@ -128,8 +160,10 @@ final class RankCatalog
      */
     public static function getNextRank(string $key): ?string
     {
+        $catalog = self::catalog();
+
         $currentOrder = null;
-        foreach (self::CATALOG as $rank) {
+        foreach ($catalog as $rank) {
             if ($rank['key'] === $key) {
                 $currentOrder = $rank['order'];
                 break;
@@ -141,7 +175,7 @@ final class RankCatalog
 
         $nextKey   = null;
         $nextOrder = PHP_INT_MAX;
-        foreach (self::CATALOG as $rank) {
+        foreach ($catalog as $rank) {
             if ($rank['order'] > $currentOrder && $rank['order'] < $nextOrder) {
                 $nextOrder = $rank['order'];
                 $nextKey   = $rank['key'];

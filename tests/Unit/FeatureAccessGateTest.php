@@ -7,8 +7,9 @@ namespace {
     if (!function_exists('get_option')) {
         /**
          * No stored overrides — FeatureAccessService::getLevelThresholds()
-         * then returns DEFAULT_THRESHOLDS, which is what production does on
-         * every environment today (`bcc_level_thresholds` is unset).
+         * then returns defaultThresholds() unmodified, which is what
+         * production does on every environment today
+         * (`bcc_level_thresholds` is unset).
          *
          * @param mixed $default
          * @return mixed
@@ -16,6 +17,25 @@ namespace {
         function get_option(string $name, $default = false)
         {
             return $default;
+        }
+    }
+
+    if (!function_exists('apply_filters')) {
+        /**
+         * Pass-through. defaultThresholds() reads its three numbers
+         * through filters so they can be tuned without a redeploy; with
+         * no filter registry in unit scope the shipped defaults from
+         * includes/config/ranks.php (or the inline fallbacks, since that
+         * file is not loaded here) are what these tests assert — which is
+         * the point. PHP falls back from namespace to global for
+         * functions, so this one shim covers RankCatalog's namespace too.
+         *
+         * @param mixed $value
+         * @return mixed
+         */
+        function apply_filters(string $hook, $value, ...$args)
+        {
+            return $value;
         }
     }
 }
