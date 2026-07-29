@@ -205,6 +205,17 @@ if (!function_exists('wp_cache_get')) {
         }
         return $GLOBALS['__bcc_test_object_cache'][$group][$key] += $offset;
     }
+    /**
+     * Repositories branch on this to choose an invalidation strategy (a real
+     * persistent cache gets a generation bump; the built-in array cache is
+     * per-request and needs none). The in-memory store above is NOT an
+     * external object cache, so answering false is the honest answer and
+     * keeps the branch that runs here the same one a plain WP install takes.
+     */
+    function wp_using_ext_object_cache(): bool
+    {
+        return false;
+    }
 }
 
 // ── Install the schema(s) the integration tests touch ───────────────────────
