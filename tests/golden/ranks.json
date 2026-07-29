@@ -16,9 +16,9 @@
     },
     {
       "auto_assigned": true,
-      "description": "Master of the trade.",
-      "key": "master",
-      "label": "Master",
+      "description": "Been on the floor a while.",
+      "key": "veteran",
+      "label": "Veteran",
       "order": 3
     }
   ],
