@@ -296,7 +296,7 @@ final class LivingService
         $nextRankKey = RankCatalog::getNextRank($rankKey);
         $thresholds  = $featureAccess['next_level_thresholds'];
 
-        // Top of the ladder (Master) or no remaining gates.
+        // Top of the ladder (Veteran) or no remaining gates.
         if ($nextRankKey === null || $thresholds === []) {
             return [
                 'current_rank'    => $rankKey,

@@ -78,7 +78,7 @@ final class MemberRankLevelPrefetchTest extends TestCase
             $this->rankFor([self::USER_ID => FeatureAccessService::LEVEL_ACTIVE])
         );
         self::assertSame(
-            ['key' => RankCatalog::RANK_MASTER, 'label' => 'Master'],
+            ['key' => RankCatalog::RANK_VETERAN, 'label' => 'Veteran'],
             $this->rankFor([self::USER_ID => FeatureAccessService::LEVEL_VETERAN])
         );
     }

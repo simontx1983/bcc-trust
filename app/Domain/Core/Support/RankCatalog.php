@@ -1,11 +1,19 @@
 <?php
 /**
- * Canonical rank catalog — the earned **Rank** axis (one of three
- * orthogonal identity axes; see docs/glossary.md §1 and api-contract §4.8).
+ * Canonical rank catalog — the earned **Rank** axis (one of two
+ * orthogonal identity axes, Rank · Trust Tier; see docs/glossary.md §1
+ * and api-contract §4.8).
  *
  * Rank mirrors the feature-access **level** (§2.6) and is fully
  * auto-derived from activity by RankService::rankForLevel():
- *   Apprentice = level New · Journeyman = level Active · Master = level Veteran.
+ *   Apprentice = level New · Journeyman = level Active · Veteran = level Veteran.
+ *
+ * The top rung was named "Master" until contract v1.58. It measured
+ * 5 pulls + 3 votes + 30 days since registration — tenure, not mastery —
+ * so the label was renamed to match what the thresholds actually test.
+ * "Master" is deliberately RESERVED for a future merit rung earned from
+ * outcome-confirmed judgment; it is not scaffolded here. Do not
+ * reintroduce it as a label until there is data to earn it.
  *
  * This class is the single source of rank labels and metadata. Every
  * other code path — the /ranks endpoint, admin tools — reads from
@@ -25,13 +33,13 @@ final class RankCatalog
 {
     public const RANK_APPRENTICE = 'apprentice';
     public const RANK_JOURNEYMAN = 'journeyman';
-    public const RANK_MASTER     = 'master';
+    public const RANK_VETERAN    = 'veteran';
 
     /**
      * Canonical earned ladder. Order matches the user-facing
-     * progression (Apprentice → Journeyman → Master). All three are
+     * progression (Apprentice → Journeyman → Veteran). All three are
      * auto-assigned (derived from feature-access level); there is no
-     * auto-conferred rank above Master.
+     * auto-conferred rank above Veteran.
      *
      * @var list<array{key: string, label: string, description: string, auto_assigned: bool, order: int}>
      */
@@ -51,9 +59,9 @@ final class RankCatalog
             'order'         => 2,
         ],
         [
-            'key'           => self::RANK_MASTER,
-            'label'         => 'Master',
-            'description'   => 'Master of the trade.',
+            'key'           => self::RANK_VETERAN,
+            'label'         => 'Veteran',
+            'description'   => 'Been on the floor a while.',
             'auto_assigned' => true,
             'order'         => 3,
         ],
@@ -114,7 +122,7 @@ final class RankCatalog
 
     /**
      * The catalog order key immediately after $key, or null when $key
-     * is the highest-ordered rank (currently Master). Unknown keys
+     * is the highest-ordered rank (currently Veteran). Unknown keys
      * also return null. Used by LivingService to render the §O3
      * progression strip's "current → next" label.
      */

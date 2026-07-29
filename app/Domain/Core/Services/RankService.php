@@ -3,17 +3,23 @@
  * Rank Service — composes the viewer-block of the /ranks view-model
  * (contract §4.8) and the canonical level→rank mapping.
  *
- * **Rank = the earned capability ladder**, one of three orthogonal
- * identity axes (Rank · Trust Tier · Role; see docs/glossary.md §1).
- * It mirrors the feature-access **level** (§2.6), NOT reputation tier:
+ * **Rank = the earned capability ladder**, one of two orthogonal
+ * identity axes (Rank · Trust Tier; see docs/glossary.md §1). The
+ * conferred Role axis was retired in contract v1.36. Rank mirrors the
+ * feature-access **level** (§2.6), NOT reputation tier:
  *
  *   level New (1)     → 'apprentice'
  *   level Active (2)  → 'journeyman'
- *   level Veteran (3) → 'master'
+ *   level Veteran (3) → 'veteran'
  *
  * This replaces the V1 reputation-tier derivation (a *caution* user is
  * no longer silently "promoted" by trust score). Activity earns the
  * level; the level names the rank.
+ *
+ * The top rung's slug and label were `master` / "Master" until contract
+ * v1.58. Level 3 tests 5 pulls + 3 votes + 30 days since registration —
+ * tenure, not mastery — so the name now matches the threshold, and the
+ * mapping is finally self-consistent (`veteran` → level Veteran).
  *
  * @package BCC\Trust\Core\Services
  * @since V1 (2026-04)
@@ -39,7 +45,7 @@ final class RankService
     public const LEVEL_TO_RANK = [
         FeatureAccessService::LEVEL_NEW     => RankCatalog::RANK_APPRENTICE,
         FeatureAccessService::LEVEL_ACTIVE  => RankCatalog::RANK_JOURNEYMAN,
-        FeatureAccessService::LEVEL_VETERAN => RankCatalog::RANK_MASTER,
+        FeatureAccessService::LEVEL_VETERAN => RankCatalog::RANK_VETERAN,
     ];
 
     /**

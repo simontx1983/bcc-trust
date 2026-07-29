@@ -28,17 +28,39 @@ if (!defined('ABSPATH')) {
  * Threshold semantics (§O5):
  *   Level 1 (New)     — default for all signups
  *   Level 2 (Active)  — requires 5+ pulls
- *   Level 3 (Veteran) — requires Level-2 thresholds AND 3+ reviews AND 30+ days active
+ *   Level 3 (Veteran) — requires Level-2 thresholds AND 3+ reviews AND an
+ *                       account at least 30 days old
  *
  * Promotion is cumulative: Level 3 implies Level 2's thresholds also met.
  *
  * Thresholds are admin-tunable via `wp_options('bcc_level_thresholds')`
  * with safe defaults below — call sites NEVER inline thresholds.
  *
- * Sources for the counters:
- *   - pulls            ← peepso_user_followers (watchlist is the UI projection per §C2)
- *   - reviews_written  ← bcc_trust_votes (count via VoteRepository::countByVoter)
- *   - days_active      ← time since wp_users.user_registered
+ * Sources for the counters — READ THESE BEFORE TREATING THE GATE AS MERIT.
+ * Every one is self-dealt; none requires sustained or corroborated
+ * participation, and none can be failed by behaving badly:
+ *
+ *   - pulls            ← peepso_user_followers, the viewer's OWN following
+ *                        count (watchlist is the UI projection per §C2).
+ *                        Entirely self-controlled — following 5 accounts
+ *                        costs nothing and involves no other party.
+ *   - reviews_written  ← bcc_trust_votes (VoteRepository::countByVoter).
+ *                        Counts VOTE ROWS, not written review prose. The
+ *                        name is historical; if a review CPT ships, update
+ *                        countReviewsWritten() and rename this key too.
+ *   - account_age_days ← time since wp_users.user_registered. This is
+ *                        ACCOUNT AGE, not active days: it accrues while the
+ *                        user is dormant and can never decrease. Named
+ *                        `days_active` until contract v1.58, which was a
+ *                        lie the progress UI repeated back to users.
+ *
+ * Consequence, stated plainly so nobody re-derives it: a user who follows
+ * 5 accounts and casts 3 votes on day one is promoted to level 3 on day 30
+ * without logging in again. Level 3 gates open_dispute, see_signal_details,
+ * see_trust_breakdown and feed_tab_signals — so this ladder is currently a
+ * tenure check standing in front of adjudication powers. Strengthening it
+ * needs outcome data (see the reliability engine); do not paper over it by
+ * nudging these numbers.
  *
  * Note (2026-05-14): `floor_visits` was removed from the LEVEL_ACTIVE
  * gate. Visiting the Floor is passive consumption — it isn't a signal
@@ -71,7 +93,7 @@ final class FeatureAccessService
      * Callers should never read this constant directly — go through
      * getLevelThresholds() so admin overrides apply.
      *
-     * @var array<int, array{label: string, pulls?: int, reviews_written?: int, days_active?: int}>
+     * @var array<int, array{label: string, pulls?: int, reviews_written?: int, account_age_days?: int}>
      */
     private const DEFAULT_THRESHOLDS = [
         self::LEVEL_NEW => [
@@ -84,7 +106,7 @@ final class FeatureAccessService
         self::LEVEL_VETERAN => [
             'label'           => 'Veteran',
             'reviews_written' => 3,
-            'days_active'     => 30,
+            'account_age_days'     => 30,
         ],
     ];
 
@@ -290,7 +312,7 @@ final class FeatureAccessService
         $pulls   = $this->countPullsForUsers($ids);
         $reviews = $this->voteRepo->countByVoters($ids);
 
-        // Prime the WP user cache once so each per-id days_active read
+        // Prime the WP user cache once so each per-id account_age_days read
         // below is a cache hit rather than a separate query.
         if (function_exists('cache_users')) {
             cache_users($ids);
@@ -301,7 +323,7 @@ final class FeatureAccessService
             $out[$uid] = $this->resolveLevel([
                 'pulls'           => (int) ($pulls[$uid] ?? 0),
                 'reviews_written' => (int) ($reviews[$uid] ?? 0),
-                'days_active'     => $this->countDaysActive($uid),
+                'account_age_days'     => $this->countAccountAgeDays($uid),
                 'has_wallet'      => false,     // unused by resolveLevel
                 'reputation_tier' => 'neutral', // unused by resolveLevel
             ]);
@@ -336,7 +358,7 @@ final class FeatureAccessService
      * Admin-tunable thresholds. Reads wp_options('bcc_level_thresholds')
      * and merges over the defaults so partial overrides are safe.
      *
-     * @return array<int, array{label: string, pulls?: int, reviews_written?: int, days_active?: int}>
+     * @return array<int, array{label: string, pulls?: int, reviews_written?: int, account_age_days?: int}>
      */
     public function getLevelThresholds(): array
     {
@@ -366,8 +388,8 @@ final class FeatureAccessService
             if (isset($override['reviews_written']) && is_int($override['reviews_written'])) {
                 $entry['reviews_written'] = $override['reviews_written'];
             }
-            if (isset($override['days_active']) && is_int($override['days_active'])) {
-                $entry['days_active'] = $override['days_active'];
+            if (isset($override['account_age_days']) && is_int($override['account_age_days'])) {
+                $entry['account_age_days'] = $override['account_age_days'];
             }
             $result[$lvl] = $entry;
         }
@@ -375,14 +397,14 @@ final class FeatureAccessService
     }
 
     /**
-     * @return array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string}
+     * @return array{pulls: int, reviews_written: int, account_age_days: int, has_wallet: bool, reputation_tier: string}
      */
     private function getUserStats(int $userId): array
     {
         return [
             'pulls'           => $this->countPulls($userId),
             'reviews_written' => $this->countReviewsWritten($userId),
-            'days_active'     => $this->countDaysActive($userId),
+            'account_age_days'     => $this->countAccountAgeDays($userId),
             'has_wallet'      => $this->hasVerifiedWallet($userId),
             'reputation_tier' => $this->getReputationTier($userId),
         ];
@@ -392,7 +414,7 @@ final class FeatureAccessService
      * Cumulative level resolver. Level 3 requires Level-2 thresholds also
      * met (a user with 100 reviews but 0 pulls is NOT Level 3).
      *
-     * @param array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
+     * @param array{pulls: int, reviews_written: int, account_age_days: int, has_wallet: bool, reputation_tier: string} $stats
      */
     private function resolveLevel(array $stats): int
     {
@@ -404,7 +426,7 @@ final class FeatureAccessService
 
         $atVeteran = $atActive
                   && $stats['reviews_written'] >= (int) ($veteranReq['reviews_written'] ?? 0)
-                  && $stats['days_active']     >= (int) ($veteranReq['days_active']     ?? 0);
+                  && $stats['account_age_days']     >= (int) ($veteranReq['account_age_days']     ?? 0);
 
         if ($atVeteran) {
             return self::LEVEL_VETERAN;
@@ -421,7 +443,7 @@ final class FeatureAccessService
      * needed) pass. The unlock_hint describes whichever sub-gate is
      * closer to resolution.
      *
-     * @param array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
+     * @param array{pulls: int, reviews_written: int, account_age_days: int, has_wallet: bool, reputation_tier: string} $stats
      * @return array{allowed: bool, unlock_hint: ?string}
      */
     private function resolveFeature(string $featureKey, int $currentLevel, array $stats): array
@@ -456,7 +478,7 @@ final class FeatureAccessService
      * Pick the hint that describes the most-actionable next step.
      * Priority: level (typically the closer gate) → tier → wallet.
      *
-     * @param array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
+     * @param array{pulls: int, reviews_written: int, account_age_days: int, has_wallet: bool, reputation_tier: string} $stats
      */
     private function composeUnlockHint(
         int $minLevel,
@@ -477,10 +499,13 @@ final class FeatureAccessService
             }
 
             if ($minLevel === self::LEVEL_VETERAN) {
+                // "stay active N days" was false — the gate is account age
+                // (see countAccountAgeDays), which accrues without the user
+                // doing anything. Say what is actually required.
                 return sprintf(
-                    'Write %d reviews and stay active %d days to unlock this.',
+                    'Write %d reviews. Unlocks once your account is %d days old.',
                     (int) ($target['reviews_written'] ?? 0),
-                    (int) ($target['days_active']     ?? 0)
+                    (int) ($target['account_age_days'] ?? 0)
                 );
             }
         }
@@ -501,9 +526,9 @@ final class FeatureAccessService
     /**
      * Render the metrics that gate the NEXT level (not cumulative). For a
      * Level-1 viewer, shows the pulls requirement; for a
-     * Level-2 viewer, shows the reviews/days_active requirements.
+     * Level-2 viewer, shows the reviews/account_age_days requirements.
      *
-     * @param array{pulls: int, reviews_written: int, days_active: int, has_wallet: bool, reputation_tier: string} $stats
+     * @param array{pulls: int, reviews_written: int, account_age_days: int, has_wallet: bool, reputation_tier: string} $stats
      * @return list<array{metric: string, label: string, current: int, required: int}>
      */
     private function renderNextLevelThresholds(int $currentLevel, array $stats): array
@@ -532,10 +557,15 @@ final class FeatureAccessService
                     'required' => (int) ($req['reviews_written'] ?? 0),
                 ],
                 [
-                    'metric'   => 'days_active',
-                    'label'    => 'Days active',
-                    'current'  => (int) $stats['days_active'],
-                    'required' => (int) ($req['days_active'] ?? 0),
+                    // Label feeds two surfaces: a metric row (current/required)
+                    // and LivingService's "%d more %s" sentence. "Days active"
+                    // was false — nothing here requires activity — and "Days
+                    // since joining" reads badly as "24 more days since
+                    // joining". Plain "Days" is honest in both.
+                    'metric'   => 'account_age_days',
+                    'label'    => 'Days',
+                    'current'  => (int) $stats['account_age_days'],
+                    'required' => (int) ($req['account_age_days'] ?? 0),
                 ],
             ];
         }
@@ -563,7 +593,16 @@ final class FeatureAccessService
         return (int) $this->voteRepo->countByVoter($userId);
     }
 
-    private function countDaysActive(int $userId): int
+    /**
+     * Days since the account was registered — NOT days the user was active.
+     *
+     * Deliberately named for what it measures. This accrues while the user
+     * is dormant and never decreases, so it is a tenure floor, not an
+     * engagement signal. A real active-day counter would need a distinct
+     * per-day activity record; that does not exist today and inventing one
+     * here would be worse than admitting the gap.
+     */
+    private function countAccountAgeDays(int $userId): int
     {
         $registered = get_userdata($userId);
         if ($registered === false || empty($registered->user_registered)) {

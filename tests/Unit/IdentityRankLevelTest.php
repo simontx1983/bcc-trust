@@ -13,12 +13,18 @@ use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 
 /**
- * Locks the Identity Slice — the three orthogonal axes (Rank · Trust
- * Tier · Role) and the level→rank derivation that replaced the old
+ * Locks the Identity Slice — the two orthogonal axes (Rank · Trust
+ * Tier) and the level→rank derivation that replaced the old
  * tier-driven rank. Pure functions only; no WP, no DB.
  *
- *   - RankService::rankForLevel  — level (1/2/3) → apprentice/journeyman/master
- *   - RankCatalog                — Master on the earned ladder; Foreman a Role
+ * The conferred Role axis (Foreman) was retired in contract v1.36, and
+ * the top rung was renamed Master → Veteran in v1.58 to match what
+ * level 3 actually tests (tenure, not mastery). "Master" is reserved
+ * for a future merit rung and must not reappear as a label until it is
+ * earned from outcome-confirmed judgment.
+ *
+ *   - RankService::rankForLevel  — level (1/2/3) → apprentice/journeyman/veteran
+ *   - RankCatalog                — Veteran tops the earned ladder; no rung above it
  *   - ReputationTierMap          — member trust labels (elite → "Elite")
  *   - LivingService::rankProgress — honest progress from level thresholds
  */
@@ -30,7 +36,7 @@ final class IdentityRankLevelTest extends TestCase
     {
         self::assertSame(RankCatalog::RANK_APPRENTICE, RankService::rankForLevel(FeatureAccessService::LEVEL_NEW));
         self::assertSame(RankCatalog::RANK_JOURNEYMAN, RankService::rankForLevel(FeatureAccessService::LEVEL_ACTIVE));
-        self::assertSame(RankCatalog::RANK_MASTER, RankService::rankForLevel(FeatureAccessService::LEVEL_VETERAN));
+        self::assertSame(RankCatalog::RANK_VETERAN, RankService::rankForLevel(FeatureAccessService::LEVEL_VETERAN));
     }
 
     public function testRankForLevelFallsBackToApprenticeForUnknownLevels(): void
@@ -50,11 +56,11 @@ final class IdentityRankLevelTest extends TestCase
 
     // ── RankCatalog — earned ladder ──────────────────────────────────
 
-    public function testEarnedLadderIsApprenticeJourneymanMaster(): void
+    public function testEarnedLadderIsApprenticeJourneymanVeteran(): void
     {
         $keys = array_column(RankCatalog::all(), 'key');
         self::assertSame(
-            [RankCatalog::RANK_APPRENTICE, RankCatalog::RANK_JOURNEYMAN, RankCatalog::RANK_MASTER],
+            [RankCatalog::RANK_APPRENTICE, RankCatalog::RANK_JOURNEYMAN, RankCatalog::RANK_VETERAN],
             $keys
         );
     }
@@ -66,20 +72,38 @@ final class IdentityRankLevelTest extends TestCase
         }
     }
 
-    public function testNextRankClimbsToMasterThenStops(): void
+    public function testNextRankClimbsToVeteranThenStops(): void
     {
         self::assertSame(RankCatalog::RANK_JOURNEYMAN, RankCatalog::getNextRank(RankCatalog::RANK_APPRENTICE));
-        self::assertSame(RankCatalog::RANK_MASTER, RankCatalog::getNextRank(RankCatalog::RANK_JOURNEYMAN));
-        self::assertNull(RankCatalog::getNextRank(RankCatalog::RANK_MASTER), 'Master is the top of the earned ladder');
+        self::assertSame(RankCatalog::RANK_VETERAN, RankCatalog::getNextRank(RankCatalog::RANK_JOURNEYMAN));
+        self::assertNull(RankCatalog::getNextRank(RankCatalog::RANK_VETERAN), 'Veteran is the top of the earned ladder');
     }
 
-    public function testMasterResolvesLabelAndIsAnAutoEarnedRung(): void
+    public function testVeteranResolvesLabelAndIsAnAutoEarnedRung(): void
     {
-        self::assertTrue(RankCatalog::isValid(RankCatalog::RANK_MASTER));
-        self::assertSame('Master', RankCatalog::getLabel(RankCatalog::RANK_MASTER));
-        $master = array_values(array_filter(RankCatalog::all(), static fn ($r) => $r['key'] === RankCatalog::RANK_MASTER));
-        self::assertCount(1, $master);
-        self::assertTrue($master[0]['auto_assigned'], 'Master is an auto-earned rung');
+        self::assertTrue(RankCatalog::isValid(RankCatalog::RANK_VETERAN));
+        self::assertSame('Veteran', RankCatalog::getLabel(RankCatalog::RANK_VETERAN));
+        $veteran = array_values(array_filter(RankCatalog::all(), static fn ($r) => $r['key'] === RankCatalog::RANK_VETERAN));
+        self::assertCount(1, $veteran);
+        self::assertTrue($veteran[0]['auto_assigned'], 'Veteran is an auto-earned rung');
+    }
+
+    /**
+     * The retired top-rung slug must not resolve. This is the clean-break
+     * guard that makes the v1.58 rename real rather than cosmetic:
+     * `master` is neither emitted nor accepted as a current rank.
+     *
+     * It stays asserted-absent for the same reason Foreman does — "Master"
+     * is reserved for a possible future outcome-derived merit rung, and an
+     * unearned label must not drift back into the catalog.
+     */
+    public function testRetiredMasterSlugIsNotOnTheLadder(): void
+    {
+        self::assertFalse(RankCatalog::isValid('master'));
+        self::assertNull(RankCatalog::getLabel('master'));
+        self::assertNull(RankCatalog::orderOf('master'));
+        self::assertNotContains('master', array_column(RankCatalog::all(), 'key'));
+        self::assertNotContains('Master', array_column(RankCatalog::all(), 'label'));
     }
 
     // ── ReputationTierMap — honest member trust labels ───────────────
@@ -141,9 +165,9 @@ final class IdentityRankLevelTest extends TestCase
         return $out;
     }
 
-    public function testProgressAtMasterIsComplete(): void
+    public function testProgressAtVeteranIsComplete(): void
     {
-        $p = self::rankProgress(RankCatalog::RANK_MASTER, [
+        $p = self::rankProgress(RankCatalog::RANK_VETERAN, [
             'level'                 => FeatureAccessService::LEVEL_VETERAN,
             'next_level_thresholds' => [],
         ]);
@@ -168,18 +192,18 @@ final class IdentityRankLevelTest extends TestCase
 
     public function testProgressUsesLimitingGateAcrossMultipleThresholds(): void
     {
-        // Journeyman → Master: reviews 2/3 (66%), days 6/30 (20%).
+        // Journeyman → Veteran: reviews 2/3 (66%), days 6/30 (20%).
         // The limiting gate (days) drives percent; both unmet clauses listed.
         $p = self::rankProgress(RankCatalog::RANK_JOURNEYMAN, [
             'level'                 => FeatureAccessService::LEVEL_ACTIVE,
             'next_level_thresholds' => [
                 ['metric' => 'reviews_written', 'label' => 'Reviews', 'current' => 2, 'required' => 3],
-                ['metric' => 'days_active', 'label' => 'Days active', 'current' => 6, 'required' => 30],
+                ['metric' => 'account_age_days', 'label' => 'Days', 'current' => 6, 'required' => 30],
             ],
         ]);
-        self::assertSame(RankCatalog::RANK_MASTER, $p['next_rank']);
+        self::assertSame(RankCatalog::RANK_VETERAN, $p['next_rank']);
         self::assertSame(20, $p['percent']);
-        self::assertSame('1 more reviews and 24 more days active to reach Master.', $p['remaining_label']);
+        self::assertSame('1 more reviews and 24 more days to reach Veteran.', $p['remaining_label']);
     }
 
     public function testProgressCapsAt99WhenGateAlreadyMet(): void

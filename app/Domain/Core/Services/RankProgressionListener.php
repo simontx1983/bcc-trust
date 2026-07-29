@@ -80,9 +80,71 @@ final class RankProgressionListener
      */
     private const ICON_RANK_UP = 'rank-up';
 
+    /** Transition outcomes returned by {@see self::decideTransition()}. */
+    public const TRANSITION_NONE      = 'none';
+    public const TRANSITION_SEED      = 'seed';
+    public const TRANSITION_PROMOTION = 'promotion';
+    public const TRANSITION_DEMOTION  = 'demotion';
+
     public function __construct(
         private readonly RankService $rankService
     ) {
+    }
+
+    /**
+     * Pure transition decision over already-resolved inputs.
+     *
+     * Extracted so the branch logic is unit-testable without WordPress:
+     * the I/O wrapper ({@see self::onActivityEvent()}) resolves the rank
+     * and persists, this decides. Same split as
+     * {@see EliteEligibilityService::evaluate()} and
+     * {@see ReliabilityStandingComputer::fromReliability()}.
+     *
+     * The `$lastSeenRaw` parameter is deliberately `mixed`: it comes
+     * straight from `get_user_meta()`, which returns '' for an absent
+     * row and can return arbitrary scalars for a corrupted one.
+     *
+     * UNKNOWN-SLUG BEHAVIOUR: a stored slug that is no longer on the
+     * ladder has no order, so it cannot be compared. We treat it as a
+     * PROMOTION rather than swallowing it — failing toward celebrating a
+     * real climb beats silently dropping one, and it can never throw.
+     *
+     * Note for any FUTURE rank rename: this branch means a stale slug in
+     * `bcc_last_seen_rank` produces one spurious rank-up per affected
+     * user. The v1.58 Master → Veteran rename needed no migration — it
+     * landed on a fresh install with no real users and zero rows holding
+     * the retired value — but a rename against a populated database would
+     * need one. Check the row count before assuming otherwise.
+     *
+     * @param mixed $lastSeenRaw Raw user_meta value (string|''|mixed).
+     * @return array{outcome: string, from: ?string, persist: bool}
+     */
+    public static function decideTransition(
+        $lastSeenRaw,
+        string $currentRank,
+        int $currentOrder
+    ): array {
+        $lastSeen = is_string($lastSeenRaw) && $lastSeenRaw !== '' ? $lastSeenRaw : null;
+
+        // First sighting — seed quietly so a pre-existing user doesn't get
+        // a celebration for a rank they already held.
+        if ($lastSeen === null) {
+            return ['outcome' => self::TRANSITION_SEED, 'from' => null, 'persist' => true];
+        }
+
+        if ($lastSeen === $currentRank) {
+            return ['outcome' => self::TRANSITION_NONE, 'from' => $lastSeen, 'persist' => false];
+        }
+
+        $lastOrder = RankCatalog::orderOf($lastSeen);
+
+        $outcome = ($lastOrder === null || $currentOrder > $lastOrder)
+            ? self::TRANSITION_PROMOTION
+            : self::TRANSITION_DEMOTION;
+
+        // Persist on BOTH directions so future comparisons stay tight
+        // against current state.
+        return ['outcome' => $outcome, 'from' => $lastSeen, 'persist' => true];
     }
 
     /**
@@ -117,25 +179,22 @@ final class RankProgressionListener
         }
 
         $lastSeenRaw = get_user_meta($userId, self::LAST_SEEN_META_KEY, true);
-        $lastSeen = is_string($lastSeenRaw) && $lastSeenRaw !== '' ? $lastSeenRaw : null;
 
-        if ($lastSeen === null) {
-            // First time we've seen this user. Seed quietly — see
-            // class docstring for the rationale.
+        $decision = self::decideTransition($lastSeenRaw, $current, $currentOrder);
+
+        if ($decision['persist']) {
             update_user_meta($userId, self::LAST_SEEN_META_KEY, $current);
+        }
+
+        if ($decision['outcome'] === self::TRANSITION_NONE
+            || $decision['outcome'] === self::TRANSITION_SEED
+        ) {
             return;
         }
 
-        if ($lastSeen === $current) {
-            return;
-        }
+        $lastSeen = (string) $decision['from'];
 
-        $lastOrder = RankCatalog::orderOf($lastSeen);
-        // Persist the new last-seen rank regardless of direction so
-        // future comparisons stay tight against the current state.
-        update_user_meta($userId, self::LAST_SEEN_META_KEY, $current);
-
-        if ($lastOrder === null || $currentOrder > $lastOrder) {
+        if ($decision['outcome'] === self::TRANSITION_PROMOTION) {
             // Promotion — celebrate.
             $label = self::buildPromotionLabel($current);
             CelebrationStash::pushHeavy(

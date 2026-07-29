@@ -404,8 +404,12 @@ final class PostsService
         if ($access['allowed'] !== true) {
             return [
                 'error'   => 'bcc_forbidden',
+                // Fallback states the requirement directly rather than naming
+                // an internal level ("the Active level" appears on no screen).
+                // The rank word is deliberately absent too — a requirement the
+                // user can act on beats a label they must go look up.
                 'message' => $access['unlock_hint']
-                    ?? 'You need to reach the Active level before writing reviews.',
+                    ?? 'Follow 5 operators and keep your standing at Neutral or better to write reviews.',
             ];
         }
 
