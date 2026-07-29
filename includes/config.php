@@ -18,6 +18,7 @@ require_once $config_dir . 'fraud-detection.php';
 require_once $config_dir . 'scoring.php';
 require_once $config_dir . 'contribution.php';
 require_once $config_dir . 'tiers.php';
+require_once $config_dir . 'ranks.php';
 require_once $config_dir . 'limits.php';
 require_once $config_dir . 'behavioral.php';
 require_once $config_dir . 'quest-rewards.php';
