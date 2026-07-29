@@ -34,6 +34,7 @@ final class MysqliWpdb
     public string $postmeta;
 
     private mysqli $db;
+    private bool $suppressErrors = false;
 
     public function __construct(mysqli $db, string $prefix = 'wp_')
     {
@@ -49,6 +50,21 @@ final class MysqliWpdb
     public function get_charset_collate(): string
     {
         return 'DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci';
+    }
+
+    /**
+     * Match WP's suppress_errors contract: set the flag, return the PREVIOUS
+     * value so callers can restore it. TableRegistry::columnExists brackets its
+     * `SHOW COLUMNS` probe with this pair, so any repository guarded by a
+     * columnExists() check (e.g. the §J.12 elite gate) needs it to exist here.
+     * The shim never echoes errors anyway — last_error is what tests read — so
+     * this only has to be honest about the flag.
+     */
+    public function suppress_errors(bool $suppress = true): bool
+    {
+        $previous             = $this->suppressErrors;
+        $this->suppressErrors = $suppress;
+        return $previous;
     }
 
     /**

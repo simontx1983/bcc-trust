@@ -2280,7 +2280,9 @@ class ScoreRepository {
      * gate immediately must follow with refreshTier().
      *
      * @param string $nowMysql UTC 'Y-m-d H:i:s' evaluation timestamp.
-     * @return bool True when at least one row was updated.
+     * @return bool True when the row now holds the intended verdict — whether
+     *              or not this call was the one that changed it. False ONLY on
+     *              a genuine persistence failure (schema missing, SQL error).
      */
     public function setEliteEligibility(int $pageId, bool $eligible, string $nowMysql): bool
     {
@@ -2304,15 +2306,22 @@ class ScoreRepository {
             $pageId
         ));
 
+        // $wpdb->query returns false on a real SQL error, otherwise the number
+        // of CHANGED rows (WordPress does not set CLIENT_FOUND_ROWS). Only the
+        // former is a failure.
         if ($result === false) {
             return false;
         }
 
+        // Zero changed rows means the row already held this exact verdict and
+        // timestamp — an idempotent re-affirmation, which is SUCCESS. Treating
+        // it as failure (as this did until #130) made every same-second
+        // re-evaluation report a bogus `schema_unavailable` degradation and
+        // aborted the backfill loop mid-drain.
         if ($result > 0) {
             $this->invalidateCache($pageId);
-            return true;
         }
-        return false;
+        return true;
     }
 
     /**

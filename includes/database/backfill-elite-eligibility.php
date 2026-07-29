@@ -79,12 +79,25 @@ if (!function_exists('bcc_trust_backfill_elite_eligibility')) {
         $hadFailure    = false;
         $drained       = false;
 
-        // A far-future staleness boundary so EVERY unevaluated row matches on
-        // the first pass. Match-set-SHRINKING paging: recomputeFor() stamps
-        // elite_eligible_at, which removes the row from this query, so the
-        // offset stays at 0 and each iteration re-queries what remains.
-        // Stepping an offset here would skip rows as the set contracts.
-        $staleBefore = gmdate('Y-m-d H:i:s', time() + YEAR_IN_SECONDS);
+        // Match-set-SHRINKING paging: recomputeFor() stamps elite_eligible_at,
+        // which removes the row from this query, so the offset stays at 0 and
+        // each iteration re-queries what remains. Stepping an offset here
+        // would skip rows as the set contracts.
+        //
+        // The boundary is THIS RUN'S START INSTANT, and that is load-bearing.
+        // It was previously `time() + YEAR_IN_SECONDS`, chosen so that every
+        // unevaluated row matched on the first pass — but the sweep predicate
+        // is `elite_eligible_at IS NULL OR elite_eligible_at < $staleBefore`,
+        // so a row stamped `now` still satisfied `now < now + 1 year`. The
+        // match set never shrank, the loop re-fetched the same pages until the
+        // iteration cap, `$drained` never became true, and the migration
+        // returned INCOMPLETE forever — on any environment holding a single
+        // page at or above the elite threshold. See #130.
+        //
+        // Rows stamped before this instant (or never) still match, so a
+        // re-run after a partial pass re-evaluates them; rows this run has
+        // already stamped drop out, which is what lets the set drain.
+        $staleBefore = gmdate('Y-m-d H:i:s');
 
         for ($i = 0; $i < $maxIterations; $i++) {
             $pageIds = $scores->listPagesForEliteSweep($minScore, $staleBefore, $batchSize, 0);
