@@ -2,6 +2,16 @@
   "items": [
     {
       "actions": {
+        "claim": {
+          "body": {
+            "entity_id": 96,
+            "entity_type": "validator"
+          },
+          "href": "/wp-json/bcc/v1/pages/2105/claim",
+          "idempotent": true,
+          "method": "POST",
+          "requires_auth": true
+        },
         "watch": {
           "body": {
             "target_id": 2105,
@@ -15,23 +25,22 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": null,
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-96-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-96-logo.jpg",
         "initials": "C",
         "monogram_color": "#1a0f3e"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "coinbase01-cosmos-wvh5ne",
       "id": 2105,
+      "is_claim_verified": true,
       "is_claimed": true,
       "is_in_good_standing": true,
       "links": {
@@ -39,6 +48,13 @@
         "self": "/v/coinbase01-cosmos-wvh5ne"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "operator",
+        "operator": {
+          "handle": "smokec9teror",
+          "name": "Smoke C"
+        }
+      },
       "name": "Coinbase01",
       "negative_signals": {
         "divergence_state": "untested",
@@ -50,10 +66,10 @@
         "commission_rate": 0.2,
         "delegator_count": 942,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "1.00000000",
         "status": "active",
-        "total_stake": "66231126.88222500",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
         "voting_power_rank": 1
       },
@@ -72,6 +88,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -111,15 +132,15 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
           "format": "score",
           "key": "trust",
           "label": "Trust",
-          "raw": 50,
-          "value": "50"
+          "raw": 51,
+          "value": "51"
         },
         {
           "format": "count",
@@ -139,12 +160,11 @@
           "format": "count",
           "key": "endorsements",
           "label": "Vouches",
-          "raw": 0,
-          "value": "0"
+          "raw": 1,
+          "value": "1"
         }
       ],
-      "tier_label": "Uncommon",
-      "trust_score": 50,
+      "trust_score": 51,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
       "viewer_has_reviewed": false
@@ -164,13 +184,12 @@
       },
       "bio": "Demo validator page seeded by bcc-demo-seeder.",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": null,
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
+        "background_value": "neutral",
         "image_url": null,
         "initials": "BN",
         "monogram_color": "#1a0f3e"
@@ -178,9 +197,9 @@
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "blacksmith-node",
       "id": 2015,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -188,6 +207,10 @@
         "self": "/v/blacksmith-node"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Blacksmith Node",
       "negative_signals": {
         "divergence_state": "untested",
@@ -212,6 +235,11 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
+        },
         "can_open_dispute": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -250,7 +278,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -282,7 +310,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -303,13 +330,12 @@
       },
       "bio": "Demo builder page seeded by bcc-demo-seeder.",
       "card_kind": "project",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": null,
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
+        "background_value": "neutral",
         "image_url": null,
         "initials": "F",
         "monogram_color": "#3e3a0f"
@@ -317,9 +343,9 @@
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "foundry",
       "id": 2016,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -327,6 +353,10 @@
         "self": "/p/foundry"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "none",
+        "operator": null
+      },
       "name": "Foundry",
       "negative_signals": {
         "divergence_state": "untested",
@@ -351,6 +381,11 @@
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
         },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "not_applicable",
+          "unlock_hint": null
+        },
         "can_open_dispute": {
           "allowed": false,
           "reason_code": "signin_required",
@@ -389,7 +424,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -421,7 +456,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -442,13 +476,12 @@
       },
       "bio": "Demo nft page seeded by bcc-demo-seeder.",
       "card_kind": "creator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": null,
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
+        "background_value": "neutral",
         "image_url": null,
         "initials": "WS",
         "monogram_color": "#0f3e3e"
@@ -456,9 +489,9 @@
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "welder-studio",
       "id": 2017,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -466,6 +499,10 @@
         "self": "/c/welder-studio"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "none",
+        "operator": null
+      },
       "name": "Welder Studio",
       "negative_signals": {
         "divergence_state": "untested",
@@ -489,6 +526,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "not_applicable",
+          "unlock_hint": null
         },
         "can_open_dispute": {
           "allowed": false,
@@ -528,7 +570,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -556,11 +598,10 @@
           "format": "count",
           "key": "endorsements",
           "label": "Vouches",
-          "raw": 0,
-          "value": "0"
+          "raw": 1,
+          "value": "1"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 51,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -581,7 +622,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -591,17 +631,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-97-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-97-logo.jpg",
         "initials": "US",
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "upbit-staking-cosmos-wdgw30",
       "id": 2106,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -609,6 +649,10 @@
         "self": "/v/upbit-staking-cosmos-wdgw30"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Upbit Staking",
       "negative_signals": {
         "divergence_state": "untested",
@@ -620,10 +664,10 @@
         "commission_rate": 1,
         "delegator_count": 283,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "4506251.00000000",
         "status": "active",
-        "total_stake": "23775032.84352600",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
         "voting_power_rank": 2
       },
@@ -642,6 +686,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -681,7 +730,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -713,7 +762,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -734,7 +782,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -744,17 +791,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-99-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-99-logo.jpg",
         "initials": "K",
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "kiln-cosmos-mkeqee",
       "id": 2107,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -762,6 +809,10 @@
         "self": "/v/kiln-cosmos-mkeqee"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Kiln",
       "negative_signals": {
         "divergence_state": "untested",
@@ -773,10 +824,10 @@
         "commission_rate": 0.08,
         "delegator_count": 286,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "1.00000000",
         "status": "active",
-        "total_stake": "18604989.73687300",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
         "voting_power_rank": 3
       },
@@ -795,6 +846,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -834,7 +890,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -866,7 +922,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -887,7 +942,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -897,17 +951,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-98-logo-1.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-98-logo-1.jpg",
         "initials": "C",
         "monogram_color": "#0f3e2a"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "cosmostation-cosmos-sluffn",
       "id": 2108,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -915,6 +969,10 @@
         "self": "/v/cosmostation-cosmos-sluffn"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Cosmostation",
       "negative_signals": {
         "divergence_state": "untested",
@@ -926,12 +984,12 @@
         "commission_rate": 0.05,
         "delegator_count": 66568,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "33142.34807100",
         "status": "active",
-        "total_stake": "16072356.17965000",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 0.9998999999999999,
-        "voting_power_rank": 4
+        "voting_power_rank": 6
       },
       "permissions": {
         "can_edit_bio": {
@@ -948,6 +1006,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -987,7 +1050,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -1019,7 +1082,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -1040,7 +1102,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -1050,17 +1111,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-100-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-100-logo.jpg",
         "initials": "K",
         "monogram_color": "#0f3e2a"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "kraken01-cosmos-e0meuw",
       "id": 2109,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -1068,6 +1129,10 @@
         "self": "/v/kraken01-cosmos-e0meuw"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Kraken01",
       "negative_signals": {
         "divergence_state": "untested",
@@ -1079,12 +1144,12 @@
         "commission_rate": 0.1,
         "delegator_count": 2099,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "1.00322600",
         "status": "active",
-        "total_stake": "14422823.62501700",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 5
+        "voting_power_rank": 4
       },
       "permissions": {
         "can_edit_bio": {
@@ -1101,6 +1166,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -1140,7 +1210,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -1172,7 +1242,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -1193,7 +1262,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -1203,17 +1271,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-101-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-101-logo.jpg",
         "initials": "E",
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "everstake-cosmos-6eete3",
       "id": 2110,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -1221,6 +1289,10 @@
         "self": "/v/everstake-cosmos-6eete3"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Everstake",
       "negative_signals": {
         "divergence_state": "untested",
@@ -1232,12 +1304,12 @@
         "commission_rate": 0.08,
         "delegator_count": 67308,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "277.90000000",
         "status": "active",
-        "total_stake": "12709334.19662200",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 6
+        "voting_power_rank": 5
       },
       "permissions": {
         "can_edit_bio": {
@@ -1254,6 +1326,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -1293,7 +1370,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -1325,7 +1402,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -1346,7 +1422,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -1356,17 +1431,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-102-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-102-logo.jpg",
         "initials": "LB",
         "monogram_color": "#3e1a0f"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "ledger-by-chorus-one-cosmos-rucvtm",
       "id": 2111,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -1374,6 +1449,10 @@
         "self": "/v/ledger-by-chorus-one-cosmos-rucvtm"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Ledger by Chorus One",
       "negative_signals": {
         "divergence_state": "untested",
@@ -1385,12 +1464,12 @@
         "commission_rate": 0.075,
         "delegator_count": 24585,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "1.00000000",
         "status": "active",
-        "total_stake": "8997907.14384200",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 8
+        "voting_power_rank": 7
       },
       "permissions": {
         "can_edit_bio": {
@@ -1407,6 +1486,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -1446,7 +1530,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -1478,7 +1562,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -1499,7 +1582,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -1509,7 +1591,7 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
+        "background_value": "neutral",
         "image_url": null,
         "initials": "D",
         "monogram_color": "#0f3e2a"
@@ -1517,9 +1599,9 @@
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "dokiacapital-cosmos-ju5zzy",
       "id": 2112,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -1527,6 +1609,10 @@
         "self": "/v/dokiacapital-cosmos-ju5zzy"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "DokiaCapital",
       "negative_signals": {
         "divergence_state": "untested",
@@ -1538,10 +1624,10 @@
         "commission_rate": 0.15,
         "delegator_count": 6325,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "1606597.77142900",
         "status": "active",
-        "total_stake": "8636688.93333700",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
         "voting_power_rank": 9
       },
@@ -1560,6 +1646,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -1599,7 +1690,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -1631,7 +1722,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -1652,7 +1742,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -1662,7 +1751,7 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
+        "background_value": "neutral",
         "image_url": null,
         "initials": "BN",
         "monogram_color": "#3e0f1a"
@@ -1670,9 +1759,9 @@
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "binance-node-cosmos-rh7w5s",
       "id": 2113,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -1680,6 +1769,10 @@
         "self": "/v/binance-node-cosmos-rh7w5s"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Binance Node",
       "negative_signals": {
         "divergence_state": "untested",
@@ -1691,12 +1784,12 @@
         "commission_rate": 0.05,
         "delegator_count": 11467,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "2.00000000",
         "status": "active",
-        "total_stake": "8202047.79414300",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 10
+        "voting_power_rank": 8
       },
       "permissions": {
         "can_edit_bio": {
@@ -1713,6 +1806,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -1752,7 +1850,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -1784,7 +1882,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -1805,7 +1902,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -1815,17 +1911,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-105-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-105-logo.jpg",
         "initials": "B",
         "monogram_color": "#1a0f3e"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "blockdaemon-cosmos-5mpakx",
       "id": 2114,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -1833,6 +1929,10 @@
         "self": "/v/blockdaemon-cosmos-5mpakx"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Blockdaemon",
       "negative_signals": {
         "divergence_state": "untested",
@@ -1844,12 +1944,12 @@
         "commission_rate": 0.1,
         "delegator_count": 3254,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "10.00000000",
         "status": "active",
-        "total_stake": "9455603.57878100",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 7
+        "voting_power_rank": 6
       },
       "permissions": {
         "can_edit_bio": {
@@ -1866,6 +1966,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -1905,7 +2010,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -1937,7 +2042,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -1958,7 +2062,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -1968,17 +2071,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-106-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-106-logo.jpg",
         "initials": "A",
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "allnodes-cosmos-3vp77d",
       "id": 2115,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -1986,6 +2089,10 @@
         "self": "/v/allnodes-cosmos-3vp77d"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Allnodes",
       "negative_signals": {
         "divergence_state": "untested",
@@ -1997,12 +2104,12 @@
         "commission_rate": 0.05,
         "delegator_count": 78252,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "1.00000000",
         "status": "active",
-        "total_stake": "7460450.13399000",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 11
+        "voting_power_rank": 10
       },
       "permissions": {
         "can_edit_bio": {
@@ -2019,6 +2126,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -2058,7 +2170,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -2090,7 +2202,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -2111,7 +2222,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -2121,7 +2231,7 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
+        "background_value": "neutral",
         "image_url": null,
         "initials": "F",
         "monogram_color": "#3e3a0f"
@@ -2129,9 +2239,9 @@
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "figment-cosmos-dn6m9d",
       "id": 2116,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -2139,6 +2249,10 @@
         "self": "/v/figment-cosmos-dn6m9d"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Figment",
       "negative_signals": {
         "divergence_state": "untested",
@@ -2150,12 +2264,12 @@
         "commission_rate": 0.09,
         "delegator_count": 9386,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "17799.75002000",
         "status": "active",
-        "total_stake": "6137797.80034200",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 14
+        "voting_power_rank": 11
       },
       "permissions": {
         "can_edit_bio": {
@@ -2172,6 +2286,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -2211,7 +2330,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -2243,7 +2362,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -2264,7 +2382,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -2274,17 +2391,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-107-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-107-logo.jpg",
         "initials": "S",
         "monogram_color": "#1a0f3e"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "sg-1-cosmos-vrj90c",
       "id": 2117,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -2292,6 +2409,10 @@
         "self": "/v/sg-1-cosmos-vrj90c"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "SG-1",
       "negative_signals": {
         "divergence_state": "untested",
@@ -2303,12 +2424,12 @@
         "commission_rate": 0.05,
         "delegator_count": 74802,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "5001.00011000",
         "status": "active",
-        "total_stake": "6441556.74820900",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 13
+        "voting_power_rank": 12
       },
       "permissions": {
         "can_edit_bio": {
@@ -2325,6 +2446,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -2364,7 +2490,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -2396,7 +2522,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -2417,7 +2542,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -2427,17 +2551,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-108-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-108-logo.jpg",
         "initials": "BO",
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "bitwise-onchain-solutions-cosmos-e02707",
       "id": 2118,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -2445,6 +2569,10 @@
         "self": "/v/bitwise-onchain-solutions-cosmos-e02707"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Bitwise Onchain Solutions",
       "negative_signals": {
         "divergence_state": "untested",
@@ -2456,12 +2584,12 @@
         "commission_rate": 0.075,
         "delegator_count": 6429,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "20.00000000",
         "status": "active",
-        "total_stake": "6542096.39829100",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 12
+        "voting_power_rank": 14
       },
       "permissions": {
         "can_edit_bio": {
@@ -2478,6 +2606,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -2517,7 +2650,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -2549,7 +2682,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -2570,7 +2702,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -2580,17 +2711,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-110-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-110-logo.jpg",
         "initials": "C",
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "cloudbyte-cosmos-yh8m5v",
       "id": 2119,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -2598,6 +2729,10 @@
         "self": "/v/cloudbyte-cosmos-yh8m5v"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "CloudByte",
       "negative_signals": {
         "divergence_state": "untested",
@@ -2609,10 +2744,10 @@
         "commission_rate": 0.05,
         "delegator_count": 846,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "2.00000000",
         "status": "active",
-        "total_stake": "5650196.76903000",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
         "voting_power_rank": 15
       },
@@ -2631,6 +2766,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -2670,7 +2810,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -2702,7 +2842,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -2723,7 +2862,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -2733,7 +2871,7 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
+        "background_value": "neutral",
         "image_url": null,
         "initials": "🐠",
         "monogram_color": "#0f3e3e"
@@ -2741,9 +2879,9 @@
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "%f0%9f%90%a0stake-fish-cosmos-2lcnj0",
       "id": 2120,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -2751,6 +2889,10 @@
         "self": "/v/%f0%9f%90%a0stake-fish-cosmos-2lcnj0"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "🐠stake.fish",
       "negative_signals": {
         "divergence_state": "untested",
@@ -2762,10 +2904,10 @@
         "commission_rate": 0.05,
         "delegator_count": 35347,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "82560.41554000",
         "status": "active",
-        "total_stake": "4996815.17942500",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
         "voting_power_rank": 16
       },
@@ -2784,6 +2926,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -2823,7 +2970,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -2855,7 +3002,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -2876,7 +3022,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -2886,17 +3031,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-114-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-114-logo.jpg",
         "initials": "IS",
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "informal-systems-cosmos-lu9qdv",
       "id": 2121,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -2904,6 +3049,10 @@
         "self": "/v/informal-systems-cosmos-lu9qdv"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Informal Systems",
       "negative_signals": {
         "divergence_state": "untested",
@@ -2915,10 +3064,10 @@
         "commission_rate": 0.05,
         "delegator_count": 14058,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "12090.72496100",
         "status": "active",
-        "total_stake": "4524916.25905400",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
         "voting_power_rank": 17
       },
@@ -2937,6 +3086,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -2976,7 +3130,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -3008,7 +3162,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -3029,7 +3182,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -3039,7 +3191,7 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
+        "background_value": "neutral",
         "image_url": null,
         "initials": "N|",
         "monogram_color": "#0f3e2a"
@@ -3047,9 +3199,9 @@
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "nansen-stake-to-stack-points-cosmos-num5xr",
       "id": 2122,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -3057,6 +3209,10 @@
         "self": "/v/nansen-stake-to-stack-points-cosmos-num5xr"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Nansen | Stake to Stack Points",
       "negative_signals": {
         "divergence_state": "untested",
@@ -3068,10 +3224,10 @@
         "commission_rate": 0.05,
         "delegator_count": 40470,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "2.00000000",
         "status": "active",
-        "total_stake": "4065220.70873900",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
         "voting_power_rank": 18
       },
@@ -3090,6 +3246,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -3129,7 +3290,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -3161,7 +3322,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -3182,7 +3342,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -3192,17 +3351,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-112-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-112-logo.jpg",
         "initials": "P",
         "monogram_color": "#0f3e3e"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "p2p-org-cosmos-734g4w",
       "id": 2123,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -3210,6 +3369,10 @@
         "self": "/v/p2p-org-cosmos-734g4w"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "P2P.org",
       "negative_signals": {
         "divergence_state": "untested",
@@ -3221,10 +3384,10 @@
         "commission_rate": 0.08,
         "delegator_count": 4489,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "4963.82562200",
         "status": "active",
-        "total_stake": "3628049.56072300",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 0.9993000000000001,
         "voting_power_rank": 19
       },
@@ -3243,6 +3406,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -3282,7 +3450,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -3314,7 +3482,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -3335,7 +3502,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -3345,17 +3511,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-115-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-115-logo.jpg",
         "initials": "G",
         "monogram_color": "#3e0f1a"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "game-cosmos-gfnp42",
       "id": 2124,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -3363,6 +3529,10 @@
         "self": "/v/game-cosmos-gfnp42"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "GAME",
       "negative_signals": {
         "divergence_state": "untested",
@@ -3374,12 +3544,12 @@
         "commission_rate": 0.05,
         "delegator_count": 16246,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "10001.00000000",
         "status": "active",
-        "total_stake": "3483530.71863100",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 0.9934000000000001,
-        "voting_power_rank": 21
+        "voting_power_rank": 20
       },
       "permissions": {
         "can_edit_bio": {
@@ -3396,6 +3566,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -3435,7 +3610,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -3467,7 +3642,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
@@ -3488,7 +3662,6 @@
       },
       "bio": "",
       "card_kind": "validator",
-      "card_tier": "uncommon",
       "chains": null,
       "claim_target": {
         "chain_slug": "cosmos",
@@ -3498,17 +3671,17 @@
       "community_dossier": null,
       "crest": {
         "background_kind": "tier",
-        "background_value": "uncommon",
-        "image_url": "http://blue-collar-crypto-custom.local/wp-content/uploads/2026/06/validator-118-logo.jpg",
+        "background_value": "neutral",
+        "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-118-logo.jpg",
         "initials": "K",
         "monogram_color": "#3e3a0f"
       },
       "current_rank_label": null,
       "endorse_unlock_hint": "Sign in to vouch.",
       "flags": [],
-      "foreman_insignia": false,
       "handle": "keplr-cosmos-fp9md2",
       "id": 2125,
+      "is_claim_verified": false,
       "is_claimed": false,
       "is_in_good_standing": true,
       "links": {
@@ -3516,6 +3689,10 @@
         "self": "/v/keplr-cosmos-fp9md2"
       },
       "member_dossier": null,
+      "messaging": {
+        "destination": "queue",
+        "operator": null
+      },
       "name": "Keplr",
       "negative_signals": {
         "divergence_state": "untested",
@@ -3527,12 +3704,12 @@
         "commission_rate": 0.05,
         "delegator_count": 14649,
         "jailed_count": 0,
-        "last_fetched_at": "2026-06-28T15:30:28Z",
+        "last_fetched_at": "{{VOLATILE}}",
         "self_stake": "1647.00000000",
         "status": "active",
-        "total_stake": "3545050.72234700",
+        "total_stake": "{{VOLATILE}}",
         "uptime_30d": 1,
-        "voting_power_rank": 20
+        "voting_power_rank": 13
       },
       "permissions": {
         "can_edit_bio": {
@@ -3549,6 +3726,11 @@
           "allowed": false,
           "reason_code": "signin_required",
           "unlock_hint": "Sign in to interact"
+        },
+        "can_message": {
+          "allowed": false,
+          "reason_code": "auth_required",
+          "unlock_hint": "Sign in to send a message."
         },
         "can_open_dispute": {
           "allowed": false,
@@ -3588,7 +3770,7 @@
       },
       "rank_label": null,
       "reputation_tier": "neutral",
-      "reputation_tier_label": null,
+      "reputation_tier_label": "Neutral",
       "social_proof": null,
       "stats": [
         {
@@ -3620,7 +3802,6 @@
           "value": "0"
         }
       ],
-      "tier_label": "Uncommon",
       "trust_score": 50,
       "viewer_attestation": null,
       "viewer_has_endorsed": false,
