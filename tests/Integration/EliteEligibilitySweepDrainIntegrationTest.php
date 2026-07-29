@@ -129,9 +129,7 @@ final class EliteEligibilitySweepDrainIntegrationTest extends TestCase
 
         (new ScoreRepository())->setEliteEligibility(self::PAGE_ID, false, gmdate('Y-m-d H:i:s'));
 
-        // Literal rather than YEAR_IN_SECONDS: the integration bootstrap does
-        // not load WP core's time constants.
-        $futureBoundary = gmdate('Y-m-d H:i:s', time() + 31536000);
+        $futureBoundary = gmdate('Y-m-d H:i:s', time() + YEAR_IN_SECONDS);
 
         self::assertContains(
             self::PAGE_ID,

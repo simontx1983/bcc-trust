@@ -32,6 +32,20 @@ if (!defined('ABSPATH')) {
     define('ABSPATH', __DIR__ . '/wp-stubs/');
 }
 
+// WP core time constants. Some production classes use these in CONSTANT
+// EXPRESSIONS (e.g. TableRegistry::EXISTS_CACHE_TTL = HOUR_IN_SECONDS), which
+// PHP resolves lazily at first class use — so a missing one is not a load
+// error, it is a fatal thrown from whichever test first touches that class.
+// Same values as wp-includes/default-constants.php.
+if (!defined('MINUTE_IN_SECONDS')) {
+    define('MINUTE_IN_SECONDS', 60);
+    define('HOUR_IN_SECONDS', 60 * MINUTE_IN_SECONDS);
+    define('DAY_IN_SECONDS', 24 * HOUR_IN_SECONDS);
+    define('WEEK_IN_SECONDS', 7 * DAY_IN_SECONDS);
+    define('MONTH_IN_SECONDS', 30 * DAY_IN_SECONDS);
+    define('YEAR_IN_SECONDS', 365 * DAY_IN_SECONDS);
+}
+
 // ── Connect + recreate the throwaway DB ─────────────────────────────────────
 
 $host = getenv('BCC_TEST_DB_HOST') ?: '127.0.0.1';
