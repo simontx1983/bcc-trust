@@ -28,8 +28,26 @@
 #
 # --capture PROVES self-stability before writing: it fetches twice and refuses
 # to write a fixture whose two fetches differ (a volatile endpoint can't be a
-# golden master). Re-capture whenever the host or the seeded DB changes — the
-# fixtures are host-pinned (avatar/cover URLs embed the capture origin).
+# golden master). Re-capture whenever the seeded DB changes.
+#
+# NORMALISATION (added with the #131 repair). Fixtures are no longer host-pinned
+# and no longer self-rotting. Two things used to change with no code change
+# behind them, so every fixture "drifted" for reasons nobody caused:
+#   · the capture origin — avatar/cover URLs embedded scheme+host, so Local's
+#     move from http to https broke all of them at once → now {{ORIGIN}}
+#   · PeepSo's ?mt=<mtime> avatar cache-buster, which changed whenever an
+#     avatar file was touched → now {{MT}}
+# Everything else is still compared byte-for-byte. A side benefit: fixtures are
+# now portable across hosts, which they could never be before.
+#
+# THIS SCRIPT CANNOT RUN IN CI — it needs a live WordPress and a seeded
+# database. That is why it sat in no workflow and its fixtures rotted unnoticed.
+# Its CI companion is scripts/golden-staleness-guard.php, which catches the
+# rot class (retired routes, orphaned fixtures, fields no PHP emits) from the
+# checked-in tree alone, and DOES run on every push. The two are complementary:
+# the guard proves the fixtures still describe reality, this script proves the
+# values still match it. Run this one before/after a behaviour-preserving
+# refactor; the guard has your back the rest of the time.
 
 set -u
 BASE="${BCC_BASE_URL:-http://blue-collar-crypto-custom.local}"
@@ -49,16 +67,92 @@ for arg in "$@"; do
     esac
 done
 
-py() { python "$@" 2>/dev/null || python3 "$@" 2>/dev/null; }
+# Run python, PRESERVING stderr. This used to be `python "$@" 2>/dev/null ||
+# python3 "$@" 2>/dev/null`, which silently swallowed every interpreter error —
+# so `cards` reported failure with ZERO output for months (its fixture contains
+# U+1F420, and printing the diff raised UnicodeEncodeError on a Windows cp1252
+# stdout). A checker you cannot distinguish from a crash is worse than no
+# checker. Probe once for an interpreter, then let errors through.
+PYBIN=""
+for c in python3 python; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" -c '' >/dev/null 2>&1; then PYBIN="$c"; break; fi
+done
+[ -n "$PYBIN" ] || { echo "[golden] no python interpreter on PATH" >&2; exit 2; }
+py() { "$PYBIN" "$@"; }
 
-# Extract `.data` from a response file, canonicalised (sorted keys). Empty on failure.
+# Origin host of the target site, used to make fixtures host-portable.
+HOST="$(printf '%s' "$BASE" | sed -E 's#^https?://##; s#/.*$##')"
+
+# Extract `.data` from a response file, canonicalised (sorted keys) and
+# NORMALISED. Prints nothing and returns non-zero on failure — the caller
+# reports it; stderr carries the reason.
 extract_data() {
-    py - "$1" <<'PY'
-import json, sys
+    py - "$1" "$HOST" <<'PY'
+import json, re, sys
+
+# stdout must survive non-ASCII payload content (emoji in card names) on a
+# Windows cp1252 console. Without this the whole script fails invisibly.
 try:
-    print(json.dumps(json.load(open(sys.argv[1])).get('data'), sort_keys=True, indent=2))
+    sys.stdout.reconfigure(encoding='utf-8')
 except Exception:
     pass
+
+path, host = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding='utf-8') as fh:
+        payload = json.load(fh)
+except Exception as e:
+    print(f"could not parse response: {e}", file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(payload, dict) or 'data' not in payload:
+    print("response has no 'data' key", file=sys.stderr)
+    sys.exit(1)
+
+# ── Normalisation ────────────────────────────────────────────────────────
+# Two classes of churn made these fixtures rot on their own, with no code
+# change behind it. Neither is behaviour we want to pin:
+#
+#   1. ORIGIN. Avatar/cover URLs embed the capture host AND scheme. Local
+#      moved http -> https and every fixture "drifted" at once. Pinning the
+#      origin also made fixtures un-runnable anywhere else, which is why this
+#      could never be pointed at staging.
+#   2. CACHE-BUSTERS. PeepSo appends ?mt=<mtime> to avatar URLs. That integer
+#      changes whenever an avatar file is touched, so a fixture re-rotted
+#      immediately after every recapture.
+#
+# Everything else is still compared byte-for-byte — the point of the net.
+#   3. EXTERNALLY-SOURCED VALUES. The fields below carry on-chain data that a
+#      background indexer cron rewrites on its own schedule. Nothing in the
+#      code under test produces them, so they cannot express a refactor
+#      regression — but they DO make the net permanently red, which is how it
+#      came to be ignored in the first place. Only their VALUES are replaced;
+#      the field names are still pinned, so removing or renaming one still
+#      drifts, and golden-staleness-guard.php still checks PHP emits them.
+#      Cost, stated plainly: a refactor that changed the FORMATTING of these
+#      two values (decimal precision, timestamp shape) would not be caught
+#      here. Keep this list minimal and explicit for that reason.
+VOLATILE_VALUE_FIELDS = {
+    'last_fetched_at',  # validator/NFT indexer sweep timestamp
+    'total_stake',      # live delegated stake, refreshed from chain
+}
+
+ORIGIN_RE = re.compile(r'https?://' + re.escape(host))
+MT_RE     = re.compile(r'([?&]mt=)\d+')
+
+def norm(node):
+    if isinstance(node, str):
+        return MT_RE.sub(r'\1{{MT}}', ORIGIN_RE.sub('{{ORIGIN}}', node))
+    if isinstance(node, list):
+        return [norm(v) for v in node]
+    if isinstance(node, dict):
+        return {
+            k: ('{{VOLATILE}}' if k in VOLATILE_VALUE_FIELDS and v is not None else norm(v))
+            for k, v in node.items()
+        }
+    return node
+
+print(json.dumps(norm(payload['data']), sort_keys=True, indent=2, ensure_ascii=False))
 PY
 }
 
@@ -108,28 +202,35 @@ while IFS= read -r line || [ -n "$line" ]; do
         echo "[golden] $name: no fixture (run --capture $name): $fixture" >&2
         rm -f "$tmp"; fail=1; continue
     fi
+    # Compare against the ALREADY-NORMALISED live extract computed above, so
+    # verify and capture can never diverge on normalisation.
+    livefile="$tmp.norm"
+    printf '%s\n' "$live" > "$livefile"
     pyfix="$(cygpath -m "$fixture" 2>/dev/null || echo "$fixture")"
-    pytmp="$(cygpath -m "$tmp" 2>/dev/null || echo "$tmp")"
-    py - "$pyfix" "$pytmp" "$name" <<'PY'
-import json, sys, difflib
-name = sys.argv[3]
-a = open(sys.argv[1]).read().strip()
+    pylive="$(cygpath -m "$livefile" 2>/dev/null || echo "$livefile")"
+    py - "$pyfix" "$pylive" "$name" <<'PY'
+import sys, difflib
 try:
-    b = json.dumps(json.load(open(sys.argv[2])).get('data'), sort_keys=True, indent=2)
-except Exception as e:
-    print(f"[golden] {name}: could not parse live response: {e}"); sys.exit(1)
+    sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+name = sys.argv[3]
+a = open(sys.argv[1], encoding='utf-8').read().strip()
+b = open(sys.argv[2], encoding='utf-8').read().strip()
 if a == b:
     print(f"[golden] {name}: MATCH"); sys.exit(0)
-print(f"[golden] {name}: DRIFT -- live differs from the golden master:")
-for ln in list(difflib.unified_diff(a.splitlines(), b.splitlines(), lineterm=''))[:40]:
-    if ln[:3] in ('+++', '---'):
-        continue
-    if ln[:1] in '+-':
-        print("  " + ln[:160])
+diff = [l for l in difflib.unified_diff(a.splitlines(), b.splitlines(), lineterm='')
+        if l[:1] in '+-' and l[:3] not in ('+++', '---')]
+print(f"[golden] {name}: DRIFT -- live differs from the golden master "
+      f"({len(diff)} changed line(s); '-' = fixture, '+' = live):")
+for ln in diff[:40]:
+    print("  " + ln[:160])
+if len(diff) > 40:
+    print(f"  ... {len(diff) - 40} more changed line(s) suppressed")
 sys.exit(1)
 PY
     [ $? -ne 0 ] && fail=1
-    rm -f "$tmp"
+    rm -f "$tmp" "$livefile"
 done < "$MANIFEST"
 
 if [ "$checked" -eq 0 ]; then

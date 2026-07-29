@@ -56,6 +56,15 @@ jobs:
       - name: Architecture guardrails (incl. PHP syntax)
         run: bash scripts/arch-guardrails.sh bcc-trust
 
+      # verify-golden.sh itself needs a live WordPress + seeded DB, which CI
+      # has not got — which is exactly why it was in no workflow, and why its
+      # fixtures rotted unnoticed for months (foreman_insignia from v1.36,
+      # card_tier from v1.57, a manifest still pinning the v1.55-retired
+      # /locals). This guard catches that whole class statically, so the rot
+      # cannot come back silently.
+      - name: Golden-fixture staleness guard
+        run: php scripts/golden-staleness-guard.php
+
   integration:
     name: PHP integration (MySQL)
     runs-on: ubuntu-latest

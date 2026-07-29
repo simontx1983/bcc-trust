@@ -19,7 +19,11 @@
 #                          cards via the Core→Onchain static reads → anchors the
 #                          Phase-11 ChainReadInterface boundary.
 #   ranks      /ranks      — leaderboard read model (RanksEndpoint).
-#   locals     /locals     — locals/group read surface (LocalsEndpoint).
+#   halls      /halls      — hall/group read surface (HallsEndpoint). Replaces
+#                          the `locals /locals` entry: that route was retired by
+#                          the v1.55 Local→Hall rename and had been returning
+#                          404 (data: null) ever since, so the fixture drifted
+#                          by construction and could never pass again.
 #
 # SCOPE NOTE (no silent cap): the per-viewer feed variants (authed /feed, /feed/tag
 # with content, /feed group/author) are NOT pinned here — anon returns them empty,
@@ -32,4 +36,4 @@ profile-phillipcosmos	/users/phillipcosmos
 feed-hot	/feed/hot
 cards	/cards
 ranks	/ranks
-locals	/locals
+halls	/halls

@@ -1,0 +1,230 @@
+{
+  "items": [
+    {
+      "chain": "akash",
+      "id": 5025,
+      "links": {
+        "self": "/halls/akash-hall"
+      },
+      "member_count": 1,
+      "name": "Akash Hall",
+      "slug": "akash-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "arbitrum",
+      "id": 5034,
+      "links": {
+        "self": "/halls/arbitrum-one-hall"
+      },
+      "member_count": 1,
+      "name": "Arbitrum One Hall",
+      "slug": "arbitrum-one-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "avalanche",
+      "id": 5035,
+      "links": {
+        "self": "/halls/avalanche-c-chain-hall"
+      },
+      "member_count": 1,
+      "name": "Avalanche C-Chain Hall",
+      "slug": "avalanche-c-chain-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "base",
+      "id": 5036,
+      "links": {
+        "self": "/halls/base-hall"
+      },
+      "member_count": 1,
+      "name": "Base Hall",
+      "slug": "base-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "bitcoin",
+      "id": 5045,
+      "links": {
+        "self": "/halls/bitcoin-hall"
+      },
+      "member_count": 1,
+      "name": "Bitcoin Hall",
+      "slug": "bitcoin-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "bsc",
+      "id": 5037,
+      "links": {
+        "self": "/halls/bnb-smart-chain-hall"
+      },
+      "member_count": 1,
+      "name": "BNB Smart Chain Hall",
+      "slug": "bnb-smart-chain-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "cosmos",
+      "id": 5026,
+      "links": {
+        "self": "/halls/cosmos-hub-hall"
+      },
+      "member_count": 1,
+      "name": "Cosmos Hub Hall",
+      "slug": "cosmos-hub-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "cryptoorgchain",
+      "id": 5027,
+      "links": {
+        "self": "/halls/cronos-pos-hall"
+      },
+      "member_count": 1,
+      "name": "Cronos POS Hall",
+      "slug": "cronos-pos-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "dungeon",
+      "id": 5028,
+      "links": {
+        "self": "/halls/dungeon-chain-hall"
+      },
+      "member_count": 1,
+      "name": "Dungeon Chain Hall",
+      "slug": "dungeon-chain-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "ethereum",
+      "id": 5038,
+      "links": {
+        "self": "/halls/ethereum-hall"
+      },
+      "member_count": 1,
+      "name": "Ethereum Hall",
+      "slug": "ethereum-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "injective",
+      "id": 5029,
+      "links": {
+        "self": "/halls/injective-hall"
+      },
+      "member_count": 1,
+      "name": "Injective Hall",
+      "slug": "injective-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "jackal",
+      "id": 5030,
+      "links": {
+        "self": "/halls/jackal-hall"
+      },
+      "member_count": 1,
+      "name": "Jackal Hall",
+      "slug": "jackal-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "juno",
+      "id": 5031,
+      "links": {
+        "self": "/halls/juno-hall"
+      },
+      "member_count": 1,
+      "name": "Juno Hall",
+      "slug": "juno-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "kujira",
+      "id": 5032,
+      "links": {
+        "self": "/halls/kujira-hall"
+      },
+      "member_count": 1,
+      "name": "Kujira Hall",
+      "slug": "kujira-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "near",
+      "id": 5041,
+      "links": {
+        "self": "/halls/near-protocol-hall"
+      },
+      "member_count": 1,
+      "name": "NEAR Protocol Hall",
+      "slug": "near-protocol-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "optimism",
+      "id": 5039,
+      "links": {
+        "self": "/halls/optimism-hall"
+      },
+      "member_count": 1,
+      "name": "Optimism Hall",
+      "slug": "optimism-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "osmosis",
+      "id": 5033,
+      "links": {
+        "self": "/halls/osmosis-hall"
+      },
+      "member_count": 1,
+      "name": "Osmosis Hall",
+      "slug": "osmosis-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "polkadot",
+      "id": 5042,
+      "links": {
+        "self": "/halls/polkadot-hall"
+      },
+      "member_count": 1,
+      "name": "Polkadot Hall",
+      "slug": "polkadot-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "polygon",
+      "id": 5040,
+      "links": {
+        "self": "/halls/polygon-hall"
+      },
+      "member_count": 1,
+      "name": "Polygon Hall",
+      "slug": "polygon-hall",
+      "viewer_membership": null
+    },
+    {
+      "chain": "solana",
+      "id": 5043,
+      "links": {
+        "self": "/halls/solana-hall"
+      },
+      "member_count": 1,
+      "name": "Solana Hall",
+      "slug": "solana-hall",
+      "viewer_membership": null
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total": 21,
+    "total_pages": 2
+  }
+}
