@@ -20,6 +20,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Trust\Core\Repositories\RateLimitRepository;
+use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
 
 class RateLimiter {
@@ -84,11 +85,19 @@ class RateLimiter {
     private static $userInfoRepo;
 
     /**
+     * @var ReputationRepository
+     */
+    private static $reputationRepo;
+
+    /**
      * Initialize repositories
      */
     private static function initRepositories(): void {
         if (self::$userInfoRepo === null) {
             self::$userInfoRepo = new UserInfoRepository();
+        }
+        if (self::$reputationRepo === null) {
+            self::$reputationRepo = new ReputationRepository();
         }
     }
 
@@ -291,8 +300,12 @@ class RateLimiter {
             $riskMultiplier = self::TRUST_MULTIPLIERS['low_risk'];
         }
 
-        // Trust boosts (only applied when no risk penalty is active)
-        $tier = $userInfo->reputation_tier ?? 'neutral';
+        // Trust boosts (only applied when no risk penalty is active).
+        // Tier comes from ReputationRepository (the self-page score row), not
+        // the user_info mirror read above — the mirror lags score writes, and
+        // a stale tier here changes a member's rate-limit ceiling. The repo
+        // memoizes per request, so the extra read is bounded.
+        $tier = self::$reputationRepo->getTier($userId);
 
         if ($userInfo->is_verified) {
             $trustMultiplier *= self::TRUST_MULTIPLIERS['verified'];
