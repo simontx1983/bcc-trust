@@ -2,6 +2,7 @@
   "items": [
     {
       "chain": "akash",
+      "collection_count": 0,
       "id": 5025,
       "links": {
         "self": "/halls/akash-hall"
@@ -9,10 +10,12 @@
       "member_count": 1,
       "name": "Akash Hall",
       "slug": "akash-hall",
+      "validator_count": 100,
       "viewer_membership": null
     },
     {
       "chain": "arbitrum",
+      "collection_count": 0,
       "id": 5034,
       "links": {
         "self": "/halls/arbitrum-one-hall"
@@ -20,10 +23,12 @@
       "member_count": 1,
       "name": "Arbitrum One Hall",
       "slug": "arbitrum-one-hall",
+      "validator_count": 0,
       "viewer_membership": null
     },
     {
       "chain": "avalanche",
+      "collection_count": 0,
       "id": 5035,
       "links": {
         "self": "/halls/avalanche-c-chain-hall"
@@ -31,10 +36,12 @@
       "member_count": 1,
       "name": "Avalanche C-Chain Hall",
       "slug": "avalanche-c-chain-hall",
+      "validator_count": 0,
       "viewer_membership": null
     },
     {
       "chain": "base",
+      "collection_count": 0,
       "id": 5036,
       "links": {
         "self": "/halls/base-hall"
@@ -42,10 +49,12 @@
       "member_count": 1,
       "name": "Base Hall",
       "slug": "base-hall",
+      "validator_count": 0,
       "viewer_membership": null
     },
     {
       "chain": "bitcoin",
+      "collection_count": 0,
       "id": 5045,
       "links": {
         "self": "/halls/bitcoin-hall"
@@ -53,10 +62,12 @@
       "member_count": 1,
       "name": "Bitcoin Hall",
       "slug": "bitcoin-hall",
+      "validator_count": 0,
       "viewer_membership": null
     },
     {
       "chain": "bsc",
+      "collection_count": 0,
       "id": 5037,
       "links": {
         "self": "/halls/bnb-smart-chain-hall"
@@ -64,10 +75,12 @@
       "member_count": 1,
       "name": "BNB Smart Chain Hall",
       "slug": "bnb-smart-chain-hall",
+      "validator_count": 0,
       "viewer_membership": null
     },
     {
       "chain": "cosmos",
+      "collection_count": 95,
       "id": 5026,
       "links": {
         "self": "/halls/cosmos-hub-hall"
@@ -75,10 +88,12 @@
       "member_count": 1,
       "name": "Cosmos Hub Hall",
       "slug": "cosmos-hub-hall",
+      "validator_count": 261,
       "viewer_membership": null
     },
     {
       "chain": "cryptoorgchain",
+      "collection_count": 0,
       "id": 5027,
       "links": {
         "self": "/halls/cronos-pos-hall"
@@ -86,10 +101,12 @@
       "member_count": 1,
       "name": "Cronos POS Hall",
       "slug": "cronos-pos-hall",
+      "validator_count": 105,
       "viewer_membership": null
     },
     {
       "chain": "dungeon",
+      "collection_count": 1,
       "id": 5028,
       "links": {
         "self": "/halls/dungeon-chain-hall"
@@ -97,10 +114,12 @@
       "member_count": 1,
       "name": "Dungeon Chain Hall",
       "slug": "dungeon-chain-hall",
+      "validator_count": 25,
       "viewer_membership": null
     },
     {
       "chain": "ethereum",
+      "collection_count": 1,
       "id": 5038,
       "links": {
         "self": "/halls/ethereum-hall"
@@ -108,10 +127,12 @@
       "member_count": 1,
       "name": "Ethereum Hall",
       "slug": "ethereum-hall",
+      "validator_count": 0,
       "viewer_membership": null
     },
     {
       "chain": "injective",
+      "collection_count": 114,
       "id": 5029,
       "links": {
         "self": "/halls/injective-hall"
@@ -119,10 +140,12 @@
       "member_count": 1,
       "name": "Injective Hall",
       "slug": "injective-hall",
+      "validator_count": 59,
       "viewer_membership": null
     },
     {
       "chain": "jackal",
+      "collection_count": 0,
       "id": 5030,
       "links": {
         "self": "/halls/jackal-hall"
@@ -130,10 +153,12 @@
       "member_count": 1,
       "name": "Jackal Hall",
       "slug": "jackal-hall",
+      "validator_count": 65,
       "viewer_membership": null
     },
     {
       "chain": "juno",
+      "collection_count": 0,
       "id": 5031,
       "links": {
         "self": "/halls/juno-hall"
@@ -141,10 +166,12 @@
       "member_count": 1,
       "name": "Juno Hall",
       "slug": "juno-hall",
+      "validator_count": 29,
       "viewer_membership": null
     },
     {
       "chain": "kujira",
+      "collection_count": 0,
       "id": 5032,
       "links": {
         "self": "/halls/kujira-hall"
@@ -152,10 +179,12 @@
       "member_count": 1,
       "name": "Kujira Hall",
       "slug": "kujira-hall",
+      "validator_count": 10,
       "viewer_membership": null
     },
     {
       "chain": "near",
+      "collection_count": 0,
       "id": 5041,
       "links": {
         "self": "/halls/near-protocol-hall"
@@ -163,10 +192,12 @@
       "member_count": 1,
       "name": "NEAR Protocol Hall",
       "slug": "near-protocol-hall",
+      "validator_count": 482,
       "viewer_membership": null
     },
     {
       "chain": "optimism",
+      "collection_count": 0,
       "id": 5039,
       "links": {
         "self": "/halls/optimism-hall"
@@ -174,10 +205,12 @@
       "member_count": 1,
       "name": "Optimism Hall",
       "slug": "optimism-hall",
+      "validator_count": 0,
       "viewer_membership": null
     },
     {
       "chain": "osmosis",
+      "collection_count": 0,
       "id": 5033,
       "links": {
         "self": "/halls/osmosis-hall"
@@ -185,10 +218,12 @@
       "member_count": 1,
       "name": "Osmosis Hall",
       "slug": "osmosis-hall",
+      "validator_count": 97,
       "viewer_membership": null
     },
     {
       "chain": "polkadot",
+      "collection_count": 0,
       "id": 5042,
       "links": {
         "self": "/halls/polkadot-hall"
@@ -196,10 +231,12 @@
       "member_count": 1,
       "name": "Polkadot Hall",
       "slug": "polkadot-hall",
+      "validator_count": 600,
       "viewer_membership": null
     },
     {
       "chain": "polygon",
+      "collection_count": 0,
       "id": 5040,
       "links": {
         "self": "/halls/polygon-hall"
@@ -207,10 +244,12 @@
       "member_count": 1,
       "name": "Polygon Hall",
       "slug": "polygon-hall",
+      "validator_count": 0,
       "viewer_membership": null
     },
     {
       "chain": "solana",
+      "collection_count": 99,
       "id": 5043,
       "links": {
         "self": "/halls/solana-hall"
@@ -218,6 +257,7 @@
       "member_count": 1,
       "name": "Solana Hall",
       "slug": "solana-hall",
+      "validator_count": 909,
       "viewer_membership": null
     }
   ],
