@@ -518,6 +518,46 @@ final class Plugin
         );
     }
 
+    // ── Rank domain (redesign Phase 4 evidence ledger, shadow) ───────
+
+    private ?\BCC\Trust\Rank\Repositories\RankEventsRepository $rankEventsRepository = null;
+    public function rankEventsRepository(): \BCC\Trust\Rank\Repositories\RankEventsRepository
+    {
+        return $this->rankEventsRepository ??= new \BCC\Trust\Rank\Repositories\RankEventsRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Repositories\ClusterFindingsRepository $clusterFindingsRepository = null;
+    public function clusterFindingsRepository(): \BCC\Trust\Rank\Repositories\ClusterFindingsRepository
+    {
+        return $this->clusterFindingsRepository ??= new \BCC\Trust\Rank\Repositories\ClusterFindingsRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Services\IndependenceResolver $independenceResolver = null;
+    public function independenceResolver(): \BCC\Trust\Rank\Services\IndependenceResolver
+    {
+        return $this->independenceResolver ??= new \BCC\Trust\Rank\Services\IndependenceResolver(
+            $this->clusterFindingsRepository()
+        );
+    }
+
+    private ?\BCC\Trust\Rank\Services\RankEvidenceIngestor $rankEvidenceIngestor = null;
+    public function rankEvidenceIngestor(): \BCC\Trust\Rank\Services\RankEvidenceIngestor
+    {
+        return $this->rankEvidenceIngestor ??= new \BCC\Trust\Rank\Services\RankEvidenceIngestor(
+            $this->rankEventsRepository(),
+            $this->independenceResolver(),
+            $this->rankScoringConfig()
+        );
+    }
+
+    private ?\BCC\Trust\Rank\Services\RankScoreCalculator $rankScoreCalculator = null;
+    public function rankScoreCalculator(): \BCC\Trust\Rank\Services\RankScoreCalculator
+    {
+        return $this->rankScoreCalculator ??= new \BCC\Trust\Rank\Services\RankScoreCalculator(
+            $this->rankScoringConfig()
+        );
+    }
+
     // ── §I1 notifications ────────────────────────────────────────────
 
     private ?Repositories\NotificationRepository $notificationRepository = null;
@@ -2019,6 +2059,81 @@ final class Plugin
         add_action('wp_login', function (string $userLogin, \WP_User $user) use ($rankLoginHandler): void {
             $rankLoginHandler('wp_login')($user->ID);
         }, 20, 2);
+
+        // ── Rank Phase 4: evidence ledger subscribers (SHADOW) ───────
+        //
+        // Each existing domain event folds into the append-only
+        // rank_events ledger via the single ingestor. Idempotent by
+        // ledger UNIQUE — hook re-fires are no-ops. Nothing reads the
+        // ledger for authorization yet. Sources with no emitter today
+        // (helpful_mark, stewardship, onboarding_assist) and the
+        // legacy-shaped dispute outcome are deliberately NOT wired —
+        // never invent a subscriber against a nonexistent hook.
+
+        $rankIngest = function (callable $call): void {
+            try {
+                $call($this->rankEvidenceIngestor());
+            } catch (\Throwable $e) {
+                \BCC\Core\Observability\DegradationMetrics::record('rank_scoring', 'evidence_ingest_failed');
+                \BCC\Core\Log\Logger::error('[bcc-trust] rank evidence ingest failed', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        };
+
+        add_action('bcc_post_created', function ($authorId, $postId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $i->ingest((int) $authorId, 'post', (int) $postId));
+        }, 20, 2);
+
+        add_action('bcc_blog_post_created', function ($authorId, $postId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $i->ingest((int) $authorId, 'post', (int) $postId));
+        }, 20, 2);
+
+        add_action('bcc_comment_created', function ($authorId, $actId, $newActId, $newCommentPostId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $i->ingest((int) $authorId, 'comment', (int) $newCommentPostId));
+        }, 20, 4);
+
+        add_action('bcc_review_published', function ($authorId, $pageId, $voteId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $i->ingest((int) $authorId, 'review', (int) $voteId));
+        }, 20, 3);
+
+        // Recognition: credit accrues to the TARGET OWNER; the attestor
+        // is the relationship identity the §10.3 per-recognizer cap and
+        // the R3 representative collapse key on. Vouch and stand_behind
+        // are both recognition evidence (§10).
+        add_action('bcc_attestation_created', function ($attestorUserId, $rowId, $targetKind, $targetId, $kind, $targetOwnerId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $i->ingest((int) $targetOwnerId, 'recognition', (int) $rowId, (int) $attestorUserId));
+        }, 20, 6);
+
+        add_action('bcc_attestation_revoked', function ($attestorUserId, $rowId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $i->reverse('recognition', (int) $rowId, 'attestation_revoked'));
+        }, 20, 2);
+
+        // Report upheld (§11.1): the REPORTER earns the credit; the
+        // hook carries the report id — resolve the reporter from the
+        // report row. Moderation undo reverses the evidence (§14.1).
+        add_action('bcc_content_hidden_by_admin', function ($targetId, $resolverUserId, $reportId) use ($rankIngest): void {
+            $rankIngest(function (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) use ($reportId): void {
+                $report = $this->contentReportRepository()->findById((int) $reportId);
+                if ($report !== null) {
+                    $i->ingest((int) $report->reporter_user_id, 'report_upheld', (int) $reportId);
+                }
+            });
+        }, 20, 3);
+
+        // Args: ($reportId, $adminUserId, $action). Reversal is
+        // unconditional across undo kinds — reversing an event that was
+        // never ingested (e.g. a dismissed report's) matches zero rows.
+        add_action('bcc_content_moderation_undone', function ($reportId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $i->reverse('report_upheld', (int) $reportId, 'moderation_undone'));
+        }, 20, 1);
 
         // ── §O1.2 first-action celebrations (retention pass 2026-05-13) ──
         //

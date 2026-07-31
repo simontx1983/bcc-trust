@@ -265,6 +265,18 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_tier_days';
     }
 
+    public static function rankEvents(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_rank_events';
+    }
+
+    public static function clusterFindings(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_cluster_findings';
+    }
+
     public static function questLog(): string
     {
         global $wpdb;
