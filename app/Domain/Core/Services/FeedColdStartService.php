@@ -115,7 +115,7 @@ final class FeedColdStartService
      *
      * @return array{
      *   halls: list<array{slug:string,name:string,chain_slug:?string,member_count:int}>,
-     *   recent_operators: list<array{handle:string,display_name:string,avatar_url:string,reputation_tier:string,reputation_tier_label:string,rank_label:string,recent_action:string,link:string}>,
+     *   recent_operators: list<array{handle:string,display_name:string,avatar_url:string,reputation_tier:string,reputation_tier_label:string,rank_label:string|null,recent_action:string,link:string}>,
      *   hot_posts: list<array<string, mixed>>
      * }
      */
@@ -196,7 +196,7 @@ final class FeedColdStartService
      * ordering. Anon viewers share the per-day seed (viewerId=0 is the
      * constant input for that branch).
      *
-     * @return list<array{handle:string,display_name:string,avatar_url:string,reputation_tier:string,reputation_tier_label:string,rank_label:string,recent_action:string,link:string}>
+     * @return list<array{handle:string,display_name:string,avatar_url:string,reputation_tier:string,reputation_tier_label:string,rank_label:string|null,recent_action:string,link:string}>
      */
     private function composeOperators(int $viewerId): array
     {
@@ -241,7 +241,7 @@ final class FeedColdStartService
      * field (§A2) — the frontend renders the strings verbatim.
      *
      * @param array<string, mixed> $summary
-     * @return array{handle:string,display_name:string,avatar_url:string,reputation_tier:string,reputation_tier_label:string,rank_label:string,recent_action:string,link:string}
+     * @return array{handle:string,display_name:string,avatar_url:string,reputation_tier:string,reputation_tier_label:string,rank_label:string|null,recent_action:string,link:string}
      */
     private static function projectOperatorRow(array $summary, string $recentAction): array
     {
@@ -260,9 +260,11 @@ final class FeedColdStartService
             'reputation_tier_label' => isset($summary['reputation_tier_label']) && is_string($summary['reputation_tier_label'])
                 ? (string) $summary['reputation_tier_label']
                 : ReputationTierMap::toReputationTierLabel('neutral'),
+            // Nullable since the Rank redesign Phase 5 cutover — New
+            // Members carry no rank chip on the operator row.
             'rank_label'    => is_string($summary['rank_label'] ?? null)
                 ? (string) $summary['rank_label']
-                : '',
+                : null,
             'recent_action' => $recentAction,
             'link'          => $handle !== '' ? '/u/' . $handle : '/',
         ];
@@ -393,6 +395,10 @@ final class FeedColdStartService
                 ->getConnectionsForUsers($userIds),
             'github_connections'           => (new \BCC\Trust\Core\Repositories\GitHubRepository())
                 ->getConnectionsForUsers($userIds),
+            // Batched member-state for the rank chip (Rank redesign
+            // Phase 5) — one bounded rank_state read for the 4 rows.
+            'member_states'                => \BCC\Trust\Core\Plugin::instance()
+                ->rankStateService()->memberStatesFor($userIds),
         ];
     }
 

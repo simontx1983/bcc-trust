@@ -60,6 +60,10 @@ require_once __DIR__ . '/schema-tier-days.php';
 // cluster determinations (shadow; nothing gates on them yet).
 require_once __DIR__ . '/schema-rank-events.php';
 require_once __DIR__ . '/schema-cluster-findings.php';
+// Rank redesign Phase 5 — canonical rank state + the 24h Apprentice
+// confirmation clock (the atomic cutover).
+require_once __DIR__ . '/schema-rank-state.php';
+require_once __DIR__ . '/schema-rank-pending.php';
 // NOTE: bcc_user_locals removed — Halls membership lives in PeepSo's
 // peepso_group_members (single graph rule); primary-Hall pointer in
 // wp_usermeta.bcc_primary_hall_group_id.
@@ -216,6 +220,14 @@ function bcc_trust_create_tables() {
         bcc_trust_create_cluster_findings_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Cluster findings table created', []);
     }
+    if (function_exists('bcc_trust_create_rank_state_table')) {
+        bcc_trust_create_rank_state_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Rank state table created', []);
+    }
+    if (function_exists('bcc_trust_create_rank_pending_table')) {
+        bcc_trust_create_rank_pending_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Rank pending table created', []);
+    }
 
     // Data backfills (canonical handles + wallet placeholder-emails) run
     // through the shared migration runner, NOT by calling each backfill
@@ -326,6 +338,9 @@ function bcc_trust_verify_all_tables() {
         // Rank redesign Phase 4 evidence ledger (shadow)
         'bcc_trust_rank_events',
         'bcc_trust_cluster_findings',
+        // Rank redesign Phase 5 canonical state + confirmation clock
+        'bcc_trust_rank_state',
+        'bcc_trust_rank_pending',
     ];
 
     $missing = [];

@@ -20,14 +20,16 @@
  * Field semantics (canonical, shared across surfaces — do not
  * duplicate the mapping elsewhere):
  *   - reputation_tier + reputation_tier_label → ReputationTierMap::resolveReputation($tier)
- *   - rank_label                              → RankService::rankForLevel($level) → RankCatalog::getLabel()
+ *   - rank_label                              → RankStateService::memberStatesFor
+ *                                               (nullable — New Members carry no rank chip)
  *
- * **Rank is level-derived, not tier-derived** (the three-axes identity
- * model — see RankService). Tier supplies the trust chip; the
- * feature-access **level** supplies the rank. Both are batched.
+ * **Rank comes from the earned rank_state row, not the tier** (Rank
+ * redesign Phase 5 — the level-derived ladder is gone). Tier supplies
+ * the trust chip; the member's rank_state row supplies the rank. Both
+ * are batched.
  *
  * Bounded: one batched ReputationRepository::getTiersForUsers() call +
- * one batched FeatureAccessService::getLevelsForUsers() call, regardless
+ * one batched RankStateService::memberStatesFor() call, regardless
  * of input size. Callers pre-cap inputs to their page size (feed: 50,
  * comment drawer: 50).
  *
@@ -38,8 +40,8 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Repositories\ReputationRepository;
-use BCC\Trust\Core\Support\RankCatalog;
 use BCC\Trust\Core\Support\ReputationTierMap;
+use BCC\Trust\Rank\Services\RankStateService;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -49,7 +51,7 @@ final class AuthorBadgeResolver
 {
     public function __construct(
         private readonly ReputationRepository $reputationRepo,
-        private readonly FeatureAccessService $featureAccess
+        private readonly RankStateService $rankStateService
     ) {
     }
 
@@ -58,10 +60,10 @@ final class AuthorBadgeResolver
      *
      * Users without a reputation row default to `neutral` tier
      * (mirrors `ReputationRepository::getTier()` single-user fallback)
-     * → "Neutral" chip; users at level New map to the Apprentice rank.
-     * Missing-user fallback semantics are intentional: a brand-new
-     * account looks like every other neutral/Apprentice account on the
-     * feed rather than a special "unknown" badge.
+     * → "Neutral" chip. Users without a rank_state row are New Members:
+     * rank_label is null and the FE AuthorBadge suppresses the chip
+     * line — that absence is the intended New Member rendering, not a
+     * degraded state.
      *
      * `user_id <= 0` entries are skipped — system actors / sentinel
      * rows don't carry a badge.
@@ -70,7 +72,7 @@ final class AuthorBadgeResolver
      * @return array<int, array{
      *   reputation_tier: string,
      *   reputation_tier_label: string,
-     *   rank_label: string,
+     *   rank_label: string|null,
      * }>
      */
     public function resolveForUsers(array $userIds): array
@@ -93,22 +95,20 @@ final class AuthorBadgeResolver
         $ids = array_keys($clean);
 
         $tierByUser  = $this->reputationRepo->getTiersForUsers($ids);
-        $levelByUser = $this->featureAccess->getLevelsForUsers($ids);
+        $stateByUser = $this->rankStateService->memberStatesFor($ids);
 
         $out = [];
         foreach ($ids as $uid) {
             // Match ReputationRepository::getTier() single-user fallback.
             $tier  = $tierByUser[$uid] ?? 'neutral';
             $rep   = ReputationTierMap::resolveReputation($tier);
-            // Absent level defaults to New (Apprentice) — same floor as
-            // FeatureAccessService::getLevel for an unknown user.
-            $level = $levelByUser[$uid] ?? FeatureAccessService::LEVEL_NEW;
-            $rankLabel = RankCatalog::getLabel(RankService::rankForLevel($level)) ?? '';
 
             $out[$uid] = [
                 'reputation_tier'       => $rep['reputation_tier'],
                 'reputation_tier_label' => $rep['reputation_tier_label'],
-                'rank_label'            => $rankLabel,
+                // Null for New Members (no rank_state row) — nullable
+                // by contract since the Phase 5 cutover.
+                'rank_label'            => $stateByUser[$uid]['rank_label'] ?? null,
             ];
         }
         return $out;
@@ -123,7 +123,7 @@ final class AuthorBadgeResolver
      * @return array{
      *   reputation_tier: string,
      *   reputation_tier_label: string,
-     *   rank_label: string,
+     *   rank_label: string|null,
      * }
      */
     public function resolveForUser(int $userId): array
@@ -134,9 +134,7 @@ final class AuthorBadgeResolver
             // omits the badge when handed an empty payload.
             'reputation_tier'       => 'neutral',
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel('neutral'),
-            'rank_label'            => RankCatalog::getLabel(
-                RankService::rankForLevel(FeatureAccessService::LEVEL_NEW)
-            ) ?? '',
+            'rank_label'            => null,
         ];
     }
 }

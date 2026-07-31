@@ -104,7 +104,7 @@ final class SuggestionService
      *   avatar_url: string,
      *   reputation_tier: string,
      *   reputation_tier_label: string,
-     *   rank_label: string,
+     *   rank_label: string|null,
      *   is_in_good_standing: bool,
      *   suggestion_reason: array{code: string, label: string}|null
      * }>
@@ -307,7 +307,9 @@ final class SuggestionService
                 'reputation_tier_label' => is_string($summary['reputation_tier_label'])
                     ? $summary['reputation_tier_label']
                     : ReputationTierMap::toReputationTierLabel('neutral'),
-                'rank_label'          => (string) $summary['rank_label'],
+                // Nullable since the Rank redesign Phase 5 cutover —
+                // New Members carry no rank chip on suggestion rows.
+                'rank_label'          => is_string($summary['rank_label']) ? $summary['rank_label'] : null,
                 'is_in_good_standing' => (bool) $summary['is_in_good_standing'],
                 'suggestion_reason'   => $reasonByUser[$cid] ?? null,
             ];

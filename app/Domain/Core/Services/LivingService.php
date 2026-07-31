@@ -9,9 +9,11 @@
  *     streak_days   : int,            // consecutive UTC days with activity ending today
  *     today         : { reviews, solids_received, disputes_signed },
  *     recent_impact : string|null,    // pre-rendered headline ("Wrote 2 reviews today")
- *     rank_progress : { current_rank, next_rank, percent, remaining_label },
  *     comparison    : ...|null        // §O3.1 — V1.0 stub (network-percentile aggregator deferred)
  *   }
+ *
+ * `rank_progress` was removed at the Rank redesign Phase 5 cutover —
+ * progression is the RankStateService::progressionFor block (§2.5).
  *
  * Composition pattern: this service ONLY computes the living block.
  * UserViewService delegates to it on the isSelf path. Keeping the
@@ -32,7 +34,6 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
-use BCC\Trust\Core\Support\RankCatalog;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
 
 if (!defined('ABSPATH')) {
@@ -69,23 +70,10 @@ final class LivingService
      *   streak_days: int,
      *   today: array{reviews: int, solids_received: int, disputes_signed: int},
      *   recent_impact: string|null,
-     *   rank_progress: array{
-     *     current_rank: string,
-     *     next_rank: string|null,
-     *     percent: int,
-     *     remaining_label: string
-     *   },
      *   comparison: array{headline: string, kind: string, as_of: string}|null
      * }
-     *
-     * @param array{
-     *   level: int,
-     *   next_level_thresholds: list<array{metric: string, label: string, current: int, required: int}>
-     * } $featureAccess  The viewer's feature_access block (§2.6), passed
-     *                   in so the rank-progress bar reuses the canonical
-     *                   level thresholds rather than re-deriving them.
      */
-    public function compose(int $userId, string $rankKey, array $featureAccess): array
+    public function compose(int $userId): array
     {
         $today = $this->today($userId);
         $streak = $this->streakDays($userId);
@@ -94,7 +82,6 @@ final class LivingService
             'streak_days'   => $streak,
             'today'         => $today,
             'recent_impact' => self::recentImpactHeadline($today),
-            'rank_progress' => self::rankProgress($rankKey, $featureAccess),
             'comparison'    => self::networkComparison($userId),
         ];
     }
@@ -266,88 +253,4 @@ final class LivingService
         return null;
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // Rank progress — current/next labels + percent + remaining hint
-    // ──────────────────────────────────────────────────────────────────
-
-    /**
-     * Build the §N11 progression block — honestly, from the **real**
-     * capability gates.
-     *
-     * Rank now mirrors the feature-access level (Apprentice=New,
-     * Journeyman=Active, Master=Veteran). The bar therefore reflects the
-     * actual level thresholds the user is working toward (pulls /
-     * reviews / days active — supplied verbatim in `next_level_thresholds`),
-     * NOT a fabricated trust-score percentage. `percent` is the limiting
-     * (closest-to-blocking) gate's ratio; `remaining_label` names what's
-     * left. At Master (top of ladder, no thresholds) it reads complete.
-     *
-     * Pure: derives entirely from the passed-in feature_access block, so
-     * it's trivially testable and adds no queries.
-     *
-     * @param array{
-     *   level: int,
-     *   next_level_thresholds: list<array{metric: string, label: string, current: int, required: int}>
-     * } $featureAccess
-     * @return array{current_rank: string, next_rank: string|null, percent: int, remaining_label: string}
-     */
-    private static function rankProgress(string $rankKey, array $featureAccess): array
-    {
-        $nextRankKey = RankCatalog::getNextRank($rankKey);
-        $thresholds  = $featureAccess['next_level_thresholds'];
-
-        // Top of the ladder (Veteran) or no remaining gates.
-        if ($nextRankKey === null || $thresholds === []) {
-            return [
-                'current_rank'    => $rankKey,
-                'next_rank'       => $nextRankKey,
-                'percent'         => 100,
-                'remaining_label' => 'Top of the trade.',
-            ];
-        }
-
-        // percent = the limiting gate (smallest current/required ratio),
-        // clamped to [0, 99] — 100 implies already promoted, which the
-        // level resolver would have done.
-        $ratios   = [];
-        $unmet    = [];
-        foreach ($thresholds as $t) {
-            $required = $t['required'];
-            $current  = $t['current'];
-            $ratios[] = $required > 0 ? min(1.0, $current / $required) : 1.0;
-            $remaining = $required - $current;
-            if ($remaining > 0) {
-                $unmet[] = sprintf('%d more %s', $remaining, strtolower($t['label']));
-            }
-        }
-        $percent = (int) max(0, min(99, (int) round(min($ratios) * 100)));
-
-        $nextLabel = (string) RankCatalog::getLabel($nextRankKey);
-        $label = $unmet === []
-            ? 'Almost there — promotion lands shortly.'
-            : sprintf('%s to reach %s.', self::joinPhrases($unmet), $nextLabel);
-
-        return [
-            'current_rank'    => $rankKey,
-            'next_rank'       => $nextRankKey,
-            'percent'         => $percent,
-            'remaining_label' => $label,
-        ];
-    }
-
-    /**
-     * Join short clauses into a natural-language list:
-     * ["a"] → "a"; ["a","b"] → "a and b"; ["a","b","c"] → "a, b and c".
-     *
-     * @param list<string> $parts
-     */
-    private static function joinPhrases(array $parts): string
-    {
-        $count = count($parts);
-        if ($count === 1) {
-            return $parts[0];
-        }
-        $last = array_pop($parts);
-        return implode(', ', $parts) . ' and ' . $last;
-    }
 }

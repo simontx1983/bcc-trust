@@ -116,7 +116,7 @@ final class CardViewService
         private readonly PageReadModelRepository $pageReadModelRepo,
         private readonly ReputationRepository $reputationRepo,
         private readonly VoteRepository $voteRepo,
-        private readonly FeatureAccessService $featureAccess,
+        private readonly Capability\CapabilityResolver $capabilityResolver,
         private readonly VoteService $voteService,
         private readonly EndorsementService $endorsementService,
         private readonly AttestationService $attestationService,
@@ -627,8 +627,9 @@ final class CardViewService
             // The member trust chip (Risky…Elite) — the sole tier vocabulary
             // since v1.57.
             'reputation_tier_label' => $summary['reputation_tier_label'],
-            // Real (level-derived) rank label now — resolved once via
-            // getSummary's RankService path (no longer a hard-stubbed null).
+            // Member-state-derived rank label (Rank redesign Phase 5) —
+            // resolved via getSummary's batched member-state path.
+            // Nullable: a New Member card carries no rank chip.
             'rank_label'          => $summary['rank_label'],
             'current_rank_label'  => $summary['current_rank_label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
@@ -1505,7 +1506,7 @@ final class CardViewService
         return array_merge(
             [
                 'can_watch'          => self::allow(),
-                'can_review'         => self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
+                'can_review'         => $this->writeReviewPermission($viewerId),
                 // §4.4 can_open_dispute — the OWNER vote-dispute entry
                 // (DisputeCallout → OpenDisputeModal → POST /disputes).
                 // Mirrors the write gate exactly: DisputeController
@@ -1700,7 +1701,7 @@ final class CardViewService
                 'can_watch'          => $isSelf ? self::deny(null, 'self_action_blocked') : self::allow(),
                 'can_review'         => $isSelf
                     ? self::deny(null, 'self_action_blocked')
-                    : self::featureGate($this->featureAccess->canPerform($viewerId, 'write_review')),
+                    : $this->writeReviewPermission($viewerId),
                 // §4.4 can_open_dispute — members are full trust subjects:
                 // a member viewing their OWN self-page can open a dispute
                 // when the self-page carries a contestable active downvote
@@ -1793,22 +1794,27 @@ final class CardViewService
     }
 
     /**
-     * Wrap a FeatureAccessService::canPerform() result with the
-     * contract's reason_code field. The underlying service emits only
-     * {allowed, unlock_hint}; for V1 we tag denials as `feature_locked`
-     * generically. A future enhancement to canPerform() can pass through
-     * a more specific reason code per gate kind (level / tier / wallet).
+     * §4.4 can_review — the CapabilityResolver is authoritative since
+     * the Rank Phase 5 atomic cutover (Apprentice+ AND Neutral+; New
+     * Members denied, Journeyman never required). The resolver's repo
+     * reads are memo'd per request by the underlying repositories, so
+     * per-card viewer-scoped calls stay cheap. Denials keep the
+     * generic `feature_locked` reason_code the FE already renders; the
+     * unlock hint states the requirement (same copy as the write path
+     * in PostsService::createReview).
      *
-     * @param array{allowed: bool, unlock_hint: string|null} $perm
      * @return Permission
      */
-    private static function featureGate(array $perm): array
+    private function writeReviewPermission(int $viewerId): array
     {
-        return [
-            'allowed'     => $perm['allowed'],
-            'unlock_hint' => $perm['unlock_hint'],
-            'reason_code' => $perm['allowed'] ? null : 'feature_locked',
-        ];
+        $decision = $this->capabilityResolver->can($viewerId, 'write_review');
+        if ($decision->isAllowed()) {
+            return self::allow();
+        }
+        return self::deny(
+            'Become an Apprentice and keep your standing at Neutral or better to write reviews.',
+            'feature_locked'
+        );
     }
 
     /**

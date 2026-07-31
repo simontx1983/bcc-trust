@@ -118,6 +118,16 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_last_login_usermeta_cleaned',
                 'callback'    => 'bcc_trust_cleanup_last_login_usermeta',
             ],
+            [
+                'id'          => 'cleanup_feature_override_usermeta_v1',
+                'done_option' => 'bcc_trust_feature_override_usermeta_cleaned',
+                'callback'    => 'bcc_trust_cleanup_feature_override_usermeta',
+            ],
+            [
+                'id'          => 'cleanup_last_seen_rank_usermeta_v1',
+                'done_option' => 'bcc_trust_last_seen_rank_usermeta_cleaned',
+                'callback'    => 'bcc_trust_cleanup_last_seen_rank_usermeta',
+            ],
         ];
     }
 

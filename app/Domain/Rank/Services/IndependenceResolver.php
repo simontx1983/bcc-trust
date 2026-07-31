@@ -71,6 +71,17 @@ class IndependenceResolver
         return $map[$userId] ?? $userId;
     }
 
+    /**
+     * The full member→representative map for active confirmed findings
+     * — RankScoreCalculator's cluster-collapse input.
+     *
+     * @return array<int, int>
+     */
+    public function activeMap(): array
+    {
+        return $this->map();
+    }
+
     /** @return array<int, int> */
     private function map(): array
     {

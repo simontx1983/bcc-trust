@@ -326,8 +326,7 @@ final class HallsService
      *
      * Split out from loadChainPreview (which does the I/O) so the field
      * selection is testable without WordPress or a database — the same
-     * pure-core / I-O-wrapper split as EliteEligibilityService::evaluate
-     * and RankProgressionListener::decideTransition.
+     * pure-core / I-O-wrapper split as EliteEligibilityService::evaluate.
      *
      * That matters most for what is ABSENT: `wallet_link_id` and
      * `operator_address` are in ValidatorRepository::COLUMNS and are

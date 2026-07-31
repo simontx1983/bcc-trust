@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Repositories\VoteRepository;
-use BCC\Trust\Core\Services\FeatureAccessService;
 use BCC\Trust\Core\Services\PostsService;
 use BCC\Trust\Core\Services\VoteService;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -50,7 +49,7 @@ final class WriterVisibilityParityTest extends TestCase
 
     private function service(): PostsService
     {
-        return new PostsService(new VoteService(), new VoteRepository(), new FeatureAccessService());
+        return new PostsService(new VoteService(), new VoteRepository());
     }
 
     /**

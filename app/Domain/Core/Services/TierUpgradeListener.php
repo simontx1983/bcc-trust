@@ -4,7 +4,7 @@
  * detecting reputation_tier crossings and emitting the Heavy "your card
  * is now Rare" celebration.
  *
- * Mirrors RankProgressionListener's design:
+ * Design (last-seen comparison over activity events):
  *   - Subscribes to activity events that could nudge reputation
  *     (no clean `bcc_reputation_changed` exists today).
  *   - Reads the user's last-seen tier from wp_usermeta, compares

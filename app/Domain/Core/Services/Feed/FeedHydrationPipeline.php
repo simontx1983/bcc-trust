@@ -602,10 +602,11 @@ final class FeedHydrationPipeline
     /**
      * Overlay rank-chip fields on every author block: reputation_tier,
      * reputation_tier_label, rank_label, and the
-     * honest tier-derived is_in_good_standing. The rank_label is now
-     * level-derived (not tier-derived); reputation_tier_label is the
-     * honest member trust chip. Server-resolved per §A2 so the frontend's
-     * AuthorBadge never derives a tier label client-side.
+     * honest tier-derived is_in_good_standing. The rank_label comes from
+     * the batched member-state map (nullable — New Members carry no rank
+     * chip); reputation_tier_label is the honest member trust chip.
+     * Server-resolved per §A2 so the frontend's AuthorBadge never
+     * derives a tier label client-side.
      *
      * This bcc-trust layer is where the chip fields appear — bcc-core's
      * ActivityFeedService::hydrateAuthors emits reputation_tier:null /
@@ -673,7 +674,7 @@ final class FeedHydrationPipeline
      * truth); do NOT inline the good-standing tier list here.
      *
      * @param array<string, mixed> $author
-     * @param array{reputation_tier: string, reputation_tier_label: string, rank_label: string} $badge
+     * @param array{reputation_tier: string, reputation_tier_label: string, rank_label: string|null} $badge
      * @return array<string, mixed>
      */
     private static function applyAuthorRankBadge(array $author, array $badge): array

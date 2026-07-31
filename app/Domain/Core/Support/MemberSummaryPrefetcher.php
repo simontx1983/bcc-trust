@@ -6,8 +6,8 @@
  * {@see \BCC\Trust\Core\Services\UserViewService::getSummary()} reads
  * into a single bounded batch keyed on `IN (userIds)`. Without this
  * the per-row hydration N+1's across the page (24 rows × 11 reads,
- * plus 4 more per row from the rank chip's getLevel fan-out — see the
- * `levels` key below).
+ * plus a per-row rank_state read for the rank chip — see the
+ * `member_states` key below).
  *
  * Three pre-existing call sites carried this same eleven-key array
  * inline:
@@ -54,8 +54,8 @@ final class MemberSummaryPrefetcher
      * `getSummary($userId, $viewerId, $prefetched)`.
      *
      * A bounded set of batch queries total irrespective of
-     * `count($userIds)` (eleven signal batches plus the two inside
-     * getLevelsForUsers). Solid-reaction id can be null pre-seeder; we
+     * `count($userIds)` (eleven signal batches plus the one inside
+     * memberStatesFor). Solid-reaction id can be null pre-seeder; we
      * skip that batch in that case and let `getSummary` default
      * `solids_received` to 0.
      *
@@ -107,13 +107,13 @@ final class MemberSummaryPrefetcher
             'wallets_verified_counts'      => WalletRepository::getVerifiedCountsForUsers($userIds),
             'x_connections'                => (new XRepository())->getConnectionsForUsers($userIds),
             'github_connections'           => (new GitHubRepository())->getConnectionsForUsers($userIds),
-            // Batched level for the rank chip. Without this map getSummary's
-            // rank falls back to autoDerivedRank→getLevel, which costs four
-            // queries PER ROW (two follower COUNTs, votes-cast COUNT,
-            // wallet-links read). getLevelsForUsers shares resolveLevel and
-            // the admin-tunable thresholds with that per-user path, so the
-            // derived rank is identical.
-            'levels'                       => Plugin::instance()->featureAccessService()->getLevelsForUsers($userIds),
+            // Batched member-state for the rank chip (Rank redesign
+            // Phase 5). One bounded rank_state query per page via
+            // RankStateService::memberStatesFor; users without a row
+            // shape to the explicit New Member state (rank/rank_label
+            // null). Without this map getSummary falls back to a
+            // per-row memberState read.
+            'member_states'                => Plugin::instance()->rankStateService()->memberStatesFor($userIds),
         ];
     }
 }

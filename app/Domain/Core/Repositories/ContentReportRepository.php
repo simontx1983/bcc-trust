@@ -501,6 +501,26 @@ final class ContentReportRepository
      * Count of distinct reporters who've filed against a target with
      * status=0 (pending). Drives Phase C's auto-hide threshold.
      */
+    /**
+     * Does any report against this target sit at STATUS 1
+     * (resolved-action_taken)? The R1 Apprentice-confirmation predicate
+     * consults exactly this — pending reports (status 0) deliberately
+     * do not count (raw accusations never block Rank).
+     */
+    public function hasUpheldForTarget(string $targetKind, int $targetId): bool
+    {
+        global $wpdb;
+        $table = TableRegistry::contentReports();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table}
+              WHERE target_kind = %s AND target_id = %d AND status = 1
+              LIMIT 1",
+            $targetKind,
+            $targetId
+        )) > 0;
+    }
+
     public function countPendingForTarget(string $targetKind, int $targetId): int
     {
         if ($targetId <= 0 || $targetKind === '') {

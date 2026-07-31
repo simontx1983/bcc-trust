@@ -599,9 +599,7 @@ final class CommentService
      * @param array{
      *   reputation_tier: string,
      *   reputation_tier_label: string,
-     *   reputation_tier: string,
-
-     *   rank_label: string,
+     *   rank_label: string|null,
      * }|null $badge  Pre-resolved badge fields (see AuthorBadgeResolver).
      * @param array{viewer_attestation: array<string, mixed>, can_vouch: array{allowed: bool, unlock_hint: string|null}}|null $vouch
      *               Pre-resolved per-author vouch state + can-vouch permission
@@ -647,11 +645,10 @@ final class CommentService
             $author['reputation_tier_label'] = $badge['reputation_tier_label'];
 
 
-            // rank_label is `''` (empty string) when RankCatalog
-            // doesn't resolve a label — the FE AuthorBadge treats
-            // empty as "no chip"; keep as nullable-string equivalent
-            // on the wire by emitting empty string (matches the
-            // existing rank_label contract on UserViewService::getSummary).
+            // rank_label is null for New Members (no rank_state row) —
+            // the FE AuthorBadge suppresses the chip line. Matches the
+            // nullable rank_label contract on UserViewService::getSummary
+            // since the Rank redesign Phase 5 cutover.
             $author['rank_label']      = $badge['rank_label'];
         }
         if ($vouch !== null) {
