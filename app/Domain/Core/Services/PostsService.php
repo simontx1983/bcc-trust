@@ -401,6 +401,12 @@ final class PostsService
 
         // §D2 + §O5 — Level 2 + tier ≥ neutral.
         $access = $this->featureAccess->canPerform($authorId, 'write_review');
+        // Rank Phase 3 shadow canary — log-only, never changes the verdict.
+        \BCC\Trust\Core\Services\Capability\CapabilityShadow::observe(
+            'write_review',
+            $access['allowed'] === true,
+            $authorId
+        );
         if ($access['allowed'] !== true) {
             return [
                 'error'   => 'bcc_forbidden',

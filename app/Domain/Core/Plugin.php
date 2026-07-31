@@ -467,6 +467,18 @@ final class Plugin
         );
     }
 
+    /**
+     * Rank Phase 3 — SHADOW-ONLY capability resolver (Addendum A2).
+     * Enforces nothing; CapabilityShadow compares its verdicts against
+     * the live gates and logs. Becomes authoritative at the Phase 5
+     * atomic cutover.
+     */
+    private ?\BCC\Trust\Core\Services\Capability\CapabilityResolver $capabilityResolver = null;
+    public function capabilityResolver(): \BCC\Trust\Core\Services\Capability\CapabilityResolver
+    {
+        return $this->capabilityResolver ??= new \BCC\Trust\Core\Services\Capability\CapabilityResolver();
+    }
+
     // ── Rank domain (redesign Phase 1 data planes) ──────────────────
 
     private ?\BCC\Trust\Rank\Support\RankScoringConfig $rankScoringConfig = null;

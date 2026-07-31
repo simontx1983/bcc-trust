@@ -161,7 +161,15 @@ class DisputeController
         $voter_id = $vote->voter_user_id;
 
         // Only page owner can dispute
-        if (!Permissions::owns_page($page_id, $current_user_id)) {
+        $ownsPage = Permissions::owns_page($page_id, $current_user_id);
+        // Rank Phase 3 shadow canary — log-only, never changes the verdict.
+        \BCC\Trust\Core\Services\Capability\CapabilityShadow::observe(
+            'open_dispute',
+            $ownsPage,
+            (int) $current_user_id,
+            ['page_id' => (int) $page_id]
+        );
+        if (!$ownsPage) {
             return $this->error('not_page_owner', 'Only the page owner can dispute votes.', 403);
         }
 
