@@ -484,9 +484,11 @@ add_action('bcc_trust_daily_ml_update', function () {
 add_action('bcc_trust_daily_graph_update', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->dailyGraphUpdate();
 });
-add_action('bcc_trust_daily_vesting', function () {
-    \BCC\Trust\Core\Plugin::instance()->cronService()->dailyVesting();
-});
+// bcc_trust_daily_vesting retired (Rank Phase 2, audit conflict #10): the
+// graduation recompute overwrote velocity-capped vested_weight values from
+// the raw weight column, erasing every correctWeight() clamp on the next
+// recalc. Vote-time vesting (VoteWeightCalculator) stays live until the
+// Phase 6 weight-formula cutover retires the whole legacy stack.
 add_action('bcc_trust_process_recalculations', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->processRecalculations();
 });

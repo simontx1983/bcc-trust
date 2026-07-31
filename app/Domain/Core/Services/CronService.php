@@ -369,85 +369,15 @@ class CronService
         }
     }
 
-    // ── Daily vote vesting ──────────────────────────────────────────────
-
-    /**
-     * Graduate votes through 5-stage vesting:
-     *   0→1 at 30 days (10%→20%), 1→2 at 90 days (20%→50%),
-     *   2→3 at 152 days (50%→75%), 3→4 at 365 days (75%→100%).
-     */
-    public function dailyVesting(): void
-    {
-        if (!$this->acquireLock('bcc_cron_vesting_lock', DAY_IN_SECONDS)) {
-            return;
-        }
-
-        try {
-        $batch_size = 1000;
-
-        // Hard time budget: if the first run after launch (or any day with a
-        // huge backlog) cannot drain every stage, resume on the next daily
-        // tick instead of dragging the cron past its wall-clock limit.
-        $deadline = time() + 300;
-
-        // Each transition: [from_stage, to_stage, days_threshold, weight_pct, is_final]
-        // Uses shared constants from trust-weights.php — single source of truth.
-        $transitions = [
-            [0, 1, BCC_TRUST_VESTING_STAGE_1_DAYS, BCC_TRUST_VESTING_STAGE_1_PCT, false],  // 10% → 20%
-            [1, 2, BCC_TRUST_VESTING_STAGE_2_DAYS, BCC_TRUST_VESTING_STAGE_2_PCT, false],  // 20% → 50%
-            [2, 3, BCC_TRUST_VESTING_STAGE_3_DAYS, BCC_TRUST_VESTING_STAGE_3_PCT, false],  // 50% → 75%
-            [3, 4, BCC_TRUST_VESTING_STAGE_4_DAYS, BCC_TRUST_VESTING_STAGE_4_PCT, true],   // 75% → 100%
-        ];
-
-        foreach ($transitions as [$fromStage, $toStage, $days, $pct, $isFinal]) {
-            if (time() >= $deadline) {
-                break;
-            }
-
-            $cursorKey = "bcc_vesting_cursor_stage{$fromStage}";
-            $cursor    = (int) get_option($cursorKey, 0);
-            $affected  = 0;
-
-            do {
-                $result = $this->voteRepo->graduateVestingBatch(
-                    $fromStage, $toStage, $days, $pct, $isFinal, $cursor, $batch_size
-                );
-
-                $affected = $result['affected'];
-                $cursor   = $result['cursor'];
-
-                if ($affected < 0) {
-                    break; // DB error
-                }
-
-                // Persist cursor after each successful batch so a mid-run
-                // crash does not lose progress or skip unprocessed votes.
-                if ($affected > 0) {
-                    update_option($cursorKey, $cursor, false);
-                }
-
-                if (time() >= $deadline) {
-                    break 2; // Exit both loops; cursor persists for next run.
-                }
-            } while ($affected >= $batch_size);
-
-            // Stage fully processed — remove cursor so next run starts fresh.
-            // Guarded by `$affected < $batch_size` so a deadline-interrupted
-            // stage (where the last batch was full) stays marked incomplete.
-            if ($affected >= 0 && $affected < $batch_size) {
-                delete_option($cursorKey);
-            }
-        }
-
-        // Flag page scores for recalculation where votes just fully vested
-        $this->voteRepo->flagScoresForFullyVestedVotes();
-
-        // Endorsement vesting was deleted in the final endorse-retirement
-        // cleanup — this cron graduates VOTES only.
-        } finally {
-            $this->releaseLock('bcc_cron_vesting_lock');
-        }
-    }
+    // ── Daily vote vesting — RETIRED (Rank Phase 2) ─────────────────────
+    //
+    // dailyVesting() graduated vote rows through the 5 stages by
+    // recomputing vested_weight from the RAW weight column, which
+    // overwrote every velocity-capped correctWeight() value and let the
+    // next recalc re-sum uncapped (audit conflict #10). Deleted rather
+    // than disabled; vote-TIME vesting (VoteWeightCalculator + the
+    // trust-weights.php constants + the vesting columns) stays live until
+    // the Phase 6 weight-formula cutover.
 
     // ── Nightly operator-reliability recompute (daily) ──────────────────
 
@@ -962,7 +892,6 @@ class CronService
             'bcc_trust_hourly_recalc'          => 'hourly',   // stale page recalc
             'bcc_trust_daily_ml_update'        => 'daily',    // daily fraud refresh (renamed from ML)
             'bcc_trust_daily_graph_update'     => 'daily',    // PageRank + ring detection (merged)
-            'bcc_trust_daily_vesting'          => 'daily',    // vote vesting
             'bcc_trust_process_recalculations' => 'bcc_five_minutes', // recalc queue processor
             'bcc_trust_daily_maintenance'      => 'daily',            // read model sync safety net
             'bcc_trust_weekly_digest'          => 'bcc_weekly',       // §I1 email digest
