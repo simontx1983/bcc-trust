@@ -461,38 +461,25 @@ final class AttestationService
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Cast a new attestation per `POST /bcc/v1/me/attestations` (§J.2).
+     * Side-effect-free cast eligibility check — the pre-lock gate
+     * sequence extracted verbatim from cast() (Rank Phase 3) so the
+     * shadow CapabilityResolver can delegate to the SAME implementation
+     * instead of growing a parallel one (§11). cast() calls this first;
+     * the transactional stand_behind slot check deliberately stays
+     * inside cast()'s locked region (race-correct there).
      *
-     * Idempotent on (attestor, target_kind, target_id, kind): an
-     * existing active row is returned with `status: "existing"` rather
-     * than erroring. This is what makes the action surface safe under
-     * double-click / network retry — the FE can call cast() twice and
-     * still see one row.
+     * Pure reads only: input validation, target resolution, self-target,
+     * tier ≥ Neutral, fraud-clear. Throws on the first failure.
      *
-     * Race-safety boundary: cast()'s critical section is wrapped in
-     *   (a) a per-attestor MySQL advisory lock (serializes all this
-     *       operator's mutations — prevents double-spending a
-     *       stand_behind slot)
-     *   (b) a per-target MySQL advisory lock (serializes
-     *       attestation_order_in_target computation so two operators
-     *       casting on the same target don't collide on the first-mover
-     *       position)
-     *   (c) TransactionManager::run with FOR UPDATE on the unique-key
-     *       range (prevents the idempotency check from racing the
-     *       insert)
-     * Locks released after COMMIT (finally block) so waiters see the
-     * committed insert under any isolation level.
-     *
-     * @return array<string, mixed> §J.2 response shape
-     * @throws AttestationException on validation / eligibility / race
+     * @return int The resolved target owner user id (reused by cast()).
+     * @throws AttestationException on any eligibility failure
      */
-    public function cast(
+    public function checkCastEligibility(
         int $attestorUserId,
         string $targetKind,
         int $targetId,
-        string $kind,
-        ?string $contextNote
-    ): array {
+        string $kind
+    ): int {
         if ($attestorUserId <= 0) {
             throw new AttestationException(
                 AttestationException::CODE_INVALID_REQUEST,
@@ -521,7 +508,6 @@ final class AttestationService
                 400
             );
         }
-        $cleanNote = self::sanitizeContextNote($contextNote);
 
         $targetOwnerId = self::resolveTargetOwnerUserId($targetKind, $targetId);
         if ($targetOwnerId <= 0) {
@@ -557,6 +543,45 @@ final class AttestationService
         }
 
         $this->assertFraudClear($attestorUserId);
+
+        return $targetOwnerId;
+    }
+
+    /**
+     * Cast a new attestation per `POST /bcc/v1/me/attestations` (§J.2).
+     *
+     * Idempotent on (attestor, target_kind, target_id, kind): an
+     * existing active row is returned with `status: "existing"` rather
+     * than erroring. This is what makes the action surface safe under
+     * double-click / network retry — the FE can call cast() twice and
+     * still see one row.
+     *
+     * Race-safety boundary: cast()'s critical section is wrapped in
+     *   (a) a per-attestor MySQL advisory lock (serializes all this
+     *       operator's mutations — prevents double-spending a
+     *       stand_behind slot)
+     *   (b) a per-target MySQL advisory lock (serializes
+     *       attestation_order_in_target computation so two operators
+     *       casting on the same target don't collide on the first-mover
+     *       position)
+     *   (c) TransactionManager::run with FOR UPDATE on the unique-key
+     *       range (prevents the idempotency check from racing the
+     *       insert)
+     * Locks released after COMMIT (finally block) so waiters see the
+     * committed insert under any isolation level.
+     *
+     * @return array<string, mixed> §J.2 response shape
+     * @throws AttestationException on validation / eligibility / race
+     */
+    public function cast(
+        int $attestorUserId,
+        string $targetKind,
+        int $targetId,
+        string $kind,
+        ?string $contextNote
+    ): array {
+        $targetOwnerId = $this->checkCastEligibility($attestorUserId, $targetKind, $targetId, $kind);
+        $cleanNote     = self::sanitizeContextNote($contextNote);
 
         $attestorLockKey = self::LOCK_PREFIX_ATTESTOR . $attestorUserId;
         $targetLockKey   = self::LOCK_PREFIX_TARGET . $targetKind . '_' . $targetId;
