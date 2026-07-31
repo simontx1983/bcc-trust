@@ -253,6 +253,18 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_page_scores_velocity';
     }
 
+    public static function loginDays(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_login_days';
+    }
+
+    public static function tierDays(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_tier_days';
+    }
+
     public static function questLog(): string
     {
         global $wpdb;

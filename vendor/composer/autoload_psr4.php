@@ -23,6 +23,7 @@ return array(
     'Base64Url\\' => array($vendorDir . '/spomky-labs/base64url/src'),
     'BN\\' => array($vendorDir . '/simplito/bn-php/lib'),
     'BI\\' => array($vendorDir . '/simplito/bigint-wrapper-php/lib'),
+    'BCC\\Trust\\Rank\\' => array($baseDir . '/app/Domain/Rank'),
     'BCC\\Trust\\Onchain\\' => array($baseDir . '/app/Domain/Onchain'),
     'BCC\\Trust\\Infrastructure\\' => array($baseDir . '/app/Infrastructure'),
     'BCC\\Trust\\Disputes\\' => array($baseDir . '/app/Domain/Disputes'),

@@ -113,6 +113,11 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_watch_tier_vocabulary_migrated',
                 'callback'    => 'bcc_trust_backfill_watch_tier_vocabulary',
             ],
+            [
+                'id'          => 'cleanup_last_login_usermeta_v1',
+                'done_option' => 'bcc_trust_last_login_usermeta_cleaned',
+                'callback'    => 'bcc_trust_cleanup_last_login_usermeta',
+            ],
         ];
     }
 

@@ -260,7 +260,8 @@ final class Plugin
     public function dormancyDetector(): \BCC\Trust\Core\Services\DormancyDetector
     {
         return $this->dormancyDetector ??= new \BCC\Trust\Core\Services\DormancyDetector(
-            $this->attestationRepository()
+            $this->attestationRepository(),
+            $this->loginDaysRepository()
         );
     }
 
@@ -463,6 +464,45 @@ final class Plugin
     {
         return $this->tierUpgradeListener ??= new Services\TierUpgradeListener(
             $this->reputationRepository()
+        );
+    }
+
+    // ── Rank domain (redesign Phase 1 data planes) ──────────────────
+
+    private ?\BCC\Trust\Rank\Support\RankScoringConfig $rankScoringConfig = null;
+    public function rankScoringConfig(): \BCC\Trust\Rank\Support\RankScoringConfig
+    {
+        return $this->rankScoringConfig ??= \BCC\Trust\Rank\Support\RankScoringConfig::fromDefaultFile();
+    }
+
+    private ?\BCC\Trust\Rank\Repositories\LoginDaysRepository $loginDaysRepository = null;
+    public function loginDaysRepository(): \BCC\Trust\Rank\Repositories\LoginDaysRepository
+    {
+        return $this->loginDaysRepository ??= new \BCC\Trust\Rank\Repositories\LoginDaysRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Repositories\TierDaysRepository $tierDaysRepository = null;
+    public function tierDaysRepository(): \BCC\Trust\Rank\Repositories\TierDaysRepository
+    {
+        return $this->tierDaysRepository ??= new \BCC\Trust\Rank\Repositories\TierDaysRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Services\RankLoginListener $rankLoginListener = null;
+    public function rankLoginListener(): \BCC\Trust\Rank\Services\RankLoginListener
+    {
+        return $this->rankLoginListener ??= new \BCC\Trust\Rank\Services\RankLoginListener(
+            $this->loginDaysRepository(),
+            $this->userInfoRepository()
+        );
+    }
+
+    private ?\BCC\Trust\Rank\Services\TierSnapshotService $tierSnapshotService = null;
+    public function tierSnapshotService(): \BCC\Trust\Rank\Services\TierSnapshotService
+    {
+        return $this->tierSnapshotService ??= new \BCC\Trust\Rank\Services\TierSnapshotService(
+            $this->tierDaysRepository(),
+            $this->reputationRepository(),
+            $this->rankScoringConfig()
         );
     }
 
@@ -1935,6 +1975,38 @@ final class Plugin
                 ]);
             }
         }, 20, 1);
+
+        // ── Rank Phase 1: explicit-login day tracking ────────────────
+        //
+        // The four deliberate-authentication events fold into one
+        // idempotent login_days row via RankLoginListener. Refresh and
+        // re-mint paths fire no event, so they are excluded by
+        // construction — never add a request-touch here (owner
+        // correction 2). Failures record the rank_scoring
+        // login_write_failed DegradationMetric: a member's login day
+        // may be missing from the time-credit / inactivity clocks.
+
+        $rankLoginHandler = function (string $source): callable {
+            return function ($userId) use ($source): void {
+                try {
+                    $this->rankLoginListener()->onAuthEvent((int) $userId, $source);
+                } catch (\Throwable $e) {
+                    \BCC\Core\Observability\DegradationMetrics::record('rank_scoring', 'login_write_failed');
+                    \BCC\Core\Log\Logger::error('[bcc-trust] rank login tracking failed', [
+                        'user_id' => (int) $userId,
+                        'source'  => $source,
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
+            };
+        };
+
+        add_action('bcc_user_login', $rankLoginHandler('login'), 20, 1);
+        add_action('bcc_user_signup', $rankLoginHandler('signup'), 20, 1);
+        add_action('bcc_email_verified', $rankLoginHandler('email_verify'), 20, 1);
+        add_action('wp_login', function (string $userLogin, \WP_User $user) use ($rankLoginHandler): void {
+            $rankLoginHandler('wp_login')($user->ID);
+        }, 20, 2);
 
         // ── §O1.2 first-action celebrations (retention pass 2026-05-13) ──
         //

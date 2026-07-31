@@ -231,6 +231,7 @@ require_once BCC_TRUST_PATH . 'includes/database/backfill-canonical-handles.php'
 require_once BCC_TRUST_PATH . 'includes/database/backfill-wallet-placeholder-emails.php';
 require_once BCC_TRUST_PATH . 'includes/database/backfill-elite-eligibility.php';
 require_once BCC_TRUST_PATH . 'includes/database/backfill-watch-tier-vocabulary.php';
+require_once BCC_TRUST_PATH . 'includes/database/cleanup-last-login-usermeta.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
@@ -1717,6 +1718,8 @@ add_action('plugins_loaded', function () {
 add_action('init', function () {
     \BCC\Trust\Disputes\Services\DisputeScheduler::boot();
     \BCC\Trust\Disputes\Services\DisputeNotificationService::registerAsyncHandlers();
+    // Rank Phase 1 — daily tier-day snapshot (self-healing schedule).
+    \BCC\Trust\Rank\Services\RankScheduler::boot();
 });
 
 /*

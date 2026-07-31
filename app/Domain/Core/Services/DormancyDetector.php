@@ -20,19 +20,21 @@
  *   - An operator who hasn't logged in but reaffirmed via API-only
  *     flow last week is still actively expressing judgment.
  *
- * **Last-login source:** `bcc_trust_last_login` user_meta, written by
- * `UserLifecycleService::onLogin()` on every login. This is the
- * canonical source — NOT the `bcc_trust_user_info.last_login` column
- * (PeepSo-mirrored, may lag) and NOT `usr_last_activity` (PeepSo
- * activity-ping, fires on any page view including anonymous heartbeat
- * — too sensitive for dormancy).
+ * **Last-login source:** `bcc_trust_login_days` via
+ * `LoginDaysRepository::lastLoginDay()` — the canonical explicit-login
+ * record written by RankLoginListener (Rank Phase 1; replaced the
+ * retired `bcc_trust_last_login` user_meta). Day granularity is
+ * equivalent for this 60-day question. NOT the
+ * `bcc_trust_user_info.last_login` column (display-only mirror) and
+ * NOT `usr_last_activity` (PeepSo activity-ping, fires on any page
+ * view including anonymous heartbeat — too sensitive for dormancy).
  *
  * **No-data defaults:**
- *   - Missing `bcc_trust_last_login` meta (operator hasn't logged in
- *     since UserLifecycleService deployed) → treat as NOT dormant.
- *     Returning true on missing-data would slap an INACTIVE marker
- *     on legitimate operators just because of a deployment gap —
- *     wrong direction per §2.7 status-anxiety mitigation.
+ *   - No login_days row yet (operator hasn't logged in since the
+ *     table shipped) → treat as NOT dormant. Returning true on
+ *     missing-data would slap an INACTIVE marker on legitimate
+ *     operators just because of a deployment gap — wrong direction
+ *     per §2.7 status-anxiety mitigation.
  *   - userId <= 0 → false (anonymous can't be dormant).
  *
  * **Performance note:** invoked once per roster row in
@@ -50,6 +52,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
+use BCC\Trust\Rank\Repositories\LoginDaysRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -65,11 +68,9 @@ final class DormancyDetector
      */
     public const DISPLAY_DORMANT_DAYS = 60;
 
-    /** WordPress user_meta key written by UserLifecycleService::onLogin. */
-    private const LOGIN_META_KEY = 'bcc_trust_last_login';
-
     public function __construct(
-        private readonly AttestationRepository $repo
+        private readonly AttestationRepository $repo,
+        private readonly LoginDaysRepository $loginDays
     ) {
     }
 
@@ -90,17 +91,13 @@ final class DormancyDetector
         $sinceTs          = $nowTs - $thresholdSeconds;
         $sinceMysqlUtc    = gmdate('Y-m-d H:i:s', $sinceTs);
 
-        // Condition 1: last_login older than threshold (or unknown).
-        // Unknown last_login → not dormant (defensive; see header).
-        $lastLoginRaw = (string) get_user_meta($userId, self::LOGIN_META_KEY, true);
-        if ($lastLoginRaw === '') {
+        // Condition 1: last explicit-login day older than threshold (or
+        // unknown). Unknown → not dormant (defensive; see header).
+        $lastLoginDay = $this->loginDays->lastLoginDay($userId);
+        if ($lastLoginDay === null) {
             return false;
         }
-        $lastLoginTs = strtotime($lastLoginRaw . ' UTC');
-        if ($lastLoginTs === false) {
-            return false;
-        }
-        if ($lastLoginTs >= $sinceTs) {
+        if ($lastLoginDay >= gmdate('Y-m-d', $sinceTs)) {
             // Recent login → not dormant regardless of attestation
             // activity. Lurkers are not dormant per §2.9.
             return false;
