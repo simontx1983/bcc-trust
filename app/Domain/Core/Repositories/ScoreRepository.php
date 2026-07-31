@@ -950,11 +950,13 @@ class ScoreRepository {
      * Mirror a member self-page's reputation_tier onto the denormalised
      * `bcc_trust_user_info.reputation_tier` column (Architecture A).
      *
-     * RateLimiter reads this denorm on EVERY request, so it must stay fresh.
-     * Under the legacy model the four ReputationRepository writers kept it in
-     * sync via mirrorTierToUserInfo(); those writers are retired, so the
-     * self-page write paths now own the mirror. Called at the END of each
-     * ScoreRepository method that changes a self-page's reputation_tier.
+     * DISPLAY-ONLY DENORM (§24.2). The Phase 2 census (2026-07-31) found
+     * ZERO readers of this column — the last behavioral consumer
+     * (RateLimiter) moved to ReputationRepository::getTier in Phase 0.
+     * Never read it for authorization, gating, or scoring; every
+     * behavioral tier read routes through ReputationRepository against
+     * the self-page score row. Called at the END of each ScoreRepository
+     * method that changes a self-page's reputation_tier.
      *
      * No-op for entity pages (only self-page ids map to a member user_id).
      * Bounded by the single page_id → single owner user_id.
@@ -1779,50 +1781,12 @@ class ScoreRepository {
         return array_keys($pageIds);
     }
 
-    /**
-     * Override score and tier for all pages owned by a user.
-     *
-     * Defence-in-depth: clamps total_score to [0, 100] and validates tier
-     * against PageScore::VALID_TIERS. Any UI/CLI path that forwards untrusted
-     * input (admin XSS, typo, script error) cannot persist out-of-range
-     * values or arbitrary tier strings.
-     *
-     * @return int Number of rows updated.
-     * @throws \InvalidArgumentException on invalid tier.
-     */
-    public function overrideScoreByOwner(int $ownerId, float $score, string $tier): int
-    {
-        global $wpdb;
-
-        if (!in_array($tier, \BCC\Trust\Core\ValueObjects\PageScore::validTiers(), true)) {
-            throw new \InvalidArgumentException(
-                'Invalid reputation tier: ' . $tier
-            );
-        }
-
-        $result = (int) $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table}
-             SET total_score = LEAST(100, GREATEST(0, %f)),
-                 reputation_tier = %s,
-                 last_calculated_at = %s
-             WHERE page_owner_id = %d",
-            $score, $tier, current_time('mysql'), $ownerId
-        ));
-
-        if ($result > 0) {
-            // Invalidate cache for every affected page so moderation
-            // decisions become visible immediately (not after 300s TTL).
-            $pageIds = $wpdb->get_col($wpdb->prepare(
-                "SELECT DISTINCT page_id FROM {$this->table} WHERE page_owner_id = %d",
-                $ownerId
-            ));
-            foreach ($pageIds as $pid) {
-                $this->invalidateCache((int) $pid);
-            }
-        }
-
-        return $result;
-    }
+    // overrideScoreByOwner() deleted (Rank Phase 2, audit conflict #11):
+    // it wrote the total_score/reputation_tier OUTPUT columns directly,
+    // which every recalc recomputes from inputs — the override reverted
+    // itself. ModerationService::overrideScore now persists the override
+    // as a penalty_adjustment delta (applyPenalty above), a formula input
+    // every recalc reproduces.
 
     /**
      * Get page_ids from the scores table with pagination.

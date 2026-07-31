@@ -30,7 +30,6 @@ return [
         'bcc_trust_hourly_recalc'               => ['interval' => 'hourly',                       'description' => 'page-score recalculation sweep'],
         'bcc_trust_daily_ml_update'             => ['interval' => 'daily',                        'description' => 'fraud-detection ML refresh'],
         'bcc_trust_daily_graph_update'          => ['interval' => 'daily',                        'description' => 'trust-graph rank + vote/endorsement ring detection'],
-        'bcc_trust_daily_vesting'               => ['interval' => 'daily',                        'description' => 'vote-weight vesting promotion'],
         'bcc_trust_process_recalculations'      => ['interval' => 'bcc_five_minutes',             'description' => 'recalc queue worker'],
         'bcc_trust_daily_maintenance'           => ['interval' => 'daily',                        'description' => 'read-model sync safety net'],
         'bcc_trust_daily_contribution_recovery' => ['interval' => 'daily',                        'description' => 'trust recovery through contribution (caution/risky cohort)'],
@@ -70,6 +69,9 @@ return [
         'bcc_trust_weekly_slow_ring_scan',
         'bcc_pull_batch_sweep',
         // Retired hooks (kept for uninstall hygiene on installs that scheduled them pre-retirement).
+        // bcc_trust_daily_vesting retired 2026-07-31 (Rank Phase 2, audit #10):
+        // the graduation recompute erased velocity-capped vested_weight values.
+        'bcc_trust_daily_vesting',
         'bcc_trust_hourly_graph_update',
         'bcc_trust_hourly_ring_detection',
         'bcc_trust_hourly_risk_refresh',

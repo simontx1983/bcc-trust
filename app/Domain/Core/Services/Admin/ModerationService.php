@@ -221,6 +221,17 @@ final class ModerationService
     /**
      * Override the trust score for all pages owned by a user.
      *
+     * Persistence model (audit conflict #11 fix): the override is stored
+     * as ADMIN FIAT in `penalty_adjustment` — the clobber-safe accumulator
+     * already inside the canonical formula — NOT as a write to the
+     * `total_score` OUTPUT column. The previous implementation wrote the
+     * output directly and then fired `bcc.trust.recalculate_score`, whose
+     * subscriber recomputed the score from inputs and reverted the
+     * override milliseconds later (and every later vote/cron recalc would
+     * have reverted it anyway). Because the adjustment is a formula input,
+     * every subsequent recalc now REPRODUCES the admin's target instead of
+     * erasing it.
+     *
      * @param int $userId   The page owner whose scores to override.
      * @param int $newScore The new score (clamped 0-100).
      * @return array{success: bool, message: string, tier?: string, pages_updated?: int}
@@ -239,27 +250,55 @@ final class ModerationService
         // §J.12: an admin override is explicit fiat, so it is evaluated as a
         // STICKY GRANT — the native-conduct floor and the eligibility gate are
         // both satisfied by the admin's decision (there are no score
-        // components to measure here; the admin is setting total_score
+        // components to measure here; the admin is setting the score
         // directly). The flag is then persisted below so the nightly
         // eligibility sweep does not silently revert the override, which
         // would otherwise present as an admin action that "didn't take".
         $tier = TrustScoreService::tierFor((float) $newScore, (float) $newScore, true);
 
-        // Collect affected page IDs before the UPDATE (for read model sync).
         $affectedPageIds = $this->scoreRepository->getPageIdsByOwner($userId);
 
-        $updated = $this->scoreRepository->overrideScoreByOwner($userId, (float) $newScore, $tier);
+        $updated = 0;
+        $now     = gmdate('Y-m-d H:i:s');
 
-        if ($tier === 'elite') {
-            $now = gmdate('Y-m-d H:i:s');
-            foreach ($affectedPageIds as $pid) {
-                $this->scoreRepository->setEliteEligibility((int) $pid, true, $now);
-            }
-        }
-
-        // Sync read model for all affected pages.
         foreach ($affectedPageIds as $pid) {
-            do_action('bcc.trust.recalculate_score', (int) $pid);
+            $pid = (int) $pid;
+
+            // 1. Fresh canonical recompute FIRST, so the delta below is
+            //    measured against the value every future recalc will
+            //    reproduce — not against a stale row.
+            do_action('bcc.trust.recalculate_score', $pid);
+
+            $row     = $this->scoreRepository->getByPageId($pid);
+            $current = $row !== null ? $row->getTotalScore() : 50.0;
+            $delta   = (float) $newScore - $current;
+
+            // 2. Accumulate the difference as admin fiat. applyPenalty
+            //    recomputes total_score + reputation_tier inline via the
+            //    canonical formula, mirrors the tier, and invalidates the
+            //    score cache — total_score lands exactly on the target.
+            try {
+                if (abs($delta) > 0.0001) {
+                    $this->scoreRepository->applyPenalty($pid, $delta);
+                }
+                $updated++;
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] score override failed for page', [
+                    'page_id' => $pid,
+                    'user_id' => $userId,
+                    'error'   => $e->getMessage(),
+                ]);
+                continue;
+            }
+
+            if ($tier === 'elite') {
+                $this->scoreRepository->setEliteEligibility($pid, true, $now);
+            }
+
+            // 3. Second recompute now REPRODUCES the target (the adjustment
+            //    is a formula input) and pushes it to the read model via the
+            //    priority-20 subscriber — proving durability on the spot.
+            do_action('bcc.trust.recalculate_score', $pid);
         }
 
         $this->logAction('admin_score_override', $userId, [

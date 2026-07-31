@@ -2123,113 +2123,12 @@ class VoteRepository {
         ));
     }
 
-    /**
-     * Graduate votes through a vesting stage transition in batches.
-     *
-     * @param int    $fromStage  Current vesting stage.
-     * @param int    $toStage    Target vesting stage.
-     * @param int    $days       Days threshold for the transition.
-     * @param float  $pct        Weight percentage for this stage (0.0-1.0).
-     * @param bool   $isFinal    Whether this is the final vesting stage.
-     * @param int    $cursor     Resume cursor (vote ID).
-     * @param int    $batchSize  Number of rows per batch.
-     * @return array{affected: int, cursor: int} Last batch result.
-     */
-    public function graduateVestingBatch(
-        int $fromStage,
-        int $toStage,
-        int $days,
-        float $pct,
-        bool $isFinal,
-        int $cursor,
-        int $batchSize
-    ): array {
-        global $wpdb;
-
-        $vestedExpr = ($pct >= 1.0)
-            ? 'weight'
-            : "ROUND(weight * {$pct}, 4)";
-
-        $fullyVestedExpr = $isFinal ? ', fully_vested_at = NOW()' : '';
-
-        $affected = $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table}
-             SET vesting_stage = %d,
-                 vested_weight = {$vestedExpr}
-                 {$fullyVestedExpr}
-             WHERE vesting_stage = %d
-               AND id > %d
-               AND vesting_started_at <= DATE_SUB(NOW(), INTERVAL %d DAY)
-             ORDER BY id ASC
-             LIMIT %d",
-            $toStage, $fromStage, $cursor, $days, $batchSize
-        ));
-
-        if ($affected === false) {
-            return ['affected' => -1, 'cursor' => $cursor];
-        }
-
-        if ($affected > 0) {
-            $newCursor = (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT MAX(id) FROM {$this->table}
-                 WHERE vesting_stage = %d AND id > %d",
-                $toStage, $cursor
-            )) ?: $cursor;
-
-            // Flag the page scores of votes just moved into $toStage so the read model
-            // picks up the new vested_weight. Without this, intermediate vesting
-            // transitions (0→1, 1→2, 2→3) silently change SUM(vested_weight) and
-            // pages drift until the daily full sync. The sibling call
-            // flagScoresForFullyVestedVotes() only covers stage 4, which has an
-            // additional weight_corrected_at predicate — that path stays intact.
-            $scores_table = \BCC\Trust\Core\Database\TableRegistry::scores();
-            $wpdb->query($wpdb->prepare(
-                "UPDATE {$scores_table} s
-                 INNER JOIN {$this->table} v ON v.page_id = s.page_id
-                 SET s.recalculate_required = 1
-                 WHERE v.vesting_stage = %d
-                   AND v.id > %d
-                   AND v.id <= %d
-                   AND s.recalculate_required = 0",
-                $toStage,
-                $cursor,
-                $newCursor
-            ));
-        } else {
-            $newCursor = $cursor;
-        }
-
-        return ['affected' => (int) $affected, 'cursor' => $newCursor];
-    }
-
-    /**
-     * Flag page scores for recalculation where votes just fully vested.
-     */
-    public function flagScoresForFullyVestedVotes(): void
-    {
-        global $wpdb;
-
-        $scores_table = \BCC\Trust\Core\Database\TableRegistry::scores();
-
-        // Query takes no user input — all literals. Still routed through
-        // $wpdb->prepare for consistency with the rest of the repo and so
-        // any future parameterization doesn't introduce raw interpolation.
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$scores_table} s
-             INNER JOIN {$this->table} v ON v.page_id = s.page_id
-             SET s.recalculate_required = 1
-             WHERE v.weight_corrected_at IS NULL
-               AND v.vesting_stage = %d
-               AND v.fully_vested_at >= DATE_SUB(NOW(), INTERVAL 1 DAY)",
-            4
-        ));
-
-        if ($result === false && class_exists('\\BCC\\Core\\Log\\Logger')) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] flagScoresForFullyVestedVotes failed', [
-                'db_error' => $wpdb->last_error,
-            ]);
-        }
-    }
+    // graduateVestingBatch() + flagScoresForFullyVestedVotes() deleted
+    // (Rank Phase 2, audit conflict #10): the cron graduation recomputed
+    // vested_weight from the RAW weight column, overwriting every
+    // velocity-capped correctWeight() value below and letting the next
+    // recalc re-sum uncapped. Vote-time vesting (VoteWeightCalculator,
+    // the insert path, resetVesting) stays live until Phase 6.
 
     /**
      * Persist the velocity-capped weight onto the vote row.
@@ -2240,9 +2139,10 @@ class VoteRepository {
      * diverge strictly upward from the incremental path, silently reversing
      * every velocity-cap clamp on the next recalc tick.
      *
-     * Does NOT touch weight_corrected_at — that column is consumed by the
-     * vesting-fully-vested recalc flag (flagScoresForFullyVestedVotes) and
-     * must remain NULL until the vote reaches stage 4.
+     * Does NOT touch weight_corrected_at — historically consumed by the
+     * retired vesting-graduation cron (Rank Phase 2); left NULL-until-set
+     * so the column's audit meaning ("a correction was applied") holds
+     * until Phase 6 retires the vesting columns wholesale.
      *
      * Called from VoteWriter inside the same transaction as the score delta,
      * so readers never observe the intermediate uncapped value.
@@ -2255,10 +2155,11 @@ class VoteRepository {
 
         // Write the velocity-capped VESTED contribution onto vested_weight,
         // not onto the canonical `weight` column. Keeping `weight` as the
-        // raw effective value preserves the audit trail AND keeps the
-        // vesting-graduation cron's math (vested_weight = weight × pct)
-        // coherent. The recalc SUM reads vested_weight so the incremental
-        // delta (cappedWeight) stays aligned with the authoritative path.
+        // raw effective value preserves the audit trail. The recalc SUM
+        // reads vested_weight so the incremental delta (cappedWeight)
+        // stays aligned with the authoritative path — and with the
+        // graduation cron retired (Phase 2, audit #10), nothing rewrites
+        // this value from the raw column anymore.
         $result = $wpdb->update(
             $this->table,
             [
