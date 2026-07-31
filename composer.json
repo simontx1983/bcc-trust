@@ -14,6 +14,7 @@
             "BCC\\Trust\\Core\\": "app/Domain/Core/",
             "BCC\\Trust\\Disputes\\": "app/Domain/Disputes/",
             "BCC\\Trust\\Onchain\\": "app/Domain/Onchain/",
+            "BCC\\Trust\\Rank\\": "app/Domain/Rank/",
             "BCC\\Trust\\Infrastructure\\": "app/Infrastructure/"
         }
     },

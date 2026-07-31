@@ -99,6 +99,27 @@ class UserInfoRepository {
         return $result;
     }
 
+    /**
+     * Refresh the display-only last_login column (admin Users tab).
+     * Written by RankLoginListener on explicit authentication; NEVER
+     * authoritative (§24.2) — the canonical login record is
+     * bcc_trust_login_days. No-op when the user has no info row yet.
+     */
+    public function touchLastLogin(int $userId): void {
+        if ($userId <= 0) {
+            return;
+        }
+
+        global $wpdb;
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table} SET last_login = %s WHERE user_id = %d",
+            current_time('mysql', true),
+            $userId
+        ));
+
+        $this->invalidateCache($userId);
+    }
+
     public function invalidateCache(int $userId): void {
         wp_cache_delete('user_info_' . $userId, 'bcc_trust');
 

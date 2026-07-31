@@ -311,7 +311,10 @@ class UserLifecycleService
     {
         $ip = IpResolver::getClientIp();
         update_user_meta($user->ID, 'bcc_trust_last_ip', $ip);
-        update_user_meta($user->ID, 'bcc_trust_last_login', current_time('mysql'));
+        // The bcc_trust_last_login usermeta write retired here (Rank
+        // Phase 1): RankLoginListener's login_days row is the canonical
+        // login record, and DormancyDetector reads it. The stale meta
+        // rows are drained by the cleanup_last_login_usermeta migration.
         $this->syncService->sync($user->ID);
     }
 

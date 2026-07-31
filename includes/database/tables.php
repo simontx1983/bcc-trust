@@ -52,6 +52,10 @@ require_once __DIR__ . '/schema-attestor-reliability-cache.php';
 // Post-shortcode permalink sidecar — act_id → 8-letter code behind
 // /u/{handle}/post/{code}. Includes a one-time option-guarded dev backfill.
 require_once __DIR__ . '/schema-post-shortcodes.php';
+// Rank redesign Phase 1 data planes — explicit-login day buckets +
+// daily trust-tier qualification history (approved plan 2026-07-31).
+require_once __DIR__ . '/schema-login-days.php';
+require_once __DIR__ . '/schema-tier-days.php';
 // NOTE: bcc_user_locals removed — Halls membership lives in PeepSo's
 // peepso_group_members (single graph rule); primary-Hall pointer in
 // wp_usermeta.bcc_primary_hall_group_id.
@@ -192,6 +196,14 @@ function bcc_trust_create_tables() {
         bcc_trust_create_post_shortcodes_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Post shortcodes table created', []);
     }
+    if (function_exists('bcc_trust_create_login_days_table')) {
+        bcc_trust_create_login_days_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Login days table created', []);
+    }
+    if (function_exists('bcc_trust_create_tier_days_table')) {
+        bcc_trust_create_tier_days_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Tier days table created', []);
+    }
 
     // Data backfills (canonical handles + wallet placeholder-emails) run
     // through the shared migration runner, NOT by calling each backfill
@@ -296,6 +308,9 @@ function bcc_trust_verify_all_tables() {
         'bcc_attestor_reliability_cache',
         // Post-shortcode permalink sidecar
         'bcc_post_shortcodes',
+        // Rank redesign Phase 1 data planes
+        'bcc_trust_login_days',
+        'bcc_trust_tier_days',
     ];
 
     $missing = [];

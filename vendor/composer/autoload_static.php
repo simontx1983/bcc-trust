@@ -55,6 +55,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
             'Base64Url\\' => 10,
             'BN\\' => 3,
             'BI\\' => 3,
+            'BCC\\Trust\\Rank\\' => 15,
             'BCC\\Trust\\Onchain\\' => 18,
             'BCC\\Trust\\Infrastructure\\' => 25,
             'BCC\\Trust\\Disputes\\' => 19,
@@ -131,6 +132,10 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BI\\' =>
         array (
             0 => __DIR__ . '/..' . '/simplito/bigint-wrapper-php/lib',
+        ),
+        'BCC\\Trust\\Rank\\' =>
+        array (
+            0 => __DIR__ . '/../..' . '/app/Domain/Rank',
         ),
         'BCC\\Trust\\Onchain\\' =>
         array (
@@ -332,6 +337,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\DigestService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/DigestService.php',
         'BCC\\Trust\\Core\\Services\\DivergenceStateClassifier' => __DIR__ . '/../..' . '/app/Domain/Core/Services/DivergenceStateClassifier.php',
         'BCC\\Trust\\Core\\Services\\DormancyDetector' => __DIR__ . '/../..' . '/app/Domain/Core/Services/DormancyDetector.php',
+        'BCC\\Trust\\Core\\Services\\EliteEligibilityService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/EliteEligibilityService.php',
         'BCC\\Trust\\Core\\Services\\EndorsementService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/EndorsementService.php',
         'BCC\\Trust\\Core\\Services\\FeatureAccessService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/FeatureAccessService.php',
         'BCC\\Trust\\Core\\Services\\FeedColdStartService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/FeedColdStartService.php',
@@ -588,6 +594,12 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\ValueObjects\\ValidatorGatedGroupConfig' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/ValidatorGatedGroupConfig.php',
         'BCC\\Trust\\Onchain\\Workers\\NftEthIndexerWorker' => __DIR__ . '/../..' . '/app/Domain/Onchain/Workers/NftEthIndexerWorker.php',
         'BCC\\Trust\\Onchain\\Workers\\ValidatorMsgQueueWorker' => __DIR__ . '/../..' . '/app/Domain/Onchain/Workers/ValidatorMsgQueueWorker.php',
+        'BCC\\Trust\\Rank\\Repositories\\LoginDaysRepository' => __DIR__ . '/../..' . '/app/Domain/Rank/Repositories/LoginDaysRepository.php',
+        'BCC\\Trust\\Rank\\Repositories\\TierDaysRepository' => __DIR__ . '/../..' . '/app/Domain/Rank/Repositories/TierDaysRepository.php',
+        'BCC\\Trust\\Rank\\Services\\RankLoginListener' => __DIR__ . '/../..' . '/app/Domain/Rank/Services/RankLoginListener.php',
+        'BCC\\Trust\\Rank\\Services\\RankScheduler' => __DIR__ . '/../..' . '/app/Domain/Rank/Services/RankScheduler.php',
+        'BCC\\Trust\\Rank\\Services\\TierSnapshotService' => __DIR__ . '/../..' . '/app/Domain/Rank/Services/TierSnapshotService.php',
+        'BCC\\Trust\\Rank\\Support\\RankScoringConfig' => __DIR__ . '/../..' . '/app/Domain/Rank/Support/RankScoringConfig.php',
         'BI\\BigInteger' => __DIR__ . '/..' . '/simplito/bigint-wrapper-php/lib/BigInteger.php',
         'BN\\BN' => __DIR__ . '/..' . '/simplito/bn-php/lib/BN.php',
         'BN\\Red' => __DIR__ . '/..' . '/simplito/bn-php/lib/Red.php',
