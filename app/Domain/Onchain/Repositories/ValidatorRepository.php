@@ -28,7 +28,11 @@ if (!defined('ABSPATH')) {
  *     last_enriched_at: string|null,
  *     next_enrichment_at: string|null,
  *     retry_after: string|null,
- *     enrichment_attempts: string
+ *     enrichment_attempts: string,
+ *     identity: string|null,
+ *     logo_url: string|null,
+ *     logo_source_ref: string|null,
+ *     logo_checked_at: string|null
  * }
  *
  * @phpstan-type ValidatorWithChain object{

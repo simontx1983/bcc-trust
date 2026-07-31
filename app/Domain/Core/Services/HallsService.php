@@ -31,6 +31,8 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\CollectionRepository;
+use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -39,6 +41,18 @@ if (!defined('ABSPATH')) {
 final class HallsService
 {
     private const MAX_PAGE_SIZE = 50;
+
+    /**
+     * How many chain-scoped entries the Hall DETAIL view previews.
+     *
+     * A Hall exists to be worth entering before anyone is in it: the
+     * reputation graph cannot be seeded, but validator and collection
+     * data is already indexed, so a Hall with zero members can still
+     * answer "who secures this chain?". This is a PREVIEW, not a
+     * directory — /validators and /cards remain the full lists, and the
+     * client links to them filtered by chain rather than paginating here.
+     */
+    private const PREVIEW_LIMIT = 6;
 
     /**
      * wp_usermeta key for the viewer's primary-Hall pointer (single-graph
@@ -66,6 +80,8 @@ final class HallsService
      *     name: string,
      *     chain: string|null,
      *     member_count: int,
+     *     validator_count: int,
+     *     collection_count: int,
      *     viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
      *     links: array{self: string}
      *   }>,
@@ -96,6 +112,7 @@ final class HallsService
         $myMemberships  = $this->loadViewerMemberships($viewerId, $groupIds);
         $primaryGroupId = $this->loadPrimaryGroupId($viewerId);
         $chainSlugs     = $groupIds === [] ? [] : ChainRepository::resolveSlugsForGroups($groupIds);
+        $contentCounts  = $this->loadChainContentCounts($chainSlugs);
 
         $items = [];
         foreach ($rows as $row) {
@@ -106,6 +123,8 @@ final class HallsService
                 'name'              => $row->post_title,
                 'chain'             => $chainSlugs[$groupId] ?? null,
                 'member_count'      => (int) $row->member_count,
+                'validator_count'   => (int) ($contentCounts[$groupId]['validators'] ?? 0),
+                'collection_count'  => (int) ($contentCounts[$groupId]['collections'] ?? 0),
                 'viewer_membership' => $this->renderViewerMembership(
                     $viewerId,
                     $groupId,
@@ -130,6 +149,52 @@ final class HallsService
     }
 
     /**
+     * Chain-scoped content counts for the DIRECTORY rows.
+     *
+     * Both repositories expose a whole-table GROUP BY keyed by chain_id
+     * and cache it, so this is TWO queries for the entire page (and zero
+     * on a warm object cache) regardless of page size — deliberately not
+     * a per-Hall lookup, which would be a textbook N+1 across 20 rows.
+     *
+     * Reason it exists: a Hall with one member reads as dead. The same
+     * Hall showing "12 validators · 4 collections" reads as somewhere
+     * worth opening, and that is true on day one because the on-chain
+     * indexers already populated it.
+     *
+     * Takes the slug map getHalls() has already resolved rather than
+     * re-querying: ChainRepository::resolveIdAnyState scans the cached
+     * active-chain list in memory, so slug→id costs nothing.
+     *
+     * @param array<int, string|null> $chainSlugs group_id => chain slug
+     * @return array<int, array{validators: int, collections: int}> keyed by group_id
+     */
+    private function loadChainContentCounts(array $chainSlugs): array
+    {
+        if ($chainSlugs === []) {
+            return [];
+        }
+
+        $validatorCounts  = ValidatorRepository::getCountsByChain();
+        $collectionCounts = CollectionRepository::getCountsByChain();
+
+        $out = [];
+        foreach ($chainSlugs as $groupId => $slug) {
+            if (!is_string($slug) || $slug === '') {
+                continue;
+            }
+            $chainId = ChainRepository::resolveIdAnyState($slug);
+            if ($chainId === null) {
+                continue;
+            }
+            $out[(int) $groupId] = [
+                'validators'  => (int) ($validatorCounts[$chainId]->cnt ?? 0),
+                'collections' => (int) ($collectionCounts[$chainId]->cnt ?? 0),
+            ];
+        }
+        return $out;
+    }
+
+    /**
      * @return array{
      *   items: list<array{
      *     id: int,
@@ -137,6 +202,8 @@ final class HallsService
      *     name: string,
      *     chain: string|null,
      *     member_count: int,
+     *     validator_count: int,
+     *     collection_count: int,
      *     viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
      *     links: array{self: string}
      *   }>,
@@ -159,10 +226,10 @@ final class HallsService
     /**
      * Render the /halls/:slug single-item payload.
      *
-     * Same item shape as the directory's `items[]` entries — the
-     * detail page can reuse the identical client-side renderer. A
-     * miss returns null so the endpoint can map to the canonical
-     * 404 envelope.
+     * Superset of the directory's `items[]` entries — same keys, plus the
+     * `validators` / `collections` previews the detail page renders above
+     * the feed. A miss returns null so the endpoint can map to the
+     * canonical 404 envelope.
      *
      * @return array{
      *   id: int,
@@ -170,6 +237,10 @@ final class HallsService
      *   name: string,
      *   chain: string|null,
      *   member_count: int,
+     *   validator_count: int,
+     *   collection_count: int,
+     *   validators: list<array{id: int, moniker: string, logo_url: string|null, total_stake: string|null, delegator_count: int|null, uptime_30d: string|null, voting_power_rank: int|null, commission_rate: string|null}>,
+     *   collections: list<array{id: int, name: string|null, image_url: string|null, contract_address: string}>,
      *   viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
      *   links: array{self: string}
      * }|null
@@ -185,13 +256,20 @@ final class HallsService
         $myMemberships  = $this->loadViewerMemberships($viewerId, [$groupId]);
         $primaryGroupId = $this->loadPrimaryGroupId($viewerId);
         $chainSlugs     = ChainRepository::resolveSlugsForGroups([$groupId]);
+        $chainSlug      = $chainSlugs[$groupId] ?? null;
+        $contentCounts  = $this->loadChainContentCounts($chainSlugs);
+        $preview        = $this->loadChainPreview($chainSlug);
 
         return [
             'id'                => $groupId,
             'slug'              => $row->post_name,
             'name'              => $row->post_title,
-            'chain'             => $chainSlugs[$groupId] ?? null,
+            'chain'             => $chainSlug,
             'member_count'      => (int) $row->member_count,
+            'validator_count'   => (int) ($contentCounts[$groupId]['validators'] ?? 0),
+            'collection_count'  => (int) ($contentCounts[$groupId]['collections'] ?? 0),
+            'validators'        => $preview['validators'],
+            'collections'       => $preview['collections'],
             'viewer_membership' => $this->renderViewerMembership(
                 $viewerId,
                 $groupId,
@@ -200,6 +278,115 @@ final class HallsService
             ),
             'links'             => ['self' => '/halls/' . $row->post_name],
         ];
+    }
+
+    /**
+     * The chain-scoped content a Hall previews above its feed.
+     *
+     * Both reads are bounded (PREVIEW_LIMIT) and already exist on the
+     * Onchain repositories — no new SQL, no parallel chain-content
+     * service. A chainless Hall (or an unknown slug) yields empty lists
+     * rather than an error, so the detail page degrades to exactly what
+     * it rendered before this existed.
+     *
+     * Field selection is deliberately narrow. ValidatorRepository::COLUMNS
+     * also carries `wallet_link_id` and `operator_address`; neither is
+     * projected here. The first is a link into a member's wallet and has
+     * no business on a public read (contract v1.51 closed 14 cross-user
+     * wallet-disclosure paths — do not reopen one), and the second is not
+     * needed to decide whether a validator is worth a look.
+     *
+     * @return array{
+     *   validators: list<array{id: int, moniker: string, logo_url: string|null, total_stake: string|null, delegator_count: int|null, uptime_30d: string|null, voting_power_rank: int|null, commission_rate: string|null}>,
+     *   collections: list<array{id: int, name: string|null, image_url: string|null, contract_address: string}>
+     * }
+     */
+    private function loadChainPreview(?string $chainSlug): array
+    {
+        $empty = ['validators' => [], 'collections' => []];
+
+        if ($chainSlug === null || $chainSlug === '') {
+            return $empty;
+        }
+        $chainId = ChainRepository::resolveIdAnyState($chainSlug);
+        if ($chainId === null) {
+            return $empty;
+        }
+
+        // Ordered by total_stake DESC in the repository — the "who secures
+        // this chain" question a newcomer actually has.
+        return self::previewFromRows(
+            ValidatorRepository::getActiveForChain($chainId, self::PREVIEW_LIMIT),
+            CollectionRepository::listVerifiedByChain($chainId, self::PREVIEW_LIMIT)
+        );
+    }
+
+    /**
+     * Pure projection of repository rows → the preview view-model.
+     *
+     * Split out from loadChainPreview (which does the I/O) so the field
+     * selection is testable without WordPress or a database — the same
+     * pure-core / I-O-wrapper split as EliteEligibilityService::evaluate
+     * and RankProgressionListener::decideTransition.
+     *
+     * That matters most for what is ABSENT: `wallet_link_id` and
+     * `operator_address` are in ValidatorRepository::COLUMNS and are
+     * deliberately not projected. The first points at a member's linked
+     * wallet, and contract v1.51 closed 14 cross-user wallet-disclosure
+     * paths — a public Hall preview must not reopen one. HallsChainPreviewTest
+     * asserts their absence so a future "just add one more field" cannot
+     * quietly leak them.
+     *
+     * @param iterable<object> $validatorRows
+     * @param iterable<object> $collectionRows
+     * @return array{
+     *   validators: list<array{id: int, moniker: string, logo_url: string|null, total_stake: string|null, delegator_count: int|null, uptime_30d: string|null, voting_power_rank: int|null, commission_rate: string|null}>,
+     *   collections: list<array{id: int, name: string|null, image_url: string|null, contract_address: string}>
+     * }
+     */
+    public static function previewFromRows(iterable $validatorRows, iterable $collectionRows): array
+    {
+        $validators = [];
+        foreach ($validatorRows as $v) {
+            $validators[] = [
+                'id'                => (int) ($v->id ?? 0),
+                'moniker'           => (string) ($v->moniker ?? ''),
+                'logo_url'          => self::nonEmptyString($v->logo_url ?? null),
+                'total_stake'       => self::nonEmptyString($v->total_stake ?? null),
+                'delegator_count'   => isset($v->delegator_count) ? (int) $v->delegator_count : null,
+                'uptime_30d'        => self::nonEmptyString($v->uptime_30d ?? null),
+                'voting_power_rank' => isset($v->voting_power_rank) ? (int) $v->voting_power_rank : null,
+                'commission_rate'   => self::nonEmptyString($v->commission_rate ?? null),
+            ];
+        }
+
+        $collections = [];
+        foreach ($collectionRows as $c) {
+            $collections[] = [
+                'id'               => (int) ($c->id ?? 0),
+                'name'             => self::nonEmptyString($c->collection_name ?? null),
+                'image_url'        => self::nonEmptyString($c->image_url ?? null),
+                'contract_address' => (string) ($c->contract_address ?? ''),
+            ];
+        }
+
+        return ['validators' => $validators, 'collections' => $collections];
+    }
+
+    /**
+     * Normalise a nullable DB string: an empty string is absence, not a
+     * value. Rendering `logo_url: ""` would have the client attempt an
+     * image load against the site root.
+     *
+     * @param mixed $value
+     */
+    private static function nonEmptyString($value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+        $string = (string) $value;
+        return $string === '' ? null : $string;
     }
 
     /**
