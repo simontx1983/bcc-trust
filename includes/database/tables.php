@@ -64,6 +64,10 @@ require_once __DIR__ . '/schema-cluster-findings.php';
 // confirmation clock (the atomic cutover).
 require_once __DIR__ . '/schema-rank-state.php';
 require_once __DIR__ . '/schema-rank-pending.php';
+// Rank redesign Phase 6 — meaningful-voting poll engine (generic polls
+// + per-voter ballots with immutable §16.6 weight snapshots).
+require_once __DIR__ . '/schema-polls.php';
+require_once __DIR__ . '/schema-ballots.php';
 // NOTE: bcc_user_locals removed — Halls membership lives in PeepSo's
 // peepso_group_members (single graph rule); primary-Hall pointer in
 // wp_usermeta.bcc_primary_hall_group_id.
@@ -228,6 +232,14 @@ function bcc_trust_create_tables() {
         bcc_trust_create_rank_pending_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Rank pending table created', []);
     }
+    if (function_exists('bcc_trust_create_polls_table')) {
+        bcc_trust_create_polls_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Polls table created', []);
+    }
+    if (function_exists('bcc_trust_create_ballots_table')) {
+        bcc_trust_create_ballots_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Ballots table created', []);
+    }
 
     // Data backfills (canonical handles + wallet placeholder-emails) run
     // through the shared migration runner, NOT by calling each backfill
@@ -341,6 +353,9 @@ function bcc_trust_verify_all_tables() {
         // Rank redesign Phase 5 canonical state + confirmation clock
         'bcc_trust_rank_state',
         'bcc_trust_rank_pending',
+        // Rank redesign Phase 6 meaningful-voting poll engine
+        'bcc_trust_polls',
+        'bcc_trust_ballots',
     ];
 
     $missing = [];
