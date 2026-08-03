@@ -7,6 +7,7 @@
  *   - POST   /bcc/v1/posts/photo            — create a photo post (multipart)
  *   - POST   /bcc/v1/posts/gif              — create a GIF post (JSON, Giphy URL)
  *   - DELETE /bcc/v1/me/reviews/(?P<id>\d+) — remove the viewer's review on a page
+ *   - DELETE /bcc/v1/feed/(?P<feed_id>[a-z0-9_]+) — delete a post (own, or any post for a site admin)
  *
  * V1 scope: status posts (open to all signed-in viewers), reviews
  * (gated on Apprentice+ AND reputation tier ≥ Neutral via
@@ -67,6 +68,30 @@ final class PostsEndpoint
                         'required'          => true,
                         'type'              => 'integer',
                         'sanitize_callback' => 'absint',
+                    ],
+                ],
+            ]
+        );
+
+        // DELETE /bcc/v1/feed/{feed_id} — delete a post. Own post for any
+        // signed-in viewer; any post for a site admin. Auth + ownership
+        // are checked inside PostsService::deletePost, not here — same
+        // '__return_true' + in-handler-check posture as
+        // CommentsEndpoint::delete, so the response is a clean
+        // bcc_unauthorized/bcc_forbidden envelope rather than WP's
+        // generic rest_forbidden.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/feed/(?P<feed_id>[a-z0-9_]+)',
+            [
+                'methods'             => WP_REST_Server::DELETABLE,
+                'callback'            => [$instance, 'deleteFeedPost'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'feed_id' => [
+                        'required'          => true,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
                     ],
                 ],
             ]
@@ -1015,6 +1040,29 @@ final class PostsEndpoint
         return $response;
     }
 
+    /**
+     * DELETE /bcc/v1/feed/{feed_id} — delete a post. See
+     * PostsService::deletePost for the authorization + deletion detail.
+     */
+    public function deleteFeedPost(WP_REST_Request $request): WP_REST_Response
+    {
+        $viewerId = get_current_user_id();
+        if ($viewerId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        $feedId = (string) $request->get_param('feed_id');
+        $result = Plugin::instance()->postsService()->deletePost($feedId, $viewerId);
+
+        if (isset($result['error'])) {
+            return self::forwardServiceError($result);
+        }
+
+        $response = ApiResponse::ok($result);
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
     public function removeReview(WP_REST_Request $request): WP_REST_Response
     {
         $viewerId = get_current_user_id();
@@ -1048,6 +1096,7 @@ final class PostsEndpoint
             'bcc_too_many_mentions'      => 400,
             'bcc_rate_limited'           => 429,
             'bcc_unavailable'            => 503,
+            'bcc_feature_disabled'       => 403,
             default                      => 400,
         };
     }
