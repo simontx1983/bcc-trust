@@ -43,6 +43,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Services;
 
+use BCC\Core\PeepSo\PeepSoMediaCache;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
@@ -106,7 +107,11 @@ final class SuggestionService
      *   reputation_tier_label: string,
      *   rank_label: string|null,
      *   is_in_good_standing: bool,
-     *   suggestion_reason: array{code: string, label: string}|null
+     *   suggestion_reason: array{
+     *     code: string,
+     *     label: string,
+     *     avatars?: list<array{handle: string, avatar_url: string}>
+     *   }|null
      * }>
      */
     public function getSuggestions(int $viewerId, int $limit): array
@@ -119,7 +124,10 @@ final class SuggestionService
         // ── 1. Candidate generation (affinity sources) ────────────────
         $following  = PeepSoFollowerRepository::getFollowing($viewerId, self::CANDIDATE_POOL_CAP);
         $followers  = PeepSoFollowerRepository::getFollowers($viewerId, self::CANDIDATE_POOL_CAP);
-        $secondDeg  = PeepSoFollowerRepository::getSecondDegreeCandidates($viewerId, self::CANDIDATE_POOL_CAP);
+        // WithSamples over the plain count-only variant — the mutual_follows
+        // signal below needs a few sample user ids to drive the RSB
+        // "Watched by [avatar][avatar] N you watch" UI, not just a number.
+        $secondDeg  = PeepSoFollowerRepository::getSecondDegreeCandidatesWithSamples($viewerId, self::CANDIDATE_POOL_CAP);
         $viewerGrp  = PeepSoGroupRepository::getUserMemberGroupIds($viewerId);
         $coMembers  = $viewerGrp === []
             ? []
@@ -168,13 +176,14 @@ final class SuggestionService
             $pool[$cid]['score'] += $contribution;
             $pool[$cid]['signals']['follows_you'] = [
                 'contribution' => $contribution,
-                'label'        => 'Follows you',
+                'label'        => 'Watches you',
             ];
         }
 
         // Mutual follows (capped).
-        foreach ($secondDeg as $cid => $mutualCount) {
+        foreach ($secondDeg as $cid => $info) {
             $touch($cid);
+            $mutualCount  = $info['count'];
             $capped       = min($mutualCount, self::MUTUAL_CAP);
             $contribution = self::W_MUTUAL * $capped;
             if ($contribution <= 0.0) {
@@ -184,9 +193,12 @@ final class SuggestionService
             $pool[$cid]['signals']['mutual_follows'] = [
                 'contribution' => $contribution,
                 'label'        => sprintf(
-                    'Followed by %d you follow',
+                    'Watched by %d you watch',
                     $mutualCount
                 ),
+                // Small sample of WHICH mutual connections, for the tiny
+                // overlapping-avatar UI — see topReason()'s pass-through.
+                'sample_ids'   => $info['sample_ids'],
             ];
         }
 
@@ -292,11 +304,50 @@ final class SuggestionService
         // ── 6. View-model (reuse getSummary + shared prefetch bundle). ─
         $prefetched = MemberSummaryPrefetcher::primeFor($chosenIds);
 
+        // Batch-resolve the mutual_follows reason's sample avatars — small
+        // (≤3 per row) set of user ids, gathered across all chosen rows so
+        // it's one avatar-cache lookup + one cache_users() warm, not N.
+        $sampleUserIds = [];
+        foreach ($reasonByUser as $reason) {
+            foreach (($reason['sample_user_ids'] ?? []) as $sampleId) {
+                $sampleUserIds[$sampleId] = true;
+            }
+        }
+        $sampleAvatarsByUser = [];
+        if ($sampleUserIds !== []) {
+            $ids = array_keys($sampleUserIds);
+            cache_users($ids);
+            $avatarUrlById = PeepSoMediaCache::avatarUrlBulk($ids);
+            foreach ($ids as $id) {
+                $user = get_userdata($id);
+                if ($user === false) {
+                    continue;
+                }
+                $sampleAvatarsByUser[$id] = [
+                    'handle'     => $user->user_login,
+                    'avatar_url' => $avatarUrlById[$id] ?? '',
+                ];
+            }
+        }
+
         $items = [];
         foreach ($chosenIds as $cid) {
             $summary = $this->userViewService->getSummary($cid, $viewerId, $prefetched);
             if ($summary === null) {
                 continue; // user vanished between candidate-gen and hydration
+            }
+            $reason = $reasonByUser[$cid] ?? null;
+            if ($reason !== null && isset($reason['sample_user_ids'])) {
+                $avatars = [];
+                foreach ($reason['sample_user_ids'] as $sampleId) {
+                    if (isset($sampleAvatarsByUser[$sampleId])) {
+                        $avatars[] = $sampleAvatarsByUser[$sampleId];
+                    }
+                }
+                unset($reason['sample_user_ids']); // internal-only; never on the wire
+                if ($avatars !== []) {
+                    $reason['avatars'] = $avatars;
+                }
             }
             $items[] = [
                 'id'                  => (int) $summary['id'],
@@ -311,7 +362,7 @@ final class SuggestionService
                 // New Members carry no rank chip on suggestion rows.
                 'rank_label'          => is_string($summary['rank_label']) ? $summary['rank_label'] : null,
                 'is_in_good_standing' => (bool) $summary['is_in_good_standing'],
-                'suggestion_reason'   => $reasonByUser[$cid] ?? null,
+                'suggestion_reason'   => $reason,
             ];
         }
 
@@ -323,8 +374,8 @@ final class SuggestionService
      * Ties broken by a deterministic code priority so the wire output
      * is stable across requests for the same inputs.
      *
-     * @param array<string, array{contribution: float, label: string}> $signals
-     * @return array{code: string, label: string}|null
+     * @param array<string, array{contribution: float, label: string, sample_ids?: list<int>}> $signals
+     * @return array{code: string, label: string, sample_user_ids?: list<int>}|null
      */
     private static function topReason(array $signals): ?array
     {
@@ -357,7 +408,12 @@ final class SuggestionService
         if ($bestCode === null) {
             return null;
         }
-        return ['code' => $bestCode, 'label' => $signals[$bestCode]['label']];
+        $reason = ['code' => $bestCode, 'label' => $signals[$bestCode]['label']];
+        $sampleIds = $signals[$bestCode]['sample_ids'] ?? [];
+        if ($sampleIds !== []) {
+            $reason['sample_user_ids'] = $sampleIds;
+        }
+        return $reason;
     }
 
     /**

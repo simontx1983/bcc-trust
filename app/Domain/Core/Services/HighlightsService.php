@@ -195,7 +195,7 @@ final class HighlightsService
                 self::SLOT_NEGATIVE,
                 $viewerId,
                 'uptime_drop',
-                'A validator you follow just dropped uptime',
+                'A validator you watch just dropped uptime',
                 'Demo entry — replace once the bcc_onchain_signals delta scorer ships.'
             );
         }
@@ -454,7 +454,7 @@ final class HighlightsService
                 self::SLOT_EXTERNAL,
                 $viewerId,
                 'creator_drop',
-                'A creator you follow just dropped a piece',
+                'A creator you watch just dropped a piece',
                 'Demo entry — replace once followed-entity activity scorer ships.'
             );
         }
