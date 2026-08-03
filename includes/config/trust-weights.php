@@ -36,20 +36,11 @@ define('BCC_TRUST_MAX_VOTE_WEIGHT', 0.6);
 // Stage 4: 365+ days    → 100% (fully vested)
 // ======================================================
 
-// Day thresholds (shared by votes, endorsements, and cron graduation)
-define('BCC_TRUST_VESTING_STAGE_1_DAYS', 30);
-define('BCC_TRUST_VESTING_STAGE_2_DAYS', 90);
-define('BCC_TRUST_VESTING_STAGE_3_DAYS', 152);
-define('BCC_TRUST_VESTING_STAGE_4_DAYS', 365);
-
-// Weight factors per stage (shared by votes and endorsements)
-// Stage 0 at 30% ensures new user votes are visible on the score
-// (old 10% made votes functionally zero — trust-killer for new users).
-define('BCC_TRUST_VESTING_STAGE_0_PCT', 0.30);
-define('BCC_TRUST_VESTING_STAGE_1_PCT', 0.50);
-define('BCC_TRUST_VESTING_STAGE_2_PCT', 0.70);
-define('BCC_TRUST_VESTING_STAGE_3_PCT', 0.85);
-define('BCC_TRUST_VESTING_STAGE_4_PCT', 1.00);
+// Vote-time vesting constants RETIRED (Rank Phase 6): the §16.6
+// formula's only vesting is the member-level maturity term
+// (rank-scoring.php `maturity`), computed from the apprentice epoch.
+// The graduation cron died in Phase 2; the calculator stages and
+// resetVesting died at the voting cutover.
 
 // ======================================================
 // VOTE DECAY SETTINGS

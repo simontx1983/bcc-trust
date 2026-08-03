@@ -112,8 +112,9 @@ final class ScoreContributorService implements ScoreContributorInterface
                 // applyVelocityCap operates on "weight points" where 1 wp = 2 score points.
                 // Bonus writes already count as score points directly, so halve
                 // before passing in to keep the budget math consistent with votes.
-                $capped = $this->scoreRepository->applyVelocityCap($pageId, $delta / 2.0);
-                $cappedDelta = $capped * 2.0;
+                $scale = \BCC\Trust\Core\Services\TrustScoreService::weightScoreScale();
+                $capped = $this->scoreRepository->applyVelocityCap($pageId, $delta / $scale);
+                $cappedDelta = $capped * $scale;
                 if ($cappedDelta < $delta) {
                     // Cap was applied — write the capped value, not the requested one.
                     $value = $currentBonus + $cappedDelta;

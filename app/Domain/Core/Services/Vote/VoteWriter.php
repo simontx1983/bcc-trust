@@ -127,22 +127,10 @@ class VoteWriter {
                 // When a user flips vote direction or the vote weight changes,
                 // the vesting clock must restart at stage 0 (30% weight).
                 // Without this, a fully vested vote can be instantly converted
-                // into a full-weight vote in the opposite direction (or at a
-                // different weight), bypassing the 30-day graduated vesting
-                // safeguard.
-                $needsVestingReset = $upsert['vote_type_changed']
-                    || (!$upsert['was_inserted'] && !empty($upsert['weight_changed']));
-                if ($needsVestingReset) {
-                    $now = current_time('mysql');
-                    $resetVested = round($weight->effective * BCC_TRUST_VESTING_STAGE_0_PCT, 4);
-
-                    $this->voteRepo->resetVesting(
-                        $upsert['vote_id'],
-                        0,
-                        $resetVested,
-                        $now
-                    );
-                }
+                // Vote-time vesting reset retired (Rank Phase 6): the §16.6
+                // formula's only vesting is the maturity term, which lives on
+                // the MEMBER (apprentice epoch), not on the vote row — a
+                // changed vote recomputes at the voter's current weight.
 
                 // ── Step 2: apply velocity cap + score delta ────────────────
                 //

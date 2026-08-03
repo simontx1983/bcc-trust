@@ -482,7 +482,7 @@ class ScoreRepository {
                      onchain_bonus,
                      last_vote_at, last_calculated_at)
                  VALUES (%d, %d, %d, %f, %f,
-                     LEAST(100, GREATEST(0, 50 + (%f - %f) * 2 + 0.0)),
+                     LEAST(100, GREATEST(0, 50 + (%f - %f) * " . \BCC\Trust\Core\Services\TrustScoreService::weightScoreScale() . " + 0.0)),
                      1, %d,
                      0.0, 'neutral', 0,
                      0.0,
@@ -1191,9 +1191,10 @@ class ScoreRepository {
         }
         $this->createIfNotExists($pageId, $userId);
 
+        $scale    = \BCC\Trust\Core\Services\TrustScoreService::weightScoreScale();
         $delta    = $reputationScore - (float) BCC_TRUST_NEUTRAL_SCORE;
-        $positive = $delta >= 0 ? $delta / 2.0 : 0.0;
-        $negative = $delta < 0 ? (-$delta) / 2.0 : 0.0;
+        $positive = $delta >= 0 ? $delta / $scale : 0.0;
+        $negative = $delta < 0 ? (-$delta) / $scale : 0.0;
 
         global $wpdb;
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
@@ -1411,7 +1412,8 @@ class ScoreRepository {
         ));
 
         $netWeight     = (float) ($row->up_weight ?? 0) - (float) ($row->down_weight ?? 0);
-        $pointsPerHour = abs($netWeight) * 2; // mirrors the score formula: each weight point = 2 score points
+        // Mirrors the score formula's weight→score scale (config-sourced).
+        $pointsPerHour = abs($netWeight) * \BCC\Trust\Core\Services\TrustScoreService::weightScoreScale();
 
         $alert     = $pointsPerHour >= 10;
         $direction = $netWeight >= 0 ? 'upward' : 'downward';
@@ -1627,12 +1629,14 @@ class ScoreRepository {
             $today
         ));
 
-        // Each weight point = 2 score points (mirrors the score formula)
-        $scoreImpact = $delta * 2;
-        $remaining   = max(0.0, $maxDaily - ($currentDelta * 2));
+        // Weight→score scale mirrors the canonical formula (config-sourced;
+        // 0.6 since Rank Phase 6 — the legacy ×2 died with the old formula).
+        $scale       = \BCC\Trust\Core\Services\TrustScoreService::weightScoreScale();
+        $scoreImpact = $delta * $scale;
+        $remaining   = max(0.0, $maxDaily - ($currentDelta * $scale));
 
         if ($scoreImpact > $remaining && $remaining > 0) {
-            $clampedDelta = $remaining / 2;
+            $clampedDelta = $remaining / $scale;
 
             AuditLogger::log('score_velocity_capped', $pageId, [
                 'original_delta'  => round($delta, 4),

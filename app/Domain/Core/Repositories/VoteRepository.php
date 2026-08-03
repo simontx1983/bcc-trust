@@ -2127,8 +2127,8 @@ class VoteRepository {
     // (Rank Phase 2, audit conflict #10): the cron graduation recomputed
     // vested_weight from the RAW weight column, overwriting every
     // velocity-capped correctWeight() value below and letting the next
-    // recalc re-sum uncapped. Vote-time vesting (VoteWeightCalculator,
-    // the insert path, resetVesting) stays live until Phase 6.
+    // recalc re-sum uncapped. Vote-time vesting followed in Phase 6 —
+    // the §16.6 maturity term on the member replaced per-vote stages.
 
     /**
      * Persist the velocity-capped weight onto the vote row.
@@ -2181,61 +2181,18 @@ class VoteRepository {
         $this->bustVoteCache($voteId);
     }
 
-    /**
-     * Reset vesting fields for a vote by ID.
-     *
-     * @throws RepositoryException on database failure
-     */
-    public function resetVesting(int $voteId, int $vestingStage, float $vestedWeight, string $vestingStartedAt): void
-    {
-        global $wpdb;
-
-        $result = $wpdb->update(
-            $this->table,
-            [
-                'vesting_stage'      => $vestingStage,
-                'vested_weight'      => $vestedWeight,
-                'vesting_started_at' => $vestingStartedAt,
-                'fully_vested_at'    => null,
-            ],
-            ['id' => $voteId],
-            ['%d', '%f', '%s', '%s'],
-            ['%d']
-        );
-
-        if ($result === false) {
-            throw new RepositoryException('VoteRepository::resetVesting failed: ' . $wpdb->last_error);
-        }
-
-        $this->bustVoteCache($voteId);
-    }
+    // resetVesting() deleted (Rank Phase 6): vote-time vesting is gone —
+    // the §16.6 maturity term lives on the MEMBER, not the vote row.
 
     /**
      * Invalidate the per-row vote cache.
      *
-     * Called from every mutation path (correctWeight, resetVesting, deletes)
-     * so getById() can never return a stale row for up to CACHE_TTL seconds.
+     * Called from every mutation path (correctWeight, deletes) so
+     * getById() can never return a stale row for up to CACHE_TTL seconds.
      */
     private function bustVoteCache(int $voteId): void
     {
         wp_cache_delete("vote_{$voteId}", self::CACHE_GROUP);
-    }
-
-    /**
-     * Get the earliest vote date for a voter (first-ever vote).
-     *
-     * @param int $voterId
-     * @return string|null  MySQL datetime string, or null if the voter has never voted.
-     */
-    public function getEarliestVoteDate( int $voterId ): ?string {
-        global $wpdb;
-
-        $result = $wpdb->get_var( $wpdb->prepare(
-            "SELECT MIN(created_at) FROM {$this->table} WHERE voter_user_id = %d",
-            $voterId
-        ) );
-
-        return $result ?: null;
     }
 
     /**

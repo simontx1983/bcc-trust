@@ -25,7 +25,7 @@ if (!defined('ABSPATH')) {
  *
  *     trust_score = clamp(
  *         BCC_TRUST_NEUTRAL_SCORE
- *           + (positive_score - negative_score) * 2
+ *           + (positive_score - negative_score) * weight_to_score_scale   (0.6 since Rank Phase 6)
  *           + onchain_bonus
  *           + contribution_bonus
  *           + penalty_adjustment
@@ -103,7 +103,7 @@ final class TrustScoreService
         float $penaltyAdjustment = 0.0,
         float $attestationBonus = 0.0
     ): float {
-        $base  = (float) self::neutral() + ($positiveScore - $negativeScore) * 2.0;
+        $base  = (float) self::neutral() + ($positiveScore - $negativeScore) * self::weightScoreScale();
         // penalty_adjustment is stored NEGATIVE (dispute/admin penalties
         // subtract); it's an additive term like the bonuses, clobber-safe
         // against vote recalcs because it lives in its own column.
@@ -192,9 +192,20 @@ final class TrustScoreService
      * attestation_bonus. The physical column is dropped by a follow-up
      * migration.
      */
+    /**
+     * The §16 weight→score scale (Rank Phase 6: 0.6, replacing the
+     * legacy ×2). Single source: rank-scoring.php's
+     * `weight_to_score_scale` via the validated, Plugin-memoized
+     * RankScoringConfig — C0 doctrine, no local constant.
+     */
+    public static function weightScoreScale(): float
+    {
+        return \BCC\Trust\Core\Plugin::instance()->rankScoringConfig()->weightToScoreScale;
+    }
+
     private static function formulaSqlFor(bool $includeOnchain): string
     {
-        $terms = '(positive_score - negative_score) * 2';
+        $terms = '(positive_score - negative_score) * ' . self::weightScoreScale();
         if ($includeOnchain) {
             $terms .= ' + onchain_bonus';
         }

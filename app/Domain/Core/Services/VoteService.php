@@ -87,7 +87,9 @@ class VoteService {
             $this->reputationRepo,
             $this->userInfoRepo
         );
-        $this->weightCalculator   = new VoteWeightCalculator();
+        $this->weightCalculator   = new VoteWeightCalculator(
+            \BCC\Trust\Core\Plugin::instance()->rankScoringConfig()
+        );
         $this->writer             = new VoteWriter(
             $this->voteRepo,
             $this->scoreRepo,
@@ -219,30 +221,23 @@ class VoteService {
 
         // ── 4. Weight calculation (pure PHP) ─────────────────────────────────
         $userInfo   = $this->getUserInfo($voterId);       // cached — may have been read in steps 2/3
-        $voterUser  = $this->getVoterUserData($voterId);  // cached — may have been read in step 2
-        $accountDays = $voterUser
-            ? (int) ((time() - strtotime($voterUser->user_registered)) / DAY_IN_SECONDS)
-            : 0;
-        $reputation  = $this->getVoterReputation($voterId); // cached
-        $voterTier   = $reputation->reputation_tier ?? 'neutral';
+        $reputation = $this->getVoterReputation($voterId); // cached
+        $voterTier  = $reputation->reputation_tier ?? 'neutral';
+        $trustScore = (float) ($reputation->reputation_score ?? 50.0);
 
-        $voterProfile = [
-            'tier'         => $voterTier,
-            'is_verified'  => (bool) ($userInfo->is_verified ?? false),
-            'account_days' => $accountDays,
-            'fraud_score'  => (int) ($userInfo->fraud_score ?? 0),
-        ];
+        // §16.6 (Rank Phase 6): weight = maturity × rank × trust × fraud,
+        // ceiling 1.75. Rank + maturity epoch from canonical rank_state
+        // (missing row = New Member = weight 0 — the eligibility checker
+        // already blocked them upstream; this is defence in depth).
+        $rankRow = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId);
 
         $weight = $this->weightCalculator->calculate(
-            $voterProfile,
-            $voterId,
+            $rankRow !== null ? (string) $rankRow->rank_slug : null,
+            $rankRow !== null ? (string) $rankRow->apprentice_awarded_at : null,
+            $trustScore,
+            $voterTier,
             $signals,
-            $preCheckIsNewVoter,    // estimate is acceptable here: wrong value can only
-                                    // affect weight when was_inserted=false, in which case
-                                    // VoteWriter skips the score delta entirely anyway
-            $this->daysSinceFirstVote($voterId),
-            null,                                     // $now — default (real clock)
-            $this->resolveQuestMultiplier($voterId)   // earned quest reward (1.00–1.30)
+            (int) ($userInfo->fraud_score ?? 0)
         );
 
         // ── 4b. Idempotency check (AFTER all gates, BEFORE mutation) ────────
@@ -398,11 +393,6 @@ class VoteService {
             'votes_up'         => (int) ($voteCounts['upvotes'] ?? 0),
             'votes_down'       => (int) ($voteCounts['downvotes'] ?? 0),
             'endorsement_count' => $scoreAfter ? $scoreAfter->getEndorsementCount() : 0,
-            'vesting' => [
-                'stage'   => $weight->vestingStage,
-                'pct'     => self::vestingStagePct($weight->vestingStage),
-                'next_stage_days' => self::daysUntilNextVestingStage($weight->vestingStage),
-            ],
             'analysis' => [
                 'weight_applied'       => $weight->effective,
                 'base_weight'          => $weight->base,
@@ -410,7 +400,6 @@ class VoteService {
                 'fraud_blocked'        => $weight->isFraudBlocked(),
                 'penalties'            => $weight->penaltiesBreakdown,
                 'voter_tier'           => $voterTier,
-                'vesting_stage'        => $weight->vestingStage,
                 'new_voter'            => $isNewVoter,  // authoritative post-transaction value
                 'vote_type_changed'    => $firstWriteResult['vote_type_changed'],
                 'has_sufficient_data'  => $scoreAfter
@@ -624,7 +613,8 @@ class VoteService {
      */
     private function runFanInPreGate(int $voterId, int $pageId): void {
         // Only gate new-ish accounts (under 30 days). Established accounts
-        // are already protected by vesting and fraud-score-based weight reduction.
+        // are already protected by the maturity ramp and fraud-score-based
+        // weight reduction.
         $voterUser   = $this->getVoterUserData($voterId); // cached
         $accountDays = $voterUser
             ? (int) ((time() - strtotime($voterUser->user_registered)) / DAY_IN_SECONDS)
@@ -854,38 +844,6 @@ class VoteService {
     }
 
     /**
-     * Resolve the voter's earned quest multiplier (1.00–BCC_QUEST_MULTIPLIER_MAX).
-     *
-     * Read-through the QuestProgressService object cache (5-min TTL) so the hot
-     * vote path stays cheap. Fail-safe: any error yields 1.0 — a reward lookup
-     * problem must never block a vote or distort its weight downward. The
-     * calculator floors the returned value at 1.0 as defence in depth.
-     */
-    private function resolveQuestMultiplier(int $voterId): float {
-        if ($voterId <= 0) {
-            return 1.0;
-        }
-        try {
-            return \BCC\Trust\Core\Plugin::instance()->questProgressService()->getMultiplier($voterId);
-        } catch (\Throwable $e) {
-            return 1.0;
-        }
-    }
-
-    /**
-     * Days since the voter's first-ever vote (0 when this is their first).
-     */
-    private function daysSinceFirstVote(int $voterId): int {
-        $firstAt = $this->voteRepo->getEarliestVoteDate($voterId);
-
-        if (!$firstAt) {
-            return 0;
-        }
-
-        return (int) ((time() - strtotime($firstAt)) / DAY_IN_SECONDS);
-    }
-
-    /**
      * Emit a downvote velocity alert when a page receives ≥5 downvotes in an hour.
      */
     private function maybeLogDownvoteVelocity(int $voterId, int $pageId): void {
@@ -986,34 +944,6 @@ class VoteService {
      *
      * @param string $event  'cast' or 'removed' — passed to the specific hook.
      */
-
-    /**
-     * Current vesting percentage as an integer (30, 50, 70, 85, 100).
-     */
-    private static function vestingStagePct(int $stage): int {
-        $pcts = [
-            0 => (int) round(BCC_TRUST_VESTING_STAGE_0_PCT * 100),
-            1 => (int) round(BCC_TRUST_VESTING_STAGE_1_PCT * 100),
-            2 => (int) round(BCC_TRUST_VESTING_STAGE_2_PCT * 100),
-            3 => (int) round(BCC_TRUST_VESTING_STAGE_3_PCT * 100),
-            4 => (int) round(BCC_TRUST_VESTING_STAGE_4_PCT * 100),
-        ];
-        return $pcts[$stage] ?? 0;
-    }
-
-    /**
-     * Days until the next vesting stage threshold.
-     * Returns null if already fully vested (stage 4).
-     */
-    private static function daysUntilNextVestingStage(int $currentStage): ?int {
-        $thresholds = [
-            0 => BCC_TRUST_VESTING_STAGE_1_DAYS,
-            1 => BCC_TRUST_VESTING_STAGE_2_DAYS,
-            2 => BCC_TRUST_VESTING_STAGE_3_DAYS,
-            3 => BCC_TRUST_VESTING_STAGE_4_DAYS,
-        ];
-        return $thresholds[$currentStage] ?? null;
-    }
 
     private static function invalidateAfterVoteChange(
         int    $voterId,
