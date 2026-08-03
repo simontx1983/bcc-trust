@@ -210,6 +210,15 @@ class VoteEligibilityChecker {
         if ($voterId <= 0) {
             throw new VoteEligibilityException('User not authenticated');
         }
+
+        // Rank Phase 5 final policy (§5.3 / §16.2): New Members — no
+        // rank_state row — cannot cast reputation-bearing votes.
+        // Apprentice or higher suffices; Journeyman is never required.
+        if (\BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId) === null) {
+            throw new VoteEligibilityException(
+                'Become an Apprentice to cast reputation-bearing votes.'
+            );
+        }
     }
 
     private function assertValidVoteType(int $voteType): void {

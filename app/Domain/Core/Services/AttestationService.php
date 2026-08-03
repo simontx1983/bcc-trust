@@ -487,6 +487,20 @@ final class AttestationService
                 400
             );
         }
+
+        // Rank Phase 5 final policy: New Members (no rank_state row)
+        // cannot perform reputation-bearing actions (§5.3). Apprentice
+        // or higher suffices — Journeyman is never required (§20.1).
+        if (\BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($attestorUserId) === null) {
+            $hint = 'Become an Apprentice to do this — post or comment, then keep it up for a day.';
+            throw new AttestationException(
+                AttestationException::CODE_INELIGIBLE,
+                $hint,
+                403,
+                ['unlock_hint' => $hint]
+            );
+        }
+
         if (!in_array($targetKind, AttestationRepository::TARGET_KINDS, true)) {
             throw new AttestationException(
                 AttestationException::CODE_INVALID_REQUEST,

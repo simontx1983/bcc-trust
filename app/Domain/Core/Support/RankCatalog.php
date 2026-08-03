@@ -4,9 +4,11 @@
  * orthogonal identity axes, Rank · Trust Tier; see docs/glossary.md §1
  * and api-contract §4.8).
  *
- * Rank mirrors the feature-access **level** (§2.6) and is fully
- * auto-derived from activity by RankService::rankForLevel():
- *   Apprentice = level New · Journeyman = level Active · Veteran = level Veteran.
+ * Since the Rank redesign Phase 5 cutover, Rank is EARNED — the
+ * member's current rung lives in the rank_state table (written by
+ * RankPromotionEngine / the §5.2 Apprentice readiness path) and is read
+ * through RankStateService. A member with no rank_state row is a New
+ * Member: rank and rank_label are null on every surface.
  *
  * The top rung was named "Master" until contract v1.58. It measured
  * 5 pulls + 3 votes + 30 days since registration — tenure, not mastery —
@@ -22,7 +24,7 @@
  * The label and description STRINGS now live in
  * includes/config/ranks.php so a rename is a config edit rather than a
  * class edit; the slugs, order and auto_assigned flags stay here because
- * they are wire values (and `bcc_last_seen_rank` persists a slug per
+ * they are wire values (and the rank_state table persists a slug per
  * user). This class remains the only reader of those constants — the
  * catalog shape and its lookup semantics are unchanged.
  *

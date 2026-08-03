@@ -232,6 +232,8 @@ require_once BCC_TRUST_PATH . 'includes/database/backfill-wallet-placeholder-ema
 require_once BCC_TRUST_PATH . 'includes/database/backfill-elite-eligibility.php';
 require_once BCC_TRUST_PATH . 'includes/database/backfill-watch-tier-vocabulary.php';
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-last-login-usermeta.php';
+require_once BCC_TRUST_PATH . 'includes/database/cleanup-feature-override-usermeta.php';
+require_once BCC_TRUST_PATH . 'includes/database/cleanup-last-seen-rank-usermeta.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a

@@ -1,29 +1,28 @@
 <?php
 /**
- * CapabilityResolver — the future single authorization entry point
- * (approved plan §25), shipped SHADOW-ONLY in Phase 3 (Addendum A2).
+ * CapabilityResolver — the single authorization entry point (approved
+ * plan §25), AUTHORITATIVE since the Phase 5 atomic cutover.
  *
- * Phase 3 contract:
- *   - implements NO rules of its own — every definitive verdict comes
- *     from delegating to today's canonical gate (§11: no parallel rule
+ * Contract:
+ *   - implements NO parallel rules — every definitive verdict comes
+ *     from delegating to the canonical gate (§11: no parallel rule
  *     implementations). See CapabilityCatalog for the per-key map.
- *   - enforces NOTHING. Live gates remain authoritative everywhere;
- *     CapabilityShadow compares and logs, and can never change an
- *     allow/deny result.
  *   - fails closed: unknown keys, unauthenticated principals, missing
  *     context, and unbuilt features all resolve DENY or UNKNOWN — never
- *     ALLOWED without a delegate saying so.
+ *     ALLOWED without a delegate saying so. Enforcing callers must
+ *     treat UNKNOWN as DENY.
  *
- * The Phase 5 atomic cutover replaces the delegate bodies with the new
- * Rank semantics and starts enforcing resolver output; the pre-cutover
- * matrix (tests/Unit/CapabilityMatrixTest.php) pins today's verdicts so
- * that flip is visible as exactly one fixture change.
+ * The write_review delegate carries the Phase 5 final policy directly
+ * (Apprentice+ AND Neutral+ — see writeReviewGate); vouch/stand_behind
+ * delegate to AttestationService::checkCastEligibility, which carries
+ * the New-Member exclusion inside it. The post-cutover authorization
+ * matrix (tests/Unit/CapabilityMatrixTest.php) pins the routing.
  *
  * Delegates are resolved lazily through protected hooks (overridden in
  * the matrix test) so the resolver itself stays dependency-free.
  *
  * @package BCC\Trust\Core\Services\Capability
- * @since Rank redesign Phase 3 (2026-07-31)
+ * @since Rank redesign Phase 3 (2026-07-31); authoritative Phase 5
  */
 
 declare(strict_types=1);
@@ -131,15 +130,27 @@ class CapabilityResolver
             : CapabilityDecision::denied('not_affected_party', 'permissions');
     }
 
-    // ── delegate hooks (overridden by the pre-cutover matrix test) ──
+    // ── delegate hooks (overridden by the authorization matrix test) ──
 
+    /**
+     * Rank Phase 5 final policy: Apprentice-or-higher (a rank_state row
+     * exists — New Members excluded, fail-safe on the missing row) AND
+     * current Trust Neutral-or-higher. Journeyman is never required
+     * (§20.1). Replaced the legacy Level-2 FeatureAccessService gate at
+     * the atomic cutover.
+     */
     protected function writeReviewGate(int $userId): bool
     {
-        $access = \BCC\Trust\Core\Plugin::instance()
-            ->featureAccessService()
-            ->canPerform($userId, 'write_review');
+        $plugin = \BCC\Trust\Core\Plugin::instance();
 
-        return ($access['allowed'] ?? false) === true;
+        if ($plugin->rankStateRepository()->getForUser($userId) === null) {
+            return false;
+        }
+
+        $config = $plugin->rankScoringConfig();
+        $tier   = $plugin->reputationRepository()->getTier($userId);
+
+        return $config->tierOrdFor($tier) >= $config->tierOrdFor('neutral');
     }
 
     /** @throws AttestationException when ineligible */

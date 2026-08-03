@@ -75,7 +75,7 @@
       "initials": "P",
       "monogram_color": "#3e3a0f"
     },
-    "current_rank_label": "Apprentice",
+    "current_rank_label": null,
     "endorse_unlock_hint": null,
     "flags": [],
     "handle": "phillipcosmos",
@@ -172,7 +172,7 @@
         "unlock_hint": "Sign in to interact"
       }
     },
-    "rank_label": "Apprentice",
+    "rank_label": null,
     "reputation_tier": "neutral",
     "reputation_tier_label": "Neutral",
     "review_target_id": 1000000137,
@@ -221,7 +221,7 @@
     "y": 50
   },
   "cover_photo_url": null,
-  "current_rank_label": "Apprentice",
+  "current_rank_label": null,
   "display_name": "phillipcosmos",
   "disputes": [],
   "flags": [],
@@ -273,10 +273,6 @@
     {
       "label": "Wallets",
       "value": "1 linked"
-    },
-    {
-      "label": "Rank",
-      "value": "Apprentice"
     }
   ],
   "is_in_good_standing": true,
@@ -292,6 +288,7 @@
     "watching": "/u/phillipcosmos/watching"
   },
   "live_shift": [],
+  "member_state": "new_member",
   "permissions": {
     "can_block": {
       "allowed": false,
@@ -332,23 +329,13 @@
     "reviews_hidden": false,
     "watching_hidden": false
   },
-  "rank": "apprentice",
-  "rank_label": "Apprentice",
+  "rank": null,
+  "rank_label": null,
   "reputation_tier": "neutral",
   "reputation_tier_label": "Neutral",
   "reviews": [],
   "shift_log": {
     "days": [
-      {
-        "date": "2025-07-31",
-        "level": 0,
-        "tooltip": "Jul 31 · no activity"
-      },
-      {
-        "date": "2025-08-01",
-        "level": 0,
-        "tooltip": "Aug 1 · no activity"
-      },
       {
         "date": "2025-08-02",
         "level": 0,
@@ -2158,28 +2145,37 @@
         "date": "2026-07-29",
         "level": 0,
         "tooltip": "Jul 29 · no activity"
+      },
+      {
+        "date": "2026-07-30",
+        "level": 0,
+        "tooltip": "Jul 30 · no activity"
+      },
+      {
+        "date": "2026-07-31",
+        "level": 0,
+        "tooltip": "Jul 31 · no activity"
       }
     ],
     "month_ticks": [
-      "Jul",
       "Aug",
       "Sep",
       "Oct",
       "Nov",
       "Dec",
+      "Dec",
       "Jan",
-      "Feb",
       "Mar",
       "Apr",
       "May",
-      "Jun"
+      "Jun",
+      "Jul"
     ],
     "summary": "6 actions over the last 52 weeks"
   },
   "standing": {
     "facts": [
       "Reputation: Neutral",
-      "Rank: Apprentice",
       "No active moderation flags"
     ],
     "is_in_good_standing": true,

@@ -52,6 +52,7 @@ final class RankScoringConfig
         'time_credit',
         'decay',
         'retention',
+        'recovery',
         'tier_ord',
         'trust_windows',
         'recognizer_minimums',
@@ -102,6 +103,7 @@ final class RankScoringConfig
     public readonly int $decayStepDays;
     public readonly float $decayPointsPerStep;
     public readonly int $tierDaysRetentionDays;
+    public readonly int $recoveryGraceDays;
     /** @var array<string, int> */
     public readonly array $tierOrd;
     /** @var array<string, array{qualifying_days: int, window_days: int, min_tier: string}> */
@@ -162,6 +164,7 @@ final class RankScoringConfig
         int $decayStepDays,
         float $decayPointsPerStep,
         int $tierDaysRetentionDays,
+        int $recoveryGraceDays,
         array $tierOrd,
         array $trustWindows,
         array $recognizerMinimums,
@@ -198,6 +201,7 @@ final class RankScoringConfig
         $this->decayStepDays            = $decayStepDays;
         $this->decayPointsPerStep       = $decayPointsPerStep;
         $this->tierDaysRetentionDays    = $tierDaysRetentionDays;
+        $this->recoveryGraceDays        = $recoveryGraceDays;
         $this->tierOrd                  = $tierOrd;
         $this->trustWindows             = $trustWindows;
         $this->recognizerMinimums       = $recognizerMinimums;
@@ -343,6 +347,9 @@ final class RankScoringConfig
         $retention             = self::mapShape($config['retention'], 'retention', ['tier_days_days']);
         $tierDaysRetentionDays = self::positiveInt($retention['tier_days_days'], 'retention.tier_days_days');
 
+        $recovery          = self::mapShape($config['recovery'], 'recovery', ['grace_days']);
+        $recoveryGraceDays = self::positiveInt($recovery['grace_days'], 'recovery.grace_days');
+
         $tierOrd = self::intMap($config['tier_ord'], 'tier_ord', self::TIERS);
         foreach (self::TIERS as $i => $tier) {
             if ($tierOrd[$tier] !== $i) {
@@ -453,6 +460,7 @@ final class RankScoringConfig
             $decayStepDays,
             $decayPointsPerStep,
             $tierDaysRetentionDays,
+            $recoveryGraceDays,
             $tierOrd,
             $trustWindows,
             $recognizerMinimums,

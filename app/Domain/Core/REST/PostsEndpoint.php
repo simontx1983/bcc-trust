@@ -9,7 +9,8 @@
  *   - DELETE /bcc/v1/me/reviews/(?P<id>\d+) — remove the viewer's review on a page
  *
  * V1 scope: status posts (open to all signed-in viewers), reviews
- * (gated on Level 2 + reputation tier ≥ neutral via FeatureAccessService),
+ * (gated on Apprentice+ AND reputation tier ≥ Neutral via
+ * CapabilityResolver — the Rank Phase 5 final policy),
  * §D6 blog posts (open to all signed-in viewers; long-form content
  * with an excerpt that surfaces on the Floor and a full_text that
  * surfaces in the per-user blog tab), v1.5 photo posts (multipart;

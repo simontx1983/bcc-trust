@@ -4,7 +4,7 @@
  * per contract §3.1 and §4.4.
  *
  * Two output variants:
- *   - is_self === true  → includes living, progression, feature_access,
+ *   - is_self === true  → includes living, progression, capabilities,
  *     ux_helpers (the four own-only blocks)
  *   - is_self === false → omits the four own-only blocks entirely
  *
@@ -19,11 +19,13 @@
  *   - counts.solids_given/received → PeepSoReactionRepository::countGivenByUser /
  *                                    countReceivedByUser, gated on §D5 reaction-id
  *                                    presence (returns 0 pre-seeder)
- *   - progression.next_rank_thresholds       → resolveProgression() derives
- *                                              from RankCatalog + trust_score
- *   - progression.trust_score_recent_changes → ScoreEventRepository::getRecentForPage
- *                                              (the member self-page's live
- *                                              bcc_trust_score_events ledger)
+ *   - member_state / rank / rank_label → RankStateService::memberState
+ *                                    (Rank redesign Phase 5 — rank_state
+ *                                    row or the explicit New Member state)
+ *   - progression (own only)       → RankStateService::progressionFor (§2.5)
+ *   - capabilities (own only)      → RankStateService::capabilitiesBlock
+ *                                    (§2.6 — replaced feature_access at
+ *                                    the Phase 5 atomic cutover)
  *
  * Intentional V1 design (NOT a stub):
  *   - counts.watching_size = followers_count proxy. §C2 single-graph rule:
@@ -46,19 +48,17 @@ use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
-use BCC\Trust\Core\Repositories\ScoreEventRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Repositories\XRepository;
-use BCC\Trust\Core\Services\Quest\QuestProgressService;
 use BCC\Trust\Core\Support\PrivacySettings;
-use BCC\Trust\Core\Support\RankCatalog;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Core\Support\WalletAddressValidator;
 use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
+use BCC\Trust\Rank\Services\RankStateService;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -68,14 +68,11 @@ final class UserViewService
 {
     private VoteRepository $voteRepo;
     private ReputationRepository $reputationRepo;
-    private RankService $rankService;
-    private FeatureAccessService $featureAccess;
+    private RankStateService $rankStateService;
     private LivingService $livingService;
-    private ScoreEventRepository $scoreEventRepo;
     private PeepSoReactionRepository $reactionRepo;
     private DisputeParticipationRepository $participationRepo;
     private AttestationService $attestationService;
-    private QuestProgressService $questProgress;
 
     /**
      * Per-request memoization of resolveAugmentedTrustScore — UserViewService
@@ -90,25 +87,19 @@ final class UserViewService
     public function __construct(
         VoteRepository $voteRepo,
         ReputationRepository $reputationRepo,
-        RankService $rankService,
-        FeatureAccessService $featureAccess,
+        RankStateService $rankStateService,
         LivingService $livingService,
-        ScoreEventRepository $scoreEventRepo,
         PeepSoReactionRepository $reactionRepo,
         DisputeParticipationRepository $participationRepo,
-        AttestationService $attestationService,
-        QuestProgressService $questProgress
+        AttestationService $attestationService
     ) {
         $this->voteRepo            = $voteRepo;
         $this->reputationRepo      = $reputationRepo;
-        $this->rankService         = $rankService;
-        $this->featureAccess       = $featureAccess;
+        $this->rankStateService    = $rankStateService;
         $this->livingService       = $livingService;
-        $this->scoreEventRepo      = $scoreEventRepo;
         $this->reactionRepo        = $reactionRepo;
         $this->participationRepo   = $participationRepo;
         $this->attestationService  = $attestationService;
-        $this->questProgress       = $questProgress;
     }
 
     /**
@@ -122,7 +113,7 @@ final class UserViewService
      * Same prefer-prefetched-else-fallback semantics as getSummary.
      *
      * @param array{
-     *   levels?: array<int, int>,
+     *   member_states?: array<int, array{member_state: string, rank: string|null, rank_label: string|null}>,
      *   reviews_written_counts?: array<int, int>,
      *   disputes_signed_counts?: array<int, int>,
      *   solids_received_counts?: array<int, int>
@@ -144,15 +135,13 @@ final class UserViewService
         $halls        = $this->resolveHalls($userId);
         $primaryHall  = $this->resolvePrimaryHall($userId, $halls);
 
-        // Rank — same prefer-prefetched branch as getSummary (the levels
-        // map shares resolveLevel + thresholds with the per-user chain),
-        // falling back to autoDerivedRank→getLevel, which costs four
-        // queries per call.
-        if ($prefetched !== null && isset($prefetched['levels'])) {
-            $rank = $this->rankFromPrefetchedLevel($userId, $prefetched['levels']);
-        } else {
-            $rank = $this->resolveRank($userId);
-        }
+        // Member state (Rank redesign Phase 5) — prefer the prefetched
+        // batched member-state map (RankStateService::memberStatesFor via
+        // MemberSummaryPrefetcher); fall back to the single-user read.
+        // A missing rank_state row IS the New Member state — explicit,
+        // never an error shape.
+        $state = $prefetched['member_states'][$userId]
+            ?? $this->rankStateService->memberState($userId);
 
         $privacy = self::resolvePrivacy($userId);
 
@@ -180,9 +169,14 @@ final class UserViewService
             // no slot for `risky` at all, so the most safety-relevant state in
             // the system was invisible wherever they were used.
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel($tier),
-            'rank'                => $rank['key'],
-            'rank_label'          => $rank['label'],
-            'current_rank_label'  => $rank['label'],
+            // Rank redesign Phase 5 — member_state distinguishes the New
+            // Member account state (no rank_state row) from ranked
+            // members (C8); rank / rank_label are nullable for new
+            // members. current_rank_label mirrors rank_label.
+            'member_state'        => $state['member_state'],
+            'rank'                => $state['rank'],
+            'rank_label'          => $state['rank_label'],
+            'current_rank_label'  => $state['rank_label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
             'bio'                 => self::resolveBio($user),
@@ -201,21 +195,19 @@ final class UserViewService
         ];
 
         if ($isSelf) {
-            // Build the feature_access block once and reuse it for the
-            // rank-progress bar + the §2.5 progression block — Rank now
-            // mirrors the level, so all three surfaces share one set of
-            // canonical level thresholds (no re-derivation, no drift).
-            $featureAccess = $this->featureAccess->getFeatureAccess($userId);
-
             // §O3 living header — composed by LivingService:
             //   - streak_days (peepso_activities walker)
             //   - today (reviews + disputes_signed; solids stub)
-            //   - rank_progress (level thresholds toward the next rank)
             //   - comparison (V1 stub; §O3.1 percentile aggregator deferred)
-            $payload['living']         = $this->livingService->compose($userId, $rank['key'], $featureAccess);
-            $payload['progression']    = $this->resolveProgression($rank, $userId, $featureAccess);
-            $payload['feature_access'] = $featureAccess;
-            $payload['ux_helpers']     = self::resolveUxHelpers($userId);
+            $payload['living']       = $this->livingService->compose($userId);
+            // §2.5 progression — the canonical backend-built block
+            // (rank math for ranked members, §5.1 readiness for New
+            // Members). Same source as GET /me/progression.
+            $payload['progression']  = $this->rankStateService->progressionFor($userId);
+            // §2.6 capabilities — replaced the retired feature_access
+            // block at the Phase 5 atomic cutover.
+            $payload['capabilities'] = $this->rankStateService->capabilitiesBlock($userId);
+            $payload['ux_helpers']   = self::resolveUxHelpers($userId);
         }
 
         return self::enforceWalletPrivacyAtEgress($payload, $isSelf);
@@ -288,7 +280,7 @@ final class UserViewService
      * Slim view-model for the /members directory list. Drops the heavy
      * blocks `getUser` carries (counts, locals, wallets, permissions,
      * privacy, viewer_blocking, plus the self-only living/progression/
-     * feature_access bundles) — those are profile-page concerns. List
+     * capabilities bundles) — those are profile-page concerns. List
      * surfaces want a card-sized read-only payload.
      *
      * Privacy: still honors `real_name_hidden` — if set and viewer
@@ -352,7 +344,7 @@ final class UserViewService
      *   wallets_verified_counts?: array<int, int>,
      *   x_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>,
      *   github_connections?: array<int, array{provider_username: string|null, verified_at: string|null}>,
-     *   levels?: array<int, int>,
+     *   member_states?: array<int, array{member_state: string, rank: string|null, rank_label: string|null}>,
      *   viewer_attestations?: array<int, array{vouch: object|null, stand_behind: object|null}>
      * }|null $prefetched
      *
@@ -365,8 +357,9 @@ final class UserViewService
      *   joined_at: string,
      *   reputation_tier: string,
      *   reputation_tier_label: string,
-     *   rank_label: string,
-     *   current_rank_label: string,
+     *   member_state: string,
+     *   rank_label: string|null,
+     *   current_rank_label: string|null,
      *   is_in_good_standing: bool,
      *   flags: list<string>,
      *   trust_score: int,
@@ -401,16 +394,12 @@ final class UserViewService
         $handle  = self::resolveHandle($user);
         $privacy = self::resolvePrivacy($userId);
 
-        // Rank — prefer the prefetched batched levels map (FeatureAccess-
-        // Service::getLevelsForUsers; same resolveLevel + thresholds as the
-        // per-user chain), fall back to autoDerivedRank→getLevel, which
-        // costs four queries per user (two follower COUNTs, votes-cast
-        // COUNT, wallet-links read).
-        if ($prefetched !== null && isset($prefetched['levels'])) {
-            $rank = $this->rankFromPrefetchedLevel($userId, $prefetched['levels']);
-        } else {
-            $rank = $this->resolveRank($userId);
-        }
+        // Member state (Rank redesign Phase 5) — prefer the prefetched
+        // batched member-state map (RankStateService::memberStatesFor via
+        // MemberSummaryPrefetcher; one bounded query per page), fall back
+        // to the single-user read for non-list callers.
+        $state = $prefetched['member_states'][$userId]
+            ?? $this->rankStateService->memberState($userId);
 
         $displayName  = $user->display_name !== '' ? $user->display_name : $user->user_login;
         $effectiveName = (!$isSelf && $privacy['real_name_hidden'])
@@ -532,8 +521,11 @@ final class UserViewService
             'joined_at'           => self::toIso8601((string) $user->user_registered),
             'reputation_tier'       => $tier,
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel($tier),
-            'rank_label'          => $rank['label'],
-            'current_rank_label'  => $rank['label'],
+            // Rank redesign Phase 5 — nullable for New Members; the
+            // explicit member_state field is the C8 disambiguator.
+            'member_state'        => $state['member_state'],
+            'rank_label'          => $state['rank_label'],
+            'current_rank_label'  => $state['rank_label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
@@ -560,30 +552,6 @@ final class UserViewService
     // ──────────────────────────────────────────────────────────────────
     // Tier & rank
     // ──────────────────────────────────────────────────────────────────
-
-    /**
-     * @return array{key: string, label: string}
-     */
-    private function resolveRank(int $userId): array
-    {
-        $derived = $this->rankService->autoDerivedRank($userId);
-        $label   = RankCatalog::getLabel($derived) ?? '';
-        return ['key' => $derived, 'label' => $label];
-    }
-
-    /**
-     * Rank from a prefetched levels map (FeatureAccessService::
-     * getLevelsForUsers). Users absent from the map resolve to LEVEL_NEW —
-     * the same outcome the per-user path produces for zero counts.
-     *
-     * @param array<int, int> $levels
-     * @return array{key: string, label: string}
-     */
-    private function rankFromPrefetchedLevel(int $userId, array $levels): array
-    {
-        $key = RankService::rankForLevel($levels[$userId] ?? FeatureAccessService::LEVEL_NEW);
-        return ['key' => $key, 'label' => RankCatalog::getLabel($key) ?? ''];
-    }
 
     /**
      * Reputation tiers considered "in good standing" per §E1.
@@ -1133,7 +1101,8 @@ final class UserViewService
 
     /**
      * Permissions for what the *viewer* can do TO this user — distinct
-     * from §O5 feature gates (those live in feature_access). For V1:
+     * from the member's own action-class gates (those live in the §2.6
+     * capabilities block). For V1:
      *
      *   can_follow      — true for any other authed viewer
      *   can_message     — true when the recipient has chat enabled
@@ -1211,136 +1180,6 @@ final class UserViewService
     {
         $familiar = (bool) get_user_meta($userId, 'bcc_ui_familiar', true);
         return ['show_helpers' => !$familiar];
-    }
-
-    // ──────────────────────────────────────────────────────────────────
-    // Progression (own only)
-    // ──────────────────────────────────────────────────────────────────
-
-    /**
-     * Phase 1 progression block. Real progression thresholds depend on
-     * a ranks-threshold service that hasn't shipped — for now we
-     * surface current rank + next rank from the catalog with empty
-     * threshold/event arrays.
-     *
-     * @param array{key: string, label: string} $rank
-     * @return array{
-     *   current_rank: string,
-     *   current_rank_label: string,
-     *   next_rank: string|null,
-     *   next_rank_label: string|null,
-     *   next_rank_thresholds: list<array{metric: string, label: string, current: int, required: int}>,
-     *   trust_score_recent_changes: list<array{delta: int, reason: string, at: string}>
-     * }
-     */
-    /**
-     * §2.5 / §N11 progression block. Rank mirrors the feature-access
-     * level, so the next-rank gate is exactly the level's
-     * `next_level_thresholds` (pulls / reviews / days active) — the real
-     * capability requirements, not a trust-score proxy. At Master (top
-     * of the ladder) `next_rank` is null and thresholds are empty.
-     *
-     * @param array{key: string, label: string} $rank
-     * @param array{next_level_thresholds: list<array{metric: string, label: string, current: int, required: int}>} $featureAccess
-     * @return array{
-     *   current_rank: string,
-     *   current_rank_label: string,
-     *   next_rank: string|null,
-     *   next_rank_label: string|null,
-     *   next_rank_thresholds: list<array{metric: string, label: string, current: int, required: int}>,
-     *   trust_score_recent_changes: list<array{delta: int, reason: string, at: string}>,
-     *   quests: array{multiplier: float, completed_count: int, total_count: int, pct: int, items: list<array{slug: string, label: string, hint: string, done: bool, weight_bonus: float, category: string}>}
-     * }
-     */
-    private function resolveProgression(array $rank, int $userId, array $featureAccess): array
-    {
-        $next = RankCatalog::getNextRank($rank['key']); // master → null
-
-        return [
-            'current_rank'               => $rank['key'],
-            'current_rank_label'         => $rank['label'],
-            'next_rank'                  => $next,
-            'next_rank_label'            => $next !== null ? RankCatalog::getLabel($next) : null,
-            'next_rank_thresholds'       => $featureAccess['next_level_thresholds'],
-            'trust_score_recent_changes' => $this->resolveTrustScoreRecentChanges($userId),
-            'quests'                     => $this->resolveQuests($userId),
-        ];
-    }
-
-    /**
-     * §N11 quest block — the completion checklist plus the earned vote-weight
-     * multiplier it grants (VoteWeightCalculator applies this at cast time).
-     * Sourced from QuestProgressService::getProgress (object-cached), reshaped
-     * from a slug-keyed map into a stable ordered list so the frontend renders
-     * without deriving anything. Own-only: resolveProgression is only reached
-     * on the self view.
-     *
-     * @return array{
-     *   multiplier: float,
-     *   completed_count: int,
-     *   total_count: int,
-     *   pct: int,
-     *   items: list<array{slug: string, label: string, hint: string, done: bool, weight_bonus: float, category: string}>
-     * }
-     */
-    private function resolveQuests(int $userId): array
-    {
-        // Backfill quests completed before their emitter was wired (throttled,
-        // own-view only — resolveProgression is self-only). Makes the checklist
-        // and the vote-weight multiplier reflect the operator's real state.
-        $this->questProgress->reconcile($userId);
-
-        $progress = $this->questProgress->getProgress($userId);
-
-        $items = [];
-        foreach ($progress['quests'] as $slug => $quest) {
-            $items[] = [
-                'slug'         => (string) $slug,
-                'label'        => (string) $quest['label'],
-                'hint'         => (string) $quest['hint'],
-                'done'         => (bool) $quest['done'],
-                'weight_bonus' => round((float) $quest['weight_bonus'], 2),
-                'category'     => (string) $quest['category'],
-            ];
-        }
-
-        return [
-            'multiplier'      => round((float) $progress['multiplier'], 2),
-            'completed_count' => (int) $progress['completed_count'],
-            'total_count'     => (int) $progress['total_count'],
-            'pct'             => (int) $progress['pct'],
-            'items'           => $items,
-        ];
-    }
-
-    /**
-     * Last few score-change events for a member, shaped per §N11.
-     * Sourced from the member's self-page row in the LIVE
-     * bcc_trust_score_events ledger (written by ScoreMutationLogger on
-     * every self-page score mutation — vote, endorsement, contribution
-     * bonus, moderation). Read via getRecentForPage so the synthetic
-     * self-page id (no wp_posts row) is not dropped by an inner join.
-     *
-     * @return list<array{delta: int, reason: string, at: string}>
-     */
-    private function resolveTrustScoreRecentChanges(int $userId): array
-    {
-        $rows = $this->scoreEventRepo->getRecentForPage(
-            MemberSelfPageService::selfPageId($userId),
-            5
-        );
-        $items = [];
-        foreach ($rows as $row) {
-            $items[] = [
-                // Round to int — the contract surfaces score points,
-                // not sub-point precision. Internal float deltas are
-                // preserved in the row for audit.
-                'delta'  => (int) round((float) $row->delta),
-                'reason' => (string) $row->reason,
-                'at'     => self::toIso8601((string) $row->created_at),
-            ];
-        }
-        return $items;
     }
 
     // ──────────────────────────────────────────────────────────────────

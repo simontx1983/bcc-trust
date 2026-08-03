@@ -1,23 +1,23 @@
 <?php
 /**
  * CapabilityCatalog — the canonical key list for the Rank-redesign
- * capability model (approved plan §25; Phase 3 skeleton).
+ * capability model (approved plan §25).
  *
- * Phase 3 status per key (SHADOW-ONLY, Addendum A2 — the resolver
- * enforces nothing; every verdict below describes what the resolver
- * REPORTS, while today's live gates stay authoritative):
+ * AUTHORITATIVE since the Phase 5 atomic cutover — the resolver's
+ * verdicts gate the write paths. Status per key:
  *
- *   DELEGATED — evaluated by delegating to today's canonical gate:
- *     write_review  → FeatureAccessService::canPerform('write_review')
- *                     (Level-2 + Neutral gate; bcc_feature_override_*
- *                     usermeta rides along inside the delegate)
- *     vouch         → AttestationService::checkCastEligibility (tier ≥
- *                     Neutral + fraud-clear + self-target; extracted
- *                     side-effect-free from cast() in this phase)
+ *   DELEGATED — evaluated by delegating to the canonical gate:
+ *     write_review  → rank_state row (Apprentice+; New Members denied)
+ *                     AND Trust Neutral+ (CapabilityResolver::
+ *                     writeReviewGate — Journeyman never required, §20.1)
+ *     vouch         → AttestationService::checkCastEligibility (carries
+ *                     the New-Member exclusion + tier ≥ Neutral +
+ *                     fraud-clear + self-target)
  *     stand_behind  → same as vouch (the transactional slot check stays
- *                     inside cast() — race-correct there, not shadowable)
+ *                     inside cast() — race-correct there)
  *     open_dispute  → Permissions::is_not_suspended + owns_page
- *                     (the DisputeController chain)
+ *                     (the DisputeController chain; rank never blocks
+ *                     opening, §20.4)
  *
  *   DEFERRED — the live gate cannot be re-evaluated side-effect-free
  *   (VoteEligibilityChecker::check consumes rate-limit quota), so the
@@ -35,9 +35,7 @@
  * resolver models the POST-retirement world. The resolver is not
  * consulted on that route, so nothing logs.
  *
- * Key names are implementation choices, not contract fields (§25). The
- * catalog gains no wire presence in Phase 3 — §2.6 feature_access is
- * untouched until the Phase 5 contract batch.
+ * Key names are implementation choices, not contract fields (§25).
  *
  * @package BCC\Trust\Core\Services\Capability
  * @since Rank redesign Phase 3 (2026-07-31)

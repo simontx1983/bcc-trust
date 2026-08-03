@@ -57,6 +57,9 @@ return [
         'bcc_disputes_reconcile_orphans'        => ['interval' => 'bcc_five_minutes',             'description' => 'dispute reconcile (covers cron + AS enqueue failures)'],
         // Rank domain (redesign Phase 1 data planes)
         'bcc_rank_daily_tier_snapshot'          => ['interval' => 'daily',                        'description' => 'rank tier-day snapshot (per-user daily trust-tier qualification rows)'],
+        // Rank domain (redesign Phase 5 cutover)
+        'bcc_rank_confirmation_sweep'           => ['interval' => 'bcc_five_minutes',             'description' => '24h Apprentice confirmation resolver (R1 predicate)'],
+        'bcc_rank_daily_evaluate'               => ['interval' => 'daily',                        'description' => 'rank promotion/demotion evaluate over ranked members'],
     ],
 
     // Fire-once / retired / legacy hooks — cleared on deactivate/uninstall

@@ -45,7 +45,6 @@ use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoPageRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\ScoreEventRepository;
-use BCC\Trust\Core\Support\RankCatalog;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -68,9 +67,9 @@ final class HighlightsService
      * bare working (the resolver falls back to its V1.0 null stub).
      * Plugin.php wires the live dependency.
      *
-     * RankService is consulted only to fetch the current auto-derived
-     * rank label so the welcome highlight for cold users can reference
-     * it by name without re-deriving on the frontend.
+     * The rank word for the cold-user welcome comes from
+     * RankStateService::memberState (Phase 5 cutover) — a New Member
+     * has no rank yet and the copy falls back to "Member".
      *
      * ScoreEventRepository powers the EXTERNAL slot — recent events
      * across the watched-entity set since a 24h window. Bare-construct
@@ -78,7 +77,6 @@ final class HighlightsService
      */
     public function __construct(
         private readonly ?LivingService $livingService = null,
-        private readonly ?RankService $rankService = null,
         private readonly ?ScoreEventRepository $scoreEventRepository = null
     ) {
     }
@@ -241,18 +239,17 @@ final class HighlightsService
             );
         }
 
-        if ($this->livingService === null || $this->rankService === null) {
+        if ($this->livingService === null) {
             return null;
         }
 
-        $rankKey = $this->rankService->autoDerivedRank($viewerId);
-        $rankLabel = RankCatalog::getLabel($rankKey) ?? 'Member';
+        // Member-state rank word (Phase 5 cutover). New Members carry no
+        // rank yet — fall back to the neutral "Member" for the welcome
+        // copy rather than inventing a rung.
+        $state = Plugin::instance()->rankStateService()->memberState($viewerId);
+        $rankLabel = $state['rank_label'] ?? 'Member';
 
-        // compose() needs the viewer's feature_access block for the rank
-        // bar; this slot only reads `today`, but the block is the viewer's
-        // own (cached counts), so the extra resolve is cheap.
-        $featureAccess = Plugin::instance()->featureAccessService()->getFeatureAccess($viewerId);
-        $living = $this->livingService->compose($viewerId, $rankKey, $featureAccess);
+        $living = $this->livingService->compose($viewerId);
 
         $today = $living['today'];
         $todayKey = gmdate('Y-m-d');

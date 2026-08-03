@@ -62,6 +62,7 @@ final class NotificationType
     public const REVIEW                           = 'bcc_review';
     public const CARD_WATCHED                     = 'bcc_card_watched';
     public const RANK_UP                          = 'bcc_rank_up';
+    public const RANK_DEMOTED                     = 'bcc_rank_demoted';
     public const WELCOME                          = 'bcc_welcome';
     public const MENTION                          = 'bcc_mention';
     public const HALL_POST                        = 'bcc_hall_post';

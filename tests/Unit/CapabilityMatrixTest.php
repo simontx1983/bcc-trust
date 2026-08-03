@@ -11,19 +11,28 @@ use BCC\Trust\Core\ValueObjects\CapabilityDecision;
 use PHPUnit\Framework\TestCase;
 
 /**
- * PRE-CUTOVER AUTHORIZATION MATRIX (approved plan R2 / Addendum A2).
+ * POST-CUTOVER AUTHORIZATION MATRIX (approved plan R2 — the Phase 5
+ * flip).
  *
- * Pins the SHADOW CapabilityResolver's Phase-3 verdicts, which mirror
- * today's live gates by delegation. The Phase 5 atomic cutover is
- * expected to flip exactly this fixture set (New Member exclusion,
- * Apprentice+Neutral vouch/review, poll-based dispute votes, community
- * caps, ...) — any earlier change to these expectations means an
- * authorization gap opened outside the sanctioned boundary. Do not
- * "fix" a failure here by editing the expectations; fix the code, or
- * you are looking at the Phase 5 PR.
+ * Pins the AUTHORITATIVE CapabilityResolver's verdicts after the Rank
+ * redesign Phase 5 atomic cutover. The live delegate policy is:
+ *
+ *   - write_review  → Apprentice+ (rank_state row exists — New Members
+ *                     denied, fail-safe on the missing row) AND Trust
+ *                     Neutral+. Journeyman is never required (§20.1).
+ *   - vouch / stand_behind → AttestationService::checkCastEligibility,
+ *                     which carries the New-Member exclusion inside it.
+ *   - open_dispute  → not-suspended + affected-party; rank never
+ *                     blocks opening (§20.4).
+ *
+ * The resolver's routing over those delegates is what this matrix pins
+ * (fail-closed unknown keys, unauthenticated deny, future keys deny,
+ * vote keys deferred to the live gate). Any change to these
+ * expectations is an authorization change and needs its own sanctioned
+ * boundary — do not "fix" a failure here by editing the expectations.
  *
  * Delegate hooks are overridden with controllable fakes; the delegates
- * themselves (FeatureAccessService gate math, attestation eligibility,
+ * themselves (rank_state + tier gate math, attestation eligibility,
  * Permissions) are covered by their own suites.
  */
 final class CapabilityMatrixTest extends TestCase
@@ -143,9 +152,9 @@ final class CapabilityMatrixTest extends TestCase
 
     public function testWriteReviewMirrorsFeatureAccessGate(): void
     {
-        // Today's gate: Level-2 + Neutral via FeatureAccessService
-        // (bcc_feature_override_{key} usermeta rides along inside the
-        // delegate — override behavior is FeatureAccessGateTest's job).
+        // Phase 5 final policy: Apprentice+ (rank_state row) AND
+        // Neutral+ via the writeReviewGate delegate; the delegate's own
+        // math is exercised against live repositories, not here.
         self::assertTrue($this->resolver(writeReview: true)->can(7, CapabilityCatalog::WRITE_REVIEW)->isAllowed());
 
         $denied = $this->resolver(writeReview: false)->can(7, CapabilityCatalog::WRITE_REVIEW);

@@ -422,31 +422,6 @@ final class Plugin
         );
     }
 
-    private ?Services\FeatureAccessService $featureAccessService = null;
-    public function featureAccessService(): Services\FeatureAccessService
-    {
-        return $this->featureAccessService ??= new Services\FeatureAccessService(
-            $this->voteRepository(),
-            $this->reputationRepository()
-        );
-    }
-
-    private ?Services\RankService $rankService = null;
-    public function rankService(): Services\RankService
-    {
-        return $this->rankService ??= new Services\RankService(
-            $this->featureAccessService()
-        );
-    }
-
-    private ?Services\RankProgressionListener $rankProgressionListener = null;
-    public function rankProgressionListener(): Services\RankProgressionListener
-    {
-        return $this->rankProgressionListener ??= new Services\RankProgressionListener(
-            $this->rankService()
-        );
-    }
-
     /**
      * §O1.2 first-action celebrations — one-shot Heavy stashing on first
      * post / first review / first blog. See FirstActionListener docstring
@@ -468,10 +443,11 @@ final class Plugin
     }
 
     /**
-     * Rank Phase 3 — SHADOW-ONLY capability resolver (Addendum A2).
-     * Enforces nothing; CapabilityShadow compares its verdicts against
-     * the live gates and logs. Becomes authoritative at the Phase 5
-     * atomic cutover.
+     * The single authorization entry point (approved plan §25) —
+     * AUTHORITATIVE since the Rank Phase 5 atomic cutover. write_review
+     * carries the final policy directly (Apprentice+ AND Neutral+);
+     * vouch/stand_behind delegate to AttestationService. CapabilityShadow
+     * remains only where a live gate is still the judge (dispute votes).
      */
     private ?\BCC\Trust\Core\Services\Capability\CapabilityResolver $capabilityResolver = null;
     public function capabilityResolver(): \BCC\Trust\Core\Services\Capability\CapabilityResolver
@@ -554,6 +530,56 @@ final class Plugin
     public function rankScoreCalculator(): \BCC\Trust\Rank\Services\RankScoreCalculator
     {
         return $this->rankScoreCalculator ??= new \BCC\Trust\Rank\Services\RankScoreCalculator(
+            $this->rankScoringConfig()
+        );
+    }
+
+    // ── Rank domain (redesign Phase 5 atomic cutover) ────────────────
+
+    private ?\BCC\Trust\Rank\Repositories\RankStateRepository $rankStateRepository = null;
+    public function rankStateRepository(): \BCC\Trust\Rank\Repositories\RankStateRepository
+    {
+        return $this->rankStateRepository ??= new \BCC\Trust\Rank\Repositories\RankStateRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Repositories\RankPendingRepository $rankPendingRepository = null;
+    public function rankPendingRepository(): \BCC\Trust\Rank\Repositories\RankPendingRepository
+    {
+        return $this->rankPendingRepository ??= new \BCC\Trust\Rank\Repositories\RankPendingRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Services\ApprenticeReadinessService $apprenticeReadinessService = null;
+    public function apprenticeReadinessService(): \BCC\Trust\Rank\Services\ApprenticeReadinessService
+    {
+        return $this->apprenticeReadinessService ??= new \BCC\Trust\Rank\Services\ApprenticeReadinessService(
+            $this->rankStateRepository(),
+            $this->rankPendingRepository(),
+            $this->contentReportRepository(),
+            new \BCC\Trust\Core\Application\WalletVerificationReadService()
+        );
+    }
+
+    private ?\BCC\Trust\Rank\Services\RankPromotionEngine $rankPromotionEngine = null;
+    public function rankPromotionEngine(): \BCC\Trust\Rank\Services\RankPromotionEngine
+    {
+        return $this->rankPromotionEngine ??= new \BCC\Trust\Rank\Services\RankPromotionEngine(
+            $this->rankStateRepository(),
+            $this->rankEventsRepository(),
+            $this->loginDaysRepository(),
+            $this->tierDaysRepository(),
+            $this->independenceResolver(),
+            $this->rankScoreCalculator(),
+            $this->rankScoringConfig()
+        );
+    }
+
+    private ?\BCC\Trust\Rank\Services\RankStateService $rankStateService = null;
+    public function rankStateService(): \BCC\Trust\Rank\Services\RankStateService
+    {
+        return $this->rankStateService ??= new \BCC\Trust\Rank\Services\RankStateService(
+            $this->rankStateRepository(),
+            $this->rankPromotionEngine(),
+            $this->apprenticeReadinessService(),
             $this->rankScoringConfig()
         );
     }
@@ -683,7 +709,7 @@ final class Plugin
     {
         return $this->authorBadgeResolver ??= new Services\AuthorBadgeResolver(
             $this->reputationRepository(),
-            $this->featureAccessService()
+            $this->rankStateService()
         );
     }
 
@@ -725,14 +751,11 @@ final class Plugin
         return $this->userViewService ??= new Services\UserViewService(
             $this->voteRepository(),
             $this->reputationRepository(),
-            $this->rankService(),
-            $this->featureAccessService(),
+            $this->rankStateService(),
             $this->livingService(),
-            $this->scoreEventRepository(),
             $this->peepSoReactionRepository(),
             \BCC\Trust\Disputes\DisputesPlugin::instance()->disputeParticipationRepository(),
-            $this->attestationService(),
-            $this->questProgressService()
+            $this->attestationService()
         );
     }
 
@@ -830,7 +853,7 @@ final class Plugin
             $this->pageReadModelRepository(),
             $this->reputationRepository(),
             $this->voteRepository(),
-            $this->featureAccessService(),
+            $this->capabilityResolver(),
             $this->voteService(),
             $this->endorsementService(),
             $this->attestationService(),
@@ -869,7 +892,6 @@ final class Plugin
         return $this->postsService ??= new Services\PostsService(
             $this->voteService(),
             $this->voteRepository(),
-            $this->featureAccessService(),
             $this->blogChainTagRepository()
         );
     }
@@ -1050,20 +1072,20 @@ final class Plugin
     public function highlightsService(): Services\HighlightsService
     {
         // §O2 retention wiring (2026-05-13):
-        //   - LivingService + RankService drive the POSITIVE slot
-        //     (today's reviews, solids, percentile, streak, cold-user
-        //     welcome) without duplicating queries.
+        //   - LivingService drives the POSITIVE slot (today's reviews,
+        //     solids, percentile, streak, cold-user welcome) without
+        //     duplicating queries; the rank word comes from
+        //     RankStateService::memberState (Phase 5 cutover).
         //   - ScoreEventRepository drives the EXTERNAL slot — recent
         //     civic-significant events on watched-entity pages
         //     (rank changes, dispute resolutions, endorsements,
         //     high-impact votes). Reads via PeepSoFollowerRepository +
         //     PeepSoPageRepository (both static utilities, no DI needed).
-        // All three deps are nullable on the service so legacy bare-
+        // Both deps are nullable on the service so legacy bare-
         // construct paths still work; the resolver falls through to
         // a V1.0 null stub when any are missing.
         return $this->highlightsService ??= new Services\HighlightsService(
             $this->livingService(),
-            $this->rankService(),
             $this->scoreEventRepository()
         );
     }
@@ -1271,6 +1293,7 @@ final class Plugin
 
         // V1 contract: rank catalog + viewer's current rank (§4.8)
         \BCC\Trust\Core\REST\RanksEndpoint::register();
+        \BCC\Trust\Core\REST\MeProgressionEndpoint::register();
 
         // V1 contract: paginated Halls catalog + viewer membership (§4.7)
         \BCC\Trust\Core\REST\HallsEndpoint::register();
@@ -1956,78 +1979,6 @@ final class Plugin
             }
         }, 10, 3);
 
-        // ── §E2 / §O1.2 rank progression listener ──────────────────────
-        //
-        // Detects auto-derived rank changes off the back of activity
-        // events and stashes a Heavy celebration when the user's rank
-        // climbs. Single entry point on the listener; each subscriber
-        // funnels the right user_id through.
-        //
-        // Priority 20 (later than the activity-stream writer at 10) so
-        // the rank check sees any reputation deltas that recompute
-        // synchronously inside the originating service. For deltas
-        // that recompute via async jobs, the next activity event the
-        // user touches will catch the promotion — eventual consistency
-        // is acceptable for celebrations (see RankProgressionListener
-        // class docstring).
-
-        add_action('bcc_post_created', function (int $authorId): void {
-            try {
-                $this->rankProgressionListener()->onActivityEvent($authorId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression post_created failed', [
-                    'user_id' => $authorId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 20, 1);
-
-        add_action('bcc_review_published', function (int $authorId): void {
-            try {
-                $this->rankProgressionListener()->onActivityEvent($authorId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression review failed', [
-                    'user_id' => $authorId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 20, 1);
-
-        add_action('bcc_blog_post_created', function (int $authorId): void {
-            try {
-                $this->rankProgressionListener()->onActivityEvent($authorId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression blog failed', [
-                    'user_id' => $authorId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 20, 1);
-
-        // Subscribed to the canonical `bcc_card_watched` event —
-        // WatchingService's single watch event.
-        add_action('bcc_card_watched', function (int $viewerId): void {
-            try {
-                $this->rankProgressionListener()->onActivityEvent($viewerId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression watch failed', [
-                    'user_id' => $viewerId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 20, 1);
-
-        add_action('bcc_trust_vote_cast', function (int $voterId): void {
-            try {
-                $this->rankProgressionListener()->onActivityEvent($voterId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] rank_progression vote failed', [
-                    'user_id' => $voterId,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
-        }, 20, 1);
-
         // ── Rank Phase 1: explicit-login day tracking ────────────────
         //
         // The four deliberate-authentication events fold into one
@@ -2085,6 +2036,31 @@ final class Plugin
             $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
                 $i->ingest((int) $authorId, 'post', (int) $postId));
         }, 20, 2);
+
+        // ── Rank Phase 5: Apprentice readiness (§5.2) ────────────────
+        // The FIRST qualifying contribution (post / blog / comment —
+        // never a review) starts the 24h confirmation clock for New
+        // Members whose profile+identity readiness holds. Idempotent
+        // (PK INSERT IGNORE); ranked members short-circuit inside.
+        $rankReadiness = function (int $userId, string $sourceType, int $sourceId, int $actId): void {
+            try {
+                $this->apprenticeReadinessService()->onQualifyingContribution($userId, $sourceType, $sourceId, $actId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] apprentice readiness check failed', [
+                    'user_id' => $userId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        };
+        add_action('bcc_post_created', function ($authorId, $postId, $actId) use ($rankReadiness): void {
+            $rankReadiness((int) $authorId, 'post', (int) $postId, (int) $actId);
+        }, 21, 3);
+        add_action('bcc_blog_post_created', function ($authorId, $postId) use ($rankReadiness): void {
+            $rankReadiness((int) $authorId, 'post', (int) $postId, 0);
+        }, 21, 2);
+        add_action('bcc_comment_created', function ($authorId, $actId, $newActId, $newCommentPostId) use ($rankReadiness): void {
+            $rankReadiness((int) $authorId, 'comment', (int) $newCommentPostId, (int) $newActId);
+        }, 21, 4);
 
         add_action('bcc_blog_post_created', function ($authorId, $postId) use ($rankIngest): void {
             $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
@@ -2145,7 +2121,7 @@ final class Plugin
         // target lookups not available with the current actor-only
         // signatures.
         //
-        // Priority 20 matches the rank-progression listener block — same
+        // Priority 20 matches the rank evidence-ledger block — same
         // semantics: fires after the originating service has committed
         // its mutation; failures here never break the request path.
 
@@ -2205,14 +2181,14 @@ final class Plugin
         //
         // Detects reputation_tier crossings off the back of activity
         // events and stashes a Heavy "Your card is now Rare" celebration
-        // when the user's tier ladder climbs. Mirrors the rank listener
-        // shape; same activity events drive both.
+        // when the user's tier ladder climbs. Same activity events drive
+        // the rank evidence ledger at priority 20.
         //
-        // Priority 25 — after rank progression (20) so a rank promotion
-        // and a tier upgrade emitted by the same event don't fight: the
-        // tier toast wins (last-write-wins on the single-slot stash),
-        // which matches the §N11 "your card is now Rare" copy users
-        // expect to see when both fire together.
+        // Priority 25 — after the rank evidence/readiness subscribers
+        // (20/21) so a rank promotion and a tier upgrade emitted by the
+        // same event don't fight: the tier toast wins (last-write-wins
+        // on the single-slot stash), which matches the §N11 "your card
+        // is now Rare" copy users expect to see when both fire together.
 
         add_action('bcc_post_created', function (int $authorId): void {
             try {
@@ -2307,9 +2283,9 @@ final class Plugin
         // method itself — failures log at warning level but never
         // break the originating request.
         //
-        // Priority 30 (after activity-stream writers at 10 and rank
-        // progression at 20) so the message can reference any state
-        // those subscribers wrote first.
+        // Priority 30 (after activity-stream writers at 10 and the rank
+        // evidence subscribers at 20) so the message can reference any
+        // state those subscribers wrote first.
 
         add_action('bcc_reaction_added', function (int $actorId, int $actId, string $kind): void {
             $this->notificationDispatcher()->onReactionAdded($actorId, $actId, $kind);
@@ -2331,6 +2307,10 @@ final class Plugin
         add_action('bcc_rank_awarded', function (int $userId, string $newRank, string $oldRank): void {
             $this->notificationDispatcher()->onRankAwarded($userId, $newRank, $oldRank);
         }, 30, 3);
+
+        add_action('bcc_rank_demoted', function (int $userId, string $newRank): void {
+            $this->notificationDispatcher()->onRankDemoted($userId, $newRank);
+        }, 30, 2);
 
         // Slice E — fold the attestation into the subject's trust score. Runs
         // at priority 25, BEFORE the notification dispatch (30) so a freshly

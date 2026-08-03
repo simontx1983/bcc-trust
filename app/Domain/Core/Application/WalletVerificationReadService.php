@@ -21,13 +21,13 @@ use BCC\Core\ServiceLocator;
  * bcc_trust_user_verifications directly.
  *
  * Concrete-only — there's no `WalletVerificationReadInterface`. The
- * service is constructed directly by its two consumers
- * (FeatureAccessService, VoteEligibilityChecker); the cross-plugin
+ * service is constructed directly by its consumers
+ * (VoteEligibilityChecker, ApprenticeReadinessService); the cross-plugin
  * ServiceLocator seam was removed when no external consumer materialized.
  *
  * @status alive — canonical wallet-verification read facade for
- *                 FeatureAccessService + VoteEligibilityChecker. Phase B
- *                 V-18 classification 2026-05-09. See
+ *                 VoteEligibilityChecker + ApprenticeReadinessService.
+ *                 Phase B V-18 classification 2026-05-09. See
  *                 docs/pattern-registry.md "Phase B inventory addendum".
  */
 class WalletVerificationReadService

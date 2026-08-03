@@ -21,8 +21,7 @@ use PHPUnit\Framework\TestCase;
  * behind it.
  *
  * The projection is a pure static over repository rows so it is testable
- * without WordPress or MySQL, matching EliteEligibilityService::evaluate
- * and RankProgressionListener::decideTransition.
+ * without WordPress or MySQL, matching EliteEligibilityService::evaluate.
  *
  * The load-bearing test here is the PRIVACY one. ValidatorRepository::COLUMNS
  * selects `wallet_link_id` (a pointer into a member's linked wallet) and

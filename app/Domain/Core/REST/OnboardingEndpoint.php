@@ -38,7 +38,6 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\PageCardPrefetcher;
-use BCC\Trust\Core\Support\RankCatalog;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -357,19 +356,19 @@ final class OnboardingEndpoint
             ]);
         }
 
-        // §A2 — surface the user's current rank label so the wizard's
-        // dopamine step can render the "rank earned" line without
-        // hardcoding "Apprentice". Reads the auto-derived rank (no
-        // admin row possible at onboarding time); RankCatalog::getLabel
-        // returns null only for unknown keys, which RankService never
-        // produces — fall back to '' to keep the type stable.
-        $rankKey   = Plugin::instance()->rankService()->autoDerivedRank($userId);
-        $rankLabel = RankCatalog::getLabel($rankKey) ?? '';
+        // §A2 — surface the user's current member state so the wizard
+        // can render honestly. Since the Rank redesign Phase 5 cutover
+        // a just-onboarded user is a New Member (no rank_state row):
+        // member_state='new_member', rank_label=null. That is CORRECT
+        // and expected by the new contract — Apprentice is earned via
+        // the §5.2 readiness path, never granted by finishing a wizard.
+        $state = Plugin::instance()->rankStateService()->memberState($userId);
 
         $resp = ApiResponse::ok([
-            'completed'  => true,
-            'home_chain' => $homeChain,
-            'rank_label' => $rankLabel,
+            'completed'    => true,
+            'home_chain'   => $homeChain,
+            'member_state' => $state['member_state'],
+            'rank_label'   => $state['rank_label'],
         ]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;

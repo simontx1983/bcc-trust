@@ -22,5 +22,9 @@
       "order": 3
     }
   ],
-  "viewer": null
+  "viewer": {
+    "member_state": null,
+    "rank": null,
+    "rank_label": null
+  }
 }

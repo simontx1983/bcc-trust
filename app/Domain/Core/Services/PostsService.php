@@ -173,7 +173,6 @@ final class PostsService
     public function __construct(
         private readonly VoteService $voteService,
         private readonly VoteRepository $voteRepository,
-        private readonly FeatureAccessService $featureAccess,
         // §D6 PR-A — chain-tag join writer. Optional in the signature
         // (defaults to null + a fresh instance) so test paths and
         // third-party callers wiring this service by hand don't break.
@@ -345,9 +344,9 @@ final class PostsService
      * is written. If step 2 fails the vote still stands as a bare
      * trust signal — degraded but not orphaned.
      *
-     * Permission gate: §D2 requires Level 2 (LEVEL_ACTIVE) AND
-     * reputation tier ≥ neutral. Both are enforced server-side via
-     * FeatureAccessService::canPerform('write_review', $userId).
+     * Permission gate (Rank Phase 5 final policy): Apprentice+ AND
+     * reputation tier ≥ Neutral, enforced server-side via
+     * CapabilityResolver::can($userId, 'write_review').
      *
      * @return array{
      *   ok: true,
@@ -399,23 +398,17 @@ final class PostsService
             ];
         }
 
-        // §D2 + §O5 — Level 2 + tier ≥ neutral.
-        $access = $this->featureAccess->canPerform($authorId, 'write_review');
-        // Rank Phase 3 shadow canary — log-only, never changes the verdict.
-        \BCC\Trust\Core\Services\Capability\CapabilityShadow::observe(
-            'write_review',
-            $access['allowed'] === true,
-            $authorId
-        );
-        if ($access['allowed'] !== true) {
+        // Rank Phase 5 final policy — CapabilityResolver is authoritative:
+        // Apprentice+ AND Neutral+ (New Members cannot write reviews;
+        // Journeyman is never required).
+        $decision = \BCC\Trust\Core\Plugin::instance()
+            ->capabilityResolver()
+            ->can($authorId, 'write_review');
+        if (!$decision->isAllowed()) {
             return [
                 'error'   => 'bcc_forbidden',
-                // Fallback states the requirement directly rather than naming
-                // an internal level ("the Active level" appears on no screen).
-                // The rank word is deliberately absent too — a requirement the
-                // user can act on beats a label they must go look up.
-                'message' => $access['unlock_hint']
-                    ?? 'Follow 5 operators and keep your standing at Neutral or better to write reviews.',
+                // States the requirement the user can act on.
+                'message' => 'Become an Apprentice and keep your standing at Neutral or better to write reviews.',
             ];
         }
 

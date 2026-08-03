@@ -75,15 +75,6 @@ namespace BCC\Trust\Core\Services {
             }
         }
     }
-    if (!class_exists(FeatureAccessService::class, false)) {
-        final class FeatureAccessService
-        {
-            public function __construct()
-            {
-            }
-        }
-    }
-
     if (!function_exists('BCC\\Trust\\Core\\Services\\do_action')) {
         function do_action($hook, ...$args): void
         {

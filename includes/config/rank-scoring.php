@@ -138,6 +138,11 @@ return [
         'tier_days_days' => 730,
     ],
 
+    // spec-locked — §14.1 ordinary evidence-loss recovery grace.
+    'recovery' => [
+        'grace_days' => 90,
+    ],
+
     // ── Trust-tier plumbing ──────────────────────────────────────────
     // Ordinal encoding for wp_bcc_trust_tier_days.tier_ord. Exactly the
     // five §2 tiers; order is the qualification order (>= comparisons).

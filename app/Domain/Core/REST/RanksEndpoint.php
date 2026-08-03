@@ -2,15 +2,18 @@
 /**
  * Ranks Endpoint
  *
- * GET /bcc/v1/ranks — rank catalog + viewer's current rank.
+ * GET /bcc/v1/ranks — rank catalog + viewer's member state.
  *
  * Per contract §4.8. Anonymous OR Bearer auth: anonymous viewers see
- * the static catalog with viewer=null; authenticated viewers see the
- * catalog plus their current/auto-derived/is-admin-conferred block.
+ * the static catalog with an all-null viewer block; authenticated
+ * viewers see the catalog plus their member-state block
+ * (member_state / rank / rank_label from RankStateService — the Rank
+ * redesign Phase 5 read facade; a New Member is an explicit state,
+ * never an error shape).
  *
- * Cache policy: public, max-age=300 (catalog rarely changes; viewer
- * block per-user but rank-changes are infrequent enough that 5 min
- * is acceptable for a Phase 1 endpoint).
+ * Cache policy: the viewer block is personal for logged-in users, so
+ * authed responses are `private, max-age=60`; anonymous responses stay
+ * `public, max-age=300` (catalog-only payload, rarely changes).
  *
  * @package BCC\Trust\Core\REST
  * @since V1 (2026-04)
@@ -48,13 +51,21 @@ final class RanksEndpoint
         unset($request); // endpoint takes no parameters; signature required by WP REST.
 
         $viewerId = get_current_user_id();
-        $viewer   = Plugin::instance()->rankService()->getViewerBlock($viewerId);
+
+        // Anonymous: all-null block (distinct from a New Member, whose
+        // member_state is the explicit 'new_member' string).
+        $viewer = $viewerId > 0
+            ? Plugin::instance()->rankStateService()->memberState($viewerId)
+            : ['member_state' => null, 'rank' => null, 'rank_label' => null];
 
         $response = ApiResponse::ok([
             'ranks'  => RankCatalog::all(),
             'viewer' => $viewer,
         ]);
-        $response->header('Cache-Control', 'public, max-age=300');
+        $response->header(
+            'Cache-Control',
+            $viewerId > 0 ? 'private, max-age=60' : 'public, max-age=300'
+        );
 
         return $response;
     }

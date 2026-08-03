@@ -284,6 +284,39 @@ final class NotificationDispatcher
      * PeepSo accepts that and the row reads naturally ("You earned
      * Journeyman.").
      */
+    /**
+     * §23.4 demotion notice — plain statement of the new rank, no
+     * shaming, no cadence pressure (the §14.2 recovery view on
+     * /me/progression carries the how-to-recover detail).
+     */
+    public function onRankDemoted(int $userId, string $newRank): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+        try {
+            $label = RankCatalog::getLabel($newRank);
+            if ($label === null) {
+                return;
+            }
+
+            $this->dispatch(
+                $userId,
+                $userId,
+                sprintf('Your rank is now %s.', $label),
+                NotificationType::RANK_DEMOTED,
+                $userId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] rank demotion dispatch failed', [
+                'user_id' => $userId,
+                'rank'    => $newRank,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+    }
+
     public function onRankAwarded(int $userId, string $newRank, string $oldRank): void
     {
         unset($oldRank);
