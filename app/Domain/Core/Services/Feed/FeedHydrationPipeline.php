@@ -1078,8 +1078,15 @@ final class FeedHydrationPipeline
      * who isn't the post's author. Anonymous + self-authored posts
      * stay at `allowed: false` (the default).
      *
-     * Server-side validation in ContentReportService is the source of
-     * truth — this just drives the frontend "Report" affordance
+     * Also sets `permissions.can_delete.allowed` — true for the post's
+     * own author, or any site admin (`manage_options`). This is UX
+     * sugar only, same posture as can_report: it drives whether the
+     * frontend shows the Delete menu item, never the actual gate —
+     * PostsService::deletePost re-checks ownership/admin server-side on
+     * the call itself regardless of what this says.
+     *
+     * Server-side validation in ContentReportService/PostsService is
+     * the source of truth — this just drives frontend affordance
      * visibility per §A2.
      *
      * @param list<array<string, mixed>> $items
@@ -1090,16 +1097,22 @@ final class FeedHydrationPipeline
         if ($items === []) {
             return [];
         }
+        $isAdmin = current_user_can('manage_options');
         $hydrated = [];
         foreach ($items as $item) {
             $author     = is_array($item['author'] ?? null) ? $item['author'] : [];
             $authorId   = is_int($author['id'] ?? null) ? $author['id'] : 0;
             $canReport  = $viewerId > 0 && $authorId > 0 && $authorId !== $viewerId;
+            $canDelete  = $viewerId > 0 && $authorId > 0 && ($authorId === $viewerId || $isAdmin);
 
             $perms = is_array($item['permissions'] ?? null) ? $item['permissions'] : [];
             $perms['can_report'] = [
                 'allowed'     => $canReport,
                 'unlock_hint' => $canReport ? null : ($viewerId > 0 ? null : 'Sign in to report.'),
+            ];
+            $perms['can_delete'] = [
+                'allowed'     => $canDelete,
+                'unlock_hint' => null,
             ];
             $item['permissions'] = $perms;
             $hydrated[] = $item;

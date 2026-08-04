@@ -8,6 +8,8 @@ use BCC\Trust\Core\Services\Feed\FeedHydrationPipeline;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 
+require_once __DIR__ . '/../Stubs/feed-hydration-stubs.php';
+
 /**
  * Regression: feed hydration must read the author user-id from
  * `author.id` (what ActivityFeedService emits), NOT `author.user_id`.
@@ -69,5 +71,40 @@ final class FeedHydrationAuthorIdTest extends TestCase
         $out = $this->hydrate([['author' => ['id' => 5], 'permissions' => []]], 0);
         self::assertFalse($this->canReport($out[0]));
         self::assertSame('Sign in to report.', $out[0]['permissions']['can_report']['unlock_hint']);
+    }
+
+    // ── can_delete (delete-post feature, 2026-08-03) ─────────────────
+
+    private function canDelete(array $item): bool
+    {
+        return (bool) ($item['permissions']['can_delete']['allowed'] ?? false);
+    }
+
+    protected function tearDown(): void
+    {
+        unset($GLOBALS['__bcc_feed_is_admin']);
+    }
+
+    public function testOwnerCanDeleteOwnPostOthersCannot(): void
+    {
+        $own   = $this->hydrate([['author' => ['id' => 9], 'permissions' => []]], 9);
+        $other = $this->hydrate([['author' => ['id' => 5], 'permissions' => []]], 9);
+        $anon  = $this->hydrate([['author' => ['id' => 5], 'permissions' => []]], 0);
+
+        self::assertTrue($this->canDelete($own[0]), 'author deletes their own post');
+        self::assertFalse($this->canDelete($other[0]), 'non-admin never deletes someone else\'s post');
+        self::assertFalse($this->canDelete($anon[0]), 'anonymous viewer deletes nothing');
+    }
+
+    public function testAdminCanDeleteAnyPostButNotAnonymously(): void
+    {
+        $GLOBALS['__bcc_feed_is_admin'] = true;
+
+        $other = $this->hydrate([['author' => ['id' => 5], 'permissions' => []]], 9);
+        self::assertTrue($this->canDelete($other[0]), 'manage_options deletes any post');
+
+        // Admin capability without a signed-in viewer id is still a no.
+        $anon = $this->hydrate([['author' => ['id' => 5], 'permissions' => []]], 0);
+        self::assertFalse($this->canDelete($anon[0]));
     }
 }
