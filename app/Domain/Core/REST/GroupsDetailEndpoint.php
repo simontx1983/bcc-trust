@@ -92,6 +92,19 @@ final class GroupsDetailEndpoint
                         'maximum'           => self::MAX_FEED_LIMIT,
                         'sanitize_callback' => 'absint',
                     ],
+                    // Rank Phase 7 (§21.3) — Hall feed-channel selector.
+                    // 'ranked' returns ONLY ranked-channel posts (everyone
+                    // may read — posting is what's gated); 'main'/absent
+                    // returns the ordinary feed with ranked posts EXCLUDED
+                    // so the channels never double-serve. On non-Hall
+                    // groups 'ranked' is simply empty (no posts carry the
+                    // marker outside Halls).
+                    'hall_feed' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['main', 'ranked'],
+                        'sanitize_callback' => 'sanitize_key',
+                    ],
                 ],
             ]
         );
@@ -161,12 +174,18 @@ final class GroupsDetailEndpoint
             $limit = self::MAX_FEED_LIMIT;
         }
 
+        // §21.3 feed channel — anything but the literal 'ranked'
+        // collapses to 'main' (which EXCLUDES ranked posts downstream).
+        $hallFeedRaw = $request->get_param('hall_feed');
+        $hallFeed    = $hallFeedRaw === 'ranked' ? 'ranked' : 'main';
+
         $payload = Plugin::instance()->feedRankingService()->getGroupFeed(
             $viewerId,
             $groupId,
             $cursor,
             $limit,
-            $publicOnly
+            $publicOnly,
+            $hallFeed
         );
 
         $response = ApiResponse::ok($payload);

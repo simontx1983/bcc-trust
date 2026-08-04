@@ -80,10 +80,170 @@ class CapabilityResolver
                 // — not shadowable. The live gate stays the only judge.
                 return CapabilityDecision::unknown('deferred_to_live_gate', 'live_gate');
 
+            case CapabilityCatalog::CREATE_COMMUNITY:
+            case CapabilityCatalog::RECEIVE_COMMUNITY:
+                // §21.2 — create and receive share the full custody gate
+                // (rank/tier/recovery + cap + cooldown). Transfer-away is
+                // deliberately looser (below): the cooldown blocks
+                // ACQUIRING custody, never relinquishing it.
+                return $this->resolveCustodyAcquisition($userId);
+
+            case CapabilityCatalog::TRANSFER_COMMUNITY:
+                return $this->resolveTransferCommunity($userId);
+
+            case CapabilityCatalog::POST_RANKED_HALL_FEED:
+                return $this->resolvePostRankedHallFeed($userId);
+
+            case CapabilityCatalog::LIST_AS_MENTOR:
+                return $this->resolveListAsMentor($userId);
+
             default:
                 // FUTURE keys — no such feature exists yet; fail closed.
+                // receive_rank_vote_multiplier stays here on purpose
+                // (Rank Phase 7): the multiplier policy already lives in
+                // the §16.6 weight formula, and its recovery-pause value
+                // is a Phase 8 owner decision — moving the key out of
+                // this branch before that decision would invent policy.
                 return CapabilityDecision::denied('feature_not_built', 'future');
         }
+    }
+
+    // ── Rank Phase 7 community-privilege gates (§21.2–§21.4, §14.2) ──
+    //
+    // Deny reasons are STABLE snake_case vocabulary (surfaced to the
+    // frontend via error.data.reason); the FIRST failing gate wins and
+    // the order below is spec-locked. Delegates (rankAtLeast /
+    // tierAtLeast / inRecovery / custodyState / notSuspended) are
+    // protected hooks so CapabilityMatrixTest can subclass; the
+    // comparison math over custodyState's facts runs HERE and is
+    // exercised by the matrix directly.
+
+    /**
+     * create_community / receive_community — §21.2 acquisition gate:
+     * Apprentice+ AND Neutral+ AND not suspended AND not in recovery
+     * AND under the per-rank ownership cap AND outside the 30-day
+     * global custody cooldown.
+     */
+    private function resolveCustodyAcquisition(int $userId): CapabilityDecision
+    {
+        if (!$this->notSuspended($userId)) {
+            return CapabilityDecision::denied('suspended', 'community_custody');
+        }
+        // Missing rank_state row = New Member; a present row is always
+        // at least Apprentice, so this single check covers both the
+        // no-row and the (impossible-by-construction) sub-Apprentice
+        // cases — fail closed either way.
+        if (!$this->rankAtLeast($userId, 'apprentice')) {
+            return CapabilityDecision::denied('new_member', 'community_custody');
+        }
+        if (!$this->tierAtLeast($userId, 'neutral')) {
+            return CapabilityDecision::denied('below_neutral', 'community_custody');
+        }
+        if ($this->inRecovery($userId)) {
+            return CapabilityDecision::denied('in_recovery', 'community_custody');
+        }
+
+        $custody = $this->custodyState($userId);
+        if ($custody['owned'] >= $custody['cap']) {
+            return CapabilityDecision::denied('cap_reached', 'community_custody');
+        }
+        if ($this->cooldownActive($custody)) {
+            return CapabilityDecision::denied('cooldown_active', 'community_custody');
+        }
+
+        return CapabilityDecision::allowed('community_custody');
+    }
+
+    /**
+     * transfer_community — the GIVER's gate (§21.2): suspension, New
+     * Member (an owner can't be one, but fail closed), and recovery
+     * pause (§14.2) only. NO cap check and NO cooldown check — the
+     * cooldown blocks acquiring custody, never giving it away (a
+     * cooldown that trapped ownership would be a hostage mechanic).
+     */
+    private function resolveTransferCommunity(int $userId): CapabilityDecision
+    {
+        if (!$this->notSuspended($userId)) {
+            return CapabilityDecision::denied('suspended', 'community_custody');
+        }
+        if (!$this->rankAtLeast($userId, 'apprentice')) {
+            return CapabilityDecision::denied('new_member', 'community_custody');
+        }
+        if ($this->inRecovery($userId)) {
+            return CapabilityDecision::denied('in_recovery', 'community_custody');
+        }
+
+        return CapabilityDecision::allowed('community_custody');
+    }
+
+    /**
+     * post_ranked_hall_feed — §21.3 write gate: Journeyman+ AND
+     * Neutral+ AND not suspended AND not in recovery. Hall membership
+     * is checked at the gate site (PostsService::gateGroupPost — the
+     * group-scoped facts live there), not here.
+     */
+    private function resolvePostRankedHallFeed(int $userId): CapabilityDecision
+    {
+        if (!$this->notSuspended($userId)) {
+            return CapabilityDecision::denied('suspended', 'ranked_hall');
+        }
+        if (!$this->rankAtLeast($userId, 'apprentice')) {
+            return CapabilityDecision::denied('new_member', 'ranked_hall');
+        }
+        if (!$this->rankAtLeast($userId, 'journeyman')) {
+            return CapabilityDecision::denied('below_journeyman', 'ranked_hall');
+        }
+        if (!$this->tierAtLeast($userId, 'neutral')) {
+            return CapabilityDecision::denied('below_neutral', 'ranked_hall');
+        }
+        if ($this->inRecovery($userId)) {
+            return CapabilityDecision::denied('in_recovery', 'ranked_hall');
+        }
+
+        return CapabilityDecision::allowed('ranked_hall');
+    }
+
+    /**
+     * list_as_mentor — §21.4 eligibility: Veteran AND tier ≥ Trusted
+     * AND not suspended AND not in recovery. The explicit opt-in is
+     * NOT part of this key — listing composes opt-in AND this verdict
+     * live (MentorListingService), so a pause needs no sweep and no
+     * materialized flag.
+     */
+    private function resolveListAsMentor(int $userId): CapabilityDecision
+    {
+        if (!$this->notSuspended($userId)) {
+            return CapabilityDecision::denied('suspended', 'mentor_listing');
+        }
+        if (!$this->rankAtLeast($userId, 'apprentice')) {
+            return CapabilityDecision::denied('new_member', 'mentor_listing');
+        }
+        if (!$this->rankAtLeast($userId, 'veteran')) {
+            return CapabilityDecision::denied('below_veteran', 'mentor_listing');
+        }
+        if (!$this->tierAtLeast($userId, 'trusted')) {
+            return CapabilityDecision::denied('below_trusted', 'mentor_listing');
+        }
+        if ($this->inRecovery($userId)) {
+            return CapabilityDecision::denied('in_recovery', 'mentor_listing');
+        }
+
+        return CapabilityDecision::allowed('mentor_listing');
+    }
+
+    /**
+     * §21.2 cooldown comparison over custodyState's facts. Strictly
+     * LESS-THAN: at exactly cooldown_seconds elapsed the cooldown has
+     * expired and the action is allowed again.
+     *
+     * @param array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int} $custody
+     */
+    private function cooldownActive(array $custody): bool
+    {
+        if ($custody['last_event_ts'] === null) {
+            return false;
+        }
+        return (time() - $custody['last_event_ts']) < $custody['cooldown_seconds'];
     }
 
     /**
@@ -173,5 +333,100 @@ class CapabilityResolver
     protected function ownsPage(int $pageId, int $userId): bool
     {
         return \BCC\Core\Permissions\Permissions::owns_page($pageId, $userId);
+    }
+
+    // ── Rank Phase 7 delegate hooks (overridden by the matrix test) ──
+
+    /**
+     * Rungs in ladder order — mirrors RankScoringConfig::RANKS
+     * (apprentice < journeyman < veteran; Master must never appear,
+     * §3.2). Unknown slugs fail closed via the null-coalesced lookup.
+     *
+     * @var array<string, int>
+     */
+    protected const RANK_ORDER = ['apprentice' => 0, 'journeyman' => 1, 'veteran' => 2];
+
+    /**
+     * Is the user's rank at least $slug? Missing rank_state row = New
+     * Member = false (fail-safe); unknown $slug can never be satisfied.
+     */
+    protected function rankAtLeast(int $userId, string $slug): bool
+    {
+        $required = static::RANK_ORDER[$slug] ?? null;
+        if ($required === null) {
+            return false;
+        }
+
+        $row = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($userId);
+        if ($row === null) {
+            return false;
+        }
+
+        $actual = static::RANK_ORDER[(string) $row->rank_slug] ?? null;
+        return $actual !== null && $actual >= $required;
+    }
+
+    /**
+     * Is the user's current trust tier at least $tierSlug? Tier via
+     * ReputationRepository::getTier (canonical), ordinals via the
+     * validated rank-scoring config (tierOrdFor).
+     */
+    protected function tierAtLeast(int $userId, string $tierSlug): bool
+    {
+        $plugin = \BCC\Trust\Core\Plugin::instance();
+        $config = $plugin->rankScoringConfig();
+        $tier   = $plugin->reputationRepository()->getTier($userId);
+
+        return $config->tierOrdFor($tier) >= $config->tierOrdFor($tierSlug);
+    }
+
+    /**
+     * §14.2 recovery pause — rank_state.recovery_status === 'grace'.
+     * Missing row = not in recovery (New Members are gated out earlier
+     * by rankAtLeast anyway).
+     */
+    protected function inRecovery(int $userId): bool
+    {
+        $row = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($userId);
+        return $row !== null && (string) $row->recovery_status === 'grace';
+    }
+
+    /**
+     * §21.2 custody facts: currently-owned User-kind group count, the
+     * per-rank ownership cap, the last custody event (create / receive
+     * / transfer_out — epoch seconds, null = never), and the cooldown
+     * window. The COMPARISONS over these facts live in the caller
+     * (resolveCustodyAcquisition / cooldownActive) so the matrix test
+     * exercises the real math against faked facts.
+     *
+     * @return array{owned: int, cap: int, last_event_ts: int|null, cooldown_seconds: int}
+     */
+    protected function custodyState(int $userId): array
+    {
+        $plugin = \BCC\Trust\Core\Plugin::instance();
+        $config = $plugin->rankScoringConfig();
+
+        // Callers gate on rankAtLeast('apprentice') before reading
+        // custody facts, so a row exists; the apprentice fallback is a
+        // conservative floor for any future caller that doesn't.
+        $row  = $plugin->rankStateRepository()->getForUser($userId);
+        $rank = $row !== null ? (string) $row->rank_slug : 'apprentice';
+        $cap  = $config->communityCaps[$rank] ?? $config->communityCaps['apprentice'];
+
+        $lastAt = $plugin->communityOwnershipLogRepository()->lastCustodyEventAt($userId);
+        $lastTs = null;
+        if ($lastAt !== null) {
+            // Ledger datetimes are UTC (written via gmdate) — pin the
+            // zone on parse; MySQL session tz is NOT UTC on this host.
+            $parsed = strtotime($lastAt . ' UTC');
+            $lastTs = $parsed === false ? null : $parsed;
+        }
+
+        return [
+            'owned'            => \BCC\Core\Repositories\PeepSoGroupRepository::countOwnedUserGroups($userId),
+            'cap'              => $cap,
+            'last_event_ts'    => $lastTs,
+            'cooldown_seconds' => $config->communityCooldownDays * 86400,
+        ];
     }
 }

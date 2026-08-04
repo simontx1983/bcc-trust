@@ -14,7 +14,8 @@
  *     "hide_birthday_year":     bool,
  *     "hide_online":            bool,
  *     "hide_from_search":       bool,
- *     "default_post_audience":  "public" | "members" | "private"
+ *     "default_post_audience":  "public" | "members" | "private",
+ *     "mentor_opt_in":          bool
  *   }
  *
  * Storage:
@@ -51,6 +52,17 @@
  *                               itself overwrites this on every post — this
  *                               setting lets the user manually nudge the
  *                               default forward.
+ *   - mentor_opt_in          → `bcc_mentor_opt_in` user_meta, "1"/"0"
+ *                               (Rank Phase 7 §21.4, via
+ *                               MentorListingService). Opting in needs NO
+ *                               eligibility — a non-Veteran may pre-opt-in;
+ *                               the LISTING composes opt-in AND the live
+ *                               list_as_mentor capability. The GET response
+ *                               therefore also carries the READ-ONLY pair
+ *                               `mentor_listed` (actively listed right now)
+ *                               and `mentor_eligibility_reason` (stable
+ *                               resolver deny slug, null while eligible) so
+ *                               the frontend can explain a paused listing.
  *
  * Auth: required. Self-only.
  *
@@ -234,6 +246,16 @@ final class MyProfilePrefsEndpoint
             $touched = true;
         }
 
+        // mentor_opt_in → bcc_mentor_opt_in user_meta (Rank Phase 7
+        // §21.4). No eligibility check on the WRITE — listing composes
+        // opt-in AND the live capability at read time.
+        $mentorOptIn = $request->get_param('mentor_opt_in');
+        if ($mentorOptIn !== null) {
+            $value = filter_var($mentorOptIn, FILTER_VALIDATE_BOOLEAN);
+            \BCC\Trust\Core\Plugin::instance()->mentorListingService()->setOptIn($userId, $value);
+            $touched = true;
+        }
+
         if (!$touched) {
             return ApiResponse::error(
                 'bcc_invalid_request',
@@ -258,11 +280,19 @@ final class MyProfilePrefsEndpoint
      *   hide_birthday_year: bool,
      *   hide_online: bool,
      *   hide_from_search: bool,
-     *   default_post_audience: string
+     *   default_post_audience: string,
+     *   mentor_opt_in: bool,
+     *   mentor_listed: bool,
+     *   mentor_eligibility_reason: string|null
      * }
      */
     private static function readAll(int $userId): array
     {
+        // §21.4 mentor listing state — opt-in flag + live-composed
+        // listing verdict (never materialized; a tier/rank/recovery
+        // change pauses the listing on the next read with no sweep).
+        $mentor = \BCC\Trust\Core\Plugin::instance()->mentorListingService()->listingFor($userId);
+
         return [
             'profile_visibility'    => self::tokenForAcc(
                 self::readProfileAccessibility($userId),
@@ -282,6 +312,9 @@ final class MyProfilePrefsEndpoint
                 self::PROFILE_VISIBILITY_TOKENS,
                 'members' // PeepSo's safest default for posts
             ),
+            'mentor_opt_in'             => $mentor['opted_in'],
+            'mentor_listed'             => $mentor['listed'],
+            'mentor_eligibility_reason' => $mentor['reason'],
         ];
     }
 

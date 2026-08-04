@@ -29,10 +29,23 @@
  *   resolver returns UNKNOWN and the live gate remains the only judge:
  *     cast_meaningful_vote, downvote
  *
+ *   LIVE (Rank Phase 7 — community privileges, §21.2–§21.4):
+ *     create_community / receive_community → Apprentice+ AND Neutral+
+ *                     AND not suspended AND not in recovery AND under
+ *                     the per-rank ownership cap AND outside the
+ *                     30-day global custody cooldown
+ *     transfer_community → giver gate only (suspension / New Member /
+ *                     recovery); cooldown never blocks giving away
+ *     post_ranked_hall_feed → Journeyman+ AND Neutral+ AND not
+ *                     suspended AND not in recovery (Hall membership
+ *                     checked at the gate site)
+ *     list_as_mentor → Veteran AND Trusted+ AND not suspended AND not
+ *                     in recovery (opt-in composes outside the key)
+ *
  *   FUTURE — no such feature exists yet; fail-closed DENY:
- *     create_community, transfer_community, receive_community,
- *     post_ranked_hall_feed, list_as_mentor,
- *     receive_rank_vote_multiplier
+ *     receive_rank_vote_multiplier (the multiplier policy already
+ *     lives in the §16.6 weight formula; its recovery-pause value is
+ *     a Phase 8 owner decision)
  *
  * Key names are implementation choices, not contract fields (§25).
  *

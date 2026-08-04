@@ -335,6 +335,15 @@ final class UsersEndpoint
                             'enum' => ['x', 'github', 'wallet'],
                         ],
                     ],
+                    // Rank Phase 7 (§21.4) — restrict to ACTIVELY LISTED
+                    // mentors: explicit opt-in AND the live
+                    // list_as_mentor capability (Veteran + Trusted+ +
+                    // no recovery + not suspended). Composes with the
+                    // other filter axes via the same AND-intersection.
+                    'mentors' => [
+                        'required' => false,
+                        'type'     => 'boolean',
+                    ],
                 ],
             ]
         );
@@ -579,6 +588,19 @@ final class UsersEndpoint
             $restrictedSets[] = $axisIds;
         }
 
+        // §21.4 mentors axis — the actively-listed set (opt-in AND live
+        // eligibility) is computed once here and reused below for the
+        // per-row is_mentor emission, so filter + badge can't drift.
+        $mentorFilter    = (bool) $request->get_param('mentors');
+        $activeMentorIds = null;
+        if ($mentorFilter) {
+            $activeMentorIds = Plugin::instance()->mentorListingService()->activeMentorIds();
+            if ($activeMentorIds === []) {
+                return self::membersEmptyResponse($page, $perPage, $typeCounts);
+            }
+            $restrictedSets[] = $activeMentorIds;
+        }
+
         // Intersect all restricted sets. `array_intersect` over int lists
         // is O(n*m) but the lists are bounded at 5000 each per repository
         // contract; the directory's realistic sizes keep this trivial.
@@ -636,11 +658,25 @@ final class UsersEndpoint
         // so the query budget is bounded regardless of `per_page`.
         $prefetched = MemberCardPrefetcher::primeFor($userIds, $viewerId);
 
+        // §21.4 — actively-listed mentors on THIS page. Reuses the
+        // filter's set when mentors=1 ran; otherwise one bounded opt-in
+        // enumeration intersected with the page (typically empty).
+        $mentorBadges = $activeMentorIds !== null
+            ? array_fill_keys(array_values(array_intersect($activeMentorIds, $userIds)), true)
+            : Plugin::instance()->mentorListingService()->listedAmong($userIds);
+
         $cardView = Plugin::instance()->cardViewService();
         $items    = [];
         foreach ($userIds as $userId) {
             $card = $cardView->getMemberCardForList($userId, $viewerId, $prefetched);
             if ($card !== null) {
+                // Additive §21.4 badge — emitted ONLY for actively
+                // listed mentors, at the endpoint (not the golden-
+                // pinned card emitter), so mentorless fixtures stay
+                // byte-identical.
+                if (isset($mentorBadges[$userId])) {
+                    $card['is_mentor'] = true;
+                }
                 $items[] = $card;
             }
         }
