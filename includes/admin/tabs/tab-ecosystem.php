@@ -118,13 +118,11 @@ function bcc_trust_render_ecosystem_tab() {
 
     <?php
     // ─────────────────────────────────────────────────────────────────
-    // SECTION 2 — Panel-duty health
+    // SECTION 2 — Dispute-flow health
     // ─────────────────────────────────────────────────────────────────
-    $pd            = $rollup['panel_duty'];
+    $pd            = $rollup['dispute_flow'];
     $windowStatus  = $pd['window_status_counts'];
     $timeoutPct    = $pd['timeout_rate_pct'];
-    $lopsided      = (int) $pd['lopsided_count'];
-    $split         = (int) $pd['split_count'];
     $totalResolved = (int) $pd['resolved_in_window'];
     $totalOpened   = (int) $pd['opened_in_window'];
 
@@ -145,7 +143,7 @@ function bcc_trust_render_ecosystem_tab() {
     }
     ?>
     <div class="bcc-panel">
-        <h3 style="margin-top:0;">◇ Panel-duty health</h3>
+        <h3 style="margin-top:0;">◇ Dispute-flow health</h3>
 
         <?php if ( $totalOpened === 0 && $totalResolved === 0 ): ?>
             <p style="color:#666;margin:0;">No disputes in window — quiet floor.</p>
@@ -183,22 +181,11 @@ function bcc_trust_render_ecosystem_tab() {
                 </span>
             </p>
 
-            <?php if ( $totalResolved > 0 ): ?>
-                <p style="margin:0;font-size:13px;color:#666;">
-                    Decision spread on resolved disputes:
-                    <strong><?php echo $lopsided; ?></strong> lopsided (≥3-vote margin)
-                    · <strong><?php echo $split; ?></strong> split (≤2-vote margin).
-                    Healthy panels produce a mix — predominantly-lopsided suggests
-                    rubber-stamping; predominantly-split suggests panels lack
-                    shared context.
-                </p>
-            <?php endif; ?>
-
             <p style="margin-top:10px;font-size:13px;color:#777;">
-                Phase 2 (commit <code>bf35a4a</code>) added affinity overlay +
-                outsider quota. Repeat-pairing detection + affinity-distribution
-                are designed but not wired this pass; review the panel-create
-                audit log entries directly.
+                Disputes are decided by open community voting on the poll
+                engine (Rank Phase 6). Per-poll tallies and quorum progress
+                stay sealed until closure — inspect closed polls via the
+                dispute detail, not live tallies.
             </p>
         <?php endif; ?>
     </div>

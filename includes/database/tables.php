@@ -31,7 +31,6 @@ require_once __DIR__ . '/schema-page-follows.php';
 require_once __DIR__ . '/schema-watch-batches.php';
 require_once __DIR__ . '/schema-content-reports.php';
 require_once __DIR__ . '/schema-hidden-activities.php';
-require_once __DIR__ . '/schema-dispute-participations.php';
 
 // V2 Phase 1: §I1 push notifications — VAPID subscriptions per user/device
 require_once __DIR__ . '/schema-push-subscriptions.php';
@@ -175,10 +174,6 @@ function bcc_trust_create_tables() {
     if (function_exists('bcc_trust_create_hidden_activities_table')) {
         bcc_trust_create_hidden_activities_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Hidden activities table created', []);
-    }
-    if (function_exists('bcc_trust_create_dispute_participations_table')) {
-        bcc_trust_create_dispute_participations_table();
-        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Dispute participations table created', []);
     }
     if (function_exists('bcc_trust_create_push_subscriptions_table')) {
         bcc_trust_create_push_subscriptions_table();
@@ -331,7 +326,6 @@ function bcc_trust_verify_all_tables() {
         'bcc_watch_batches',
         'bcc_content_reports',
         'bcc_hidden_activities',
-        'bcc_dispute_participations',
         // V2 Phase 1 push notifications
         'bcc_push_subscriptions',
         // V1.5 a11y photo alt sidecar

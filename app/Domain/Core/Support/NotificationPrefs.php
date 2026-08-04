@@ -70,7 +70,6 @@ final class NotificationPrefs
     public const PUSH_TYPES = [
         'review',
         'dispute_outcome',
-        'panelist_selected',
         'mention',
         'hall_post',
         'comment_received',
@@ -113,7 +112,6 @@ final class NotificationPrefs
         'push_master'                                        => false,
         'push_event_review'                                  => true,
         'push_event_dispute_outcome'                         => true,
-        'push_event_panelist_selected'                       => true,
         'push_event_mention'                                 => true,
         'push_event_hall_post'                               => true,
         'push_event_comment_received'                        => true,

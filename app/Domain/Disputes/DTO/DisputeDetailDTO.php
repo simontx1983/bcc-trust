@@ -15,14 +15,13 @@ if (!defined('ABSPATH')) {
  *   - getDisputeDetailForAdmin() (admin detail view)
  *   - getByReporterPaginated()   (reporter's own disputes list)
  *
- * Both queries select the same 16 columns in the same roles — safe to share a
- * DTO between them. The panelist queue uses a superset with `my_decision`
- * (see PanelistQueueItemDTO).
+ * Both queries select the same 13 columns in the same roles — safe to share a
+ * DTO between them. Panel tally fields retired (Rank Phase 6 Wave 3, D-7):
+ * vote state lives on the poll engine, C10 forbids exposing open tallies.
  *
  * Fail-soft display / fail-fast logic:
  *   - LOGIC (strict):  id, status, vote_id, page_id, voter_id, reporter_id,
- *                      panel_accepts, panel_rejects, panel_size, created_at.
- *                      Plus cross-field invariant accepts+rejects≤size.
+ *                      created_at.
  *   - DISPLAY (tolerant): reason (NOT NULL but schema DEFAULT ''), evidence_url,
  *                         resolved_at, page_title, reporter_name, voter_name.
  *                         Nullable fields are LEFT JOIN / nullable columns.
@@ -38,9 +37,6 @@ final class DisputeDetailDTO
         public readonly string  $reason,
         public readonly ?string $evidence_url,
         public readonly string  $status,
-        public readonly int     $panel_accepts,
-        public readonly int     $panel_rejects,
-        public readonly int     $panel_size,
         public readonly string  $created_at,
         public readonly ?string $resolved_at,
         public readonly ?string $page_title,
@@ -56,10 +52,6 @@ final class DisputeDetailDTO
         // reason is display-only (formatDispute passes through to response);
         // NOT NULL but DEFAULT '' per schema — no non-empty check.
         DisputeStatus::assert($status);
-        DTOAssert::positiveInt($panel_size,       $dto, 'panel_size');
-        DTOAssert::nonNegativeInt($panel_accepts, $dto, 'panel_accepts');
-        DTOAssert::nonNegativeInt($panel_rejects, $dto, 'panel_rejects');
-        DTOAssert::panelTally($panel_accepts, $panel_rejects, $panel_size, $dto);
         DTOAssert::datetime($created_at,          $dto, 'created_at');
         DTOAssert::nullableDatetime($resolved_at, $dto, 'resolved_at');
     }

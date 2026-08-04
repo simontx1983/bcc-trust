@@ -4,7 +4,6 @@ namespace BCC\Trust\Disputes\Services;
 
 use BCC\Core\Contracts\DisputeAdjudicationInterface;
 use BCC\Core\ServiceLocator;
-use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Disputes\Services\DisputeNotificationService;
 use BCC\Core\Log\Logger as CoreLogger;
@@ -33,8 +32,8 @@ final class DisputeResolver
         }
 
         if ($txn['race']) {
-            // Already resolved by a concurrent request — expected under
-            // concurrent panelist voting; not an error condition.
+            // Already resolved by a concurrent request — expected when
+            // the sweep and backstop race; not an error condition.
             CoreLogger::info('[bcc-disputes] resolve_race_skipped', [
                 'dispute_id' => $disputeId,
                 'outcome'    => $outcome,
@@ -43,14 +42,6 @@ final class DisputeResolver
         }
 
         // ── Pre-commit gate: verify trust engine is available ────────────
-        //
-        // Compute quorum INSIDE the still-open transaction. Under MySQL's
-        // default REPEATABLE READ, the panel-row SELECT here reads a
-        // snapshot consistent with the locked dispute row — closing the
-        // race window where `cleanupForDeletedUser` could delete a
-        // panelist row between commit and a post-commit quorum read,
-        // falsely flipping $quorumMet to false and silently suppressing
-        // the reporter penalty on a genuinely rejected dispute.
         try {
             $hasRealAdjudicator = ServiceLocator::hasRealService(DisputeAdjudicationInterface::class);
 
@@ -63,18 +54,13 @@ final class DisputeResolver
                 return false;
             }
 
-            // Quorum evaluated inside the transaction so panel rows cannot
-            // be concurrently mutated between here and adjudication.
-            if ($outcome === 'accepted') {
-                $quorumMet = true;
-            } elseif ($outcome === 'timeout_no_quorum') {
-                $quorumMet = false;
-            } else {
-                // outcome === 'rejected' — verify via the authoritative panel
-                // rows rather than trusting the caller, so a stale/denormalised
-                // cache tally cannot smuggle a false-positive quorum signal.
-                $quorumMet = DisputeRepository::wasQuorumMetForDispute($disputeId);
-            }
+            // Post-panel semantics (Rank Phase 6): 'accepted' and
+            // 'rejected' are DECISIVE by construction — either the poll
+            // engine closed with quorum + majority met, or an admin
+            // force-resolved. Either way the reporter-penalty gate is
+            // armed. 'timeout_no_quorum' (the poll's inconclusive
+            // expiry) is the only no-quorum outcome and suppresses it.
+            $quorumMet = $outcome !== 'timeout_no_quorum';
 
             // adjudication_status='pending' is already set atomically
             // by beginResolveTransaction() in the same UPDATE statement.
@@ -163,37 +149,9 @@ final class DisputeResolver
             return false;
         }
 
-        // §D5 — backfill outcome_match on every credited participation
-        // row attached to this dispute. We map the dispute-status enum
-        // ('accepted'/'rejected') to the panel-vote enum ('accept'/
-        // 'reject') the participation rows store. timeout_no_quorum
-        // disputes intentionally leave outcome_match NULL — there's no
-        // "correct" answer when quorum failed.
-        if ($outcome === 'accepted' || $outcome === 'rejected') {
-            $finalDecision = $outcome === 'accepted' ? 'accept' : 'reject';
-            try {
-                $participationRepo = new DisputeParticipationRepository();
-                $updated = $participationRepo->backfillOutcomeMatch($disputeId, $finalDecision);
-                CoreLogger::audit('dispute_participation_backfilled', [
-                    'dispute_id' => $disputeId,
-                    'outcome'    => $outcome,
-                    'rows'       => $updated,
-                ]);
-            } catch (\Throwable $e) {
-                // Backfill failure is non-fatal: the dispute is already
-                // resolved and the panelist's credited rows still exist —
-                // they just don't get an accuracy mark. There is no
-                // reconciliation sweep, so surface it on /system/health
-                // (sustained activation = accuracy marks accruing NULL)
-                // alongside the log.
-                \BCC\Core\Observability\DegradationMetrics::record('post_commit_task', 'dispute_backfill_failed');
-                CoreLogger::error('[bcc-disputes] participation_backfill_failed', [
-                    'dispute_id' => $disputeId,
-                    'outcome'    => $outcome,
-                    'error'      => $e->getMessage(),
-                ]);
-            }
-        }
+        // §D5 outcome-match backfill deleted (Rank Phase 6, D-7): the
+        // panel-participation credit retired with the panel — nothing
+        // writes participation rows and nothing reads accuracy marks.
 
         // Reporter penalty is now owned by the trust-engine inside its own
         // transaction via DisputeAdjudicationInterface::rejectVoteDispute.
@@ -225,6 +183,23 @@ final class DisputeResolver
             CoreLogger::error('[bcc-disputes] reporter_email_enqueue_soft_failed', [
                 'dispute_id'  => $disputeId,
                 'reporter_id' => $reporterId,
+            ]);
+        }
+
+        // Outcome notice to the disputed voter — the other dispute party.
+        // Courtesy-only (no idempotency marker, no reconcile sweep): a
+        // lost enqueue drops the notice, never the resolution. NO tallies
+        // in the payload.
+        try {
+            DisputeNotificationService::enqueueAsync(
+                'bcc_disputes_email_voter_result',
+                [$disputeId, $voterId, $outcome]
+            );
+        } catch (\Throwable $e) {
+            CoreLogger::error('[bcc-disputes] voter_result_enqueue_failed', [
+                'dispute_id' => $disputeId,
+                'voter_id'   => $voterId,
+                'error'      => $e->getMessage(),
             ]);
         }
 

@@ -175,6 +175,37 @@ class PollRepository
     }
 
     /**
+     * The most recent poll for a subject regardless of status —
+     * Wave 3's dispute layer resolves the closed poll behind a
+     * still-reviewing dispute (backstop reconcile) and the viewer
+     * state for closed votes through this. Uncached: callers are
+     * per-entity reads or the daily backstop sweep.
+     *
+     * @phpstan-return PollRow|null
+     */
+    public function getLatestBySubject(string $pollType, string $subjectType, int $subjectId): ?object
+    {
+        if ($subjectId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+
+        /** @var PollRow|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            'SELECT ' . self::COLUMNS . " FROM {$this->table}
+              WHERE poll_type = %s AND subject_type = %s AND subject_id = %d
+              ORDER BY id DESC
+              LIMIT 1",
+            $pollType,
+            $subjectType,
+            $subjectId
+        ));
+
+        return $row;
+    }
+
+    /**
      * Open polls whose binding window (day-7) has started — the close
      * sweep's evaluation batch. Deliberately uncached (sweep-only).
      *

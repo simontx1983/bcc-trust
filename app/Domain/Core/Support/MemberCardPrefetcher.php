@@ -12,15 +12,13 @@
  * member. On a 24-row directory page those per-row reads were the
  * dominant share of a ~60-queries-per-member profile.
  *
- * This helper warms all of them in five bounded batches:
+ * This helper warms all of them in four bounded batches:
  *
  *   1. MemberSummaryPrefetcher::primeFor      — the eleven summary maps
  *   2. cache_users()                          — WP users + usermeta in 2 queries
  *   3. ReputationRepository::primeByUserIds   — rows for members AND viewer
  *      (the viewer's tier gates getViewerActionPermissions on every row)
- *   4. DisputeParticipationRepository::primeCountsForUsers
- *                                             — lifetime trust bonus counts
- *   5. AttestationRepository::findActiveByAttestorForTargets
+ *   4. AttestationRepository::findActiveByAttestorForTargets
  *                                             — viewer→user_profile rows,
  *      returned under the `viewer_attestations` key (same key + row shape
  *      the page-card path uses, consumed via
@@ -45,10 +43,10 @@
  *      group members, suggestions) stays untouched, so non-card member
  *      surfaces pay nothing for a signal block they never render.
  *
- * Batches 2-4 warm request-scoped memos inside their owners, so the
- * existing single-user accessors (getTier, getScore,
- * getEarnedLifetimeTrust, get_userdata, get_user_meta) become free —
- * no call-site changes beyond swapping primeFor here.
+ * Batches 2-3 warm request-scoped memos inside their owners, so the
+ * existing single-user accessors (getTier, getScore, get_userdata,
+ * get_user_meta) become free — no call-site changes beyond swapping
+ * primeFor here.
  *
  * @package BCC\Trust\Core\Support
  * @since 2026-06-12
@@ -62,7 +60,6 @@ use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\MemberSelfPageService;
-use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 
 if (!defined('ABSPATH')) {
@@ -102,7 +99,6 @@ final class MemberCardPrefetcher
                 $reputationIds[] = $viewerId;
             }
             (new ReputationRepository())->primeByUserIds($reputationIds);
-            (new DisputeParticipationRepository())->primeCountsForUsers($idList);
         }
 
         $map = MemberSummaryPrefetcher::primeFor($idList);

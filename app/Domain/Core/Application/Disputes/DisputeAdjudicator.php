@@ -220,10 +220,10 @@ final class DisputeAdjudicator implements DisputeAdjudicationInterface
         int $resolvedBy,
         bool $quorumMet
     ): bool {
-        // Quorum-gated reporter penalty: ONLY when enough panelists actually
-        // voted. TTL expiry with 0-2 panel votes on a 5-seat panel still
-        // flips the dispute to 'rejected' (vote stands) but must NOT punish
-        // the reporter for reviewer silence.
+        // Quorum-gated reporter penalty: ONLY when the community poll
+        // actually reached quorum. A day-90 Inconclusive close still
+        // flips the dispute to 'rejected' (vote stands) but must NOT
+        // punish the reporter for voter silence.
         //
         // Both the idempotency claim AND the penalty run inside a single
         // TransactionManager::run(): a committed claim means a committed

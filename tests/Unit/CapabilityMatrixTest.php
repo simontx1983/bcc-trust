@@ -38,7 +38,6 @@ use PHPUnit\Framework\TestCase;
 final class CapabilityMatrixTest extends TestCase
 {
     private const FUTURE_KEYS = [
-        CapabilityCatalog::CAST_DISPUTE_VOTE, // known divergence vs live panel route until Phase 6
         CapabilityCatalog::CREATE_COMMUNITY,
         CapabilityCatalog::TRANSFER_COMMUNITY,
         CapabilityCatalog::RECEIVE_COMMUNITY,
@@ -158,6 +157,23 @@ final class CapabilityMatrixTest extends TestCase
         self::assertTrue($this->resolver(writeReview: true)->can(7, CapabilityCatalog::WRITE_REVIEW)->isAllowed());
 
         $denied = $this->resolver(writeReview: false)->can(7, CapabilityCatalog::WRITE_REVIEW);
+        self::assertTrue($denied->isDenied());
+        self::assertSame('feature_gate', $denied->reason);
+        self::assertSame('feature_access', $denied->source);
+    }
+
+    public function testCastDisputeVoteRoutesThroughTheWriteActionPolicy(): void
+    {
+        // Rank Phase 6 Wave 3 (D-7): the panel is retired; the key now
+        // carries the same Apprentice+ AND Neutral+ policy shape as the
+        // other write actions. The live gate (DisputeVoteService)
+        // additionally enforces §18 party exclusion + fraud hard-block
+        // per dispute — exercised in DisputePanelRetirementTest.
+        self::assertTrue(
+            $this->resolver(writeReview: true)->can(7, CapabilityCatalog::CAST_DISPUTE_VOTE)->isAllowed()
+        );
+
+        $denied = $this->resolver(writeReview: false)->can(7, CapabilityCatalog::CAST_DISPUTE_VOTE);
         self::assertTrue($denied->isDenied());
         self::assertSame('feature_gate', $denied->reason);
         self::assertSame('feature_access', $denied->source);

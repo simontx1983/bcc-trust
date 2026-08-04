@@ -88,6 +88,7 @@ class DisputeListTable extends WP_List_Table
             'accepted'          => 'Accepted',
             'rejected'          => 'Rejected',
             'timeout_no_quorum' => 'Expired (no quorum)',
+            'dismissed'         => 'Dismissed',
         ];
         foreach ($filterLabels as $s => $label) {
             $c = $counts[$s] ?? 0;
@@ -107,7 +108,7 @@ class DisputeListTable extends WP_List_Table
     {
         // Filters
         $status_filter = isset($_GET['dispute_status']) ? sanitize_key($_GET['dispute_status']) : '';
-        if (!in_array($status_filter, ['reviewing', 'accepted', 'rejected', 'timeout_no_quorum'], true)) {
+        if (!in_array($status_filter, ['reviewing', 'accepted', 'rejected', 'timeout_no_quorum', 'dismissed'], true)) {
             $status_filter = '';
         }
 
@@ -214,12 +215,14 @@ class DisputeListTable extends WP_List_Table
                     'accepted'          => '#2e7d32',
                     'rejected'          => '#c62828',
                     'timeout_no_quorum' => '#9e9e9e',
+                    'dismissed'         => '#6d4c41',
                 ];
                 $labels = [
                     'reviewing'         => 'Reviewing',
                     'accepted'          => 'Accepted',
                     'rejected'          => 'Rejected',
                     'timeout_no_quorum' => 'Expired',
+                    'dismissed'         => 'Dismissed',
                 ];
                 $color = $colors[$item->status] ?? '#666';
                 $label = $labels[$item->status] ?? ucfirst($item->status);

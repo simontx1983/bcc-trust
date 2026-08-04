@@ -1159,7 +1159,7 @@ final class NotificationDispatcher
 
         try {
             $message = $newState === 'disputed'
-                ? 'Your entity is now under active dispute. The panel mechanic will resolve it.'
+                ? 'Your entity is now under active dispute. Community voting will resolve it.'
                 : 'Your entity reads as polarizing — reliable operators currently disagree on you.';
 
             // System event — but PeepSoNotificationWriter REJECTS sender

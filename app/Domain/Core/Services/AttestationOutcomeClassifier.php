@@ -29,11 +29,12 @@
  *     goodness = 0.5.
  *
  * ── DISPUTE DIRECTION IS LOAD-BEARING ───────────────────────────────────────
- * A vote-dispute contests a DOWNVOTE against the target. Per
- * DisputeRepository::computeVerdict, 'accepted' means the panel ACCEPTED the
- * dispute → the downvote is removed → the target is VINDICATED; 'rejected'
- * means the panel REJECTED the dispute → the downvote STANDS → the target's
- * negative mark is UPHELD. So for an attestor who BACKED that target:
+ * A vote-dispute contests a DOWNVOTE against the target. Per the
+ * DisputeStatus enum (community poll since Rank Phase 6), 'accepted'
+ * means the community ACCEPTED the dispute → the downvote is removed →
+ * the target is VINDICATED; 'rejected' means the community REJECTED the
+ * dispute → the downvote STANDS → the target's negative mark is UPHELD.
+ * So for an attestor who BACKED that target:
  *
  *      dispute 'rejected'  ⇒  target's negative mark UPHELD  ⇒  NEGATIVE
  *      dispute 'accepted'  ⇒  target VINDICATED              ⇒  POSITIVE

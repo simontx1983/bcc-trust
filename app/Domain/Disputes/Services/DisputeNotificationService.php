@@ -2,7 +2,6 @@
 
 namespace BCC\Trust\Disputes\Services;
 
-use BCC\Trust\Disputes\Repositories\DisputePanelRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Disputes\Repositories\UserReportRepository;
 use WP_User;
@@ -19,8 +18,13 @@ class DisputeNotificationService
      */
     public static function registerAsyncHandlers(): void
     {
-        add_action('bcc_disputes_notify_panelist', function (int $uid, int $dispute_id, int $page_id) {
-            self::notifyPanelist($uid, $dispute_id, $page_id);
+        // Poll-lifecycle notices to the disputed voter (a dispute party).
+        add_action('bcc_disputes_email_voter_opened', function (int $dispute_id, int $voter_id) {
+            self::emailVoterDisputeOpened($dispute_id, $voter_id);
+        }, 10, 2);
+
+        add_action('bcc_disputes_email_voter_result', function (int $dispute_id, int $voter_id, string $outcome) {
+            self::emailVoterResult($dispute_id, $voter_id, $outcome);
         }, 10, 3);
 
         add_action('bcc_disputes_email_reported_user', function (int $report_id, int $reported_user_id) {
@@ -164,71 +168,79 @@ class DisputeNotificationService
         return self::readMailFailureBucket(self::mailFailureKey(time() - HOUR_IN_SECONDS));
     }
 
-    public static function notifyPanelist(int $uid, int $dispute_id, int $page_id): void
+    /**
+     * Open notice to the disputed voter — their vote is under dispute
+     * and the community vote has opened. Courtesy-only path: fired once
+     * from submit, no claim marker, no reconcile sweep. NO tallies.
+     */
+    public static function emailVoterDisputeOpened(int $dispute_id, int $voter_id): void
     {
-        // Claim-before-send: flip notified_at from NULL → $ts atomically BEFORE
-        // calling wp_mail. Two concurrent AS workers scheduled for the same
-        // (dispute_id, panelist_user_id) cannot both pass the claim, so only one
-        // worker actually sends. A previous check-then-mail-then-mark pattern
-        // had a TOCTOU gap: both workers read NULL, both sent wp_mail, then
-        // one lost the mark race. Under AS replay / reconcile overlap that
-        // produced duplicate panelist emails.
-        $ts = gmdate('Y-m-d H:i:s');
-        if (!DisputePanelRepository::markPanelistNotified($dispute_id, $uid, $ts)) {
-            // Someone else already claimed or completed the send.
+        $user = get_userdata($voter_id);
+        if (!$user || !$user->user_email) {
             return;
         }
 
-        $user = get_userdata($uid);
-        if (!$user || !$user->user_email) {
-            // Nothing to send — keep the claim so we don't thrash AS retries
-            // on a permanently-unresolvable user. The claim row is a tombstone
-            // for "no mail possible".
-            return;
-        }
-        $page = get_post($page_id);
-        $subject = '[BCC] You have been selected as a dispute panelist';
-        $body = sprintf(
-            "Hello %s,\n\nA dispute has been filed against a vote on \"%s\". As a Gold/Platinum member, you've been selected to help review it.\n\nLog in and visit your dispute queue to cast your vote within %d days.\n\nDispute ID: #%d\n",
+        $subject = '[BCC] A vote you cast is under dispute';
+        $body    = sprintf(
+            "Hello %s,\n\nA vote you cast has been disputed by the page owner, and a community review is now open. "
+            . "No action is required from you — the community will decide the outcome, and we'll let you know how it resolves.\n\nDispute ID: #%d\n",
             $user->display_name,
-            $page ? $page->post_title : "a project page",
-            BCC_DISPUTES_TTL_DAYS,
             $dispute_id
         );
 
-        // Throw on wp_mail failure so Action Scheduler retries with backoff.
-        // Previously we logged-and-returned, which marked the action as
-        // "successful" in AS, permanently losing the notification. Throwing
-        // here is the correct AS failure-protocol: AS will retry up to its
-        // configured limit before giving up.
-        $sent = false;
-        try {
-            $sent = (bool) wp_mail($user->user_email, $subject, $body);
-        } finally {
-            if (!$sent) {
-                // Release our claim so the next AS retry (or reconciliation
-                // sweep) can re-attempt. Scoped to $ts so we never clear a
-                // concurrent successful send's marker.
-                DisputePanelRepository::clearPanelistNotified($dispute_id, $uid, $ts);
-            }
-        }
-
-        if (!$sent) {
+        // Courtesy notice: log-and-return on failure (no claim marker, so
+        // throwing for an AS retry could double-send on a slow SMTP).
+        if (!wp_mail($user->user_email, $subject, $body)) {
             \BCC\Core\Log\Logger::error('[bcc-disputes] wp_mail failed', [
-                'type' => 'panelist_notification',
-                'user_id' => $uid,
+                'type'       => 'voter_opened_notification',
+                'user_id'    => $voter_id,
                 'dispute_id' => $dispute_id,
             ]);
-            self::recordMailFailure('panelist_notification');
-            throw new \RuntimeException(
-                "wp_mail failed for panelist notification (dispute={$dispute_id}, user={$uid}) — Action Scheduler will retry"
-            );
+            self::recordMailFailure('voter_opened_notification');
+        }
+    }
+
+    /**
+     * Outcome notice to the disputed voter. Mirrors the reporter-result
+     * vocabulary; carries NO tallies. Courtesy-only path (see
+     * emailVoterDisputeOpened for the no-claim rationale).
+     */
+    public static function emailVoterResult(int $dispute_id, int $voter_id, string $outcome): void
+    {
+        $user = get_userdata($voter_id);
+        if (!$user || !$user->user_email) {
+            return;
+        }
+
+        if ($outcome === 'accepted') {
+            $subject = '[BCC] Dispute outcome — your vote was removed';
+            $body    = 'The community reviewed a dispute over a vote you cast and agreed with the dispute. The vote has been removed.';
+        } elseif ($outcome === 'timeout_no_quorum') {
+            $subject = '[BCC] Dispute outcome — no decision reached';
+            $body    = 'The community review of a dispute over a vote you cast ended without a decision. Your vote stands unchanged.';
+        } else {
+            // 'rejected' — the dispute failed; the vote stands.
+            $subject = '[BCC] Dispute outcome — your vote stands';
+            $body    = 'The community reviewed a dispute over a vote you cast and decided the vote was valid. Your vote stands unchanged.';
+        }
+
+        $body = sprintf("Hello %s,\n\n%s\n\nDispute ID: #%d\n", $user->display_name, $body, $dispute_id);
+
+        if (!wp_mail($user->user_email, $subject, $body)) {
+            \BCC\Core\Log\Logger::error('[bcc-disputes] wp_mail failed', [
+                'type'       => 'voter_result_notification',
+                'user_id'    => $voter_id,
+                'dispute_id' => $dispute_id,
+            ]);
+            self::recordMailFailure('voter_result_notification');
         }
     }
 
     public static function emailReportedUser(int $report_id, WP_User $reported_user): void
     {
-        // Claim-before-send: see notifyPanelist() for rationale.
+        // Claim-before-send: flip the marker from NULL → $ts atomically
+        // BEFORE calling wp_mail so two concurrent AS workers cannot
+        // both send (see emailReporterResult for the full rationale).
         $ts = gmdate('Y-m-d H:i:s');
         if (!UserReportRepository::markReportNotified($report_id, $ts)) {
             return;
@@ -266,7 +278,7 @@ class DisputeNotificationService
 
     public static function emailAdminReport(int $report_id, int $reporter_id, WP_User $reported_user, string $reason_key, string $reason_detail): void
     {
-        // Claim-before-send: see notifyPanelist() for rationale. Duplicate
+        // Claim-before-send (see emailReporterResult). Duplicate
         // admin emails previously leaked via the check-then-mark TOCTOU and
         // looked like a spam attack to moderators.
         $ts = gmdate('Y-m-d H:i:s');
@@ -350,11 +362,14 @@ class DisputeNotificationService
 
     public static function emailReporterResult(int $disputeId, int $reporterId, string $outcome): void
     {
-        // Claim-before-send: see notifyPanelist() for rationale. This is the
-        // most exposed of the four handlers because DisputeResolver::handle
-        // AND the reconciliation Phase B retry can both enqueue this hook for
-        // the same dispute during a slow-adjudicator race. Claim-then-send
-        // closes the double-email window.
+        // Claim-before-send: flip resolved_notified_at from NULL → $ts
+        // atomically BEFORE calling wp_mail. Two concurrent AS workers
+        // scheduled for the same dispute cannot both pass the claim, so
+        // only one sends. This is the most exposed handler because
+        // DisputeResolver::handle AND the reconciliation Phase B retry
+        // can both enqueue this hook for the same dispute during a
+        // slow-adjudicator race. Claim-then-send closes the
+        // double-email window.
         $ts = gmdate('Y-m-d H:i:s');
         if (!DisputeRepository::markResolvedNotified($disputeId, $ts)) {
             return;
@@ -368,19 +383,20 @@ class DisputeNotificationService
 
         if ($outcome === 'accepted') {
             $subject = '[BCC] Your dispute was accepted — vote removed';
-            $body    = 'Good news! The community panel reviewed your dispute and agreed the vote was invalid. It has been removed from your trust score.';
+            $body    = 'Good news! The community reviewed your dispute and agreed the vote was invalid. It has been removed from your trust score.';
         } elseif ($outcome === 'timeout_no_quorum') {
-            // Distinct from 'rejected': the panel never reached quorum, so
+            // Distinct from 'rejected': the community vote ended
+            // inconclusive (quorum/majority never met before expiry), so
             // the dispute was NOT judged on its merits. No penalty was
             // applied. The disputed vote still stands, but the reporter is
             // not treated as having filed a bad-faith report.
-            $subject = '[BCC] Your dispute could not be decided — not enough panel votes';
-            $body    = 'Your dispute could not be decided because not enough community panelists voted within the review period. '
+            $subject = '[BCC] Your dispute could not be decided — not enough community votes';
+            $body    = 'Your dispute could not be decided because not enough qualified community votes were cast within the review period. '
                      . 'The vote remains on your profile, but no penalty was applied to you. You may file a new dispute if you still believe the vote is invalid.';
         } else {
-            // 'rejected' (quorum reached, majority voted reject).
+            // 'rejected' (quorum reached, majority voted to keep the vote).
             $subject = '[BCC] Your dispute was reviewed — vote stands';
-            $body    = 'The community panel reviewed your dispute and decided the vote was valid. The vote remains on your profile.';
+            $body    = 'The community reviewed your dispute and decided the vote was valid. The vote remains on your profile.';
         }
 
         $sent = false;

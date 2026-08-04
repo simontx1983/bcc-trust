@@ -779,7 +779,6 @@ final class Plugin
             $this->rankStateService(),
             $this->livingService(),
             $this->peepSoReactionRepository(),
-            \BCC\Trust\Disputes\DisputesPlugin::instance()->disputeParticipationRepository(),
             $this->attestationService()
         );
     }

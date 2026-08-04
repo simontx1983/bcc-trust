@@ -87,6 +87,21 @@ class InMemoryPollRepository extends PollRepository
         return null;
     }
 
+    public function getLatestBySubject(string $pollType, string $subjectType, int $subjectId): ?object
+    {
+        $latest = null;
+        foreach ($this->rows as $row) {
+            if ($row->poll_type === $pollType
+                && $row->subject_type === $subjectType
+                && (int) $row->subject_id === $subjectId
+                && ($latest === null || (int) $row->id > (int) $latest->id)
+            ) {
+                $latest = $row;
+            }
+        }
+        return $latest;
+    }
+
     public function listOpenPastBinding(string $nowSql, int $limit): array
     {
         $out = [];

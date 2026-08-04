@@ -143,12 +143,13 @@ final class DisputeResolverTest extends TestCase
         $this->assertCallLogged('setAdjudicationStatus', [self::DISPUTE_ID, 'completed']);
     }
 
-    // ── 2) Rejected WITH quorum ───────────────────────────────────────────
+    // ── 2) Rejected (always decisive post-panel) ──────────────────────────
 
-    public function testRejectedWithQuorumAppliesPenalty(): void
+    public function testRejectedPropagatesQuorumMetTrue(): void
     {
-        \BCC\Trust\Disputes\Repositories\DisputeRepository::$quorumMet = true;
-
+        // Rank Phase 6: 'rejected' only arrives from a decisive poll
+        // close (quorum + majority met) or an admin force-resolve — the
+        // reporter-penalty gate is always armed for it.
         $ok = $this->resolver()->handle(
             self::DISPUTE_ID,
             self::VOTE_ID,
@@ -166,36 +167,9 @@ final class DisputeResolverTest extends TestCase
         self::assertSame('reject', $call['method']);
         self::assertTrue(
             $call['quorum_met'],
-            'rejected + quorum=true must propagate quorumMet=true so penalty fires'
+            'rejected must propagate quorumMet=true so penalty fires'
         );
         self::assertSame(self::REPORTER_ID, $call['reporter_id']);
-    }
-
-    // ── 3) Rejected WITHOUT quorum ────────────────────────────────────────
-
-    public function testRejectedWithoutQuorumSkipsPenalty(): void
-    {
-        \BCC\Trust\Disputes\Repositories\DisputeRepository::$quorumMet = false;
-
-        $ok = $this->resolver()->handle(
-            self::DISPUTE_ID,
-            self::VOTE_ID,
-            self::PAGE_ID,
-            self::VOTER_ID,
-            self::REPORTER_ID,
-            'rejected',
-            self::ACTOR_ID
-        );
-
-        self::assertTrue($ok);
-        self::assertCount(1, $this->adjudicator->calls);
-        $call = $this->adjudicator->calls[0];
-
-        self::assertSame('reject', $call['method']);
-        self::assertFalse(
-            $call['quorum_met'],
-            'quorum=false must propagate so trust-engine skips reporter penalty'
-        );
     }
 
     // ── 4) timeout_no_quorum ──────────────────────────────────────────────

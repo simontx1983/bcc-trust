@@ -2195,38 +2195,6 @@ class VoteRepository {
         wp_cache_delete("vote_{$voteId}", self::CACHE_GROUP);
     }
 
-    /**
-     * Count active votes cast by a user within the last N days.
-     *
-     * Drives §D5 interest-coupled panel duty (scale-hardening Phase 2,
-     * 2026-05-13). The "recent civic activity" affinity signal: a
-     * panelist who has voted in the last 30 days is materially more
-     * informed about current floor dynamics than one who has gone
-     * quiet. The dispute panel benefits from at least some such
-     * panelists.
-     *
-     * Indexed: bcc_trust_votes (voter_user_id, created_at) composite
-     * covers WHERE + range filter cheaply. The status=1 filter excludes
-     * removed/disputed votes from the count so revocations don't
-     * artificially deflate the recent-activity signal.
-     *
-     * Bounded by the time window — never a full table scan.
-     *
-     * @param int $voterId   The user to count for.
-     * @param int $daysBack  Window size in days. Caller-bounded.
-     */
-    public function countRecentByActor( int $voterId, int $daysBack ): int {
-        global $wpdb;
-
-        $daysBack = max(1, $daysBack);
-
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table}
-              WHERE voter_user_id = %d
-                AND status = 1
-                AND created_at > DATE_SUB(NOW(), INTERVAL %d DAY)",
-            $voterId,
-            $daysBack
-        ) );
-    }
+    // countRecentByActor() retired with §D5 panel-duty affinity ranking
+    // (Rank Phase 6 Wave 3, D-7) — its only consumer was panelist selection.
 }

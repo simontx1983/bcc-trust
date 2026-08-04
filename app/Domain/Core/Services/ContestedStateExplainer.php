@@ -94,9 +94,9 @@ final class ContestedStateExplainer
         DivergenceStateClassifier::STATE_DISPUTED => [
             'headline' => 'Under active dispute.',
             'body' =>
-                "A panel review is open on a recent vote about you. The dispute "
-                . "moves through the panel mechanic; the state lifts when the "
-                . "panel resolves. This is procedural — it isn't a judgment.",
+                "A dispute is open on a recent vote about you. The community "
+                . "votes on it; the state lifts when the dispute resolves. "
+                . "This is procedural — it isn't a judgment.",
         ],
     ];
 

@@ -128,6 +128,16 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_last_seen_rank_usermeta_cleaned',
                 'callback'    => 'bcc_trust_cleanup_last_seen_rank_usermeta',
             ],
+            [
+                'id'          => 'cleanup_dispute_panel_v1',
+                'done_option' => 'bcc_trust_dispute_panel_cleaned',
+                'callback'    => 'bcc_trust_cleanup_dispute_panel',
+            ],
+            [
+                'id'          => 'cleanup_dispute_participations_v1',
+                'done_option' => 'bcc_trust_dispute_participations_cleaned',
+                'callback'    => 'bcc_trust_cleanup_dispute_participations',
+            ],
         ];
     }
 

@@ -11,10 +11,10 @@ if (!defined('ABSPATH')) {
  *
  * Only these four values may appear in the bcc_disputes.status column.
  *
- * 'closed' is DELIBERATELY NOT listed here: that string appears in the outgoing
- * REST response at DisputeController.php to mask the final resolution from
- * panelists before all votes are cast. It is a presentation-only value and
- * must never enter the DB or a DTO.
+ * Since Rank Phase 6 (Wave 3) the dispute's vote runs on the generic
+ * poll engine; poll outcomes map onto these terminal values in
+ * DisputeVoteService (passed → accepted, failed → rejected,
+ * inconclusive → timeout_no_quorum).
  */
 final class DisputeStatus
 {
@@ -23,12 +23,13 @@ final class DisputeStatus
     public const REJECTED          = 'rejected';
     public const DISMISSED         = 'dismissed';
     /**
-     * TTL expired without reaching quorum. Distinguished from REJECTED so
-     * that the adjudicator is NOT invoked, no reporter penalty fires, and
-     * the result email uses "not decided" language instead of "rejected."
-     * The underlying vote remains untouched (same net effect as rejected
-     * for the page owner), but the reporter is not penalised for panelist
-     * silence.
+     * The community vote expired inconclusive (quorum/majority never
+     * met by day-90). Distinguished from REJECTED so that the
+     * adjudicator is NOT invoked, no reporter penalty fires, and the
+     * result email uses "not decided" language instead of "rejected."
+     * The underlying vote remains untouched (same net effect as
+     * rejected for the page owner), but the reporter is not penalised
+     * for community silence.
      */
     public const TIMEOUT_NO_QUORUM = 'timeout_no_quorum';
 

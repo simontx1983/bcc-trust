@@ -345,11 +345,9 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_hidden_activities';
     }
 
-    public static function disputeParticipations(): string
-    {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_dispute_participations';
-    }
+    // disputeParticipations() deleted (Rank Phase 6, D-7): the §D5
+    // panel-participation credit retired with the panel; the table is
+    // dropped by the cleanup_dispute_participations_v1 migration.
 
     // V2 Phase 1: §I1 push notifications
 
@@ -462,7 +460,6 @@ final class TableRegistry
             'watch_batches'      => self::watchBatches(),
             'content_reports'    => self::contentReports(),
             'hidden_activities'  => self::hiddenActivities(),
-            'dispute_participations' => self::disputeParticipations(),
             // V2 Phase 1 push notifications
             'push_subscriptions' => self::pushSubscriptions(),
             // V1.5 a11y photo alt sidecar

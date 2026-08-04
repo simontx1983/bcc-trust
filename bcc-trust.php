@@ -36,9 +36,9 @@ define('BCC_ONCHAIN_MAX_CONTRACT_SCORE',  4.8);
 define('BCC_ONCHAIN_CACHE_HOURS',        24);
 define('BCC_ONCHAIN_MAX_TOTAL_BONUS',    20);
 
-// Disputes domain limits.
-define('BCC_DISPUTES_PANEL_SIZE',          5);      // panelists per dispute
-define('BCC_DISPUTES_TTL_DAYS',            7);      // auto-resolve after N days
+// Disputes domain limits. (Panel size + TTL constants retired with the
+// five-member panel — Rank Phase 6 Wave 3; the poll engine's config
+// owns the dispute-vote windows now.)
 define('BCC_DISPUTES_MAX_PER_PAGE',        3);      // max disputes per page per 30 days
 define('BCC_DISPUTES_REPORTER_MAX_ACTIVE', 5);      // max active disputes per reporter
 define('BCC_DISPUTES_MIN_REASON_LENGTH',   20);     // min chars for dispute reason
@@ -234,6 +234,8 @@ require_once BCC_TRUST_PATH . 'includes/database/backfill-watch-tier-vocabulary.
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-last-login-usermeta.php';
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-feature-override-usermeta.php';
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-last-seen-rank-usermeta.php';
+require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-panel.php';
+require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-participations.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
@@ -1724,6 +1726,20 @@ add_action('init', function () {
     \BCC\Trust\Disputes\Services\DisputeNotificationService::registerAsyncHandlers();
     // Rank Phase 1 — daily tier-day snapshot (self-healing schedule).
     \BCC\Trust\Rank\Services\RankScheduler::boot();
+
+    // Rank Phase 6 Wave 3 — dispute votes ride the poll engine. The
+    // engine fires `bcc_trust_poll_closed` (positional args) after its
+    // close transaction commits; the dispute layer maps decisive
+    // outcomes onto the existing async-resolve machinery.
+    add_action(
+        'bcc_trust_poll_closed',
+        function (int $pollId, string $outcome, string $pollType, string $subjectType, int $subjectId): void {
+            \BCC\Trust\Disputes\DisputesPlugin::instance()->disputeVoteService()
+                ->onPollClosed($pollId, $outcome, $pollType, $subjectType, $subjectId);
+        },
+        10,
+        5
+    );
 });
 
 /*
@@ -1772,16 +1788,16 @@ add_action('init', function () {
 | V2 Phase 1 — Web push subscribers + flush worker
 |--------------------------------------------------------------------------
 |
-| Three things wired here:
+| Two things wired here:
 |   1. The Action-Scheduler worker that drains the per-(recipient, type)
 |      queue 5 minutes after the first event lands in the window.
 |   2. A push subscriber on `bcc_disputes_email_reporter_result` —
 |      fires alongside the existing email handler. When the dispute
 |      reporter has push enabled, they get a real-time ping in addition
 |      to the email; both surfaces stay independent.
-|   3. A push subscriber on `bcc_disputes_notify_panelist` — same
-|      additive pattern for the "you've been picked for panel duty"
-|      notification.
+|
+| (The `bcc_disputes_notify_panelist` subscriber was retired with the
+| five-member panel — Rank Phase 6 Wave 3.)
 |
 | Review + endorse pushes are wired inside NotificationDispatcher itself
 | (alongside the bell write), not here.
@@ -1812,27 +1828,6 @@ add_action('init', function () {
         3
     );
 
-    add_action(
-        'bcc_disputes_notify_panelist',
-        function (int $userId, int $disputeId, int $pageId): void {
-            $pageName = '';
-            $page = get_post($pageId);
-            if ($page instanceof \WP_Post) {
-                $pageName = (string) $page->post_title;
-            }
-            \BCC\Trust\Core\Plugin::instance()->pushDispatcher()->enqueue(
-                $userId,
-                'panelist_selected',
-                [
-                    'dispute_id' => $disputeId,
-                    'page_id'    => $pageId,
-                    'page_name'  => $pageName,
-                ]
-            );
-        },
-        10,
-        3
-    );
 });
 
 // User deletion: clean up disputes, panel assignments, and reports.
@@ -1884,7 +1879,7 @@ add_action('peepso_user_profile_after_buttons', function ($user) {
     );
 });
 
-// Disputes admin notices: schema-migration failures + panelist-pool health.
+// Disputes admin notices: schema-migration failures.
 add_action('admin_notices', function (): void {
     if (!current_user_can('manage_options')) {
         return;
@@ -1914,10 +1909,6 @@ add_action('admin_notices', function (): void {
         );
     }
 });
-
-// Panelist pool health check — moved to NotificationCenter as the
-// `disputes.panelist_pool_low` item. See
-// \BCC\Trust\Core\Admin\NotificationCenter::checkPanelistPool().
 
 /*
 |--------------------------------------------------------------------------
@@ -2340,7 +2331,7 @@ if (is_admin()) {
     }, 25);
 
     // Notification Center — single admin surface for operational
-    // health signals (panelist pool, stale chains, dispute
+    // health signals (stale chains, dispute
     // adjudication delays, permanent orphans). Replaces N separate
     // banners with one summary banner + a dedicated page.
     \BCC\Trust\Core\Admin\NotificationCenter::register();

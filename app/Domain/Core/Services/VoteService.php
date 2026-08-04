@@ -815,6 +815,55 @@ class VoteService {
     }
 
     /**
+     * §16.6 weight-input snapshot for a poll-engine ballot (Rank
+     * Phase 6 Wave 3 — dispute votes). Assembles the SAME inputs
+     * castPageVote() feeds VoteWeightCalculator (fingerprint-derived
+     * fraud signals, cached user_info fraud score, reputation score,
+     * canonical rank_state row) so ballot weights and page-vote weights
+     * can never drift apart. Returns the BallotSnapshot shape
+     * PollService::cast() validates; `fraud_discount` of 0.0 is the
+     * FraudDiscountCalculator hard block — callers must fail closed on
+     * it before casting.
+     *
+     * @return array{rank_slug: string|null, maturity: float, rank_multiplier: float, trust_multiplier: float, trust_score: float, fraud_discount: float, effective_weight: float}
+     */
+    public function assembleBallotWeightSnapshot(int $voterId): array {
+        $fingerprint = $this->getOrGenerateFingerprint();
+        $signals     = $this->buildCachedSignals($voterId, $fingerprint);
+
+        $userInfo   = $this->getUserInfo($voterId);
+        $reputation = $this->getVoterReputation($voterId);
+        $voterTier  = $reputation->reputation_tier ?? 'neutral';
+        $trustScore = (float) ($reputation->reputation_score ?? 50.0);
+
+        $rankRow  = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId);
+        $rankSlug = $rankRow !== null ? (string) $rankRow->rank_slug : null;
+        $epoch    = $rankRow !== null ? (string) $rankRow->apprentice_awarded_at : null;
+
+        $weight = $this->weightCalculator->calculate(
+            $rankSlug,
+            $epoch,
+            $trustScore,
+            $voterTier,
+            $signals,
+            (int) ($userInfo->fraud_score ?? 0)
+        );
+
+        $now    = new DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $config = \BCC\Trust\Core\Plugin::instance()->rankScoringConfig();
+
+        return [
+            'rank_slug'        => $rankSlug,
+            'maturity'         => $this->weightCalculator->maturity($epoch, $now),
+            'rank_multiplier'  => $rankSlug !== null ? ($config->rankMultipliers[$rankSlug] ?? 0.0) : 0.0,
+            'trust_multiplier' => $this->weightCalculator->trustMultiplier($trustScore),
+            'trust_score'      => $trustScore,
+            'fraud_discount'   => $weight->fraudDiscount,
+            'effective_weight' => $weight->effective,
+        ];
+    }
+
+    /**
      * Assemble pre-fetched fraud signals into the shape VoteWeightCalculator expects.
      * Values from DeviceFingerprinter; trust_rank from cached user_info.
      *
