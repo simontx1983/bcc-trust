@@ -1,0 +1,207 @@
+{
+    "scenario": "quorum_reachability",
+    "model": {
+        "quorum": {
+            "voters": 10,
+            "weight": 7.5
+        },
+        "trials": 500,
+        "note": "plan EXPECTS early Inconclusive dominance; this table locates where binding becomes feasible"
+    },
+    "table": [
+        {
+            "day": 90,
+            "pool_size": 5,
+            "top10_weight": null,
+            "top10_reaches_quorum": false,
+            "quorum_probability": {
+                "p_30": 0.0,
+                "p_50": 0.0
+            }
+        },
+        {
+            "day": 90,
+            "pool_size": 10,
+            "top10_weight": 9.4226,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.0,
+                "p_50": 0.004
+            }
+        },
+        {
+            "day": 90,
+            "pool_size": 15,
+            "top10_weight": 10.2897,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.0,
+                "p_50": 0.124
+            }
+        },
+        {
+            "day": 90,
+            "pool_size": 20,
+            "top10_weight": 10.9385,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.054,
+                "p_50": 0.616
+            }
+        },
+        {
+            "day": 90,
+            "pool_size": 30,
+            "top10_weight": 10.9823,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.386,
+                "p_50": 0.972
+            }
+        },
+        {
+            "day": 90,
+            "pool_size": 50,
+            "top10_weight": 11.2954,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.946,
+                "p_50": 1.0
+            }
+        },
+        {
+            "day": 180,
+            "pool_size": 5,
+            "top10_weight": null,
+            "top10_reaches_quorum": false,
+            "quorum_probability": {
+                "p_30": 0.0,
+                "p_50": 0.0
+            }
+        },
+        {
+            "day": 180,
+            "pool_size": 10,
+            "top10_weight": 9.3047,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.0,
+                "p_50": 0.0
+            }
+        },
+        {
+            "day": 180,
+            "pool_size": 15,
+            "top10_weight": 10.7139,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.008,
+                "p_50": 0.124
+            }
+        },
+        {
+            "day": 180,
+            "pool_size": 20,
+            "top10_weight": 10.8373,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.054,
+                "p_50": 0.55
+            }
+        },
+        {
+            "day": 180,
+            "pool_size": 30,
+            "top10_weight": 10.8659,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.398,
+                "p_50": 0.982
+            }
+        },
+        {
+            "day": 180,
+            "pool_size": 50,
+            "top10_weight": 11.9273,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.964,
+                "p_50": 1.0
+            }
+        },
+        {
+            "day": 365,
+            "pool_size": 5,
+            "top10_weight": null,
+            "top10_reaches_quorum": false,
+            "quorum_probability": {
+                "p_30": 0.0,
+                "p_50": 0.0
+            }
+        },
+        {
+            "day": 365,
+            "pool_size": 10,
+            "top10_weight": 10.9248,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.0,
+                "p_50": 0.002
+            }
+        },
+        {
+            "day": 365,
+            "pool_size": 15,
+            "top10_weight": 10.7903,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.002,
+                "p_50": 0.128
+            }
+        },
+        {
+            "day": 365,
+            "pool_size": 20,
+            "top10_weight": 11.1234,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.044,
+                "p_50": 0.57
+            }
+        },
+        {
+            "day": 365,
+            "pool_size": 30,
+            "top10_weight": 13.5738,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.382,
+                "p_50": 0.982
+            }
+        },
+        {
+            "day": 365,
+            "pool_size": 50,
+            "top10_weight": 13.4569,
+            "top10_reaches_quorum": true,
+            "quorum_probability": {
+                "p_30": 0.95,
+                "p_50": 1.0
+            }
+        }
+    ],
+    "min_pool_for_p50_binding_day365": {
+        "p_30": 50,
+        "p_50": 20
+    },
+    "targets": {
+        "reachability_reported": {
+            "target": "INFO: honest report of quorum reachability (no hard pass/fail \u2014 plan expects early Inconclusive)",
+            "actual": {
+                "p_30": 50,
+                "p_50": 20
+            },
+            "pass": null
+        }
+    }
+}

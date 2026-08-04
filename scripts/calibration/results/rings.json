@@ -1,0 +1,708 @@
+{
+    "scenario": "rings",
+    "model": {
+        "cadence": {
+            "logins_per_month": 22.0,
+            "posts_per_month": 8.0,
+            "comments_per_active_day": 4,
+            "reviews_per_month": 2.0,
+            "attest_per_pair_month": 2.0,
+            "help_per_pair_month": 2.0
+        },
+        "tier_model": "every ring member tier-qualified (adversary-favourable)",
+        "horizon": 400
+    },
+    "rings": {
+        "R3": {
+            "confirmed": {
+                "members": [
+                    {
+                        "member": 1,
+                        "is_representative": true,
+                        "total": 36.0,
+                        "categories": {
+                            "contribution": 24.5,
+                            "helping": 2.5,
+                            "recognition": 3.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 30.0,
+                        "recognizers": 1,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 2,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 3,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    }
+                ],
+                "combined_evidence_sum": 30.0,
+                "honest_twin_evidence_sum": 35.5,
+                "honest_twin": {
+                    "total": 41.5,
+                    "categories": {
+                        "contribution": 24.5,
+                        "helping": 5.0,
+                        "recognition": 6.0,
+                        "outcomes": 0.0,
+                        "time": 6.0
+                    },
+                    "recognizers": 2,
+                    "journeyman_at_180": false
+                },
+                "note_time_category": "time is login-derived, not ledgered evidence: each ring member still accrues time credit, so the TIME-inclusive ring total exceeds one member's; the collapse claim is about ledgered evidence.",
+                "assertions": {
+                    "non_rep_recognition_exactly_zero": true,
+                    "non_rep_all_evidence_zero": true,
+                    "all_non_rep_fail_promotion_180": true,
+                    "combined_le_honest_equivalent": true
+                }
+            },
+            "suspected": {
+                "members": [
+                    {
+                        "member": 1,
+                        "journeyman_first_hold_day": null,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 41.5,
+                        "categories_at_180": {
+                            "contribution": 24.5,
+                            "helping": 5.0,
+                            "recognition": 6.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 2,
+                        "journeyman_blocking_at_180": [
+                            "helping_min",
+                            "recognizers"
+                        ]
+                    },
+                    {
+                        "member": 2,
+                        "journeyman_first_hold_day": null,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 38.0,
+                        "categories_at_180": {
+                            "contribution": 21.0,
+                            "helping": 5.0,
+                            "recognition": 6.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 2,
+                        "journeyman_blocking_at_180": [
+                            "total",
+                            "helping_min",
+                            "recognizers"
+                        ]
+                    },
+                    {
+                        "member": 3,
+                        "journeyman_first_hold_day": null,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 42.0,
+                        "categories_at_180": {
+                            "contribution": 25.0,
+                            "helping": 5.0,
+                            "recognition": 6.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 2,
+                        "journeyman_blocking_at_180": [
+                            "helping_min",
+                            "recognizers"
+                        ]
+                    }
+                ],
+                "journeyman_blocked_for_all": true,
+                "earliest_journeyman_day": null
+            }
+        },
+        "R5": {
+            "confirmed": {
+                "members": [
+                    {
+                        "member": 1,
+                        "is_representative": true,
+                        "total": 35.0,
+                        "categories": {
+                            "contribution": 23.5,
+                            "helping": 2.5,
+                            "recognition": 3.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 29.0,
+                        "recognizers": 1,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 2,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 3,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 4,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 5,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    }
+                ],
+                "combined_evidence_sum": 29.0,
+                "honest_twin_evidence_sum": 45.5,
+                "honest_twin": {
+                    "total": 51.5,
+                    "categories": {
+                        "contribution": 23.5,
+                        "helping": 10.0,
+                        "recognition": 12.0,
+                        "outcomes": 0.0,
+                        "time": 6.0
+                    },
+                    "recognizers": 4,
+                    "journeyman_at_180": true
+                },
+                "note_time_category": "time is login-derived, not ledgered evidence: each ring member still accrues time credit, so the TIME-inclusive ring total exceeds one member's; the collapse claim is about ledgered evidence.",
+                "assertions": {
+                    "non_rep_recognition_exactly_zero": true,
+                    "non_rep_all_evidence_zero": true,
+                    "all_non_rep_fail_promotion_180": true,
+                    "combined_le_honest_equivalent": true
+                }
+            },
+            "suspected": {
+                "members": [
+                    {
+                        "member": 1,
+                        "journeyman_first_hold_day": 80,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 51.5,
+                        "categories_at_180": {
+                            "contribution": 23.5,
+                            "helping": 10.0,
+                            "recognition": 12.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 4,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 2,
+                        "journeyman_first_hold_day": 72,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 50.5,
+                        "categories_at_180": {
+                            "contribution": 22.5,
+                            "helping": 10.0,
+                            "recognition": 12.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 4,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 3,
+                        "journeyman_first_hold_day": 51,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 51.5,
+                        "categories_at_180": {
+                            "contribution": 23.5,
+                            "helping": 10.0,
+                            "recognition": 12.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 4,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 4,
+                        "journeyman_first_hold_day": 65,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 53.0,
+                        "categories_at_180": {
+                            "contribution": 25.0,
+                            "helping": 10.0,
+                            "recognition": 12.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 4,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 5,
+                        "journeyman_first_hold_day": 61,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 51.5,
+                        "categories_at_180": {
+                            "contribution": 23.5,
+                            "helping": 10.0,
+                            "recognition": 12.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 4,
+                        "journeyman_blocking_at_180": []
+                    }
+                ],
+                "journeyman_blocked_for_all": false,
+                "earliest_journeyman_day": 51
+            }
+        },
+        "R10": {
+            "confirmed": {
+                "members": [
+                    {
+                        "member": 1,
+                        "is_representative": true,
+                        "total": 34.0,
+                        "categories": {
+                            "contribution": 22.5,
+                            "helping": 2.5,
+                            "recognition": 3.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 28.0,
+                        "recognizers": 1,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 2,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 3,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 4,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 5,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 6,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 7,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 8,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 9,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    },
+                    {
+                        "member": 10,
+                        "is_representative": false,
+                        "total": 6.0,
+                        "categories": {
+                            "contribution": 0.0,
+                            "helping": 0.0,
+                            "recognition": 0.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "evidence_sum": 0.0,
+                        "recognizers": 0,
+                        "journeyman_at_180": false
+                    }
+                ],
+                "combined_evidence_sum": 28.0,
+                "honest_twin_evidence_sum": 60.0,
+                "honest_twin": {
+                    "total": 66.0,
+                    "categories": {
+                        "contribution": 22.5,
+                        "helping": 22.5,
+                        "recognition": 15.0,
+                        "outcomes": 0.0,
+                        "time": 6.0
+                    },
+                    "recognizers": 9,
+                    "journeyman_at_180": true
+                },
+                "note_time_category": "time is login-derived, not ledgered evidence: each ring member still accrues time credit, so the TIME-inclusive ring total exceeds one member's; the collapse claim is about ledgered evidence.",
+                "assertions": {
+                    "non_rep_recognition_exactly_zero": true,
+                    "non_rep_all_evidence_zero": true,
+                    "all_non_rep_fail_promotion_180": true,
+                    "combined_le_honest_equivalent": true
+                }
+            },
+            "suspected": {
+                "members": [
+                    {
+                        "member": 1,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 66.0,
+                        "categories_at_180": {
+                            "contribution": 22.5,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 2,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 67.5,
+                        "categories_at_180": {
+                            "contribution": 24.0,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 3,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 65.5,
+                        "categories_at_180": {
+                            "contribution": 22.0,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 4,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 65.5,
+                        "categories_at_180": {
+                            "contribution": 22.0,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 5,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 65.5,
+                        "categories_at_180": {
+                            "contribution": 22.0,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 6,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 66.5,
+                        "categories_at_180": {
+                            "contribution": 23.0,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 7,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 68.5,
+                        "categories_at_180": {
+                            "contribution": 25.0,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 8,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 68.5,
+                        "categories_at_180": {
+                            "contribution": 25.0,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 9,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 66.0,
+                        "categories_at_180": {
+                            "contribution": 22.5,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    },
+                    {
+                        "member": 10,
+                        "journeyman_first_hold_day": 45,
+                        "veteran_first_hold_day": null,
+                        "total_at_180": 67.5,
+                        "categories_at_180": {
+                            "contribution": 24.0,
+                            "helping": 22.5,
+                            "recognition": 15.0,
+                            "outcomes": 0.0,
+                            "time": 6.0
+                        },
+                        "recognizers_at_180": 9,
+                        "journeyman_blocking_at_180": []
+                    }
+                ],
+                "journeyman_blocked_for_all": false,
+                "earliest_journeyman_day": 45
+            }
+        }
+    },
+    "targets": {
+        "confirmed_non_rep_zero_recognition": {
+            "target": "CONFIRMED: every non-representative earns exactly 0.0 recognition credit (all R)",
+            "actual": {
+                "R3": true,
+                "R5": true,
+                "R10": true
+            },
+            "pass": true
+        },
+        "confirmed_non_rep_fail_180": {
+            "target": "CONFIRMED: 100% of non-representative members fail promotion at day 180 (all R)",
+            "actual": {
+                "R3": true,
+                "R5": true,
+                "R10": true
+            },
+            "pass": true
+        },
+        "confirmed_collapse_to_one_identity": {
+            "target": "CONFIRMED: ring combined ledgered evidence <= one honest member equivalent (all R)",
+            "actual": {
+                "R3": true,
+                "R5": true,
+                "R10": true
+            },
+            "pass": true
+        },
+        "suspected_r3_blocked": {
+            "target": "SUSPECTED R=3: journeyman blocked for every member (recognizer minimum 3 needs >= 3 independent recognizers)",
+            "actual": true,
+            "pass": true
+        },
+        "suspected_r5_r10_report": {
+            "target": "INFO: SUSPECTED R=5 / R=10 outcomes reported honestly (caps alone may not block)",
+            "actual": {
+                "R5_earliest_journeyman": 51,
+                "R10_earliest_journeyman": 45
+            },
+            "pass": null
+        }
+    }
+}
