@@ -750,7 +750,7 @@ final class CardViewService
      * Shape rules (locked, contract §3.2.4):
      *   - trust fields are shape-stable placeholders — communities have
      *     no trust system (trust_score 0 / reputation_tier "neutral" /
-     *     reputation_tier "neutral"); `kicker` carries the group-type word.
+     *     reputation_tier_label null); `kicker` carries the group-type word.
      *   - crest: chain-keyed background for NFT groups with a chain_tag,
      *     tier-keyed "common" otherwise; image_url = collection cover
      *     (nullable → FE monogram fallback).
