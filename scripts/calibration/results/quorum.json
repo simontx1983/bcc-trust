@@ -32,7 +32,7 @@
         {
             "day": 90,
             "pool_size": 15,
-            "top10_weight": 10.2897,
+            "top10_weight": 10.4943,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.0,
@@ -62,7 +62,7 @@
         {
             "day": 90,
             "pool_size": 50,
-            "top10_weight": 11.2954,
+            "top10_weight": 11.5538,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.946,
@@ -82,7 +82,7 @@
         {
             "day": 180,
             "pool_size": 10,
-            "top10_weight": 9.3047,
+            "top10_weight": 9.5038,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.0,
@@ -92,7 +92,7 @@
         {
             "day": 180,
             "pool_size": 15,
-            "top10_weight": 10.7139,
+            "top10_weight": 10.9211,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.008,
@@ -122,7 +122,7 @@
         {
             "day": 180,
             "pool_size": 50,
-            "top10_weight": 11.9273,
+            "top10_weight": 12.2209,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.964,
@@ -162,7 +162,7 @@
         {
             "day": 365,
             "pool_size": 20,
-            "top10_weight": 11.1234,
+            "top10_weight": 11.518,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.044,
@@ -172,7 +172,7 @@
         {
             "day": 365,
             "pool_size": 30,
-            "top10_weight": 13.5738,
+            "top10_weight": 13.834,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.382,
@@ -182,7 +182,7 @@
         {
             "day": 365,
             "pool_size": 50,
-            "top10_weight": 13.4569,
+            "top10_weight": 13.6969,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.95,

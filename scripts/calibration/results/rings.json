@@ -100,7 +100,6 @@
                         },
                         "recognizers_at_180": 2,
                         "journeyman_blocking_at_180": [
-                            "helping_min",
                             "recognizers"
                         ]
                     },
@@ -119,7 +118,6 @@
                         "recognizers_at_180": 2,
                         "journeyman_blocking_at_180": [
                             "total",
-                            "helping_min",
                             "recognizers"
                         ]
                     },
@@ -137,7 +135,6 @@
                         },
                         "recognizers_at_180": 2,
                         "journeyman_blocking_at_180": [
-                            "helping_min",
                             "recognizers"
                         ]
                     }
@@ -251,7 +248,7 @@
                 "members": [
                     {
                         "member": 1,
-                        "journeyman_first_hold_day": 80,
+                        "journeyman_first_hold_day": 69,
                         "veteran_first_hold_day": null,
                         "total_at_180": 51.5,
                         "categories_at_180": {
@@ -266,7 +263,7 @@
                     },
                     {
                         "member": 2,
-                        "journeyman_first_hold_day": 72,
+                        "journeyman_first_hold_day": 59,
                         "veteran_first_hold_day": null,
                         "total_at_180": 50.5,
                         "categories_at_180": {
@@ -281,7 +278,7 @@
                     },
                     {
                         "member": 3,
-                        "journeyman_first_hold_day": 51,
+                        "journeyman_first_hold_day": 46,
                         "veteran_first_hold_day": null,
                         "total_at_180": 51.5,
                         "categories_at_180": {
@@ -296,7 +293,7 @@
                     },
                     {
                         "member": 4,
-                        "journeyman_first_hold_day": 65,
+                        "journeyman_first_hold_day": 59,
                         "veteran_first_hold_day": null,
                         "total_at_180": 53.0,
                         "categories_at_180": {
@@ -311,7 +308,7 @@
                     },
                     {
                         "member": 5,
-                        "journeyman_first_hold_day": 61,
+                        "journeyman_first_hold_day": 59,
                         "veteran_first_hold_day": null,
                         "total_at_180": 51.5,
                         "categories_at_180": {
@@ -326,7 +323,7 @@
                     }
                 ],
                 "journeyman_blocked_for_all": false,
-                "earliest_journeyman_day": 51
+                "earliest_journeyman_day": 46
             }
         },
         "R10": {
@@ -699,7 +696,7 @@
         "suspected_r5_r10_report": {
             "target": "INFO: SUSPECTED R=5 / R=10 outcomes reported honestly (caps alone may not block)",
             "actual": {
-                "R5_earliest_journeyman": 51,
+                "R5_earliest_journeyman": 46,
                 "R10_earliest_journeyman": 45
             },
             "pass": null
