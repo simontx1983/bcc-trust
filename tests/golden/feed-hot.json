@@ -31,6 +31,10 @@
         "self": "/u/phillip-bcc/post/SEIeZorK"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -89,6 +93,10 @@
         "self": "/u/phillip-bcc/post/atXSmIgZ"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -144,6 +152,10 @@
         "self": "/u/phillip-bcc/post/tucxjSUz"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -197,6 +209,10 @@
         "self": "/u/phillip-bcc/post/DKiBGLpE"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -252,6 +268,10 @@
         "self": "/u/smokea4ic74l/post/fkBhndQo"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -300,6 +320,10 @@
         "self": "/u/smokea4ic74l/post/nBnLvTPk"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -352,6 +376,10 @@
         "self": "/u/smokeb4ic74l/post/HkVCrexh"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -404,6 +432,10 @@
         "self": "/u/smokeb4ic74l/post/NfXPqKzD"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -456,6 +488,10 @@
         "self": "/u/smokeb4ic74l/post/aRLRUJzU"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -518,6 +554,10 @@
         "self": "/u/smokeb9suc8u/post/wdUHIcYx"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -588,6 +628,10 @@
         "self": "/u/claudeai/post/vSQAWzIp"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -666,6 +710,10 @@
         "self": "/u/claudeai/post/rxzpoQbb"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -726,6 +774,10 @@
         "self": "/u/claudeai/post/mBWnFyfE"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -779,6 +831,10 @@
         "self": "/u/1234/post/bCpcWwGi"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -832,6 +888,10 @@
         "self": "/u/1234/post/jnaQFQtw"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -885,6 +945,10 @@
         "self": "/u/claudeai/post/OmeUhsZU"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -938,6 +1002,10 @@
         "self": "/u/claudeai/post/Aobalmeh"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -1011,6 +1079,10 @@
         "self": "/u/claudeai/post/zlOmUZbH"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -1074,6 +1146,10 @@
         "self": "/u/claudeai/post/ntPhabuY"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."
@@ -1137,6 +1213,10 @@
         "self": "/u/claudeai/post/wpmIzebo"
       },
       "permissions": {
+        "can_delete": {
+          "allowed": false,
+          "unlock_hint": null
+        },
         "can_report": {
           "allowed": false,
           "unlock_hint": "Sign in to report."

@@ -337,26 +337,6 @@
   "shift_log": {
     "days": [
       {
-        "date": "2025-08-02",
-        "level": 0,
-        "tooltip": "Aug 2 · no activity"
-      },
-      {
-        "date": "2025-08-03",
-        "level": 0,
-        "tooltip": "Aug 3 · no activity"
-      },
-      {
-        "date": "2025-08-04",
-        "level": 0,
-        "tooltip": "Aug 4 · no activity"
-      },
-      {
-        "date": "2025-08-05",
-        "level": 0,
-        "tooltip": "Aug 5 · no activity"
-      },
-      {
         "date": "2025-08-06",
         "level": 0,
         "tooltip": "Aug 6 · no activity"
@@ -2155,6 +2135,26 @@
         "date": "2026-07-31",
         "level": 0,
         "tooltip": "Jul 31 · no activity"
+      },
+      {
+        "date": "2026-08-01",
+        "level": 0,
+        "tooltip": "Aug 1 · no activity"
+      },
+      {
+        "date": "2026-08-02",
+        "level": 0,
+        "tooltip": "Aug 2 · no activity"
+      },
+      {
+        "date": "2026-08-03",
+        "level": 0,
+        "tooltip": "Aug 3 · no activity"
+      },
+      {
+        "date": "2026-08-04",
+        "level": 0,
+        "tooltip": "Aug 4 · no activity"
       }
     ],
     "month_ticks": [
@@ -2163,8 +2163,8 @@
       "Oct",
       "Nov",
       "Dec",
-      "Dec",
       "Jan",
+      "Feb",
       "Mar",
       "Apr",
       "May",
