@@ -19,28 +19,6 @@ if (!defined('ABSPATH')) {
  */
 final class DTOAssert extends \BCC\Core\DTO\DTOAssert
 {
-    /**
-     * Cross-field invariant: total votes (accepts + rejects) cannot exceed
-     * panel size. Centralised so the trust-critical "cannot have more votes
-     * than panelists" rule has one source of truth across every DTO that
-     * carries the panel tally.
-     *
-     * Self-sufficient by design: it delegates to positiveInt/nonNegativeInt
-     * for the component-level checks so the invariant can be invoked in
-     * isolation without prior validation. DTO constructors typically still
-     * call those helpers first for focused per-field error messages — the
-     * internal delegation here acts as a safety net for any caller that
-     * skips that setup.
-     */
-    public static function panelTally(int $accepts, int $rejects, int $size, string $dto): void
-    {
-        self::positiveInt($size,       $dto, 'panel_size');
-        self::nonNegativeInt($accepts, $dto, 'panel_accepts');
-        self::nonNegativeInt($rejects, $dto, 'panel_rejects');
-        if ($accepts + $rejects > $size) {
-            throw new \LogicException(
-                "{$dto}: panel tally must satisfy accepts+rejects ≤ size (got {$accepts}+{$rejects} > {$size})"
-            );
-        }
-    }
+    // panelTally() retired with the five-member panel (Rank Phase 6
+    // Wave 3, D-7) — dispute-vote invariants live on the poll engine.
 }

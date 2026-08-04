@@ -85,7 +85,7 @@ final class PushPayload
             $body = match ($outcome) {
                 'accepted'           => 'Your dispute was accepted — the vote was removed.',
                 'rejected'           => 'Your dispute was reviewed; the vote stands.',
-                'timeout_no_quorum'  => 'Your dispute couldn\'t be decided — not enough panel votes.',
+                'timeout_no_quorum'  => 'Your dispute couldn\'t be decided — not enough community votes.',
                 default              => 'A dispute you reported was resolved.',
             };
         }
@@ -360,32 +360,8 @@ final class PushPayload
         ];
     }
 
-    /**
-     * @param array<string, mixed> $first
-     * @return array{title: string, body: string, url: string, tag?: string}
-     */
-    public static function forPanelistSelected(int $count, array $first): array
-    {
-        $disputeId = self::intFrom($first, 'dispute_id');
-        $pageName  = self::stringFrom($first, 'page_name');
-
-        $title = 'Panel duty';
-        $body  = $count > 1
-            ? sprintf('You\'ve been selected to review %d disputes.', $count)
-            : ($pageName !== ''
-                ? sprintf('You\'ve been selected to review a dispute about %s.', $pageName)
-                : 'You\'ve been selected to review a new dispute.');
-
-        return [
-            'title' => $title,
-            'body'  => $body,
-            'url'   => $count > 1
-                ? '/disputes/panel'
-                : ($disputeId > 0
-                    ? sprintf('/disputes/%d', $disputeId)
-                    : '/disputes/panel'),
-        ];
-    }
+    // forPanelistSelected() deleted (Rank Phase 6, D-7): panelist
+    // selection retired with the panel; no push type fires for it.
 
     /**
      * Holder-community go-live. Fired once per waitlisted-and-qualified

@@ -110,7 +110,6 @@ namespace BCC\Trust\Disputes\Repositories {
                 'race'          => false,
             ];
 
-            public static bool $quorumMet    = true;
             public static bool $setAdjResult = true;
             public static string $adjStatus  = 'completed';
             public static bool $commitResult = true;
@@ -140,12 +139,6 @@ namespace BCC\Trust\Disputes\Repositories {
                 self::$calls[] = ['invalidateDispute', $disputeId];
             }
 
-            public static function wasQuorumMetForDispute(int $disputeId): bool
-            {
-                self::$calls[] = ['wasQuorumMetForDispute', $disputeId];
-                return self::$quorumMet;
-            }
-
             public static function setAdjudicationStatus(int $disputeId, string $status): bool
             {
                 self::$calls[] = ['setAdjudicationStatus', $disputeId, $status];
@@ -167,7 +160,6 @@ namespace BCC\Trust\Disputes\Repositories {
                     'db_error'      => null,
                     'race'          => false,
                 ];
-                self::$quorumMet    = true;
                 self::$setAdjResult = true;
                 self::$adjStatus    = 'completed';
                 self::$commitResult = true;
@@ -175,29 +167,8 @@ namespace BCC\Trust\Disputes\Repositories {
         }
     }
 
-    // §D5 outcome-match backfill collaborator. Added to DisputeResolver::handle()
-    // after this test was written; the real repo reaches TableRegistry + $wpdb,
-    // which a pure unit test must not touch — so stub it like the rest.
-    if (!class_exists(__NAMESPACE__ . '\\DisputeParticipationRepository', false)) {
-        final class DisputeParticipationRepository
-        {
-            /** @var list<array{0:int,1:string}> */
-            public static array $calls = [];
-            public static int $backfillResult = 0;
-
-            public function backfillOutcomeMatch(int $disputeId, string $finalDecision): int
-            {
-                self::$calls[] = [$disputeId, $finalDecision];
-                return self::$backfillResult;
-            }
-
-            public static function reset(): void
-            {
-                self::$calls          = [];
-                self::$backfillResult = 0;
-            }
-        }
-    }
+    // The §D5 DisputeParticipationRepository stub was deleted with the
+    // backfill call it collaborated on (Rank Phase 6, D-7).
 }
 
 // ── Disputes\Services\DisputeNotificationService ───────────────────────────

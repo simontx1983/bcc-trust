@@ -10,6 +10,11 @@
  *     write_review  → rank_state row (Apprentice+; New Members denied)
  *                     AND Trust Neutral+ (CapabilityResolver::
  *                     writeReviewGate — Journeyman never required, §20.1)
+ *     cast_dispute_vote → same Apprentice+ AND Neutral+ policy shape
+ *                     (Rank Phase 6 Wave 3 — the panel is retired; the
+ *                     live gate, DisputeVoteService, additionally
+ *                     enforces §18 party exclusion + fraud hard-block
+ *                     per dispute)
  *     vouch         → AttestationService::checkCastEligibility (carries
  *                     the New-Member exclusion + tier ≥ Neutral +
  *                     fraud-clear + self-target)
@@ -27,13 +32,7 @@
  *   FUTURE — no such feature exists yet; fail-closed DENY:
  *     create_community, transfer_community, receive_community,
  *     post_ranked_hall_feed, list_as_mentor,
- *     receive_rank_vote_multiplier, cast_dispute_vote
- *
- * KNOWN DIVERGENCE (documented, expected): `cast_dispute_vote` reports
- * DENY while the legacy fixed-panel vote route (POST /disputes/{id}/vote)
- * is still live — the approved plan retires the panel in Phase 6; the
- * resolver models the POST-retirement world. The resolver is not
- * consulted on that route, so nothing logs.
+ *     receive_rank_vote_multiplier
  *
  * Key names are implementation choices, not contract fields (§25).
  *

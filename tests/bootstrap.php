@@ -27,15 +27,4 @@ if (!defined('ABSPATH')) {
 // per-test mirrors become no-ops against the real values.
 require_once dirname(__DIR__) . '/includes/config.php';
 
-// Dispute constants live in bcc-trust.php (the plugin main file), which unit
-// tests cannot require without booting the whole plugin — mirror them
-// guarded. Production owner: bcc-trust.php. Remove these when the constants
-// move into includes/config/.
-if (!defined('BCC_DISPUTES_PANEL_SIZE')) {
-    define('BCC_DISPUTES_PANEL_SIZE', 5);
-}
-if (!defined('BCC_DISPUTES_TTL_DAYS')) {
-    define('BCC_DISPUTES_TTL_DAYS', 7);
-}
-
 require_once __DIR__ . '/../vendor/autoload.php';

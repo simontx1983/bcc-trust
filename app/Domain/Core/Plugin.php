@@ -584,6 +584,31 @@ final class Plugin
         );
     }
 
+    // ── Rank domain (redesign Phase 6 meaningful voting) ─────────────
+
+    private ?\BCC\Trust\Rank\Repositories\PollRepository $pollRepository = null;
+    public function pollRepository(): \BCC\Trust\Rank\Repositories\PollRepository
+    {
+        return $this->pollRepository ??= new \BCC\Trust\Rank\Repositories\PollRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Repositories\BallotRepository $ballotRepository = null;
+    public function ballotRepository(): \BCC\Trust\Rank\Repositories\BallotRepository
+    {
+        return $this->ballotRepository ??= new \BCC\Trust\Rank\Repositories\BallotRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Services\PollService $pollService = null;
+    public function pollService(): \BCC\Trust\Rank\Services\PollService
+    {
+        return $this->pollService ??= new \BCC\Trust\Rank\Services\PollService(
+            $this->pollRepository(),
+            $this->ballotRepository(),
+            $this->clusterFindingsRepository(),
+            $this->rankScoringConfig()
+        );
+    }
+
     // ── §I1 notifications ────────────────────────────────────────────
 
     private ?Repositories\NotificationRepository $notificationRepository = null;
@@ -754,7 +779,6 @@ final class Plugin
             $this->rankStateService(),
             $this->livingService(),
             $this->peepSoReactionRepository(),
-            \BCC\Trust\Disputes\DisputesPlugin::instance()->disputeParticipationRepository(),
             $this->attestationService()
         );
     }

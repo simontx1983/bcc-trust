@@ -25,8 +25,8 @@ final class PageScoreContributionTest extends TestCase
         self::assertSame(50.0, TrustScoreService::compute(0.0, 0.0, 0.0));
         // The new term lifts the score…
         self::assertSame(58.0, TrustScoreService::compute(0.0, 0.0, 0.0, 8.0));
-        // …alongside votes + the other bonuses…
-        self::assertSame(78.0, TrustScoreService::compute(10.0, 0.0, 0.0, 8.0));
+        // …alongside votes + the other bonuses (10 net weight × 0.6 scale)…
+        self::assertSame(64.0, TrustScoreService::compute(10.0, 0.0, 0.0, 8.0));
         // …and is still clamped to [0, 100].
         self::assertSame(100.0, TrustScoreService::compute(0.0, 0.0, 0.0, 200.0));
     }
@@ -40,8 +40,8 @@ final class PageScoreContributionTest extends TestCase
     {
         // penalty_adjustment is negative (dispute/admin penalties subtract).
         self::assertSame(45.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, -5.0));
-        // Stacks with votes + the other terms…
-        self::assertSame(73.0, TrustScoreService::compute(10.0, 0.0, 0.0, 8.0, -5.0));
+        // Stacks with votes + the other terms (10 × 0.6 + 8 − 5)…
+        self::assertSame(59.0, TrustScoreService::compute(10.0, 0.0, 0.0, 8.0, -5.0));
         // …and is still clamped to [0, 100] (a big penalty floors at 0).
         self::assertSame(0.0, TrustScoreService::compute(0.0, 0.0, 0.0, 0.0, -200.0));
         // Default 0 leaves the formula unchanged (entity pages never penalised).
@@ -89,11 +89,11 @@ final class PageScoreContributionTest extends TestCase
 
     public function testPageScoreCarriesContributionAndPassesTheFormulaCheck(): void
     {
-        // total 78 = 50 + (10-0)*2 + 0 + 8(contribution) — must validate.
+        // total 64 = 50 + (10-0)×0.6 + 0 + 8(contribution) — must validate.
         $score = new PageScore(
             1_000_000_005, // a self-page id (member 5)
             5,
-            78.0,          // total_score
+            64.0,          // total_score
             10.0,          // positive
             0.0,           // negative
             1,             // vote_count
@@ -109,16 +109,16 @@ final class PageScoreContributionTest extends TestCase
         );
 
         self::assertSame(8.0, $score->getContributionBonus());
-        self::assertSame(78.0, $score->getTotalScore());
+        self::assertSame(64.0, $score->getTotalScore());
     }
 
     public function testPageScoreRejectsTotalThatIgnoresContribution(): void
     {
-        // total 70 ignores the +8 contribution (expected 78) — beyond tolerance,
+        // total 56 ignores the +8 contribution (expected 64) — beyond tolerance,
         // so the VO's formula check rejects it.
         $this->expectException(\InvalidArgumentException::class);
         new PageScore(
-            1_000_000_005, 5, 70.0, 10.0, 0.0, 1, 1, 0.0, 'neutral',
+            1_000_000_005, 5, 56.0, 10.0, 0.0, 1, 1, 0.0, 'neutral',
             0, null, null, null, 0.0, 8.0
         );
     }

@@ -2,9 +2,10 @@
 /**
  * Quest Progress Service
  *
- * Tracks quest completion and computes the quest multiplier for a user.
- * The multiplier is derived (not stored) from completed quests in the
- * bcc_trust_quest_log table, cached in WordPress object cache.
+ * Tracks quest completion in the bcc_trust_quest_log table, cached in
+ * WordPress object cache. Quests are onboarding guidance / achievements
+ * only (D-1, Rank Phase 6) — completion grants no vote, Trust, or Rank
+ * power.
  *
  * Completion signals arrive via action hooks from any plugin:
  *   do_action('bcc_trust_quest_signal', $userId, 'connect_wallet');
@@ -52,13 +53,11 @@ class QuestProgressService {
              *
              * @param int    $userId     The user who completed the quest.
              * @param string $slug       The quest slug.
-             * @param float  $multiplier The user's new quest multiplier.
              */
             do_action(
                 'bcc_trust_quest_completed',
                 $userId,
-                $slug,
-                $this->getMultiplier($userId)
+                $slug
             );
         }
 
@@ -84,36 +83,6 @@ class QuestProgressService {
     }
 
     /**
-     * Get the quest multiplier for a user.
-     *
-     * multiplier = 1.0 + sum(bonus for each completed quest)
-     * Cached in object cache for BCC_QUEST_CACHE_TTL seconds.
-     *
-     * @return float Between BCC_QUEST_MULTIPLIER_BASE (1.0) and BCC_QUEST_MULTIPLIER_MAX (1.30).
-     */
-    public function getMultiplier(int $userId): float {
-        $cacheKey = "quest_mult_" . BCC_QUEST_CACHE_VER . "_{$userId}";
-        $cached   = wp_cache_get($cacheKey, BCC_QUEST_CACHE_GROUP);
-
-        if ($cached !== false) {
-            return (float) $cached;
-        }
-
-        $completed  = $this->getCompletedSlugs($userId);
-        $multiplier = BCC_QUEST_MULTIPLIER_BASE;
-
-        foreach ($completed as $slug) {
-            $multiplier += QuestRegistry::bonusFor($slug);
-        }
-
-        $multiplier = min($multiplier, BCC_QUEST_MULTIPLIER_MAX);
-
-        wp_cache_set($cacheKey, $multiplier, BCC_QUEST_CACHE_GROUP, BCC_QUEST_CACHE_TTL);
-
-        return $multiplier;
-    }
-
-    /**
      * Check if a user can endorse.
      *
      * Requires exactly ONE identity proof — any of:
@@ -122,10 +91,10 @@ class QuestProgressService {
      *   - Verified GitHub
      *   - Verified X
      *
-     * The quest system is a progression reward (vote weight multiplier),
-     * not an endorsement gate. The endorsement gate only needs proof
-     * you're a real person. The account age gate (7 days) in
-     * EndorsementService provides the Sybil time-delay.
+     * The quest system is onboarding guidance, not an endorsement gate.
+     * The endorsement gate only needs proof you're a real person. The
+     * account age gate (7 days) in EndorsementService provides the
+     * Sybil time-delay.
      */
     public function canEndorse(int $userId): bool {
         $progress = $this->getEndorseProgress($userId);
@@ -162,8 +131,7 @@ class QuestProgressService {
      * Get full progress for a user (used by REST endpoint / frontend).
      *
      * @return array{
-     *     quests: array<string, array{label: string, hint: string, done: bool, completed_at: ?string, weight_bonus: float, unlocks: string[], category: string}>,
-     *     multiplier: float,
+     *     quests: array<string, array{label: string, hint: string, done: bool, completed_at: ?string, unlocks: string[], category: string}>,
      *     completed_count: int,
      *     total_count: int,
      *     pct: int
@@ -175,13 +143,11 @@ class QuestProgressService {
 
         $quests         = [];
         $completedCount = 0;
-        $bonusSum       = 0.0;
 
         foreach ($allQuests as $slug => $quest) {
             $done = isset($completedMap[$slug]);
             if ($done) {
                 $completedCount++;
-                $bonusSum += $quest['weight_bonus'];
             }
 
             $quests[$slug] = [
@@ -189,18 +155,15 @@ class QuestProgressService {
                 'hint'         => $quest['hint'],
                 'done'         => $done,
                 'completed_at' => $completedMap[$slug] ?? null,
-                'weight_bonus' => $quest['weight_bonus'],
                 'unlocks'      => $quest['unlocks'],
                 'category'     => $quest['category'],
             ];
         }
 
-        $total      = count($allQuests);
-        $multiplier = min(BCC_QUEST_MULTIPLIER_BASE + $bonusSum, BCC_QUEST_MULTIPLIER_MAX);
+        $total = count($allQuests);
 
         return [
             'quests'          => $quests,
-            'multiplier'      => $multiplier,
             'completed_count' => $completedCount,
             'total_count'     => $total,
             'pct'             => $total > 0 ? (int) round(($completedCount / $total) * 100) : 0,
@@ -240,7 +203,6 @@ class QuestProgressService {
      * Invalidate all cached quest data for a user.
      */
     public function invalidateCache(int $userId): void {
-        wp_cache_delete("quest_mult_" . BCC_QUEST_CACHE_VER . "_{$userId}", BCC_QUEST_CACHE_GROUP);
         wp_cache_delete("quest_map_" . BCC_QUEST_CACHE_VER . "_{$userId}", BCC_QUEST_CACHE_GROUP);
     }
 

@@ -27,10 +27,23 @@ final class DisputesPlugin
         return self::$instance;
     }
 
-    private ?\BCC\Trust\Disputes\Repositories\DisputeParticipationRepository $disputeParticipationRepository = null;
-    public function disputeParticipationRepository(): \BCC\Trust\Disputes\Repositories\DisputeParticipationRepository
+    private ?\BCC\Trust\Disputes\Services\DisputeVoteService $disputeVoteService = null;
+
+    /**
+     * Rank Phase 6 Wave 3 — the dispute layer over the generic poll
+     * engine. Engine collaborators come from the Core container (the
+     * poll engine lives in the Rank domain).
+     */
+    public function disputeVoteService(): \BCC\Trust\Disputes\Services\DisputeVoteService
     {
-        return $this->disputeParticipationRepository
-            ??= new \BCC\Trust\Disputes\Repositories\DisputeParticipationRepository();
+        if ($this->disputeVoteService === null) {
+            $core = \BCC\Trust\Core\Plugin::instance();
+            $this->disputeVoteService = new \BCC\Trust\Disputes\Services\DisputeVoteService(
+                $core->pollService(),
+                $core->pollRepository(),
+                $core->rankScoringConfig()
+            );
+        }
+        return $this->disputeVoteService;
     }
 }

@@ -60,6 +60,8 @@ return [
         // Rank domain (redesign Phase 5 cutover)
         'bcc_rank_confirmation_sweep'           => ['interval' => 'bcc_five_minutes',             'description' => '24h Apprentice confirmation resolver (R1 predicate)'],
         'bcc_rank_daily_evaluate'               => ['interval' => 'daily',                        'description' => 'rank promotion/demotion evaluate over ranked members'],
+        // Rank domain (redesign Phase 6 meaningful voting)
+        'bcc_rank_poll_close_sweep'             => ['interval' => 'hourly',                       'description' => 'meaningful-vote poll close sweep (quorum/majority evaluation + day-90 inconclusive)'],
     ],
 
     // Fire-once / retired / legacy hooks — cleared on deactivate/uninstall

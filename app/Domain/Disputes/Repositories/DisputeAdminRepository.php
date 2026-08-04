@@ -39,7 +39,6 @@ class DisputeAdminRepository
         $row = $wpdb->get_row($wpdb->prepare(
             "SELECT d.id, d.vote_id, d.page_id, d.reporter_id, d.voter_id,
                     d.reason, d.evidence_url, d.status,
-                    d.panel_accepts, d.panel_rejects, d.panel_size,
                     d.created_at, d.resolved_at,
                     p.post_title   AS page_title,
                     reporter.display_name AS reporter_name,
@@ -132,7 +131,6 @@ class DisputeAdminRepository
 
         $sql = "SELECT d.id, d.vote_id, d.page_id, d.reporter_id, d.voter_id,
                        d.reason, d.status,
-                       d.panel_accepts, d.panel_rejects, d.panel_size,
                        d.created_at, d.resolved_at,
                        p.post_title   AS page_title,
                        reporter.display_name AS reporter_name,
@@ -167,9 +165,6 @@ class DisputeAdminRepository
                     voter_id:      RowAssert::requireDigitInt($row, 'voter_id'),
                     reason:        RowAssert::requireString($row, 'reason'),
                     status:        DisputeStatus::assert(RowAssert::requireString($row, 'status')),
-                    panel_accepts: RowAssert::requireDigitInt($row, 'panel_accepts'),
-                    panel_rejects: RowAssert::requireDigitInt($row, 'panel_rejects'),
-                    panel_size:    RowAssert::requireDigitInt($row, 'panel_size'),
                     created_at:    RowAssert::requireString($row, 'created_at'),
                     resolved_at:   RowAssert::optString($row, 'resolved_at'),
                     page_title:    RowAssert::optString($row, 'page_title'),

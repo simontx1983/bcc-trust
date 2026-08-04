@@ -57,6 +57,12 @@ class CapabilityResolver
 
         switch ($key) {
             case CapabilityCatalog::WRITE_REVIEW:
+            case CapabilityCatalog::CAST_DISPUTE_VOTE:
+                // Same Phase 5 final policy shape for both write actions:
+                // Apprentice+ (rank_state row) AND Trust Neutral+. The
+                // dispute-vote live gate (DisputeVoteService) additionally
+                // enforces §18 party exclusion + fraud hard-block per
+                // dispute — this key answers the feature-level question.
                 return $this->writeReviewGate($userId)
                     ? CapabilityDecision::allowed('feature_access')
                     : CapabilityDecision::denied('feature_gate', 'feature_access');
@@ -75,9 +81,7 @@ class CapabilityResolver
                 return CapabilityDecision::unknown('deferred_to_live_gate', 'live_gate');
 
             default:
-                // FUTURE keys (incl. cast_dispute_vote — known documented
-                // divergence vs the legacy panel route until Phase 6
-                // retires it; see CapabilityCatalog header).
+                // FUTURE keys — no such feature exists yet; fail closed.
                 return CapabilityDecision::denied('feature_not_built', 'future');
         }
     }

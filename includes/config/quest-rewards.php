@@ -10,24 +10,10 @@
  */
 if (!defined('ABSPATH')) exit;
 
-// ======================================================
-// QUEST WEIGHT BONUSES
-// Each quest adds this value to the quest multiplier.
-// Total max bonus = sum of all = 0.30 → max multiplier = 1.30
-// ======================================================
-define('BCC_QUEST_BONUS_CONNECT_WALLET',   0.08);
-define('BCC_QUEST_BONUS_VERIFY_GITHUB',    0.07);
-define('BCC_QUEST_BONUS_VERIFY_X',         0.05);
-define('BCC_QUEST_BONUS_SHARE_X',          0.02);
-define('BCC_QUEST_BONUS_COMPLETE_PROFILE', 0.03);
-define('BCC_QUEST_BONUS_FIRST_VOTE',       0.03);
-define('BCC_QUEST_BONUS_EXPLORE_PROJECTS', 0.02);
-
-// ======================================================
-// QUEST MULTIPLIER BOUNDS
-// ======================================================
-define('BCC_QUEST_MULTIPLIER_BASE', 1.0);   // No quests completed
-define('BCC_QUEST_MULTIPLIER_MAX',  1.30);   // All quests completed
+// Quest WEIGHT BONUSES + MULTIPLIER BOUNDS retired (Rank Phase 6,
+// decision D-1): quests grant NO vote, Trust, or Rank power — they
+// remain onboarding guidance / achievements only. The §16.6 formula
+// (maturity × rank × trust × fraud) has no quest term.
 
 // ======================================================
 // QUEST CACHE

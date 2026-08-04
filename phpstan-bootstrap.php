@@ -37,8 +37,6 @@ if (!defined('BCC_ONCHAIN_CACHE_HOURS'))        { define('BCC_ONCHAIN_CACHE_HOUR
 if (!defined('BCC_ONCHAIN_MAX_TOTAL_BONUS'))    { define('BCC_ONCHAIN_MAX_TOTAL_BONUS',    20); }
 
 // Disputes domain limits.
-if (!defined('BCC_DISPUTES_PANEL_SIZE'))          { define('BCC_DISPUTES_PANEL_SIZE',          5); }
-if (!defined('BCC_DISPUTES_TTL_DAYS'))            { define('BCC_DISPUTES_TTL_DAYS',            7); }
 if (!defined('BCC_DISPUTES_MAX_PER_PAGE'))        { define('BCC_DISPUTES_MAX_PER_PAGE',        3); }
 if (!defined('BCC_DISPUTES_REPORTER_MAX_ACTIVE')) { define('BCC_DISPUTES_REPORTER_MAX_ACTIVE', 5); }
 if (!defined('BCC_DISPUTES_MIN_REASON_LENGTH'))   { define('BCC_DISPUTES_MIN_REASON_LENGTH',   20); }

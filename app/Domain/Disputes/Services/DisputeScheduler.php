@@ -4,8 +4,8 @@ namespace BCC\Trust\Disputes\Services;
 
 use BCC\Core\Contracts\DisputeAdjudicationInterface;
 use BCC\Core\ServiceLocator;
+use BCC\Trust\Disputes\DisputesPlugin;
 use BCC\Trust\Disputes\Services\DisputeResolver;
-use BCC\Trust\Disputes\Repositories\DisputePanelRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Disputes\Repositories\UserReportRepository;
 use BCC\Core\Log\Logger as CoreLogger;
@@ -164,9 +164,11 @@ class DisputeScheduler
     }
 
     /**
-     * Auto-resolve disputes that have been open longer than BCC_DISPUTES_TTL_DAYS.
-     * Outcome is determined by whichever side has more votes; ties go to 'rejected'
-     * (benefit of the doubt to the voter).
+     * Daily backstop for the poll→dispute seam (Rank Phase 6): for every
+     * dispute stuck in 'reviewing' past the grace period, reconcile it
+     * against its poll — self-heal a missing poll, skip an open one
+     * (the hourly engine sweep owns closing), re-drive the outcome of a
+     * closed one whose close hook or async job was lost.
      */
     public static function auto_resolve_expired(): void
     {
@@ -210,50 +212,20 @@ class DisputeScheduler
 
     private static function doAutoResolve(): void
     {
-        $cutoff  = gmdate('Y-m-d H:i:s', time() - (BCC_DISPUTES_TTL_DAYS * DAY_IN_SECONDS));
-        $expired = DisputeRepository::getExpiredDisputes($cutoff, 50);
+        // One-hour grace: long enough that the submit-time poll open and
+        // the poll-close hook have clearly had their chance; the sweep
+        // only acts on missing/closed polls, so open polls are untouched
+        // regardless of dispute age.
+        $cutoff     = gmdate('Y-m-d H:i:s', time() - HOUR_IN_SECONDS);
+        $candidates = DisputeRepository::listReviewingCreatedBefore($cutoff, 50);
 
-        if (empty($expired)) {
+        if (empty($candidates)) {
             return;
         }
 
-        // Dispatch each resolution as an async action instead of resolving
-        // synchronously in a loop. Each resolve() triggers a DB transaction +
-        // trust-engine adjudication — blocking the cron with 50 sequential
-        // transactions causes timeouts at scale.
-        foreach ($expired as $dispute) {
-            $verdict = DisputeRepository::computeVerdict(
-                (int) $dispute->panel_accepts,
-                (int) $dispute->panel_rejects,
-                (int) $dispute->panel_size
-            );
-
-            $args = [
-                (int) $dispute->id,
-                (int) $dispute->vote_id,
-                (int) $dispute->page_id,
-                (int) $dispute->voter_id,
-                (int) $dispute->reporter_id,
-                $verdict['outcome'],
-            ];
-
-
-            $enqueued = false;
-            try {
-                $enqueued = DisputeNotificationService::enqueueAsync('bcc_disputes_async_resolve', $args);
-            } catch (\Throwable $e) {
-                CoreLogger::error('[bcc-disputes] auto_resolve_enqueue_failed', [
-                    'dispute_id' => (int) $dispute->id,
-                    'error'      => $e->getMessage(),
-                ]);
-            }
-            if (!$enqueued) {
-                // Next auto_resolve tick (24h) or reconcile tick will re-pick
-                // this dispute since status still 'reviewing'.
-                CoreLogger::error('[bcc-disputes] auto_resolve_enqueue_soft_failed', [
-                    'dispute_id' => (int) $dispute->id,
-                ]);
-            }
+        $voteService = DisputesPlugin::instance()->disputeVoteService();
+        foreach ($candidates as $dispute) {
+            $voteService->reconcileReviewingDispute((int) $dispute->id);
         }
     }
 
@@ -296,42 +268,28 @@ class DisputeScheduler
     {
         // PHASE -1: Release stuck claim-before-send markers.
         //
-        // The four notification paths (panelist, reporter-result,
-        // reported-user, admin-report) all use the same "set notified_at
-        // before wp_mail; clear on failure via try/finally" pattern.  The
+        // The three notification paths (reporter-result, reported-user,
+        // admin-report) all use the same "set notified_at before
+        // wp_mail; clear on failure via try/finally" pattern.  The
         // finally does NOT run if the worker dies mid-send (OOM-killer,
         // Action Scheduler SIGKILL at timeout, memory_limit fatal inside
         // a wp_mail hook), leaving a timestamp set that LOOKS like a
-        // confirmed delivery — invisible to the Phase 0 / Phase 0.5
-        // sweeps which only pick up rows where the marker is NULL.
+        // confirmed delivery — invisible to the Phase 0.5 sweep which
+        // only picks up rows where the marker is NULL.
         //
         // This phase clears markers older than $stuckClaimCutoff so the
         // later sweeps can re-enqueue.  Tradeoff: if the original send
         // DID go through but the worker died before clearing state, the
         // recipient will be double-emailed — an acceptable price for not
-        // silently dropping panelist assignments indefinitely.
+        // silently dropping resolution notices indefinitely.
         self::releaseStuckClaims();
 
-        // PHASE 0: Re-enqueue panelist notifications that were never sent.
-        // Covers silent enqueue failures (AS returned 0, wp_schedule_single_event
-        // returned false) AND wp_mail delivery failures. notified_at is the
-        // claim-before-send marker — notifyPanelist flips it from NULL → now
-        // before calling wp_mail and clears it back to NULL on send failure,
-        // so this sweep re-selects the row if (and only if) no worker is
-        // currently inside the send window with the claim held.
-        self::reconcilePendingPanelistNotifications();
-
         // PHASE 0.5: Re-enqueue reporter-result emails that were never sent.
-        // Covers the same failure modes as PHASE 0, for the "dispute resolved"
-        // email to the reporter. resolved_notified_at is the claim-before-send
-        // marker — see PHASE 0 comment.
+        // Covers silent enqueue failures (AS returned 0,
+        // wp_schedule_single_event returned false) AND wp_mail delivery
+        // failures, for the "dispute resolved" email to the reporter.
+        // resolved_notified_at is the claim-before-send marker.
         self::reconcilePendingReporterResultEmails();
-
-        // PHASE A: Retry stuck "reviewing" disputes where all votes are in
-        // but resolution failed (trust engine was unavailable at resolution time).
-        // These are invisible to the orphan query (which only looks for
-        // accepted/rejected status), so they'd wait 7 days for auto-resolve.
-        self::retryStuckReviewingDisputes();
 
         // PHASE A.5: Alert admins if adjudication has been unavailable for >1 hour.
         self::checkAdjudicationHealth();
@@ -343,7 +301,7 @@ class DisputeScheduler
             return;
         }
 
-        // Trust-adjudicator presence gate — mirrors emergencyResolveIfStale.
+        // Trust-adjudicator presence gate.
         // Without this, calls to executeAdjudication() below fall through to
         // the NullObject whose accept/reject methods return false, which
         // trips markAdjudicationFailedAndBumpReopen() and chews through the
@@ -368,13 +326,13 @@ class DisputeScheduler
                 'reopen_count' => $dispute->reopen_count,
             ]);
 
-            // Compute quorum ONCE; stable for the rest of this iteration because
-            // status is already out of 'reviewing' (reconciliation only picks up
-            // accepted/rejected orphans). For 'accepted' quorum is met by
-            // definition; for 'rejected' we check the panel tally.
-            $quorumMet = ($dispute->status === 'accepted')
-                ? true
-                : DisputeRepository::wasQuorumMetForDispute($disputeId);
+            // Orphans are accepted/rejected only — both are decisive
+            // outcomes (a poll close that met quorum+majority, or an
+            // explicit admin decision), so the reporter-penalty gate is
+            // always armed here. timeout_no_quorum never reaches this
+            // path (its executeAdjudication early-return marks it
+            // completed on the spot).
+            $quorumMet = true;
 
             try {
                 $success = $resolver->executeAdjudication(
@@ -416,36 +374,8 @@ class DisputeScheduler
                     continue;
                 }
 
-                // §D5 — backfill outcome_match on the credited participation
-                // rows, mirroring DisputeResolver::handle. The reconcile path
-                // calls executeAdjudication directly (never handle()), so
-                // without this the panelist accuracy mark was never written for
-                // any dispute resolved through reconciliation — countCorrect
-                // undercounted and those panelists silently lost their accuracy
-                // trust term. timeout_no_quorum orphans never reach here
-                // (status is accepted/rejected). [audit M-B4]
-                if ($dispute->status === 'accepted' || $dispute->status === 'rejected') {
-                    $finalDecision = $dispute->status === 'accepted' ? 'accept' : 'reject';
-                    try {
-                        $participationRepo = new \BCC\Trust\Disputes\Repositories\DisputeParticipationRepository();
-                        $backfilled = $participationRepo->backfillOutcomeMatch($disputeId, $finalDecision);
-                        CoreLogger::audit('dispute_participation_backfilled', [
-                            'dispute_id' => $disputeId,
-                            'outcome'    => $dispute->status,
-                            'rows'       => $backfilled,
-                            'via'        => 'reconcile',
-                        ]);
-                    } catch (\Throwable $e) {
-                        // Non-fatal: the dispute is resolved; the credited rows
-                        // just miss their accuracy mark (same posture as the
-                        // resolver's own backfill).
-                        CoreLogger::error('[bcc-disputes] reconcile_participation_backfill_failed', [
-                            'dispute_id' => $disputeId,
-                            'outcome'    => $dispute->status,
-                            'error'      => $e->getMessage(),
-                        ]);
-                    }
-                }
+                // §D5 outcome-match backfill deleted (Rank Phase 6, D-7):
+                // participation credit retired with the panel.
 
                 // Reporter penalty is now applied inside the trust-engine
                 // adjudicator's own transaction (see executeAdjudication →
@@ -521,13 +451,11 @@ class DisputeScheduler
     {
         $cutoff = gmdate('Y-m-d H:i:s', time() - 600); // 10 minutes
 
-        $panelistReleased       = DisputePanelRepository::resetStuckPanelistClaims($cutoff);
         $reporterResultReleased = DisputeRepository::resetStuckReporterResultClaims($cutoff);
         $reportedUserReleased   = UserReportRepository::resetStuckReportedUserClaims($cutoff);
         $adminReportReleased    = UserReportRepository::resetStuckAdminReportClaims($cutoff);
 
-        $total = $panelistReleased + $reporterResultReleased
-               + $reportedUserReleased + $adminReportReleased;
+        $total = $reporterResultReleased + $reportedUserReleased + $adminReportReleased;
 
         if ($total === 0) {
             return;
@@ -539,60 +467,12 @@ class DisputeScheduler
         // this sweep — exactly the invisible failure this phase exists to
         // surface.
         CoreLogger::error('[bcc-disputes] stuck_claims_released', [
-            'panelist_notifications'    => $panelistReleased,
-            'reporter_result_emails'    => $reporterResultReleased,
-            'reported_user_emails'      => $reportedUserReleased,
-            'admin_report_emails'       => $adminReportReleased,
-            'total'                     => $total,
-            'cutoff'                    => $cutoff,
+            'reporter_result_emails' => $reporterResultReleased,
+            'reported_user_emails'   => $reportedUserReleased,
+            'admin_report_emails'    => $adminReportReleased,
+            'total'                  => $total,
+            'cutoff'                 => $cutoff,
         ]);
-    }
-
-    /**
-     * Reconcile panel rows whose initial notification never landed.
-     *
-     * Grace period (120s) gives the original async enqueue time to fire
-     * before we treat it as failed. Batch size is bounded to keep each
-     * reconcile tick under the 5-minute cron interval even under
-     * large-scale email outages. Each re-enqueue targets the same
-     * `bcc_disputes_notify_panelist` hook; notifyPanelist only sets
-     * notified_at after a confirmed wp_mail send, so repeated sweeps
-     * cannot double-deliver once SMTP recovers.
-     */
-    private static function reconcilePendingPanelistNotifications(): void
-    {
-        $cutoff  = gmdate('Y-m-d H:i:s', time() - 120);
-        $pending = DisputePanelRepository::getPendingPanelistNotifications($cutoff, 20);
-
-        if (empty($pending)) {
-            return;
-        }
-
-        CoreLogger::info('[bcc-disputes] reconcile_pending_panelist_notifications', [
-            'count' => count($pending),
-        ]);
-
-        foreach ($pending as $row) {
-            $enqueued = false;
-            try {
-                $enqueued = DisputeNotificationService::enqueueAsync(
-                    'bcc_disputes_notify_panelist',
-                    [$row['panelist_user_id'], $row['dispute_id'], $row['page_id']]
-                );
-            } catch (\Throwable $e) {
-                CoreLogger::error('[bcc-disputes] reconcile_notify_enqueue_exception', [
-                    'dispute_id'  => $row['dispute_id'],
-                    'panelist_id' => $row['panelist_user_id'],
-                    'error'       => $e->getMessage(),
-                ]);
-            }
-            if (!$enqueued) {
-                CoreLogger::error('[bcc-disputes] reconcile_notify_enqueue_soft_failed', [
-                    'dispute_id'  => $row['dispute_id'],
-                    'panelist_id' => $row['panelist_user_id'],
-                ]);
-            }
-        }
     }
 
     /**
@@ -636,63 +516,6 @@ class DisputeScheduler
                 CoreLogger::error('[bcc-disputes] reconcile_reporter_email_enqueue_soft_failed', [
                     'dispute_id'  => $row['dispute_id'],
                     'reporter_id' => $row['reporter_id'],
-                ]);
-            }
-        }
-    }
-
-    /**
-     * Find disputes stuck in "reviewing" where total votes >= panel_size
-     * (all votes are in but resolution was never executed — typically
-     * because the trust engine was unavailable at the moment of the
-     * deciding vote). Re-trigger resolution for these disputes.
-     */
-    private static function retryStuckReviewingDisputes(): void
-    {
-        // Grace period: only retry disputes where the last vote was > 2 minutes ago.
-        $cutoff = gmdate('Y-m-d H:i:s', time() - 120);
-
-        $stuck = DisputeRepository::getStuckReviewingDisputes($cutoff, 10);
-
-        if (empty($stuck)) {
-            return;
-        }
-
-        foreach ($stuck as $dispute) {
-            $verdict = DisputeRepository::computeVerdict(
-                (int) $dispute->panel_accepts,
-                (int) $dispute->panel_rejects,
-                (int) $dispute->panel_size
-            );
-
-            CoreLogger::info('[bcc-disputes] retry_stuck_reviewing', [
-                'dispute_id' => (int) $dispute->id,
-                'accepts'    => (int) $dispute->panel_accepts,
-                'rejects'    => (int) $dispute->panel_rejects,
-                'outcome'    => $verdict['outcome'],
-            ]);
-
-            $enqueued = false;
-            try {
-                $enqueued = DisputeNotificationService::enqueueAsync('bcc_disputes_async_resolve', [
-                    (int) $dispute->id,
-                    (int) $dispute->vote_id,
-                    (int) $dispute->page_id,
-                    (int) $dispute->voter_id,
-                    (int) $dispute->reporter_id,
-                    $verdict['outcome'],
-                ]);
-            } catch (\Throwable $e) {
-                CoreLogger::error('[bcc-disputes] stuck_reviewing_enqueue_failed', [
-                    'dispute_id' => (int) $dispute->id,
-                    'error'      => $e->getMessage(),
-                ]);
-            }
-            if (!$enqueued) {
-                // Next reconcile tick will re-query stuck reviewing disputes
-                // (dispute still 'reviewing' with last vote > 2min ago).
-                CoreLogger::error('[bcc-disputes] stuck_reviewing_enqueue_soft_failed', [
-                    'dispute_id' => (int) $dispute->id,
                 ]);
             }
         }
@@ -756,139 +579,6 @@ class DisputeScheduler
                 $staleCount
             ),
         ];
-    }
-
-    /**
-     * Emergency fallback: resolve severely overdue disputes on-demand.
-     *
-     * Called from DisputeController when a panelist or reporter loads
-     * their queue. If cron has stopped (misconfigured, disabled, hosting
-     * issue), disputes can sit in 'reviewing' indefinitely. This catches
-     * disputes that are 2x the TTL (14 days) overdue and resolves up to
-     * 5 per request to avoid blocking the HTTP response.
-     *
-     * This is a SAFETY NET, not a replacement for cron. It only fires
-     * when cron has clearly failed.
-     */
-    public static function emergencyResolveIfStale(): void
-    {
-        // Only trigger if auto-resolve hasn't run in 48+ hours.
-        $lastRun = (int) get_option('bcc_disputes_auto_resolve_last_run', 0);
-
-        // Fresh install: last_run=0 means auto_resolve has never fired (or this
-        // is a new deploy). Treat as healthy and skip the emergency path —
-        // otherwise every panelist-queue load on a fresh site would trigger
-        // the expensive stale-resolve DB probe (bounded only by a 10-min
-        // transient). The daily auto_resolve cron will populate this option
-        // on its first tick; after that, real staleness is detected normally.
-        if ($lastRun === 0) {
-            return;
-        }
-
-        if ((time() - $lastRun) < 2 * DAY_IN_SECONDS) {
-            return; // Cron is working — no emergency needed.
-        }
-
-        // Rate-limit the emergency check globally. The transient is our
-        // "don't hammer this path" marker; the advisory lock below handles
-        // the thundering-herd race where N concurrent panel_queue requests
-        // all race past get_transient() before the first set_transient()
-        // lands. GET_LOCK is non-blocking (timeout=0) so we return immediately
-        // without tying up PHP workers waiting for the lock.
-        $emergencyKey = 'bcc_disputes_emergency_check';
-        if (get_transient($emergencyKey)) {
-            return;
-        }
-
-        if (!DisputeRepository::acquireEmergencyResolveLock()) {
-            // Another worker is already inside this path — let them finish
-            // and the transient they set will suppress subsequent requests.
-            return;
-        }
-
-        try {
-            // Re-check the transient INSIDE the lock. Request A acquires the
-            // lock, runs the emergency path, sets the transient, releases the
-            // lock; request B then acquires the lock but the transient is
-            // already set — this re-check prevents a second emergency batch.
-            // @phpstan-ignore if.alwaysFalse (transient mutates from another request between outer and inner checks)
-            if (get_transient($emergencyKey)) {
-                return;
-            }
-
-            // If the trust adjudicator is down, every enqueued async_resolve will
-            // roll back in DisputeResolver::handle(). Skip WITHOUT setting
-            // the 10-minute transient so the emergency path can fire as soon as
-            // the service recovers.
-            if (!ServiceLocator::hasRealService(DisputeAdjudicationInterface::class)) {
-                return;
-            }
-
-            set_transient($emergencyKey, 1, 600);
-
-            self::doEmergencyResolve($lastRun);
-        } finally {
-            DisputeRepository::releaseEmergencyResolveLock();
-        }
-    }
-
-    /**
-     * Body of the emergency resolve path. Extracted so emergencyResolveIfStale()
-     * can wrap it in acquire/release while keeping the try/finally tidy.
-     */
-    private static function doEmergencyResolve(int $lastRun): void
-    {
-
-        $hardStopCutoff = gmdate('Y-m-d H:i:s', time() - (BCC_DISPUTES_TTL_DAYS * 2 * DAY_IN_SECONDS));
-        $stale = DisputeRepository::getExpiredDisputes($hardStopCutoff, 5);
-
-        if (empty($stale)) {
-            return;
-        }
-
-        CoreLogger::warning('[bcc-disputes] emergency_resolve_triggered', [
-            'count'       => count($stale),
-            'last_cron'   => $lastRun > 0 ? gmdate('Y-m-d H:i:s', $lastRun) : 'never',
-            'hard_cutoff' => $hardStopCutoff,
-        ]);
-
-        foreach ($stale as $dispute) {
-            $disputeId = (int) $dispute->id;
-
-            // Intentionally no per-dispute dedup: both as_next_scheduled_action
-            // and wp_next_scheduled require an exact args match, and we enqueue
-            // with a 6-tuple. DisputeResolver::handle is idempotent
-            // (WHERE status='reviewing' in beginResolveTransaction), so a
-            // duplicate async_resolve is a harmless no-op.
-
-            $verdict = DisputeRepository::computeVerdict(
-                (int) $dispute->panel_accepts,
-                (int) $dispute->panel_rejects,
-                (int) $dispute->panel_size
-            );
-
-            $enqueued = false;
-            try {
-                $enqueued = DisputeNotificationService::enqueueAsync('bcc_disputes_async_resolve', [
-                    $disputeId,
-                    (int) $dispute->vote_id,
-                    (int) $dispute->page_id,
-                    (int) $dispute->voter_id,
-                    (int) $dispute->reporter_id,
-                    $verdict['outcome'],
-                ]);
-            } catch (\Throwable $e) {
-                CoreLogger::error('[bcc-disputes] emergency_resolve_enqueue_failed', [
-                    'dispute_id' => $disputeId,
-                    'error'      => $e->getMessage(),
-                ]);
-            }
-            if (!$enqueued) {
-                CoreLogger::error('[bcc-disputes] emergency_resolve_enqueue_soft_failed', [
-                    'dispute_id' => $disputeId,
-                ]);
-            }
-        }
     }
 
     /**

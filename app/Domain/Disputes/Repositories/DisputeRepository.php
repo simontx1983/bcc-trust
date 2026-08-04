@@ -31,11 +31,6 @@ class DisputeRepository
         return DB::table('disputes');
     }
 
-    public static function panel_table(): string
-    {
-        return DB::table('dispute_panel');
-    }
-
     // The §1.0 raw-transaction guards (beginTx / commitTx / rollbackTx)
     // live in DisputeRepositorySupport — shared with UserReportRepository
     // so every raw `START TRANSACTION` site in the dispute domain routes
@@ -44,14 +39,13 @@ class DisputeRepository
     // ── Delete-cascade (page deletion) ────────────────────────────────────
 
     /**
-     * Hard-delete every dispute attached to a deleted page, cascading its
-     * children FIRST so no panel / participation rows orphan.
+     * Hard-delete every dispute attached to a deleted page.
      *
-     * Order is load-bearing: bcc_dispute_panel + bcc_dispute_participations
-     * are keyed on dispute_id with no FK ON DELETE CASCADE, so they MUST be
-     * removed before their parent dispute rows. The whole cascade runs in
-     * one transaction — a mid-cascade failure rolls back rather than leaving
-     * a half-deleted dispute tree.
+     * The §D5 participation-row child cascade retired with the panel
+     * (Rank Phase 6, D-7) — `bcc_dispute_participations` is dropped.
+     * Ballot rows on a dispute's poll live in the Rank domain
+     * (bcc_trust_ballots) and are the poll engine's audit record; they
+     * reference the poll, not the dispute row, and are retained.
      *
      * Called from UserLifecycleService::onPageDelete (before_delete_post) so
      * a permanently-deleted page leaves no dispute residue. Disputes are
@@ -64,9 +58,7 @@ class DisputeRepository
         }
 
         global $wpdb;
-        $disputeTable       = self::disputes_table();
-        $panelTable         = self::panel_table();
-        $participationTable = TableRegistry::disputeParticipations();
+        $disputeTable = self::disputes_table();
 
         if (!DisputeRepositorySupport::beginTx()) {
             \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in deleteForPage', [
@@ -77,33 +69,6 @@ class DisputeRepository
         }
 
         try {
-            // Resolve the dispute ids for this page once, then cascade
-            // children by that id set. Bounded by BCC_DISPUTES_MAX_PER_PAGE-
-            // class volume; LIMIT is belt-and-suspenders.
-            $disputeIds = $wpdb->get_col($wpdb->prepare(
-                "SELECT id FROM {$disputeTable} WHERE page_id = %d LIMIT 5000",
-                $pageId
-            ));
-            $disputeIds = array_values(array_filter(
-                array_map('intval', $disputeIds),
-                static fn(int $id): bool => $id > 0
-            ));
-
-            if ($disputeIds !== []) {
-                $placeholders = implode(',', array_fill(0, count($disputeIds), '%d'));
-
-                // Children FIRST — panel rows then participation rows.
-                $wpdb->query($wpdb->prepare(
-                    "DELETE FROM {$panelTable} WHERE dispute_id IN ({$placeholders})",
-                    ...$disputeIds
-                ));
-                $wpdb->query($wpdb->prepare(
-                    "DELETE FROM {$participationTable} WHERE dispute_id IN ({$placeholders})",
-                    ...$disputeIds
-                ));
-            }
-
-            // Parent disputes LAST.
             $wpdb->delete($disputeTable, ['page_id' => $pageId], ['%d']);
 
             if (!DisputeRepositorySupport::commitTx('deleteForPage')) {
@@ -128,18 +93,15 @@ class DisputeRepository
     }
 
     /**
-     * Hard-delete every dispute-domain row a deleted user appears in,
-     * cascading by user FK across the three user-keyed tables:
-     *   - bcc_dispute_panel.panelist_user_id (the user sat on a panel)
-     *   - bcc_dispute_participations.user_id (the user's credited votes)
+     * Hard-delete every dispute-domain row a deleted user appears in:
      *   - bcc_user_reports.reporter_id / reported_id (both directions)
      *
-     * Dispute ROWS themselves are NOT deleted here — a dispute is
+     * The §D5 participation leg retired with the panel (Rank Phase 6,
+     * D-7). Dispute ROWS themselves are NOT deleted here — a dispute is
      * page-scoped, not user-scoped, and its reporter_id/voter_id are
-     * historical references that survive the user. The verdict math already
-     * derives from the authoritative panel rows (getExpiredDisputes /
-     * castPanelVoteAtomic re-derive tallies), so a deleted panelist's panel
-     * row vanishing is exactly the drift those paths were built to tolerate.
+     * historical references that survive the user. Ballot rows on the
+     * dispute's poll live in the Rank domain (bcc_trust_ballots) and
+     * are evaluated by the poll engine at close time.
      * Single transaction so the user's dispute footprint is removed atomically.
      *
      * Called from UserLifecycleService::onUserDelete (delete_user).
@@ -151,9 +113,7 @@ class DisputeRepository
         }
 
         global $wpdb;
-        $panelTable         = self::panel_table();
-        $participationTable = TableRegistry::disputeParticipations();
-        $reportsTable       = UserReportRepository::user_reports_table();
+        $reportsTable = UserReportRepository::user_reports_table();
 
         if (!DisputeRepositorySupport::beginTx()) {
             \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in deleteForUser', [
@@ -164,8 +124,6 @@ class DisputeRepository
         }
 
         try {
-            $wpdb->delete($panelTable, ['panelist_user_id' => $userId], ['%d']);
-            $wpdb->delete($participationTable, ['user_id' => $userId], ['%d']);
             // bcc_user_reports keys the user in BOTH directions — clean each.
             $wpdb->delete($reportsTable, ['reporter_id' => $userId], ['%d']);
             $wpdb->delete($reportsTable, ['reported_id' => $userId], ['%d']);
@@ -190,92 +148,12 @@ class DisputeRepository
         wp_cache_delete('report_status_counts', self::CACHE_GROUP);
     }
 
-    // ── Verdict calculation (shared, single source of truth) ──────────────
-
-    /**
-     * Determine whether a dispute should resolve and what the outcome is.
-     *
-     * Rules:
-     * - Quorum: at least min(3, panel_size) votes must be cast.
-     * - Majority: accepts or rejects must reach floor(panel_size/2)+1.
-     * - If quorum is met and accepts >= majority → 'accepted'.
-     * - Otherwise → 'rejected' (protects the original voter's decision).
-     *
-     * @return array{should_resolve: bool, outcome: string}
-     */
-    public static function computeVerdict(int $accepts, int $rejects, int $panelSize): array
-    {
-        $totalVoted = $accepts + $rejects;
-        $majority   = (int) floor($panelSize / 2) + 1;
-        $quorum     = self::quorumFor($panelSize);
-
-        $shouldResolve = $totalVoted >= $quorum && ($accepts >= $majority || $rejects >= $majority);
-
-        if ($totalVoted < $quorum) {
-            // Quorum never reached. Used only at TTL (scheduler ignores
-            // should_resolve). Keeps adjudicator uninvoked and suppresses
-            // the reporter penalty — panelist silence must not be treated
-            // as proof of a bad-faith report.
-            $outcome = 'timeout_no_quorum';
-        } elseif ($accepts >= $majority) {
-            $outcome = 'accepted';
-        } else {
-            // Majority rejected (or tied with rejects reaching majority).
-            // Genuine reject verdict — penalty fires in DisputeResolver.
-            $outcome = 'rejected';
-        }
-
-        return ['should_resolve' => $shouldResolve, 'outcome' => $outcome];
-    }
-
-    /**
-     * Quorum threshold used by computeVerdict(). Exposed as a helper so the
-     * reporter-penalty gate in DisputeResolver cannot drift from the
-     * verdict rule here.
-     */
-    public static function quorumFor(int $panelSize): int
-    {
-        return min(3, max(0, $panelSize));
-    }
-
-    /**
-     * Re-derive whether quorum was actually reached for a dispute using the
-     * authoritative panel rows (not the denormalised panel_accepts/rejects
-     * columns, which can drift under panelist deletion). Used to gate the
-     * reporter-penalty hook: panelist inactivity must never count as proof
-     * of a fraudulent dispute.
-     */
-    public static function wasQuorumMetForDispute(int $disputeId): bool
-    {
-        global $wpdb;
-        $disputeTable = self::disputes_table();
-        $panelTable   = self::panel_table();
-
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT d.panel_size,
-                    COALESCE(SUM(CASE WHEN p.decision IN ('accept','reject') THEN 1 ELSE 0 END), 0) AS votes_cast
-             FROM {$disputeTable} d
-             LEFT JOIN {$panelTable} p ON p.dispute_id = d.id
-             WHERE d.id = %d
-             GROUP BY d.id, d.panel_size",
-            $disputeId
-        ), ARRAY_A);
-
-        if (!is_array($row)) {
-            // Dispute vanished — treat as no-quorum so the penalty is skipped
-            // (fail-closed on the penalty side).
-            return false;
-        }
-
-        $panelSize = (int) ($row['panel_size'] ?? 0);
-        $votesCast = (int) ($row['votes_cast'] ?? 0);
-
-        return $votesCast >= self::quorumFor($panelSize);
-    }
+    // Verdict math retired (Rank Phase 6 Wave 3): quorum/majority for
+    // dispute votes is evaluated by the generic poll engine (PollService).
 
     // Generation-counter cache helpers (getGeneration / bumpGeneration)
-    // live in DisputeRepositorySupport — shared with DisputePanelRepository
-    // so panel-queue keys and the invalidation bumps here stay in lockstep.
+    // live in DisputeRepositorySupport — shared with UserReportRepository
+    // so reporter keys and the invalidation bumps here stay in lockstep.
 
     // ── Advisory locks ────────────────────────────────────────────────────────
 
@@ -312,38 +190,9 @@ class DisputeRepository
         }
     }
 
-    /**
-     * Acquire a MySQL advisory lock for the emergency-resolve code path
-     * triggered from REST /disputes/panel when cron is stale.
-     *
-     * Non-blocking (timeout=0). Prevents a thundering herd of concurrent
-     * authenticated requests all racing past get_transient() before the
-     * first set_transient() lands — without this lock, N REST workers
-     * all execute getExpiredDisputes() JOIN + enqueue loop before the
-     * 10-minute transient backstop suppresses them.
-     */
-    public static function acquireEmergencyResolveLock(): bool
-    {
-        if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
-            return \BCC\Core\DB\AdvisoryLock::acquire('bcc_disputes_emergency_resolve', 0);
-        }
-        global $wpdb;
-        return (int) $wpdb->get_var("SELECT GET_LOCK('bcc_disputes_emergency_resolve', 0)") === 1;
-    }
-
-    /**
-     * Release the emergency-resolve advisory lock.
-     */
-    public static function releaseEmergencyResolveLock(): void
-    {
-        global $wpdb;
-        $result = $wpdb->query("SELECT RELEASE_LOCK('bcc_disputes_emergency_resolve')");
-        if ($result === false && class_exists('\\BCC\\Core\\Log\\Logger')) {
-            \BCC\Core\Log\Logger::error('[bcc-disputes] Failed to release emergency-resolve lock', [
-                'db_error' => $wpdb->last_error,
-            ]);
-        }
-    }
+    // Emergency-resolve lock retired with the panel-queue endpoint (Rank
+    // Phase 6 Wave 3) — the poll engine's hourly sweep + the daily
+    // backstop replace the REST-triggered emergency path.
 
     /**
      * Acquire the reconciliation advisory lock (separate from auto-resolve
@@ -635,23 +484,25 @@ class DisputeRepository
     }
 
     /**
-     * Atomically create a dispute row and its panel assignments.
+     * Atomically create a dispute row (page limit, reporter limit,
+     * duplicate check, and the vote-row lock all run inside one
+     * transaction). The community-vote poll is opened by the caller
+     * AFTER commit (DisputeVoteService::openPollForDispute) — poll rows
+     * belong to the Rank domain and must not join this transaction.
      *
      * @param array<string, mixed> $disputeData  Dispute column values.
-     * @param int[]  $panelistIds  User IDs to assign as panelists.
-     * @return array{id: ?int, failed_panelist: ?int, db_error: ?string}
+     * @return array{id: ?int, db_error: ?string}
      */
-    public static function createDisputeWithPanel(array $disputeData, array $panelistIds): array
+    public static function createDispute(array $disputeData): array
     {
         global $wpdb;
         $disputeTable = self::disputes_table();
-        $panelTable   = self::panel_table();
 
         if (!DisputeRepositorySupport::beginTx()) {
-            \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in createDisputeWithPanel', [
+            \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in createDispute', [
                 'db_error' => (string) $wpdb->last_error,
             ]);
-            return ['id' => null, 'failed_panelist' => null, 'db_error' => 'tx_begin_failed'];
+            return ['id' => null, 'db_error' => 'tx_begin_failed'];
         }
 
         // Atomic dispute limit check: count recent disputes FOR UPDATE to
@@ -669,12 +520,12 @@ class DisputeRepository
             $pageId
         ));
         if ($recentCount >= BCC_DISPUTES_MAX_PER_PAGE) {
-            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:dispute_limit_reached');
-            return ['id' => null, 'failed_panelist' => null, 'db_error' => 'dispute_limit_reached'];
+            DisputeRepositorySupport::rollbackTx('createDispute:dispute_limit_reached');
+            return ['id' => null, 'db_error' => 'dispute_limit_reached'];
         }
 
         // Per-reporter global limit: max active disputes at any time.
-        // Prevents panelist pool exhaustion by users with many pages.
+        // Prevents dispute-queue flooding by users with many pages.
         $reporterId = (int) $disputeData['reporter_id'];
         $activeReporterCount = (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$disputeTable}
@@ -683,8 +534,8 @@ class DisputeRepository
             $reporterId
         ));
         if ($activeReporterCount >= BCC_DISPUTES_REPORTER_MAX_ACTIVE) {
-            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:reporter_limit_reached');
-            return ['id' => null, 'failed_panelist' => null, 'db_error' => 'reporter_limit_reached'];
+            DisputeRepositorySupport::rollbackTx('createDispute:reporter_limit_reached');
+            return ['id' => null, 'db_error' => 'reporter_limit_reached'];
         }
 
         // Atomic duplicate check: verify no active dispute exists for this
@@ -701,8 +552,8 @@ class DisputeRepository
             $voteId
         ));
         if ($existingForVote) {
-            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:already_disputed');
-            return ['id' => null, 'failed_panelist' => null, 'db_error' => 'already_disputed'];
+            DisputeRepositorySupport::rollbackTx('createDispute:already_disputed');
+            return ['id' => null, 'db_error' => 'already_disputed'];
         }
 
         // Verify the vote is still active via the TrustReadService contract.
@@ -716,52 +567,17 @@ class DisputeRepository
         // (fail-closed).
         $trustRead = \BCC\Core\ServiceLocator::resolveTrustReadService();
         if (!$trustRead->lockActiveVoteForDispute($voteId)) {
-            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:vote_no_longer_active');
-            return ['id' => null, 'failed_panelist' => null, 'db_error' => 'vote_no_longer_active'];
-        }
-
-        // Re-verify panelist load counts inside the transaction with FOR UPDATE
-        // to prevent TOCTOU race where selectPanelists() ran outside the transaction.
-        // This ensures load caps cannot be bypassed by concurrent dispute creation.
-        $maxActivePanels = (int) apply_filters('bcc_disputes_max_active_panels_per_user', 10);
-        if (!empty($panelistIds)) {
-            $panelistPlaceholders = implode(',', array_fill(0, count($panelistIds), '%d'));
-            $loadRows = $wpdb->get_results($wpdb->prepare(
-                "SELECT p.panelist_user_id, COUNT(*) AS active_count
-                 FROM {$panelTable} p
-                 INNER JOIN {$disputeTable} d ON d.id = p.dispute_id
-                 WHERE p.panelist_user_id IN ({$panelistPlaceholders})
-                   AND d.status = 'reviewing'
-                   AND p.decision IS NULL
-                 GROUP BY p.panelist_user_id
-                 FOR UPDATE",
-                ...$panelistIds
-            ));
-
-            $loadMap = [];
-            foreach ($loadRows as $row) {
-                $loadMap[(int) $row->panelist_user_id] = (int) $row->active_count;
-            }
-
-            // Filter out any panelists that have exceeded their load cap
-            // since the pre-transaction check.
-            $panelistIds = array_values(array_filter($panelistIds, function (int $uid) use ($loadMap, $maxActivePanels) {
-                return ($loadMap[$uid] ?? 0) < $maxActivePanels;
-            }));
-
-            if (count($panelistIds) < BCC_DISPUTES_PANEL_SIZE) {
-                DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:insufficient_panelists');
-                return ['id' => null, 'failed_panelist' => null, 'db_error' => 'insufficient_panelists'];
-            }
+            DisputeRepositorySupport::rollbackTx('createDispute:vote_no_longer_active');
+            return ['id' => null, 'db_error' => 'vote_no_longer_active'];
         }
 
         // created_at written explicitly in UTC. The column DEFAULT is
         // CURRENT_TIMESTAMP (MySQL session tz, time_zone=SYSTEM), but every
         // reader compares it against UTC cutoffs — the 30-day rate window
-        // above, the 7-day auto-resolve TTL (getExpiredDisputes), recent-
-        // activity, and reporter-rate reads. Writing UTC here puts the
-        // column on the one clock they all use. Mirrors
-        // UserReportRepository's created_at handling.
+        // above, the backstop sweep cutoff, recent-activity, and
+        // reporter-rate reads. Writing UTC here puts the column on the
+        // one clock they all use. Mirrors UserReportRepository's
+        // created_at handling.
         $wpdb->insert($disputeTable, [
             'vote_id'      => $disputeData['vote_id'],
             'page_id'      => $disputeData['page_id'],
@@ -770,9 +586,8 @@ class DisputeRepository
             'reason'       => $disputeData['reason'],
             'evidence_url' => $disputeData['evidence_url'],
             'status'       => $disputeData['status'],
-            'panel_size'   => $disputeData['panel_size'],
             'created_at'   => gmdate('Y-m-d H:i:s'),
-        ], ['%d', '%d', '%d', '%d', '%s', '%s', '%s', '%d', '%s']);
+        ], ['%d', '%d', '%d', '%d', '%s', '%s', '%s', '%s']);
 
         $dispute_id = $wpdb->insert_id;
 
@@ -782,37 +597,21 @@ class DisputeRepository
             // db_error strings. Preserve the original INSERT failure reason.
             $insertError = (string) $wpdb->last_error;
             if ($insertError !== '' && stripos($insertError, 'Duplicate entry') !== false) {
-                DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:duplicate_entry');
-                return ['id' => null, 'failed_panelist' => null, 'db_error' => 'already_disputed'];
+                DisputeRepositorySupport::rollbackTx('createDispute:duplicate_entry');
+                return ['id' => null, 'db_error' => 'already_disputed'];
             }
-            DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:insert_failed');
-            return ['id' => null, 'failed_panelist' => null, 'db_error' => $insertError];
+            DisputeRepositorySupport::rollbackTx('createDispute:insert_failed');
+            return ['id' => null, 'db_error' => $insertError];
         }
 
-        foreach ($panelistIds as $uid) {
-            $wpdb->insert($panelTable, [
-                'dispute_id'       => $dispute_id,
-                'panelist_user_id' => $uid,
-            ], ['%d', '%d']);
-
-            if ($wpdb->last_error) {
-                $error = $wpdb->last_error;
-                DisputeRepositorySupport::rollbackTx('createDisputeWithPanel:panel_insert_failed');
-                return ['id' => null, 'failed_panelist' => $uid, 'db_error' => $error];
-            }
-        }
-
-        if (!DisputeRepositorySupport::commitTx('createDisputeWithPanel')) {
+        if (!DisputeRepositorySupport::commitTx('createDispute')) {
             // COMMIT failed → MySQL rolled back.  Returning here with
             // db_error='commit_failed' lets the controller surface a 5xx and
             // the reporter retry, instead of returning a dead insert_id.
-            return ['id' => null, 'failed_panelist' => null, 'db_error' => 'commit_failed'];
+            return ['id' => null, 'db_error' => 'commit_failed'];
         }
 
-        // Invalidate: each panelist's queue cache, reporter's dispute list, status counts.
-        foreach ($panelistIds as $uid) {
-            DisputeRepositorySupport::bumpGeneration("panel_q_gen:{$uid}");
-        }
+        // Invalidate: reporter's dispute list, status counts.
         DisputeRepositorySupport::bumpGeneration("reporter_gen:{$disputeData['reporter_id']}");
         wp_cache_delete('dispute_status_counts', self::CACHE_GROUP);
 
@@ -822,7 +621,7 @@ class DisputeRepository
             wp_cache_delete("disputed_vote:{$disputeData['vote_id']}", self::CACHE_GROUP);
         }
 
-        return ['id' => $dispute_id, 'failed_panelist' => null, 'db_error' => null];
+        return ['id' => $dispute_id, 'db_error' => null];
     }
 
     /**
@@ -1075,7 +874,6 @@ class DisputeRepository
 
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT d.id, d.vote_id, d.page_id, d.reason, d.evidence_url, d.status,
-                    d.panel_accepts, d.panel_rejects, d.panel_size,
                     d.voter_id, d.reporter_id, d.created_at, d.resolved_at,
                     p.post_title AS page_title,
                     u.display_name AS voter_name,
@@ -1098,7 +896,7 @@ class DisputeRepository
         foreach ($rows as $row) {
             // Fail-soft at the list edge: a single corrupt legacy row must not
             // take down the whole reporter view. Single-entity reads
-            // (getDisputeById, castPanelVoteAtomic) remain fail-fast.
+            // (getDisputeById) remain fail-fast.
             try {
                 $dtos[] = DisputeRepositorySupport::hydrateDisputeDetail($row);
             } catch (\LogicException $e) {
@@ -1147,8 +945,7 @@ class DisputeRepository
         $table = self::disputes_table();
 
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT id, status, vote_id, page_id, voter_id, reporter_id,
-                    panel_accepts, panel_rejects, panel_size
+            "SELECT id, status, vote_id, page_id, voter_id, reporter_id
              FROM {$table} WHERE id = %d LIMIT 1",
             $disputeId
         ), ARRAY_A);
@@ -1166,21 +963,17 @@ class DisputeRepository
     /**
      * Strict hydration of an ARRAY_A row from the disputes table into a
      * DisputeCoreDTO. Fails-fast on any missing or wrong-typed trust-critical
-     * field; the DTO constructor additionally enforces cross-field invariants
-     * (IDs positive, panel counts non-negative, accepts+rejects ≤ size).
+     * field; the DTO constructor additionally enforces the ID invariants.
      *
      * @param array<string, scalar|null> $row
      */
     private static function hydrateDisputeCore(array $row): DisputeCoreDTO
     {
-        $id           = RowAssert::requireDigitInt($row, 'id');
-        $voteId       = RowAssert::requireDigitInt($row, 'vote_id');
-        $pageId       = RowAssert::requireDigitInt($row, 'page_id');
-        $voterId      = RowAssert::requireDigitInt($row, 'voter_id');
-        $reporterId   = RowAssert::requireDigitInt($row, 'reporter_id');
-        $panelAccepts = RowAssert::requireDigitInt($row, 'panel_accepts');
-        $panelRejects = RowAssert::requireDigitInt($row, 'panel_rejects');
-        $panelSize    = RowAssert::requireDigitInt($row, 'panel_size');
+        $id         = RowAssert::requireDigitInt($row, 'id');
+        $voteId     = RowAssert::requireDigitInt($row, 'vote_id');
+        $pageId     = RowAssert::requireDigitInt($row, 'page_id');
+        $voterId    = RowAssert::requireDigitInt($row, 'voter_id');
+        $reporterId = RowAssert::requireDigitInt($row, 'reporter_id');
 
         if (!isset($row['status']) || !is_string($row['status'])) {
             throw new \LogicException('DisputeCore hydration: status missing or not string');
@@ -1188,15 +981,12 @@ class DisputeRepository
         $status = DisputeStatus::assert($row['status']);
 
         return new DisputeCoreDTO(
-            id:            $id,
-            status:        $status,
-            vote_id:       $voteId,
-            page_id:       $pageId,
-            voter_id:      $voterId,
-            reporter_id:   $reporterId,
-            panel_accepts: $panelAccepts,
-            panel_rejects: $panelRejects,
-            panel_size:    $panelSize,
+            id:          $id,
+            status:      $status,
+            vote_id:     $voteId,
+            page_id:     $pageId,
+            voter_id:    $voterId,
+            reporter_id: $reporterId,
         );
     }
 
@@ -1208,164 +998,12 @@ class DisputeRepository
     private static function hydrateResolutionCandidate(array $row): DisputeResolutionCandidateDTO
     {
         return new DisputeResolutionCandidateDTO(
-            id:            RowAssert::requireDigitInt($row, 'id'),
-            vote_id:       RowAssert::requireDigitInt($row, 'vote_id'),
-            page_id:       RowAssert::requireDigitInt($row, 'page_id'),
-            voter_id:      RowAssert::requireDigitInt($row, 'voter_id'),
-            reporter_id:   RowAssert::requireDigitInt($row, 'reporter_id'),
-            panel_accepts: RowAssert::requireDigitInt($row, 'panel_accepts'),
-            panel_rejects: RowAssert::requireDigitInt($row, 'panel_rejects'),
-            panel_size:    RowAssert::requireDigitInt($row, 'panel_size'),
+            id:          RowAssert::requireDigitInt($row, 'id'),
+            vote_id:     RowAssert::requireDigitInt($row, 'vote_id'),
+            page_id:     RowAssert::requireDigitInt($row, 'page_id'),
+            voter_id:    RowAssert::requireDigitInt($row, 'voter_id'),
+            reporter_id: RowAssert::requireDigitInt($row, 'reporter_id'),
         );
-    }
-
-    /**
-     * Atomically cast a panel vote: lock dispute, record decision, update tally, re-read.
-     *
-     * This method encapsulates the entire cast_vote transaction:
-     * 1. SELECT FOR UPDATE on dispute row (serialises concurrent voters)
-     * 2. UPDATE panel row WHERE decision IS NULL (prevents double-voting)
-     * 3. Increment tally column
-     * 4. Re-read dispute inside the lock
-     * 5. COMMIT
-     *
-     * @return array{status: string, code: string, message: string, dispute: ?DisputeCoreDTO, accepts: int, rejects: int}
-     */
-    public static function castPanelVoteAtomic(int $disputeId, int $userId, string $decision, string $note): array
-    {
-        global $wpdb;
-        $disputeTable = self::disputes_table();
-        $panelTable   = self::panel_table();
-
-        if (!DisputeRepositorySupport::beginTx()) {
-            \BCC\Core\Log\Logger::error('[bcc-disputes] START TRANSACTION failed in castPanelVoteAtomic', [
-                'dispute_id' => $disputeId,
-                'db_error'   => (string) $wpdb->last_error,
-            ]);
-            return ['status' => 'error', 'code' => 'db_error', 'message' => 'Transaction failed.', 'http' => 500, 'dispute' => null, 'accepts' => 0, 'rejects' => 0, 'db_error' => (string) $wpdb->last_error];
-        }
-
-        // Lock the dispute row — concurrent voters block here.
-        $lockedRow = $wpdb->get_row($wpdb->prepare(
-            "SELECT id, status, vote_id, page_id, voter_id, reporter_id,
-                    panel_accepts, panel_rejects, panel_size
-             FROM {$disputeTable} WHERE id = %d FOR UPDATE",
-            $disputeId
-        ), ARRAY_A);
-
-        if (!is_array($lockedRow)) {
-            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:dispute_closed');
-            return ['status' => 'error', 'code' => 'dispute_closed', 'message' => 'This dispute is no longer open.', 'http' => 410, 'dispute' => null, 'accepts' => 0, 'rejects' => 0];
-        }
-
-        // Hydrate + validate inside the transaction. If DB corruption is present,
-        // hydrateDisputeCore throws — ROLLBACK keeps the transaction safe.
-        try {
-            $dispute = self::hydrateDisputeCore($lockedRow);
-        } catch (\LogicException $e) {
-            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:hydrate_failed');
-            throw $e;
-        }
-
-        if ($dispute->status !== DisputeStatus::REVIEWING) {
-            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:dispute_closed');
-            return ['status' => 'error', 'code' => 'dispute_closed', 'message' => 'This dispute is no longer open.', 'http' => 410, 'dispute' => null, 'accepts' => 0, 'rejects' => 0];
-        }
-
-        // Atomic vote recording: UPDATE … WHERE decision IS NULL prevents double-voting.
-        $voted = $wpdb->query($wpdb->prepare(
-            "UPDATE {$panelTable} SET decision = %s, note = %s, voted_at = %s
-             WHERE dispute_id = %d AND panelist_user_id = %d AND decision IS NULL",
-            $decision, $note, gmdate('Y-m-d H:i:s'), $disputeId, $userId
-        ));
-
-        if ($voted === false) {
-            $voteError = (string) $wpdb->last_error; // capture before ROLLBACK clears it
-            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:vote_update_failed');
-            return ['status' => 'error', 'code' => 'db_error', 'message' => 'Failed to record vote.', 'http' => 500, 'step' => 'panel_vote_update', 'dispute' => null, 'accepts' => 0, 'rejects' => 0, 'db_error' => $voteError];
-        }
-        if ($voted === 0) {
-            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:already_voted');
-            return ['status' => 'error', 'code' => 'already_voted', 'message' => 'You have already voted on this dispute.', 'http' => 409, 'dispute' => null, 'accepts' => 0, 'rejects' => 0];
-        }
-
-        // Atomic tally update — uses parameterised CASE to avoid
-        // interpolating a column name into the SQL string.
-        $tally_ok = $wpdb->query($wpdb->prepare(
-            "UPDATE {$disputeTable}
-             SET panel_accepts = panel_accepts + IF(%s = 'accept', 1, 0),
-                 panel_rejects = panel_rejects + IF(%s = 'reject', 1, 0)
-             WHERE id = %d",
-            $decision,
-            $decision,
-            $disputeId
-        ));
-
-        if ($tally_ok === false) {
-            $tallyError = (string) $wpdb->last_error; // capture before ROLLBACK clears it
-            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:tally_update_failed');
-            return ['status' => 'error', 'code' => 'db_error', 'message' => 'Failed to update tally.', 'http' => 500, 'step' => 'tally_increment', 'dispute' => null, 'accepts' => 0, 'rejects' => 0, 'db_error' => $tallyError];
-        }
-
-        // Re-read tallies (still inside transaction / row lock)
-        $updatedRow = $wpdb->get_row($wpdb->prepare(
-            "SELECT id, status, panel_accepts, panel_rejects, panel_size,
-                    vote_id, page_id, voter_id, reporter_id
-             FROM {$disputeTable} WHERE id = %d",
-            $disputeId
-        ), ARRAY_A);
-
-        if (!is_array($updatedRow)) {
-            // Dispute row disappeared between FOR UPDATE lock and re-read —
-            // this should be impossible under normal MySQL isolation.
-            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:row_vanished');
-            throw new \LogicException("Dispute {$disputeId} vanished inside its own transaction");
-        }
-
-        try {
-            $dispute = self::hydrateDisputeCore($updatedRow);
-        } catch (\LogicException $e) {
-            DisputeRepositorySupport::rollbackTx('castPanelVoteAtomic:rehydrate_failed');
-            throw $e;
-        }
-
-        // Derive authoritative accepts/rejects from the panel table directly.
-        // The denormalized panel_accepts/panel_rejects columns on bcc_disputes
-        // can drift when panel rows are deleted (via user deletion) without a
-        // matching tally decrement, so they must NOT be trusted for verdict
-        // math. Panel rows are the single source of truth; the denormalized
-        // columns remain as a display/cache convenience only.
-        $derived = $wpdb->get_row($wpdb->prepare(
-            "SELECT
-                COALESCE(SUM(CASE WHEN decision = 'accept' THEN 1 ELSE 0 END), 0) AS accepts,
-                COALESCE(SUM(CASE WHEN decision = 'reject' THEN 1 ELSE 0 END), 0) AS rejects
-             FROM {$panelTable}
-             WHERE dispute_id = %d",
-            $disputeId
-        ), ARRAY_A);
-
-        $liveAccepts = is_array($derived) ? (int) $derived['accepts'] : 0;
-        $liveRejects = is_array($derived) ? (int) $derived['rejects'] : 0;
-
-        if (!DisputeRepositorySupport::commitTx('castPanelVoteAtomic')) {
-            // COMMIT failed → vote was rolled back by MySQL.  Do NOT
-            // invalidate caches or return success — let the panelist retry.
-            return ['status' => 'error', 'code' => 'db_error', 'message' => 'Failed to finalize vote.', 'http' => 500, 'step' => 'commit', 'dispute' => null, 'accepts' => 0, 'rejects' => 0, 'db_error' => (string) $wpdb->last_error];
-        }
-
-        // Invalidate all caches affected by this vote (tally changed,
-        // queue state changed for ALL panelists, reporter sees updated tally).
-        self::invalidateDispute($disputeId);
-
-        return [
-            'status'  => 'success',
-            'code'    => 'ok',
-            'message' => 'Vote recorded.',
-            'http'    => 200,
-            'dispute' => $dispute,
-            'accepts' => $liveAccepts,
-            'rejects' => $liveRejects,
-        ];
     }
 
     /**
@@ -1419,39 +1057,24 @@ class DisputeRepository
     // ── Scheduler query methods ─────────────────────────────────────────────
 
     /**
-     * Get expired disputes past the cutoff date, limited batch.
-     *
-     * SQL unchanged — only post-query mapping added. Ordering, filtering, and
-     * limit semantics are preserved exactly.
+     * Reviewing disputes created at or before the cutoff — the daily
+     * backstop sweep's candidate batch (DisputeScheduler →
+     * DisputeVoteService::reconcileReviewingDispute resolves each
+     * against its poll's state). Bounded, oldest first.
      *
      * @return list<DisputeResolutionCandidateDTO>
      */
-    public static function getExpiredDisputes(string $cutoff, int $limit = 50): array
+    public static function listReviewingCreatedBefore(string $cutoff, int $limit = 50): array
     {
         global $wpdb;
-        $table      = self::disputes_table();
-        $panelTable = self::panel_table();
+        $table = self::disputes_table();
 
-        // Derive tallies from panel rows instead of trusting the denormalised
-        // panel_accepts / panel_rejects columns.  If the counts diverge (admin
-        // edit, partial-failure on a future code path), the verdict is still
-        // computed from the authoritative panel decisions.
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT d.id, d.panel_size, d.vote_id, d.page_id, d.voter_id, d.reporter_id,
-                    COALESCE(pt.accepts, 0) AS panel_accepts,
-                    COALESCE(pt.rejects, 0) AS panel_rejects
-             FROM {$table} d
-             LEFT JOIN (
-                 SELECT dispute_id,
-                        SUM(decision = 'accept') AS accepts,
-                        SUM(decision = 'reject') AS rejects
-                 FROM {$panelTable}
-                 WHERE decision IS NOT NULL
-                 GROUP BY dispute_id
-             ) pt ON pt.dispute_id = d.id
-             WHERE d.status = 'reviewing'
-               AND d.created_at <= %s
-             ORDER BY d.created_at ASC
+            "SELECT id, vote_id, page_id, voter_id, reporter_id
+             FROM {$table}
+             WHERE status = 'reviewing'
+               AND created_at <= %s
+             ORDER BY created_at ASC
              LIMIT %d",
             $cutoff, $limit
         ), ARRAY_A);
@@ -1474,9 +1097,9 @@ class DisputeRepository
      *
      * Returns true ONLY when this call is the first to flip
      * `resolution_enqueued_at` from NULL to NOW() on a still-reviewing
-     * dispute. Subsequent callers (concurrent panelists, reconciliation
-     * sweeps) see the row already claimed and return false — preventing
-     * duplicate jobs in the Action Scheduler queue.
+     * dispute. Subsequent callers (poll-close hook vs admin
+     * force-resolve races) see the row already claimed and return
+     * false — preventing duplicate jobs in the Action Scheduler queue.
      *
      * The async handler remains idempotent on its own (UPDATE status
      * ... WHERE status='reviewing' in beginResolveTransaction), so this
@@ -1800,63 +1423,6 @@ class DisputeRepository
     }
 
     /**
-     * Find disputes stuck in "reviewing" where all panel votes are in
-     * but resolution was never executed (trust engine unavailable at
-     * the moment of the deciding vote).
-     *
-     * SQL unchanged — only post-query mapping added.
-     *
-     * @return list<DisputeResolutionCandidateDTO>
-     */
-    public static function getStuckReviewingDisputes(string $cutoff, int $limit = 10): array
-    {
-        global $wpdb;
-        $table      = self::disputes_table();
-        $panelTable = self::panel_table();
-
-        // Derive tallies from panel rows (authoritative) instead of the
-        // denormalised dispute columns.  Also uses the latest panel vote
-        // timestamp to avoid re-triggering on disputes where the deciding
-        // vote just came in seconds ago.
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT d.id, d.vote_id, d.page_id, d.voter_id, d.reporter_id,
-                    d.panel_size,
-                    COALESCE(pv.accepts, 0) AS panel_accepts,
-                    COALESCE(pv.rejects, 0) AS panel_rejects
-             FROM {$table} d
-             INNER JOIN (
-                 SELECT dispute_id,
-                        MAX(voted_at) AS last_voted_at,
-                        SUM(decision = 'accept') AS accepts,
-                        SUM(decision = 'reject') AS rejects
-                 FROM {$panelTable}
-                 WHERE decision IS NOT NULL
-                 GROUP BY dispute_id
-             ) pv ON pv.dispute_id = d.id
-             WHERE d.status = 'reviewing'
-               AND (
-                   pv.accepts >= FLOOR(d.panel_size / 2) + 1
-                   OR pv.rejects >= FLOOR(d.panel_size / 2) + 1
-               )
-               AND pv.last_voted_at < %s
-             ORDER BY pv.last_voted_at ASC
-             LIMIT %d",
-            $cutoff,
-            $limit
-        ), ARRAY_A);
-
-        if (!is_array($rows)) {
-            return [];
-        }
-
-        $dtos = [];
-        foreach ($rows as $row) {
-            $dtos[] = self::hydrateResolutionCandidate($row);
-        }
-        return $dtos;
-    }
-
-    /**
      * Count orphaned disputes (committed but adjudication pending/failed).
      * Uses COUNT(*) instead of hydrating full rows.
      */
@@ -1897,15 +1463,14 @@ class DisputeRepository
     // ── Cache invalidation ─────────────────────────────────────────────────
 
     /**
-     * Invalidate all caches affected by a dispute status/tally change.
+     * Invalidate all caches affected by a dispute status change.
      *
-     * Must be called by any code that writes to the disputes or panel tables
+     * Must be called by any code that writes to the disputes table
      * outside of this repository (e.g. DisputeResolver).
      *
      * Invalidates:
      * - dispute:{disputeId} (direct delete)
      * - disputed_vote:{voteId} (direct delete — UI re-dispute gate after rejection)
-     * - panel_q_gen:{panelistId} for ALL panelists on the dispute (generation bump)
      * - reporter_gen:{reporterId} (generation bump)
      */
     public static function invalidateDispute(int $disputeId): void
@@ -1915,7 +1480,6 @@ class DisputeRepository
 
         global $wpdb;
         $disputeTable = self::disputes_table();
-        $panelTable   = self::panel_table();
 
         // Fetch reporter_id AND vote_id in one round-trip so we can invalidate
         // the per-vote "is this vote disputed?" cache too. Previously only the
@@ -1932,15 +1496,6 @@ class DisputeRepository
                 wp_cache_delete("disputed_vote:{$dispute->vote_id}", self::CACHE_GROUP);
             }
         }
-
-        $panelistIds = $wpdb->get_col($wpdb->prepare(
-            "SELECT panelist_user_id FROM {$panelTable} WHERE dispute_id = %d LIMIT %d",
-            $disputeId, BCC_DISPUTES_PANEL_SIZE
-        ));
-
-        foreach ($panelistIds as $uid) {
-            DisputeRepositorySupport::bumpGeneration("panel_q_gen:{$uid}");
-        }
     }
 
     // ── User deletion cleanup ──────────────────────────────────────────────
@@ -1948,9 +1503,13 @@ class DisputeRepository
     /**
      * Remove all dispute/report traces for a deleted user, atomically.
      *
-     * - Drops panel assignments (they can no longer vote)
      * - Dismisses open disputes they filed
+     * - Dismisses open disputes filed against them
      * - Dismisses open reports filed by or against them
+     *
+     * The user's dispute-vote ballots live on the Rank domain's poll
+     * engine (bcc_trust_ballots) and are evaluated at poll close; they
+     * are not touched here.
      *
      * Returns the list of dispute IDs whose caches must be invalidated
      * after commit so callers can bump generation counters outside the
@@ -1962,15 +1521,10 @@ class DisputeRepository
     {
         global $wpdb;
         $disputes = self::disputes_table();
-        $panel    = self::panel_table();
         $reports  = UserReportRepository::user_reports_table();
 
         // Collect affected dispute IDs BEFORE modifying rows so callers
         // can invalidate caches after the transaction commits.
-        $affectedDisputeIds = $wpdb->get_col($wpdb->prepare(
-            "SELECT DISTINCT dispute_id FROM {$panel} WHERE panelist_user_id = %d",
-            $userId
-        ));
         $reporterDisputeIds = $wpdb->get_col($wpdb->prepare(
             "SELECT id FROM {$disputes} WHERE reporter_id = %d AND status = 'reviewing'",
             $userId
@@ -1986,7 +1540,7 @@ class DisputeRepository
         ));
         $affectedDisputeIds = array_values(array_unique(array_map(
             'intval',
-            array_merge($affectedDisputeIds, $reporterDisputeIds, $voterDisputeIds)
+            array_merge($reporterDisputeIds, $voterDisputeIds)
         )));
 
         try {
@@ -1995,35 +1549,6 @@ class DisputeRepository
                     '[bcc-disputes] START TRANSACTION failed in cleanupForDeletedUser: ' . (string) $wpdb->last_error
                 );
             }
-
-            // Decrement denormalised tallies BEFORE deleting the panel rows.
-            // Otherwise bcc_disputes.panel_accepts / panel_rejects keep counting
-            // votes from a panelist whose row no longer exists, and the admin /
-            // panelist UI (which reads those denormalised columns via
-            // DisputeDetailDTO / PanelistQueueItemDTO) shows stale tallies.
-            // Verdict math already derives from panel rows (SUM in
-            // getExpiredDisputes / getStuckReviewingDisputes / castPanelVoteAtomic)
-            // so this fix is purely about keeping the display columns honest.
-            //
-            // GREATEST(0, …) is belt-and-suspenders: the tally is TINYINT UNSIGNED,
-            // which would wrap to 255 on an underflow rather than clamping. We
-            // should never underflow (every recorded decision increments exactly
-            // one tally), but a prior partial-failure history could leave drift
-            // that we don't want to amplify here.
-            $wpdb->query($wpdb->prepare(
-                "UPDATE {$disputes} d
-                 INNER JOIN {$panel} p ON p.dispute_id = d.id
-                 SET
-                   d.panel_accepts = GREATEST(0, CAST(d.panel_accepts AS SIGNED) - IF(p.decision = 'accept', 1, 0)),
-                   d.panel_rejects = GREATEST(0, CAST(d.panel_rejects AS SIGNED) - IF(p.decision = 'reject', 1, 0))
-                 WHERE p.panelist_user_id = %d
-                   AND p.decision IS NOT NULL",
-                $userId
-            ));
-
-            // Remove panel assignments for this user (they can no longer vote).
-            // Active disputes with reduced panels still auto-resolve via TTL.
-            $wpdb->delete($panel, ['panelist_user_id' => $userId], ['%d']);
 
             // Close any open disputes filed BY this user (reporter leaving).
             $wpdb->query($wpdb->prepare(
@@ -2181,8 +1706,8 @@ class DisputeRepository
     // ── Notification idempotency ───────────────────────────────────────────
 
     /**
-     * Reset stuck reporter-result email claims (same rationale as
-     * resetStuckPanelistClaims but targets disputes.resolved_notified_at).
+     * Reset stuck reporter-result email claims (claim-then-send rows
+     * whose worker died; targets disputes.resolved_notified_at).
      *
      * Guard: only reset where the dispute has reached a terminal status
      * and adjudication_status = 'completed'.  This avoids resetting
@@ -2217,8 +1742,10 @@ class DisputeRepository
         $charset = $wpdb->get_charset_collate();
 
         $disputes = self::disputes_table();
-        $panel    = self::panel_table();
 
+        // Panel-era columns (panel_accepts/panel_rejects/panel_size) and the
+        // bcc_dispute_panel table are RETIRED (Rank Phase 6 Wave 3, D-7);
+        // the cleanup_dispute_panel_v1 migration drops them on live sites.
         $sql = "
         CREATE TABLE {$disputes} (
             id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -2230,9 +1757,6 @@ class DisputeRepository
             evidence_url    VARCHAR(2083)            DEFAULT NULL,
             status          VARCHAR(20)     NOT NULL DEFAULT 'reviewing',
             adjudication_status VARCHAR(20) NOT NULL DEFAULT 'none',
-            panel_accepts   TINYINT UNSIGNED NOT NULL DEFAULT 0,
-            panel_rejects   TINYINT UNSIGNED NOT NULL DEFAULT 0,
-            panel_size      TINYINT UNSIGNED NOT NULL DEFAULT 5,
             created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
             reopen_count    TINYINT UNSIGNED NOT NULL DEFAULT 0,
             resolved_at              DATETIME DEFAULT NULL,
@@ -2247,23 +1771,6 @@ class DisputeRepository
             INDEX idx_status_created (status, created_at),
             INDEX idx_adjudication (adjudication_status),
             INDEX idx_reconcile (status, adjudication_status, resolved_at)
-        ) {$charset};
-
-        CREATE TABLE {$panel} (
-            id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-            dispute_id       BIGINT UNSIGNED NOT NULL,
-            panelist_user_id BIGINT UNSIGNED NOT NULL,
-            decision         VARCHAR(20)              DEFAULT NULL,
-            note             VARCHAR(500)             DEFAULT NULL,
-            assigned_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            voted_at         DATETIME                 DEFAULT NULL,
-            notified_at      DATETIME                 DEFAULT NULL,
-            PRIMARY KEY (id),
-            UNIQUE KEY uq_panelist_dispute (dispute_id, panelist_user_id),
-            INDEX idx_dispute   (dispute_id),
-            INDEX idx_panelist  (panelist_user_id),
-            INDEX idx_panelist_decision (panelist_user_id, decision),
-            INDEX idx_undecided (decision)
         ) {$charset};
         ";
 

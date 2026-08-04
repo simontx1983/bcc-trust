@@ -61,9 +61,9 @@ define('BCC_CONTRIB_WEIGHT_POST', 0.05);          // blog/research/guide post
 define('BCC_CONTRIB_WEIGHT_COMMENT', 0.02);       // helpful comment
 define('BCC_CONTRIB_WEIGHT_REVIEW', 0.05);        // review written
 define('BCC_CONTRIB_WEIGHT_SCAM_REPORT', 0.10);   // upheld scam/content report
-// Dispute participation already has its own §D5 credit; the recovery
-// component folds in DisputeParticipationRepository::getEarnedLifetimeTrust
-// rather than re-counting, so no separate weight here.
+// Dispute participation carries no contribution weight: the §D5 panel
+// credit retired with the panel (Rank Phase 6, D-7), and open dispute
+// voting grants no trust or contribution credit.
 
 // ======================================================
 // RULE 4 — TRUST-WEIGHTED ENGAGEMENT

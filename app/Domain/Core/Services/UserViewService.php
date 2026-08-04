@@ -55,7 +55,6 @@ use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Core\Support\WalletAddressValidator;
-use BCC\Trust\Disputes\Repositories\DisputeParticipationRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Rank\Services\RankStateService;
@@ -71,7 +70,6 @@ final class UserViewService
     private RankStateService $rankStateService;
     private LivingService $livingService;
     private PeepSoReactionRepository $reactionRepo;
-    private DisputeParticipationRepository $participationRepo;
     private AttestationService $attestationService;
 
     /**
@@ -90,7 +88,6 @@ final class UserViewService
         RankStateService $rankStateService,
         LivingService $livingService,
         PeepSoReactionRepository $reactionRepo,
-        DisputeParticipationRepository $participationRepo,
         AttestationService $attestationService
     ) {
         $this->voteRepo            = $voteRepo;
@@ -98,7 +95,6 @@ final class UserViewService
         $this->rankStateService    = $rankStateService;
         $this->livingService       = $livingService;
         $this->reactionRepo        = $reactionRepo;
-        $this->participationRepo   = $participationRepo;
         $this->attestationService  = $attestationService;
     }
 
@@ -581,20 +577,12 @@ final class UserViewService
     }
 
     /**
-     * §D5 — augmented trust score for the user view-model.
+     * Trust score for the user view-model.
      *
-     * NOTE:
-     * trust_score includes participation bonus (read-time only).
-     * reputation_score in DB remains the base truth.
-     * Do NOT use trust_score for persistence or tier calculations.
-     * See docs/trust-engine-coverage.md "Known divergences" section.
-     *
-     * The bonus is the user's clamped lifetime participation contribution
-     * (see DisputeParticipationRepository::getEarnedLifetimeTrust). The
-     * final score is clamped to [0, 100] as a defensive bound — the
-     * repo already caps the bonus, but a future weight tweak could
-     * theoretically push past 100 if base + bonus drift; the clamp here
-     * keeps PageScore semantics consistent without trusting upstream.
+     * The §D5 panel-participation read-time bonus is RETIRED (Rank
+     * Phase 6, D-7): the panel died and its trust credit died with it,
+     * so trust_score now equals the reputation base — clamped to
+     * [0, 100] as a defensive bound.
      *
      * Memoized per request — UserViewService is request-scoped and the
      * same user can be composed multiple times in one render (profile +
@@ -606,12 +594,7 @@ final class UserViewService
             return $this->trustScoreCache[$userId];
         }
 
-        $base  = $this->reputationRepo->getScore($userId);
-        $bonus = $this->participationRepo->getEarnedLifetimeTrust($userId);
-
-        // Round once at the end — never round base and bonus separately.
-        // Mid-pipeline rounding would create ±1 jitter that reads as bugs.
-        $score = $base + $bonus;
+        $score = $this->reputationRepo->getScore($userId);
         if ($score < 0.0)   { $score = 0.0; }
         if ($score > 100.0) { $score = 100.0; }
 

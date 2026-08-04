@@ -1840,8 +1840,8 @@ class AdminDashboardRepository
      *   window_days: int
      *   generated_at: string (UTC mysql)
      *   slow_rings: array{total: int, by_type: array<string,int>, latest_slow_ring: ?array}
-     *   panel_duty: array{window_status_counts, opened_in_window, resolved_in_window,
-     *                     timeout_rate_pct, lopsided_count, split_count, all_time_status_counts}
+     *   dispute_flow: array{window_status_counts, opened_in_window, resolved_in_window,
+     *                       timeout_rate_pct, all_time_status_counts}
      *   tier_movement: array{current_distribution: array<string,int>, wow_delta: null}
      *   watch_graph: array{new_pulls_in_window: int, top_gainers: list<array>}
      *   feed_dominance: array{total_posts: int, distinct_authors: int,
@@ -1867,7 +1867,7 @@ class AdminDashboardRepository
             'window_days'   => $days,
             'generated_at'  => gmdate('Y-m-d H:i:s'),
             'slow_rings'    => $this->ecosystemSlowRings($days),
-            'panel_duty'    => $this->ecosystemPanelDuty($days),
+            'dispute_flow'  => $this->ecosystemDisputeFlow($days),
             'tier_movement' => $this->ecosystemTierMovement(),
             'watch_graph'   => $this->ecosystemWatchGraph($days),
             'feed_dominance' => $this->ecosystemFeedDominance($days),
@@ -1931,22 +1931,14 @@ class AdminDashboardRepository
     }
 
     /**
-     * Panel-duty health rollup. Composes on DisputeRepository (status
-     * counts in window + lopsided/split detection) and the existing
-     * dispute table directly for windowed reads not covered by the
-     * existing static helpers.
-     *
-     * Audit-identified gaps surfaced here (the Phase 2 affinity
-     * overlay's effects):
-     *   - timeout_rate_pct — `timeout_no_quorum / resolved`
-     *   - lopsided/split distribution — accept/reject spread
-     *
-     * Repeat-pairings + affinity-distribution detection deferred to
-     * a follow-up pass; both require richer panel-row queries.
+     * Dispute-flow health rollup: windowed status counts + the
+     * inconclusive rate (`timeout_no_quorum / resolved`). Renamed from
+     * ecosystemPanelDuty at the panel retirement (Rank Phase 6, D-7) —
+     * the panel-spread metrics died with the panel columns.
      *
      * @return array<string, mixed>
      */
-    private function ecosystemPanelDuty(int $days): array
+    private function ecosystemDisputeFlow(int $days): array
     {
         global $wpdb;
 
@@ -1991,43 +1983,11 @@ class AdminDashboardRepository
             );
         }
 
-        // Lopsided (5-0 or 4-1) vs split (3-2) panel decisions among
-        // resolved disputes in the window. Reads accept/reject spreads
-        // from the dispute row's denormalised tallies.
-        /** @var list<array{accepts: int|string, rejects: int|string}>|null $resolvedRows */
-        $resolvedRows = $wpdb->get_results($wpdb->prepare(
-            "SELECT panel_accepts AS accepts, panel_rejects AS rejects
-             FROM {$disputeTable}
-             WHERE created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
-               AND status IN ('accepted', 'rejected')
-             LIMIT 1000",
-            $days
-        ), ARRAY_A);
-
-        $lopsided = 0;
-        $split    = 0;
-        foreach (($resolvedRows ?: []) as $row) {
-            $a = (int) $row['accepts'];
-            $r = (int) $row['rejects'];
-            $delta = abs($a - $r);
-            // 5-0 or 4-1 = lopsided (delta >= 3); 3-2 or 2-3 = split (delta <= 1).
-            // Mid-spreads (delta = 2) classified as "split-leaning" elsewhere if
-            // we ever surface a third bucket; for now treat as split for the
-            // operator-readable summary.
-            if ($delta >= 3) {
-                $lopsided++;
-            } else {
-                $split++;
-            }
-        }
-
         return [
             'window_status_counts'  => $statusCounts,
             'opened_in_window'      => $totalInWindow,
             'resolved_in_window'    => $resolvedInWindow,
             'timeout_rate_pct'      => $timeoutRatePct,
-            'lopsided_count'        => $lopsided,
-            'split_count'           => $split,
             'all_time_status_counts' => \BCC\Trust\Disputes\Repositories\DisputeAdminRepository::getDisputeStatusCounts(),
         ];
     }

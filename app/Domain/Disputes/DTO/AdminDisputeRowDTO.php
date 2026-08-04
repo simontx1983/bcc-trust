@@ -16,7 +16,7 @@ if (!defined('ABSPATH')) {
  * be optional on DisputeDetailDTO — a false nullable that would mask future
  * select-list drift.
  *
- * Same fail-fast logic rules (id/status/IDs/tallies strict, display names
+ * Same fail-fast logic rules (id/status/IDs strict, display names
  * tolerant).
  */
 final class AdminDisputeRowDTO
@@ -29,9 +29,6 @@ final class AdminDisputeRowDTO
         public readonly int     $voter_id,
         public readonly string  $reason,
         public readonly string  $status,
-        public readonly int     $panel_accepts,
-        public readonly int     $panel_rejects,
-        public readonly int     $panel_size,
         public readonly string  $created_at,
         public readonly ?string $resolved_at,
         public readonly ?string $page_title,
@@ -47,10 +44,6 @@ final class AdminDisputeRowDTO
         // reason is display-only here (admin list mb_strimwidth); NOT NULL but
         // DEFAULT '' per schema — no non-empty check.
         DisputeStatus::assert($status);
-        DTOAssert::positiveInt($panel_size,       $dto, 'panel_size');
-        DTOAssert::nonNegativeInt($panel_accepts, $dto, 'panel_accepts');
-        DTOAssert::nonNegativeInt($panel_rejects, $dto, 'panel_rejects');
-        DTOAssert::panelTally($panel_accepts, $panel_rejects, $panel_size, $dto);
         DTOAssert::datetime($created_at,          $dto, 'created_at');
         DTOAssert::nullableDatetime($resolved_at, $dto, 'resolved_at');
     }

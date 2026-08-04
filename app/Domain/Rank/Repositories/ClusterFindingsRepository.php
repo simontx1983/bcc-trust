@@ -161,6 +161,31 @@ class ClusterFindingsRepository
     }
 
     /**
+     * All active SUSPECTED findings (bounded) — mirror of
+     * listActiveConfirmed() for the §19 suspected-cluster pro-rata cap
+     * (PollService close evaluation). Same PHP-side membership
+     * filtering rationale: findings are rare by construction.
+     *
+     * @return list<object>
+     * @phpstan-return list<ClusterFindingRow>
+     */
+    public function listActiveSuspected(): array
+    {
+        global $wpdb;
+
+        /** @var list<ClusterFindingRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            'SELECT ' . self::COLUMNS_READ . " FROM {$this->table}
+              WHERE reversed_at IS NULL AND level = 'suspected'
+              ORDER BY id ASC
+              LIMIT %d",
+            self::MAX_ACTIVE_FINDINGS
+        ));
+
+        return $rows ?: [];
+    }
+
+    /**
      * D-5 auto-selection: oldest registration wins, ties break to the
      * lowest user_id. Bounded IN over the member list.
      *

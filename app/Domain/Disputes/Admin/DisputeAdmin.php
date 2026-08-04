@@ -4,7 +4,6 @@ namespace BCC\Trust\Disputes\Admin;
 
 use BCC\Trust\Disputes\Services\DisputeNotificationService;
 use BCC\Trust\Disputes\Repositories\DisputeAdminRepository;
-use BCC\Trust\Disputes\Repositories\DisputePanelRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Disputes\Repositories\UserReportRepository;
 
@@ -98,9 +97,6 @@ class DisputeAdmin
             $vote  = $votes[(int) $dispute->vote_id] ?? null;
         }
 
-        // Panel votes.
-        $panelists = DisputePanelRepository::getPanelistsForDispute($dispute_id);
-
         $back_url = admin_url('admin.php?page=bcc-disputes');
         $is_open  = $dispute->status === 'reviewing';
 
@@ -120,7 +116,7 @@ class DisputeAdmin
             $queued = sanitize_key($_GET['resolve_queued']);
             if ($queued === 'in_progress') {
                 echo '<div class="notice notice-warning is-dismissible"><p>'
-                   . esc_html__('A resolution is already queued for this dispute (panel quorum or a prior action). Refresh to see the final status.', 'bcc-disputes')
+                   . esc_html__('A resolution is already queued for this dispute (community vote or a prior action). Refresh to see the final status.', 'bcc-disputes')
                    . '</p></div>';
             } else {
                 printf(
@@ -192,7 +188,7 @@ class DisputeAdmin
 
         echo '</div>'; // end left column
 
-        // ── Right column: Panel + Metadata + Actions ────────────────────────
+        // ── Right column: Metadata + Actions ────────────────────────
 
         echo '<div>';
 
@@ -206,12 +202,14 @@ class DisputeAdmin
             'accepted'          => '#2e7d32',
             'rejected'          => '#c62828',
             'timeout_no_quorum' => '#9e9e9e',
+            'dismissed'         => '#6d4c41',
         ];
         $status_labels = [
             'reviewing'         => __('Reviewing', 'bcc-disputes'),
             'accepted'          => __('Accepted', 'bcc-disputes'),
             'rejected'          => __('Rejected', 'bcc-disputes'),
             'timeout_no_quorum' => __('Expired (no quorum)', 'bcc-disputes'),
+            'dismissed'         => __('Dismissed', 'bcc-disputes'),
         ];
         $scolor = $status_colors[$dispute->status] ?? '#666';
         $slabel = $status_labels[$dispute->status] ?? ucfirst($dispute->status);
@@ -219,53 +217,15 @@ class DisputeAdmin
             __('Status', 'bcc-disputes'),
             sprintf('<strong style="color:%s;">%s</strong>', esc_attr($scolor), esc_html($slabel))
         );
-        self::detail_row(__('Panel Size', 'bcc-disputes'), (int) $dispute->panel_size);
-        self::detail_row(__('Accepts', 'bcc-disputes'), (int) $dispute->panel_accepts);
-        self::detail_row(__('Rejects', 'bcc-disputes'), (int) $dispute->panel_rejects);
         self::detail_row(__('Resolved', 'bcc-disputes'), esc_html($dispute->resolved_at ?: '—'));
         echo '</table>';
-        echo '</div>';
-
-        // Panel votes card
-        echo '<div class="card" style="max-width:none;margin-top:16px;">';
-        echo '<h2>' . esc_html__('Panel Votes', 'bcc-disputes') . '</h2>';
-
-        if (empty($panelists)) {
-            echo '<p>' . esc_html__('No panelists assigned.', 'bcc-disputes') . '</p>';
-        } else {
-            echo '<table class="widefat striped">';
-            echo '<thead><tr>';
-            echo '<th>' . esc_html__('Panelist', 'bcc-disputes') . '</th>';
-            echo '<th>' . esc_html__('Decision', 'bcc-disputes') . '</th>';
-            echo '<th>' . esc_html__('Note', 'bcc-disputes') . '</th>';
-            echo '<th>' . esc_html__('Voted At', 'bcc-disputes') . '</th>';
-            echo '</tr></thead><tbody>';
-
-            foreach ($panelists as $pan) {
-                echo '<tr>';
-                printf('<td>%s (#%d)</td>', esc_html($pan->display_name ?: 'Unknown'), (int) $pan->panelist_user_id);
-
-                if ($pan->decision) {
-                    $dcolor = $pan->decision === 'accept' ? '#2e7d32' : '#c62828';
-                    printf('<td><strong style="color:%s;">%s</strong></td>', esc_attr($dcolor), esc_html(ucfirst($pan->decision)));
-                } else {
-                    echo '<td><em>' . esc_html__('Pending', 'bcc-disputes') . '</em></td>';
-                }
-
-                printf('<td>%s</td>', esc_html($pan->note ?: '—'));
-                printf('<td>%s</td>', esc_html($pan->voted_at ?: '—'));
-                echo '</tr>';
-            }
-
-            echo '</tbody></table>';
-        }
         echo '</div>';
 
         // Admin actions card
         if ($is_open) {
             echo '<div class="card" style="max-width:none;margin-top:16px;">';
             echo '<h2>' . esc_html__('Admin Actions', 'bcc-disputes') . '</h2>';
-            echo '<p class="description">' . esc_html__('Force-resolve this dispute. This overrides the panel process.', 'bcc-disputes') . '</p>';
+            echo '<p class="description">' . esc_html__('Force-resolve this dispute. This overrides the community vote.', 'bcc-disputes') . '</p>';
 
             echo '<div style="display:flex;gap:8px;margin-top:12px;">';
 
@@ -323,7 +283,7 @@ class DisputeAdmin
 
         // Enqueue the async resolve instead of running the adjudicator call
         // inline — the admin UI used to block on trust-engine latency. The
-        // claim gate prevents duplicate jobs if a panel-quorum enqueue is
+        // claim gate prevents duplicate jobs if a poll-close enqueue is
         // already in flight; in that case we surface a distinct "already
         // queued" notice so the admin knows to refresh rather than retry.
         $query_args = ['page' => 'bcc-disputes', 'dispute_id' => $dispute_id];

@@ -82,10 +82,10 @@ final class EliteEligibilityTest extends TestCase
 
     public function testComputeNativeExcludesOnchainBonusOnly(): void
     {
-        // 50 + (10-0)*2 = 70; the 20-point onchain term is dropped.
-        self::assertSame(70.0, TrustScoreService::computeNative(10.0, 0.0));
+        // 50 + (10-0)×0.6 = 56; the 20-point onchain term is dropped.
+        self::assertSame(56.0, TrustScoreService::computeNative(10.0, 0.0));
         // Every other term survives: +8 contribution, -5 penalty, +12 attestation.
-        self::assertSame(85.0, TrustScoreService::computeNative(10.0, 0.0, 8.0, -5.0, 12.0));
+        self::assertSame(71.0, TrustScoreService::computeNative(10.0, 0.0, 8.0, -5.0, 12.0));
     }
 
     public function testNativeScoreIsClampedIndependently(): void
@@ -94,14 +94,14 @@ final class EliteEligibilityTest extends TestCase
         // total_score of 100, so `total_score - onchain_bonus` would report 80
         // for BOTH — identical readings for wildly different conduct.
         //
-        //   A: positive 20 → raw 50 + 40 + 20 + 20 = 130
-        //   B: positive  5 → raw 50 + 10 + 20 + 20 = 100
+        //   A: positive 50 → raw 50 + 30 + 20 + 20 = 120
+        //   B: positive 20 → raw 50 + 12 + 20 + 20 = 102
+        self::assertSame(100.0, TrustScoreService::compute(50.0, 0.0, 20.0, 0.0, 0.0, 20.0));
         self::assertSame(100.0, TrustScoreService::compute(20.0, 0.0, 20.0, 0.0, 0.0, 20.0));
-        self::assertSame(100.0, TrustScoreService::compute(5.0, 0.0, 20.0, 0.0, 0.0, 20.0));
 
         // Recomputed from the terms instead, they separate correctly.
-        self::assertSame(100.0, TrustScoreService::computeNative(20.0, 0.0, 0.0, 0.0, 20.0));
-        self::assertSame(80.0, TrustScoreService::computeNative(5.0, 0.0, 0.0, 0.0, 20.0));
+        self::assertSame(100.0, TrustScoreService::computeNative(50.0, 0.0, 0.0, 0.0, 20.0));
+        self::assertSame(82.0, TrustScoreService::computeNative(20.0, 0.0, 0.0, 0.0, 20.0));
     }
 
     public function testNativeFormulaSqlDropsOnchainAndKeepsEverythingElse(): void
@@ -136,10 +136,10 @@ final class EliteEligibilityTest extends TestCase
 
     public function testGenuineConductReachesElite(): void
     {
-        // Same 90 total, but earned: 50 + (11-0)*2 + 18 attestation = 90
+        // Same 90 total, but earned: 50 + (40-0)×0.6 + 16 attestation = 90
         // native. Over both the threshold and the floor.
-        $total  = TrustScoreService::compute(11.0, 0.0, 0.0, 0.0, 0.0, 18.0);
-        $native = TrustScoreService::computeNative(11.0, 0.0, 0.0, 0.0, 18.0);
+        $total  = TrustScoreService::compute(40.0, 0.0, 0.0, 0.0, 0.0, 16.0);
+        $native = TrustScoreService::computeNative(40.0, 0.0, 0.0, 0.0, 16.0);
 
         self::assertSame(90.0, $total);
         self::assertSame(90.0, $native);

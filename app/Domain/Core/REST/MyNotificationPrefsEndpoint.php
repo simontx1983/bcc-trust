@@ -19,8 +19,7 @@
  *       "enabled": bool,
  *       "events": {
  *         "review":            bool,
- *         "dispute_outcome":   bool,
- *         "panelist_selected": bool
+ *         "dispute_outcome":   bool
  *       }
  *     }
  *   }

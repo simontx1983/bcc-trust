@@ -17,8 +17,7 @@ if (!defined('ABSPATH')) {
  *
  * Two-engineer audit follow-up: both engineers were seeing 4 separate
  * red banners on every plugin-list / dashboard / settings page load
- * (panelist pool low, chain data stale, dispute adjudication delays,
- * permanent orphans). Each was operationally useful but the per-page
+ * (chain data stale, dispute adjudication delays, permanent orphans). Each was operationally useful but the per-page
  * stacking was banner-fatigue territory.
  *
  * Design:
@@ -34,7 +33,7 @@ if (!defined('ABSPATH')) {
  *
  * NotificationItem shape:
  *   [
- *       'id'      => 'disputes.panelist_pool_low',  // stable identifier
+ *       'id'      => 'disputes.adjudication_delayed', // stable identifier
  *       'source'  => 'BCC Trust (Disputes)',        // human label
  *       'level'   => 'error' | 'warning' | 'info',
  *       'message' => '<HTML allowed via wp_kses_post>',
@@ -132,9 +131,8 @@ final class NotificationCenter
      */
     public static function contributeBuiltins(array $items): array
     {
-        if ($item = self::checkPanelistPool()) {
-            $items[] = $item;
-        }
+        // checkPanelistPool retired (Rank Phase 6 Wave 3, D-7): dispute
+        // votes ride the open poll engine — there is no assigned pool.
         if ($item = self::checkStaleChains()) {
             $items[] = $item;
         }
@@ -145,50 +143,6 @@ final class NotificationCenter
             $items[] = $item;
         }
         return $items;
-    }
-
-    /**
-     * @return NotificationItem|null
-     */
-    public static function checkPanelistPool(): ?array
-    {
-        $cacheKey   = 'bcc_disputes_panelist_pool_count';
-        $cacheGroup = 'bcc_disputes';
-        $poolCount  = wp_cache_get($cacheKey, $cacheGroup);
-
-        if ($poolCount === false) {
-            if (!class_exists('\\BCC\\Core\\ServiceLocator')
-                || !\BCC\Core\ServiceLocator::hasRealService(\BCC\Core\Contracts\TrustReadServiceInterface::class)
-            ) {
-                return null;
-            }
-
-            $trustRead = \BCC\Core\ServiceLocator::resolveTrustReadService();
-            $eligible  = $trustRead->getEligiblePanelistUserIds([], BCC_DISPUTES_PANEL_SIZE * 3);
-            $poolCount = count($eligible);
-            wp_cache_set($cacheKey, $poolCount, $cacheGroup, HOUR_IN_SECONDS);
-        }
-
-        $minimumHealthy = BCC_DISPUTES_PANEL_SIZE * 2;
-        if ((int) $poolCount >= $minimumHealthy) {
-            return null;
-        }
-
-        $level = (int) $poolCount < BCC_DISPUTES_PANEL_SIZE ? 'error' : 'warning';
-
-        return [
-            'id'      => 'disputes.panelist_pool_low',
-            'source'  => 'BCC Trust (Disputes)',
-            'level'   => $level,
-            'message' => sprintf(
-                'The eligible panelist pool is critically low — only <strong>%d</strong> qualified members found. '
-                . 'At least <strong>%d</strong> are needed per dispute (and %d recommended for proper randomization). '
-                . 'Disputes cannot be filed until enough Trusted/Elite tier members with clean records are available.',
-                (int) $poolCount,
-                BCC_DISPUTES_PANEL_SIZE,
-                $minimumHealthy
-            ),
-        ];
     }
 
     /**

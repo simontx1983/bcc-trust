@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 
 /**
  * Shared internals for the dispute repository family
- * (DisputeRepository, DisputeAdminRepository, DisputePanelRepository,
+ * (DisputeRepository, DisputeAdminRepository,
  * UserReportRepository).
  *
  * Holds the §1.0 raw-transaction guards, the generation-counter cache
@@ -165,7 +165,7 @@ final class DisputeRepositorySupport
 
     /**
      * Strict hydration into DisputeDetailDTO. Shared by getByReporterPaginated
-     * and getDisputeDetailForAdmin (both SELECT the same 16 columns).
+     * and getDisputeDetailForAdmin (both SELECT the same 13 columns).
      *
      * @param array<string, scalar|null> $row
      */
@@ -180,9 +180,6 @@ final class DisputeRepositorySupport
             reason:        RowAssert::requireString($row, 'reason'),
             evidence_url:  RowAssert::optString($row, 'evidence_url'),
             status:        DisputeStatus::assert(RowAssert::requireString($row, 'status')),
-            panel_accepts: RowAssert::requireDigitInt($row, 'panel_accepts'),
-            panel_rejects: RowAssert::requireDigitInt($row, 'panel_rejects'),
-            panel_size:    RowAssert::requireDigitInt($row, 'panel_size'),
             created_at:    RowAssert::requireString($row, 'created_at'),
             resolved_at:   RowAssert::optString($row, 'resolved_at'),
             page_title:    RowAssert::optString($row, 'page_title'),
