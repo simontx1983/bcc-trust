@@ -553,6 +553,16 @@ final class PostsService
         if (!(bool) get_option('bcc_post_delete_enabled', true)) {
             return ['error' => 'bcc_feature_disabled', 'message' => 'Deleting posts is not available right now.'];
         }
+        // Destructive-mutation seatbelt (same posture as the create
+        // paths): throttle BEFORE the ownership gate so a scripted
+        // burst can't even enumerate which ids it owns.
+        if (!Throttle::allow(
+            'post_delete_' . $viewerId,
+            BCC_TRUST_RATE_LIMIT_POST_DELETE,
+            BCC_TRUST_RATE_WINDOW_POST_DELETE
+        )) {
+            return ['error' => 'bcc_rate_limited', 'message' => 'Too many deletions — try again in a few minutes.'];
+        }
 
         $actId = self::parseFeedId($feedId);
         if ($actId === null) {
@@ -593,7 +603,10 @@ final class PostsService
             ]);
         }
 
-        do_action('bcc_post_deleted', $viewerId, $actId, $isOwner ? 'owner' : 'admin');
+        // $postId as 4th arg: the Rank evidence ledger keys post events
+        // by wp_post id ('post', $postId), not act_id — the reversal
+        // subscriber in Plugin.php needs it.
+        do_action('bcc_post_deleted', $viewerId, $actId, $isOwner ? 'owner' : 'admin', $postId);
 
         return ['ok' => true, 'feed_id' => $feedId];
     }

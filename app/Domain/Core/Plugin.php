@@ -2135,6 +2135,18 @@ final class Plugin
                 $i->reverse('report_upheld', (int) $reportId, 'moderation_undone'));
         }, 20, 1);
 
+        // Post deletion (PostsService::deletePost — owner self-delete or
+        // admin trash) reverses the post's Rank evidence. Without this,
+        // publish→earn→delete→repeat farms contribution credit: the
+        // ledger's ('post', wp_post_id) events survive the trash. Both
+        // status and blog posts ingest under sourceType 'post', so one
+        // reversal covers both; reversing an id with no ledger rows
+        // (pre-ledger posts) matches zero rows — harmless.
+        add_action('bcc_post_deleted', function ($viewerId, $actId, $mode, $postId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $i->reverse('post', (int) $postId, $mode === 'owner' ? 'author_self_delete' : 'admin_removed'));
+        }, 20, 4);
+
         // ── §O1.2 first-action celebrations (retention pass 2026-05-13) ──
         //
         // One-shot stashings for first_post / first_review / first_blog.

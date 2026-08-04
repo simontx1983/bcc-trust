@@ -42,6 +42,12 @@ define('BCC_TRUST_RATE_WINDOW_API', 60);
 define('BCC_TRUST_RATE_LIMIT_STATUS_POST', 5);
 define('BCC_TRUST_RATE_WINDOW_STATUS_POST', 120);
 
+// Post deletion seatbelt (PostsService::deletePost). Own-post deletes
+// are rare human actions — 10/10min never touches a real user but
+// clips a scripted mass-trash (incl. a compromised admin session).
+define('BCC_TRUST_RATE_LIMIT_POST_DELETE', 10);
+define('BCC_TRUST_RATE_WINDOW_POST_DELETE', 600);
+
 // §D6 PR-B — blog cover-image upload throttle (BlogCoverImageEndpoint).
 //
 // Sized for the composer's "pick a cover, change my mind, pick another"
