@@ -80,7 +80,7 @@
     },
     {
       "chain": "cosmos",
-      "collection_count": 95,
+      "collection_count": 96,
       "id": 5026,
       "links": {
         "self": "/halls/cosmos-hub-hall"
@@ -88,7 +88,7 @@
       "member_count": 2,
       "name": "Cosmos Hub Hall",
       "slug": "cosmos-hub-hall",
-      "validator_count": 261,
+      "validator_count": 263,
       "viewer_membership": null
     },
     {
@@ -192,7 +192,7 @@
       "member_count": 1,
       "name": "NEAR Protocol Hall",
       "slug": "near-protocol-hall",
-      "validator_count": 482,
+      "validator_count": 484,
       "viewer_membership": null
     },
     {
@@ -218,7 +218,7 @@
       "member_count": 1,
       "name": "Osmosis Hall",
       "slug": "osmosis-hall",
-      "validator_count": 97,
+      "validator_count": 98,
       "viewer_membership": null
     },
     {
@@ -257,7 +257,7 @@
       "member_count": 1,
       "name": "Solana Hall",
       "slug": "solana-hall",
-      "validator_count": 909,
+      "validator_count": 911,
       "viewer_membership": null
     }
   ],
