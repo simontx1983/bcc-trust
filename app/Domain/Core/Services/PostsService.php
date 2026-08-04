@@ -34,6 +34,7 @@ use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
 use BCC\Trust\Core\ValueObjects\BlogCategory;
+use BCC\Trust\Core\ValueObjects\GroupType;
 use Exception;
 
 if (!defined('ABSPATH')) {
@@ -69,6 +70,22 @@ final class PostsService
      * two values stay within the group's own audience.
      */
     private const VISIBILITY_PUBLIC_ALL = 'public_all';
+
+    /**
+     * Rank Phase 7 (§21.3) — per-Hall feed channel selector. Every
+     * Hall carries TWO feeds: 'main' (any member posts) and 'ranked'
+     * (Journeyman+ AND Neutral+ members only; everyone reads). A
+     * ranked post is stamped with `_bcc_ranked_feed = '1'` post meta;
+     * the read side (bcc-core PeepSoActivityRepository) filters the
+     * channels apart on that marker. Anything except 'ranked'
+     * collapses to 'main' (defense in depth — same posture as
+     * normalizeVisibility).
+     */
+    public const HALL_FEED_MAIN   = 'main';
+    public const HALL_FEED_RANKED = 'ranked';
+
+    /** Ranked-channel post-meta marker (read by bcc-core's feed query). */
+    public const META_RANKED_FEED = '_bcc_ranked_feed';
 
     /**
      * §D2 — review bodies allow long-form text. The cap is generous
@@ -207,6 +224,60 @@ final class PostsService
     }
 
     /**
+     * Clamp the §21.3 feed-channel selector: only the literal 'ranked'
+     * selects the ranked channel; everything else (absent, typo,
+     * hostile) collapses to 'main' so a malformed value can never
+     * bypass the ranked-posting gate by accident — it simply posts to
+     * the main channel it was always allowed to post to.
+     */
+    public static function normalizeHallFeed(string $hallFeed): string
+    {
+        return $hallFeed === self::HALL_FEED_RANKED
+            ? self::HALL_FEED_RANKED
+            : self::HALL_FEED_MAIN;
+    }
+
+    /**
+     * Pure §21.3 channel-shape check: 'ranked' is only valid when the
+     * target group is a Hall. Called twice — once pre-gate with
+     * `$isHallGroup = false` when no group is targeted at all (a wall
+     * post has no ranked channel), and once inside gateGroupPost with
+     * the resolved kind. Pure static so RankedFeedGateTest exercises
+     * it without WordPress.
+     *
+     * @return array{error: string, message: string}|null Null = passes.
+     */
+    public static function rankedChannelError(string $hallFeed, bool $isHallGroup): ?array
+    {
+        if ($hallFeed !== self::HALL_FEED_RANKED) {
+            return null;
+        }
+        if (!$isHallGroup) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => 'Only Halls have a ranked feed.',
+            ];
+        }
+        return null;
+    }
+
+    /**
+     * Plain state descriptions per post_ranked_hall_feed deny reason
+     * (stable machine reason rides in error.data.reason).
+     */
+    private static function rankedDenyMessage(string $reason): string
+    {
+        return match ($reason) {
+            'suspended'        => 'Your account is suspended.',
+            'new_member'       => 'Reach Journeyman rank to post in the ranked feed.',
+            'below_journeyman' => 'Reach Journeyman rank to post in the ranked feed.',
+            'below_neutral'    => 'Your standing must be Neutral or better to post in the ranked feed.',
+            'in_recovery'      => 'Ranked-feed posting is paused while your rank is in recovery.',
+            default            => 'You can\'t post in the ranked feed right now.',
+        };
+    }
+
+    /**
      * Create a status post on the viewer's own wall.
      *
      * Auth is the caller's responsibility (REST endpoint checks
@@ -229,7 +300,8 @@ final class PostsService
         int $authorId,
         string $content,
         int $groupId = 0,
-        string $visibility = self::VISIBILITY_DEFAULT
+        string $visibility = self::VISIBILITY_DEFAULT,
+        string $hallFeed = self::HALL_FEED_MAIN
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -239,13 +311,24 @@ final class PostsService
         // to members_only. The REST enum already gates this, but the
         // service is the security boundary.
         $visibility = self::normalizeVisibility($visibility);
+        $hallFeed   = self::normalizeHallFeed($hallFeed);
+
+        // §21.3 — a ranked-channel post with no group target is shape-
+        // invalid (a wall has no ranked channel); with a group target
+        // the Hall-kind + capability gates run inside gateGroupPost.
+        if ($groupId <= 0) {
+            $channelError = self::rankedChannelError($hallFeed, false);
+            if ($channelError !== null) {
+                return $channelError;
+            }
+        }
 
         // Group-wall validation runs BEFORE content / mention / throttle
         // gates so a non-member never burns a throttle slot probing
         // group existence. Returns null on success (allowed); an error
         // envelope on failure.
         if ($groupId > 0) {
-            $gateError = self::gateGroupPost($authorId, $groupId, $visibility);
+            $gateError = self::gateGroupPost($authorId, $groupId, $visibility, $hallFeed);
             if ($gateError !== null) {
                 return $gateError;
             }
@@ -310,6 +393,11 @@ final class PostsService
 
         $postId = $result['post_id'];
         $actId  = $result['act_id'];
+
+        // §21.3 — stamp the ranked-channel marker AFTER the write (the
+        // gate already passed above; the read side splits the two Hall
+        // channels on this meta).
+        self::stampRankedFeed($postId, $hallFeed);
 
         // §A3 event bus — single emission per state change. Subscribers
         // run async via Action Scheduler (cf. Plugin.php's existing
@@ -1676,7 +1764,8 @@ final class PostsService
         array $file,
         string $caption,
         int $groupId = 0,
-        string $visibility = self::VISIBILITY_DEFAULT
+        string $visibility = self::VISIBILITY_DEFAULT,
+        string $hallFeed = self::HALL_FEED_MAIN
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -1684,11 +1773,20 @@ final class PostsService
 
         // Defense in depth — clamp to the allowed set (see createStatus).
         $visibility = self::normalizeVisibility($visibility);
+        $hallFeed   = self::normalizeHallFeed($hallFeed);
+
+        // §21.3 — same channel-shape check as createStatus.
+        if ($groupId <= 0) {
+            $channelError = self::rankedChannelError($hallFeed, false);
+            if ($channelError !== null) {
+                return $channelError;
+            }
+        }
 
         // Group-wall validation runs BEFORE caption / throttle / file
         // gates — same ordering as createStatus.
         if ($groupId > 0) {
-            $gateError = self::gateGroupPost($authorId, $groupId, $visibility);
+            $gateError = self::gateGroupPost($authorId, $groupId, $visibility, $hallFeed);
             if ($gateError !== null) {
                 return $gateError;
             }
@@ -1743,6 +1841,9 @@ final class PostsService
         $actId   = $result['act_id'];
         $photoId = $result['photo_id'];
 
+        // §21.3 — ranked-channel marker (gate already passed).
+        self::stampRankedFeed($postId, $hallFeed);
+
         // §A3 event bus — uniform with status / blog. Subscribers
         // attach independently and run async via Action Scheduler.
         do_action('bcc_post_created', $authorId, $postId, $actId);
@@ -1791,7 +1892,8 @@ final class PostsService
         string $url,
         string $caption,
         int $groupId = 0,
-        string $visibility = self::VISIBILITY_DEFAULT
+        string $visibility = self::VISIBILITY_DEFAULT,
+        string $hallFeed = self::HALL_FEED_MAIN
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -1799,11 +1901,20 @@ final class PostsService
 
         // Defense in depth — clamp to the allowed set (see createStatus).
         $visibility = self::normalizeVisibility($visibility);
+        $hallFeed   = self::normalizeHallFeed($hallFeed);
+
+        // §21.3 — same channel-shape check as createStatus.
+        if ($groupId <= 0) {
+            $channelError = self::rankedChannelError($hallFeed, false);
+            if ($channelError !== null) {
+                return $channelError;
+            }
+        }
 
         // Group-wall validation runs BEFORE caption / throttle / URL
         // gates — same ordering as createStatus / createPhotoPost.
         if ($groupId > 0) {
-            $gateError = self::gateGroupPost($authorId, $groupId, $visibility);
+            $gateError = self::gateGroupPost($authorId, $groupId, $visibility, $hallFeed);
             if ($gateError !== null) {
                 return $gateError;
             }
@@ -1854,6 +1965,9 @@ final class PostsService
 
         $postId = $result['post_id'];
         $actId  = $result['act_id'];
+
+        // §21.3 — ranked-channel marker (gate already passed).
+        self::stampRankedFeed($postId, $hallFeed);
 
         // §A3 event bus — uniform with status / photo. Subscribers
         // attach independently.
@@ -2023,10 +2137,21 @@ final class PostsService
      * boundary is unambiguous and a direct REST call cannot bypass it.
      * See GroupsService::canUsePublicAll / {@see PublicAllPolicy}.
      *
-     * @return array{error: string, message: string}|null
+     * `$hallFeed` is the already-normalized §21.3 feed-channel selector.
+     * When it is `ranked` the target must be a Hall AND the author must
+     * pass the post_ranked_hall_feed capability (Journeyman+ AND
+     * Neutral+ AND not suspended AND not in recovery — the resolver is
+     * authoritative). Membership was already required above, so the
+     * full §21.3 predicate (member AND ranked-capable) holds here.
+     *
+     * @return array{error: string, message: string, data?: array<string, mixed>}|null
      */
-    private static function gateGroupPost(int $authorId, int $groupId, string $visibility): ?array
-    {
+    private static function gateGroupPost(
+        int $authorId,
+        int $groupId,
+        string $visibility,
+        string $hallFeed = self::HALL_FEED_MAIN
+    ): ?array {
         $groupsService = Plugin::instance()->groupsService();
 
         $access = $groupsService->resolveGroupAccess($authorId, $groupId);
@@ -2085,6 +2210,42 @@ final class PostsService
             ];
         }
 
+        // §21.3 ranked-channel gate — runs AFTER membership (a Hall
+        // member below Journeyman gets the honest capability denial,
+        // not a shape error; a non-member never reaches this branch).
+        if ($hallFeed === self::HALL_FEED_RANKED) {
+            $ctx    = Plugin::instance()->groupContextResolver()->forGroup($groupId);
+            $isHall = $ctx !== null && $ctx->type === GroupType::Hall;
+
+            $channelError = self::rankedChannelError($hallFeed, $isHall);
+            if ($channelError !== null) {
+                return $channelError;
+            }
+
+            $decision = Plugin::instance()
+                ->capabilityResolver()
+                ->can($authorId, 'post_ranked_hall_feed');
+            if (!$decision->isAllowed()) {
+                return [
+                    'error'   => 'bcc_forbidden',
+                    'message' => self::rankedDenyMessage($decision->reason),
+                    'data'    => ['reason' => $decision->reason],
+                ];
+            }
+        }
+
         return null;
+    }
+
+    /**
+     * Stamp the §21.3 ranked-channel marker on a just-written post.
+     * No-op for main-channel posts (absent meta ⇒ main — the read side
+     * anti-joins on the key, so we never write a 'main' marker row).
+     */
+    private static function stampRankedFeed(int $postId, string $hallFeed): void
+    {
+        if ($postId > 0 && $hallFeed === self::HALL_FEED_RANKED) {
+            update_post_meta($postId, self::META_RANKED_FEED, '1');
+        }
     }
 }

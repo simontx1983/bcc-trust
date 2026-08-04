@@ -289,6 +289,12 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_rank_pending';
     }
 
+    public static function communityOwnershipLog(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_community_ownership_log';
+    }
+
     public static function polls(): string
     {
         global $wpdb;

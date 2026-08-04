@@ -194,6 +194,18 @@ final class PostsEndpoint
                         'enum'              => ['members_only', 'public_group', 'public_all'],
                         'sanitize_callback' => 'sanitize_text_field',
                     ],
+                    // Rank Phase 7 (§21.3) — Hall feed-channel selector.
+                    // 'ranked' targets the Hall's second feed (write gate:
+                    // Journeyman+ AND Neutral+ AND Hall member); absent /
+                    // 'main' is the ordinary group feed. Only meaningful
+                    // when group_id targets a Hall — 'ranked' anywhere
+                    // else is bcc_invalid_request. Status kind only.
+                    'hall_feed' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['main', 'ranked'],
+                        'sanitize_callback' => 'sanitize_key',
+                    ],
                     // ── §D6 crypto-blog composer (PR-A) fields ───────
                     //
                     // All optional at the REST layer; the service
@@ -300,6 +312,14 @@ final class PostsEndpoint
                         'type'              => 'string',
                         'enum'              => ['members_only', 'public_group', 'public_all'],
                         'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    // §21.3 Hall feed-channel selector — same semantics
+                    // as on /posts (multipart form field here).
+                    'hall_feed' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['main', 'ranked'],
+                        'sanitize_callback' => 'sanitize_key',
                     ],
                 ],
             ]
@@ -481,6 +501,14 @@ final class PostsEndpoint
                         'enum'              => ['members_only', 'public_group', 'public_all'],
                         'sanitize_callback' => 'sanitize_text_field',
                     ],
+                    // §21.3 Hall feed-channel selector — same semantics
+                    // as on /posts and /posts/photo.
+                    'hall_feed' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'enum'              => ['main', 'ranked'],
+                        'sanitize_callback' => 'sanitize_key',
+                    ],
                 ],
             ]
         );
@@ -504,10 +532,13 @@ final class PostsEndpoint
         // page-scoped, blogs are own-wall in V1). Only matters when
         // group_id > 0; the service validates the value set.
         $visibility = (string) ($request->get_param('visibility') ?? 'members_only');
+        // §21.3 Hall feed-channel — status kind only; the service
+        // normalizes (anything but 'ranked' collapses to 'main').
+        $hallFeed = (string) ($request->get_param('hall_feed') ?? 'main');
         $service = Plugin::instance()->postsService();
 
         if ($kind === 'status') {
-            $result = $service->createStatus($viewerId, $content, $groupId, $visibility);
+            $result = $service->createStatus($viewerId, $content, $groupId, $visibility, $hallFeed);
         } elseif ($kind === 'review') {
             // Reviews are page-scoped, not wall-scoped — group_id is
             // ignored here on purpose. Surfacing it would create a
@@ -751,7 +782,8 @@ final class PostsEndpoint
         $caption    = (string) ($request->get_param('caption') ?? '');
         $groupId    = (int) ($request->get_param('group_id') ?? 0);
         $visibility = (string) ($request->get_param('visibility') ?? 'members_only');
-        $result     = Plugin::instance()->postsService()->createPhotoPost($viewerId, $file, $caption, $groupId, $visibility);
+        $hallFeed   = (string) ($request->get_param('hall_feed') ?? 'main');
+        $result     = Plugin::instance()->postsService()->createPhotoPost($viewerId, $file, $caption, $groupId, $visibility, $hallFeed);
 
         if (isset($result['error'])) {
             return self::forwardServiceError($result);
@@ -784,8 +816,9 @@ final class PostsEndpoint
         $caption    = (string) ($request->get_param('caption') ?? '');
         $groupId    = (int) ($request->get_param('group_id') ?? 0);
         $visibility = (string) ($request->get_param('visibility') ?? 'members_only');
+        $hallFeed   = (string) ($request->get_param('hall_feed') ?? 'main');
 
-        $result = Plugin::instance()->postsService()->createGifPost($viewerId, $url, $caption, $groupId, $visibility);
+        $result = Plugin::instance()->postsService()->createGifPost($viewerId, $url, $caption, $groupId, $visibility, $hallFeed);
         if (isset($result['error'])) {
             return self::forwardServiceError($result);
         }

@@ -5,6 +5,8 @@
  *
  *   POST /me/groups/{id}/join     — join an open group
  *   POST /me/groups/{id}/leave    — leave any group I'm a member of
+ *   POST /me/groups/{id}/transfer — hand ownership to another member
+ *                                    (Rank Phase 7 §21.2 custody gates)
  *
  * Holder groups use /me/holder-groups; Halls use /me/halls — both
  * have their own gate/policy. This endpoint is for the residual case:
@@ -121,6 +123,31 @@ final class MyGroupsEndpoint
                         'required'          => true,
                         'type'              => 'string',
                         'sanitize_callback' => 'sanitize_key',
+                    ],
+                ],
+            ]
+        );
+
+        // Rank Phase 7 (§21.2) — transfer ownership of a User-kind
+        // (member-created) community to another active member. Gate
+        // chain lives in CommunityCustodyService: owner-only, User-kind
+        // only, giver can('transfer_community'), receiver already a
+        // member + can('receive_community'); the PeepSo write goes
+        // through PeepSoGroupWriter::transferOwnership. Both parties'
+        // 30-day custody cooldowns (re)arm on success.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/me/groups/(?P<id>\d+)/transfer',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'postTransfer'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'id' => ['required' => true, 'sanitize_callback' => 'absint'],
+                    'to_user_id' => [
+                        'required'          => true,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
                     ],
                 ],
             ]
@@ -393,6 +420,21 @@ final class MyGroupsEndpoint
             return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
         }
 
+        // Rank Phase 7 (§21.2) — the custody acquisition gate:
+        // Apprentice+ AND Neutral+ AND not in Rank recovery AND under
+        // the per-rank ownership cap AND outside the 30-day global
+        // custody cooldown. The resolver is authoritative; the stable
+        // deny reason rides in error.data.reason for the frontend.
+        $decision = Plugin::instance()->capabilityResolver()->can($userId, 'create_community');
+        if (!$decision->isAllowed()) {
+            return ApiResponse::error(
+                'bcc_forbidden',
+                self::createDenyMessage($decision->reason),
+                403,
+                ['reason' => $decision->reason]
+            );
+        }
+
         $name         = trim((string) $request->get_param('name'));
         $description  = trim((string) $request->get_param('description'));
         $privacyRaw   = (string) ($request->get_param('privacy') ?: 'open');
@@ -502,6 +544,20 @@ final class MyGroupsEndpoint
             'trust_min' => $trustMin > 0 ? $trustMin : null,
         ], 'group', $userId);
 
+        // Custody ledger (§21.2) — 'create' (re)arms the 30-day global
+        // cooldown. Non-fatal: the group exists either way, but a
+        // failed ledger write means the cooldown did NOT arm, so it is
+        // error-logged loudly rather than swallowed.
+        $custodyLogged = Plugin::instance()
+            ->communityOwnershipLogRepository()
+            ->record($userId, $groupId, 'create', null);
+        if (!$custodyLogged) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] custody ledger write failed on create — cooldown NOT armed', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+            ]);
+        }
+
         $post = get_post($groupId);
         $slug = $post instanceof \WP_Post ? (string) $post->post_name : '';
 
@@ -518,6 +574,74 @@ final class MyGroupsEndpoint
         ]);
         $response->set_status(201);
         return $response;
+    }
+
+    /**
+     * POST /me/groups/{id}/transfer — hand a User-kind community to
+     * another active member (Rank Phase 7, §21.2).
+     *
+     * The full gate chain + write + custody ledger live in
+     * CommunityCustodyService::transfer; this handler is auth +
+     * throttle + envelope mapping only. Response on success:
+     * { ok: true, group_id, new_owner_id }. Deny reasons (stable
+     * snake_case, receiver-side prefixed `receiver_*`) ride in
+     * error.data.reason.
+     *
+     * @param WP_REST_Request<array<string, mixed>> $request
+     */
+    public function postTransfer(WP_REST_Request $request): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // Rate-limit before every non-auth read (throttle-before-
+        // credentials): transfers are rare, deliberate actions — 5/hour
+        // matches the create bucket and caps cooldown-ledger churn.
+        if (!\BCC\Core\Security\Throttle::allow('group_transfer:' . $userId, 5, 3600)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again in an hour.', 429);
+        }
+
+        $groupId  = (int) $request->get_param('id');
+        $toUserId = (int) $request->get_param('to_user_id');
+
+        $result = Plugin::instance()->communityCustodyService()->transfer($userId, $groupId, $toUserId);
+
+        if (isset($result['error'])) {
+            $code   = (string) $result['error'];
+            $status = match ($code) {
+                'bcc_not_found'      => 404,
+                'bcc_forbidden'      => 403,
+                'bcc_internal_error' => 500,
+                default              => 400,
+            };
+            /** @var array<string, mixed>|null $data */
+            $data = isset($result['data']) && is_array($result['data']) ? $result['data'] : null;
+            return ApiResponse::error($code, (string) ($result['message'] ?? ''), $status, $data);
+        }
+
+        $response = ApiResponse::ok($result);
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
+    /**
+     * Plain state descriptions per create_community deny reason —
+     * no cadence pressure, no nudges. The stable machine reason is in
+     * error.data.reason; this is the human sentence beside it.
+     */
+    private static function createDenyMessage(string $reason): string
+    {
+        return match ($reason) {
+            'suspended'       => 'Your account is suspended.',
+            'new_member'      => 'Reach Apprentice rank to create a community.',
+            'below_neutral'   => 'Your standing must be Neutral or better to create a community.',
+            'in_recovery'     => 'Community actions are paused while your rank is in recovery.',
+            'cap_reached'     => 'You own the maximum number of communities for your rank.',
+            'cooldown_active' => 'A 30-day cooldown follows creating, receiving, or transferring a community. Yours is still active.',
+            default           => 'You can\'t create a community right now.',
+        };
     }
 
     /**

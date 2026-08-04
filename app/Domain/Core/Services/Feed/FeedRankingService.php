@@ -393,9 +393,17 @@ final class FeedRankingService
      * invariant). When false (a member is reading) no visibility filter
      * is applied, so the member sees every post including members_only.
      *
+     * Rank Phase 7 (§21.3): `$hallFeed` selects the Hall feed channel.
+     * 'ranked' narrows to posts stamped `_bcc_ranked_feed` (everyone
+     * may read; POSTING into the channel is what's gated, at write
+     * time); 'main' (default) EXCLUDES ranked posts so the two
+     * channels never double-serve. Applied on every group-scoped read
+     * — outside Halls no post carries the marker, so 'main' is a
+     * no-op there and 'ranked' is honestly empty.
+     *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getGroupFeed(int $viewerId, int $groupId, ?string $cursor = null, int $limit = 20, bool $publicOnly = false): array
+    public function getGroupFeed(int $viewerId, int $groupId, ?string $cursor = null, int $limit = 20, bool $publicOnly = false, string $hallFeed = 'main'): array
     {
         if ($groupId <= 0) {
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
@@ -450,7 +458,9 @@ final class FeedRankingService
             $hidden === []   ? null : $hidden,
             $groupId,
             null,
-            $visibilityIn
+            $visibilityIn,
+            null,
+            $hallFeed === 'ranked' ? 'ranked' : 'main'
         );
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);

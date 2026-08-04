@@ -34,7 +34,8 @@ final class CapabilityDecision
      *        'unknown_capability', 'feature_gate', 'not_affected_party').
      * @param string $source Which rule family produced the verdict
      *        ('fail_closed' | 'feature_access' | 'attestation_gate' |
-     *        'permissions' | 'future' | 'live_gate').
+     *        'permissions' | 'future' | 'live_gate' |
+     *        'community_custody' | 'ranked_hall' | 'mentor_listing').
      */
     private function __construct(
         public readonly string $outcome,

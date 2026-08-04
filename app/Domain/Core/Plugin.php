@@ -548,6 +548,26 @@ final class Plugin
         return $this->rankPendingRepository ??= new \BCC\Trust\Rank\Repositories\RankPendingRepository();
     }
 
+    // ── Rank domain (redesign Phase 7 community privileges) ──────────
+
+    private ?\BCC\Trust\Rank\Repositories\CommunityOwnershipLogRepository $communityOwnershipLogRepository = null;
+    public function communityOwnershipLogRepository(): \BCC\Trust\Rank\Repositories\CommunityOwnershipLogRepository
+    {
+        return $this->communityOwnershipLogRepository ??= new \BCC\Trust\Rank\Repositories\CommunityOwnershipLogRepository();
+    }
+
+    private ?\BCC\Trust\Core\Services\CommunityCustodyService $communityCustodyService = null;
+    public function communityCustodyService(): \BCC\Trust\Core\Services\CommunityCustodyService
+    {
+        return $this->communityCustodyService ??= new \BCC\Trust\Core\Services\CommunityCustodyService();
+    }
+
+    private ?\BCC\Trust\Core\Services\MentorListingService $mentorListingService = null;
+    public function mentorListingService(): \BCC\Trust\Core\Services\MentorListingService
+    {
+        return $this->mentorListingService ??= new \BCC\Trust\Core\Services\MentorListingService();
+    }
+
     private ?\BCC\Trust\Rank\Services\ApprenticeReadinessService $apprenticeReadinessService = null;
     public function apprenticeReadinessService(): \BCC\Trust\Rank\Services\ApprenticeReadinessService
     {
