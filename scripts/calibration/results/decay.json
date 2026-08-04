@@ -1,0 +1,224 @@
+{
+    "scenario": "decay_recovery",
+    "config": {
+        "decay_grace_days": 365,
+        "decay_step_days": 30,
+        "decay_points_per_step": 1.0,
+        "recovery_grace_days": 90
+    },
+    "inactivity": {
+        "stop_day": 200,
+        "last_login_day": 199,
+        "first_decay_day_expected": 594,
+        "samples": [
+            {
+                "day": 200,
+                "days_since_login": 1,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.5
+            },
+            {
+                "day": 300,
+                "days_since_login": 101,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.5
+            },
+            {
+                "day": 400,
+                "days_since_login": 201,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.5
+            },
+            {
+                "day": 500,
+                "days_since_login": 301,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.5
+            },
+            {
+                "day": 564,
+                "days_since_login": 365,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.5
+            },
+            {
+                "day": 565,
+                "days_since_login": 366,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.5
+            },
+            {
+                "day": 593,
+                "days_since_login": 394,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.5
+            },
+            {
+                "day": 594,
+                "days_since_login": 395,
+                "decay_real": 1.0,
+                "decay_expected": 1.0,
+                "total": 75.5
+            },
+            {
+                "day": 595,
+                "days_since_login": 396,
+                "decay_real": 1.0,
+                "decay_expected": 1.0,
+                "total": 75.5
+            },
+            {
+                "day": 624,
+                "days_since_login": 425,
+                "decay_real": 2.0,
+                "decay_expected": 2.0,
+                "total": 74.5
+            },
+            {
+                "day": 625,
+                "days_since_login": 426,
+                "decay_real": 2.0,
+                "decay_expected": 2.0,
+                "total": 74.5
+            },
+            {
+                "day": 654,
+                "days_since_login": 455,
+                "decay_real": 3.0,
+                "decay_expected": 3.0,
+                "total": 73.5
+            },
+            {
+                "day": 700,
+                "days_since_login": 501,
+                "decay_real": 4.0,
+                "decay_expected": 4.0,
+                "total": 72.5
+            },
+            {
+                "day": 750,
+                "days_since_login": 551,
+                "decay_real": 6.0,
+                "decay_expected": 6.0,
+                "total": 70.5
+            },
+            {
+                "day": 800,
+                "days_since_login": 601,
+                "decay_real": 7.0,
+                "decay_expected": 7.0,
+                "total": 69.5
+            }
+        ],
+        "floor_probe_day3000_total": 0.0
+    },
+    "evidence_loss": [
+        {
+            "profile": "casual",
+            "member_id": 2,
+            "events_before_150": 45,
+            "events_reversed": 13,
+            "journeyman_day_orig": null,
+            "requirements_after_loss": "n/a (not Journeyman by day 150)",
+            "journeyman_day_with_loss": null
+        },
+        {
+            "profile": "regular",
+            "member_id": 202,
+            "events_before_150": 192,
+            "events_reversed": 57,
+            "journeyman_day_orig": 215,
+            "requirements_after_loss": "n/a (not Journeyman by day 150)",
+            "journeyman_day_with_loss": 215
+        },
+        {
+            "profile": "heavy",
+            "member_id": 402,
+            "events_before_150": 601,
+            "events_reversed": 180,
+            "journeyman_day_orig": 100,
+            "requirements_after_loss": "retained",
+            "days_to_recover": 0
+        },
+        {
+            "profile": "sporadic",
+            "member_id": 602,
+            "events_before_150": 5,
+            "events_reversed": 1,
+            "journeyman_day_orig": null,
+            "requirements_after_loss": "n/a (not Journeyman by day 150)",
+            "journeyman_day_with_loss": null
+        }
+    ],
+    "targets": {
+        "decay_matches_config": {
+            "target": "REAL calculator decay == steps x points per config at every sampled day",
+            "actual": true,
+            "pass": true
+        },
+        "no_decay_inside_grace": {
+            "target": "zero decay through day 400 (grace 365d > sim window; confirmed from config)",
+            "actual": true,
+            "pass": true
+        },
+        "score_floor_at_zero": {
+            "target": "total never negative under unbounded decay (day-3000 probe)",
+            "actual": 0.0,
+            "pass": true
+        },
+        "total_monotone_after_stop": {
+            "target": "total non-increasing once activity stops (time credit frozen, decay only)",
+            "actual": true,
+            "pass": true
+        },
+        "recovery_within_grace": {
+            "target": "members losing requirements at day 150 re-satisfy within the 90-day grace at their own cadence (INFO if none lost)",
+            "actual": [
+                {
+                    "profile": "casual",
+                    "member_id": 2,
+                    "events_before_150": 45,
+                    "events_reversed": 13,
+                    "journeyman_day_orig": null,
+                    "requirements_after_loss": "n/a (not Journeyman by day 150)",
+                    "journeyman_day_with_loss": null
+                },
+                {
+                    "profile": "regular",
+                    "member_id": 202,
+                    "events_before_150": 192,
+                    "events_reversed": 57,
+                    "journeyman_day_orig": 215,
+                    "requirements_after_loss": "n/a (not Journeyman by day 150)",
+                    "journeyman_day_with_loss": 215
+                },
+                {
+                    "profile": "heavy",
+                    "member_id": 402,
+                    "events_before_150": 601,
+                    "events_reversed": 180,
+                    "journeyman_day_orig": 100,
+                    "requirements_after_loss": "retained",
+                    "days_to_recover": 0
+                },
+                {
+                    "profile": "sporadic",
+                    "member_id": 602,
+                    "events_before_150": 5,
+                    "events_reversed": 1,
+                    "journeyman_day_orig": null,
+                    "requirements_after_loss": "n/a (not Journeyman by day 150)",
+                    "journeyman_day_with_loss": null
+                }
+            ],
+            "pass": true
+        }
+    }
+}

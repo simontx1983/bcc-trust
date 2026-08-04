@@ -1,0 +1,364 @@
+{
+    "scenario": "honest_cohorts",
+    "model": {
+        "epoch": "2026-01-01",
+        "horizon_days": 400,
+        "members_per_profile": 200,
+        "tier_model": "80% of members neutral+ from day 0 and trusted+ from day 90 (ASSUMED); 20% caution (never qualify)",
+        "profiles": {
+            "casual": {
+                "logins_per_month": 8.0,
+                "posts_per_month": 2.0,
+                "comments_per_active_day": 1,
+                "reviews_per_month": 0.0,
+                "attest_received_per_month": 0.5,
+                "helpful_prob_per_comment": 0.15,
+                "proven_outcome_per_month": 0.0,
+                "upheld_report_per_month": 0.0,
+                "stewardship_per_month": 0.0
+            },
+            "regular": {
+                "logins_per_month": 15.0,
+                "posts_per_month": 4.0,
+                "comments_per_active_day": 2,
+                "reviews_per_month": 1.0,
+                "attest_received_per_month": 1.0,
+                "helpful_prob_per_comment": 0.15,
+                "proven_outcome_per_month": 0.2,
+                "upheld_report_per_month": 0.1,
+                "stewardship_per_month": 0.0
+            },
+            "heavy": {
+                "logins_per_month": 22.0,
+                "posts_per_month": 8.0,
+                "comments_per_active_day": 4,
+                "reviews_per_month": 2.0,
+                "attest_received_per_month": 2.0,
+                "helpful_prob_per_comment": 0.15,
+                "proven_outcome_per_month": 0.5,
+                "upheld_report_per_month": 0.25,
+                "stewardship_per_month": 0.25
+            },
+            "sporadic": {
+                "logins_per_month": 4.0,
+                "posts_per_month": 1.0,
+                "comments_per_active_day": 0,
+                "reviews_per_month": 0.0,
+                "attest_received_per_month": 0.25,
+                "helpful_prob_per_comment": 0.0,
+                "proven_outcome_per_month": 0.0,
+                "upheld_report_per_month": 0.0,
+                "stewardship_per_month": 0.0
+            }
+        }
+    },
+    "per_profile": {
+        "casual": {
+            "n": 200,
+            "journeyman": {
+                "n": 0,
+                "min": null,
+                "p25": null,
+                "median": null,
+                "p75": null,
+                "max": null
+            },
+            "journeyman_reach_pct": 0.0,
+            "veteran": {
+                "n": 0,
+                "min": null,
+                "p25": null,
+                "median": null,
+                "p75": null,
+                "max": null
+            },
+            "veteran_reach_pct": 0.0
+        },
+        "regular": {
+            "n": 200,
+            "journeyman": {
+                "n": 159,
+                "min": 96,
+                "p25": 137.0,
+                "median": 177.0,
+                "p75": 225.0,
+                "max": 364
+            },
+            "journeyman_reach_pct": 79.5,
+            "veteran": {
+                "n": 0,
+                "min": null,
+                "p25": null,
+                "median": null,
+                "p75": null,
+                "max": null
+            },
+            "veteran_reach_pct": 0.0
+        },
+        "heavy": {
+            "n": 200,
+            "journeyman": {
+                "n": 160,
+                "min": 45,
+                "p25": 61.0,
+                "median": 83.0,
+                "p75": 108.0,
+                "max": 219
+            },
+            "journeyman_reach_pct": 80.0,
+            "veteran": {
+                "n": 138,
+                "min": 210,
+                "p25": 218.0,
+                "median": 252.0,
+                "p75": 300.0,
+                "max": 395
+            },
+            "veteran_reach_pct": 69.0
+        },
+        "sporadic": {
+            "n": 200,
+            "journeyman": {
+                "n": 0,
+                "min": null,
+                "p25": null,
+                "median": null,
+                "p75": null,
+                "max": null
+            },
+            "journeyman_reach_pct": 0.0,
+            "veteran": {
+                "n": 0,
+                "min": null,
+                "p25": null,
+                "median": null,
+                "p75": null,
+                "max": null
+            },
+            "veteran_reach_pct": 0.0
+        }
+    },
+    "overall": {
+        "journeyman": {
+            "n": 319,
+            "min": 45,
+            "p25": 83.0,
+            "median": 125.0,
+            "p75": 183.0,
+            "max": 364
+        },
+        "journeyman_promoted": 319,
+        "veteran": {
+            "n": 138,
+            "min": 210,
+            "p25": 218.0,
+            "median": 252.0,
+            "p75": 300.0,
+            "max": 395
+        },
+        "veteran_promoted": 138,
+        "veteran_by_day_120": 0,
+        "veteran_by_day_180": 0,
+        "veteran_by_day_365": 129,
+        "journeyman_histogram_30d": {
+            "0.00-30.00": 0,
+            "30.00-60.00": 36,
+            "60.00-90.00": 54,
+            "90.00-120.00": 53,
+            "120.00-150.00": 58,
+            "150.00-180.00": 37,
+            "180.00-210.00": 31,
+            "210.00-240.00": 18,
+            "240.00-270.00": 16,
+            "270.00-300.00": 8,
+            "300.00-330.00": 7,
+            "330.00-360.00": 0,
+            "360.00-390.00": 1,
+            "390.00-420.00": 0
+        },
+        "veteran_histogram_30d": {
+            "0.00-30.00": 0,
+            "30.00-60.00": 0,
+            "60.00-90.00": 0,
+            "90.00-120.00": 0,
+            "120.00-150.00": 0,
+            "150.00-180.00": 0,
+            "180.00-210.00": 0,
+            "210.00-240.00": 54,
+            "240.00-270.00": 26,
+            "270.00-300.00": 23,
+            "300.00-330.00": 19,
+            "330.00-360.00": 6,
+            "360.00-390.00": 7,
+            "390.00-420.00": 3
+        }
+    },
+    "day400_why_blocked": {
+        "casual": {
+            "day": 400,
+            "total": 47.5,
+            "categories": {
+                "contribution": 17.5,
+                "helping": 8.5,
+                "recognition": 7.5,
+                "outcomes": 0.0,
+                "time": 14.0
+            },
+            "contribution_types": 2,
+            "recognizers": 10,
+            "outcomes": 0,
+            "outcome_types": 0,
+            "journeyman_terms": {
+                "total": true,
+                "contribution_min": true,
+                "helping_min": true,
+                "recognition_min": true,
+                "contribution_types": false,
+                "recognizers": true,
+                "trust_window": true
+            },
+            "veteran_terms": {
+                "total": false,
+                "contribution_min": true,
+                "helping_min": false,
+                "recognition_min": false,
+                "outcomes_min": false,
+                "contribution_types": false,
+                "recognizers": true,
+                "outcome_count": false,
+                "outcome_types": false,
+                "trust_window": true
+            }
+        },
+        "regular": {
+            "day": 400,
+            "total": 73.25,
+            "categories": {
+                "contribution": 25.0,
+                "helping": 23.0,
+                "recognition": 6.75,
+                "outcomes": 4.5,
+                "time": 14.0
+            },
+            "contribution_types": 4,
+            "recognizers": 9,
+            "outcomes": 3,
+            "outcome_types": 2,
+            "journeyman_terms": {
+                "total": true,
+                "contribution_min": true,
+                "helping_min": true,
+                "recognition_min": true,
+                "contribution_types": true,
+                "recognizers": true,
+                "trust_window": true
+            },
+            "veteran_terms": {
+                "total": false,
+                "contribution_min": true,
+                "helping_min": true,
+                "recognition_min": false,
+                "outcomes_min": false,
+                "contribution_types": false,
+                "recognizers": true,
+                "outcome_count": false,
+                "outcome_types": true,
+                "trust_window": true
+            }
+        },
+        "heavy": {
+            "day": 400,
+            "total": 94.0,
+            "categories": {
+                "contribution": 25.0,
+                "helping": 25.0,
+                "recognition": 15.0,
+                "outcomes": 15.0,
+                "time": 14.0
+            },
+            "contribution_types": 5,
+            "recognizers": 30,
+            "outcomes": 13,
+            "outcome_types": 2,
+            "journeyman_terms": {
+                "total": true,
+                "contribution_min": true,
+                "helping_min": true,
+                "recognition_min": true,
+                "contribution_types": true,
+                "recognizers": true,
+                "trust_window": true
+            },
+            "veteran_terms": {
+                "total": true,
+                "contribution_min": true,
+                "helping_min": true,
+                "recognition_min": true,
+                "outcomes_min": true,
+                "contribution_types": true,
+                "recognizers": true,
+                "outcome_count": true,
+                "outcome_types": true,
+                "trust_window": true
+            }
+        },
+        "sporadic": {
+            "day": 400,
+            "total": 23.75,
+            "categories": {
+                "contribution": 8.75,
+                "helping": 0.0,
+                "recognition": 3.0,
+                "outcomes": 0.0,
+                "time": 12.0
+            },
+            "contribution_types": 1,
+            "recognizers": 4,
+            "outcomes": 0,
+            "outcome_types": 0,
+            "journeyman_terms": {
+                "total": false,
+                "contribution_min": true,
+                "helping_min": false,
+                "recognition_min": false,
+                "contribution_types": false,
+                "recognizers": true,
+                "trust_window": true
+            },
+            "veteran_terms": {
+                "total": false,
+                "contribution_min": false,
+                "helping_min": false,
+                "recognition_min": false,
+                "outcomes_min": false,
+                "contribution_types": false,
+                "recognizers": false,
+                "outcome_count": false,
+                "outcome_types": false,
+                "trust_window": true
+            }
+        }
+    },
+    "targets": {
+        "journeyman_median_75_110": {
+            "target": "median first-Journeyman day within 75-110 (over promoted members)",
+            "actual": 125.0,
+            "pass": false
+        },
+        "earliest_journeyman_ge_45": {
+            "target": "earliest Journeyman day >= 45 (trust-window floor)",
+            "actual": 45,
+            "pass": true
+        },
+        "earliest_veteran_ge_120": {
+            "target": "earliest Veteran day >= 120 (veteran trust-window floor)",
+            "actual": 210,
+            "pass": true
+        },
+        "veteran_plan_band_info": {
+            "target": "INFO: plan expects first Veteran in months 10-16 (~day 300-480; horizon is 400)",
+            "actual": 210,
+            "pass": null
+        }
+    }
+}

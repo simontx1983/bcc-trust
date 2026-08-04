@@ -1,0 +1,96 @@
+Rank Phase 9 calibration harness — summary
+Epoch day 0 = 2026-01-01 (deterministic; see README.md for real-vs-mirrored math)
+========================================================================
+
+HONEST (honest_cohorts)
+------------------------------------------------------------------------
+[FAIL] journeyman_median_75_110
+       target: median first-Journeyman day within 75-110 (over promoted members)
+       actual: 125.0
+[PASS] earliest_journeyman_ge_45
+       target: earliest Journeyman day >= 45 (trust-window floor)
+       actual: 45
+[PASS] earliest_veteran_ge_120
+       target: earliest Veteran day >= 120 (veteran trust-window floor)
+       actual: 210
+[INFO] veteran_plan_band_info
+       target: INFO: plan expects first Veteran in months 10-16 (~day 300-480; horizon is 400)
+       actual: 210
+
+  per-profile first-Journeyman day (n | reach% | min/p25/median/p75/max):
+    casual    n=200  reach=  0.0%  NULL / NULL / NULL / NULL / NULL
+    regular   n=200  reach= 79.5%  96 / 137.0 / 177.0 / 225.0 / 364
+    heavy     n=200  reach= 80.0%  45 / 61.0 / 83.0 / 108.0 / 219
+    sporadic  n=200  reach=  0.0%  NULL / NULL / NULL / NULL / NULL
+  veteran: promoted=138  by day 120/180/365 = 0/0/129  earliest=210
+
+RINGS (rings)
+------------------------------------------------------------------------
+[PASS] confirmed_non_rep_zero_recognition
+       target: CONFIRMED: every non-representative earns exactly 0.0 recognition credit (all R)
+       actual: {"R3":true,"R5":true,"R10":true}
+[PASS] confirmed_non_rep_fail_180
+       target: CONFIRMED: 100% of non-representative members fail promotion at day 180 (all R)
+       actual: {"R3":true,"R5":true,"R10":true}
+[PASS] confirmed_collapse_to_one_identity
+       target: CONFIRMED: ring combined ledgered evidence <= one honest member equivalent (all R)
+       actual: {"R3":true,"R5":true,"R10":true}
+[PASS] suspected_r3_blocked
+       target: SUSPECTED R=3: journeyman blocked for every member (recognizer minimum 3 needs >= 3 independent recognizers)
+       actual: true
+[INFO] suspected_r5_r10_report
+       target: INFO: SUSPECTED R=5 / R=10 outcomes reported honestly (caps alone may not block)
+       actual: {"R5_earliest_journeyman":51,"R10_earliest_journeyman":45}
+
+WEIGHTS (vote_weights)
+------------------------------------------------------------------------
+[PASS] max_weight_le_1_75
+       target: max effective weight <= vote_ceiling (1.75), zero members above, all snapshot days
+       actual: {"day_90":1.2816,"day_180":1.2803,"day_365":1.4931}
+[PASS] gini_le_0_65
+       target: Gini coefficient of effective weights <= 0.65, all snapshot days
+       actual: {"day_90":0.0742,"day_180":0.0872,"day_365":0.1126}
+
+QUORUM (quorum_reachability)
+------------------------------------------------------------------------
+[INFO] reachability_reported
+       target: INFO: honest report of quorum reachability (no hard pass/fail — plan expects early Inconclusive)
+       actual: {"p_30":50,"p_50":20}
+
+  reachability (day | pool | top10 weight | P(quorum) @30% | @50%):
+    day 90   E=5    top10=n/a      p30=0.000  p50=0.000
+    day 90   E=10   top10=9.42     p30=0.000  p50=0.004
+    day 90   E=15   top10=10.29    p30=0.000  p50=0.124
+    day 90   E=20   top10=10.94    p30=0.054  p50=0.616
+    day 90   E=30   top10=10.98    p30=0.386  p50=0.972
+    day 90   E=50   top10=11.30    p30=0.946  p50=1.000
+    day 180  E=5    top10=n/a      p30=0.000  p50=0.000
+    day 180  E=10   top10=9.30     p30=0.000  p50=0.000
+    day 180  E=15   top10=10.71    p30=0.008  p50=0.124
+    day 180  E=20   top10=10.84    p30=0.054  p50=0.550
+    day 180  E=30   top10=10.87    p30=0.398  p50=0.982
+    day 180  E=50   top10=11.93    p30=0.964  p50=1.000
+    day 365  E=5    top10=n/a      p30=0.000  p50=0.000
+    day 365  E=10   top10=10.92    p30=0.000  p50=0.002
+    day 365  E=15   top10=10.79    p30=0.002  p50=0.128
+    day 365  E=20   top10=11.12    p30=0.044  p50=0.570
+    day 365  E=30   top10=13.57    p30=0.382  p50=0.982
+    day 365  E=50   top10=13.46    p30=0.950  p50=1.000
+
+DECAY (decay_recovery)
+------------------------------------------------------------------------
+[PASS] decay_matches_config
+       target: REAL calculator decay == steps x points per config at every sampled day
+       actual: true
+[PASS] no_decay_inside_grace
+       target: zero decay through day 400 (grace 365d > sim window; confirmed from config)
+       actual: true
+[PASS] score_floor_at_zero
+       target: total never negative under unbounded decay (day-3000 probe)
+       actual: 0.0
+[PASS] total_monotone_after_stop
+       target: total non-increasing once activity stops (time credit frozen, decay only)
+       actual: true
+[PASS] recovery_within_grace
+       target: members losing requirements at day 150 re-satisfy within the 90-day grace at their own cadence (INFO if none lost)
+       actual: [{"profile":"casual","member_id":2,"events_before_150":45,"events_reversed":13,"journeyman_day_orig":null,"requirements_after_loss":"n/a (not Journeyman by day 150)","journeyman_day_with_loss":null},{"profile":"regular","member_id":202,"events_before_150":192,"events_reversed":57,"journeyman_day_orig":215,"requirements_after_loss":"n/a (not Journeyman by day 150)","journeyman_day_with_loss":215},{"profile":"heavy","member_id":402,"events_before_150":601,"events_reversed":180,"journeyman_day_orig":100,"requirements_after_loss":"retained","days_to_recover":0},{"profile":"sporadic","member_id":602,"events_before_150":5,"events_reversed":1,"journeyman_day_orig":null,"requirements_after_loss":"n/a (not Journeyman by day 150)","journeyman_day_with_loss":null}]
