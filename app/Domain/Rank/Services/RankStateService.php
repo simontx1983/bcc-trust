@@ -23,6 +23,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Rank\Services;
 
 use BCC\Trust\Core\Support\RankCatalog;
+use BCC\Trust\Rank\Repositories\FindingsRepository;
 use BCC\Trust\Rank\Repositories\RankStateRepository;
 
 if (!defined('ABSPATH')) {
@@ -31,11 +32,28 @@ if (!defined('ABSPATH')) {
 
 class RankStateService
 {
+    /**
+     * §14.2 privileges paused during recovery grace (Phase 8): the
+     * §31.4 vote-multiplier pause plus the three Phase 7 inRecovery
+     * gates (ranked-Hall posting, community custody, mentor listing).
+     * Slugs are wire identifiers — the frontend renders labels.
+     */
+    private const RECOVERY_PAUSED_PRIVILEGES = [
+        'vote_multiplier',
+        'ranked_hall_posting',
+        'community_custody',
+        'mentor_listing',
+    ];
+
+    /** Reversed findings stay visible own-view for this many days (§15.5). */
+    private const REVERSED_VISIBLE_DAYS = 30;
+
     public function __construct(
         private readonly RankStateRepository $rankState,
         private readonly RankPromotionEngine $engine,
         private readonly ApprenticeReadinessService $readiness,
-        private readonly \BCC\Trust\Rank\Support\RankScoringConfig $config
+        private readonly \BCC\Trust\Rank\Support\RankScoringConfig $config,
+        private readonly FindingsRepository $findings
     ) {
     }
 
@@ -149,10 +167,54 @@ class RankStateService
                 'points' => $assessment['decay'],
             ],
             'recovery'           => (string) $row->recovery_status === 'grace'
-                ? ['deadline' => (string) $row->recovery_deadline]
+                ? [
+                    // §14.2 (Phase 8): own-view recovery detail — the
+                    // deadline, WHAT is paused, and one plain sentence.
+                    // Never a schedule nudge (§2.7); never public (§22.3).
+                    'deadline'          => (string) $row->recovery_deadline,
+                    'paused_privileges' => self::RECOVERY_PAUSED_PRIVILEGES,
+                    'instructions'      => 'Restore the requirements shown below before the deadline to keep your rank.',
+                ]
                 : null,
+            'findings'           => $this->findingsBlock($userId),
             'quests'             => $this->questsBlock($userId),
         ];
+    }
+
+    /**
+     * §15 own-view findings block (Phase 8): active findings plus
+     * reversals from the last 30 days. OWN VIEW ONLY — §22.3 keeps
+     * everything recovery/finding-related off public surfaces; this
+     * method is reached solely through progressionFor (self-scoped by
+     * the /me/progression endpoint). Empty list when clean.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function findingsBlock(int $userId): array
+    {
+        $rows = $this->findings->getActiveForUser($userId);
+
+        $since = gmdate('Y-m-d H:i:s', time() - (self::REVERSED_VISIBLE_DAYS * 86400));
+        foreach ($this->findings->getRecentlyReversedForUser($userId, $since) as $reversed) {
+            $rows[] = $reversed;
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = [
+                'id'                 => (int) $row->id,
+                'type'               => (string) $row->finding_type,
+                'severity'           => (string) $row->severity,
+                'score_penalty'      => round((float) $row->score_penalty, 2),
+                'ceiling_rank'       => $row->ceiling_rank_slug !== null ? (string) $row->ceiling_rank_slug : null,
+                'ceiling_expires_at' => $row->ceiling_expires_at !== null ? (string) $row->ceiling_expires_at : null,
+                'penalty_expires_at' => (string) $row->penalty_expires_at,
+                'appeal_status'      => (string) $row->appeal_status,
+                'status'             => (string) $row->status,
+                'created_at'         => (string) $row->created_at,
+            ];
+        }
+        return $out;
     }
 
     /**

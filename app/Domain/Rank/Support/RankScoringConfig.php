@@ -53,6 +53,7 @@ final class RankScoringConfig
         'decay',
         'retention',
         'recovery',
+        'findings',
         'tier_ord',
         'trust_windows',
         'recognizer_minimums',
@@ -71,6 +72,12 @@ final class RankScoringConfig
 
     /** The five §4.1 categories. */
     private const CATEGORIES = ['contribution', 'helping', 'recognition', 'outcomes', 'time'];
+
+    /** The four §15.3 misconduct severity classes, exactly (owner-approved 2026-08-04). */
+    private const FINDING_CLASSES = ['minor', 'moderate', 'serious', 'severe'];
+
+    /** Rungs a finding ceiling may pin a member to (§15.3 — never veteran). */
+    private const FINDING_CEILING_RANKS = ['apprentice', 'journeyman'];
 
     /** @var array<string, float> */
     public readonly array $categoryMax;
@@ -104,6 +111,10 @@ final class RankScoringConfig
     public readonly float $decayPointsPerStep;
     public readonly int $tierDaysRetentionDays;
     public readonly int $recoveryGraceDays;
+    /** @var array<string, array{score_penalty: float, ceiling_rank: string|null, ceiling_days: int|null, immediate_demotion: bool, penalty_expiry_days: int}> */
+    public readonly array $findingClasses;
+    public readonly float $perFindingPenaltyCap;
+    public readonly float $totalActivePenaltyCap;
     /** @var array<string, int> */
     public readonly array $tierOrd;
     /** @var array<string, array{qualifying_days: int, window_days: int, min_tier: string}> */
@@ -128,6 +139,7 @@ final class RankScoringConfig
      * @param array<string, array<string, float>> $categoryMinimums
      * @param array<string, float> $shareCaps
      * @param array<string, float> $rankMultipliers
+     * @param array<string, array{score_penalty: float, ceiling_rank: string|null, ceiling_days: int|null, immediate_demotion: bool, penalty_expiry_days: int}> $findingClasses
      * @param array<string, int> $tierOrd
      * @param array<string, array{qualifying_days: int, window_days: int, min_tier: string}> $trustWindows
      * @param array<string, int> $recognizerMinimums
@@ -165,6 +177,9 @@ final class RankScoringConfig
         float $decayPointsPerStep,
         int $tierDaysRetentionDays,
         int $recoveryGraceDays,
+        array $findingClasses,
+        float $perFindingPenaltyCap,
+        float $totalActivePenaltyCap,
         array $tierOrd,
         array $trustWindows,
         array $recognizerMinimums,
@@ -202,6 +217,9 @@ final class RankScoringConfig
         $this->decayPointsPerStep       = $decayPointsPerStep;
         $this->tierDaysRetentionDays    = $tierDaysRetentionDays;
         $this->recoveryGraceDays        = $recoveryGraceDays;
+        $this->findingClasses           = $findingClasses;
+        $this->perFindingPenaltyCap     = $perFindingPenaltyCap;
+        $this->totalActivePenaltyCap    = $totalActivePenaltyCap;
         $this->tierOrd                  = $tierOrd;
         $this->trustWindows             = $trustWindows;
         $this->recognizerMinimums       = $recognizerMinimums;
@@ -350,6 +368,70 @@ final class RankScoringConfig
         $recovery          = self::mapShape($config['recovery'], 'recovery', ['grace_days']);
         $recoveryGraceDays = self::positiveInt($recovery['grace_days'], 'recovery.grace_days');
 
+        // ── §15.3 misconduct findings (owner-approved 2026-08-04) ────
+        $findings = self::mapShape(
+            $config['findings'],
+            'findings',
+            ['classes', 'per_finding_penalty_cap', 'total_active_penalty_cap']
+        );
+        $perFindingPenaltyCap  = self::positiveFloat($findings['per_finding_penalty_cap'], 'findings.per_finding_penalty_cap');
+        $totalActivePenaltyCap = self::positiveFloat($findings['total_active_penalty_cap'], 'findings.total_active_penalty_cap');
+        // Caps ordered: a single finding can never exceed the active total.
+        if ($perFindingPenaltyCap - $totalActivePenaltyCap > 0.0001) {
+            throw new \InvalidArgumentException('rank-scoring config: findings.per_finding_penalty_cap must not exceed total_active_penalty_cap');
+        }
+
+        // Exactly the four known classes — no more, no fewer.
+        $rawClasses = self::mapShape($findings['classes'], 'findings.classes', self::FINDING_CLASSES);
+        $findingClasses = [];
+        foreach (self::FINDING_CLASSES as $class) {
+            $raw = self::mapShape(
+                $rawClasses[$class],
+                "findings.classes.{$class}",
+                ['score_penalty', 'ceiling_rank', 'ceiling_days', 'immediate_demotion', 'penalty_expiry_days']
+            );
+
+            $penalty = self::positiveFloat($raw['score_penalty'], "findings.classes.{$class}.score_penalty");
+            if ($penalty - $perFindingPenaltyCap > 0.0001) {
+                throw new \InvalidArgumentException("rank-scoring config: findings.classes.{$class}.score_penalty exceeds per_finding_penalty_cap");
+            }
+
+            $ceilingRank = $raw['ceiling_rank'];
+            if ($ceilingRank !== null && (!is_string($ceilingRank) || !in_array($ceilingRank, self::FINDING_CEILING_RANKS, true))) {
+                throw new \InvalidArgumentException("rank-scoring config: findings.classes.{$class}.ceiling_rank must be apprentice, journeyman, or null");
+            }
+
+            $ceilingDays = $raw['ceiling_days'];
+            if ($ceilingRank === null) {
+                if ($ceilingDays !== null) {
+                    throw new \InvalidArgumentException("rank-scoring config: findings.classes.{$class}.ceiling_days requires a ceiling_rank");
+                }
+            } else {
+                $ceilingDays = self::positiveInt($ceilingDays, "findings.classes.{$class}.ceiling_days");
+            }
+
+            if (!is_bool($raw['immediate_demotion'])) {
+                throw new \InvalidArgumentException("rank-scoring config: findings.classes.{$class}.immediate_demotion must be a boolean");
+            }
+            $immediate = $raw['immediate_demotion'];
+            // Immediate demotion only makes sense alongside a ceiling —
+            // the ceiling defines where the demotion can land.
+            if ($immediate && $ceilingRank === null) {
+                throw new \InvalidArgumentException("rank-scoring config: findings.classes.{$class}.immediate_demotion requires a ceiling_rank");
+            }
+            if ($class === 'severe' && !$immediate) {
+                throw new \InvalidArgumentException('rank-scoring config: findings.classes.severe must have immediate_demotion');
+            }
+
+            $findingClasses[$class] = [
+                'score_penalty'       => $penalty,
+                'ceiling_rank'        => $ceilingRank,
+                'ceiling_days'        => $ceilingDays,
+                'immediate_demotion'  => $immediate,
+                'penalty_expiry_days' => self::positiveInt($raw['penalty_expiry_days'], "findings.classes.{$class}.penalty_expiry_days"),
+            ];
+        }
+
         $tierOrd = self::intMap($config['tier_ord'], 'tier_ord', self::TIERS);
         foreach (self::TIERS as $i => $tier) {
             if ($tierOrd[$tier] !== $i) {
@@ -461,6 +543,9 @@ final class RankScoringConfig
             $decayPointsPerStep,
             $tierDaysRetentionDays,
             $recoveryGraceDays,
+            $findingClasses,
+            $perFindingPenaltyCap,
+            $totalActivePenaltyCap,
             $tierOrd,
             $trustWindows,
             $recognizerMinimums,

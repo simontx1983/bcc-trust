@@ -211,4 +211,60 @@ final class VoteWeightFormulaTest extends TestCase
         self::assertLessThan(1.0, $w->fraudDiscount);
         self::assertSame(round(1.2 * $w->fraudDiscount, 4), $w->effective);
     }
+
+    // ── §31.4 recovery pause (Rank Phase 8) ──────────────────────────────
+
+    public function testRecoveryPausesRankMultiplierToApprentice(): void
+    {
+        // A fully-vested elite veteran IN RECOVERY votes with the
+        // apprentice multiplier: 1.0 × 1.0 × 1.25 = 1.25 — never the
+        // earned 1.4 (§31.4: the rank multiplier is the FOURTH paused
+        // privilege, joining custody/ranked-hall/mentor from Phase 7).
+        $w = $this->calc->calculate(
+            'veteran',
+            $this->epochDaysAgo(90),
+            100.0,
+            'elite',
+            $this->cleanSignals(),
+            0,
+            $this->now,
+            true
+        );
+
+        self::assertSame(1.25, $w->base);
+        self::assertSame(1.25, $w->effective);
+    }
+
+    public function testRankMultiplierSeamIsSharedByBothWeightPaths(): void
+    {
+        // rankMultiplier() is the ONE seam both castPageVote and the
+        // ballot snapshot assembler consume (assembleBallotWeightSnapshot's
+        // rank_multiplier field) — pinning it here pins snapshot parity.
+        self::assertSame(1.4, $this->calc->rankMultiplier('veteran', false));
+        self::assertSame(1.2, $this->calc->rankMultiplier('journeyman', false));
+        self::assertSame(1.0, $this->calc->rankMultiplier('apprentice', false));
+
+        // In recovery, every earned rung pauses down to apprentice.
+        self::assertSame(1.0, $this->calc->rankMultiplier('veteran', true));
+        self::assertSame(1.0, $this->calc->rankMultiplier('journeyman', true));
+        self::assertSame(1.0, $this->calc->rankMultiplier('apprentice', true));
+
+        // Fail-closed stays fail-closed even in recovery: a New Member
+        // or unknown rung gets 0 — recovery never GRANTS weight (§5.3).
+        self::assertSame(0.0, $this->calc->rankMultiplier(null, true));
+        self::assertSame(0.0, $this->calc->rankMultiplier('master', true));
+        self::assertSame(0.0, $this->calc->rankMultiplier(null, false));
+    }
+
+    public function testRecoveryNeverExceedsCeilingNorGoesNegative(): void
+    {
+        foreach ([true, false] as $inRecovery) {
+            $w = $this->calc->calculate(
+                'veteran', $this->epochDaysAgo(90), 100.0, 'elite',
+                $this->cleanSignals(), 0, $this->now, $inRecovery
+            );
+            self::assertLessThanOrEqual(1.75, $w->effective);
+            self::assertGreaterThanOrEqual(0.0, $w->effective);
+        }
+    }
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Rank\Repositories\ClusterFindingsRepository;
+use BCC\Trust\Rank\Repositories\FindingsRepository;
 use BCC\Trust\Rank\Repositories\LoginDaysRepository;
 use BCC\Trust\Rank\Repositories\RankEventsRepository;
 use BCC\Trust\Rank\Repositories\RankStateRepository;
@@ -33,7 +34,8 @@ require_once __DIR__ . '/../Stubs/rank-unit-stubs.php';
  *     satisfied rung — never "one rung down" by assumption (§23.3,
  *     including the veteran→apprentice multi-rung case);
  *   - transitions emit exactly the sanctioned actions
- *     (`bcc_rank_awarded` / `bcc_rank_demoted`).
+ *     (`bcc_rank_awarded` / `bcc_rank_demoted`, and — Phase 8 —
+ *     `bcc_rank_recovery_started` when the grace begins).
  *
  * evaluate() runs against an assess() override so every requirement
  * picture is exact; persistence is captured by a RankStateRepository
@@ -95,6 +97,11 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
             {
             }
         };
+        $findings = new class extends FindingsRepository {
+            public function __construct()
+            {
+            }
+        };
 
         $config = RankScoringConfig::fromDefaultFile();
 
@@ -105,6 +112,7 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
             $events,
             $login,
             $tier,
+            $findings,
             new IndependenceResolver($clusters),
             new RankScoreCalculator($config),
             $config
@@ -117,11 +125,12 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
                 RankEventsRepository $events,
                 LoginDaysRepository $login,
                 TierDaysRepository $tier,
+                FindingsRepository $findings,
                 IndependenceResolver $independence,
                 RankScoreCalculator $calculator,
                 RankScoringConfig $config
             ) {
-                parent::__construct($state, $events, $login, $tier, $independence, $calculator, $config);
+                parent::__construct($state, $events, $login, $tier, $findings, $independence, $calculator, $config);
             }
 
             public function assess(int $userId): ?array
@@ -133,6 +142,7 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
                     'row'                => (object) ($this->fakeRow + ['apprentice_awarded_at' => '2026-07-01 00:00:00']),
                     'categories'         => ['contribution' => 0.0, 'helping' => 0.0, 'recognition' => 0.0, 'outcomes' => 0.0, 'time' => 0.0],
                     'decay'              => 0.0,
+                    'finding_penalty'    => 0.0,
                     'total'              => 0.0,
                     'contribution_types' => 0,
                     'recognizers'        => 0,
@@ -199,7 +209,10 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
         self::assertNotFalse($actual);
         self::assertEqualsWithDelta($expected, $actual, 3600.0);
 
-        self::assertSame([], RankUnitWpFakes::firedHooks(), 'grace start is silent — no demotion action');
+        // Phase 8: grace start emits the recovery notice — but NEVER a
+        // demotion action (§14.1.3 still holds: no instant demotion).
+        self::assertSame(['bcc_rank_recovery_started'], RankUnitWpFakes::firedHooks());
+        self::assertSame([self::USER, $deadline], RankUnitWpFakes::$actions[0][1]);
     }
 
     public function testGraceHoldsUntilDeadline(): void

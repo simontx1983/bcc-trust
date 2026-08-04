@@ -295,6 +295,23 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_community_ownership_log';
     }
 
+    /**
+     * Rank Phase 8 — formal MISCONDUCT findings (§15). Distinct from
+     * clusterFindings() (Phase 4 non-independence determinations).
+     */
+    public static function findings(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_findings';
+    }
+
+    /** Rank Phase 8 — append-only finding decision history (§15.5). */
+    public static function findingDecisions(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_finding_decisions';
+    }
+
     public static function polls(): string
     {
         global $wpdb;

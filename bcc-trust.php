@@ -1718,6 +1718,9 @@ add_action('plugins_loaded', function (): void {
 add_action('plugins_loaded', function () {
     if (is_admin()) {
         \BCC\Trust\Disputes\Admin\DisputeAdmin::boot();
+        // Rank Phase 8 — misconduct findings issuance/reconsideration
+        // (§15; the ONLY issuance path per §15.1).
+        \BCC\Trust\Rank\Admin\FindingsAdmin::boot();
     }
 }, 15);
 

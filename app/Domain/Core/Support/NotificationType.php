@@ -69,6 +69,29 @@ final class NotificationType
     public const COMMENT_RECEIVED                 = 'bcc_comment_received';
 
     /**
+     * Rank redesign Phase 8 — recovery + misconduct notices (§14.2 /
+     * §15 / §12.3). All self-notifications (from = to = the member),
+     * bell-only (deliberately NO push types — none of these are
+     * "you really need to know right now" events), plain deadline-
+     * framed copy with zero cadence-pressure patterns (§2.7).
+     *
+     *   - RANK_RECOVERY_STARTED  — §14.1 grace began; privileges paused
+     *   - RANK_RECOVERY_REMINDER — 30- and 7-day recovery marks
+     *   - RANK_DECAY_WARNING     — §12.3 inactivity decay is active
+     *                              (30-day usermeta re-notify gate)
+     *   - RANK_FINDING_ISSUED    — a §15 misconduct finding was recorded
+     *   - RANK_APPEAL_OUTCOME    — §15.5 reconsideration (upheld /
+     *                              reduced / remanded)
+     *   - RANK_FINDING_REVERSED  — §15.5 reversal + restoration statement
+     */
+    public const RANK_RECOVERY_STARTED            = 'bcc_rank_recovery_started';
+    public const RANK_RECOVERY_REMINDER           = 'bcc_rank_recovery_reminder';
+    public const RANK_DECAY_WARNING               = 'bcc_rank_decay_warning';
+    public const RANK_FINDING_ISSUED              = 'bcc_rank_finding_issued';
+    public const RANK_APPEAL_OUTCOME              = 'bcc_rank_appeal_outcome';
+    public const RANK_FINDING_REVERSED            = 'bcc_rank_finding_reversed';
+
+    /**
      * V2 Trust Attestation Layer event taxonomy (§I1, locked 2026-05-13).
      * Four discrete event types so the recipient can independently
      * toggle each in prefs and the FE can render distinct copy per
@@ -114,6 +137,18 @@ final class NotificationType
         self::REVIEW,
         self::CARD_WATCHED,
         self::RANK_UP,
+        // RANK_DEMOTED was dispatched but missing here from its Phase 5
+        // introduction — NotificationViewService silently rejected every
+        // demotion bell row. Fixed Rank Phase 8; the generic
+        // NotificationTypeRegistrationTest now makes this class of bug
+        // structurally impossible.
+        self::RANK_DEMOTED,
+        self::RANK_RECOVERY_STARTED,
+        self::RANK_RECOVERY_REMINDER,
+        self::RANK_DECAY_WARNING,
+        self::RANK_FINDING_ISSUED,
+        self::RANK_APPEAL_OUTCOME,
+        self::RANK_FINDING_REVERSED,
         self::WELCOME,
         self::MENTION,
         self::HALL_POST,

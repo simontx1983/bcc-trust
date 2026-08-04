@@ -21,6 +21,12 @@
  * path); it is the floor a ranked member can be demoted to — Phase 5
  * ships no apprentice-revocation rule.
  *
+ * Phase 8 (recovery + misconduct): assess() folds active finding
+ * penalties (capped) into the score and applies finding ceilings as
+ * satisfied[] AND-terms; evaluate() surfaces recovery-started /
+ * recovery-reminder / decay-warning actions; evaluateImmediate() is
+ * the severe-finding no-grace demotion path (§15.3 class 4).
+ *
  * Transitions are audited and emit the existing `bcc_rank_awarded`
  * action (bell + celebration chain) or `bcc_rank_demoted`.
  *
@@ -32,6 +38,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Rank\Services;
 
+use BCC\Trust\Rank\Repositories\FindingsRepository;
 use BCC\Trust\Rank\Repositories\LoginDaysRepository;
 use BCC\Trust\Rank\Repositories\RankEventsRepository;
 use BCC\Trust\Rank\Repositories\RankStateRepository;
@@ -50,11 +57,21 @@ class RankPromotionEngine
     /** Wall-clock budget for one daily sweep, seconds. */
     private const TIME_BUDGET_SECONDS = 30;
 
+    /** Recovery-reminder marks: fire when exactly this many whole days remain. */
+    private const REMINDER_DAYS = [30, 7];
+
+    /** usermeta stamp gating the §12.3 decay warning to one per 30 days. */
+    private const DECAY_WARNED_META = 'bcc_rank_decay_warned_at';
+
+    /** Seconds in the decay-warning re-notify gate. */
+    private const DECAY_WARN_GATE_SECONDS = 30 * 86400;
+
     public function __construct(
         private readonly RankStateRepository $rankState,
         private readonly RankEventsRepository $events,
         private readonly LoginDaysRepository $loginDays,
         private readonly TierDaysRepository $tierDays,
+        private readonly FindingsRepository $findings,
         private readonly IndependenceResolver $independence,
         private readonly RankScoreCalculator $calculator,
         private readonly RankScoringConfig $config
@@ -70,6 +87,7 @@ class RankPromotionEngine
      *     row: object{rank_slug: string, apprentice_awarded_at: string, recovery_status: string, recovery_deadline: string|null},
      *     categories: array<string, float>,
      *     decay: float,
+     *     finding_penalty: float,
      *     total: float,
      *     contribution_types: int,
      *     recognizers: int,
@@ -90,11 +108,38 @@ class RankPromotionEngine
         $activeEvents = $this->events->listActiveForSubject($userId);
         $clusterMap   = $this->independence->activeMap();
 
+        // §15.3 (Phase 8): active-unexpired finding penalties, capped at
+        // the total-active cap (each is already ≤ the per-finding cap by
+        // config snapshot). Ceilings: the LOWEST active unexpired
+        // ceiling bounds the highest satisfiable rung. Expiry is
+        // evaluated here in PHP (UTC) — the repository read is
+        // status-only by design.
+        $nowUtc        = gmdate('Y-m-d H:i:s');
+        $penaltySum    = 0.0;
+        $rankOrder     = ['apprentice' => 1, 'journeyman' => 2, 'veteran' => 3];
+        $ceilingOrd    = $rankOrder['veteran']; // no restriction by default
+        foreach ($this->findings->getActiveForUser($userId) as $finding) {
+            if ((string) $finding->penalty_expires_at > $nowUtc) {
+                $penaltySum += (float) $finding->score_penalty;
+            }
+            $ceilingSlug = $finding->ceiling_rank_slug !== null ? (string) $finding->ceiling_rank_slug : '';
+            if ($ceilingSlug !== ''
+                && isset($rankOrder[$ceilingSlug])
+                && $finding->ceiling_expires_at !== null
+                && (string) $finding->ceiling_expires_at > $nowUtc
+            ) {
+                $ceilingOrd = min($ceilingOrd, $rankOrder[$ceilingSlug]);
+            }
+        }
+        $findingPenalty = min($penaltySum, $this->config->totalActivePenaltyCap);
+
         $result = $this->calculator->calculate(
             $activeEvents,
             $this->loginDays->distinctMonthCount($userId),
             $this->loginDays->lastLoginDay($userId),
-            $clusterMap
+            $clusterMap,
+            null,
+            $findingPenalty
         );
 
         // Diversity + independent-headcount reads over the same rows.
@@ -140,9 +185,16 @@ class RankPromotionEngine
 
         $suspensionClear = \BCC\Core\Permissions\Permissions::is_not_suspended($userId, false);
 
+        // §15.3 ceiling AND-term (mirrors $suspensionClear): any rung
+        // ABOVE the lowest active finding ceiling is unsatisfiable.
+        // Consequence: a class-3 (serious) ceiling on a higher-ranked
+        // member flows through the ORDINARY §14.1 grace machinery — the
+        // 90-day recovery either outlasts the ceiling or demotes at the
+        // deadline. Class-4 (severe) skips grace via evaluateImmediate().
         $satisfied = [
             'apprentice' => true, // Held rung; Phase 5 has no apprentice-loss rule.
             'journeyman' => $suspensionClear
+                && $ceilingOrd >= $rankOrder['journeyman']
                 && $result['total'] >= $this->config->thresholds['journeyman']
                 && $result['categories']['contribution'] >= $this->config->categoryMinimums['journeyman']['contribution']
                 && $result['categories']['helping'] >= $this->config->categoryMinimums['journeyman']['helping']
@@ -151,6 +203,7 @@ class RankPromotionEngine
                 && count($recognizers) >= $this->config->recognizerMinimums['journeyman']
                 && $windows['journeyman']['qualifying'] >= $windows['journeyman']['required'],
             'veteran' => $suspensionClear
+                && $ceilingOrd >= $rankOrder['veteran']
                 && $result['total'] >= $this->config->thresholds['veteran']
                 && $result['categories']['contribution'] >= $this->config->categoryMinimums['veteran']['contribution']
                 && $result['categories']['helping'] >= $this->config->categoryMinimums['veteran']['helping']
@@ -178,6 +231,7 @@ class RankPromotionEngine
             'row'                => $row,
             'categories'         => $result['categories'],
             'decay'              => $result['decay'],
+            'finding_penalty'    => $result['finding_penalty'],
             'total'              => $result['total'],
             'contribution_types' => count($contributionTypes),
             'recognizers'        => count($recognizers),
@@ -212,11 +266,13 @@ class RankPromotionEngine
         $inGrace       = (string) $row->recovery_status === 'grace';
         $graceDeadline = $row->recovery_deadline !== null ? (string) $row->recovery_deadline : null;
 
-        $newRank      = $current;
-        $newStatus    = '';
-        $newDeadline  = null;
-        $promoted     = false;
-        $demoted      = false;
+        $newRank       = $current;
+        $newStatus     = '';
+        $newDeadline   = null;
+        $promoted      = false;
+        $demoted       = false;
+        $graceStarted  = false;
+        $reminderDays  = null;
 
         if ($targetOrder > $currentOrder && !$inGrace) {
             // §23.1 automatic promotion (blocked during recovery §14.1.4).
@@ -231,16 +287,30 @@ class RankPromotionEngine
             // Current rung's requirements lost.
             if (!$inGrace) {
                 // §14.1.3 — start the 90-day recovery grace.
-                $newStatus   = 'grace';
-                $newDeadline = gmdate('Y-m-d H:i:s', time() + ($this->config->recoveryGraceDays * 86400));
+                $newStatus    = 'grace';
+                $newDeadline  = gmdate('Y-m-d H:i:s', time() + ($this->config->recoveryGraceDays * 86400));
+                $graceStarted = true;
             } elseif ($graceDeadline !== null && $graceDeadline <= gmdate('Y-m-d H:i:s')) {
                 // §14.1.7 — grace expired: demote to highest satisfied.
                 $newRank = $target;
                 $demoted = true;
             } else {
-                // Grace still running — keep rank + deadline.
+                // Grace still running — keep rank + deadline. When
+                // exactly 30 or 7 whole days remain, surface the
+                // deadline-framed reminder (Phase 8). Fired from the
+                // daily sweep; an extra same-day evaluate (finding
+                // issuance/reversal) can re-fire within that one day —
+                // acceptable for an admin-time path.
                 $newStatus   = 'grace';
                 $newDeadline = $graceDeadline;
+
+                $deadlineTs = $graceDeadline !== null ? strtotime($graceDeadline . ' UTC') : false;
+                if ($deadlineTs !== false) {
+                    $daysLeft = (int) floor(($deadlineTs - time()) / 86400);
+                    if (in_array($daysLeft, self::REMINDER_DAYS, true)) {
+                        $reminderDays = $daysLeft;
+                    }
+                }
             }
         }
 
@@ -267,7 +337,84 @@ class RankPromotionEngine
                 'to'      => $newRank,
             ]);
             do_action('bcc_rank_demoted', $userId, $newRank, $current);
+        } elseif ($graceStarted && $newDeadline !== null) {
+            // §14.2 (Phase 8): grace start is no longer silent — the
+            // recovery notice states the deadline and the paused
+            // privileges (bell copy lives in NotificationDispatcher).
+            \BCC\Core\Log\Logger::audit('rank_recovery_started', [
+                'user_id'  => $userId,
+                'rank'     => $current,
+                'deadline' => $newDeadline,
+            ]);
+            do_action('bcc_rank_recovery_started', $userId, $newDeadline);
+        } elseif ($reminderDays !== null) {
+            do_action('bcc_rank_recovery_reminder', $userId, $reminderDays);
         }
+
+        // §12.3 decay warning (Phase 8): active decay surfaces a plain
+        // statement, at most once per 30 days (usermeta stamp). A login
+        // self-heals decay with zero writes, so the stamp only gates
+        // notification frequency — never the score math.
+        if ($assessment['decay'] > 0.0) {
+            $this->maybeWarnDecay($userId);
+        }
+    }
+
+    /**
+     * Immediate-demotion path (§15.3 class 4 / severe — Phase 8).
+     * FindingsService calls this instead of evaluate() when the issued
+     * finding carries immediate_demotion: when the assessment's target
+     * is BELOW the current rung the demotion lands NOW — no §14.1
+     * grace; recovery_status clears. When the target holds the current
+     * rung (or exceeds it) this delegates to the ordinary evaluate()
+     * semantics.
+     */
+    public function evaluateImmediate(int $userId): void
+    {
+        $assessment = $this->assess($userId);
+        if ($assessment === null) {
+            return;
+        }
+
+        $row     = $assessment['row'];
+        $current = (string) $row->rank_slug;
+        $target  = $assessment['target'];
+
+        $order = ['apprentice' => 1, 'journeyman' => 2, 'veteran' => 3];
+        if ($order[$target] >= ($order[$current] ?? 1)) {
+            $this->evaluate($userId);
+            return;
+        }
+
+        $this->rankState->persistEvaluation(
+            $userId,
+            $target,
+            $assessment['total'],
+            $assessment['categories'],
+            '',
+            null
+        );
+
+        \BCC\Core\Log\Logger::audit('rank_demoted', [
+            'user_id' => $userId,
+            'from'    => $current,
+            'to'      => $target,
+            'via'     => 'finding',
+        ]);
+        do_action('bcc_rank_demoted', $userId, $target, $current);
+    }
+
+    /** One decay-warning bell per 30 days, gated by a usermeta stamp. */
+    private function maybeWarnDecay(int $userId): void
+    {
+        $stamp = get_user_meta($userId, self::DECAY_WARNED_META, true);
+        $last  = is_numeric($stamp) ? (int) $stamp : 0;
+        if ($last > 0 && (time() - $last) < self::DECAY_WARN_GATE_SECONDS) {
+            return;
+        }
+
+        update_user_meta($userId, self::DECAY_WARNED_META, (string) time());
+        do_action('bcc_rank_decay_warning', $userId);
     }
 
     /**

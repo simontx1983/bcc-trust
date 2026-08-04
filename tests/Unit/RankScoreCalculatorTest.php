@@ -176,5 +176,49 @@ final class RankScoreCalculatorTest extends TestCase
 
         self::assertSame(0.0, $result['total']);
         self::assertSame(0.0, $result['decay']);
+        self::assertSame(0.0, $result['finding_penalty']);
+    }
+
+    // ── §15.3 finding penalties (Phase 8) ───────────────────────────────
+
+    public function testFindingPenaltySubtractsAfterCategoryCeilings(): void
+    {
+        // 30 login months → time capped at 20; a resolved penalty of
+        // 12.5 lands AFTER the ceilings: total = 20 − 12.5.
+        $result = $this->calculator()->calculate([], 30, gmdate('Y-m-d'), [], null, 12.5);
+
+        self::assertSame(20.0, $result['categories']['time']);
+        self::assertSame(12.5, $result['finding_penalty']);
+        self::assertSame(7.5, $result['total']);
+    }
+
+    public function testFindingPenaltyFloorsAtZero(): void
+    {
+        // A penalty larger than the earned score can never drive the
+        // total negative.
+        $result = $this->calculator()->calculate([], 5, gmdate('Y-m-d'), [], null, 60.0);
+
+        self::assertSame(5.0, $result['categories']['time']);
+        self::assertSame(0.0, $result['total']);
+    }
+
+    public function testFindingPenaltyStacksWithDecay(): void
+    {
+        // Penalty and decay both subtract: 20 (time) − 10 (penalty)
+        // − 2 (two decay steps) = 8.
+        $result = $this->calculator()->calculate([], 30, '2025-06-01', [], '2026-07-31', 10.0);
+
+        self::assertSame(2.0, $result['decay']);
+        self::assertSame(10.0, $result['finding_penalty']);
+        self::assertSame(8.0, $result['total']);
+    }
+
+    public function testNegativeFindingPenaltyIsClampedToZero(): void
+    {
+        // Defensive: a negative input can never ADD score.
+        $result = $this->calculator()->calculate([], 10, gmdate('Y-m-d'), [], null, -5.0);
+
+        self::assertSame(0.0, $result['finding_penalty']);
+        self::assertSame(10.0, $result['total']);
     }
 }
