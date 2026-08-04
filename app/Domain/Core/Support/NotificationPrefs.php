@@ -47,6 +47,18 @@ final class NotificationPrefs
         NotificationType::REVIEW,
         NotificationType::CARD_WATCHED,
         NotificationType::RANK_UP,
+        // RANK_DEMOTED + HOLDER_COMMUNITY_LIVE were dispatched but
+        // missing here (registration drift) — backfilled in Rank
+        // Phase 8; NotificationTypeRegistrationTest now pins
+        // BELL_TYPES == NotificationType::ALL.
+        NotificationType::RANK_DEMOTED,
+        // Rank Phase 8 recovery + misconduct notices (bell-only).
+        NotificationType::RANK_RECOVERY_STARTED,
+        NotificationType::RANK_RECOVERY_REMINDER,
+        NotificationType::RANK_DECAY_WARNING,
+        NotificationType::RANK_FINDING_ISSUED,
+        NotificationType::RANK_APPEAL_OUTCOME,
+        NotificationType::RANK_FINDING_REVERSED,
         NotificationType::WELCOME,
         NotificationType::MENTION,
         NotificationType::HALL_POST,
@@ -56,6 +68,7 @@ final class NotificationPrefs
         NotificationType::ATTESTATION_REVOKED,
         NotificationType::ATTESTATION_REAFFIRMED,
         NotificationType::DIVERGENCE_STATE_WARNING,
+        NotificationType::HOLDER_COMMUNITY_LIVE,
     ];
 
     /**
@@ -99,6 +112,13 @@ final class NotificationPrefs
         'bell_bcc_review'                                    => true,
         'bell_bcc_card_watched'                              => true,
         'bell_bcc_rank_up'                                   => true,
+        'bell_bcc_rank_demoted'                              => true,
+        'bell_bcc_rank_recovery_started'                     => true,
+        'bell_bcc_rank_recovery_reminder'                    => true,
+        'bell_bcc_rank_decay_warning'                        => true,
+        'bell_bcc_rank_finding_issued'                       => true,
+        'bell_bcc_rank_appeal_outcome'                       => true,
+        'bell_bcc_rank_finding_reversed'                     => true,
         'bell_bcc_welcome'                                   => true,
         'bell_bcc_mention'                                   => true,
         'bell_bcc_hall_post'                                 => true,

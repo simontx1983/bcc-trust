@@ -143,6 +143,25 @@ return [
         'grace_days' => 90,
     ],
 
+    // ── Misconduct findings (§15) ────────────────────────────────────
+    // owner-approved 2026-08-04 (spec §15.3) — the four severity classes.
+    // Values are SNAPSHOT onto each finding at issuance (config edits
+    // never rewrite history). ceiling_rank caps the highest attainable
+    // rung while the ceiling is active; immediate_demotion (severe only)
+    // demotes without the §14.1 grace. Per-finding penalties are each
+    // bounded by per_finding_penalty_cap; the calculator applies at most
+    // total_active_penalty_cap across all active unexpired findings.
+    'findings' => [
+        'classes' => [
+            'minor'    => ['score_penalty' => 5.0,  'ceiling_rank' => null,         'ceiling_days' => null, 'immediate_demotion' => false, 'penalty_expiry_days' => 90],
+            'moderate' => ['score_penalty' => 15.0, 'ceiling_rank' => null,         'ceiling_days' => null, 'immediate_demotion' => false, 'penalty_expiry_days' => 180],
+            'serious'  => ['score_penalty' => 25.0, 'ceiling_rank' => 'journeyman', 'ceiling_days' => 180,  'immediate_demotion' => false, 'penalty_expiry_days' => 180],
+            'severe'   => ['score_penalty' => 40.0, 'ceiling_rank' => 'apprentice', 'ceiling_days' => 365,  'immediate_demotion' => true,  'penalty_expiry_days' => 365],
+        ],
+        'per_finding_penalty_cap'  => 40.0,
+        'total_active_penalty_cap' => 60.0,
+    ],
+
     // ── Trust-tier plumbing ──────────────────────────────────────────
     // Ordinal encoding for wp_bcc_trust_tier_days.tier_ord. Exactly the
     // five §2 tiers; order is the qualification order (>= comparisons).

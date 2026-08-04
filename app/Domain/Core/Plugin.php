@@ -587,8 +587,34 @@ final class Plugin
             $this->rankEventsRepository(),
             $this->loginDaysRepository(),
             $this->tierDaysRepository(),
+            $this->findingsRepository(),
             $this->independenceResolver(),
             $this->rankScoreCalculator(),
+            $this->rankScoringConfig()
+        );
+    }
+
+    // ── Rank domain (redesign Phase 8 recovery + misconduct) ─────────
+
+    private ?\BCC\Trust\Rank\Repositories\FindingsRepository $findingsRepository = null;
+    public function findingsRepository(): \BCC\Trust\Rank\Repositories\FindingsRepository
+    {
+        return $this->findingsRepository ??= new \BCC\Trust\Rank\Repositories\FindingsRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Repositories\FindingDecisionsRepository $findingDecisionsRepository = null;
+    public function findingDecisionsRepository(): \BCC\Trust\Rank\Repositories\FindingDecisionsRepository
+    {
+        return $this->findingDecisionsRepository ??= new \BCC\Trust\Rank\Repositories\FindingDecisionsRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Services\FindingsService $findingsService = null;
+    public function findingsService(): \BCC\Trust\Rank\Services\FindingsService
+    {
+        return $this->findingsService ??= new \BCC\Trust\Rank\Services\FindingsService(
+            $this->findingsRepository(),
+            $this->findingDecisionsRepository(),
+            $this->rankPromotionEngine(),
             $this->rankScoringConfig()
         );
     }
@@ -600,7 +626,8 @@ final class Plugin
             $this->rankStateRepository(),
             $this->rankPromotionEngine(),
             $this->apprenticeReadinessService(),
-            $this->rankScoringConfig()
+            $this->rankScoringConfig(),
+            $this->findingsRepository()
         );
     }
 
@@ -1338,6 +1365,9 @@ final class Plugin
         // V1 contract: rank catalog + viewer's current rank (§4.8)
         \BCC\Trust\Core\REST\RanksEndpoint::register();
         \BCC\Trust\Core\REST\MeProgressionEndpoint::register();
+        // Rank Phase 8: once-only member appeal on a misconduct finding
+        // (own finding only; §15.5)
+        \BCC\Trust\Core\REST\MeFindingAppealEndpoint::register();
 
         // V1 contract: paginated Halls catalog + viewer membership (§4.7)
         \BCC\Trust\Core\REST\HallsEndpoint::register();
@@ -2367,6 +2397,36 @@ final class Plugin
         add_action('bcc_rank_demoted', function (int $userId, string $newRank): void {
             $this->notificationDispatcher()->onRankDemoted($userId, $newRank);
         }, 30, 2);
+
+        // Rank Phase 8 — recovery + misconduct notices (§14.2 / §15 /
+        // §12.3). All bell-only self-notifications; the dispatcher
+        // methods self-isolate with try/catch. A reversal routes to the
+        // dedicated restoration notice; other reconsiderations to the
+        // appeal-outcome notice — one bell per event, never both.
+        add_action('bcc_rank_recovery_started', function (int $userId, string $deadline): void {
+            $this->notificationDispatcher()->onRankRecoveryStarted($userId, $deadline);
+        }, 30, 2);
+
+        add_action('bcc_rank_recovery_reminder', function (int $userId, int $daysLeft): void {
+            $this->notificationDispatcher()->onRankRecoveryReminder($userId, $daysLeft);
+        }, 30, 2);
+
+        add_action('bcc_rank_decay_warning', function (int $userId): void {
+            $this->notificationDispatcher()->onRankDecayWarning($userId);
+        }, 30, 1);
+
+        add_action('bcc_rank_finding_issued', function (int $userId, int $findingId, string $severity): void {
+            unset($severity); // copy is severity-neutral by design (no shaming)
+            $this->notificationDispatcher()->onRankFindingIssued($userId, $findingId);
+        }, 30, 3);
+
+        add_action('bcc_rank_finding_reconsidered', function (int $userId, int $findingId, string $decision): void {
+            if ($decision === 'reversed') {
+                $this->notificationDispatcher()->onRankFindingReversed($userId, $findingId);
+            } else {
+                $this->notificationDispatcher()->onRankAppealOutcome($userId, $findingId, $decision);
+            }
+        }, 30, 3);
 
         // Slice E — fold the attestation into the subject's trust score. Runs
         // at priority 25, BEFORE the notification dispatch (30) so a freshly

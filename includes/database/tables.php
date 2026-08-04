@@ -70,6 +70,10 @@ require_once __DIR__ . '/schema-ballots.php';
 // Rank redesign Phase 7 — append-only community-custody ledger (§21.2
 // caps + 30-day global cooldown; create/receive/transfer_out events).
 require_once __DIR__ . '/schema-community-ownership-log.php';
+// Rank redesign Phase 8 — misconduct findings (§15) + append-only
+// decision history (§15.5). Distinct from cluster findings (Phase 4).
+require_once __DIR__ . '/schema-findings.php';
+require_once __DIR__ . '/schema-finding-decisions.php';
 // NOTE: bcc_user_locals removed — Halls membership lives in PeepSo's
 // peepso_group_members (single graph rule); primary-Hall pointer in
 // wp_usermeta.bcc_primary_hall_group_id.
@@ -242,6 +246,14 @@ function bcc_trust_create_tables() {
         bcc_trust_create_community_ownership_log_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Community ownership log table created', []);
     }
+    if (function_exists('bcc_trust_create_findings_table')) {
+        bcc_trust_create_findings_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Findings table created', []);
+    }
+    if (function_exists('bcc_trust_create_finding_decisions_table')) {
+        bcc_trust_create_finding_decisions_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Finding decisions table created', []);
+    }
 
     // Data backfills (canonical handles + wallet placeholder-emails) run
     // through the shared migration runner, NOT by calling each backfill
@@ -359,6 +371,9 @@ function bcc_trust_verify_all_tables() {
         'bcc_trust_ballots',
         // Rank redesign Phase 7 community-custody ledger
         'bcc_trust_community_ownership_log',
+        // Rank redesign Phase 8 misconduct findings + decisions
+        'bcc_trust_findings',
+        'bcc_trust_finding_decisions',
     ];
 
     $missing = [];

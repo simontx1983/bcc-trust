@@ -36,6 +36,47 @@ namespace BCC\Trust\Rank\Services {
             \BCC\Trust\Tests\Stubs\RankUnitWpFakes::$actions[] = [$hook, $args];
         }
     }
+
+    if (!function_exists(__NAMESPACE__ . '\\get_user_meta')) {
+        /**
+         * Registry-backed user-meta fake (Phase 8 decay-warning gate).
+         * Mirrors WP's single=true contract: '' when absent.
+         */
+        function get_user_meta(int $userId, string $key, bool $single = false): mixed
+        {
+            unset($single);
+            return \BCC\Trust\Tests\Stubs\RankUnitWpFakes::$userMeta[$userId][$key] ?? '';
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\\update_user_meta')) {
+        function update_user_meta(int $userId, string $key, mixed $value): bool
+        {
+            \BCC\Trust\Tests\Stubs\RankUnitWpFakes::$userMeta[$userId][$key] = $value;
+            return true;
+        }
+    }
+}
+
+// ── Namespaced WP-function fakes for BCC\Trust\Rank\Repositories ─────
+// (generation-counter cache bumps in the real repositories)
+
+namespace BCC\Trust\Rank\Repositories {
+    if (!function_exists(__NAMESPACE__ . '\\wp_cache_incr')) {
+        function wp_cache_incr(string $key, int $offset = 1, string $group = ''): int|false
+        {
+            unset($key, $offset, $group);
+            return false; // route to the wp_cache_set fallback branch
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\\wp_cache_set')) {
+        function wp_cache_set(string $key, mixed $value, string $group = '', int $expire = 0): bool
+        {
+            unset($key, $value, $group, $expire);
+            return true;
+        }
+    }
 }
 
 // ── Registries the fakes read/write ──────────────────────────────────
@@ -76,10 +117,14 @@ namespace BCC\Trust\Tests\Stubs {
         /** @var list<array{0: string, 1: array<int, mixed>}> */
         public static array $actions = [];
 
+        /** @var array<int, array<string, mixed>> user_id => key => value */
+        public static array $userMeta = [];
+
         public static function reset(): void
         {
-            self::$posts   = [];
-            self::$actions = [];
+            self::$posts    = [];
+            self::$actions  = [];
+            self::$userMeta = [];
         }
 
         /** @return list<string> Hook names fired, in order. */

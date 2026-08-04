@@ -8,7 +8,8 @@
  * the §30 invariants are provable in unit tests with no WordPress and
  * no DB. Cap order (approved plan): representative collapse → per-type
  * / per-recipient / per-recognizer share caps → category ceilings →
- * (findings penalties, Phase 8) → inactivity decay.
+ * findings penalties (Phase 8 — the caller resolves the active
+ * penalty sum, already bounded by the §15.3 caps) → inactivity decay.
  *
  * Time is DERIVED (distinct login months × config rate, capped), never
  * ledgered. Decay derives from the last explicit-login day: zero
@@ -47,10 +48,15 @@ class RankScoreCalculator
      *        clustered RELATIONSHIP identities to their representative
      *        so a ring of recognizers counts as one voice.
      * @param string|null $today 'Y-m-d' override for tests; null = now.
+     * @param float $findingPenalty Resolved active misconduct penalty
+     *        (§15.3, Phase 8) — the CALLER sums active unexpired finding
+     *        penalties and applies the total-active cap; the calculator
+     *        stays pure and just subtracts.
      *
      * @return array{
      *     categories: array<string, float>,
      *     decay: float,
+     *     finding_penalty: float,
      *     total: float
      * }
      */
@@ -59,7 +65,8 @@ class RankScoreCalculator
         int $distinctLoginMonths,
         ?string $lastLoginDay,
         array $memberToRepresentative = [],
-        ?string $today = null
+        ?string $today = null,
+        float $findingPenalty = 0.0
     ): array {
         $categories = [];
         foreach (array_keys($this->config->categoryMax) as $category) {
@@ -119,15 +126,19 @@ class RankScoreCalculator
             $this->config->timeCreditCap
         ), 4);
 
-        // ── Inactivity decay (§12.3) ────────────────────────────────
-        $decay = $this->decayFor($lastLoginDay, $today);
+        // ── Findings penalty (§15.3, Phase 8) then decay (§12.3) ────
+        // Order per the approved plan: penalties subtract after the
+        // category ceilings, before/alongside decay; the floor is 0.
+        $findingPenalty = max(0.0, $findingPenalty);
+        $decay          = $this->decayFor($lastLoginDay, $today);
 
-        $total = max(0.0, min(100.0, array_sum($categories) - $decay));
+        $total = max(0.0, min(100.0, array_sum($categories) - $findingPenalty - $decay));
 
         return [
-            'categories' => $categories,
-            'decay'      => $decay,
-            'total'      => round($total, 4),
+            'categories'      => $categories,
+            'decay'           => $decay,
+            'finding_penalty' => round($findingPenalty, 4),
+            'total'           => round($total, 4),
         ];
     }
 

@@ -234,4 +234,142 @@ final class RankScoringConfigTest extends TestCase
         // same default ReputationRepository::getTier uses.
         self::assertSame(2, $config->tierOrdFor('legendary'));
     }
+
+    // ── §15.3 misconduct findings (owner-approved 2026-08-04) ────────────
+
+    public function testRealShippedFindingsBlockIsPinnedExactly(): void
+    {
+        $config = RankScoringConfig::fromDefaultFile();
+
+        self::assertSame(['minor', 'moderate', 'serious', 'severe'], array_keys($config->findingClasses));
+        self::assertSame(40.0, $config->perFindingPenaltyCap);
+        self::assertSame(60.0, $config->totalActivePenaltyCap);
+
+        self::assertSame(
+            ['score_penalty' => 5.0, 'ceiling_rank' => null, 'ceiling_days' => null, 'immediate_demotion' => false, 'penalty_expiry_days' => 90],
+            $config->findingClasses['minor']
+        );
+        self::assertSame(
+            ['score_penalty' => 15.0, 'ceiling_rank' => null, 'ceiling_days' => null, 'immediate_demotion' => false, 'penalty_expiry_days' => 180],
+            $config->findingClasses['moderate']
+        );
+        self::assertSame(
+            ['score_penalty' => 25.0, 'ceiling_rank' => 'journeyman', 'ceiling_days' => 180, 'immediate_demotion' => false, 'penalty_expiry_days' => 180],
+            $config->findingClasses['serious']
+        );
+        self::assertSame(
+            ['score_penalty' => 40.0, 'ceiling_rank' => 'apprentice', 'ceiling_days' => 365, 'immediate_demotion' => true, 'penalty_expiry_days' => 365],
+            $config->findingClasses['severe']
+        );
+    }
+
+    public function testFindingsRejectUnknownFifthClass(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['classes']['catastrophic'] = $config['findings']['classes']['severe'];
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testFindingsRejectMissingClass(): void
+    {
+        $config = $this->realConfig();
+        unset($config['findings']['classes']['severe']);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testFindingPenaltyMustNotExceedPerFindingCap(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['classes']['severe']['score_penalty'] = 41.0; // cap 40
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes.severe.score_penalty');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testFindingPenaltyMustBePositive(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['classes']['minor']['score_penalty'] = 0.0;
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes.minor.score_penalty');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testFindingCapsMustBeOrdered(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['total_active_penalty_cap'] = 30.0; // < per-finding 40
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('per_finding_penalty_cap');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testFindingExpiryDaysMustBePositive(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['classes']['minor']['penalty_expiry_days'] = 0;
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes.minor.penalty_expiry_days');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testFindingCeilingRankMustBeApprenticeOrJourneyman(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['classes']['serious']['ceiling_rank'] = 'veteran';
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes.serious.ceiling_rank');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testFindingCeilingDaysRequireCeilingRank(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['classes']['minor']['ceiling_days'] = 90; // ceiling_rank stays null
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes.minor.ceiling_days');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testFindingCeilingDaysMustBePositiveWhenCeilingSet(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['classes']['serious']['ceiling_days'] = 0;
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes.serious.ceiling_days');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testImmediateDemotionRequiresCeiling(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['classes']['moderate']['immediate_demotion'] = true; // no ceiling on moderate
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes.moderate.immediate_demotion');
+        RankScoringConfig::fromArray($config);
+    }
+
+    public function testSevereMustHaveImmediateDemotion(): void
+    {
+        $config = $this->realConfig();
+        $config['findings']['classes']['severe']['immediate_demotion'] = false;
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('findings.classes.severe must have immediate_demotion');
+        RankScoringConfig::fromArray($config);
+    }
 }

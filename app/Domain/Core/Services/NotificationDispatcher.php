@@ -317,6 +317,197 @@ final class NotificationDispatcher
         }
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // Rank Phase 8 — recovery + misconduct notices (§14.2 / §15 / §12.3)
+    //
+    // All self-notifications, bell-only (no push — none are urgent).
+    // Copy discipline mirrors the §23.4 demotion note above: plain,
+    // deadline-framed statements. Never a schedule nudge (§2.7) — the
+    // member is told WHAT is true and WHERE to see details, not what
+    // they ought to be doing on a cadence.
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * §14.1 recovery grace started. States the deadline and that some
+     * privileges are paused, and points at the progression page (which
+     * carries the paused-privilege list + requirement detail).
+     *
+     * @param string $deadline MySQL UTC datetime (rank_state.recovery_deadline).
+     */
+    public function onRankRecoveryStarted(int $userId, string $deadline): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+        try {
+            $date    = substr($deadline, 0, 10);
+            $message = sprintf(
+                'Your rank entered recovery. You have until %s to restore its requirements; some privileges are paused until recovery ends. Your progression page shows the details.',
+                $date
+            );
+
+            $this->dispatch(
+                $userId,
+                $userId,
+                $message,
+                NotificationType::RANK_RECOVERY_STARTED,
+                $userId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] recovery-started dispatch failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Recovery window mark (fired by the daily evaluate at exactly 30
+     * and 7 whole days remaining). Deadline-framed statement — not a
+     * schedule nudge.
+     */
+    public function onRankRecoveryReminder(int $userId, int $daysLeft): void
+    {
+        if ($userId <= 0 || $daysLeft <= 0) {
+            return;
+        }
+        try {
+            $this->dispatch(
+                $userId,
+                $userId,
+                sprintf('Your rank recovery window has %d days remaining.', $daysLeft),
+                NotificationType::RANK_RECOVERY_REMINDER,
+                $userId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] recovery-reminder dispatch failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * §12.3 inactivity decay is actively reducing the member's score.
+     * The engine gates re-notification to once per 30 days (usermeta
+     * stamp); the copy is a plain state statement.
+     */
+    public function onRankDecayWarning(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+        try {
+            $this->dispatch(
+                $userId,
+                $userId,
+                'Inactivity is reducing your rank score.',
+                NotificationType::RANK_DECAY_WARNING,
+                $userId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] decay-warning dispatch failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * A §15 misconduct finding was recorded against the member. Plain
+     * statement, no shaming; the progression page carries the finding
+     * detail and the appeal entry point. external_id = the finding id.
+     */
+    public function onRankFindingIssued(int $userId, int $findingId): void
+    {
+        if ($userId <= 0 || $findingId <= 0) {
+            return;
+        }
+        try {
+            $this->dispatch(
+                $userId,
+                $userId,
+                'A conduct finding was recorded on your account. You can review it and request an appeal from your progression page.',
+                NotificationType::RANK_FINDING_ISSUED,
+                $findingId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] finding-issued dispatch failed', [
+                'user_id'    => $userId,
+                'finding_id' => $findingId,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * §15.5 reconsideration outcome for upheld / reduced / remanded
+     * (a REVERSAL sends the dedicated restoration notice below
+     * instead — one bell per event, never both).
+     */
+    public function onRankAppealOutcome(int $userId, int $findingId, string $decision): void
+    {
+        if ($userId <= 0 || $findingId <= 0) {
+            return;
+        }
+        try {
+            $message = match ($decision) {
+                'upheld'   => 'Your appeal was reviewed. The finding was upheld.',
+                'reduced'  => "Your appeal was reviewed. The finding's penalty was reduced.",
+                'remanded' => 'Your appeal was reviewed. The finding was sent back for further review.',
+                default    => 'Your appeal was reviewed.',
+            };
+
+            $this->dispatch(
+                $userId,
+                $userId,
+                $message,
+                NotificationType::RANK_APPEAL_OUTCOME,
+                $findingId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] appeal-outcome dispatch failed', [
+                'user_id'    => $userId,
+                'finding_id' => $findingId,
+                'decision'   => $decision,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * §15.5 reversal — the restoration statement. Score restoration is
+     * deterministic (the promotion engine re-evaluates without the
+     * finding), so the copy can assert it plainly.
+     */
+    public function onRankFindingReversed(int $userId, int $findingId): void
+    {
+        if ($userId <= 0 || $findingId <= 0) {
+            return;
+        }
+        try {
+            $this->dispatch(
+                $userId,
+                $userId,
+                'A finding on your account was reversed. Your rank score and standing have been restored.',
+                NotificationType::RANK_FINDING_REVERSED,
+                $findingId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] finding-reversed dispatch failed', [
+                'user_id'    => $userId,
+                'finding_id' => $findingId,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+    }
+
     public function onRankAwarded(int $userId, string $newRank, string $oldRank): void
     {
         unset($oldRank);

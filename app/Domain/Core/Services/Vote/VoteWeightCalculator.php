@@ -12,7 +12,12 @@
  *     promotion never completes vesting early (owner correction 3).
  *   - rank_multiplier (§16.4): apprentice 1.0 · journeyman 1.2 ·
  *     veteran 1.4 — from RankScoringConfig; unknown/missing rank ⇒ 0
- *     (fail closed; New Members cannot vote, §5.3).
+ *     (fail closed; New Members cannot vote, §5.3). During §14.1
+ *     recovery grace the APPRENTICE multiplier applies regardless of
+ *     the earned rung (§31.4 recovery pause — Rank Phase 8); see
+ *     rankMultiplier(). Ballot weight snapshots are immutable once
+ *     cast (invariant 21): a ballot cast BEFORE recovery keeps its
+ *     pre-recovery weight verbatim — recasting is what re-snapshots.
  *   - trust_multiplier (§16.5): linear 45→0.75 … 100→1.25 over the
  *     member's current trust SCORE.
  *   - fraud_discount: FraudDiscountCalculator (single source of truth,
@@ -57,6 +62,9 @@ class VoteWeightCalculator {
      * @param array<string, mixed> $signals     Fraud signals (unchanged
      *        FraudDiscountCalculator contract).
      * @param int $fraudScore                   Current fraud score 0–100.
+     * @param bool $inRecovery                  §14.1 recovery-grace flag
+     *        (rank_state.recovery_status === 'grace') — pauses the
+     *        earned rank multiplier down to apprentice (§31.4).
      */
     public function calculate(
         ?string             $rankSlug,
@@ -65,14 +73,13 @@ class VoteWeightCalculator {
         string              $voterTier,
         array               $signals,
         int                 $fraudScore,
-        ?\DateTimeImmutable $now = null
+        ?\DateTimeImmutable $now = null,
+        bool                $inRecovery = false
     ): VoteWeight {
         $now ??= new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
 
         $maturity  = $this->maturity($apprenticeAwardedAt, $now);
-        $rankMult  = $rankSlug !== null
-            ? ($this->config->rankMultipliers[$rankSlug] ?? 0.0)
-            : 0.0;
+        $rankMult  = $this->rankMultiplier($rankSlug, $inRecovery);
         $trustMult = $this->trustMultiplier($trustScore);
 
         $base = round($maturity * $rankMult * $trustMult, 4);
@@ -91,6 +98,28 @@ class VoteWeightCalculator {
             vested:             $effective,
             voterTier:          $voterTier,
         );
+    }
+
+    /**
+     * §16.4 rank multiplier, with the §31.4 recovery pause (Rank
+     * Phase 8): during §14.1 recovery grace the APPRENTICE multiplier
+     * applies — never the earned one. Null/unknown slugs stay 0 (fail
+     * closed) even in recovery: a New Member cannot vote at all.
+     *
+     * Public and shared by BOTH weight paths (calculate() above and
+     * VoteService::assembleBallotWeightSnapshot's rank_multiplier
+     * field) — the same seam pattern as maturity()/trustMultiplier(),
+     * so page-vote weights and ballot snapshots can never drift.
+     */
+    public function rankMultiplier(?string $rankSlug, bool $inRecovery): float
+    {
+        if ($rankSlug === null || !isset($this->config->rankMultipliers[$rankSlug])) {
+            return 0.0;
+        }
+        if ($inRecovery) {
+            return $this->config->rankMultipliers['apprentice'];
+        }
+        return $this->config->rankMultipliers[$rankSlug];
     }
 
     /**

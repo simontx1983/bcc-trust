@@ -229,7 +229,10 @@ class VoteService {
         // ceiling 1.75. Rank + maturity epoch from canonical rank_state
         // (missing row = New Member = weight 0 — the eligibility checker
         // already blocked them upstream; this is defence in depth).
-        $rankRow = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId);
+        // §31.4 (Rank Phase 8): recovery grace pauses the earned rank
+        // multiplier down to apprentice — same row, zero extra queries.
+        $rankRow    = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId);
+        $inRecovery = $rankRow !== null && (string) $rankRow->recovery_status === 'grace';
 
         $weight = $this->weightCalculator->calculate(
             $rankRow !== null ? (string) $rankRow->rank_slug : null,
@@ -237,7 +240,9 @@ class VoteService {
             $trustScore,
             $voterTier,
             $signals,
-            (int) ($userInfo->fraud_score ?? 0)
+            (int) ($userInfo->fraud_score ?? 0),
+            null,
+            $inRecovery
         );
 
         // ── 4b. Idempotency check (AFTER all gates, BEFORE mutation) ────────
@@ -836,9 +841,16 @@ class VoteService {
         $voterTier  = $reputation->reputation_tier ?? 'neutral';
         $trustScore = (float) ($reputation->reputation_score ?? 50.0);
 
-        $rankRow  = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId);
-        $rankSlug = $rankRow !== null ? (string) $rankRow->rank_slug : null;
-        $epoch    = $rankRow !== null ? (string) $rankRow->apprentice_awarded_at : null;
+        // §31.4 (Rank Phase 8): the recovery pause rides the SAME
+        // rank_state row — the snapshot's rank_multiplier and the
+        // effective weight both flow through the calculator's shared
+        // rankMultiplier() seam, so they can never drift. Snapshots
+        // are immutable once cast (invariant 21): a ballot cast before
+        // recovery keeps its pre-recovery weight verbatim.
+        $rankRow    = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId);
+        $rankSlug   = $rankRow !== null ? (string) $rankRow->rank_slug : null;
+        $epoch      = $rankRow !== null ? (string) $rankRow->apprentice_awarded_at : null;
+        $inRecovery = $rankRow !== null && (string) $rankRow->recovery_status === 'grace';
 
         $weight = $this->weightCalculator->calculate(
             $rankSlug,
@@ -846,16 +858,17 @@ class VoteService {
             $trustScore,
             $voterTier,
             $signals,
-            (int) ($userInfo->fraud_score ?? 0)
+            (int) ($userInfo->fraud_score ?? 0),
+            null,
+            $inRecovery
         );
 
-        $now    = new DateTimeImmutable('now', new \DateTimeZone('UTC'));
-        $config = \BCC\Trust\Core\Plugin::instance()->rankScoringConfig();
+        $now = new DateTimeImmutable('now', new \DateTimeZone('UTC'));
 
         return [
             'rank_slug'        => $rankSlug,
             'maturity'         => $this->weightCalculator->maturity($epoch, $now),
-            'rank_multiplier'  => $rankSlug !== null ? ($config->rankMultipliers[$rankSlug] ?? 0.0) : 0.0,
+            'rank_multiplier'  => $this->weightCalculator->rankMultiplier($rankSlug, $inRecovery),
             'trust_multiplier' => $this->weightCalculator->trustMultiplier($trustScore),
             'trust_score'      => $trustScore,
             'fraud_discount'   => $weight->fraudDiscount,
