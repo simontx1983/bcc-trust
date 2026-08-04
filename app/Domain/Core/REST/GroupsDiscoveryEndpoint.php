@@ -202,6 +202,7 @@ final class GroupsDiscoveryEndpoint
             $display = $displays[$groupId] ?? null;
             $heat    = $activity[$groupId] ?? [
                 'posts_last_7d'    => 0,
+                'active_members_7d' => 0,
                 'last_activity_at' => null,
                 'heat'             => 'cold',
                 'heat_label'       => 'Quiet',
@@ -282,6 +283,7 @@ final class GroupsDiscoveryEndpoint
                     'trust_min'        => $row['trust_min'],
                     'viewer_is_member' => isset($membershipByGroup[$groupId]),
                     'posts_last_7d'    => (int) ($row['activity']['posts_last_7d'] ?? 0),
+                    'active_members_7d' => (int) ($row['activity']['active_members_7d'] ?? 0),
                 ],
                 $viewerId
             );

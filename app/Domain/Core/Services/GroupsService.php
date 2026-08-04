@@ -169,6 +169,7 @@ final class GroupsService
         $heat = Plugin::instance()->groupActivityHeatService()->forGroups([$groupId]);
         $activity = $heat[$groupId] ?? [
             'posts_last_7d'    => 0,
+            'active_members_7d' => 0,
             'last_activity_at' => null,
             'heat'             => 'cold',
             'heat_label'       => 'Quiet',
@@ -269,6 +270,7 @@ final class GroupsService
                 'trust_min'        => $trustMinWire,
                 'viewer_is_member' => $isMember,
                 'posts_last_7d'    => (int) $activity['posts_last_7d'],
+                'active_members_7d' => (int) ($activity['active_members_7d'] ?? 0),
             ],
             $viewerId
         );

@@ -94,6 +94,10 @@ final class MemberSummaryPrefetcher
 
         return [
             'follower_counts'              => PeepSoFollowerRepository::getFollowersCountForUsers($userIds),
+            // Active side of the same graph — how many accounts each user
+            // watches. Batched for the identical reason the passive side
+            // is: N × getCounts() would issue 2N sequential COUNTs.
+            'following_counts'             => PeepSoFollowerRepository::getFollowingCountForUsers($userIds),
             'primary_halls'                => PeepSoGroupRepository::getPrimaryHallForUsers($userIds),
             'owned_pages_counts'           => UserSyncRepository::getOwnedPageCountsForUsers($userIds),
             'owned_pages_by_type'          => PeepSoPageRepository::getOwnedPageTypeCountsForUsers($userIds),

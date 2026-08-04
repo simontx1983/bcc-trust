@@ -44,6 +44,7 @@ final class GroupActivityHeatService {
      * @param int[] $groupIds
      * @return array<int, array{
      *     posts_last_7d: int,
+     *     active_members_7d: int,
      *     last_activity_at: string|null,
      *     heat: string,
      *     heat_label: string
@@ -61,16 +62,20 @@ final class GroupActivityHeatService {
         foreach ($groupIds as $groupId) {
             $row = $raw[$groupId] ?? null;
             $posts = $row !== null ? (int) $row->posts : 0;
+            // Distinct posters in the same window — rides on the heat
+            // query, so it costs nothing extra to carry.
+            $actives = $row !== null ? (int) $row->actives : 0;
             $lastAt = $row !== null && $row->last_at !== null
                 ? $this->toIso8601((string) $row->last_at)
                 : null;
             $heat = $this->bucket($posts, $warmAt, $hotAt);
 
             $out[$groupId] = [
-                'posts_last_7d'    => $posts,
-                'last_activity_at' => $lastAt,
-                'heat'             => $heat,
-                'heat_label'       => $this->heatLabel($heat),
+                'posts_last_7d'     => $posts,
+                'active_members_7d' => $actives,
+                'last_activity_at'  => $lastAt,
+                'heat'              => $heat,
+                'heat_label'        => $this->heatLabel($heat),
             ];
         }
         return $out;

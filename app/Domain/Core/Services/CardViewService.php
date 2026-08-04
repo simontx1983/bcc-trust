@@ -101,7 +101,8 @@ if (!defined('ABSPATH')) {
  *   chain_tag: string|null,
  *   trust_min: int|null,
  *   viewer_is_member: bool,
- *   posts_last_7d: int
+ *   posts_last_7d: int,
+ *   active_members_7d?: int
  * }
  */
 final class CardViewService
@@ -681,6 +682,7 @@ final class CardViewService
                 $userId,
                 $trustScore,
                 (int) $summary['followers_count'],
+                (int) $summary['following_count'],
                 $prefetched
             ),
             'permissions'         => $this->resolveMemberPermissions($userId, $viewerId),
@@ -778,6 +780,7 @@ final class CardViewService
         $imageUrl    = $groupData['image_url'];
         $memberCount = $groupData['member_count'];
         $posts7d     = $groupData['posts_last_7d'];
+        $actives     = (int) ($groupData['active_members_7d'] ?? 0);
         // Defensive: membership is only meaningful for authed viewers.
         $viewerIsMember = $viewerId > 0 && $groupData['viewer_is_member'];
 
@@ -851,9 +854,27 @@ final class CardViewService
                 $backgroundValue,
                 $imageUrl ?? ''
             ),
+            // Four stats, and the frontend splits them: `members` is the
+            // audience count and rides in the nameplate (the slot every
+            // other kind uses for watchers); the other three fill the
+            // grid. Communities have no trust axis, so Trust/Reviews/
+            // Vouches can never appear here — these are the three real
+            // numbers a community has.
+            //
+            // `active` is DISTINCT posters in the same 7-day window the
+            // heat query already scans: "318 members, 41 active" is the
+            // difference between a room and a mailing list. Window is 7d
+            // rather than 30d because it rides free on that query; the
+            // label deliberately omits the duration.
             'stats'               => [
                 ['key' => 'members',  'label' => 'Members',    'value' => (string) $memberCount, 'raw' => $memberCount, 'format' => 'count'],
                 ['key' => 'posts_7d', 'label' => 'Posts (7d)', 'value' => (string) $posts7d,     'raw' => $posts7d,     'format' => 'count'],
+                ['key' => 'active',   'label' => 'Active',     'value' => (string) $actives,     'raw' => $actives,     'format' => 'count'],
+                // Access is a word, not a number — but it answers "can I
+                // get in?", which is the first thing anyone asks of a
+                // community. Server-rendered so the client never derives
+                // the gate (§A2).
+                ['key' => 'access',   'label' => 'Access',     'value' => self::communityAccessLabel($groupData), 'format' => 'text'],
             ],
             'permissions'         => self::communityPermissions(),
             'social_proof'        => null,
@@ -872,6 +893,35 @@ final class CardViewService
                 ],
             ],
         ];
+    }
+
+    /**
+     * Server-rendered access word for the community stat grid.
+     *
+     * Precedence matches the front-face standing strip and the back-face
+     * dossier: a trust gate beats privacy, because trust-gated groups run
+     * on PeepSo "open" privacy underneath — `trust_min` is the canonical
+     * gate signal, not the privacy column.
+     *
+     * Kept short: this renders in a one-third-width stat cell.
+     *
+     * @phpstan-param CommunityGroupData $groupData
+     * @param array<string, mixed> $groupData
+     */
+    private static function communityAccessLabel(array $groupData): string
+    {
+        $trustMin = $groupData['trust_min'] ?? null;
+        if ($trustMin !== null) {
+            return 'Trust ' . (int) $trustMin . '+';
+        }
+        $privacy = (string) ($groupData['privacy'] ?? 'open');
+        if ($privacy === 'secret') {
+            return 'Invite only';
+        }
+        if ($privacy === 'closed') {
+            return 'Private';
+        }
+        return 'Public';
     }
 
     /**
@@ -1434,14 +1484,22 @@ final class CardViewService
      * @param int $watchersCount Passed in from getSummary's
      *                           `followers_count` so the 3-col
      *                           StatsPanel isn't sparse — no re-query.
+     * @param int $watchingCount Passed in from getSummary's
+     *                           `following_count` — the active side of
+     *                           the same graph, also already resolved.
      * @param array<string, mixed>|null $prefetched MemberSummaryPrefetcher
      *                           batch; its `reviews_written_counts` map is
      *                           consulted before falling back to a
      *                           per-member countByVoter() query.
      * @return list<Stat>
      */
-    private function buildMemberStats(int $userId, int $trustScore, int $watchersCount, ?array $prefetched = null): array
-    {
+    private function buildMemberStats(
+        int $userId,
+        int $trustScore,
+        int $watchersCount,
+        int $watchingCount,
+        ?array $prefetched = null
+    ): array {
         // Same read pattern as UserViewService::getSummary — when the
         // batch map is present, a missing key means zero (countByVoters
         // GROUP BY omits zero-count voters), not "not prefetched".
@@ -1455,6 +1513,10 @@ final class CardViewService
             ['key' => 'trust',           'label' => 'Trust',    'value' => (string) $trustScore,     'raw' => $trustScore,     'format' => 'score'],
             ['key' => 'reviews_written', 'label' => 'Reviews',  'value' => (string) $reviewsWritten, 'raw' => $reviewsWritten, 'format' => 'count'],
             ['key' => 'watchers',        'label' => 'Watchers', 'value' => (string) $watchersCount,  'raw' => $watchersCount,  'format' => 'count'],
+            // Active side of the follow graph. Emitted even at zero — the
+            // card shows both sides of a member's identity block, and a
+            // missing key there would read as broken rather than empty.
+            ['key' => 'watching',        'label' => 'Watching', 'value' => (string) $watchingCount,  'raw' => $watchingCount,  'format' => 'count'],
         ];
     }
 
