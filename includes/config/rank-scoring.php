@@ -50,9 +50,13 @@ return [
     ],
 
     // spec-locked — §4.3 mandatory category depth (30% / 60% of maxima).
+    // helping minimums zeroed — owner-approved 2026-08-04 (Phase 9
+    // calibration): every helping source (helpful_mark, stewardship,
+    // onboarding) has NO emitter yet, so a nonzero minimum makes
+    // promotion unreachable. Restore when helping emitters ship.
     'category_minimums' => [
-        'journeyman' => ['contribution' => 7.5,  'helping' => 7.5,  'recognition' => 4.5, 'outcomes' => 0.0, 'time' => 0.0],
-        'veteran'    => ['contribution' => 15.0, 'helping' => 15.0, 'recognition' => 9.0, 'outcomes' => 9.0, 'time' => 0.0],
+        'journeyman' => ['contribution' => 7.5,  'helping' => 0.0,  'recognition' => 4.5, 'outcomes' => 0.0, 'time' => 0.0],
+        'veteran'    => ['contribution' => 15.0, 'helping' => 0.0,  'recognition' => 9.0, 'outcomes' => 9.0, 'time' => 0.0],
     ],
 
     // spec-locked — §4.4: one event's combined lifetime Rank contribution.
@@ -183,7 +187,10 @@ return [
     // spec-locked — §10.3 / §11.2 / §6–§7.
     'recognizer_minimums' => ['journeyman' => 3, 'veteran' => 5],
     'outcome_minimums'    => ['veteran_outcomes' => 5, 'veteran_outcome_types' => 2],
-    'diversity_minimums'  => ['journeyman_categories' => 3, 'veteran_categories' => 5],
+    // veteran 5 -> 4 — owner-approved 2026-08-04 (Phase 9 calibration):
+    // only 4 contribution types have real emitters (post, comment,
+    // review, upheld report); raise back to 5 when stewardship ships.
+    'diversity_minimums'  => ['journeyman_categories' => 3, 'veteran_categories' => 4],
 
     // ── Community privileges ─────────────────────────────────────────
     // spec-locked — §21.2 active ownership caps + 30-day global cooldown.
@@ -206,7 +213,10 @@ return [
         'onboarding_assist'         => 0.5,
         'helping_min'               => 0.5,
         'helping_max'               => 1.0,
-        'recognition_weight_factor' => 0.75,
+        // 0.75 -> 1.0 — owner-approved 2026-08-04 (Phase 9 calibration):
+        // pulls the regular-cohort Journeyman median toward the 75-110d
+        // target band (was ~177d at 0.75).
+        'recognition_weight_factor' => 1.0,
         'proven_outcome'            => 2.0,
     ],
 
