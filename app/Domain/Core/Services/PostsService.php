@@ -26,6 +26,7 @@ use BCC\Core\Log\Logger;
 use BCC\Core\PeepSo\PeepSoGifWriter;
 use BCC\Core\PeepSo\PeepSoPhotoWriter;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
+use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
@@ -519,6 +520,100 @@ final class PostsService
             'ok'      => true,
             'page_id' => $pageId,
         ];
+    }
+
+    /**
+     * Delete a feed post — the viewer's own, or (site admins only) any
+     * post. Authorization is server-side ONLY: current_user_can
+     * ('manage_options') for the admin path, same posture as
+     * AdminReportsEndpoint. The frontend's delete-menu-item visibility
+     * is UX sugar, never the actual gate — a non-admin calling this
+     * directly for someone else's post still gets bcc_forbidden here.
+     *
+     * Deletion is wp_trash_post() on the activity's linked wp_post row
+     * (act_external_id) — reversible, and the ONLY thing that needs to
+     * happen: every feed/permalink read already filters on
+     * post_status='publish' (PeepSoActivityRepository), so a trashed
+     * post disappears from every surface immediately, no further
+     * cleanup (comments/reactions/photos hang off the same post id and
+     * simply stop being reachable through it).
+     *
+     * Kill switch: the `bcc_post_delete_enabled` option, default true.
+     * Flip to false (no code change, no deploy) to pull this capability
+     * entirely — every call degrades to bcc_feature_disabled regardless
+     * of viewer or ownership.
+     *
+     * @return array{ok: true, feed_id: string}|array{error: string, message: string}
+     */
+    public function deletePost(string $feedId, int $viewerId): array
+    {
+        if ($viewerId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+        if (!(bool) get_option('bcc_post_delete_enabled', true)) {
+            return ['error' => 'bcc_feature_disabled', 'message' => 'Deleting posts is not available right now.'];
+        }
+
+        $actId = self::parseFeedId($feedId);
+        if ($actId === null) {
+            return ['error' => 'bcc_invalid_request', 'message' => 'Invalid feed_id.'];
+        }
+
+        $activity = PeepSoActivityRepository::getById($actId);
+        if ($activity === null) {
+            return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
+        }
+
+        $isOwner = (int) $activity->act_user_id === $viewerId;
+        $isAdmin = current_user_can('manage_options');
+        if (!$isOwner && !$isAdmin) {
+            return ['error' => 'bcc_forbidden', 'message' => 'You can only delete your own posts.'];
+        }
+
+        $postId  = (int) $activity->act_external_id;
+        $trashed = wp_trash_post($postId);
+        if ($trashed === false || $trashed === null) {
+            Logger::error('[PostsService] deletePost trash failed', [
+                'act_id'  => $actId,
+                'post_id' => $postId,
+            ]);
+            return ['error' => 'bcc_internal_error', 'message' => 'Could not delete this post.'];
+        }
+
+        // Audit trail for the admin-delete path — the owner path is
+        // unremarkable (deleting your own post), but an admin removing
+        // someone else's post is exactly the kind of action that should
+        // be traceable after the fact.
+        if (!$isOwner) {
+            Logger::audit('[PostsService] admin deleted another user\'s post', [
+                'act_id'   => $actId,
+                'post_id'  => $postId,
+                'admin_id' => $viewerId,
+                'owner_id' => (int) $activity->act_user_id,
+            ]);
+        }
+
+        do_action('bcc_post_deleted', $viewerId, $actId, $isOwner ? 'owner' : 'admin');
+
+        return ['ok' => true, 'feed_id' => $feedId];
+    }
+
+    /**
+     * Parse "feed_<n>" → numeric act_id. Mirrors CommentService's
+     * private parser of the same name — kept local rather than shared
+     * since it's a tiny, stable, single-purpose format check.
+     */
+    private static function parseFeedId(string $feedId): ?int
+    {
+        if (!str_starts_with($feedId, 'feed_')) {
+            return null;
+        }
+        $rest = substr($feedId, 5);
+        if ($rest === '' || !ctype_digit($rest)) {
+            return null;
+        }
+        $value = (int) $rest;
+        return $value > 0 ? $value : null;
     }
 
     /**
