@@ -442,6 +442,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Support\\FraudClassification' => __DIR__ . '/../..' . '/app/Domain/Core/Support/FraudClassification.php',
         'BCC\\Trust\\Core\\Support\\FrontendRedirect' => __DIR__ . '/../..' . '/app/Domain/Core/Support/FrontendRedirect.php',
         'BCC\\Trust\\Core\\Support\\GroupInteractionGate' => __DIR__ . '/../..' . '/app/Domain/Core/Support/GroupInteractionGate.php',
+        'BCC\\Trust\\Core\\Support\\InternalPath' => __DIR__ . '/../..' . '/app/Domain/Core/Support/InternalPath.php',
         'BCC\\Trust\\Core\\Support\\JwtToken' => __DIR__ . '/../..' . '/app/Domain/Core/Support/JwtToken.php',
         'BCC\\Trust\\Core\\Support\\MemberCardPrefetcher' => __DIR__ . '/../..' . '/app/Domain/Core/Support/MemberCardPrefetcher.php',
         'BCC\\Trust\\Core\\Support\\MemberSummaryPrefetcher' => __DIR__ . '/../..' . '/app/Domain/Core/Support/MemberSummaryPrefetcher.php',

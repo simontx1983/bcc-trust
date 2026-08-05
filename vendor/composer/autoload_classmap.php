@@ -292,6 +292,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\FraudClassification' => $baseDir . '/app/Domain/Core/Support/FraudClassification.php',
     'BCC\\Trust\\Core\\Support\\FrontendRedirect' => $baseDir . '/app/Domain/Core/Support/FrontendRedirect.php',
     'BCC\\Trust\\Core\\Support\\GroupInteractionGate' => $baseDir . '/app/Domain/Core/Support/GroupInteractionGate.php',
+    'BCC\\Trust\\Core\\Support\\InternalPath' => $baseDir . '/app/Domain/Core/Support/InternalPath.php',
     'BCC\\Trust\\Core\\Support\\JwtToken' => $baseDir . '/app/Domain/Core/Support/JwtToken.php',
     'BCC\\Trust\\Core\\Support\\MemberCardPrefetcher' => $baseDir . '/app/Domain/Core/Support/MemberCardPrefetcher.php',
     'BCC\\Trust\\Core\\Support\\MemberSummaryPrefetcher' => $baseDir . '/app/Domain/Core/Support/MemberSummaryPrefetcher.php',

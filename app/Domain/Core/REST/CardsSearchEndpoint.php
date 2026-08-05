@@ -19,6 +19,12 @@
  *   - bcc-search returns the WordPress permalink in `page_url`. The
  *     headless frontend uses Next.js routes (`/v/:slug`, `/p/:slug`,
  *     `/c/:slug`). We resolve those server-side too.
+ *   - v1.70: the All-scope response merges the groups + users
+ *     verticals server-side (community + member rows) under a
+ *     deterministic floor/quota allocation, and `kind=member|community`
+ *     routes to that single vertical. The merge lives HERE so the
+ *     frontend keeps its single-request-per-keystroke design — the
+ *     dropdown never fans out client-side.
  *
  * Response shape is intentionally smaller than the full Card view-model
  * — autocomplete needs name + handle + tier + click-through, not stats
@@ -31,7 +37,9 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\InternalPath;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use WP_REST_Request;
@@ -61,7 +69,21 @@ final class CardsSearchEndpoint
     ];
 
     /** @var list<string> */
-    private const ALLOWED_KINDS = ['validator', 'project', 'creator'];
+    private const ALLOWED_KINDS = ['validator', 'project', 'creator', 'member', 'community'];
+
+    /**
+     * Response cap (contract §4.9, documented v1.70). Mirrors
+     * bcc-search SearchController::LIMIT — the pages vertical never
+     * returns more than 12 rows. Deliberately NOT a public `limit`
+     * param: the endpoint has exactly one consumer (GlobalSearch) and
+     * it has never passed one; revisit only when a second consumer
+     * needs a variable N.
+     */
+    private const MAX_ITEMS = 12;
+
+    /** All-scope per-vertical quotas (contract §4.9 allocation). */
+    private const COMMUNITY_QUOTA = 3;
+    private const MEMBER_QUOTA    = 3;
 
     public static function register(): void
     {
@@ -105,15 +127,26 @@ final class CardsSearchEndpoint
         if ($kindParam !== '' && !in_array($kindParam, self::ALLOWED_KINDS, true)) {
             return ApiResponse::error(
                 'bcc_invalid_request',
-                'kind must be validator, project, or creator.',
+                'kind must be validator, project, creator, member, or community.',
                 400
             );
         }
 
+        // Scoped single-vertical paths (v1.70): member/community skip
+        // the pages pipeline entirely — a scoped keystroke costs
+        // exactly one vertical query.
+        if ($kindParam === 'community') {
+            return self::okItems($this->communitySuggestions($query, self::MAX_ITEMS));
+        }
+        if ($kindParam === 'member') {
+            return self::okItems($this->memberSuggestions($query, self::MAX_ITEMS));
+        }
+
         // Translate canonical kind → bcc-search's category_slug
-        // (legacy page_type). Empty kind = all categories. The
-        // ALLOWED_KINDS guard above mirrors the map keys, so a hit
-        // is guaranteed when $kindParam is non-empty.
+        // (legacy page_type). Empty kind = all categories. Only the
+        // three page kinds can reach this map — member/community
+        // returned above — so a hit is guaranteed when $kindParam is
+        // non-empty.
         $categorySlug = $kindParam !== ''
             ? PageTypeMap::KIND_TO_PAGE_TYPE[$kindParam]
             : '';
@@ -176,6 +209,309 @@ final class CardsSearchEndpoint
             }
         }
 
+        // Page-kind scope: pages only, capped.
+        if ($kindParam !== '') {
+            return self::okItems(array_slice($items, 0, self::MAX_ITEMS));
+        }
+
+        // All scope (v1.70): merge in the community + member verticals
+        // under the deterministic floor/quota allocation (§4.9).
+        $communities = $this->communitySuggestions($query, self::COMMUNITY_QUOTA);
+        $members     = $this->memberSuggestions($query, self::MEMBER_QUOTA);
+
+        return self::okItems(
+            self::allocateSuggestions($items, $communities, $members, self::MAX_ITEMS)
+        );
+    }
+
+    /**
+     * Deterministic All-scope allocation (contract §4.9, v1.70).
+     *
+     * Floors first, in priority order — 1 page, then 1 community, then
+     * 1 member, each only when that vertical has results and capacity
+     * remains — then communities top up to COMMUNITY_QUOTA, members to
+     * MEMBER_QUOTA, and pages absorb ALL remaining capacity (unused
+     * community/member quota flows back to pages). Display grouping is
+     * pages → communities → members; within a vertical the upstream
+     * ranking order is preserved. Never exceeds $limit; may return
+     * fewer (vertical shortfall).
+     *
+     * Public static: pure, exercised directly by unit tests. Not part
+     * of any external API.
+     *
+     * @param list<array<string, mixed>> $pages
+     * @param list<array<string, mixed>> $communities
+     * @param list<array<string, mixed>> $members
+     * @return list<array<string, mixed>>
+     */
+    public static function allocateSuggestions(
+        array $pages,
+        array $communities,
+        array $members,
+        int $limit
+    ): array {
+        if ($limit <= 0) {
+            return [];
+        }
+
+        $p = 0;
+        $c = 0;
+        $m = 0;
+        $cap = $limit;
+
+        // No $cap guard on the first floor: $cap === $limit ≥ 1 here
+        // (the ≤ 0 case returned above).
+        if ($pages !== []) {
+            $p = 1;
+            $cap--;
+        }
+        if ($communities !== [] && $cap > 0) {
+            $c = 1;
+            $cap--;
+        }
+        if ($members !== [] && $cap > 0) {
+            $m = 1;
+            $cap--;
+        }
+
+        $add = min(min(count($communities), self::COMMUNITY_QUOTA) - $c, $cap);
+        if ($add > 0) {
+            $c += $add;
+            $cap -= $add;
+        }
+        $add = min(min(count($members), self::MEMBER_QUOTA) - $m, $cap);
+        if ($add > 0) {
+            $m += $add;
+            $cap -= $add;
+        }
+        $add = min(count($pages) - $p, $cap);
+        if ($add > 0) {
+            $p += $add;
+        }
+
+        return array_merge(
+            array_slice($pages, 0, $p),
+            array_slice($communities, 0, $c),
+            array_slice($members, 0, $m)
+        );
+    }
+
+    /**
+     * Fetch + normalize community suggestions from the groups vertical.
+     *
+     * Zero queries of its own — id/name/slug/kind/group_url all arrive
+     * in the proxied payload (bcc-search batches the kind meta in its
+     * single three-JOIN query).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function communitySuggestions(string $query, int $limit): array
+    {
+        $internal = new WP_REST_Request('GET', '/bcc/v1/search/groups');
+        $internal->set_param('q', $query);
+        $internal->set_param('limit', $limit);
+        $upstream = rest_do_request($internal);
+
+        if ($upstream->is_error()) {
+            // Degraded / rate-limited vertical → silently absent from
+            // the merge (same "never block mid-type" rule as pages).
+            return [];
+        }
+
+        $body = $upstream->get_data();
+        $rows = is_array($body) && isset($body['results']) && is_array($body['results'])
+            ? $body['results']
+            : [];
+
+        $out = [];
+        foreach ($rows as $row) {
+            $suggestion = self::buildCommunitySuggestion(is_array($row) ? $row : (array) $row);
+            if ($suggestion !== null) {
+                $out[] = $suggestion;
+            }
+            if (count($out) >= $limit) {
+                break;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Fetch + normalize member suggestions from the users vertical,
+     * enriched with REAL reputation values.
+     *
+     * ONE bounded batch (≤ $limit ≤ 12 ids) via
+     * ReputationRepository::primeByUserIds warms the row memo, so the
+     * per-row getTier()/getScore() reads below are free — the
+     * MemberCardPrefetcher::primeFor pattern. No per-row queries.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function memberSuggestions(string $query, int $limit): array
+    {
+        $internal = new WP_REST_Request('GET', '/bcc/v1/search/users');
+        $internal->set_param('q', $query);
+        $internal->set_param('limit', $limit);
+        $upstream = rest_do_request($internal);
+
+        if ($upstream->is_error()) {
+            return [];
+        }
+
+        $body = $upstream->get_data();
+        $rows = is_array($body) && isset($body['results']) && is_array($body['results'])
+            ? $body['results']
+            : [];
+        if ($rows === []) {
+            return [];
+        }
+
+        $userIds = [];
+        foreach ($rows as $row) {
+            $rowArr = is_array($row) ? $row : (array) $row;
+            $uid    = isset($rowArr['id']) ? (int) $rowArr['id'] : 0;
+            if ($uid > 0) {
+                $userIds[] = $uid;
+            }
+        }
+
+        $repo = new ReputationRepository();
+        if ($userIds !== []) {
+            $repo->primeByUserIds($userIds);
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            $rowArr = is_array($row) ? $row : (array) $row;
+            $uid    = isset($rowArr['id']) ? (int) $rowArr['id'] : 0;
+            if ($uid <= 0) {
+                continue;
+            }
+
+            // Real values — memo reads after the batch prime. ALL
+            // tiers surface, risky/caution included: autocomplete is a
+            // lookup surface, not an endorsement surface (§4.9).
+            $tier  = $repo->getTier($uid);
+            $label = ReputationTierMap::toReputationTierLabel($tier);
+            $score = (int) round($repo->getScore($uid));
+
+            $suggestion = self::buildMemberSuggestion($rowArr, $tier, $label, $score);
+            if ($suggestion !== null) {
+                $out[] = $suggestion;
+            }
+            if (count($out) >= $limit) {
+                break;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Build a community SearchSuggestion from a /search/groups row, or
+     * null when required fields are missing or the href fails
+     * internal-path validation.
+     *
+     * Field semantics (contract §4.9 / §3.2.4, v1.70):
+     *   - Trust placeholders: tier 'neutral' + label null (the FE tier
+     *     chip is null-label-suppressed) + trust_score null (this shape
+     *     admits null, unlike the Card shape's 0).
+     *   - is_claim_verified false — §3.2: communities are not
+     *     on-chain-claimed.
+     *   - NO `is_verified` key: no owner-email verification meaning
+     *     exists for a community on this surface. Omitted, never false.
+     *   - href is CONSUMED from the vertical's kind-aware relative
+     *     group_url — this class builds no community URL of its own, so
+     *     CardUrlMap's no-inline-prefix rule is not in play. The
+     *     InternalPath gate drops any absolute/protocol-relative URL a
+     *     version-skewed (pre-v1.70) bcc-search could still emit.
+     *
+     * Public static: pure, exercised directly by unit tests.
+     *
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>|null
+     */
+    public static function buildCommunitySuggestion(array $row): ?array
+    {
+        $id   = isset($row['id']) ? (int) $row['id'] : 0;
+        $name = isset($row['name']) && is_string($row['name']) ? $row['name'] : '';
+        $slug = isset($row['slug']) && is_string($row['slug']) ? $row['slug'] : '';
+        $url  = isset($row['group_url']) && is_string($row['group_url']) ? $row['group_url'] : '';
+
+        if ($id <= 0 || $name === '' || !InternalPath::isValid($url)) {
+            return null;
+        }
+
+        return [
+            'id'                    => $id,
+            'name'                  => $name,
+            'handle'                => $slug,
+            'card_kind'             => 'community',
+            'reputation_tier'       => 'neutral',
+            'reputation_tier_label' => null,
+            'trust_score'           => null,
+            'is_claim_verified'     => false,
+            'href'                  => $url,
+        ];
+    }
+
+    /**
+     * Build a member SearchSuggestion from a /search/users row plus its
+     * batch-resolved reputation values, or null when required fields
+     * are missing or the href fails internal-path validation.
+     *
+     * Field semantics (contract §4.9, v1.70):
+     *   - REAL tier/label/score — the same values the member Card
+     *     carries. Callers resolve them via the primed
+     *     ReputationRepository memo (no per-row queries).
+     *   - is_claim_verified false — §3.2: member self-pages
+     *     (ID_BASE + user_id) can never key an on-chain claim.
+     *   - NO `is_verified` key: /search/users does not provide the
+     *     authoritative email-verification signal
+     *     (bcc_trust_user_info.is_verified) and no bounded batch
+     *     reader exists for it. Omission means UNAVAILABLE, not false —
+     *     members do have a real email-verification value; emitting
+     *     false would assert something untrue about verified members.
+     *   - href is CONSUMED from the vertical's relative profile_url
+     *     (/u/{handle}, v1.46-hardened) after the InternalPath gate.
+     *
+     * Public static: pure, exercised directly by unit tests.
+     *
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>|null
+     */
+    public static function buildMemberSuggestion(
+        array $row,
+        string $tier,
+        string $label,
+        int $score
+    ): ?array {
+        $id       = isset($row['id']) ? (int) $row['id'] : 0;
+        $username = isset($row['username']) && is_string($row['username']) ? $row['username'] : '';
+        $display  = isset($row['display_name']) && is_string($row['display_name']) ? $row['display_name'] : '';
+        $url      = isset($row['profile_url']) && is_string($row['profile_url']) ? $row['profile_url'] : '';
+
+        if ($id <= 0 || $username === '' || !InternalPath::isValid($url)) {
+            return null;
+        }
+
+        return [
+            'id'                    => $id,
+            'name'                  => $display !== '' ? $display : $username,
+            'handle'                => $username,
+            'card_kind'             => 'member',
+            'reputation_tier'       => $tier,
+            'reputation_tier_label' => $label,
+            'trust_score'           => $score,
+            'is_claim_verified'     => false,
+            'href'                  => $url,
+        ];
+    }
+
+    /**
+     * @param list<array<string, mixed>> $items
+     */
+    private static function okItems(array $items): WP_REST_Response
+    {
         $response = ApiResponse::ok(['items' => $items]);
         $response->header('Cache-Control', 'private, max-age=15');
         return $response;
