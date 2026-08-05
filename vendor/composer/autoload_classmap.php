@@ -179,6 +179,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\Capability\\CapabilityCatalog' => $baseDir . '/app/Domain/Core/Services/Capability/CapabilityCatalog.php',
     'BCC\\Trust\\Core\\Services\\Capability\\CapabilityResolver' => $baseDir . '/app/Domain/Core/Services/Capability/CapabilityResolver.php',
     'BCC\\Trust\\Core\\Services\\Capability\\CapabilityShadow' => $baseDir . '/app/Domain/Core/Services/Capability/CapabilityShadow.php',
+    'BCC\\Trust\\Core\\Services\\Capability\\CredibilityAtoms' => $baseDir . '/app/Domain/Core/Services/Capability/CredibilityAtoms.php',
     'BCC\\Trust\\Core\\Services\\CardReviewsService' => $baseDir . '/app/Domain/Core/Services/CardReviewsService.php',
     'BCC\\Trust\\Core\\Services\\CardViewService' => $baseDir . '/app/Domain/Core/Services/CardViewService.php',
     'BCC\\Trust\\Core\\Services\\CardWatchersService' => $baseDir . '/app/Domain/Core/Services/CardWatchersService.php',

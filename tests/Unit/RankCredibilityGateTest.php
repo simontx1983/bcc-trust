@@ -81,6 +81,46 @@ final class RankCredibilityGateTest extends TestCase
     {
         self::assertFalse($this->gate()->isResponsibleOwner(0));
     }
+
+    // ── isCredible (parameterized composite) ────────────────────────────
+
+    public function testIsCredibleDefaultsRequireTheFourCoreGates(): void
+    {
+        self::assertTrue($this->gate()->isCredible(self::U));
+        self::assertFalse($this->gate(notSuspended: false)->isCredible(self::U), 'suspended');
+        self::assertFalse($this->gate(hasRankState: false)->isCredible(self::U), 'new member');
+        self::assertFalse($this->gate(tierNeutralPlus: false)->isCredible(self::U), 'below neutral');
+        self::assertFalse($this->gate(fraudClear: false)->isCredible(self::U), 'fraud');
+    }
+
+    public function testIsCredibleSkipsRankAndTierWhenNotRequired(): void
+    {
+        // Owner-shape call: rank + tier skipped (owner is Apprentice+ by
+        // construction), suspension + fraud still enforced.
+        self::assertTrue(
+            $this->gate(hasRankState: false, tierNeutralPlus: false)
+                ->isCredible(self::U, requireRankState: false, requireTierNeutral: false)
+        );
+    }
+
+    public function testIsCredibleRecoveryGateAppliesOnlyWhenRequired(): void
+    {
+        // Default (recovery not required): in-recovery does not block.
+        self::assertTrue($this->gate(inRecovery: true)->isCredible(self::U));
+        // Required: in-recovery blocks.
+        self::assertFalse(
+            $this->gate(inRecovery: true)->isCredible(self::U, requireNotInRecovery: true)
+        );
+    }
+
+    public function testIsCredibleSuspensionAndFraudGatesCanBeWaived(): void
+    {
+        // write_review-shape: suspension + fraud waived, rank + tier kept.
+        self::assertTrue(
+            $this->gate(notSuspended: false, fraudClear: false)
+                ->isCredible(self::U, requireNotSuspended: false, requireFraudClear: false)
+        );
+    }
 }
 
 /**
