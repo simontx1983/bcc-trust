@@ -8,8 +8,8 @@
  *   - DELETE /me/blocks/:user_id  — unblock the target
  *
  * Auth: required. Self-only — no admin endpoint to see-or-edit
- * another user's blocks (the audit trail for that lives on the
- * `peepso_user_blocked` / `bcc_user_blocked` action subscribers).
+ * another user's blocks (the audit trail is written inline here via
+ * AuditLogger::log on the block/unblock state transitions).
  *
  * Self-block protection is double-layered:
  *   - the writer rejects blocker_id == blocked_id

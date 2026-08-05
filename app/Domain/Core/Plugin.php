@@ -2432,6 +2432,45 @@ final class Plugin
             5
         );
 
+        // ── §K1 Phase C — auto-hide audit trail ──────────────────────────
+        //
+        // Mirror of the admin-hide audit row (ModerationQueueService writes
+        // AuditLogger::log('admin_hide_report', ...) on a manual Hide) so the
+        // two hide paths leave a consistent forensic trail. Auto-hide has no
+        // human actor, so the row is attributed to the system (user_id 0) —
+        // the same convention AutoHideService uses when it stores
+        // hidden_by_user_id = 0 for threshold hides. AuditLogger::log already
+        // swallows write failures into a DegradationMetric rather than
+        // throwing; the closure is wrapped defensively regardless so an audit
+        // hiccup can never break the hide that already committed.
+        add_action(
+            'bcc_content_auto_hidden',
+            function (int $targetId, int $count, int $threshold, int $reportId): void {
+                try {
+                    \BCC\Trust\Core\Security\AuditLogger::log(
+                        'content_auto_hidden',
+                        $targetId,
+                        [
+                            'target_id'    => $targetId,
+                            'report_count' => $count,
+                            'threshold'    => $threshold,
+                            'report_id'    => $reportId,
+                        ],
+                        'feed_item',
+                        0
+                    );
+                } catch (\Throwable $e) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] content_auto_hidden audit failed', [
+                        'target_id' => $targetId,
+                        'report_id' => $reportId,
+                        'error'     => $e->getMessage(),
+                    ]);
+                }
+            },
+            10,
+            4
+        );
+
         // ── §I1 notifications dispatcher ────────────────────────────────
         //
         // Translates BCC events into peepso_notifications rows so users

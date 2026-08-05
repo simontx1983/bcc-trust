@@ -152,12 +152,11 @@ final class HelpfulMarkEndpoint
             if ($markId <= 0) {
                 return ApiResponse::error('bcc_internal_error', 'Failed to mark helpful.', 500);
             }
-            // §A3-style event layered on the write, mirroring
-            // bcc_stoke_added. The Rank subscriber (Plugin.php) resolves
-            // the content author, gates the marker's §9.2 credibility,
-            // and mints helping evidence keyed on $markId. Cosmetic /
-            // self / non-credible marks are recorded here but mint NO
-            // Rank evidence — the gate lives in the subscriber.
+            // §A3-style event layered on the write. The Rank subscriber
+            // (Plugin.php) resolves the content author, gates the marker's
+            // §9.2 credibility, and mints helping evidence keyed on $markId.
+            // Cosmetic / self / non-credible marks are recorded here but
+            // mint NO Rank evidence — the gate lives in the subscriber.
             do_action('bcc_helpful_mark_added', $userId, $actId, $markId);
         } else {
             $markId = $repo->removeMark($actId, $userId);

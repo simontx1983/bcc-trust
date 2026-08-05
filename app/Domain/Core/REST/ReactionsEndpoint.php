@@ -212,14 +212,6 @@ final class ReactionsEndpoint
             return ApiResponse::error('bcc_internal_error', 'Failed to remove reaction.', 500);
         }
 
-        // Symmetric counterpart to bcc_reaction_added. Subscribers can
-        // tear down their own state (e.g. retract a notification that was
-        // sent moments ago). The 3rd arg is retained for signature
-        // stability — it once carried the removed kind for a reaction
-        // (vouch) that has since moved to the attestation system, so it
-        // is always empty now.
-        do_action('bcc_reaction_removed', $userId, $actId, '');
-
         return self::buildStateResponse($actId, $userId, $grammar);
     }
 

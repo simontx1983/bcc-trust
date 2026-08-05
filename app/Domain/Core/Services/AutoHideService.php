@@ -5,8 +5,10 @@
  * Subscribes to `bcc_content_reported`. After each report lands, counts
  * the pending reports against that target; once the count crosses the
  * configured threshold, marks the activity hidden via
- * HiddenActivityRepository and emits `bcc_content_auto_hidden` for
- * downstream subscribers (notification dispatcher, audit log).
+ * HiddenActivityRepository and emits `bcc_content_auto_hidden`. The
+ * audit-log consumer for that event is wired in Plugin.php (one
+ * bcc_trust_activity row per auto-hide); a notification consumer for
+ * the post author is intentionally NOT wired in V1.
  *
  * Idempotent: if the row is already hidden the threshold check
  * short-circuits — no double events, no double DB writes.
@@ -112,8 +114,9 @@ final class AutoHideService
             'related_report_id' => $reportId,
         ]);
 
-        // §A3 event bus — Phase C+ subscribers (notification dispatcher
-        // for the post author, audit logger) attach independently.
+        // §A3 event bus. The audit-logger consumer is wired in Plugin.php
+        // (writes one content_auto_hidden audit row). A notification
+        // consumer for the post author is intentionally NOT wired in V1.
         do_action('bcc_content_auto_hidden', $targetId, $count, $threshold, $reportId);
     }
 
