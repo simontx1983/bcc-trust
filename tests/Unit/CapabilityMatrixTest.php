@@ -221,6 +221,20 @@ final class CapabilityMatrixTest extends TestCase
         self::assertSame('feature_access', $denied->source);
     }
 
+    public function testSuspendedMemberIsDeniedBothWriteActions(): void
+    {
+        // Participation opt-out (SuspensionGateParity): suspension with the
+        // admin bypass OFF blocks both write actions BEFORE the rank/tier
+        // feature gate — even a member who would otherwise pass
+        // writeReviewGate. Mirrors the open_dispute gate.
+        foreach ([CapabilityCatalog::WRITE_REVIEW, CapabilityCatalog::CAST_DISPUTE_VOTE] as $key) {
+            $denied = $this->resolver(writeReview: true, notSuspended: false)->can(7, $key);
+            self::assertTrue($denied->isDenied(), "key {$key}");
+            self::assertSame('suspended', $denied->reason, "key {$key}");
+            self::assertSame('permissions', $denied->source, "key {$key}");
+        }
+    }
+
     public function testCastDisputeVoteRoutesThroughTheWriteActionPolicy(): void
     {
         // Rank Phase 6 Wave 3 (D-7): the panel is retired; the key now

@@ -60,6 +60,13 @@ class CapabilityResolver
         switch ($key) {
             case CapabilityCatalog::WRITE_REVIEW:
             case CapabilityCatalog::CAST_DISPUTE_VOTE:
+                // Participation paths opt out of the suspension admin-bypass
+                // (Permissions::is_not_suspended intent) — a suspended
+                // member, admin included, cannot cast a peer-trust signal.
+                // Mirrors the open_dispute gate below + DisputeVoteService.
+                if (!$this->notSuspended($userId)) {
+                    return CapabilityDecision::denied('suspended', 'permissions');
+                }
                 // Same Phase 5 final policy shape for both write actions:
                 // Apprentice+ (rank_state row) AND Trust Neutral+. The
                 // dispute-vote live gate (DisputeVoteService) additionally
