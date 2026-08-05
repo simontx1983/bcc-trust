@@ -28,6 +28,7 @@ final class RankScheduler
     public const EVENT_CONFIRMATION_SWEEP   = 'bcc_rank_confirmation_sweep';
     public const EVENT_DAILY_EVALUATE       = 'bcc_rank_daily_evaluate';
     public const EVENT_POLL_CLOSE_SWEEP     = 'bcc_rank_poll_close_sweep';
+    public const EVENT_STEWARDSHIP_SWEEP    = 'bcc_rank_stewardship_sweep';
 
     public static function schedule(): void
     {
@@ -43,6 +44,9 @@ final class RankScheduler
         if (!wp_next_scheduled(self::EVENT_POLL_CLOSE_SWEEP)) {
             wp_schedule_event(time(), 'hourly', self::EVENT_POLL_CLOSE_SWEEP);
         }
+        if (!wp_next_scheduled(self::EVENT_STEWARDSHIP_SWEEP)) {
+            wp_schedule_event(time(), 'bcc_weekly', self::EVENT_STEWARDSHIP_SWEEP);
+        }
     }
 
     public static function unschedule(): void
@@ -51,6 +55,7 @@ final class RankScheduler
         wp_clear_scheduled_hook(self::EVENT_CONFIRMATION_SWEEP);
         wp_clear_scheduled_hook(self::EVENT_DAILY_EVALUATE);
         wp_clear_scheduled_hook(self::EVENT_POLL_CLOSE_SWEEP);
+        wp_clear_scheduled_hook(self::EVENT_STEWARDSHIP_SWEEP);
     }
 
     public static function boot(): void
@@ -59,6 +64,7 @@ final class RankScheduler
         add_action(self::EVENT_CONFIRMATION_SWEEP, [__CLASS__, 'runConfirmationSweep']);
         add_action(self::EVENT_DAILY_EVALUATE, [__CLASS__, 'runDailyEvaluate']);
         add_action(self::EVENT_POLL_CLOSE_SWEEP, [__CLASS__, 'runPollCloseSweep']);
+        add_action(self::EVENT_STEWARDSHIP_SWEEP, [__CLASS__, 'runStewardshipSweep']);
 
         // Self-healing: recreate the scheduled events if deleted or
         // never registered. schedule() is idempotent via wp_next_scheduled
@@ -106,6 +112,25 @@ final class RankScheduler
         } catch (\Throwable $e) {
             \BCC\Core\Observability\DegradationMetrics::record('rank_scoring', 'poll_close_failed');
             \BCC\Core\Log\Logger::error('[bcc-trust] rank poll close sweep failed', [
+                'error' => $e->getMessage(),
+                'class' => get_class($e),
+            ]);
+        }
+    }
+
+    public static function runStewardshipSweep(): void
+    {
+        update_option('bcc_rank_stewardship_sweep_last_run', time(), false);
+
+        try {
+            \BCC\Trust\Core\Plugin::instance()->stewardshipSweepService()->run();
+            update_option('bcc_rank_stewardship_sweep_last_success', time(), false);
+        } catch (\Throwable $e) {
+            // Reuse the existing rank_scoring evidence-ingest metric — the
+            // sweep's whole job is minting evidence, and reusing it avoids a
+            // cross-repo bcc-core map + docs bump for a new event name.
+            \BCC\Core\Observability\DegradationMetrics::record('rank_scoring', 'evidence_ingest_failed');
+            \BCC\Core\Log\Logger::error('[bcc-trust] rank stewardship sweep failed', [
                 'error' => $e->getMessage(),
                 'class' => get_class($e),
             ]);

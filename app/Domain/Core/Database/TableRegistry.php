@@ -425,6 +425,19 @@ final class TableRegistry
     }
 
     /**
+     * Helpful marks — one row per (act_id, user_id), the row's existence
+     * IS the deliberate §9.2 "Mark helpful" endorsement (one per person).
+     * Distinct from `stokes` (cosmetic): a credible marker's row mints
+     * Rank `helping` evidence keyed on the row id. See
+     * schema-helpful-marks.php.
+     */
+    public static function helpfulMarks(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_helpful_marks';
+    }
+
+    /**
      * Slice 3 — nightly memoization of AttestationOutcomeClassifier output.
      * One row per attestor (PRIMARY KEY user_id). The cron owns writes;
      * read paths (/me/reliability, standing) read-cache-first and fall
