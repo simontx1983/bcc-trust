@@ -62,6 +62,8 @@ return [
         'bcc_rank_daily_evaluate'               => ['interval' => 'daily',                        'description' => 'rank promotion/demotion evaluate over ranked members'],
         // Rank domain (redesign Phase 6 meaningful voting)
         'bcc_rank_poll_close_sweep'             => ['interval' => 'hourly',                       'description' => 'meaningful-vote poll close sweep (quorum/majority evaluation + day-90 inconclusive)'],
+        // Rank domain (helping emitters) — weekly community-upkeep credit
+        'bcc_rank_stewardship_sweep'            => ['interval' => 'bcc_weekly',                   'description' => 'weekly stewardship sweep — credits owners of active User-kind communities (helping + contribution)'],
     ],
 
     // Fire-once / retired / legacy hooks — cleared on deactivate/uninstall

@@ -534,6 +534,32 @@ final class Plugin
         );
     }
 
+    // ── Rank domain (helping emitters) ───────────────────────────────
+
+    private ?\BCC\Trust\Rank\Services\RankCredibilityGate $rankCredibilityGate = null;
+    public function rankCredibilityGate(): \BCC\Trust\Rank\Services\RankCredibilityGate
+    {
+        return $this->rankCredibilityGate ??= new \BCC\Trust\Rank\Services\RankCredibilityGate();
+    }
+
+    private ?\BCC\Trust\Rank\Services\HelpfulMarkEvidenceListener $helpfulMarkEvidenceListener = null;
+    public function helpfulMarkEvidenceListener(): \BCC\Trust\Rank\Services\HelpfulMarkEvidenceListener
+    {
+        return $this->helpfulMarkEvidenceListener ??= new \BCC\Trust\Rank\Services\HelpfulMarkEvidenceListener();
+    }
+
+    private ?\BCC\Trust\Rank\Repositories\StewardshipCandidateRepository $stewardshipCandidateRepository = null;
+    public function stewardshipCandidateRepository(): \BCC\Trust\Rank\Repositories\StewardshipCandidateRepository
+    {
+        return $this->stewardshipCandidateRepository ??= new \BCC\Trust\Rank\Repositories\StewardshipCandidateRepository();
+    }
+
+    private ?\BCC\Trust\Rank\Services\StewardshipSweepService $stewardshipSweepService = null;
+    public function stewardshipSweepService(): \BCC\Trust\Rank\Services\StewardshipSweepService
+    {
+        return $this->stewardshipSweepService ??= new \BCC\Trust\Rank\Services\StewardshipSweepService();
+    }
+
     // ── Rank domain (redesign Phase 5 atomic cutover) ────────────────
 
     private ?\BCC\Trust\Rank\Repositories\RankStateRepository $rankStateRepository = null;
@@ -737,6 +763,12 @@ final class Plugin
     public function stokeRepository(): Repositories\StokeRepository
     {
         return $this->stokeRepository ??= new Repositories\StokeRepository();
+    }
+
+    private ?Repositories\HelpfulMarkRepository $helpfulMarkRepository = null;
+    public function helpfulMarkRepository(): Repositories\HelpfulMarkRepository
+    {
+        return $this->helpfulMarkRepository ??= new Repositories\HelpfulMarkRepository();
     }
 
     private ?Repositories\CommentRepository $commentRepository = null;
@@ -1475,6 +1507,13 @@ final class Plugin
         // peepso_group_id). Plain X-"like" toggle, no heat_stage.
         \BCC\Trust\Core\REST\CommentStokeEndpoint::register();
 
+        // Helpful mark — POST/DELETE /feed/{id}/helpful and
+        // /comments/{id}/helpful. The deliberate §9.2 "Mark helpful"
+        // endorsement: its OWN bcc_trust_helpful_marks table (NOT a
+        // cosmetic reaction), and a credible marker's mark mints Rank
+        // helping evidence for the content author (subscriber below).
+        \BCC\Trust\Core\REST\HelpfulMarkEndpoint::register();
+
         // V1 contract: §D1 Composer status posts — POST /posts.
         // Wraps PeepSoActivity::add_post via PeepSoStatusWriter
         // (single-graph rule); fires bcc_post_created on the §A3 bus.
@@ -2090,10 +2129,10 @@ final class Plugin
         // Each existing domain event folds into the append-only
         // rank_events ledger via the single ingestor. Idempotent by
         // ledger UNIQUE — hook re-fires are no-ops. Nothing reads the
-        // ledger for authorization yet. Sources with no emitter today
-        // (helpful_mark, stewardship, onboarding_assist) and the
-        // legacy-shaped dispute outcome are deliberately NOT wired —
-        // never invent a subscriber against a nonexistent hook.
+        // ledger for authorization yet. The helping emitters slice wired
+        // helpful_mark (below) + stewardship (RankScheduler weekly sweep);
+        // onboarding_assist and the legacy-shaped dispute outcome remain
+        // unwired — never invent a subscriber against a nonexistent hook.
 
         $rankIngest = function (callable $call): void {
             try {
@@ -2164,6 +2203,24 @@ final class Plugin
             $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
                 $i->reverse('recognition', (int) $rowId, 'attestation_revoked'));
         }, 20, 2);
+
+        // Helpful mark (§9.2 helping route): a deliberate, credibility-
+        // gated "Mark helpful" credits the CONTENT AUTHOR's helping
+        // category. The listener resolves author (content→owner), excludes
+        // self-marks, and gates the MARKER's §9.2 credibility; the marker
+        // is the relationshipUserId the §9.3 per-recipient helping cap
+        // keys on. Non-credible / self marks are recorded cosmetically at
+        // the endpoint but mint no evidence. Distinct from cosmetic
+        // reactions (§8.5) — those never reach this bus.
+        add_action('bcc_helpful_mark_added', function ($markerUserId, $actId, $markId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $this->helpfulMarkEvidenceListener()->onMarkAdded((int) $markerUserId, (int) $actId, (int) $markId));
+        }, 20, 3);
+
+        add_action('bcc_helpful_mark_removed', function ($markerUserId, $actId, $markId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $this->helpfulMarkEvidenceListener()->onMarkRemoved((int) $markId));
+        }, 20, 3);
 
         // Report upheld (§11.1): the REPORTER earns the credit; the
         // hook carries the report id — resolve the reporter from the
