@@ -522,58 +522,118 @@ final class MyGroupsEndpoint
                 break;
         }
 
-        $groupId = \BCC\Core\PeepSo\PeepSoGroupWriter::createPlainGroup(
-            $userId,
-            $name,
-            $description,
-            $privacyInt,
-            $chainTagId,
-            $trustMin
-        );
-        if ($groupId === 0) {
-            return ApiResponse::error(
-                'bcc_internal_error',
-                'Could not create the community. Try again in a moment.',
-                500
+        // ── §21.2 TOCTOU close ───────────────────────────────────────
+        // Serialize the cap/cooldown check-then-act under a per-user
+        // advisory lock so two tightly-timed create requests can't each
+        // pass the cap gate before either records its ledger row (which
+        // would leave the user over their rank ownership cap or with a
+        // double-armed cooldown). The outer create_community gate above
+        // is a fast-fail for UX; the RE-CHECK inside the lock is
+        // authoritative and atomic with the create + ledger write.
+        // Contention fails CLOSED with a retryable 409 rather than
+        // proceeding unlocked. NOTE: this path can't be exercised by the
+        // unit suite (it needs a live MySQL session for GET_LOCK + the
+        // PeepSo writer) — covered by CommunityCustodyServiceTest's
+        // contention pin on the sibling transfer path.
+        $lockKey = 'bcc_community_custody_' . $userId;
+        if (!self::acquireCustodyLock($lockKey)) {
+            return ApiResponse::error('bcc_conflict', 'Please retry.', 409);
+        }
+
+        try {
+            // Authoritative re-read of the cap/cooldown gate INSIDE the
+            // lock. Own-status reasons stay specific here (self-disclosure
+            // — this is the creator's OWN account), unlike the receiver
+            // collapse on the transfer path.
+            $recheck = Plugin::instance()->capabilityResolver()->can($userId, 'create_community');
+            if (!$recheck->isAllowed()) {
+                return ApiResponse::error(
+                    'bcc_forbidden',
+                    self::createDenyMessage($recheck->reason),
+                    403,
+                    ['reason' => $recheck->reason]
+                );
+            }
+
+            $groupId = \BCC\Core\PeepSo\PeepSoGroupWriter::createPlainGroup(
+                $userId,
+                $name,
+                $description,
+                $privacyInt,
+                $chainTagId,
+                $trustMin
             );
-        }
+            if ($groupId === 0) {
+                return ApiResponse::error(
+                    'bcc_internal_error',
+                    'Could not create the community. Try again in a moment.',
+                    500
+                );
+            }
 
-        AuditLogger::log('group_create', $groupId, [
-            'privacy'   => $privacyRaw,
-            'chain_tag' => $chain->slug,
-            'trust_min' => $trustMin > 0 ? $trustMin : null,
-        ], 'group', $userId);
+            AuditLogger::log('group_create', $groupId, [
+                'privacy'   => $privacyRaw,
+                'chain_tag' => $chain->slug,
+                'trust_min' => $trustMin > 0 ? $trustMin : null,
+            ], 'group', $userId);
 
-        // Custody ledger (§21.2) — 'create' (re)arms the 30-day global
-        // cooldown. Non-fatal: the group exists either way, but a
-        // failed ledger write means the cooldown did NOT arm, so it is
-        // error-logged loudly rather than swallowed.
-        $custodyLogged = Plugin::instance()
-            ->communityOwnershipLogRepository()
-            ->record($userId, $groupId, 'create', null);
-        if (!$custodyLogged) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] custody ledger write failed on create — cooldown NOT armed', [
-                'user_id'  => $userId,
-                'group_id' => $groupId,
+            // Custody ledger (§21.2) — 'create' (re)arms the 30-day global
+            // cooldown. Non-fatal: the group exists either way, but a
+            // failed ledger write means the cooldown did NOT arm, so it is
+            // error-logged loudly rather than swallowed.
+            $custodyLogged = Plugin::instance()
+                ->communityOwnershipLogRepository()
+                ->record($userId, $groupId, 'create', null);
+            if (!$custodyLogged) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] custody ledger write failed on create — cooldown NOT armed', [
+                    'user_id'  => $userId,
+                    'group_id' => $groupId,
+                ]);
+            }
+
+            $post = get_post($groupId);
+            $slug = $post instanceof \WP_Post ? (string) $post->post_name : '';
+
+            $response = ApiResponse::ok([
+                'group_id'  => $groupId,
+                'slug'      => $slug,
+                'name'      => $name,
+                'privacy'   => $privacyRaw,
+                'chain_tag' => $chain->slug,
+                // Echo trust_min when set so the client can show a
+                // confirmation toast ("Trust 50+ group created"); null
+                // for the other three privacy modes.
+                'trust_min' => $trustMin > 0 ? $trustMin : null,
             ]);
+            $response->set_status(201);
+            return $response;
+        } finally {
+            self::releaseCustodyLock($lockKey);
         }
+    }
 
-        $post = get_post($groupId);
-        $slug = $post instanceof \WP_Post ? (string) $post->post_name : '';
+    /**
+     * Acquire the per-user §21.2 custody advisory lock (non-blocking).
+     * Fails CLOSED when bcc-core's AdvisoryLock primitive is unavailable —
+     * the cap/cooldown critical section never runs unlocked. NULL-vs-0
+     * handling (driver error vs held-elsewhere) lives inside
+     * AdvisoryLock::acquire; both map to false here. Mirrors
+     * DisputeRepository::acquireAutoResolveLock.
+     */
+    private static function acquireCustodyLock(string $key): bool
+    {
+        if (!class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            return false;
+        }
+        return \BCC\Core\DB\AdvisoryLock::acquire($key, 0);
+    }
 
-        $response = ApiResponse::ok([
-            'group_id'  => $groupId,
-            'slug'      => $slug,
-            'name'      => $name,
-            'privacy'   => $privacyRaw,
-            'chain_tag' => $chain->slug,
-            // Echo trust_min when set so the client can show a
-            // confirmation toast ("Trust 50+ group created"); null
-            // for the other three privacy modes.
-            'trust_min' => $trustMin > 0 ? $trustMin : null,
-        ]);
-        $response->set_status(201);
-        return $response;
+    /** Release the per-user custody advisory lock (safe no-op if not held). */
+    private static function releaseCustodyLock(string $key): void
+    {
+        if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            \BCC\Core\DB\AdvisoryLock::release($key);
+        }
     }
 
     /**
@@ -613,6 +673,9 @@ final class MyGroupsEndpoint
             $status = match ($code) {
                 'bcc_not_found'      => 404,
                 'bcc_forbidden'      => 403,
+                // Advisory-lock contention on the receiver's custody
+                // critical section — retryable (§21.2 TOCTOU fail-closed).
+                'bcc_conflict'       => 409,
                 'bcc_internal_error' => 500,
                 default              => 400,
             };
