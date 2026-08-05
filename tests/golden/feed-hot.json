@@ -22,6 +22,8 @@
       "external_id": 5050,
       "group": {
         "id": 5026,
+        "link": "/halls/cosmos-hub-hall",
+        "name": "Cosmos Hub Hall",
         "type": "hall",
         "verification": null
       },
@@ -200,6 +202,8 @@
       "external_id": 5022,
       "group": {
         "id": 5021,
+        "link": "/groups/test-group-2-2",
+        "name": "test group 2",
         "type": "user",
         "verification": null
       },

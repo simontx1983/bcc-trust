@@ -35,6 +35,8 @@
 
 namespace BCC\Trust\Core\Support;
 
+use BCC\Trust\Core\ValueObjects\GroupType;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -48,6 +50,19 @@ final class CardUrlMap
         'creator'   => '/c/',
         'member'    => '/u/',
     ];
+
+    /**
+     * Frontend route prefix for a group's canonical page, keyed by
+     * whether the group is a Hall. Halls live under /halls/{slug}
+     * (the union-hall directory); every other group kind (nft /
+     * validator / system / user) lives under /groups/{slug}.
+     *
+     * These MUST stay byte-identical to the inline prefixes the group
+     * emitters already use (HallsService `'/halls/'`, GroupsService
+     * `'/groups/'`) — see groupUrl().
+     */
+    public const HALL_URL_PREFIX  = '/halls/';
+    public const GROUP_URL_PREFIX = '/groups/';
 
     /**
      * Frontend route for the entity's canonical page (Next.js).
@@ -93,5 +108,45 @@ final class CardUrlMap
     public static function postUrl(string $handle, string $shortCode): string
     {
         return self::KIND_URL_PREFIX['member'] . $handle . '/post/' . $shortCode;
+    }
+
+    /**
+     * Frontend route for a group's canonical page.
+     *
+     * The SAME centralization rule as the kind prefixes above applies:
+     * every NEW emitter of a group link routes through here. (The five
+     * pre-existing inline `'/halls/'`/`'/groups/'` builders in
+     * HallsService / GroupsService / CardViewService / PushPayload are
+     * grandfathered — they stay byte-identical to this composer, so a
+     * later consolidation is a pure no-op refactor.)
+     *
+     * Routing rule (matches §4.7.x group `type`):
+     *   - hall  → /halls/{slug}
+     *   - else  → /groups/{slug}   (nft / validator / system / user)
+     *
+     * Identifier semantics:
+     *   - $type → the GroupType enum VALUE (`$ctx->type->value`) — the
+     *     same string the feed `group.type` block emits.
+     *   - $slug → the group's `post_name` (WP-sanitized slug).
+     */
+    public static function groupUrl(string $type, string $slug): string
+    {
+        $prefix = $type === GroupType::Hall->value
+            ? self::HALL_URL_PREFIX
+            : self::GROUP_URL_PREFIX;
+        return $prefix . self::sanitizeSlug($slug);
+    }
+
+    /**
+     * Normalize a group slug for URL composition. `post_name` arrives
+     * already WP-sanitized, so for real data this is a no-op (byte-
+     * identical to the grandfathered inline builders); the trim + leading
+     * -slash strip only guards against a caller passing a stray-slashed
+     * or padded value, so we never emit `/halls//x` or a trailing-space
+     * link. Pure (no WP), so groupUrl stays unit-pinnable.
+     */
+    private static function sanitizeSlug(string $slug): string
+    {
+        return ltrim(trim($slug), '/');
     }
 }

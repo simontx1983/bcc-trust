@@ -42,6 +42,7 @@ use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
+use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 
 if (!defined('ABSPATH')) {
@@ -90,7 +91,7 @@ final class FeedHydrationPipeline
         $items = $this->hydrateAuthorVouch($items, $viewerId);
         $items = $this->hydrateSocialProofReactors($items);
         $items = self::hydrateViewerPermissions($items, $viewerId);
-        $items = $this->hydrateGroupContexts($items);
+        $items = $this->hydrateGroupContexts($items, $viewerId);
         $items = $this->hydrateCommentCounts($items, $viewerId);
         // Links stage runs LAST — after hydrateAuthorBadges/Ranks, so
         // author.handle is final when the permalink is composed.
@@ -183,13 +184,30 @@ final class FeedHydrationPipeline
      *
      *   group: {
      *     id: int,
-     *     type: 'nft' | 'hall' | 'system' | 'user',
-     *     verification: { kind: 'on_chain', label: 'On-Chain Verified' } | null
+     *     type: 'nft' | 'validator' | 'hall' | 'system' | 'user',
+     *     verification: { kind: 'on_chain', label: 'On-Chain Verified' } | null,
+     *     name?: string,   // group display name (post_title)
+     *     link?: string    // /halls/{slug} (hall) or /groups/{slug} (else)
      *   }
      *
      * Items with no group association get no `group` field — absence is
      * the signal "this is not a group post." The frontend can render a
      * verified badge per item or sort/filter client-side.
+     *
+     * Attribution privacy gate (SECRET groups): `name` + `link` reveal
+     * the group's IDENTITY, so they are emitted only when the viewer is
+     * allowed to know the group exists — i.e. the group is not SECRET, OR
+     * the viewer is an active member of it. A secret group a non-member
+     * (or anonymous viewer) sees a syndicated post from still ships the
+     * pre-existing `{id, type, verification}` (all opaque — id is a bare
+     * int, type is a category), but never the name/link. `id`/`type` were
+     * already on the wire, so this is byte-compatible for that case.
+     *
+     * Batched (§4): one `findManyByIds` for every group's name+slug, and
+     * — only when there is at least one SECRET group on the page and the
+     * viewer is authed — one `findUserMemberships` over just the SECRET
+     * ids. No per-item queries; anon viewers issue neither the membership
+     * read nor any secret name/link.
      *
      * Server-side ranking by verified status is intentionally not
      * applied here — the current ranking layer is recency-only and
@@ -199,7 +217,7 @@ final class FeedHydrationPipeline
      * @param list<array<string, mixed>> $items
      * @return list<array<string, mixed>>
      */
-    private function hydrateGroupContexts(array $items): array
+    private function hydrateGroupContexts(array $items, int $viewerId): array
     {
         if ($items === []) {
             return [];
@@ -242,20 +260,93 @@ final class FeedHydrationPipeline
         }
 
         $contexts = $this->groupContextResolver->forManyGroups(array_keys($allGroupIds));
+        if ($contexts === []) {
+            return $items;
+        }
+
+        // Name + slug for every group on the page — ONE batched read
+        // (mirrors the findManyByIds pairing HolderGroupsEndpoint uses).
+        $displays = PeepSoGroupRepository::findManyByIds(array_keys($allGroupIds));
+
+        // SECRET-group gate inputs. The viewer may only learn a secret
+        // group exists (→ receive its name/link) if they are an active
+        // member. Collect the secret subset from the resolved contexts,
+        // then — for authed viewers only — ONE membership read scoped to
+        // just those ids (anon issues no query; non-secret groups need no
+        // membership check at all).
+        $secretGroupIds = [];
+        foreach ($contexts as $gid => $ctx) {
+            if ($ctx->privacy === PeepSoPrivacy::Secret) {
+                $secretGroupIds[] = $gid;
+            }
+        }
+        $secretMemberships = ($viewerId > 0 && $secretGroupIds !== [])
+            ? PeepSoGroupRepository::findUserMemberships($viewerId, $secretGroupIds)
+            : [];
 
         foreach ($groupIdsByItem as $i => $gid) {
             $ctx = $contexts[$gid] ?? null;
             if (!($ctx instanceof GroupContext)) {
                 continue;
             }
-            $items[$i]['group'] = [
-                'id'           => $ctx->groupId,
-                'type'         => $ctx->type->value,
-                'verification' => $ctx->verification?->toApiResponse(),
-            ];
+            $display = $displays[$gid] ?? null;
+            $name    = $display !== null ? (string) $display->post_title : '';
+            $slug    = $display !== null ? (string) $display->post_name : '';
+            // isset over the secret-only membership map == active member.
+            // Always false for non-secret groups (not queried) and anon —
+            // groupAttribution's gate only consults it in the secret branch.
+            $isMember = isset($secretMemberships[$gid]);
+
+            $items[$i]['group'] = self::groupAttribution($ctx, $name, $slug, $isMember);
         }
 
         return $items;
+    }
+
+    /**
+     * Compose one item's `group` attribution block — the PURE gate +
+     * shape decision, extracted so the SECRET-group privacy rule is
+     * unit-pinnable without a live PeepSo/WP (the surrounding batched
+     * wiring in hydrateGroupContexts needs post-meta + membership reads).
+     *
+     * `{id, type, verification}` ship ALWAYS — those already shipped and
+     * are opaque (bare int / category / public badge). `name` + `link`
+     * are added ONLY when the viewer is allowed to know the group exists
+     * AND a display row resolved:
+     *
+     *   allowed  ⇔  privacy !== Secret  OR  viewer is an active member
+     *
+     *   - secret + non-member (incl. anonymous, passed $viewerIsMember
+     *     false) → NO name/link: the group's identity never leaks.
+     *   - resolved-but-empty name/slug (deleted-group edge — the display
+     *     row dropped out of findManyByIds) → NO name/link, defensively;
+     *     never a broken `/groups/` link.
+     *
+     * Link composition routes through the single CardUrlMap::groupUrl
+     * composer — hall → /halls/{slug}, else → /groups/{slug}.
+     *
+     * @return array<string, mixed>
+     */
+    private static function groupAttribution(
+        GroupContext $ctx,
+        string $name,
+        string $slug,
+        bool $viewerIsMember
+    ): array {
+        $block = [
+            'id'           => $ctx->groupId,
+            'type'         => $ctx->type->value,
+            'verification' => $ctx->verification?->toApiResponse(),
+        ];
+
+        $mayKnow = $ctx->privacy !== PeepSoPrivacy::Secret || $viewerIsMember;
+        if (!$mayKnow || $name === '' || $slug === '') {
+            return $block;
+        }
+
+        $block['name'] = $name;
+        $block['link'] = CardUrlMap::groupUrl($ctx->type->value, $slug);
+        return $block;
     }
 
     // ──────────────────────────────────────────────────────────────────
