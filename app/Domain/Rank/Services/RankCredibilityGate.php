@@ -35,35 +35,64 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Rank\Services;
 
+use BCC\Trust\Core\Services\Capability\CredibilityAtoms;
+
 if (!defined('ABSPATH')) {
     exit;
 }
 
 class RankCredibilityGate
 {
+    use CredibilityAtoms;
+
     /**
-     * §9.2 credible Helpful-mark recognizer: Apprentice+ (a rank_state
-     * row exists — New Members excluded) AND Trust tier Neutral+ AND not
-     * suspended AND fraud-clear. The first failing gate short-circuits;
-     * order is not load-bearing (all four must hold).
+     * Parameterized credibility composite — the single predicate every
+     * "credible enough?" boolean gate composes (§11). Each requirement is
+     * a flag so a caller expresses its exact rule without a parallel body:
+     * the recognizer wants rank + tier + suspension + fraud; the
+     * stewardship owner wants suspension + recovery + fraud only.
+     * `$userId` must be positive; every enabled gate must hold (all ANDed,
+     * order not load-bearing).
      */
-    public function isCredibleRecognizer(int $userId): bool
-    {
+    public function isCredible(
+        int $userId,
+        bool $requireRankState = true,
+        bool $requireTierNeutral = true,
+        bool $requireNotSuspended = true,
+        bool $requireNotInRecovery = false,
+        bool $requireFraudClear = true
+    ): bool {
         if ($userId <= 0) {
             return false;
         }
-        if (!$this->notSuspended($userId)) {
+        if ($requireNotSuspended && !$this->notSuspended($userId)) {
             return false;
         }
         // Missing rank_state row = New Member; a present row is always at
         // least Apprentice, so this single check covers both cases.
-        if (!$this->hasRankState($userId)) {
+        if ($requireRankState && !$this->hasRankState($userId)) {
             return false;
         }
-        if (!$this->tierAtLeastNeutral($userId)) {
+        if ($requireTierNeutral && !$this->tierAtLeastNeutral($userId)) {
             return false;
         }
-        return $this->fraudClear($userId);
+        if ($requireNotInRecovery && $this->inRecovery($userId)) {
+            return false;
+        }
+        if ($requireFraudClear && !$this->fraudClear($userId)) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * §9.2 credible Helpful-mark recognizer: Apprentice+ (a rank_state
+     * row exists — New Members excluded) AND Trust tier Neutral+ AND not
+     * suspended AND fraud-clear. All four required.
+     */
+    public function isCredibleRecognizer(int $userId): bool
+    {
+        return $this->isCredible($userId);
     }
 
     /**
@@ -74,68 +103,25 @@ class RankCredibilityGate
      */
     public function isResponsibleOwner(int $userId): bool
     {
-        if ($userId <= 0) {
-            return false;
-        }
-        if (!$this->notSuspended($userId)) {
-            return false;
-        }
-        if ($this->inRecovery($userId)) {
-            return false;
-        }
-        return $this->fraudClear($userId);
+        return $this->isCredible(
+            $userId,
+            requireRankState: false,
+            requireTierNeutral: false,
+            requireNotInRecovery: true
+        );
     }
 
-    // ── collaborator hooks (overridden by RankCredibilityGateTest) ──────
+    // ── collaborator hooks ──────────────────────────────────────────────
+    // notSuspended / hasRankState / inRecovery / fraudClear (and the
+    // parameterized tierAtLeast) now come from the shared CredibilityAtoms
+    // trait — one definition, §11. RankCredibilityGateTest overrides them
+    // on its subclass exactly as before. Only the Neutral-specific tier
+    // hook is kept locally, as a thin wrapper over the shared tierAtLeast,
+    // so the test's `tierAtLeastNeutral` override seam is preserved.
 
-    protected function notSuspended(int $userId): bool
-    {
-        return \BCC\Core\Permissions\Permissions::is_not_suspended($userId, false);
-    }
-
-    /** Apprentice+ — a rank_state row exists (New Members have none). */
-    protected function hasRankState(int $userId): bool
-    {
-        return \BCC\Trust\Core\Plugin::instance()
-            ->rankStateRepository()
-            ->getForUser($userId) !== null;
-    }
-
-    /** §14.2 recovery pause — rank_state.recovery_status === 'grace'. */
-    protected function inRecovery(int $userId): bool
-    {
-        $row = \BCC\Trust\Core\Plugin::instance()
-            ->rankStateRepository()
-            ->getForUser($userId);
-        return $row !== null && (string) $row->recovery_status === 'grace';
-    }
-
-    /** Trust tier ≥ Neutral, via the canonical reputation read + config ordinals. */
+    /** Trust tier ≥ Neutral — thin wrapper over the shared tierAtLeast. */
     protected function tierAtLeastNeutral(int $userId): bool
     {
-        $plugin = \BCC\Trust\Core\Plugin::instance();
-        $config = $plugin->rankScoringConfig();
-        $tier   = $plugin->reputationRepository()->getTier($userId);
-
-        return $config->tierOrdFor($tier) >= $config->tierOrdFor('neutral');
-    }
-
-    /**
-     * fraud_score below the HIGH block threshold. Mirrors
-     * AttestationService::assertFraudClear (single fraud rule, §11): a
-     * missing user_info row is fraud-clear, and the automated-test bypass
-     * lets fresh test accounts whose score isn't computed yet through.
-     */
-    protected function fraudClear(int $userId): bool
-    {
-        if (defined('BCC_TRUST_TEST_MODE') && \BCC_TRUST_TEST_MODE) {
-            return true;
-        }
-        $info = \BCC\Trust\Core\Plugin::instance()->userInfoRepository()->getByUserId($userId);
-        if ($info === null) {
-            return true;
-        }
-        $fraudScore = isset($info->fraud_score) ? (int) $info->fraud_score : 0;
-        return !(defined('BCC_TRUST_FRAUD_HIGH') && $fraudScore >= (int) \BCC_TRUST_FRAUD_HIGH);
+        return $this->tierAtLeast($userId, 'neutral');
     }
 }

@@ -38,6 +38,8 @@ if (!defined('ABSPATH')) {
 
 class CapabilityResolver
 {
+    use CredibilityAtoms;
+
     /**
      * Resolve one capability for one principal. Context keys are
      * capability-specific (documented per branch below); missing
@@ -305,16 +307,12 @@ class CapabilityResolver
      */
     protected function writeReviewGate(int $userId): bool
     {
-        $plugin = \BCC\Trust\Core\Plugin::instance();
-
-        if ($plugin->rankStateRepository()->getForUser($userId) === null) {
-            return false;
-        }
-
-        $config = $plugin->rankScoringConfig();
-        $tier   = $plugin->reputationRepository()->getTier($userId);
-
-        return $config->tierOrdFor($tier) >= $config->tierOrdFor('neutral');
+        // Rank-presence (Apprentice+, New Members excluded) AND tier
+        // Neutral+, composed from the shared credibility atoms.
+        // Deliberately no suspension / fraud / recovery gate here — that
+        // asymmetry (enforced instead at the REST layer, §20.1) is
+        // unchanged by the atom consolidation.
+        return $this->hasRankState($userId) && $this->tierAtLeast($userId, 'neutral');
     }
 
     /** @throws AttestationException when ineligible */
@@ -325,71 +323,17 @@ class CapabilityResolver
             ->checkCastEligibility($userId, $targetKind, $targetId, $kind);
     }
 
-    protected function notSuspended(int $userId): bool
-    {
-        return \BCC\Core\Permissions\Permissions::is_not_suspended($userId, false);
-    }
-
     protected function ownsPage(int $pageId, int $userId): bool
     {
         return \BCC\Core\Permissions\Permissions::owns_page($pageId, $userId);
     }
 
     // ── Rank Phase 7 delegate hooks (overridden by the matrix test) ──
-
-    /**
-     * Rungs in ladder order — mirrors RankScoringConfig::RANKS
-     * (apprentice < journeyman < veteran; Master must never appear,
-     * §3.2). Unknown slugs fail closed via the null-coalesced lookup.
-     *
-     * @var array<string, int>
-     */
-    protected const RANK_ORDER = ['apprentice' => 0, 'journeyman' => 1, 'veteran' => 2];
-
-    /**
-     * Is the user's rank at least $slug? Missing rank_state row = New
-     * Member = false (fail-safe); unknown $slug can never be satisfied.
-     */
-    protected function rankAtLeast(int $userId, string $slug): bool
-    {
-        $required = static::RANK_ORDER[$slug] ?? null;
-        if ($required === null) {
-            return false;
-        }
-
-        $row = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($userId);
-        if ($row === null) {
-            return false;
-        }
-
-        $actual = static::RANK_ORDER[(string) $row->rank_slug] ?? null;
-        return $actual !== null && $actual >= $required;
-    }
-
-    /**
-     * Is the user's current trust tier at least $tierSlug? Tier via
-     * ReputationRepository::getTier (canonical), ordinals via the
-     * validated rank-scoring config (tierOrdFor).
-     */
-    protected function tierAtLeast(int $userId, string $tierSlug): bool
-    {
-        $plugin = \BCC\Trust\Core\Plugin::instance();
-        $config = $plugin->rankScoringConfig();
-        $tier   = $plugin->reputationRepository()->getTier($userId);
-
-        return $config->tierOrdFor($tier) >= $config->tierOrdFor($tierSlug);
-    }
-
-    /**
-     * §14.2 recovery pause — rank_state.recovery_status === 'grace'.
-     * Missing row = not in recovery (New Members are gated out earlier
-     * by rankAtLeast anyway).
-     */
-    protected function inRecovery(int $userId): bool
-    {
-        $row = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($userId);
-        return $row !== null && (string) $row->recovery_status === 'grace';
-    }
+    // rankAtLeast / tierAtLeast / inRecovery (and notSuspended above) now
+    // come from the shared CredibilityAtoms trait — one definition, §11.
+    // The matrix test overrides them on its subclass exactly as before;
+    // the Phase 7 composite gates below compose these atoms with the
+    // §21.2 cap / cooldown facts, which stay local.
 
     /**
      * §21.2 custody facts: currently-owned User-kind group count, the
