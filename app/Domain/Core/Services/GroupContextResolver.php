@@ -71,8 +71,13 @@ final class GroupContextResolver {
     }
 
     /**
-     * Batch resolve. Primes WP's post-meta cache once via
-     * update_meta_cache(), then loops calling forGroup() (warm).
+     * Batch resolve. Primes WP's post-OBJECT cache AND postmeta cache
+     * once via _prime_post_caches() (term cache skipped — the resolver
+     * never reads terms), then loops calling forGroup() (warm). This is
+     * load-bearing: forGroup() calls get_post($groupId), so without the
+     * object-cache prime each distinct group on a hot feed page would
+     * issue its own SELECT * FROM wp_posts. Priming the object cache
+     * collapses those to a single batched read.
      *
      * @param int[] $groupIds
      * @return array<int, GroupContext>
@@ -89,7 +94,7 @@ final class GroupContextResolver {
             }
         }
         if ($missing !== []) {
-            update_meta_cache('post', $missing);
+            _prime_post_caches($missing, false, true);
         }
 
         $out = [];

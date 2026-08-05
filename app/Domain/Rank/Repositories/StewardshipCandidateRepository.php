@@ -36,14 +36,20 @@ class StewardshipCandidateRepository
     private const OWNER_STATUS  = 'member_owner';
 
     /**
-     * (group_id, owner_id) for up to $limit User-kind communities,
-     * ordered by group id ASC (stable). One bounded aggregate-free read;
-     * a peepso-group has exactly one member_owner row, so no dedupe is
+     * (group_id, owner_id) for up to $limit User-kind communities whose
+     * gm_group_id is STRICTLY GREATER THAN $afterGroupId, ordered by
+     * group id ASC (stable). One bounded aggregate-free read; a
+     * peepso-group has exactly one member_owner row, so no dedupe is
      * needed.
+     *
+     * $afterGroupId is the sweep's wrap-around cursor (0 = from the
+     * start) — StewardshipSweepService pages through the full set across
+     * successive weekly runs so no community beyond the first $limit is
+     * ever starved of stewardship credit.
      *
      * @return list<object{group_id: int, owner_id: int}>
      */
-    public function listUserKindCommunitiesWithOwners(int $limit = 100): array
+    public function listUserKindCommunitiesWithOwners(int $limit = 100, int $afterGroupId = 0): array
     {
         if ($limit <= 0) {
             return [];
@@ -63,12 +69,14 @@ class StewardshipCandidateRepository
                 AND p.post_type       = %s
                 AND p.post_status     = %s
                 AND pm_kind.meta_value IS NULL
+                AND gm.gm_group_id    > %d
               ORDER BY gm.gm_group_id ASC
               LIMIT %d",
             self::META_KIND,
             self::OWNER_STATUS,
             self::POST_TYPE,
             self::POST_STATUS,
+            $afterGroupId,
             $limit
         ));
 

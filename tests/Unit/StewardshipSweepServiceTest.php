@@ -141,6 +141,90 @@ final class StewardshipSweepServiceTest extends TestCase
         );
     }
 
+    // ── wrap-around cursor (no community starved) ───────────────────────
+
+    public function testCursorPagesDisjointSetsAcrossRunsThenWrapsAtEnd(): void
+    {
+        // 150 active User-kind communities — one and a half BATCH_LIMIT (100)
+        // pages. group id g, owner 1000+g, all above the 5-poster bar.
+        $candidates = [];
+        $actives    = [];
+        for ($g = 1; $g <= 150; $g++) {
+            $candidates[] = [$g, 1000 + $g];
+            $actives[$g]  = 5;
+        }
+
+        $svc = new RecordingStewardshipSweep($candidates, $actives, [], [], self::PERIOD);
+
+        // Run 1: lowest 100 by group id; full batch → cursor advances, no wrap.
+        $svc->run();
+        $firstCalls  = $svc->ingestCalls;
+        $firstGroups = $this->creditedGroups($firstCalls);
+        self::assertSame(range(1, 100), $firstGroups);
+        self::assertSame(100, $svc->cursor, 'full batch → cursor = highest processed group id');
+        $svc->ingestCalls = [];
+
+        // Run 2: the remaining 50; short batch → cursor wraps to 0.
+        $svc->run();
+        $secondGroups = $this->creditedGroups($svc->ingestCalls);
+        self::assertSame(range(101, 150), $secondGroups);
+        self::assertSame(0, $svc->cursor, 'short batch (reached the end) → cursor resets to 0');
+        $svc->ingestCalls = [];
+
+        // The two runs covered DISJOINT sets whose union is EVERY community —
+        // nothing beyond the first batch is starved.
+        self::assertSame([], array_values(array_intersect($firstGroups, $secondGroups)));
+        self::assertSame(
+            range(1, 150),
+            array_values(array_unique(array_merge($firstGroups, $secondGroups)))
+        );
+
+        // Run 3 (post-wrap): back to the lowest 100 — SAME period ⇒ byte-
+        // identical (owner, sourceId) pairs as run 1, so the ledger's
+        // UNIQUE(event_uid, category) dedupes the replay (idempotency holds
+        // across the wrap; re-processing mints no double credit).
+        $svc->run();
+        self::assertSame($firstCalls, $svc->ingestCalls, 'wrap replays the first page identically');
+    }
+
+    public function testFewerThanBatchLimitWrapsTheCursorEveryRun(): void
+    {
+        // Below BATCH_LIMIT the run consumes the whole set and resets the
+        // cursor to 0 — identical to the pre-cursor behavior.
+        $svc = $this->sweep(
+            candidates: [[self::GROUP_A, self::OWNER_A], [self::GROUP_B, self::OWNER_B]],
+            actives:    [self::GROUP_A => 6, self::GROUP_B => 7],
+        );
+        $svc->run();
+
+        self::assertSame(0, $svc->cursor);
+        self::assertSame([0], $svc->cursorWrites);
+        self::assertSame(
+            [
+                [self::OWNER_A, StewardshipSweepService::periodSourceId(self::GROUP_A, self::PERIOD)],
+                [self::OWNER_B, StewardshipSweepService::periodSourceId(self::GROUP_B, self::PERIOD)],
+            ],
+            $svc->ingestCalls
+        );
+    }
+
+    /**
+     * Derive the credited group ids (ascending) from recorded ingest
+     * calls — sourceId = groupId * 1_000_000 + period (periodSourceId).
+     *
+     * @param list<array{int, int}> $ingestCalls
+     * @return list<int>
+     */
+    private function creditedGroups(array $ingestCalls): array
+    {
+        $groups = [];
+        foreach ($ingestCalls as [, $sourceId]) {
+            $groups[] = intdiv($sourceId - self::PERIOD, 1_000_000);
+        }
+        sort($groups);
+        return $groups;
+    }
+
     /**
      * @param list<array{int, int}> $candidates [groupId, ownerId]
      * @param array<int, int> $actives groupId => active posters
@@ -159,7 +243,8 @@ final class StewardshipSweepServiceTest extends TestCase
 
 /**
  * Recording double — scripts candidates, activity heat, responsibility,
- * and ingest so the suite pins the sweep without WordPress or a DB.
+ * ingest, and the wrap-around cursor so the suite pins the sweep without
+ * WordPress or a DB.
  */
 final class RecordingStewardshipSweep extends StewardshipSweepService
 {
@@ -167,6 +252,12 @@ final class RecordingStewardshipSweep extends StewardshipSweepService
     public array $ingestCalls = [];
     /** @var list<array{int, int}> [ownerId, groupId] */
     public array $failures = [];
+
+    /** In-memory stand-in for the bcc_rank_stewardship_cursor wp_option. */
+    public int $cursor;
+
+    /** @var list<int> Cursor values persisted, in order. */
+    public array $cursorWrites = [];
 
     /**
      * @param list<array{int, int}> $candidateRows
@@ -179,17 +270,46 @@ final class RecordingStewardshipSweep extends StewardshipSweepService
         private readonly array $actives,
         private readonly array $responsible,
         private readonly array $failOwners,
-        private readonly int $fixedPeriod
+        private readonly int $fixedPeriod,
+        int $initialCursor = 0
     ) {
+        $this->cursor = $initialCursor;
     }
 
-    protected function candidates(int $limit): array
+    protected function candidates(int $limit, int $afterGroupId): array
     {
+        // Mirror the repository: gm_group_id > $afterGroupId, ORDER BY
+        // gm_group_id ASC, LIMIT $limit.
+        $rows = $this->candidateRows;
+        usort($rows, static fn (array $a, array $b): int => $a[0] <=> $b[0]);
+
         $out = [];
-        foreach ($this->candidateRows as [$groupId, $ownerId]) {
+        foreach ($rows as [$groupId, $ownerId]) {
+            if ($groupId <= $afterGroupId) {
+                continue;
+            }
             $out[] = (object) ['group_id' => $groupId, 'owner_id' => $ownerId];
+            if (count($out) >= $limit) {
+                break;
+            }
         }
         return $out;
+    }
+
+    protected function readCursor(): int
+    {
+        return $this->cursor;
+    }
+
+    protected function writeCursor(int $groupId): void
+    {
+        $this->cursor         = $groupId;
+        $this->cursorWrites[] = $groupId;
+    }
+
+    protected function onCursorAdvance(int $from, int $to, bool $wrapped): void
+    {
+        // No-op in tests — keeps the double WP/Logger-free.
     }
 
     protected function activityHeat(array $groupIds, int $sinceSeconds): array
