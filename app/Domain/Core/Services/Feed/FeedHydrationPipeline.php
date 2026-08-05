@@ -765,7 +765,7 @@ final class FeedHydrationPipeline
      * truth); do NOT inline the good-standing tier list here.
      *
      * @param array<string, mixed> $author
-     * @param array{reputation_tier: string, reputation_tier_label: string, rank_label: string|null} $badge
+     * @param array{reputation_tier: string, reputation_tier_label: string, rank_label: string|null, member_state: string} $badge
      * @return array<string, mixed>
      */
     private static function applyAuthorRankBadge(array $author, array $badge): array
@@ -775,6 +775,7 @@ final class FeedHydrationPipeline
 
 
         $author['rank_label']            = $badge['rank_label'];
+        $author['member_state']          = $badge['member_state'];
         $author['is_in_good_standing']   = UserViewService::isInGoodStanding($badge['reputation_tier']);
         return $author;
     }
