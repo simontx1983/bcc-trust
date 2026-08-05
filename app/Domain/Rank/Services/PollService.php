@@ -379,11 +379,20 @@ class PollService
         $now    = $now ?? $this->utcNow();
         $nowSql = $now->format('Y-m-d H:i:s');
 
+        // §18/§19 cluster findings are GLOBAL and stable across one sweep,
+        // so index them ONCE here and thread the maps down into every
+        // evaluatePoll(). Previously evaluatePoll() re-read BOTH unscoped
+        // lists (listActiveConfirmed + listActiveSuspected) for every poll
+        // it closed — up to 2 × (200 binding + 200 expiry) identical reads
+        // per hourly tick.
+        $confirmedByMember = $this->indexConfirmedByMember();
+        $suspectedByMember = $this->indexSuspectedByMember();
+
         $closed       = 0;
         $inconclusive = 0;
 
         foreach ($this->polls->listOpenPastBinding($nowSql, self::SWEEP_BATCH) as $poll) {
-            $outcome = $this->evaluateAndMaybeClose($poll, $now, false);
+            $outcome = $this->evaluateAndMaybeClose($poll, $now, false, $confirmedByMember, $suspectedByMember);
             if ($outcome === 'passed' || $outcome === 'failed') {
                 $closed++;
             }
@@ -393,7 +402,7 @@ class PollService
             if (!$this->isPast($poll->expires_at, $now)) {
                 continue; // Service-side guard — never trust the list query alone.
             }
-            $outcome = $this->evaluateAndMaybeClose($poll, $now, true);
+            $outcome = $this->evaluateAndMaybeClose($poll, $now, true, $confirmedByMember, $suspectedByMember);
             if ($outcome === 'passed' || $outcome === 'failed') {
                 $closed++;
             } elseif ($outcome === 'inconclusive') {
@@ -407,12 +416,20 @@ class PollService
     /**
      * Evaluate one open poll and close it when warranted. Returns the
      * outcome this call closed it with, or null (left open / lost the
-     * close race / not yet binding).
+     * close race / not yet binding). The cluster maps are loaded once per
+     * sweep and threaded in — never re-read here.
      *
      * @phpstan-param PollRow $poll
+     * @phpstan-param array<int, list<ClusterFindingRow>> $confirmedByMember
+     * @phpstan-param array<int, ClusterFindingRow> $suspectedByMember
      */
-    private function evaluateAndMaybeClose(object $poll, \DateTimeImmutable $now, bool $forceClose): ?string
-    {
+    private function evaluateAndMaybeClose(
+        object $poll,
+        \DateTimeImmutable $now,
+        bool $forceClose,
+        array $confirmedByMember,
+        array $suspectedByMember
+    ): ?string {
         // §17.2 day-7 guard IN THE SERVICE: even if the list query ever
         // drifted, a poll before its binding window is never evaluated.
         if (!$this->isPast($poll->binding_earliest_at, $now)) {
@@ -420,7 +437,7 @@ class PollService
         }
 
         $pollId = (int) $poll->id;
-        $eval   = $this->evaluatePoll($pollId);
+        $eval   = $this->evaluatePoll($pollId, $confirmedByMember, $suspectedByMember);
 
         $outcome = $this->decideOutcome($eval);
         if ($outcome === null) {
@@ -469,6 +486,46 @@ class PollService
     }
 
     /**
+     * Index every active CONFIRMED finding by member id (a member may
+     * appear in more than one). Read ONCE per sweep in closeDuePolls();
+     * the §18 representative rule then resolves per ballot in memory.
+     *
+     * @phpstan-return array<int, list<ClusterFindingRow>>
+     */
+    private function indexConfirmedByMember(): array
+    {
+        /** @var array<int, list<ClusterFindingRow>> $confirmedByMember */
+        $confirmedByMember = [];
+        foreach ($this->clusters->listActiveConfirmed() as $finding) {
+            foreach ($this->memberIds($finding) as $memberId) {
+                $confirmedByMember[$memberId][] = $finding;
+            }
+        }
+        return $confirmedByMember;
+    }
+
+    /**
+     * Index every active SUSPECTED finding by member id — lowest finding
+     * id wins per member (the repository reads id ASC). Read ONCE per
+     * sweep; the §19 pro-rata cap then applies per ballot in memory.
+     *
+     * @phpstan-return array<int, ClusterFindingRow>
+     */
+    private function indexSuspectedByMember(): array
+    {
+        /** @var array<int, ClusterFindingRow> $suspectedByMember */
+        $suspectedByMember = [];
+        foreach ($this->clusters->listActiveSuspected() as $finding) {
+            foreach ($this->memberIds($finding) as $memberId) {
+                if (!isset($suspectedByMember[$memberId])) {
+                    $suspectedByMember[$memberId] = $finding; // Lowest finding id wins (id ASC read).
+                }
+            }
+        }
+        return $suspectedByMember;
+    }
+
+    /**
      * Close-time evaluation of one poll's active ballots (§18/§19):
      *
      *   1. CONFIRMED clusters: a member ballot counts ONLY when the
@@ -479,29 +536,17 @@ class PollService
      *      pro-rata — C_total depends only on the sums, so splitting
      *      one identity into many changes nothing (split-proof).
      *
+     * The member-keyed cluster maps are built once per sweep by
+     * indexConfirmedByMember()/indexSuspectedByMember() and injected —
+     * this method never re-reads the cluster findings.
+     *
+     * @phpstan-param array<int, list<ClusterFindingRow>> $confirmedByMember
+     * @phpstan-param array<int, ClusterFindingRow> $suspectedByMember
      * @phpstan-return PollEvaluation
      */
-    private function evaluatePoll(int $pollId): array
+    private function evaluatePoll(int $pollId, array $confirmedByMember, array $suspectedByMember): array
     {
         $rows = $this->ballots->listActiveForPoll($pollId);
-
-        /** @var array<int, list<ClusterFindingRow>> $confirmedByMember */
-        $confirmedByMember = [];
-        foreach ($this->clusters->listActiveConfirmed() as $finding) {
-            foreach ($this->memberIds($finding) as $memberId) {
-                $confirmedByMember[$memberId][] = $finding;
-            }
-        }
-
-        /** @var array<int, ClusterFindingRow> $suspectedByMember */
-        $suspectedByMember = [];
-        foreach ($this->clusters->listActiveSuspected() as $finding) {
-            foreach ($this->memberIds($finding) as $memberId) {
-                if (!isset($suspectedByMember[$memberId])) {
-                    $suspectedByMember[$memberId] = $finding; // Lowest finding id wins (id ASC read).
-                }
-            }
-        }
 
         /** @var list<EvaluatedBallot> $evaluated */
         $evaluated       = [];

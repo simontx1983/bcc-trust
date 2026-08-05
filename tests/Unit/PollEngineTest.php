@@ -632,4 +632,57 @@ final class PollEngineTest extends TestCase
             $state['tally']
         );
     }
+
+    // ── sweep load-once (cluster lists read once per run, §18/§19) ────
+
+    public function testSweepReadsEachClusterListExactlyOncePerRun(): void
+    {
+        // Spy repo counting the two GLOBAL cluster-list reads.
+        $clusters = new class extends StubClusterFindingsRepository {
+            public int $confirmedCalls = 0;
+
+            public int $suspectedCalls = 0;
+
+            public function listActiveConfirmed(): array
+            {
+                $this->confirmedCalls++;
+                return parent::listActiveConfirmed();
+            }
+
+            public function listActiveSuspected(): array
+            {
+                $this->suspectedCalls++;
+                return parent::listActiveSuspected();
+            }
+        };
+        $service = new TestPollService(
+            $this->polls,
+            $this->ballots,
+            $clusters,
+            RankScoringConfig::fromDefaultFile()
+        );
+
+        // Three independent subjects, each with a decisive quorum, all due
+        // to close in the same sweep tick.
+        $pollIds = [];
+        foreach ([201, 202, 203] as $subjectId) {
+            $pollId = $service->open('dispute', 'vote', $subjectId, $this->at(self::T0));
+            foreach ($this->voterRange(1, 10) as $voterId) {
+                $service->cast($pollId, $voterId, 'for', $this->snapshot(1.0), $this->at('2026-08-01 01:00:00'));
+            }
+            $pollIds[] = $pollId;
+        }
+
+        $result = $service->closeDuePolls($this->at(self::SWEEP_AT));
+
+        // Outcomes unchanged by the load-once refactor — all three pass —
+        // but each cluster list was read exactly ONCE for the whole sweep
+        // (previously once per closed poll = 3× each).
+        self::assertSame(['closed' => 3, 'inconclusive' => 0], $result);
+        self::assertSame(1, $clusters->confirmedCalls, 'confirmed cluster list read once per sweep');
+        self::assertSame(1, $clusters->suspectedCalls, 'suspected cluster list read once per sweep');
+        foreach ($pollIds as $pollId) {
+            self::assertSame('passed', $this->polls->rows[$pollId]->outcome);
+        }
+    }
 }

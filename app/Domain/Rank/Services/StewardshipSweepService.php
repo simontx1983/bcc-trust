@@ -36,6 +36,16 @@
  * the reused `rank_scoring.evidence_ingest_failed` DegradationMetric and
  * the sweep continues.
  *
+ * Coverage (wrap-around cursor): each run reads a persisted cursor
+ * (`bcc_rank_stewardship_cursor` wp_option, the highest gm_group_id the
+ * previous run processed) and asks for the next BATCH_LIMIT communities
+ * whose group id is greater than it; after processing it persists the
+ * new high-water mark, or resets to 0 when it consumed the tail of the
+ * set. Without this the same lowest-BATCH_LIMIT group ids were selected
+ * every week and every community beyond them was permanently starved.
+ * At fewer than BATCH_LIMIT communities the cursor wraps every run —
+ * identical to the pre-cursor behavior.
+ *
  * Collaborators are protected hooks (CapabilityResolver subclass pattern)
  * so StewardshipSweepServiceTest exercises the real sweep logic without
  * WordPress or a DB.
@@ -75,11 +85,32 @@ class StewardshipSweepService
     /** Packing radix for the composite (group, period) source id. */
     private const PERIOD_RADIX = 1000000;
 
+    /**
+     * wp_option holding the wrap-around sweep cursor (the highest
+     * gm_group_id processed by the previous run; 0 = start from the
+     * beginning). Persisted non-autoloaded — read once per weekly run.
+     */
+    private const CURSOR_OPTION = 'bcc_rank_stewardship_cursor';
+
     public function run(): void
     {
-        $deadline   = $this->now() + self::TIME_BUDGET_SECONDS;
-        $candidates = $this->candidates(self::BATCH_LIMIT);
+        $deadline = $this->now() + self::TIME_BUDGET_SECONDS;
+
+        // Wrap-around cursor: page the FULL community set across successive
+        // weekly runs. Without it the same lowest-BATCH_LIMIT group ids were
+        // re-selected forever (ORDER BY group_id ASC LIMIT with no offset),
+        // permanently starving every community beyond the first BATCH_LIMIT
+        // by group id of stewardship credit.
+        $afterGroupId = $this->readCursor();
+        $candidates   = $this->candidates(self::BATCH_LIMIT, $afterGroupId);
         if ($candidates === []) {
+            // Reached the end of the set from a non-zero cursor — wrap to
+            // the start so the next weekly run covers the earliest
+            // communities. (A zero cursor with no rows = no communities.)
+            if ($afterGroupId !== 0) {
+                $this->writeCursor(0);
+                $this->onCursorAdvance($afterGroupId, 0, true);
+            }
             return;
         }
 
@@ -89,12 +120,18 @@ class StewardshipSweepService
         }
         $activesByGroup = $this->activityHeat($groupIds, self::ACTIVITY_WINDOW_SECONDS);
 
-        $period = $this->isoPeriod();
+        $period     = $this->isoPeriod();
+        $maxGroupId = $afterGroupId;
 
         foreach ($candidates as $c) {
             if ($this->now() >= $deadline) {
-                break; // Budget exhausted — next weekly run resumes.
+                break; // Budget exhausted — cursor persists the last processed id.
             }
+
+            // Candidates arrive ORDER BY group_id ASC, so this is monotonic —
+            // the last processed row is the highest group id we advanced past
+            // (including those skipped below the bar; they were still covered).
+            $maxGroupId = $c->group_id;
 
             $actives = $activesByGroup[$c->group_id] ?? 0;
             if ($actives < self::MIN_ACTIVE_POSTERS) {
@@ -113,6 +150,17 @@ class StewardshipSweepService
                 $this->onIngestFailure($e, $c->owner_id, $c->group_id);
             }
         }
+
+        // Advance the cursor. A short batch (fewer than BATCH_LIMIT) means we
+        // consumed the tail of the set → wrap to 0 so the next run restarts
+        // from the beginning; every community is thus covered within a bounded
+        // number of weeks. Stewardship credit is idempotent per (group, ISO
+        // week), so re-covering a community in a later week just mints that
+        // week's credit — never a double-count.
+        $reachedEnd = count($candidates) < self::BATCH_LIMIT;
+        $newCursor  = $reachedEnd ? 0 : $maxGroupId;
+        $this->writeCursor($newCursor);
+        $this->onCursorAdvance($afterGroupId, $newCursor, $reachedEnd);
     }
 
     /**
@@ -130,11 +178,37 @@ class StewardshipSweepService
     // ── collaborator hooks (overridden by StewardshipSweepServiceTest) ──
 
     /** @return list<object{group_id: int, owner_id: int}> */
-    protected function candidates(int $limit): array
+    protected function candidates(int $limit, int $afterGroupId): array
     {
         return \BCC\Trust\Core\Plugin::instance()
             ->stewardshipCandidateRepository()
-            ->listUserKindCommunitiesWithOwners($limit);
+            ->listUserKindCommunitiesWithOwners($limit, $afterGroupId);
+    }
+
+    /** Read the persisted wrap-around cursor (0 when unset). */
+    protected function readCursor(): int
+    {
+        return (int) get_option(self::CURSOR_OPTION, 0);
+    }
+
+    /** Persist the wrap-around cursor (non-autoloaded). */
+    protected function writeCursor(int $groupId): void
+    {
+        update_option(self::CURSOR_OPTION, $groupId, false);
+    }
+
+    /**
+     * Observability hook for a cursor move. $wrapped is true when the run
+     * reached the end of the set and reset to 0 (next run restarts from
+     * the beginning).
+     */
+    protected function onCursorAdvance(int $from, int $to, bool $wrapped): void
+    {
+        \BCC\Core\Log\Logger::info('[bcc-trust] stewardship sweep cursor advanced', [
+            'from'    => $from,
+            'to'      => $to,
+            'wrapped' => $wrapped,
+        ]);
     }
 
     /**
