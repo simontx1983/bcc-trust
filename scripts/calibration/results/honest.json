@@ -12,10 +12,11 @@
                 "comments_per_active_day": 1,
                 "reviews_per_month": 0.0,
                 "attest_received_per_month": 0.5,
-                "helpful_prob_per_comment": 0.15,
                 "proven_outcome_per_month": 0.0,
                 "upheld_report_per_month": 0.0,
-                "stewardship_per_month": 0.0
+                "helpful_received_per_month": 2.0,
+                "distinct_markers": 4,
+                "owner_period": 0
             },
             "regular": {
                 "logins_per_month": 15.0,
@@ -23,10 +24,11 @@
                 "comments_per_active_day": 2,
                 "reviews_per_month": 1.0,
                 "attest_received_per_month": 1.0,
-                "helpful_prob_per_comment": 0.15,
                 "proven_outcome_per_month": 0.2,
                 "upheld_report_per_month": 0.1,
-                "stewardship_per_month": 0.0
+                "helpful_received_per_month": 6.0,
+                "distinct_markers": 8,
+                "owner_period": 3
             },
             "heavy": {
                 "logins_per_month": 22.0,
@@ -34,10 +36,11 @@
                 "comments_per_active_day": 4,
                 "reviews_per_month": 2.0,
                 "attest_received_per_month": 2.0,
-                "helpful_prob_per_comment": 0.15,
                 "proven_outcome_per_month": 0.5,
                 "upheld_report_per_month": 0.25,
-                "stewardship_per_month": 0.25
+                "helpful_received_per_month": 14.0,
+                "distinct_markers": 12,
+                "owner_period": 2
             },
             "sporadic": {
                 "logins_per_month": 4.0,
@@ -45,10 +48,11 @@
                 "comments_per_active_day": 0,
                 "reviews_per_month": 0.0,
                 "attest_received_per_month": 0.25,
-                "helpful_prob_per_comment": 0.0,
                 "proven_outcome_per_month": 0.0,
                 "upheld_report_per_month": 0.0,
-                "stewardship_per_month": 0.0
+                "helpful_received_per_month": 0.4,
+                "distinct_markers": 2,
+                "owner_period": 0
             }
         }
     },
@@ -77,44 +81,44 @@
         "regular": {
             "n": 200,
             "journeyman": {
-                "n": 159,
-                "min": 84,
-                "p25": 121.0,
+                "n": 160,
+                "min": 61,
+                "p25": 116.0,
                 "median": 146.0,
-                "p75": 185.0,
-                "max": 316
+                "p75": 184.0,
+                "max": 367
             },
-            "journeyman_reach_pct": 79.5,
+            "journeyman_reach_pct": 80.0,
             "veteran": {
-                "n": 22,
-                "min": 304,
-                "p25": 323.0,
-                "median": 348.0,
-                "p75": 376.0,
-                "max": 392
+                "n": 27,
+                "min": 287,
+                "p25": 340.0,
+                "median": 361.0,
+                "p75": 377.0,
+                "max": 397
             },
-            "veteran_reach_pct": 11.0
+            "veteran_reach_pct": 13.5
         },
         "heavy": {
             "n": 200,
             "journeyman": {
                 "n": 160,
                 "min": 45,
-                "p25": 52.0,
-                "median": 65.0,
-                "p75": 90.0,
-                "max": 206
+                "p25": 53.0,
+                "median": 66.0,
+                "p75": 88.0,
+                "max": 172
             },
             "journeyman_reach_pct": 80.0,
             "veteran": {
-                "n": 142,
+                "n": 140,
                 "min": 210,
                 "p25": 210.0,
-                "median": 229.0,
-                "p75": 293.0,
-                "max": 395
+                "median": 243.0,
+                "p75": 317.0,
+                "max": 397
             },
-            "veteran_reach_pct": 71.0
+            "veteran_reach_pct": 70.0
         },
         "sporadic": {
             "n": 200,
@@ -140,40 +144,40 @@
     },
     "overall": {
         "journeyman": {
-            "n": 319,
+            "n": 320,
             "min": 45,
-            "p25": 65.0,
-            "median": 111.0,
-            "p75": 149.0,
-            "max": 316
+            "p25": 66.0,
+            "median": 105.0,
+            "p75": 147.0,
+            "max": 367
         },
-        "journeyman_promoted": 319,
+        "journeyman_promoted": 320,
         "veteran": {
-            "n": 164,
+            "n": 167,
             "min": 210,
-            "p25": 210.0,
-            "median": 241.0,
-            "p75": 308.0,
-            "max": 395
+            "p25": 212.0,
+            "median": 271.0,
+            "p75": 340.0,
+            "max": 397
         },
-        "veteran_promoted": 164,
+        "veteran_promoted": 167,
         "veteran_by_day_120": 0,
         "veteran_by_day_180": 0,
-        "veteran_by_day_365": 149,
+        "veteran_by_day_365": 142,
         "journeyman_histogram_30d": {
             "0.00-30.00": 0,
             "30.00-60.00": 60,
-            "60.00-90.00": 57,
-            "90.00-120.00": 61,
-            "120.00-150.00": 62,
-            "150.00-180.00": 30,
-            "180.00-210.00": 18,
-            "210.00-240.00": 17,
-            "240.00-270.00": 10,
+            "60.00-90.00": 75,
+            "90.00-120.00": 59,
+            "120.00-150.00": 47,
+            "150.00-180.00": 36,
+            "180.00-210.00": 22,
+            "210.00-240.00": 10,
+            "240.00-270.00": 6,
             "270.00-300.00": 3,
-            "300.00-330.00": 1,
-            "330.00-360.00": 0,
-            "360.00-390.00": 0,
+            "300.00-330.00": 0,
+            "330.00-360.00": 1,
+            "360.00-390.00": 1,
             "390.00-420.00": 0
         },
         "veteran_histogram_30d": {
@@ -184,28 +188,28 @@
             "120.00-150.00": 0,
             "150.00-180.00": 0,
             "180.00-210.00": 0,
-            "210.00-240.00": 80,
-            "240.00-270.00": 17,
-            "270.00-300.00": 15,
-            "300.00-330.00": 23,
-            "330.00-360.00": 11,
-            "360.00-390.00": 14,
+            "210.00-240.00": 66,
+            "240.00-270.00": 16,
+            "270.00-300.00": 11,
+            "300.00-330.00": 24,
+            "330.00-360.00": 19,
+            "360.00-390.00": 27,
             "390.00-420.00": 4
         }
     },
     "day400_why_blocked": {
         "casual": {
             "day": 400,
-            "total": 50.0,
+            "total": 50.5,
             "categories": {
                 "contribution": 17.5,
-                "helping": 8.5,
-                "recognition": 10.0,
+                "helping": 10.0,
+                "recognition": 9.0,
                 "outcomes": 0.0,
                 "time": 14.0
             },
             "contribution_types": 2,
-            "recognizers": 10,
+            "recognizers": 9,
             "outcomes": 0,
             "outcome_types": 0,
             "journeyman_terms": {
@@ -232,17 +236,17 @@
         },
         "regular": {
             "day": 400,
-            "total": 75.5,
+            "total": 76.5,
             "categories": {
                 "contribution": 25.0,
-                "helping": 23.0,
-                "recognition": 9.0,
-                "outcomes": 4.5,
+                "helping": 20.0,
+                "recognition": 11.0,
+                "outcomes": 6.5,
                 "time": 14.0
             },
             "contribution_types": 4,
-            "recognizers": 9,
-            "outcomes": 3,
+            "recognizers": 11,
+            "outcomes": 4,
             "outcome_types": 2,
             "journeyman_terms": {
                 "total": true,
@@ -276,9 +280,9 @@
                 "outcomes": 15.0,
                 "time": 14.0
             },
-            "contribution_types": 5,
-            "recognizers": 30,
-            "outcomes": 13,
+            "contribution_types": 4,
+            "recognizers": 21,
+            "outcomes": 11,
             "outcome_types": 2,
             "journeyman_terms": {
                 "total": true,
@@ -304,16 +308,16 @@
         },
         "sporadic": {
             "day": 400,
-            "total": 24.75,
+            "total": 26.75,
             "categories": {
                 "contribution": 8.75,
-                "helping": 0.0,
-                "recognition": 4.0,
+                "helping": 2.0,
+                "recognition": 3.0,
                 "outcomes": 0.0,
-                "time": 12.0
+                "time": 13.0
             },
             "contribution_types": 1,
-            "recognizers": 4,
+            "recognizers": 3,
             "outcomes": 0,
             "outcome_types": 0,
             "journeyman_terms": {
@@ -342,8 +346,8 @@
     "targets": {
         "journeyman_median_75_110": {
             "target": "median first-Journeyman day within 75-110 (over promoted members)",
-            "actual": 111.0,
-            "pass": false
+            "actual": 105.0,
+            "pass": true
         },
         "earliest_journeyman_ge_45": {
             "target": "earliest Journeyman day >= 45 (trust-window floor)",

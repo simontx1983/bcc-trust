@@ -22,7 +22,7 @@
         {
             "day": 90,
             "pool_size": 10,
-            "top10_weight": 9.4226,
+            "top10_weight": 9.6244,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.0,
@@ -32,7 +32,7 @@
         {
             "day": 90,
             "pool_size": 15,
-            "top10_weight": 10.4943,
+            "top10_weight": 10.6966,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.0,
@@ -42,7 +42,7 @@
         {
             "day": 90,
             "pool_size": 20,
-            "top10_weight": 10.9385,
+            "top10_weight": 10.7726,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.054,
@@ -52,7 +52,7 @@
         {
             "day": 90,
             "pool_size": 30,
-            "top10_weight": 10.9823,
+            "top10_weight": 11.0969,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.386,
@@ -62,7 +62,7 @@
         {
             "day": 90,
             "pool_size": 50,
-            "top10_weight": 11.5538,
+            "top10_weight": 11.6045,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.946,
@@ -82,7 +82,7 @@
         {
             "day": 180,
             "pool_size": 10,
-            "top10_weight": 9.5038,
+            "top10_weight": 9.4856,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.0,
@@ -92,7 +92,7 @@
         {
             "day": 180,
             "pool_size": 15,
-            "top10_weight": 10.9211,
+            "top10_weight": 11.102,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.008,
@@ -102,7 +102,7 @@
         {
             "day": 180,
             "pool_size": 20,
-            "top10_weight": 10.8373,
+            "top10_weight": 10.9957,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.054,
@@ -112,7 +112,7 @@
         {
             "day": 180,
             "pool_size": 30,
-            "top10_weight": 10.8659,
+            "top10_weight": 11.0011,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.398,
@@ -122,7 +122,7 @@
         {
             "day": 180,
             "pool_size": 50,
-            "top10_weight": 12.2209,
+            "top10_weight": 12.341,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.964,
@@ -152,7 +152,7 @@
         {
             "day": 365,
             "pool_size": 15,
-            "top10_weight": 10.7903,
+            "top10_weight": 10.6088,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.002,
@@ -162,7 +162,7 @@
         {
             "day": 365,
             "pool_size": 20,
-            "top10_weight": 11.518,
+            "top10_weight": 11.7091,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.044,
@@ -172,7 +172,7 @@
         {
             "day": 365,
             "pool_size": 30,
-            "top10_weight": 13.834,
+            "top10_weight": 13.7545,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.382,
@@ -182,7 +182,7 @@
         {
             "day": 365,
             "pool_size": 50,
-            "top10_weight": 13.6969,
+            "top10_weight": 13.8814,
             "top10_reaches_quorum": true,
             "quorum_probability": {
                 "p_30": 0.95,

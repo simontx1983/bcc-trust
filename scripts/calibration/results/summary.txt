@@ -4,9 +4,9 @@ Epoch day 0 = 2026-01-01 (deterministic; see README.md for real-vs-mirrored math
 
 HONEST (honest_cohorts)
 ------------------------------------------------------------------------
-[FAIL] journeyman_median_75_110
+[PASS] journeyman_median_75_110
        target: median first-Journeyman day within 75-110 (over promoted members)
-       actual: 111.0
+       actual: 105.0
 [PASS] earliest_journeyman_ge_45
        target: earliest Journeyman day >= 45 (trust-window floor)
        actual: 45
@@ -19,10 +19,10 @@ HONEST (honest_cohorts)
 
   per-profile first-Journeyman day (n | reach% | min/p25/median/p75/max):
     casual    n=200  reach=  0.0%  NULL / NULL / NULL / NULL / NULL
-    regular   n=200  reach= 79.5%  84 / 121.0 / 146.0 / 185.0 / 316
-    heavy     n=200  reach= 80.0%  45 / 52.0 / 65.0 / 90.0 / 206
+    regular   n=200  reach= 80.0%  61 / 116.0 / 146.0 / 184.0 / 367
+    heavy     n=200  reach= 80.0%  45 / 53.0 / 66.0 / 88.0 / 172
     sporadic  n=200  reach=  0.0%  NULL / NULL / NULL / NULL / NULL
-  veteran: promoted=164  by day 120/180/365 = 0/0/149  earliest=210
+  veteran: promoted=167  by day 120/180/365 = 0/0/142  earliest=210
 
 RINGS (rings)
 ------------------------------------------------------------------------
@@ -46,10 +46,10 @@ WEIGHTS (vote_weights)
 ------------------------------------------------------------------------
 [PASS] max_weight_le_1_75
        target: max effective weight <= vote_ceiling (1.75), zero members above, all snapshot days
-       actual: {"day_90":1.2816,"day_180":1.2803,"day_365":1.4931}
+       actual: {"day_90":1.2816,"day_180":1.2803,"day_365":1.4952}
 [PASS] gini_le_0_65
        target: Gini coefficient of effective weights <= 0.65, all snapshot days
-       actual: {"day_90":0.0777,"day_180":0.089,"day_365":0.115}
+       actual: {"day_90":0.0803,"day_180":0.0898,"day_365":0.1145}
 
 QUORUM (quorum_reachability)
 ------------------------------------------------------------------------
@@ -59,23 +59,23 @@ QUORUM (quorum_reachability)
 
   reachability (day | pool | top10 weight | P(quorum) @30% | @50%):
     day 90   E=5    top10=n/a      p30=0.000  p50=0.000
-    day 90   E=10   top10=9.42     p30=0.000  p50=0.004
-    day 90   E=15   top10=10.49    p30=0.000  p50=0.124
-    day 90   E=20   top10=10.94    p30=0.054  p50=0.616
-    day 90   E=30   top10=10.98    p30=0.386  p50=0.972
-    day 90   E=50   top10=11.55    p30=0.946  p50=1.000
+    day 90   E=10   top10=9.62     p30=0.000  p50=0.004
+    day 90   E=15   top10=10.70    p30=0.000  p50=0.124
+    day 90   E=20   top10=10.77    p30=0.054  p50=0.616
+    day 90   E=30   top10=11.10    p30=0.386  p50=0.972
+    day 90   E=50   top10=11.60    p30=0.946  p50=1.000
     day 180  E=5    top10=n/a      p30=0.000  p50=0.000
-    day 180  E=10   top10=9.50     p30=0.000  p50=0.000
-    day 180  E=15   top10=10.92    p30=0.008  p50=0.124
-    day 180  E=20   top10=10.84    p30=0.054  p50=0.550
-    day 180  E=30   top10=10.87    p30=0.398  p50=0.982
-    day 180  E=50   top10=12.22    p30=0.964  p50=1.000
+    day 180  E=10   top10=9.49     p30=0.000  p50=0.000
+    day 180  E=15   top10=11.10    p30=0.008  p50=0.124
+    day 180  E=20   top10=11.00    p30=0.054  p50=0.550
+    day 180  E=30   top10=11.00    p30=0.398  p50=0.982
+    day 180  E=50   top10=12.34    p30=0.964  p50=1.000
     day 365  E=5    top10=n/a      p30=0.000  p50=0.000
     day 365  E=10   top10=10.92    p30=0.000  p50=0.002
-    day 365  E=15   top10=10.79    p30=0.002  p50=0.128
-    day 365  E=20   top10=11.52    p30=0.044  p50=0.570
-    day 365  E=30   top10=13.83    p30=0.382  p50=0.982
-    day 365  E=50   top10=13.70    p30=0.950  p50=1.000
+    day 365  E=15   top10=10.61    p30=0.002  p50=0.128
+    day 365  E=20   top10=11.71    p30=0.044  p50=0.570
+    day 365  E=30   top10=13.75    p30=0.382  p50=0.982
+    day 365  E=50   top10=13.88    p30=0.950  p50=1.000
 
 DECAY (decay_recovery)
 ------------------------------------------------------------------------
@@ -91,6 +91,55 @@ DECAY (decay_recovery)
 [PASS] total_monotone_after_stop
        target: total non-increasing once activity stops (time credit frozen, decay only)
        actual: true
-[PASS] recovery_within_grace
+[FAIL] recovery_within_grace
        target: members losing requirements at day 150 re-satisfy within the 90-day grace at their own cadence (INFO if none lost)
-       actual: [{"profile":"casual","member_id":2,"events_before_150":45,"events_reversed":13,"journeyman_day_orig":null,"requirements_after_loss":"n/a (not Journeyman by day 150)","journeyman_day_with_loss":null},{"profile":"regular","member_id":202,"events_before_150":192,"events_reversed":57,"journeyman_day_orig":181,"requirements_after_loss":"n/a (not Journeyman by day 150)","journeyman_day_with_loss":190},{"profile":"heavy","member_id":402,"events_before_150":601,"events_reversed":180,"journeyman_day_orig":92,"requirements_after_loss":"retained","days_to_recover":0},{"profile":"sporadic","member_id":602,"events_before_150":5,"events_reversed":1,"journeyman_day_orig":null,"requirements_after_loss":"n/a (not Journeyman by day 150)","journeyman_day_with_loss":null}]
+       actual: [{"profile":"casual","member_id":2,"events_before_150":54,"events_reversed":16,"journeyman_day_orig":null,"requirements_after_loss":"n/a (not Journeyman by day 150)","journeyman_day_with_loss":null},{"profile":"regular","member_id":202,"events_before_150":209,"events_reversed":62,"journeyman_day_orig":139,"requirements_after_loss":"lost","days_to_recover":152,"recovered_within_90d_grace":false,"journeyman_blocking_at_150":["recognition_min"]},{"profile":"heavy","member_id":402,"events_before_150":561,"events_reversed":168,"journeyman_day_orig":84,"requirements_after_loss":"retained","days_to_recover":0},{"profile":"sporadic","member_id":602,"events_before_150":9,"events_reversed":2,"journeyman_day_orig":null,"requirements_after_loss":"n/a (not Journeyman by day 150)","journeyman_day_with_loss":null}]
+
+HELPING (helping_restore)
+------------------------------------------------------------------------
+[PASS] shipped_baseline_still_promotes
+       target: SHIPPED config: honest cohorts still reach Journeyman AND Veteran (baseline unbroken)
+       actual: {"journeyman":320,"veteran":167}
+[PASS] helping_ge_7_5_reachable
+       target: RESTORE helping Journeyman min (7.5) reachable for regular AND heavy (>=50% of each by day 400)
+       actual: {"regular_pct":100,"heavy_pct":100}
+[PASS] helping_ge_15_reachable
+       target: RESTORE helping Veteran min (15) reachable for heavy (>=25% by day 400)
+       actual: {"regular_pct":100,"heavy_pct":100}
+[PASS] diversity5_owner_only
+       target: contribution-diversity-5 reached ONLY by community owners (stewardship is the 5th type)
+       actual: {"any_non_owner_reached_5":false,"owners_ge5":145,"owner_total":167}
+[PASS] restore_veteran_reachable
+       target: RESTORE config: at least one genuine member still reaches Veteran (diversity 5 + helping 15 not over-gated)
+       actual: {"veteran_promoted":82,"earliest":210}
+[PASS] restore_journeyman_not_overgated
+       target: RESTORE config: Journeyman still reachable and median shift vs SHIPPED is bounded (<=45d)
+       actual: {"shipped_median":105,"restore_median":105,"shift_days":0,"restore_promoted":320}
+[PASS] anti_farm_10pct_cap_bites
+       target: ANTI-FARM: marks from <10 distinct markers cannot fill helping; volume cannot beat the 0.10 per-marker cap
+       actual: true
+
+  day-400 helping (n | owners | %>=7.5 | %>=15 | min/median/max):
+    casual    n=200  own=0    >=7.5= 97.5%  >=15=  0.0%  6.5 / 9.5 / 10.0
+    regular   n=200  own=67   >=7.5=100.0%  >=15=100.0%  18.5 / 20.0 / 22.5
+    heavy     n=200  own=100  >=7.5=100.0%  >=15=100.0%  25.0 / 25.0 / 25.0
+    sporadic  n=200  own=0    >=7.5=  0.0%  >=15=  0.0%  0.5 / 2.5 / 5.0
+
+  contribution diversity-5 (owner-gated):
+    casual    types={"2":200}  %>=5=  0.0%  owners %>=5=  0.0%
+    regular   types={"3":41,"4":111,"5":48}  %>=5= 24.0%  owners %>=5= 71.6%
+    heavy     types={"3":4,"4":99,"5":97}  %>=5= 48.5%  owners %>=5= 97.0%
+    sporadic  types={"1":200}  %>=5=  0.0%  owners %>=5=  0.0%
+    owners>=5=145/167  non-owners>=5=0/633  any_non_owner_reached_5=false
+
+  anti-farm helping(distinct markers x 50 marks): {"1":2.5,"2":5,"3":7.5,"5":12.5,"6":15,"9":22.5,"10":25,"12":25}
+    9 markers=22.50 (<25 => cannot fill)  10 markers=25.00  3x1000 marks=7.50 (cap bites)  owner 5mk+steward=15.00
+
+  promotion  SHIPPED vs RESTORE (journeyman median | veteran promoted | earliest):
+    SHIPPED  J-median=105.0  V-promoted=167  V-earliest=210
+    RESTORE  J-median=105.0  V-promoted=82  V-earliest=210  (J-median shift 0.0 d)
+    per-profile J-reach% / V-reach% (SHIPPED -> RESTORE):
+      casual    J   0.0%->  0.0%   V   0.0%->  0.0%
+      regular   J  80.0%-> 80.0%   V  13.5%->  6.5%
+      heavy     J  80.0%-> 80.0%   V  70.0%-> 34.5%
+      sporadic  J   0.0%->  0.0%   V   0.0%->  0.0%

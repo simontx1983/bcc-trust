@@ -8,113 +8,113 @@
     },
     "inactivity": {
         "stop_day": 200,
-        "last_login_day": 199,
-        "first_decay_day_expected": 594,
+        "last_login_day": 198,
+        "first_decay_day_expected": 593,
         "samples": [
             {
                 "day": 200,
-                "days_since_login": 1,
+                "days_since_login": 2,
                 "decay_real": 0.0,
                 "decay_expected": 0.0,
-                "total": 79.0
-            },
-            {
-                "day": 300,
-                "days_since_login": 101,
-                "decay_real": 0.0,
-                "decay_expected": 0.0,
-                "total": 79.0
-            },
-            {
-                "day": 400,
-                "days_since_login": 201,
-                "decay_real": 0.0,
-                "decay_expected": 0.0,
-                "total": 79.0
-            },
-            {
-                "day": 500,
-                "days_since_login": 301,
-                "decay_real": 0.0,
-                "decay_expected": 0.0,
-                "total": 79.0
-            },
-            {
-                "day": 564,
-                "days_since_login": 365,
-                "decay_real": 0.0,
-                "decay_expected": 0.0,
-                "total": 79.0
-            },
-            {
-                "day": 565,
-                "days_since_login": 366,
-                "decay_real": 0.0,
-                "decay_expected": 0.0,
-                "total": 79.0
-            },
-            {
-                "day": 593,
-                "days_since_login": 394,
-                "decay_real": 0.0,
-                "decay_expected": 0.0,
-                "total": 79.0
-            },
-            {
-                "day": 594,
-                "days_since_login": 395,
-                "decay_real": 1.0,
-                "decay_expected": 1.0,
-                "total": 78.0
-            },
-            {
-                "day": 595,
-                "days_since_login": 396,
-                "decay_real": 1.0,
-                "decay_expected": 1.0,
-                "total": 78.0
-            },
-            {
-                "day": 624,
-                "days_since_login": 425,
-                "decay_real": 2.0,
-                "decay_expected": 2.0,
-                "total": 77.0
-            },
-            {
-                "day": 625,
-                "days_since_login": 426,
-                "decay_real": 2.0,
-                "decay_expected": 2.0,
-                "total": 77.0
-            },
-            {
-                "day": 654,
-                "days_since_login": 455,
-                "decay_real": 3.0,
-                "decay_expected": 3.0,
                 "total": 76.0
             },
             {
-                "day": 700,
-                "days_since_login": 501,
-                "decay_real": 4.0,
-                "decay_expected": 4.0,
+                "day": 300,
+                "days_since_login": 102,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.0
+            },
+            {
+                "day": 400,
+                "days_since_login": 202,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.0
+            },
+            {
+                "day": 500,
+                "days_since_login": 302,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.0
+            },
+            {
+                "day": 563,
+                "days_since_login": 365,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.0
+            },
+            {
+                "day": 564,
+                "days_since_login": 366,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.0
+            },
+            {
+                "day": 592,
+                "days_since_login": 394,
+                "decay_real": 0.0,
+                "decay_expected": 0.0,
+                "total": 76.0
+            },
+            {
+                "day": 593,
+                "days_since_login": 395,
+                "decay_real": 1.0,
+                "decay_expected": 1.0,
                 "total": 75.0
             },
             {
-                "day": 750,
-                "days_since_login": 551,
-                "decay_real": 6.0,
-                "decay_expected": 6.0,
+                "day": 594,
+                "days_since_login": 396,
+                "decay_real": 1.0,
+                "decay_expected": 1.0,
+                "total": 75.0
+            },
+            {
+                "day": 623,
+                "days_since_login": 425,
+                "decay_real": 2.0,
+                "decay_expected": 2.0,
+                "total": 74.0
+            },
+            {
+                "day": 624,
+                "days_since_login": 426,
+                "decay_real": 2.0,
+                "decay_expected": 2.0,
+                "total": 74.0
+            },
+            {
+                "day": 653,
+                "days_since_login": 455,
+                "decay_real": 3.0,
+                "decay_expected": 3.0,
                 "total": 73.0
             },
             {
+                "day": 700,
+                "days_since_login": 502,
+                "decay_real": 4.0,
+                "decay_expected": 4.0,
+                "total": 72.0
+            },
+            {
+                "day": 750,
+                "days_since_login": 552,
+                "decay_real": 6.0,
+                "decay_expected": 6.0,
+                "total": 70.0
+            },
+            {
                 "day": 800,
-                "days_since_login": 601,
+                "days_since_login": 602,
                 "decay_real": 7.0,
                 "decay_expected": 7.0,
-                "total": 72.0
+                "total": 69.0
             }
         ],
         "floor_probe_day3000_total": 0.0
@@ -123,8 +123,8 @@
         {
             "profile": "casual",
             "member_id": 2,
-            "events_before_150": 45,
-            "events_reversed": 13,
+            "events_before_150": 54,
+            "events_reversed": 16,
             "journeyman_day_orig": null,
             "requirements_after_loss": "n/a (not Journeyman by day 150)",
             "journeyman_day_with_loss": null
@@ -132,26 +132,30 @@
         {
             "profile": "regular",
             "member_id": 202,
-            "events_before_150": 192,
-            "events_reversed": 57,
-            "journeyman_day_orig": 181,
-            "requirements_after_loss": "n/a (not Journeyman by day 150)",
-            "journeyman_day_with_loss": 190
+            "events_before_150": 209,
+            "events_reversed": 62,
+            "journeyman_day_orig": 139,
+            "requirements_after_loss": "lost",
+            "days_to_recover": 152,
+            "recovered_within_90d_grace": false,
+            "journeyman_blocking_at_150": [
+                "recognition_min"
+            ]
         },
         {
             "profile": "heavy",
             "member_id": 402,
-            "events_before_150": 601,
-            "events_reversed": 180,
-            "journeyman_day_orig": 92,
+            "events_before_150": 561,
+            "events_reversed": 168,
+            "journeyman_day_orig": 84,
             "requirements_after_loss": "retained",
             "days_to_recover": 0
         },
         {
             "profile": "sporadic",
             "member_id": 602,
-            "events_before_150": 5,
-            "events_reversed": 1,
+            "events_before_150": 9,
+            "events_reversed": 2,
             "journeyman_day_orig": null,
             "requirements_after_loss": "n/a (not Journeyman by day 150)",
             "journeyman_day_with_loss": null
@@ -184,8 +188,8 @@
                 {
                     "profile": "casual",
                     "member_id": 2,
-                    "events_before_150": 45,
-                    "events_reversed": 13,
+                    "events_before_150": 54,
+                    "events_reversed": 16,
                     "journeyman_day_orig": null,
                     "requirements_after_loss": "n/a (not Journeyman by day 150)",
                     "journeyman_day_with_loss": null
@@ -193,32 +197,36 @@
                 {
                     "profile": "regular",
                     "member_id": 202,
-                    "events_before_150": 192,
-                    "events_reversed": 57,
-                    "journeyman_day_orig": 181,
-                    "requirements_after_loss": "n/a (not Journeyman by day 150)",
-                    "journeyman_day_with_loss": 190
+                    "events_before_150": 209,
+                    "events_reversed": 62,
+                    "journeyman_day_orig": 139,
+                    "requirements_after_loss": "lost",
+                    "days_to_recover": 152,
+                    "recovered_within_90d_grace": false,
+                    "journeyman_blocking_at_150": [
+                        "recognition_min"
+                    ]
                 },
                 {
                     "profile": "heavy",
                     "member_id": 402,
-                    "events_before_150": 601,
-                    "events_reversed": 180,
-                    "journeyman_day_orig": 92,
+                    "events_before_150": 561,
+                    "events_reversed": 168,
+                    "journeyman_day_orig": 84,
                     "requirements_after_loss": "retained",
                     "days_to_recover": 0
                 },
                 {
                     "profile": "sporadic",
                     "member_id": 602,
-                    "events_before_150": 5,
-                    "events_reversed": 1,
+                    "events_before_150": 9,
+                    "events_reversed": 2,
                     "journeyman_day_orig": null,
                     "requirements_after_loss": "n/a (not Journeyman by day 150)",
                     "journeyman_day_with_loss": null
                 }
             ],
-            "pass": true
+            "pass": false
         }
     }
 }

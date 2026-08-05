@@ -75,6 +75,38 @@ function calib_config(): \BCC\Trust\Rank\Support\RankScoringConfig
     return $config;
 }
 
+/**
+ * PROPOSED-RESTORE config — the SHIPPED rank-scoring.php array with only
+ * the three Phase-9-zeroed helping gates restored, run through the REAL
+ * RankScoringConfig::fromArray() validator (same path fromDefaultFile
+ * uses). The shipped file is NOT edited; the harness injects the override
+ * so the two-scenario comparison isolates exactly these three tunables:
+ *
+ *   category_minimums.journeyman.helping : 0.0 -> 7.5   (30% of the 25 max)
+ *   category_minimums.veteran.helping    : 0.0 -> 15.0  (60% of the 25 max)
+ *   diversity_minimums.veteran_categories: 4   -> 5     (5th type = stewardship)
+ *
+ * Everything else (routing, points, share caps, thresholds) is identical
+ * to the shipped config, so member ledgers are byte-identical between the
+ * two scenarios — only the promotion predicate differs.
+ */
+function calib_restore_config(): \BCC\Trust\Rank\Support\RankScoringConfig
+{
+    static $config = null;
+    if ($config === null) {
+        $path = dirname(__DIR__, 2) . '/includes/config/rank-scoring.php';
+        /** @var array<string, mixed> $arr */
+        $arr = require $path; // Plain require re-evaluates; the file is side-effect-free.
+
+        $arr['category_minimums']['journeyman']['helping'] = 7.5;
+        $arr['category_minimums']['veteran']['helping']    = 15.0;
+        $arr['diversity_minimums']['veteran_categories']   = 5;
+
+        $config = \BCC\Trust\Rank\Support\RankScoringConfig::fromArray($arr);
+    }
+    return $config;
+}
+
 function calib_calculator(): \BCC\Trust\Rank\Services\RankScoreCalculator
 {
     static $calc = null;

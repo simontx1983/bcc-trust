@@ -38,59 +38,118 @@ final class CalibProfiles
      *
      * ASSUMED (documented calibration assumptions — see README ▸
      * "Modeling assumptions"): attestations_received_per_month for the
-     * non-heavy profiles, helpful_mark_prob_per_comment, and every
-     * outcomes/stewardship rate. The brief's profiles carry no
-     * helping-category or outcomes-category actions at all, yet the
-     * §4.3 minimums require both — without these assumed rates NOBODY
-     * can promote, so the rates below are load-bearing for every
-     * promotion-day number the harness reports.
+     * non-heavy profiles, every outcomes rate, and — since the helping
+     * emitters landed (2026-08-04) — the two helping evidence streams
+     * that model the REAL merged emitters:
+     *
+     *   helpful_received_per_month / distinct_markers  → the §9.2
+     *       credible-Helpful-mark route. A member EARNS helping when
+     *       OTHER credible members mark THEIR content helpful; the mark
+     *       credits the content author, keyed by the MARKER as the §9.3
+     *       relationship id (share-capped at 0.10 × 25 = 2.5 per marker).
+     *       So filling helping is DISTINCT-MARKER-bounded, not volume-
+     *       bounded: distinct_markers is the size of a member's credible-
+     *       marker pool; helpful_received_per_month is the arrival rate,
+     *       spread uniformly across that pool. Heavier contributors post
+     *       more helpful content → more markers and a higher rate.
+     *
+     *   owner_period  → the weekly stewardship route. A member who OWNS
+     *       an active User-kind community (≥5 active posters) earns one
+     *       `stewardship` event per ISO week (→ contribution + helping,
+     *       relationship id 0, so all stewardship-helping shares the
+     *       single identity-0 bucket capped at 2.5). owner_period p>0
+     *       makes members at index % p == 0 active-community owners;
+     *       0 = no owners. Stewardship is the ONLY 5th contribution
+     *       source-type, so Veteran contribution-diversity-5 is
+     *       reachable ONLY by owners.
+     *
+     * The brief's profiles carry no helping- or outcomes-category
+     * actions at all, yet the §4.3 minimums require both — so every rate
+     * below is load-bearing for every promotion-day number the harness
+     * reports.
      */
     public const HONEST = [
         'casual' => [
-            'logins_per_month'          => 8.0,
-            'posts_per_month'           => 2.0,
-            'comments_per_active_day'   => 1,
-            'reviews_per_month'         => 0.0,
-            'attest_received_per_month' => 0.5,  // ASSUMED
-            'helpful_prob_per_comment'  => 0.15, // ASSUMED
-            'proven_outcome_per_month'  => 0.0,
-            'upheld_report_per_month'   => 0.0,
-            'stewardship_per_month'     => 0.0,
+            'logins_per_month'           => 8.0,
+            'posts_per_month'            => 2.0,
+            'comments_per_active_day'    => 1,
+            'reviews_per_month'          => 0.0,
+            'attest_received_per_month'  => 0.5,  // ASSUMED
+            'proven_outcome_per_month'   => 0.0,
+            'upheld_report_per_month'    => 0.0,
+            'helpful_received_per_month' => 2.0,  // ASSUMED (credible marks received)
+            'distinct_markers'           => 4,    // ASSUMED (marker-pool size)
+            'owner_period'               => 0,    // no active-community owners
         ],
         'regular' => [
-            'logins_per_month'          => 15.0,
-            'posts_per_month'           => 4.0,
-            'comments_per_active_day'   => 2,
-            'reviews_per_month'         => 1.0,
-            'attest_received_per_month' => 1.0,  // ASSUMED
-            'helpful_prob_per_comment'  => 0.15, // ASSUMED
-            'proven_outcome_per_month'  => 0.2,  // ASSUMED
-            'upheld_report_per_month'   => 0.1,  // ASSUMED
-            'stewardship_per_month'     => 0.0,
+            'logins_per_month'           => 15.0,
+            'posts_per_month'            => 4.0,
+            'comments_per_active_day'    => 2,
+            'reviews_per_month'          => 1.0,
+            'attest_received_per_month'  => 1.0,  // ASSUMED
+            'proven_outcome_per_month'   => 0.2,  // ASSUMED
+            'upheld_report_per_month'    => 0.1,  // ASSUMED
+            'helpful_received_per_month' => 6.0,  // ASSUMED
+            'distinct_markers'           => 8,    // ASSUMED
+            'owner_period'               => 3,    // ASSUMED (~33% own an active community)
         ],
         'heavy' => [
-            'logins_per_month'          => 22.0,
-            'posts_per_month'           => 8.0,
-            'comments_per_active_day'   => 4,
-            'reviews_per_month'         => 2.0,
-            'attest_received_per_month' => 2.0,  // brief: "occasional"
-            'helpful_prob_per_comment'  => 0.15, // ASSUMED
-            'proven_outcome_per_month'  => 0.5,  // ASSUMED
-            'upheld_report_per_month'   => 0.25, // ASSUMED
-            'stewardship_per_month'     => 0.25, // ASSUMED (5th contribution type)
+            'logins_per_month'           => 22.0,
+            'posts_per_month'            => 8.0,
+            'comments_per_active_day'    => 4,
+            'reviews_per_month'          => 2.0,
+            'attest_received_per_month'  => 2.0,  // brief: "occasional"
+            'proven_outcome_per_month'   => 0.5,  // ASSUMED
+            'upheld_report_per_month'    => 0.25, // ASSUMED
+            'helpful_received_per_month' => 14.0, // ASSUMED
+            'distinct_markers'           => 12,   // ASSUMED
+            'owner_period'               => 2,    // ASSUMED (50% own an active community)
         ],
         'sporadic' => [
-            'logins_per_month'          => 4.0,
-            'posts_per_month'           => 1.0,
-            'comments_per_active_day'   => 0,
-            'reviews_per_month'         => 0.0,
-            'attest_received_per_month' => 0.25, // ASSUMED
-            'helpful_prob_per_comment'  => 0.0,
-            'proven_outcome_per_month'  => 0.0,
-            'upheld_report_per_month'   => 0.0,
-            'stewardship_per_month'     => 0.0,
+            'logins_per_month'           => 4.0,
+            'posts_per_month'            => 1.0,
+            'comments_per_active_day'    => 0,
+            'reviews_per_month'          => 0.0,
+            'attest_received_per_month'  => 0.25, // ASSUMED
+            'proven_outcome_per_month'   => 0.0,
+            'upheld_report_per_month'    => 0.0,
+            'helpful_received_per_month' => 0.4,  // ASSUMED
+            'distinct_markers'           => 2,    // ASSUMED
+            'owner_period'               => 0,
         ],
     ];
+
+    /**
+     * ID base for a member's synthetic credible-marker pool. Marker ids
+     * are MARKER_ID_BASE + memberId * MARKER_ID_STRIDE + k (k in
+     * 0..distinct_markers-1) — distinct per (member, marker) and far
+     * clear of both the 1..cohortSize counterparty ids and the
+     * identity-0 stewardship bucket, so each marker is its own §9.3
+     * helping-cap identity. Non-credible marks mint no evidence in the
+     * real emitter, so the harness only ever emits credible ones.
+     */
+    public const MARKER_ID_BASE   = 700000;
+    public const MARKER_ID_STRIDE = 100;
+
+    /**
+     * Modeled day a new owner's community first clears the ≥5-active-
+     * poster bar (ASSUMED — a community needs ~2 weeks to warm up). No
+     * stewardship credit before this day.
+     */
+    public const STEWARDSHIP_ACTIVATION_DAY = 14;
+
+    /** Stewardship cadence: one event per this many days (weekly sweep). */
+    public const STEWARDSHIP_PERIOD_DAYS = 7;
+
+    /**
+     * Deterministic active-community ownership by (profile, cohort
+     * index). owner_period p: owner ⇔ p > 0 AND index % p == 0.
+     */
+    public static function isCommunityOwner(string $profileName, int $index): bool
+    {
+        $period = self::HONEST[$profileName]['owner_period'] ?? 0;
+        return $period > 0 && ($index % $period) === 0;
+    }
 
     /**
      * Ring cadence (heavy self-activity + mutual recognition/helping).
@@ -193,14 +252,28 @@ final class CalibMemberSimulator
     /**
      * Generate one honest member's full history, day-stepped.
      *
-     * Cadence model: actions only on login days; per-login-day action
-     * probability = monthly_rate / logins_per_month. Attestations
-     * RECEIVED arrive independently of the member's own logins
-     * (P = rate / 30 per day). Counterparty identities are drawn
-     * uniformly from the cohort id pool (excluding self).
+     * Cadence model: the member's OWN actions (post/comment/review/
+     * outcome/upheld report) occur only on login days, with per-login-day
+     * probability = monthly_rate / logins_per_month.
+     *
+     * Two evidence streams do NOT depend on the member's own logins,
+     * matching the real emitters (see CalibProfiles::HONEST):
+     *
+     *   - recognition received  (P = rate / 30 per day): an attestation
+     *     from a cohort counterparty (identity = the attestor);
+     *   - helpful marks received (P = rate / 30 per day): a credible
+     *     mark on the member's content, credited to the member and keyed
+     *     by ONE of the member's distinct_markers (drawn uniformly from
+     *     that fixed pool) — so a small marker pool saturates the §9.3
+     *     0.10 (=2.5) per-marker helping cap and volume beyond it is lost;
+     *   - stewardship (owners only, weekly from the activation day):
+     *     one `stewardship` event → contribution + helping, relationship
+     *     id 0 (shared identity-0 helping bucket).
      *
      * @param int|null $stopDay All activity (given AND received) stops
      *        at this day — the decay scenario's inactivity switch.
+     * @param bool $isOwner Member owns an active User-kind community →
+     *        weekly stewardship accrual (the 5th contribution type).
      * @return array{
      *     rows: list<object>,
      *     prefix: array<int, int>,
@@ -216,7 +289,8 @@ final class CalibMemberSimulator
         int $cohortSize,
         int $seed,
         int $maxDay,
-        ?int $stopDay = null
+        ?int $stopDay = null,
+        bool $isOwner = false
     ): array {
         mt_srand($seed);
 
@@ -233,8 +307,10 @@ final class CalibMemberSimulator
         $pReview      = $profile['logins_per_month'] > 0 ? $profile['reviews_per_month'] / $profile['logins_per_month'] : 0.0;
         $pOutcome     = $profile['logins_per_month'] > 0 ? $profile['proven_outcome_per_month'] / $profile['logins_per_month'] : 0.0;
         $pUpheld      = $profile['logins_per_month'] > 0 ? $profile['upheld_report_per_month'] / $profile['logins_per_month'] : 0.0;
-        $pStewardship = $profile['logins_per_month'] > 0 ? $profile['stewardship_per_month'] / $profile['logins_per_month'] : 0.0;
         $pAttestRecv  = $profile['attest_received_per_month'] / 30.0;
+        $pHelpfulRecv = $profile['helpful_received_per_month'] / 30.0;
+        $distinctMarkers = max(0, (int) $profile['distinct_markers']);
+        $markerBase   = CalibProfiles::MARKER_ID_BASE + $memberId * CalibProfiles::MARKER_ID_STRIDE;
 
         $lastLogin = null;
 
@@ -251,16 +327,9 @@ final class CalibMemberSimulator
                 }
                 for ($c = 0; $c < $profile['comments_per_active_day']; $c++) {
                     self::ingest($rows, $config, 'comment', 0, $day, "m{$memberId}:e" . $uidSeq++);
-                    if (self::chance($profile['helpful_prob_per_comment'])) {
-                        $recipient = self::otherMember($memberId, $cohortSize);
-                        self::ingest($rows, $config, 'helpful_mark', $recipient, $day, "m{$memberId}:e" . $uidSeq++);
-                    }
                 }
                 if (self::chance($pReview)) {
                     self::ingest($rows, $config, 'review', 0, $day, "m{$memberId}:e" . $uidSeq++);
-                }
-                if (self::chance($pStewardship)) {
-                    self::ingest($rows, $config, 'stewardship', 0, $day, "m{$memberId}:e" . $uidSeq++);
                 }
                 if (self::chance($pOutcome)) {
                     self::ingest($rows, $config, 'outcome', 0, $day, "m{$memberId}:e" . $uidSeq++);
@@ -270,9 +339,26 @@ final class CalibMemberSimulator
                 }
             }
 
+            // Received evidence — independent of the member's own logins.
             if ($active && self::chance($pAttestRecv)) {
                 $attestor = self::otherMember($memberId, $cohortSize);
                 self::ingest($rows, $config, 'recognition', $attestor, $day, "m{$memberId}:e" . $uidSeq++);
+            }
+            if ($active && $distinctMarkers > 0 && self::chance($pHelpfulRecv)) {
+                // §9.2: a credible member marks the member's content
+                // helpful → helping credit keyed by the MARKER (§9.3 cap).
+                $marker = $markerBase + mt_rand(0, $distinctMarkers - 1);
+                self::ingest($rows, $config, 'helpful_mark', $marker, $day, "m{$memberId}:e" . $uidSeq++);
+            }
+
+            // Weekly stewardship for owners of an active community.
+            if (
+                $active
+                && $isOwner
+                && $day >= CalibProfiles::STEWARDSHIP_ACTIVATION_DAY
+                && (($day - CalibProfiles::STEWARDSHIP_ACTIVATION_DAY) % CalibProfiles::STEWARDSHIP_PERIOD_DAYS) === 0
+            ) {
+                self::ingest($rows, $config, 'stewardship', 0, $day, "m{$memberId}:steward{$day}");
             }
 
             $prefix[$day]      = count($rows);
