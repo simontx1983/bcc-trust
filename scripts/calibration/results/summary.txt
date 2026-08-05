@@ -40,7 +40,7 @@ RINGS (rings)
        actual: true
 [INFO] suspected_r5_r10_report
        target: INFO: SUSPECTED R=5 / R=10 outcomes reported honestly (caps alone may not block)
-       actual: {"R5_earliest_journeyman":46,"R10_earliest_journeyman":45}
+       actual: {"R5_earliest_journeyman":48,"R10_earliest_journeyman":45}
 
 WEIGHTS (vote_weights)
 ------------------------------------------------------------------------

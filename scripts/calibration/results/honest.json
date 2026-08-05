@@ -167,8 +167,8 @@
         "journeyman_histogram_30d": {
             "0.00-30.00": 0,
             "30.00-60.00": 60,
-            "60.00-90.00": 75,
-            "90.00-120.00": 59,
+            "60.00-90.00": 74,
+            "90.00-120.00": 60,
             "120.00-150.00": 47,
             "150.00-180.00": 36,
             "180.00-210.00": 22,
@@ -224,7 +224,7 @@
             "veteran_terms": {
                 "total": false,
                 "contribution_min": true,
-                "helping_min": true,
+                "helping_min": false,
                 "recognition_min": true,
                 "outcomes_min": false,
                 "contribution_types": false,
@@ -323,7 +323,7 @@
             "journeyman_terms": {
                 "total": false,
                 "contribution_min": true,
-                "helping_min": true,
+                "helping_min": false,
                 "recognition_min": false,
                 "contribution_types": false,
                 "recognizers": true,
@@ -332,7 +332,7 @@
             "veteran_terms": {
                 "total": false,
                 "contribution_min": false,
-                "helping_min": true,
+                "helping_min": false,
                 "recognition_min": false,
                 "outcomes_min": false,
                 "contribution_types": false,

@@ -50,13 +50,15 @@ return [
     ],
 
     // spec-locked — §4.3 mandatory category depth (30% / 60% of maxima).
-    // helping minimums zeroed — owner-approved 2026-08-04 (Phase 9
-    // calibration): every helping source (helpful_mark, stewardship,
-    // onboarding) has NO emitter yet, so a nonzero minimum makes
-    // promotion unreachable. Restore when helping emitters ship.
+    // helping minimums RESTORED — owner-approved 2026-08-04 (post
+    // helpful_mark + stewardship emitters): the helpful_mark + stewardship
+    // emitters make helping earnable, and the calibration re-run proved
+    // 7.5/15 reachable without over-gating (Journeyman median unchanged at
+    // 105d; anti-farm holds — <10 distinct markers can never fill helping).
+    // (onboarding emitter still deferred; helping is earnable without it.)
     'category_minimums' => [
-        'journeyman' => ['contribution' => 7.5,  'helping' => 0.0,  'recognition' => 4.5, 'outcomes' => 0.0, 'time' => 0.0],
-        'veteran'    => ['contribution' => 15.0, 'helping' => 0.0,  'recognition' => 9.0, 'outcomes' => 9.0, 'time' => 0.0],
+        'journeyman' => ['contribution' => 7.5,  'helping' => 7.5,  'recognition' => 4.5, 'outcomes' => 0.0, 'time' => 0.0],
+        'veteran'    => ['contribution' => 15.0, 'helping' => 15.0, 'recognition' => 9.0, 'outcomes' => 9.0, 'time' => 0.0],
     ],
 
     // spec-locked — §4.4: one event's combined lifetime Rank contribution.
@@ -187,9 +189,15 @@ return [
     // spec-locked — §10.3 / §11.2 / §6–§7.
     'recognizer_minimums' => ['journeyman' => 3, 'veteran' => 5],
     'outcome_minimums'    => ['veteran_outcomes' => 5, 'veteran_outcome_types' => 2],
-    // veteran 5 -> 4 — owner-approved 2026-08-04 (Phase 9 calibration):
-    // only 4 contribution types have real emitters (post, comment,
-    // review, upheld report); raise back to 5 when stewardship ships.
+    // veteran stays 4 — owner-approved 2026-08-04. Stewardship now ships
+    // (the 5th contribution type), but because it is EARNED ONLY BY
+    // OWNING an active community, restoring this to 5 would make
+    // community ownership a de-facto Veteran prerequisite (calibration:
+    // heavy-member Veteran reach 70% -> 34.5%, zero non-owners reach 5).
+    // Owner decision: Veteran should NOT hard-require owning a community,
+    // so it stays 4 (the four non-ownership contribution types + real
+    // helping). Raise to 5 only if a 6th non-stewardship source ships or
+    // the ownership gate becomes intended.
     'diversity_minimums'  => ['journeyman_categories' => 3, 'veteran_categories' => 4],
 
     // ── Community privileges ─────────────────────────────────────────
