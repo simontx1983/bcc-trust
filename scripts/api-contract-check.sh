@@ -364,7 +364,10 @@ run_t1() {
     log "${BOLD}Tier 1 — deep verify (public reads, no auth needed)${NC}"
 
     t1_check "/wp-json/bcc/v1/ranks"                "ranks"
-    t1_check "/wp-json/bcc/v1/locals"               "locals"
+    # v1.55 Local→Hall rename (2026-07-24) retired /locals; /halls is the
+    # replacement surface. Offset-paginated (page/page_size/total/total_pages)
+    # per HallsEndpoint — same shape tests/golden/halls.json pins.
+    t1_check "/wp-json/bcc/v1/halls"                "halls"               offset
 
     local sample_handle="${BCC_SAMPLE_HANDLE:-admin}"
     t1_check "/wp-json/bcc/v1/users/${sample_handle}"          "users/:handle"

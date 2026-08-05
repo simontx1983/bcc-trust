@@ -2197,6 +2197,20 @@ final class Plugin
                 $i->reverse('post', (int) $postId, $mode === 'owner' ? 'author_self_delete' : 'admin_removed'));
         }, 20, 4);
 
+        // Comment deletion — same farming loop as posts, same fix. The
+        // only BCC deletion chokepoint is CommentService::deleteComment
+        // (author self-delete by authorization check; cross-author
+        // removal still flows through PeepSo's own UI, outside BCC
+        // hooks — hence the fixed 'author_self_delete' reason). The 4th
+        // arg is the comment's wp_post ID, the exact sourceId the
+        // bcc_comment_created subscriber above ingests. Reversing an id
+        // with no ledger rows (pre-ledger comments) matches zero rows —
+        // harmless.
+        add_action('bcc_comment_deleted', function ($viewerId, $parentActId, $commentActId, $commentPostId) use ($rankIngest): void {
+            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
+                $i->reverse('comment', (int) $commentPostId, 'author_self_delete'));
+        }, 20, 4);
+
         // ── §O1.2 first-action celebrations (retention pass 2026-05-13) ──
         //
         // One-shot stashings for first_post / first_review / first_blog.

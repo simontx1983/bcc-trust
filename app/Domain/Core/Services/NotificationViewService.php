@@ -14,8 +14,11 @@
  *   - REVIEW         → `/v/<page_handle>` etc. via PageTypeMap +
  *                       page_id (the reviewed page)
  *   - CARD_WATCHED   → `/u/<actor_handle>` (the watcher's profile)
- *   - RANK_UP        → `/u/<recipient_handle>` (your own profile —
- *                       progression strip lives there)
+ *   - RANK_UP / RANK_DEMOTED / RANK_RECOVERY_* / RANK_DECAY_WARNING /
+ *     RANK_FINDING_* / RANK_APPEAL_OUTCOME
+ *                    → `/me/progression` (the §N11 standing file —
+ *                       the member's own progression surface, where
+ *                       grade, recovery, and findings detail render)
  *   - MENTION        → `/?focus=<act_id>` (jump to the floor focused
  *                       on the post containing the mention; mirrors
  *                       REACTION). For comment mentions, act_id is the
@@ -228,7 +231,22 @@ final class NotificationViewService
             NotificationType::REACTION    => $actId > 0 ? '/?focus=' . $actId : '/',
             NotificationType::REVIEW      => self::resolvePageLink($externalId),
             NotificationType::CARD_WATCHED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
-            NotificationType::RANK_UP     => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
+            // Rank standing changes + §15 findings all deep-link to the
+            // member's own progression surface (/me/progression — the
+            // §N11 standing file, same route the FE's nav-items.tsx
+            // registers as "My Progression"). These are system events:
+            // external_id/act_id carry nothing routable and the actor
+            // is the recipient (RANK_UP) or nobody, so before this arm
+            // most of them fell to the '/' default and the bell row
+            // dead-ended on the floor.
+            NotificationType::RANK_UP,
+            NotificationType::RANK_DEMOTED,
+            NotificationType::RANK_RECOVERY_STARTED,
+            NotificationType::RANK_RECOVERY_REMINDER,
+            NotificationType::RANK_DECAY_WARNING,
+            NotificationType::RANK_FINDING_ISSUED,
+            NotificationType::RANK_APPEAL_OUTCOME,
+            NotificationType::RANK_FINDING_REVERSED => '/me/progression',
             // Welcome notification routes to the floor — the user is
             // probably already there when they see it (it fires within
             // seconds of signup), but tapping the bell row should still
