@@ -517,7 +517,13 @@ final class CommentService
             return ['error' => 'bcc_internal_error', 'message' => 'Could not delete comment.'];
         }
 
-        do_action('bcc_comment_deleted', $viewerId, $parentActId, $commentActId);
+        // §A3 event — the comment's wp_post ID rides along (4th arg,
+        // mirroring how bcc_post_deleted carries $postId) because it is
+        // the Rank evidence ledger's sourceId for sourceType 'comment'
+        // (the bcc_comment_created ingest subscriber in Plugin.php
+        // ingests $newCommentPostId) — the evidence-reversal subscriber
+        // needs the same id to reverse it.
+        do_action('bcc_comment_deleted', $viewerId, $parentActId, $commentActId, (int) $meta->comment_post_id);
 
         return ['ok' => true, 'comment_id' => $commentId];
     }

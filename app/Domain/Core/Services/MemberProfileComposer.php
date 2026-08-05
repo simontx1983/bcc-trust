@@ -265,6 +265,27 @@ final class MemberProfileComposer
         //   lookups (cheap; single user).
         $base['verifications'] = self::buildVerifications($userId, $walletCount, $prefetched);
 
+        // ── `profile_complete` — the SERVER's completeness verdict,
+        //   own-view only (additive: the key is ABSENT for every other
+        //   viewer, mirroring the own-only progression/wallets blocks).
+        //   The FE previously mirrored QuestValidator's 80% threshold
+        //   client-side against `verifications.profile_completeness`;
+        //   that mirror misses the validator's other passes (filled-
+        //   field floor, verified-identity override), so the verdict is
+        //   now computed through the SAME code path the quest gate and
+        //   ApprenticeReadinessService::profileReady already use — one
+        //   threshold, one home. Defensive catch matches
+        //   resolveProfileCompleteness: a validator failure must not
+        //   take down the profile page.
+        if ($isSelf) {
+            try {
+                $base['verifications']['profile_complete'] =
+                    \BCC\Trust\Core\Services\Quest\QuestValidator::validate($userId, 'complete_profile');
+            } catch (\Throwable $e) {
+                $base['verifications']['profile_complete'] = false;
+            }
+        }
+
         return $base;
     }
 
