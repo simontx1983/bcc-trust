@@ -226,17 +226,20 @@ class VoteService {
         $trustScore = (float) ($reputation->reputation_score ?? 50.0);
 
         // §16.6 (Rank Phase 6): weight = maturity × rank × trust × fraud,
-        // ceiling 1.75. Rank + maturity epoch from canonical rank_state
-        // (missing row = New Member = weight 0 — the eligibility checker
-        // already blocked them upstream; this is defence in depth).
-        // §31.4 (Rank Phase 8): recovery grace pauses the earned rank
-        // multiplier down to apprentice — same row, zero extra queries.
-        $rankRow    = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId);
-        $inRecovery = $rankRow !== null && (string) $rankRow->recovery_status === 'grace';
+        // ceiling 1.75. Rank multiplier from canonical rank_state (missing
+        // row = New Member = weight 0 — the eligibility checker already
+        // blocked them upstream; defence in depth). §16.3 maturity vests
+        // from account tenure (signup), so onboarding time is not a
+        // vesting penalty. §31.4 (Rank Phase 8): recovery grace pauses the
+        // earned rank multiplier down to apprentice — same row.
+        $rankRow     = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId);
+        $inRecovery  = $rankRow !== null && (string) $rankRow->recovery_status === 'grace';
+        $voterUser   = $this->getVoterUserData($voterId); // cached
+        $tenureEpoch = $voterUser ? (string) $voterUser->user_registered : null;
 
         $weight = $this->weightCalculator->calculate(
             $rankRow !== null ? (string) $rankRow->rank_slug : null,
-            $rankRow !== null ? (string) $rankRow->apprentice_awarded_at : null,
+            $tenureEpoch,
             $trustScore,
             $voterTier,
             $signals,
@@ -849,7 +852,10 @@ class VoteService {
         // recovery keeps its pre-recovery weight verbatim.
         $rankRow    = \BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($voterId);
         $rankSlug   = $rankRow !== null ? (string) $rankRow->rank_slug : null;
-        $epoch      = $rankRow !== null ? (string) $rankRow->apprentice_awarded_at : null;
+        // §16.3 maturity vests from account tenure (signup), not the
+        // apprentice-award moment — see VoteWeightCalculator::maturity().
+        $voterUser  = $this->getVoterUserData($voterId); // cached
+        $epoch      = $voterUser ? (string) $voterUser->user_registered : null;
         $inRecovery = $rankRow !== null && (string) $rankRow->recovery_status === 'grace';
 
         $weight = $this->weightCalculator->calculate(

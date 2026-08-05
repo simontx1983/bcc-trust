@@ -17,8 +17,9 @@ use PHPUnit\Framework\TestCase;
  * Runs against the REAL shipped RankScoringConfig (Phase 0 doctrine) so a
  * config edit is exercised by the same tests that guard the invariants:
  *   - §16.3 maturity boundary suite (d = 0 / 45 / 89 / 90; master-plan C3)
- *   - invariant 15: maturity is a property of the apprentice epoch —
- *     promotion never completes vesting early
+ *   - invariant 15: maturity is a property of the account-tenure epoch
+ *     (the member's signup date — the calculator's epoch argument), so
+ *     onboarding and promotion timing never change the vesting curve
  *   - invariant 17: the max ordinary stack is exactly the 1.75 ceiling
  *   - invariant 18: no input combination exceeds the ceiling
  *

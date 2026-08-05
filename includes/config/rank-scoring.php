@@ -73,9 +73,12 @@ return [
     ],
 
     // ── Meaningful-vote weight inputs ────────────────────────────────
-    // spec-locked — §16.3 Apprentice vesting: floor at award, linear to
-    // 1.0 over span_days, measured from apprentice_awarded_at (the
-    // maturity epoch survives promotion — owner correction 3).
+    // spec-locked — §16.3 account-tenure vesting: floor at signup, linear
+    // to 1.0 over span_days, measured from the member's registration date
+    // (wp_users.user_registered). Anchoring on account tenure rather than
+    // the apprentice-award moment means onboarding time is not a vesting
+    // penalty (owner decision 2026-08-05); the New Member gate still blocks
+    // voting (rank multiplier 0) until the member is confirmed.
     'maturity' => [
         'floor'     => 0.075,
         'span_days' => 90,
