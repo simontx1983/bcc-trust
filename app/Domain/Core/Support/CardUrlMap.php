@@ -13,6 +13,11 @@
  *    Current consumers:
  *      - CardViewService (links.self / links.review on card view-models)
  *      - WatchingService (links.card + actions.view on watch items)
+ *      - GroupsService (links.self on the group detail response)
+ *      - PushPayload (hall-post + holder-community-live push URLs)
+ *      - FeedHydrationPipeline (group.link on syndicated feed posts)
+ *      (the last three route their group URLs through groupUrl() rather
+ *      than the inline prefixes they used pre-canonicalization.)
  *
  *    Next.js frontend routes MUST agree with the prefixes here.
  *    Divergence creates silent broken links across kinds — the bug
@@ -55,14 +60,14 @@ final class CardUrlMap
      * Frontend route prefix for a group's canonical page, keyed by
      * whether the group is a Hall. Halls live under /halls/{slug}
      * (the union-hall directory); every other group kind (nft /
-     * validator / system / user) lives under /groups/{slug}.
+     * validator / system / user) canonicalizes on /communities/{slug}.
      *
-     * These MUST stay byte-identical to the inline prefixes the group
-     * emitters already use (HallsService `'/halls/'`, GroupsService
-     * `'/groups/'`) — see groupUrl().
+     * The thin `/groups/{slug}` FE route is retired: every non-hall
+     * group now resolves on the `/communities/` canonical route, and
+     * this composer is the single place that prefix is emitted.
      */
-    public const HALL_URL_PREFIX  = '/halls/';
-    public const GROUP_URL_PREFIX = '/groups/';
+    public const HALL_URL_PREFIX      = '/halls/';
+    public const COMMUNITY_URL_PREFIX = '/communities/';
 
     /**
      * Frontend route for the entity's canonical page (Next.js).
@@ -114,15 +119,15 @@ final class CardUrlMap
      * Frontend route for a group's canonical page.
      *
      * The SAME centralization rule as the kind prefixes above applies:
-     * every NEW emitter of a group link routes through here. (The five
-     * pre-existing inline `'/halls/'`/`'/groups/'` builders in
-     * HallsService / GroupsService / CardViewService / PushPayload are
-     * grandfathered — they stay byte-identical to this composer, so a
-     * later consolidation is a pure no-op refactor.)
+     * every emitter of a group link routes through here. The former
+     * inline `'/halls/'`/`'/groups/'` builders in HallsService /
+     * GroupsService / CardViewService / PushPayload have all been
+     * converged onto this composer, so the `/communities/` cutover is a
+     * single-site change.
      *
      * Routing rule (matches §4.7.x group `type`):
      *   - hall  → /halls/{slug}
-     *   - else  → /groups/{slug}   (nft / validator / system / user)
+     *   - else  → /communities/{slug}   (nft / validator / system / user)
      *
      * Identifier semantics:
      *   - $type → the GroupType enum VALUE (`$ctx->type->value`) — the
@@ -133,17 +138,16 @@ final class CardUrlMap
     {
         $prefix = $type === GroupType::Hall->value
             ? self::HALL_URL_PREFIX
-            : self::GROUP_URL_PREFIX;
+            : self::COMMUNITY_URL_PREFIX;
         return $prefix . self::sanitizeSlug($slug);
     }
 
     /**
      * Normalize a group slug for URL composition. `post_name` arrives
-     * already WP-sanitized, so for real data this is a no-op (byte-
-     * identical to the grandfathered inline builders); the trim + leading
-     * -slash strip only guards against a caller passing a stray-slashed
-     * or padded value, so we never emit `/halls//x` or a trailing-space
-     * link. Pure (no WP), so groupUrl stays unit-pinnable.
+     * already WP-sanitized, so for real data this is a no-op; the trim +
+     * leading-slash strip only guards against a caller passing a stray-
+     * slashed or padded value, so we never emit `/communities//x` or a
+     * trailing-space link. Pure (no WP), so groupUrl stays unit-pinnable.
      */
     private static function sanitizeSlug(string $slug): string
     {

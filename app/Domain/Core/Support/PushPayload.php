@@ -27,6 +27,8 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Support;
 
+use BCC\Trust\Core\ValueObjects\GroupType;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -174,7 +176,7 @@ final class PushPayload
             'title' => $title,
             'body'  => $body,
             'url'   => $hallSlug !== ''
-                ? '/halls/' . $hallSlug
+                ? CardUrlMap::groupUrl(GroupType::Hall->value, $hallSlug)
                 : '/halls',
         ];
         if ($groupId > 0) {
@@ -390,7 +392,7 @@ final class PushPayload
             'title' => $title,
             'body'  => $body,
             'url'   => ($count === 1 && $slug !== '')
-                ? '/communities/' . $slug
+                ? CardUrlMap::groupUrl(GroupType::Nft->value, $slug)
                 : '/communities',
         ];
         if ($groupId > 0) {
