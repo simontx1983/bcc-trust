@@ -58,6 +58,14 @@ class RankStateService
     }
 
     /**
+     * §D-3 status-chip label for the pre-Apprentice New Member state.
+     * New Member is a status chip, NOT a rung — `rank` stays null, but the
+     * chip renders this label so the rank-chip is never empty (the Neutral
+     * tier rides alongside). Gates read the rank_state row, never this label.
+     */
+    private const NEW_MEMBER_LABEL = 'New Member';
+
+    /**
      * @return array{member_state: string, rank: string|null, rank_label: string|null}
      */
     public function memberState(int $userId): array
@@ -105,7 +113,7 @@ class RankStateService
             return [
                 'member_state' => 'new_member',
                 'rank'         => null,
-                'rank_label'   => null,
+                'rank_label'   => self::NEW_MEMBER_LABEL,
                 'readiness'    => $this->readiness->readinessFor($userId),
             ];
         }
@@ -296,7 +304,7 @@ class RankStateService
     private function shape(?string $rankSlug): array
     {
         if ($rankSlug === null) {
-            return ['member_state' => 'new_member', 'rank' => null, 'rank_label' => null];
+            return ['member_state' => 'new_member', 'rank' => null, 'rank_label' => self::NEW_MEMBER_LABEL];
         }
 
         return [

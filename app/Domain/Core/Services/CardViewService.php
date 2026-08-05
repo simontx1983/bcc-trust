@@ -630,9 +630,11 @@ final class CardViewService
             'reputation_tier_label' => $summary['reputation_tier_label'],
             // Member-state-derived rank label (Rank redesign Phase 5) —
             // resolved via getSummary's batched member-state path.
-            // Nullable: a New Member card carries no rank chip.
+            // "New Member" for the §D-3 status chip; `member_state` lets
+            // the FE style it distinctly. Never empty for a valid member.
             'rank_label'          => $summary['rank_label'],
             'current_rank_label'  => $summary['current_rank_label'],
+            'member_state'        => $summary['member_state'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::buildFlags($userId),
             // §V1.5 endorse fields stay present on member cards for

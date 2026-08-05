@@ -61,9 +61,9 @@ final class AuthorBadgeResolver
      * Users without a reputation row default to `neutral` tier
      * (mirrors `ReputationRepository::getTier()` single-user fallback)
      * → "Neutral" chip. Users without a rank_state row are New Members:
-     * rank_label is null and the FE AuthorBadge suppresses the chip
-     * line — that absence is the intended New Member rendering, not a
-     * degraded state.
+     * `rank_label` is "New Member" (the §D-3 status chip — the rank-chip
+     * is never empty) and `member_state` is `new_member`, so the FE can
+     * style the New Member chip distinctly from an earned rank.
      *
      * `user_id <= 0` entries are skipped — system actors / sentinel
      * rows don't carry a badge.
@@ -73,6 +73,7 @@ final class AuthorBadgeResolver
      *   reputation_tier: string,
      *   reputation_tier_label: string,
      *   rank_label: string|null,
+     *   member_state: string,
      * }>
      */
     public function resolveForUsers(array $userIds): array
@@ -106,9 +107,12 @@ final class AuthorBadgeResolver
             $out[$uid] = [
                 'reputation_tier'       => $rep['reputation_tier'],
                 'reputation_tier_label' => $rep['reputation_tier_label'],
-                // Null for New Members (no rank_state row) — nullable
-                // by contract since the Phase 5 cutover.
+                // Rank-chip label: an earned rung's label, or "New Member"
+                // for the pre-Apprentice status chip (§D-3) — never empty
+                // for a valid user. `member_state` lets the FE style the
+                // New Member chip distinctly from an earned rank.
                 'rank_label'            => $stateByUser[$uid]['rank_label'] ?? null,
+                'member_state'          => $stateByUser[$uid]['member_state'] ?? 'ranked',
             ];
         }
         return $out;
@@ -124,6 +128,7 @@ final class AuthorBadgeResolver
      *   reputation_tier: string,
      *   reputation_tier_label: string,
      *   rank_label: string|null,
+     *   member_state: string,
      * }
      */
     public function resolveForUser(int $userId): array
@@ -135,6 +140,7 @@ final class AuthorBadgeResolver
             'reputation_tier'       => 'neutral',
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel('neutral'),
             'rank_label'            => null,
+            'member_state'          => 'ranked',
         ];
     }
 }

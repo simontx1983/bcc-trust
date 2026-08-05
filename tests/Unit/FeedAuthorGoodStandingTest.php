@@ -45,7 +45,7 @@ final class FeedAuthorGoodStandingTest extends TestCase
 
     /**
      * @param string $tier
-     * @return array{reputation_tier: string, reputation_tier_label: string, card_tier: string|null, tier_label: string|null, rank_label: string}
+     * @return array{reputation_tier: string, reputation_tier_label: string, card_tier: string|null, tier_label: string|null, rank_label: string, member_state: string}
      */
     private function badgeForTier(string $tier): array
     {
@@ -55,6 +55,7 @@ final class FeedAuthorGoodStandingTest extends TestCase
             'reputation_tier'       => $tier,
             'reputation_tier_label' => \BCC\Trust\Core\Support\ReputationTierMap::toReputationTierLabel($tier),
             'rank_label'            => 'Apprentice',
+            'member_state'          => 'ranked',
         ];
     }
 
@@ -130,6 +131,7 @@ final class FeedAuthorGoodStandingTest extends TestCase
         self::assertSame('trusted', $out['reputation_tier']);
         self::assertSame('Trusted', $out['reputation_tier_label']);
         self::assertSame('Apprentice', $out['rank_label']);
+        self::assertSame('ranked', $out['member_state']);
 
         // card_tier / tier_label are RETIRED (contract v1.57) — assert they
         // are GONE, not merely changed. A copy-through helper that silently
