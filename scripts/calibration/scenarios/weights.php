@@ -135,7 +135,7 @@ function calib_scenario_weights(): array
         'model'    => [
             'trust_scores' => 'tier-consistent draws: caution 30-44, neutral 45-59, trusted 60-80 (ASSUMED)',
             'fraud'        => 'clean signals, fraud_score 0 (discount 1.0)',
-            'maturity'     => 'apprentice epoch = day 0 for every member (accounts created day 0)',
+            'maturity'     => 'tenure epoch = signup = day 0 for every member (accounts created day 0)',
         ],
         'per_day'  => $perDay,
         'targets'  => [

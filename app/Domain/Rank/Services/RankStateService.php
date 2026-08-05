@@ -122,12 +122,15 @@ class RankStateService
             ];
         }
 
-        // §16.3 Apprentice vesting from the maturity epoch (survives
-        // promotion — owner correction 3).
-        $awardedTs = strtotime((string) $row->apprentice_awarded_at . ' UTC');
-        $elapsed   = $awardedTs !== false
-            ? max(0, min($this->config->maturitySpanDays, (int) floor((time() - $awardedTs) / 86400)))
-            : $this->config->maturitySpanDays;
+        // §16.3 vesting from the tenure epoch — the member's signup date
+        // (wp_users.user_registered), matching VoteWeightCalculator so the
+        // displayed vesting can never drift from the applied vote weight.
+        // Missing/unparseable epoch ⇒ floor (same fail-safe as the calculator).
+        $user         = get_userdata($userId);
+        $tenureTs     = $user !== false ? strtotime((string) $user->user_registered . ' UTC') : false;
+        $elapsed      = $tenureTs !== false
+            ? max(0, min($this->config->maturitySpanDays, (int) floor((time() - $tenureTs) / 86400)))
+            : 0;
         $maturity = $this->config->maturityFloor
             + ($elapsed / $this->config->maturitySpanDays) * (1.0 - $this->config->maturityFloor);
 

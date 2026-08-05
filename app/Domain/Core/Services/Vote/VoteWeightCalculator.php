@@ -53,8 +53,9 @@ class VoteWeightCalculator {
      * @param string|null $rankSlug             Voter's earned rank, or null
      *        for a New Member (weight 0 — defensive; the eligibility
      *        checker blocks the vote upstream).
-     * @param string|null $apprenticeAwardedAt  MySQL UTC datetime — the
-     *        §16.3 maturity epoch. Null (missing state) vests nothing.
+     * @param string|null $tenureEpoch          MySQL UTC datetime — the
+     *        §16.3 maturity epoch: the voter's signup date
+     *        (wp_users.user_registered). Null vests the floor.
      * @param float $trustScore                 Current trust score 0–100.
      * @param string $voterTier                 Reputation tier at
      *        calculation time (informational — carried on the VO for
@@ -68,7 +69,7 @@ class VoteWeightCalculator {
      */
     public function calculate(
         ?string             $rankSlug,
-        ?string             $apprenticeAwardedAt,
+        ?string             $tenureEpoch,
         float               $trustScore,
         string              $voterTier,
         array               $signals,
@@ -78,7 +79,7 @@ class VoteWeightCalculator {
     ): VoteWeight {
         $now ??= new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
 
-        $maturity  = $this->maturity($apprenticeAwardedAt, $now);
+        $maturity  = $this->maturity($tenureEpoch, $now);
         $rankMult  = $this->rankMultiplier($rankSlug, $inRecovery);
         $trustMult = $this->trustMultiplier($trustScore);
 
@@ -124,16 +125,18 @@ class VoteWeightCalculator {
 
     /**
      * §16.3: floor + (d / span × (1 − floor)), d clamped to [0, span]
-     * from the apprentice epoch. Missing epoch ⇒ the floor (never a
-     * negative or an over-unity value).
+     * from the tenure epoch — the voter's signup date. Anchoring on
+     * account tenure (not the apprentice-award moment) means onboarding
+     * time is not a vesting penalty; the gate still blocks New Members
+     * (rank multiplier 0) until confirmed. Missing epoch ⇒ the floor.
      */
-    public function maturity(?string $apprenticeAwardedAt, \DateTimeImmutable $now): float
+    public function maturity(?string $tenureEpoch, \DateTimeImmutable $now): float
     {
-        if ($apprenticeAwardedAt === null || $apprenticeAwardedAt === '') {
+        if ($tenureEpoch === null || $tenureEpoch === '') {
             return $this->config->maturityFloor;
         }
 
-        $epoch = strtotime($apprenticeAwardedAt . ' UTC');
+        $epoch = strtotime($tenureEpoch . ' UTC');
         if ($epoch === false) {
             return $this->config->maturityFloor;
         }
