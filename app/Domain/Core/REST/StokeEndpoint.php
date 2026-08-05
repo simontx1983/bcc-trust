@@ -101,11 +101,6 @@ final class StokeEndpoint
             return ApiResponse::error('bcc_internal_error', 'Failed to stoke.', 500);
         }
 
-        // §A3-style event layered on the write, mirroring
-        // bcc_reaction_added — subscribers (future analytics) listen
-        // here rather than reaching into the repository directly.
-        do_action('bcc_stoke_added', $userId, $actId);
-
         return self::buildStateResponse($actId, $userId);
     }
 
@@ -133,8 +128,6 @@ final class StokeEndpoint
         if (!Plugin::instance()->stokeRepository()->removeStoke($actId, $userId)) {
             return ApiResponse::error('bcc_internal_error', 'Failed to un-stoke.', 500);
         }
-
-        do_action('bcc_stoke_removed', $userId, $actId);
 
         return self::buildStateResponse($actId, $userId);
     }

@@ -128,8 +128,6 @@ final class CommentStokeEndpoint
             );
         }
 
-        do_action($isAdd ? 'bcc_stoke_added' : 'bcc_stoke_removed', $userId, $commentActId);
-
         $state = [
             'stoke_count'       => $stokeRepo->countForActivity($commentActId),
             'viewer_has_stoked' => $stokeRepo->viewerHasStoked($commentActId, $userId),
