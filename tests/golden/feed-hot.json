@@ -202,7 +202,7 @@
       "external_id": 5022,
       "group": {
         "id": 5021,
-        "link": "/groups/test-group-2-2",
+        "link": "/communities/test-group-2-2",
         "name": "test group 2",
         "type": "user",
         "verification": null

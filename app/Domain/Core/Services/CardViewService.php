@@ -878,7 +878,7 @@ final class CardViewService
             ],
             'permissions'         => self::communityPermissions(),
             'social_proof'        => null,
-            'links'               => ['self' => '/communities/' . $slug],
+            'links'               => ['self' => CardUrlMap::groupUrl($groupData['type'], $slug)],
             // `open` is the only card action — communities are joined
             // via the group detail's own join flow, never watched, so
             // no `watch` action is emitted. Self-describing GET

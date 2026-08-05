@@ -56,7 +56,7 @@ final class FeedGroupAttributionTest extends TestCase
         self::assertSame('nft', $block['type']);
         self::assertArrayHasKey('verification', $block);
         self::assertSame('Bored Apes', $block['name']);
-        self::assertSame('/groups/bored-apes', $block['link']);
+        self::assertSame('/communities/bored-apes', $block['link']);
     }
 
     public function testClosedGroupGetsNameAndLink(): void
@@ -65,7 +65,7 @@ final class FeedGroupAttributionTest extends TestCase
         $block = self::attribution(self::ctx(GroupType::Nft, PeepSoPrivacy::Closed), 'Punks', 'punks', false);
 
         self::assertSame('Punks', $block['name']);
-        self::assertSame('/groups/punks', $block['link']);
+        self::assertSame('/communities/punks', $block['link']);
     }
 
     // (b) secret + NON-member → id/type only, NO name/link ---------------
@@ -88,7 +88,7 @@ final class FeedGroupAttributionTest extends TestCase
         $block = self::attribution(self::ctx(GroupType::User, PeepSoPrivacy::Secret), 'Inner Circle', 'inner-circle', true);
 
         self::assertSame('Inner Circle', $block['name']);
-        self::assertSame('/groups/inner-circle', $block['link']);
+        self::assertSame('/communities/inner-circle', $block['link']);
     }
 
     // (d) anonymous viewer + secret → hidden -----------------------------
@@ -105,13 +105,13 @@ final class FeedGroupAttributionTest extends TestCase
 
     // (e) hall vs non-hall link prefix -----------------------------------
 
-    public function testHallLinksToHallsNonHallToGroups(): void
+    public function testHallLinksToHallsNonHallToCommunities(): void
     {
         $hall = self::attribution(self::ctx(GroupType::Hall, PeepSoPrivacy::Open), 'Ethereum Hall', 'ethereum-hall', false);
         self::assertSame('/halls/ethereum-hall', $hall['link']);
 
         $nft = self::attribution(self::ctx(GroupType::Nft, PeepSoPrivacy::Open), 'Bored Apes', 'bored-apes', false);
-        self::assertSame('/groups/bored-apes', $nft['link']);
+        self::assertSame('/communities/bored-apes', $nft['link']);
     }
 
     // (f) name/slug surface as name; deleted-group edge → omit -----------

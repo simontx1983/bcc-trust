@@ -187,7 +187,7 @@ final class FeedHydrationPipeline
      *     type: 'nft' | 'validator' | 'hall' | 'system' | 'user',
      *     verification: { kind: 'on_chain', label: 'On-Chain Verified' } | null,
      *     name?: string,   // group display name (post_title)
-     *     link?: string    // /halls/{slug} (hall) or /groups/{slug} (else)
+     *     link?: string    // /halls/{slug} (hall) or /communities/{slug} (else)
      *   }
      *
      * Items with no group association get no `group` field — absence is
@@ -320,10 +320,10 @@ final class FeedHydrationPipeline
      *     false) → NO name/link: the group's identity never leaks.
      *   - resolved-but-empty name/slug (deleted-group edge — the display
      *     row dropped out of findManyByIds) → NO name/link, defensively;
-     *     never a broken `/groups/` link.
+     *     never a broken `/communities/` link.
      *
      * Link composition routes through the single CardUrlMap::groupUrl
-     * composer — hall → /halls/{slug}, else → /groups/{slug}.
+     * composer — hall → /halls/{slug}, else → /communities/{slug}.
      *
      * @return array<string, mixed>
      */

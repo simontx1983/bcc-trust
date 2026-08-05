@@ -46,6 +46,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\GroupPostPolicyRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\PublicAllPolicy;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
@@ -302,7 +303,7 @@ final class GroupsService
             // slug; null means untagged.
             'chain_tag'         => $chainTag,
             'trust_min'         => $trustMinWire,
-            'links'             => ['self' => '/groups/' . (string) $row->post_name],
+            'links'             => ['self' => CardUrlMap::groupUrl($ctx->type->value, (string) $row->post_name)],
             'card'              => $card,
         ];
     }
