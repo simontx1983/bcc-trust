@@ -330,6 +330,7 @@ final class UserViewService
      *
      * @param array{
      *   follower_counts?: array<int, int>,
+     *   following_counts?: array<int, int>,
      *   primary_halls?: array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>,
      *   owned_pages_counts?: array<int, int>,
      *   owned_pages_by_type?: array<int, array{validator: int, project: int, nft: int, dao: int}>,
@@ -360,6 +361,7 @@ final class UserViewService
      *   flags: list<string>,
      *   trust_score: int,
      *   followers_count: int,
+     *   following_count: int,
      *   primary_hall: array{id: int, slug: string, name: string}|null,
      *   owned_pages_count: int,
      *   owned_pages_by_type: array{validator: int, project: int, nft: int, dao: int},
@@ -405,10 +407,24 @@ final class UserViewService
         // Followers count — prefer prefetched batch, fall back to the
         // single-user repo call so non-list callers (admin tools,
         // tests) still work without a prefetch ceremony.
+        // Both sides of the follow graph. getCounts() resolves BOTH in one
+        // call, so the fallback is memoized rather than called twice —
+        // otherwise adding the watching count would have doubled this
+        // path from 2 COUNT queries to 4.
+        $graphCounts = null;
         if ($prefetched !== null && isset($prefetched['follower_counts'])) {
             $followersCount = $prefetched['follower_counts'][$userId] ?? 0;
         } else {
-            $followersCount = PeepSoFollowerRepository::getCounts($userId)['followers'];
+            $graphCounts    = PeepSoFollowerRepository::getCounts($userId);
+            $followersCount = $graphCounts['followers'];
+        }
+        if ($prefetched !== null && isset($prefetched['following_counts'])) {
+            $followingCount = $prefetched['following_counts'][$userId] ?? 0;
+        } else {
+            if ($graphCounts === null) {
+                $graphCounts = PeepSoFollowerRepository::getCounts($userId);
+            }
+            $followingCount = $graphCounts['following'];
         }
 
         // Primary Hall — same prefer-prefetched pattern. The prefetch
@@ -526,6 +542,10 @@ final class UserViewService
             'flags'               => self::resolveFlags($userId),
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
             'followers_count'     => $followersCount,
+            // Active side of the same graph — accounts this member
+            // watches. Surfaced on the member trading card beside
+            // followers_count so the identity block shows both.
+            'following_count'     => $followingCount,
             'primary_hall'        => $primaryHall,
             'owned_pages_count'   => $ownedPagesCount,
             'owned_pages_by_type' => $ownedPagesByType,
