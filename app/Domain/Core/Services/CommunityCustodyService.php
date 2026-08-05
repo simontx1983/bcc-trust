@@ -19,12 +19,21 @@
  *      an unsolicited transfer to a stranger would burn THEIR cap and
  *      re-arm THEIR cooldown — membership is the consent proxy)
  *   6. receiver passes can('receive_community') — evaluated FOR the
- *      receiver; deny reasons surface prefixed `receiver_*`
+ *      receiver; ANY denial collapses to the SINGLE generic wire reason
+ *      `receiver_ineligible` (privacy: never leak the target's
+ *      suspension / rank / tier / recovery / cap / cooldown status). The
+ *      true sub-reason is logged server-side for admin debugging only.
  *   7. PeepSoGroupWriter::transferOwnership (the sanctioned write path
  *      — peepso-write-guard: every BCC gate above runs first)
  *   8. TWO custody-ledger rows (giver 'transfer_out', receiver
  *      'receive') — both (re)arm the 30-day global cooldown — then the
  *      audit trail
+ *
+ * Steps 6–8 run inside a per-RECEIVER advisory lock (§21.2 TOCTOU
+ * close): the cap/cooldown check-then-act must be atomic so two
+ * tightly-timed transfers can't each pass the receiver's cap check
+ * before either records. Contention fails CLOSED with a retryable
+ * bcc_conflict rather than proceeding unlocked.
  *
  * Collaborators are reached through protected hooks (same subclass
  * pattern as CapabilityResolver) so CommunityCustodyServiceTest can
@@ -120,35 +129,61 @@ class CommunityCustodyService
             ];
         }
 
-        // ── 6. receiver capability, evaluated FOR the receiver ───────
-        $receiverDecision = $this->capability($toUserId, 'receive_community');
-        if (!$receiverDecision->isAllowed()) {
-            $reason = 'receiver_' . $receiverDecision->reason;
+        // ── 6–8 under a per-RECEIVER advisory lock (§21.2 TOCTOU) ────
+        // The cap + cooldown gate below is the RECEIVER's (create and
+        // receive share resolveCustodyAcquisition). Serialize the
+        // receiver's check-then-act so two tightly-timed transfers can't
+        // each pass the cap check before either records — mirrors
+        // postCreate's per-creator lock. The giver has no cap/cooldown
+        // gate, so the lock is keyed on the RECEIVER. Contention fails
+        // CLOSED (retryable bcc_conflict) rather than proceeding unlocked.
+        $lockKey = self::custodyLockKey($toUserId);
+        if (!$this->acquireLock($lockKey)) {
             return [
-                'error'   => 'bcc_forbidden',
-                'message' => self::receiverDenyMessage($receiverDecision->reason),
-                'data'    => ['reason' => $reason],
+                'error'   => 'bcc_conflict',
+                'message' => 'Please retry.',
             ];
         }
 
-        // ── 7. the sanctioned write path ─────────────────────────────
-        if (!$this->writerTransfer($groupId, $viewerId, $toUserId)) {
+        try {
+            // ── 6. receiver capability, evaluated FOR the receiver ───
+            // Re-read INSIDE the lock so the cap/cooldown facts are the
+            // ones we act on. A denial NEVER leaks the receiver's
+            // specific status (suspension / rank / tier / recovery / cap
+            // / cooldown): the wire reason collapses to the single
+            // generic `receiver_ineligible`; the true sub-reason is
+            // logged server-side for admin debugging only.
+            $receiverDecision = $this->capability($toUserId, 'receive_community');
+            if (!$receiverDecision->isAllowed()) {
+                $this->logReceiverDenied($groupId, $viewerId, $toUserId, $receiverDecision->reason);
+                return [
+                    'error'   => 'bcc_forbidden',
+                    'message' => self::receiverDenyMessage(),
+                    'data'    => ['reason' => 'receiver_ineligible'],
+                ];
+            }
+
+            // ── 7. the sanctioned write path ─────────────────────────
+            if (!$this->writerTransfer($groupId, $viewerId, $toUserId)) {
+                return [
+                    'error'   => 'bcc_internal_error',
+                    'message' => 'Could not transfer the community. Try again in a moment.',
+                ];
+            }
+
+            // ── 8. custody ledger (both cooldowns re-arm) + audit ────
+            $this->recordCustody($viewerId, $groupId, 'transfer_out', $toUserId);
+            $this->recordCustody($toUserId, $groupId, 'receive', $viewerId);
+            $this->audit($groupId, $viewerId, $toUserId);
+
             return [
-                'error'   => 'bcc_internal_error',
-                'message' => 'Could not transfer the community. Try again in a moment.',
+                'ok'           => true,
+                'group_id'     => $groupId,
+                'new_owner_id' => $toUserId,
             ];
+        } finally {
+            $this->releaseLock($lockKey);
         }
-
-        // ── 8. custody ledger (both cooldowns re-arm) + audit ────────
-        $this->recordCustody($viewerId, $groupId, 'transfer_out', $toUserId);
-        $this->recordCustody($toUserId, $groupId, 'receive', $viewerId);
-        $this->audit($groupId, $viewerId, $toUserId);
-
-        return [
-            'ok'           => true,
-            'group_id'     => $groupId,
-            'new_owner_id' => $toUserId,
-        ];
     }
 
     /**
@@ -166,22 +201,17 @@ class CommunityCustodyService
     }
 
     /**
-     * Plain state descriptions per receiver deny reason. The wire
-     * reason carries the `receiver_` prefix; the human copy names the
-     * blocked party so the owner understands the transfer target — not
-     * their own account — is the blocker.
+     * The SINGLE generic receiver-denial message. Privacy (wallet-privacy
+     * P0 precedent): the initiating owner must NEVER learn the transfer
+     * target's specific status — suspension, rank, tier, recovery,
+     * ownership cap, or cooldown. All six receive_community sub-reasons
+     * collapse to this one sentence beside the `receiver_ineligible` wire
+     * reason; the true sub-reason is logged server-side only
+     * (logReceiverDenied).
      */
-    private static function receiverDenyMessage(string $reason): string
+    private static function receiverDenyMessage(): string
     {
-        return match ($reason) {
-            'suspended'       => 'The new owner\'s account is suspended.',
-            'new_member'      => 'The new owner must be at least an Apprentice.',
-            'below_neutral'   => 'The new owner\'s standing must be Neutral or better.',
-            'in_recovery'     => 'The new owner\'s community actions are paused during rank recovery.',
-            'cap_reached'     => 'The new owner already owns the maximum number of communities for their rank.',
-            'cooldown_active' => 'The new owner is inside the 30-day community cooldown.',
-            default           => 'The new owner can\'t receive this community right now.',
-        };
+        return 'This member can\'t receive a community right now.';
     }
 
     // ── collaborator hooks (overridden by CommunityCustodyServiceTest) ──
@@ -238,5 +268,58 @@ class CommunityCustodyService
             'from' => $fromUserId,
             'to'   => $toUserId,
         ], 'group', $fromUserId);
+    }
+
+    /**
+     * Server-side-only record of WHY a receiver was ineligible. The true
+     * sub-reason (suspended / new_member / below_neutral / in_recovery /
+     * cap_reached / cooldown_active) is kept for admin debugging but MUST
+     * NEVER reach the wire — the response collapses to the generic
+     * `receiver_ineligible` (privacy: the owner must not learn the
+     * target's suspension / rank / tier / cooldown / cap status).
+     */
+    protected function logReceiverDenied(int $groupId, int $fromUserId, int $toUserId, string $trueReason): void
+    {
+        \BCC\Core\Log\Logger::info('[bcc-trust] community transfer denied — receiver ineligible', [
+            'group_id'    => $groupId,
+            'from'        => $fromUserId,
+            'to'          => $toUserId,
+            'true_reason' => $trueReason,
+        ]);
+    }
+
+    // ── §21.2 TOCTOU advisory lock (mirrors DisputeRepository) ──────────
+
+    /**
+     * Per-user advisory-lock key namespacing the custody critical section.
+     * Well under MySQL's 64-char GET_LOCK name limit.
+     */
+    private static function custodyLockKey(int $userId): string
+    {
+        return 'bcc_community_custody_' . $userId;
+    }
+
+    /**
+     * Acquire the per-user custody advisory lock (non-blocking, timeout 0).
+     * Routed through a protected hook so CommunityCustodyServiceTest can
+     * simulate contention without a live MySQL session. Fails CLOSED when
+     * the bcc-core primitive is unavailable — the cap/cooldown critical
+     * section never runs unlocked. NULL-vs-0 handling lives inside
+     * AdvisoryLock::acquire (driver error and held-elsewhere both → false).
+     */
+    protected function acquireLock(string $key): bool
+    {
+        if (!class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            return false;
+        }
+        return \BCC\Core\DB\AdvisoryLock::acquire($key, 0);
+    }
+
+    /** Release the custody advisory lock (safe no-op if not held). */
+    protected function releaseLock(string $key): void
+    {
+        if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            \BCC\Core\DB\AdvisoryLock::release($key);
+        }
     }
 }
