@@ -25,6 +25,7 @@ require_once __DIR__ . '/scenarios/rings.php';
 require_once __DIR__ . '/scenarios/weights.php';
 require_once __DIR__ . '/scenarios/quorum.php';
 require_once __DIR__ . '/scenarios/decay.php';
+require_once __DIR__ . '/scenarios/helping.php';
 
 $scenarioFns = [
     'honest'  => 'calib_scenario_honest',
@@ -32,6 +33,7 @@ $scenarioFns = [
     'weights' => 'calib_scenario_weights',
     'quorum'  => 'calib_scenario_quorum',
     'decay'   => 'calib_scenario_decay',
+    'helping' => 'calib_scenario_helping',
 ];
 
 $requested = null;
@@ -138,6 +140,69 @@ foreach (array_keys($scenarioFns) as $name) {
                 $row['day'], $row['pool_size'],
                 $row['top10_weight'] === null ? 'n/a' : sprintf('%.2f', $row['top10_weight']),
                 $row['quorum_probability']['p_30'], $row['quorum_probability']['p_50']
+            );
+        }
+    }
+
+    if ($name === 'helping') {
+        $lines[] = '';
+        $lines[] = '  day-400 helping (n | owners | %>=7.5 | %>=15 | min/median/max):';
+        foreach ($result['helping_distribution'] as $profile => $d) {
+            $lines[] = sprintf(
+                '    %-9s n=%d  own=%-3d  >=7.5=%5.1f%%  >=15=%5.1f%%  %s / %s / %s',
+                $profile, $d['n'], $d['owners_n'], $d['pct_ge_7_5'], $d['pct_ge_15'],
+                var_export($d['helping_min'], true), var_export($d['helping_median'], true),
+                var_export($d['helping_max'], true)
+            );
+        }
+        $lines[] = '';
+        $lines[] = '  contribution diversity-5 (owner-gated):';
+        foreach ($result['contribution_diversity']['per_profile'] as $profile => $d) {
+            $lines[] = sprintf(
+                '    %-9s types=%s  %%>=5=%5.1f%%  owners %%>=5=%5.1f%%',
+                $profile,
+                json_encode($d['types_histogram'], JSON_UNESCAPED_SLASHES),
+                $d['pct_ge_5'], $d['owners_pct_ge_5']
+            );
+        }
+        $cd = $result['contribution_diversity'];
+        $lines[] = sprintf(
+            '    owners>=5=%d/%d  non-owners>=5=%d/%d  any_non_owner_reached_5=%s',
+            $cd['owners_ge5'], $cd['owners_total'], $cd['non_owners_ge5'], $cd['non_owners_total'],
+            $cd['any_non_owner_reached_5'] ? 'true' : 'false'
+        );
+        $lines[] = '';
+        $lines[] = '  anti-farm helping(distinct markers x 50 marks): '
+            . json_encode($result['anti_farm']['helping_by_distinct_markers'], JSON_UNESCAPED_SLASHES);
+        $lines[] = sprintf(
+            '    9 markers=%.2f (<25 => cannot fill)  10 markers=%.2f  3x1000 marks=%.2f (cap bites)  owner 5mk+steward=%.2f',
+            $result['anti_farm']['nonowner_9_markers_helping'],
+            $result['anti_farm']['nonowner_10_markers_helping'],
+            $result['anti_farm']['small_pool_volume_helping_3x1000'],
+            $result['anti_farm']['owner_5_markers_plus_stewardship']
+        );
+        $lines[] = '';
+        $lines[] = '  promotion  SHIPPED vs RESTORE (journeyman median | veteran promoted | earliest):';
+        $ps = $result['promotion']['shipped'];
+        $pr = $result['promotion']['restore'];
+        $lines[] = sprintf(
+            '    SHIPPED  J-median=%s  V-promoted=%d  V-earliest=%s',
+            var_export($ps['journeyman_median'], true), $ps['veteran_promoted'],
+            var_export($ps['veteran_earliest'], true)
+        );
+        $lines[] = sprintf(
+            '    RESTORE  J-median=%s  V-promoted=%d  V-earliest=%s  (J-median shift %s d)',
+            var_export($pr['journeyman_median'], true), $pr['veteran_promoted'],
+            var_export($pr['veteran_earliest'], true),
+            var_export($result['promotion']['journeyman_median_shift_days'], true)
+        );
+        $lines[] = '    per-profile J-reach% / V-reach% (SHIPPED -> RESTORE):';
+        foreach ($ps['per_profile'] as $profile => $sp) {
+            $rp = $pr['per_profile'][$profile];
+            $lines[] = sprintf(
+                '      %-9s J %5.1f%%->%5.1f%%   V %5.1f%%->%5.1f%%',
+                $profile, $sp['journeyman_reach_pct'], $rp['journeyman_reach_pct'],
+                $sp['veteran_reach_pct'], $rp['veteran_reach_pct']
             );
         }
     }

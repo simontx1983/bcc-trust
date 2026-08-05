@@ -10,8 +10,8 @@ calibration checkpoints.
 
 ```bash
 cd app/public/wp-content/plugins/bcc-trust
-php scripts/calibration/run.php                 # full suite (~3 s)
-php scripts/calibration/run.php --scenario=X    # X ∈ honest|rings|weights|quorum|decay
+php scripts/calibration/run.php                 # full suite (~10 s)
+php scripts/calibration/run.php --scenario=X    # X ∈ honest|rings|weights|quorum|decay|helping
 ```
 
 Outputs one `results/<scenario>.json` per scenario (raw distributions +
@@ -35,6 +35,7 @@ is a harness bug; the production file is always the source of truth.**
 | Piece | Source |
 |---|---|
 | Config load + validation | `RankScoringConfig::fromDefaultFile()` over the real `includes/config/rank-scoring.php` |
+| PROPOSED-RESTORE config (`helping` scenario) | the shipped config array with only the three helping gates overridden, re-validated through the REAL `RankScoringConfig::fromArray()` — the shipped file is never edited (`calib_restore_config()` in `bootstrap.php`) |
 | Rank Score math (share caps, category ceilings, time credit, decay, floor) | `RankScoreCalculator::calculate()` / `decayFor()` |
 | §4.4 event-cap allocation | `RankEvidenceIngestor::allocateWithinCap()` (public static, pure) |
 | Vote weight (maturity, rank/trust multipliers, ceiling clamp) | `VoteWeightCalculator::calculate()` (+ `FraudDiscountCalculator::compute()` with clean signals; constants loaded from the real `includes/config/fraud-detection.php`) |
@@ -60,15 +61,35 @@ is a harness bug; the production file is always the source of truth.**
    outcomes-category actions**, yet §4.3 minimums require both — with
    the profiles as literally specified, *nobody can ever promote*.
    The harness therefore adds ASSUMED rates (marked in
-   `CalibProfiles::HONEST`): helpful-mark probability 0.15 per comment,
-   attestation-received rates for non-heavy profiles, and
-   outcomes/stewardship rates for regular/heavy. Every promotion-day
-   number downstream is sensitive to these rates.
-3. **Stewardship for heavy members is assumed** (0.25/mo) because the
-   Veteran diversity minimum requires **5 distinct contribution source
-   types** and only 5 exist (post, comment, review, report_upheld,
-   stewardship) — without stewardship, Veteran is structurally
-   unreachable for everyone.
+   `CalibProfiles::HONEST`): attestation-received rates for non-heavy
+   profiles, outcomes rates for regular/heavy, and the two helping
+   streams described next. Every promotion-day number downstream is
+   sensitive to these rates.
+3. **The two helping emitters are modeled after the REAL merged
+   emitters** (`HelpfulMarkEvidenceListener` + `StewardshipSweepService`),
+   not as generic helping points:
+   - *helpful_mark* — a member EARNS helping when OTHER credible members
+     mark THEIR content helpful. The mark credits the content author and
+     is keyed by the MARKER as the §9.3 `helping_recipient` relationship
+     id, so a single marker is capped at 0.10 × 25 = **2.5** of the
+     recipient's helping (5 marks × 0.5). Filling helping is therefore
+     DISTINCT-MARKER-bounded: `distinct_markers` (ASSUMED) sizes each
+     member's credible-marker pool and `helpful_received_per_month`
+     (ASSUMED) is the arrival rate, spread uniformly across that pool.
+     Reaching helping 25 needs ≥10 distinct markers; Veteran 15 needs
+     ≥6; Journeyman 7.5 needs ≥3. Non-credible marks mint no evidence in
+     production, so the harness only emits credible ones.
+   - *stewardship* — a member who OWNS an active User-kind community
+     earns one `stewardship` event per ISO week (→ contribution +
+     helping, relationship id 0). All stewardship-helping shares the
+     single identity-0 bucket, capped at 2.5. `owner_period` (ASSUMED)
+     makes members at `index % owner_period == 0` owners (regular ≈ 33%,
+     heavy 50%); stewardship starts at
+     `STEWARDSHIP_ACTIVATION_DAY` (14). Stewardship is the ONLY 5th
+     contribution source type (post, comment, review, report_upheld,
+     stewardship), so **Veteran contribution-diversity-5 is reachable
+     ONLY by community owners** — a load-bearing consequence the
+     `helping` scenario tests directly.
 4. Trust scores for vote weights are tier-consistent draws
    (caution 30–44, neutral 45–59, trusted 60–80); fraud signals are
    clean (discount 1.0); every member's apprentice epoch is day 0.
@@ -86,6 +107,7 @@ is a harness bug; the production file is always the source of truth.**
 | 3 | `weights` — real VoteWeightCalculator over the cohort at days 90/180/365 | max ≤ 1.75 with zero above; Gini ≤ 0.65; histogram |
 | 4 | `quorum` — pools E ∈ {5..50}, top-10 sum + 500-trial participation draws (30%/50%) | informational: locate where binding outcomes become feasible (plan expects early Inconclusive dominance) |
 | 5 | `decay` — heavy member inactive from day 200 (run to day 800); 30% evidence reversal at day 150 per profile | real decay == config arithmetic (grace 365d, 30d step, 1pt → nothing decays inside day 400); score floors at 0; recovery vs the 90-day grace |
+| 6 | `helping` — the honest cohort under SHIPPED vs PROPOSED-RESTORE config (helping min 7.5/15, veteran-diversity 5), driven by the two modeled helping emitters | SHIPPED baseline still promotes; helping ≥7.5/≥15 reachable for regular/heavy; diversity-5 reached ONLY by owners; RESTORE still reaches Veteran (not over-gated); Journeyman median shift bounded; ANTI-FARM: <10 distinct markers can never fill helping and volume can't beat the 0.10 cap |
 
 Note on the "combined ≤ one honest member" ring assertion: it compares
 **ledgered evidence** (contribution + helping + recognition + outcomes).

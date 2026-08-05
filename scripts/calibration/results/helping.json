@@ -1,0 +1,293 @@
+{
+    "scenario": "helping_restore",
+    "model": {
+        "epoch": "2026-01-01",
+        "horizon_days": 400,
+        "helping_category_max": 25.0,
+        "per_marker_share_cap": 2.5,
+        "helpful_mark_points": 0.5,
+        "stewardship_points": 0.5,
+        "restore_overrides": {
+            "category_minimums.journeyman.helping": 7.5,
+            "category_minimums.veteran.helping": 15.0,
+            "diversity_minimums.veteran_categories": 5
+        },
+        "assumed_rates": {
+            "casual": {
+                "helpful_received_per_month": 2.0,
+                "distinct_markers": 4,
+                "owner_period": 0
+            },
+            "regular": {
+                "helpful_received_per_month": 6.0,
+                "distinct_markers": 8,
+                "owner_period": 3
+            },
+            "heavy": {
+                "helpful_received_per_month": 14.0,
+                "distinct_markers": 12,
+                "owner_period": 2
+            },
+            "sporadic": {
+                "helpful_received_per_month": 0.4,
+                "distinct_markers": 2,
+                "owner_period": 0
+            }
+        },
+        "stewardship_activation_day": 14,
+        "stewardship_period_days": 7
+    },
+    "helping_distribution": {
+        "casual": {
+            "n": 200,
+            "owners_n": 0,
+            "pct_ge_7_5": 97.5,
+            "pct_ge_15": 0.0,
+            "helping_min": 6.5,
+            "helping_median": 9.5,
+            "helping_max": 10.0
+        },
+        "regular": {
+            "n": 200,
+            "owners_n": 67,
+            "pct_ge_7_5": 100.0,
+            "pct_ge_15": 100.0,
+            "helping_min": 18.5,
+            "helping_median": 20.0,
+            "helping_max": 22.5
+        },
+        "heavy": {
+            "n": 200,
+            "owners_n": 100,
+            "pct_ge_7_5": 100.0,
+            "pct_ge_15": 100.0,
+            "helping_min": 25.0,
+            "helping_median": 25.0,
+            "helping_max": 25.0
+        },
+        "sporadic": {
+            "n": 200,
+            "owners_n": 0,
+            "pct_ge_7_5": 0.0,
+            "pct_ge_15": 0.0,
+            "helping_min": 0.5,
+            "helping_median": 2.5,
+            "helping_max": 5.0
+        }
+    },
+    "contribution_diversity": {
+        "per_profile": {
+            "casual": {
+                "n": 200,
+                "types_histogram": {
+                    "2": 200
+                },
+                "pct_ge_5": 0.0,
+                "owners_n": 0,
+                "owners_pct_ge_5": 0.0
+            },
+            "regular": {
+                "n": 200,
+                "types_histogram": {
+                    "3": 41,
+                    "4": 111,
+                    "5": 48
+                },
+                "pct_ge_5": 24.0,
+                "owners_n": 67,
+                "owners_pct_ge_5": 71.6
+            },
+            "heavy": {
+                "n": 200,
+                "types_histogram": {
+                    "3": 4,
+                    "4": 99,
+                    "5": 97
+                },
+                "pct_ge_5": 48.5,
+                "owners_n": 100,
+                "owners_pct_ge_5": 97.0
+            },
+            "sporadic": {
+                "n": 200,
+                "types_histogram": {
+                    "1": 200
+                },
+                "pct_ge_5": 0.0,
+                "owners_n": 0,
+                "owners_pct_ge_5": 0.0
+            }
+        },
+        "owners_ge5": 145,
+        "owners_total": 167,
+        "non_owners_ge5": 0,
+        "non_owners_total": 633,
+        "any_non_owner_reached_5": false
+    },
+    "anti_farm": {
+        "per_marker_cap": 2.5,
+        "helping_by_distinct_markers": {
+            "1": 2.5,
+            "2": 5.0,
+            "3": 7.5,
+            "5": 12.5,
+            "6": 15.0,
+            "9": 22.5,
+            "10": 25.0,
+            "12": 25.0
+        },
+        "markers_to_fill_25": 10,
+        "markers_to_reach_veteran_15": 6,
+        "markers_to_reach_journeyman_7_5": 3,
+        "nonowner_9_markers_helping": 22.5,
+        "nonowner_10_markers_helping": 25.0,
+        "small_pool_volume_helping_3x1000": 7.5,
+        "small_pool_volume_helping_3x5": 7.5,
+        "owner_5_markers_plus_stewardship": 15.0,
+        "owner_2_markers_plus_stewardship": 7.5,
+        "assertion_holds": true
+    },
+    "promotion": {
+        "shipped": {
+            "per_profile": {
+                "casual": {
+                    "n": 200,
+                    "journeyman_reach_pct": 0.0,
+                    "journeyman_median": null,
+                    "veteran_reach_pct": 0.0,
+                    "veteran_earliest": null,
+                    "veteran_median": null
+                },
+                "regular": {
+                    "n": 200,
+                    "journeyman_reach_pct": 80.0,
+                    "journeyman_median": 146.0,
+                    "veteran_reach_pct": 13.5,
+                    "veteran_earliest": 287,
+                    "veteran_median": 361.0
+                },
+                "heavy": {
+                    "n": 200,
+                    "journeyman_reach_pct": 80.0,
+                    "journeyman_median": 66.0,
+                    "veteran_reach_pct": 70.0,
+                    "veteran_earliest": 210,
+                    "veteran_median": 243.0
+                },
+                "sporadic": {
+                    "n": 200,
+                    "journeyman_reach_pct": 0.0,
+                    "journeyman_median": null,
+                    "veteran_reach_pct": 0.0,
+                    "veteran_earliest": null,
+                    "veteran_median": null
+                }
+            },
+            "journeyman_median": 105.0,
+            "journeyman_promoted": 320,
+            "veteran_promoted": 167,
+            "veteran_earliest": 210,
+            "veteran_median": 271.0
+        },
+        "restore": {
+            "per_profile": {
+                "casual": {
+                    "n": 200,
+                    "journeyman_reach_pct": 0.0,
+                    "journeyman_median": null,
+                    "veteran_reach_pct": 0.0,
+                    "veteran_earliest": null,
+                    "veteran_median": null
+                },
+                "regular": {
+                    "n": 200,
+                    "journeyman_reach_pct": 80.0,
+                    "journeyman_median": 146.0,
+                    "veteran_reach_pct": 6.5,
+                    "veteran_earliest": 287,
+                    "veteran_median": 364.0
+                },
+                "heavy": {
+                    "n": 200,
+                    "journeyman_reach_pct": 80.0,
+                    "journeyman_median": 66.0,
+                    "veteran_reach_pct": 34.5,
+                    "veteran_earliest": 210,
+                    "veteran_median": 253.0
+                },
+                "sporadic": {
+                    "n": 200,
+                    "journeyman_reach_pct": 0.0,
+                    "journeyman_median": null,
+                    "veteran_reach_pct": 0.0,
+                    "veteran_earliest": null,
+                    "veteran_median": null
+                }
+            },
+            "journeyman_median": 105.0,
+            "journeyman_promoted": 320,
+            "veteran_promoted": 82,
+            "veteran_earliest": 210,
+            "veteran_median": 268.0
+        },
+        "journeyman_median_shift_days": 0.0
+    },
+    "targets": {
+        "shipped_baseline_still_promotes": {
+            "target": "SHIPPED config: honest cohorts still reach Journeyman AND Veteran (baseline unbroken)",
+            "actual": {
+                "journeyman": 320,
+                "veteran": 167
+            },
+            "pass": true
+        },
+        "helping_ge_7_5_reachable": {
+            "target": "RESTORE helping Journeyman min (7.5) reachable for regular AND heavy (>=50% of each by day 400)",
+            "actual": {
+                "regular_pct": 100.0,
+                "heavy_pct": 100.0
+            },
+            "pass": true
+        },
+        "helping_ge_15_reachable": {
+            "target": "RESTORE helping Veteran min (15) reachable for heavy (>=25% by day 400)",
+            "actual": {
+                "regular_pct": 100.0,
+                "heavy_pct": 100.0
+            },
+            "pass": true
+        },
+        "diversity5_owner_only": {
+            "target": "contribution-diversity-5 reached ONLY by community owners (stewardship is the 5th type)",
+            "actual": {
+                "any_non_owner_reached_5": false,
+                "owners_ge5": 145,
+                "owner_total": 167
+            },
+            "pass": true
+        },
+        "restore_veteran_reachable": {
+            "target": "RESTORE config: at least one genuine member still reaches Veteran (diversity 5 + helping 15 not over-gated)",
+            "actual": {
+                "veteran_promoted": 82,
+                "earliest": 210
+            },
+            "pass": true
+        },
+        "restore_journeyman_not_overgated": {
+            "target": "RESTORE config: Journeyman still reachable and median shift vs SHIPPED is bounded (<=45d)",
+            "actual": {
+                "shipped_median": 105.0,
+                "restore_median": 105.0,
+                "shift_days": 0.0,
+                "restore_promoted": 320
+            },
+            "pass": true
+        },
+        "anti_farm_10pct_cap_bites": {
+            "target": "ANTI-FARM: marks from <10 distinct markers cannot fill helping; volume cannot beat the 0.10 per-marker cap",
+            "actual": true,
+            "pass": true
+        }
+    }
+}

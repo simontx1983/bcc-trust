@@ -11,21 +11,41 @@ declare(strict_types=1);
 
 /**
  * Shared cohort provider (memoized) — weights/quorum/decay reuse it.
+ * Runs the SHIPPED config; the helping scenario drives the same builder
+ * with the PROPOSED-RESTORE config too.
  *
  * @return array{
- *     members: list<array{member_id: int, profile: string, index: int, seed: int, tier_qualified: bool, journeyman_day: int|null, veteran_day: int|null}>,
+ *     members: list<array{member_id: int, profile: string, index: int, seed: int, tier_qualified: bool, is_owner: bool, journeyman_day: int|null, veteran_day: int|null, day400: array{total: float, helping: float, contribution: float, contribution_types: int}}>,
  *     day400_snapshots: array<string, array<string, mixed>>
  * }
  */
 function calib_honest_cohort(): array
 {
-    static $cohort = null;
-    if ($cohort !== null) {
-        return $cohort;
+    return calib_build_cohort(calib_config(), 'shipped');
+}
+
+/**
+ * Build the honest cohort under an ARBITRARY scoring config. Member
+ * histories (ledger rows, seeds, ownership) are config-INDEPENDENT — only
+ * the promotion predicate reads the config — so the shipped and restore
+ * runs share identical ledgers and differ only in journeyman/veteran days.
+ *
+ * @return array{
+ *     members: list<array{member_id: int, profile: string, index: int, seed: int, tier_qualified: bool, is_owner: bool, journeyman_day: int|null, veteran_day: int|null, day400: array{total: float, helping: float, contribution: float, contribution_types: int}}>,
+ *     day400_snapshots: array<string, array<string, mixed>>
+ * }
+ */
+function calib_build_cohort(\BCC\Trust\Rank\Support\RankScoringConfig $config, string $cacheKey): array
+{
+    /** @var array<string, array<string, mixed>> $cache */
+    static $cache = [];
+    if (isset($cache[$cacheKey])) {
+        /** @var array{members: list<array<string, mixed>>, day400_snapshots: array<string, array<string, mixed>>} $hit */
+        $hit = $cache[$cacheKey];
+        return $hit;
     }
 
-    $config = calib_config();
-    $calc   = calib_calculator();
+    $calc = new \BCC\Trust\Rank\Services\RankScoreCalculator($config);
 
     $profiles   = CalibProfiles::HONEST;
     $n          = CalibProfiles::COHORT_N;
@@ -40,9 +60,12 @@ function calib_honest_cohort(): array
             $memberId++;
             // Exactly 80% tier-qualified (deterministic, not drawn).
             $tierQualified = ($i % 5) !== 0;
+            $isOwner       = CalibProfiles::isCommunityOwner($profileName, $i);
             $seed          = CalibMemberSimulator::seed("honest:{$profileName}:{$i}");
 
-            $gen = CalibMemberSimulator::generate($config, $profile, $memberId, $cohortSize, $seed, CALIB_MAX_DAY);
+            $gen = CalibMemberSimulator::generate(
+                $config, $profile, $memberId, $cohortSize, $seed, CALIB_MAX_DAY, null, $isOwner
+            );
 
             $jDay = CalibMemberSimulator::firstHoldDay(
                 $calc, $config, $gen, 'journeyman', CALIB_MAX_DAY,
@@ -59,13 +82,17 @@ function calib_honest_cohort(): array
                 );
             }
 
-            // Why-blocked snapshot at day 400 for the first tier-qualified
-            // member of each profile (diagnostic for the report).
+            // Day-400 assessment (the member's mature evidence): helping /
+            // contribution depth and the distinct contribution-type count
+            // feed the helping-reachability + diversity-5 distributions.
+            $a = CalibMemberSimulator::assessAt(
+                $calc, $config, $gen, CALIB_MAX_DAY,
+                $tierQualified, CalibProfiles::TRUSTED_FROM_DAY
+            );
+
+            // Why-blocked snapshot for the first tier-qualified member of
+            // each profile (diagnostic for the report).
             if ($i === 1) {
-                $a = CalibMemberSimulator::assessAt(
-                    $calc, $config, $gen, CALIB_MAX_DAY,
-                    $tierQualified, CalibProfiles::TRUSTED_FROM_DAY
-                );
                 $snapshots[$profileName] = [
                     'day'                => CALIB_MAX_DAY,
                     'total'              => $a['total'],
@@ -85,15 +112,24 @@ function calib_honest_cohort(): array
                 'index'          => $i,
                 'seed'           => $seed,
                 'tier_qualified' => $tierQualified,
+                'is_owner'       => $isOwner,
                 'journeyman_day' => $jDay,
                 'veteran_day'    => $vDay,
+                'day400'         => [
+                    'total'              => $a['total'],
+                    'helping'            => $a['categories']['helping'],
+                    'contribution'       => $a['categories']['contribution'],
+                    'contribution_types' => $a['contribution_types'],
+                ],
             ];
 
             unset($gen);
         }
     }
 
-    return $cohort = ['members' => $members, 'day400_snapshots' => $snapshots];
+    $cohort = ['members' => $members, 'day400_snapshots' => $snapshots];
+    $cache[$cacheKey] = $cohort;
+    return $cohort;
 }
 
 /** @return array<string, mixed> */
