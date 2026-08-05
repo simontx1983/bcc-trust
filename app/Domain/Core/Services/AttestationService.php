@@ -64,15 +64,6 @@ use Throwable;
 
 final class AttestationService
 {
-    /**
-     * Reputation tiers that satisfy the "good standing" gate. Sourced
-     * from UserViewService::GOOD_STANDING_TIERS per the §G2 single-
-     * source-of-truth rule — duplicated here as a class constant only
-     * for clarity. Vouch / Back / Report all gate on this set.
-     *
-     * @var list<string>
-     */
-    private const NEUTRAL_PLUS_TIERS = ['neutral', 'trusted', 'elite'];
 
     /**
      * Reputation tiers that satisfy the Dispute gate per §J.1
@@ -323,7 +314,7 @@ final class AttestationService
         // synthesis invisibility + §J.7 heuristic #2 "no synthesis
         // mechanics in copy").
         $viewerTier = $this->reputationRepo->getTier($viewerUserId);
-        $isNeutralPlus = in_array($viewerTier, self::NEUTRAL_PLUS_TIERS, true);
+        $isNeutralPlus = in_array($viewerTier, UserViewService::GOOD_STANDING_TIERS, true);
 
         if (!$isNeutralPlus) {
             return [
@@ -488,6 +479,20 @@ final class AttestationService
             );
         }
 
+        // Participation paths opt out of the suspension admin-bypass
+        // (Permissions::is_not_suspended intent, §M / SuspensionGateParity)
+        // — a suspended member, admin included, cannot vouch or back.
+        // Mirrors DisputeVoteService's inline gate.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($attestorUserId, false)) {
+            $hint = 'Your account is suspended.';
+            throw new AttestationException(
+                AttestationException::CODE_INELIGIBLE,
+                $hint,
+                403,
+                ['unlock_hint' => $hint]
+            );
+        }
+
         // Rank Phase 5 final policy: New Members (no rank_state row)
         // cannot perform reputation-bearing actions (§5.3). Apprentice
         // or higher suffices — Journeyman is never required (§20.1).
@@ -543,7 +548,7 @@ final class AttestationService
         }
 
         $attestorTier = $this->reputationRepo->getTier($attestorUserId);
-        if (!in_array($attestorTier, self::NEUTRAL_PLUS_TIERS, true)) {
+        if (!in_array($attestorTier, UserViewService::GOOD_STANDING_TIERS, true)) {
             $verb = $kind === 'vouch'
                 ? 'vouch'
                 : 'back operators';
