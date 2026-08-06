@@ -236,6 +236,7 @@ require_once BCC_TRUST_PATH . 'includes/database/cleanup-feature-override-userme
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-last-seen-rank-usermeta.php';
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-panel.php';
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-participations.php';
+require_once BCC_TRUST_PATH . 'includes/database/purge-edge-cache.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
@@ -1410,10 +1411,15 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 |
 | CorsHandler → CORS for /bcc/v1/* gated by BCC_FRONTEND_ORIGIN.
 |               Same-origin only when the constant is undefined.
+|
+| EdgeCache   → excludes every BCC REST response from the LiteSpeed
+|               edge cache (Origin-variant CORS hazard — see the class
+|               docblock; owner-directed 2026-08-06).
 */
 
 \BCC\Trust\Core\Support\BearerAuth::register();
 \BCC\Trust\Core\Support\CorsHandler::register();
+\BCC\Trust\Infrastructure\EdgeCache::init();
 
 // §K2 / §G1: hook PeepSo's user-search filter so users with
 // `bcc_privacy_discovery_optout = 1` are excluded from search results.
