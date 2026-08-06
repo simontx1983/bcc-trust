@@ -20,6 +20,7 @@
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -62,8 +63,11 @@ final class UserEndorsementsEndpoint
      */
     public static function handleList(WP_REST_Request $request): WP_REST_Response
     {
+        // Canonical error envelope (not a bare {message}) so the
+        // Envelope passes it through as {error:{...}} and the 429
+        // Retry-After injection engages instead of SUCCESS-wrapping.
         if (!\BCC\Core\Security\Throttle::allow('endorsements_mine', 30, 60)) {
-            return new WP_REST_Response(['message' => 'Too many requests.'], 429);
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $user_id = get_current_user_id();
@@ -84,8 +88,9 @@ final class UserEndorsementsEndpoint
      */
     public static function handleStats(WP_REST_Request $request): WP_REST_Response
     {
+        // Same canonical 429 envelope as handleList.
         if (!\BCC\Core\Security\Throttle::allow('endorsements_mine_stats', 30, 60)) {
-            return new WP_REST_Response(['message' => 'Too many requests.'], 429);
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $user_id = get_current_user_id();

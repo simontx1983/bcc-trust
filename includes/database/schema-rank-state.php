@@ -5,9 +5,11 @@
  *
  * One row per RANKED member. A MISSING row is the New Member account
  * state (fail-safe: no row ⇒ no rank ⇒ no reputation-bearing
- * capability). `apprentice_awarded_at` is the §16.3 maturity epoch —
- * vesting runs from it for the full 90 days and survives promotion
- * (owner correction 3). Scores are a materialization of the
+ * capability). `apprentice_awarded_at` records when the rung was earned;
+ * the §16.3 maturity epoch is the member's SIGNUP date
+ * (wp_users.user_registered, v1.71) — vesting runs from signup for the
+ * full 90 days and survives promotion (owner correction 3). Scores are
+ * a materialization of the
  * RankScoreCalculator over the append-only rank_events ledger — the
  * ledger is authoritative; this row is reproducible from it (§24.1)
  * and rewritten by the promotion engine, never hand-edited.

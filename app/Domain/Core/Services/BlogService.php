@@ -58,6 +58,24 @@ final class BlogService
         return $this->chainTagRepo ?? new BlogChainTagRepository();
     }
 
+    /**
+     * Warm the chain-tag prefetch memo for a page of blog posts in one
+     * bounded query — the feed pipeline calls this before its per-row
+     * {@see hydrateForPostId} loop so the per-row
+     * BlogChainTagRepository::findByPostId reads become in-memory
+     * lookups (cold /feed/hot N+1 fix). Safe to skip: without the
+     * prefetch every read still works, one query per row.
+     *
+     * @param list<int> $postIds
+     */
+    public function prefetchChainTags(array $postIds): void
+    {
+        if ($postIds === []) {
+            return;
+        }
+        $this->chainTags()->prefetchForPostIds($postIds);
+    }
+
     private function shortcodes(): PostShortcodeRepository
     {
         return $this->shortcodeRepo ?? new PostShortcodeRepository();
@@ -382,12 +400,12 @@ final class BlogService
 
         // ── Chain tags — resolve via FK to bcc_onchain_chains ────────
         //
-        // PR-A reads per-post because BlogService is a single-author
-        // tab — the per-row chain-tag fetch is bounded by
-        // BLOG_CHAIN_TAGS_MAX. When the Floor renderer adopts blog
-        // excerpts at multi-author scale it should batch via
-        // BlogChainTagRepository::findByPostIds + a single
-        // ChainRepository fetch (already cache-backed).
+        // Per-post read, bounded by BLOG_CHAIN_TAGS_MAX. On the Floor
+        // (multi-author feed) FeedHydrationPipeline::loadBlogBodies
+        // warms the repository's prefetch memo via prefetchChainTags
+        // first, so this per-row call is an in-memory lookup there;
+        // the single-author blog tab stays per-post (cache-backed).
+        // ChainRepository::getById below is already cache-backed.
         $chainIds = $this->chainTags()->findByPostId($postId);
         /** @var list<array{id: int, slug: string, name: string, color: ?string, icon_url: ?string}> $chainRows */
         $chainRows = [];

@@ -29,6 +29,7 @@ final class CommunityCustodyServiceTest extends TestCase
     /**
      * @param array<int, ?string> $statuses userId => membership status
      * @param array<string, CapabilityDecision> $decisions "userId:key" => verdict
+     * @param list<string> $deniedLockKeys advisory-lock keys that fail to acquire
      */
     private function service(
         array $statuses = [self::OWNER => 'member_owner', self::RECEIVER => 'member'],
@@ -36,9 +37,10 @@ final class CommunityCustodyServiceTest extends TestCase
         bool $userExists = true,
         array $decisions = [],
         bool $writerOk = true,
-        bool $lockAcquirable = true
+        bool $lockAcquirable = true,
+        array $deniedLockKeys = []
     ): RecordingCustodyService {
-        return new RecordingCustodyService($statuses, $kind, $userExists, $decisions, $writerOk, $lockAcquirable);
+        return new RecordingCustodyService($statuses, $kind, $userExists, $decisions, $writerOk, $lockAcquirable, $deniedLockKeys);
     }
 
     public function testHappyPathTransfersLogsBothCustodyRowsAndAudits(): void
@@ -62,10 +64,18 @@ final class CommunityCustodyServiceTest extends TestCase
         );
         self::assertSame([[self::GROUP, self::OWNER, self::RECEIVER]], $svc->auditCalls);
 
-        // §21.2 TOCTOU: the cap/cooldown critical section is serialized on
-        // the RECEIVER's per-user lock, acquired once and released once.
-        self::assertSame(['bcc_community_custody_' . self::RECEIVER], $svc->lockAcquireCalls);
-        self::assertSame(['bcc_community_custody_' . self::RECEIVER], $svc->lockReleaseCalls);
+        // §21.2 TOCTOU: the per-GROUP lock (same-group serialization)
+        // wraps the whole gate chain; the RECEIVER's per-user lock wraps
+        // the cap/cooldown critical section. Fixed order group → receiver,
+        // released in reverse (receiver first — inner finally unwinds first).
+        self::assertSame(
+            ['bcc_community_custody_group_' . self::GROUP, 'bcc_community_custody_' . self::RECEIVER],
+            $svc->lockAcquireCalls
+        );
+        self::assertSame(
+            ['bcc_community_custody_' . self::RECEIVER, 'bcc_community_custody_group_' . self::GROUP],
+            $svc->lockReleaseCalls
+        );
     }
 
     public function testNonexistentGroupAndNonMemberBothCollapseTo404(): void
@@ -196,20 +206,55 @@ final class CommunityCustodyServiceTest extends TestCase
                 "reason {$reason}"
             );
 
-            // Lock acquired (re-read is inside it) then released even on
-            // the denial return.
-            self::assertSame(['bcc_community_custody_' . self::RECEIVER], $svc->lockReleaseCalls, "reason {$reason}");
+            // Locks acquired (re-read is inside them) then released even on
+            // the denial return — receiver (inner) unwinds before group.
+            self::assertSame(
+                ['bcc_community_custody_' . self::RECEIVER, 'bcc_community_custody_group_' . self::GROUP],
+                $svc->lockReleaseCalls,
+                "reason {$reason}"
+            );
         }
     }
 
     /**
-     * §21.2 TOCTOU fail-closed: if the per-receiver custody lock can't be
-     * acquired (a concurrent create/receive holds it), the transfer fails
-     * CLOSED with a retryable bcc_conflict (→ 409) rather than proceeding
-     * unlocked. No write, no ledger, and — since acquire failed before the
-     * try — no release.
+     * A `member_readonly` receiver holds a membership row (step 5's
+     * consent proxy passes) but is moderation-muted — custody must not
+     * land on them. The denial collapses to the SAME generic
+     * receiver_ineligible wire shape as a step-6 capability denial (the
+     * giver never learns the member is read-only) while the true reason
+     * is logged server-side.
      */
-    public function testLockContentionFailsClosedWithConflict(): void
+    public function testReadonlyReceiverCollapsesToGenericIneligible(): void
+    {
+        $svc = $this->service(
+            statuses: [self::OWNER => 'member_owner', self::RECEIVER => 'member_readonly']
+        );
+        $result = $svc->transfer(self::OWNER, self::GROUP, self::RECEIVER);
+
+        self::assertSame('bcc_forbidden', $result['error'] ?? null);
+        self::assertSame(['reason' => 'receiver_ineligible'], $result['data'] ?? null);
+        self::assertSame('This member can\'t receive a community right now.', $result['message'] ?? null);
+        self::assertSame([], $svc->writerCalls);
+        self::assertSame([], $svc->custodyCalls);
+        self::assertSame(
+            [[self::GROUP, self::OWNER, self::RECEIVER, 'member_readonly']],
+            $svc->receiverDeniedLog
+        );
+        // Step-5 denial fires inside the group lock, before the receiver
+        // lock is ever taken.
+        self::assertSame(['bcc_community_custody_group_' . self::GROUP], $svc->lockAcquireCalls);
+        self::assertSame(['bcc_community_custody_group_' . self::GROUP], $svc->lockReleaseCalls);
+    }
+
+    /**
+     * §21.2 TOCTOU fail-closed: if the per-GROUP custody lock can't be
+     * acquired (a concurrent same-group transfer holds it), the transfer
+     * fails CLOSED with a retryable bcc_conflict (→ 409) rather than
+     * proceeding unlocked. No write, no ledger, and — since acquire
+     * failed before the try — no release, and the receiver lock is
+     * never even attempted.
+     */
+    public function testGroupLockContentionFailsClosedWithConflict(): void
     {
         $svc    = $this->service(lockAcquirable: false);
         $result = $svc->transfer(self::OWNER, self::GROUP, self::RECEIVER);
@@ -219,8 +264,30 @@ final class CommunityCustodyServiceTest extends TestCase
         self::assertSame([], $svc->writerCalls);
         self::assertSame([], $svc->custodyCalls);
         self::assertSame([], $svc->auditCalls);
-        self::assertSame(['bcc_community_custody_' . self::RECEIVER], $svc->lockAcquireCalls);
+        self::assertSame(['bcc_community_custody_group_' . self::GROUP], $svc->lockAcquireCalls);
         self::assertSame([], $svc->lockReleaseCalls);
+    }
+
+    /**
+     * Same fail-closed posture one layer in: the group lock acquires but
+     * the per-RECEIVER lock is contended (a concurrent create/receive
+     * holds it). Retryable bcc_conflict, no write — and the group lock
+     * (already held) is still released on the way out.
+     */
+    public function testReceiverLockContentionFailsClosedWithConflict(): void
+    {
+        $svc    = $this->service(deniedLockKeys: ['bcc_community_custody_' . self::RECEIVER]);
+        $result = $svc->transfer(self::OWNER, self::GROUP, self::RECEIVER);
+
+        self::assertSame('bcc_conflict', $result['error'] ?? null);
+        self::assertSame('Please retry.', $result['message'] ?? null);
+        self::assertSame([], $svc->writerCalls);
+        self::assertSame([], $svc->custodyCalls);
+        self::assertSame(
+            ['bcc_community_custody_group_' . self::GROUP, 'bcc_community_custody_' . self::RECEIVER],
+            $svc->lockAcquireCalls
+        );
+        self::assertSame(['bcc_community_custody_group_' . self::GROUP], $svc->lockReleaseCalls);
     }
 
     public function testWriterFailureIsInternalErrorWithNoLedgerOrAudit(): void
@@ -256,6 +323,7 @@ final class RecordingCustodyService extends CommunityCustodyService
     /**
      * @param array<int, ?string> $statuses
      * @param array<string, CapabilityDecision> $decisions
+     * @param list<string> $deniedLockKeys per-key contention script
      */
     public function __construct(
         private readonly array $statuses,
@@ -263,7 +331,8 @@ final class RecordingCustodyService extends CommunityCustodyService
         private readonly bool $fakeUserExists,
         private readonly array $decisions,
         private readonly bool $writerOk,
-        private readonly bool $lockAcquirable = true
+        private readonly bool $lockAcquirable = true,
+        private readonly array $deniedLockKeys = []
     ) {
     }
 
@@ -312,6 +381,9 @@ final class RecordingCustodyService extends CommunityCustodyService
     protected function acquireLock(string $key): bool
     {
         $this->lockAcquireCalls[] = $key;
+        if (in_array($key, $this->deniedLockKeys, true)) {
+            return false;
+        }
         return $this->lockAcquirable;
     }
 

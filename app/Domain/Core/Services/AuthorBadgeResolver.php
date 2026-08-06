@@ -111,8 +111,13 @@ final class AuthorBadgeResolver
                 // for the pre-Apprentice status chip (§D-3) — never empty
                 // for a valid user. `member_state` lets the FE style the
                 // New Member chip distinctly from an earned rank.
+                // Fallback pair (memberStatesFor missing the user —
+                // shouldn't happen) is the New Member pair per v1.59/
+                // v1.72: member_state 'new_member' with rank_label null.
+                // Never 'ranked' with a null label — that's a
+                // contradictory wire shape the FE has no rendering for.
                 'rank_label'            => $stateByUser[$uid]['rank_label'] ?? null,
-                'member_state'          => $stateByUser[$uid]['member_state'] ?? 'ranked',
+                'member_state'          => $stateByUser[$uid]['member_state'] ?? 'new_member',
             ];
         }
         return $out;
@@ -136,11 +141,14 @@ final class AuthorBadgeResolver
         $map = $this->resolveForUsers([$userId]);
         return $map[$userId] ?? [
             // Falls through for $userId <= 0 — caller's view-model
-            // omits the badge when handed an empty payload.
+            // omits the badge when handed an empty payload. Same safe
+            // default as the batched path: the New Member pair
+            // (member_state 'new_member' + rank_label null per v1.59/
+            // v1.72), never 'ranked' with a null label.
             'reputation_tier'       => 'neutral',
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel('neutral'),
             'rank_label'            => null,
-            'member_state'          => 'ranked',
+            'member_state'          => 'new_member',
         ];
     }
 }

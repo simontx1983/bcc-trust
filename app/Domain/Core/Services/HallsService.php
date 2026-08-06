@@ -487,7 +487,7 @@ final class HallsService
             'viewer_membership' => [
                 'is_member'  => true,
                 'is_primary' => true,
-                'joined_at'  => self::toIso8601($row->joined_at),
+                'joined_at'  => self::joinedAtIso($row),
             ],
         ];
     }
@@ -567,7 +567,7 @@ final class HallsService
                 'viewer_membership' => [
                     'is_member'  => true,
                     'is_primary' => $primaryGroupId === $groupId,
-                    'joined_at'  => self::toIso8601($existing[$groupId]->joined_at),
+                    'joined_at'  => self::joinedAtIso($existing[$groupId]),
                 ],
             ];
         }
@@ -594,7 +594,7 @@ final class HallsService
             'viewer_membership' => [
                 'is_member'  => true,
                 'is_primary' => false,
-                'joined_at'  => self::toIso8601($row->joined_at),
+                'joined_at'  => self::joinedAtIso($row),
             ],
         ];
     }
@@ -694,7 +694,7 @@ final class HallsService
      *   - viewer authed, not member  → {is_member: false, ...}
      *   - viewer authed, member      → {is_member: true, ...}
      *
-     * @param object{group_id: numeric-string, joined_at: string}|null $row
+     * @param object{group_id: numeric-string, joined_at: string, gm_joined_utc?: numeric-string}|null $row
      * @return array{is_member: bool, is_primary: bool, joined_at: string|null}|null
      */
     private function renderViewerMembership(
@@ -718,8 +718,26 @@ final class HallsService
         return [
             'is_member'  => true,
             'is_primary' => $primaryGroupId === $groupId,
-            'joined_at'  => self::toIso8601($row->joined_at),
+            'joined_at'  => self::joinedAtIso($row),
         ];
+    }
+
+    /**
+     * Clock-split fix: prefer the DB-computed epoch projection
+     * (`UNIX_TIMESTAMP(gm_joined) AS gm_joined_utc` — bcc-core ships
+     * it; deploy core FIRST) over PHP-side strtotime of the naive
+     * datetime, which skews when MySQL's session time_zone (SYSTEM,
+     * UTC−5 locally) disagrees with the BCC norm of UTC. The fallback
+     * keeps an old bcc-core (no gm_joined_utc alias) rendering
+     * exactly as before.
+     */
+    private static function joinedAtIso(object $row): ?string
+    {
+        if (isset($row->gm_joined_utc) && is_numeric($row->gm_joined_utc)) {
+            $ts = (int) $row->gm_joined_utc;
+            return $ts > 0 ? gmdate('Y-m-d\TH:i:s\Z', $ts) : null;
+        }
+        return self::toIso8601((string) ($row->joined_at ?? ''));
     }
 
     private static function toIso8601(string $mysqlDatetime): ?string

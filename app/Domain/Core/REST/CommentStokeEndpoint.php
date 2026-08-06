@@ -99,6 +99,15 @@ final class CommentStokeEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many stokes. Please wait.', 429);
         }
 
+        // §M suspension-gate parity — participation writes opt out of
+        // the suspension admin-bypass: a suspended member, admin
+        // included, cannot stoke (either direction of the toggle).
+        // Throttle stays FIRST (throttle-before-credentials rule).
+        // Mirrors StokeEndpoint / ReactionsEndpoint.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $commentActId = (int) $request->get_param('id');
         if ($commentActId <= 0) {
             return ApiResponse::error('bcc_invalid_request', 'Invalid comment id.', 400);

@@ -93,7 +93,14 @@ if (!function_exists('bcc_trust_backfill_display_name_placeholders')) {
                 // Neutral placeholder: the public self-chosen handle
                 // when available, else Member <ID> (which the
                 // completeness gate treats as not-yet-chosen).
-                $placeholder = $handle !== '' && !str_contains($handle, '@')
+                // Symmetry with the selection query above: a handle
+                // containing '@' OR starting 'u_' would itself match
+                // the email/login patterns, re-selecting the row every
+                // iteration and wedging the loop at INCOMPLETE — such
+                // handles fall to Member <ID> instead.
+                $placeholder = $handle !== ''
+                        && !str_contains($handle, '@')
+                        && !str_starts_with($handle, 'u_')
                     ? $handle
                     : 'Member ' . $userId;
 

@@ -458,7 +458,10 @@ class ChainsPage
      * the DB (defense-in-depth). Sanitisation is strict: description →
      * plain-text (sanitize_textarea_field), icon_url → esc_url_raw, color →
      * validated #RRGGBB (sanitize_hex_color, which returns null on a bad
-     * value). All the actual DB work + cache-bust lives in
+     * value). A non-empty submitted value the sanitiser rejects is NOT
+     * written as NULL — the field keeps its stored value and the notice
+     * names the rejected field; empty input remains the deliberate
+     * clear → NULL path. All the actual DB work + cache-bust lives in
      * ChainRepository::updateIdentity (§1 — no $wpdb in an Admin page).
      *
      * @return array{type: string, message: string}|null notice to render,
@@ -493,19 +496,53 @@ class ChainsPage
         $iconUrlRaw     = isset($_POST['icon_url']) ? wp_unslash($_POST['icon_url']) : '';
         $colorRaw       = isset($_POST['color']) ? wp_unslash($_POST['color']) : '';
 
-        $description = sanitize_textarea_field(is_string($descriptionRaw) ? $descriptionRaw : '');
-        $iconUrl     = esc_url_raw(is_string($iconUrlRaw) ? $iconUrlRaw : '');
-        $color       = sanitize_hex_color(is_string($colorRaw) ? $colorRaw : '');
+        $descriptionRaw = is_string($descriptionRaw) ? $descriptionRaw : '';
+        $iconUrlRaw     = is_string($iconUrlRaw) ? $iconUrlRaw : '';
+        $colorRaw       = is_string($colorRaw) ? $colorRaw : '';
+
+        $description = sanitize_textarea_field($descriptionRaw);
+        $iconUrl     = esc_url_raw($iconUrlRaw);
+        $color       = sanitize_hex_color($colorRaw);
+
+        // Empty input = deliberate clear → NULL (documented contract).
+        // But a NON-empty input the sanitiser rejects must never silently
+        // become a clear: surface the field error and keep that column's
+        // stored value untouched — every other valid field still saves.
+        $current     = ChainRepository::getById($chainId);
+        $fieldErrors = [];
+
+        $iconUrlValue = $iconUrl !== '' ? $iconUrl : null;
+        if (trim($iconUrlRaw) !== '' && $iconUrl === '') {
+            $fieldErrors[] = 'Icon URL must be a valid URL like https://example.com/icon.svg — nothing was saved for this field.';
+            $iconUrlValue  = isset($current->icon_url) && is_string($current->icon_url) && $current->icon_url !== ''
+                ? $current->icon_url
+                : null;
+        }
+
+        $colorValue = ($color !== null && $color !== '') ? $color : null;
+        if (trim($colorRaw) !== '' && ($color === null || $color === '')) {
+            $fieldErrors[] = 'Color must be a hex value like #627EEA — nothing was saved for this field.';
+            $colorValue    = isset($current->color) && is_string($current->color) && $current->color !== ''
+                ? $current->color
+                : null;
+        }
 
         $ok = ChainRepository::updateIdentity(
             $chainId,
             $description !== '' ? $description : null,
-            $iconUrl !== '' ? $iconUrl : null,
-            ($color !== null && $color !== '') ? $color : null
+            $iconUrlValue,
+            $colorValue
         );
 
         if (!$ok) {
             return ['type' => 'error', 'message' => 'Chain not found — nothing was saved.'];
+        }
+
+        if ($fieldErrors !== []) {
+            return [
+                'type'    => 'error',
+                'message' => implode(' ', $fieldErrors) . ' Every other field was saved.',
+            ];
         }
 
         return ['type' => 'success', 'message' => 'Chain identity saved.'];

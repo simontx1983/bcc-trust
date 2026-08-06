@@ -8,8 +8,9 @@
  *               × fraud_discount, clamped to [0, vote_ceiling]
  *
  *   - maturity (§16.3): 0.075 → 1.0 linear over 90 days from the
- *     member's APPRENTICE EPOCH (rank_state.apprentice_awarded_at) —
- *     promotion never completes vesting early (owner correction 3).
+ *     member's TENURE EPOCH — the signup date (wp_users.user_registered,
+ *     v1.71) — promotion never completes vesting early (owner
+ *     correction 3).
  *   - rank_multiplier (§16.4): apprentice 1.0 · journeyman 1.2 ·
  *     veteran 1.4 — from RankScoringConfig; unknown/missing rank ⇒ 0
  *     (fail closed; New Members cannot vote, §5.3). During §14.1
