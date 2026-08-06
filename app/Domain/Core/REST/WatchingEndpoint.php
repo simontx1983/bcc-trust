@@ -140,6 +140,18 @@ final class WatchingEndpoint
                 'maximum'           => self::MAX_PAGE_SIZE,
                 'sanitize_callback' => 'absint',
             ],
+            // v1.76 additive (§4.5): `include=cards` attaches the full
+            // §3.2 Card view-model to every item. Absent → the response
+            // is byte-identical to pre-v1.76 (no `card` key at all).
+            // The route arg max on page_size stays MAX_PAGE_SIZE; the
+            // hydrated clamp (HYDRATED_MAX_PAGE_SIZE) is applied
+            // silently in the service and echoed in pagination.
+            'include' => [
+                'required'          => false,
+                'type'              => 'string',
+                'enum'              => ['cards'],
+                'sanitize_callback' => 'sanitize_key',
+            ],
         ];
     }
 
@@ -215,7 +227,12 @@ final class WatchingEndpoint
             $pageSize = self::DEFAULT_PAGE_SIZE;
         }
 
-        $payload = Plugin::instance()->watchingService()->getWatching($userId, $page, $pageSize);
+        // Only the literal 'cards' opts in — the enum already rejects
+        // anything else, so this is belt-and-braces for a missing param.
+        $includeCards = ((string) $request->get_param('include') === 'cards');
+
+        $payload = Plugin::instance()->watchingService()
+            ->getWatching($userId, $page, $pageSize, $includeCards);
 
         $response = ApiResponse::ok($payload);
         $response->header('Cache-Control', 'no-store');
