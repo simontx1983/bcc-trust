@@ -87,6 +87,14 @@ final class StokeEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many stokes. Please wait.', 429);
         }
 
+        // §M suspension-gate parity — participation writes opt out of
+        // the suspension admin-bypass: a suspended member, admin
+        // included, cannot stoke. Throttle stays FIRST (throttle-
+        // before-credentials rule). Mirrors ReactionsEndpoint.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $actId = (int) $request->get_param('id');
         if ($actId <= 0) {
             return ApiResponse::error('bcc_invalid_request', 'Invalid post id.', 400);
@@ -113,6 +121,12 @@ final class StokeEndpoint
 
         if (!\BCC\Core\Security\Throttle::allow('stoke', self::STOKE_RATE_LIMIT, self::STOKE_RATE_WINDOW)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many stokes. Please wait.', 429);
+        }
+
+        // §M suspension-gate parity — same gate as addStoke (the
+        // toggle is frozen both ways for a suspended account).
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
         }
 
         $actId = (int) $request->get_param('id');

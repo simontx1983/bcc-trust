@@ -604,7 +604,7 @@ final class GroupsService
 
         return [
             'is_member' => true,
-            'joined_at' => self::toIso8601((string) $row->joined_at),
+            'joined_at' => self::joinedAtIso($row),
         ];
     }
 
@@ -961,6 +961,24 @@ final class GroupsService
             return rtrim(substr($stripped, 0, self::DESCRIPTION_LIMIT)) . '…';
         }
         return $stripped;
+    }
+
+    /**
+     * Clock-split fix: prefer the DB-computed epoch projection
+     * (`UNIX_TIMESTAMP(gm_joined) AS gm_joined_utc` — bcc-core ships
+     * it; deploy core FIRST) over PHP-side strtotime of the naive
+     * datetime, which skews when MySQL's session time_zone (SYSTEM,
+     * UTC−5 locally) disagrees with the BCC norm of UTC. The fallback
+     * keeps an old bcc-core (no gm_joined_utc alias) rendering
+     * exactly as before.
+     */
+    private static function joinedAtIso(object $row): ?string
+    {
+        if (isset($row->gm_joined_utc) && is_numeric($row->gm_joined_utc)) {
+            $ts = (int) $row->gm_joined_utc;
+            return $ts > 0 ? gmdate('Y-m-d\TH:i:s\Z', $ts) : null;
+        }
+        return self::toIso8601((string) ($row->joined_at ?? ''));
     }
 
     private static function toIso8601(string $mysqlDatetime): ?string

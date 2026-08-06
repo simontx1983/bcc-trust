@@ -132,6 +132,14 @@ final class ReactionsEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many reactions. Please wait.', 429);
         }
 
+        // §M suspension-gate parity — participation writes opt out of
+        // the suspension admin-bypass: a suspended member, admin
+        // included, cannot react. Throttle stays FIRST (throttle-
+        // before-credentials rule). Mirrors MyGroupsEndpoint::postJoin.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $actId = self::parseFeedId((string) $request->get_param('feed_id'));
         if ($actId === null) {
             return ApiResponse::error('bcc_invalid_request', 'Invalid feed_id.', 400);
@@ -191,6 +199,12 @@ final class ReactionsEndpoint
 
         if (!\BCC\Core\Security\Throttle::allow('react', self::REACT_RATE_LIMIT, self::REACT_RATE_WINDOW)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many reactions. Please wait.', 429);
+        }
+
+        // §M suspension-gate parity — same gate as setReaction (a
+        // suspended account's reaction rail is frozen both ways).
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
         }
 
         $actId = self::parseFeedId((string) $request->get_param('feed_id'));

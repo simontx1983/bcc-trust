@@ -133,6 +133,18 @@ final class HelpfulMarkEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many marks. Please wait.', 429);
         }
 
+        // §M suspension-gate parity — participation writes opt out of
+        // the suspension admin-bypass: a suspended member, admin
+        // included, cannot mint a new Helpful mark (this is the §9.2
+        // Rank-evidence route). Throttle stays FIRST (throttle-before-
+        // credentials rule). The UN-mark path deliberately stays open:
+        // a suspended member retracting their OWN prior endorsement
+        // only removes a signal they gave — never mints evidence (the
+        // removal event reverses it).
+        if ($isAdd && !\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $actId = (int) $request->get_param('id');
         if ($actId <= 0) {
             return ApiResponse::error('bcc_invalid_request', 'Invalid id.', 400);

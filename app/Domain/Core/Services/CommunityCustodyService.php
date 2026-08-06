@@ -17,7 +17,10 @@
  *   4. giver passes can('transfer_community') (reason passthrough)
  *   5. receiver ALREADY holds an active membership row (anti-grief:
  *      an unsolicited transfer to a stranger would burn THEIR cap and
- *      re-arm THEIR cooldown — membership is the consent proxy)
+ *      re-arm THEIR cooldown — membership is the consent proxy); a
+ *      `member_readonly` row (moderation-muted) is a membership but
+ *      NOT custody-eligible — it collapses to the same generic
+ *      receiver_ineligible denial as step 6
  *   6. receiver passes can('receive_community') — evaluated FOR the
  *      receiver; ANY denial collapses to the SINGLE generic wire reason
  *      `receiver_ineligible` (privacy: never leak the target's
@@ -29,11 +32,16 @@
  *      'receive') — both (re)arm the 30-day global cooldown — then the
  *      audit trail
  *
- * Steps 6–8 run inside a per-RECEIVER advisory lock (§21.2 TOCTOU
- * close): the cap/cooldown check-then-act must be atomic so two
- * tightly-timed transfers can't each pass the receiver's cap check
- * before either records. Contention fails CLOSED with a retryable
- * bcc_conflict rather than proceeding unlocked.
+ * Steps 1–8 run inside a per-GROUP advisory lock (same-group transfers
+ * serialize, so two tightly-timed transfers of one group to two
+ * DIFFERENT receivers can't both pass the owner-precondition read
+ * before either writer fires), and steps 6–8 additionally run inside a
+ * per-RECEIVER advisory lock (§21.2 TOCTOU close): the cap/cooldown
+ * check-then-act must be atomic so two tightly-timed transfers can't
+ * each pass the receiver's cap check before either records. Lock order
+ * is fixed group → receiver; both acquires are non-blocking and
+ * contention fails CLOSED with a retryable bcc_conflict rather than
+ * proceeding unlocked.
  *
  * Collaborators are reached through protected hooks (same subclass
  * pattern as CapabilityResolver) so CommunityCustodyServiceTest can
@@ -63,6 +71,39 @@ class CommunityCustodyService
      *         |array{error: string, message: string, data?: array<string, mixed>}
      */
     public function transfer(int $viewerId, int $groupId, int $toUserId): array
+    {
+        // Per-GROUP advisory lock — serializes same-group transfers so
+        // the owner-precondition read (step 1) and the writer call
+        // (step 7) are atomic per group: without it, two tightly-timed
+        // transfers of the SAME group to two DIFFERENT receivers hold
+        // different per-receiver locks and both pass the owner check
+        // before either writer fires. Non-blocking; contention fails
+        // CLOSED with the same retryable bcc_conflict as the receiver
+        // lock. Lock ORDER is fixed group → receiver everywhere (and
+        // both acquires are timeout-0), so the nested pair cannot
+        // deadlock.
+        $groupLockKey = self::custodyGroupLockKey($groupId);
+        if (!$this->acquireLock($groupLockKey)) {
+            return [
+                'error'   => 'bcc_conflict',
+                'message' => 'Please retry.',
+            ];
+        }
+        try {
+            return $this->transferLocked($viewerId, $groupId, $toUserId);
+        } finally {
+            $this->releaseLock($groupLockKey);
+        }
+    }
+
+    /**
+     * Steps 1–8 — runs entirely inside the per-GROUP advisory lock
+     * acquired by {@see transfer}.
+     *
+     * @return array{ok: true, group_id: int, new_owner_id: int}
+     *         |array{error: string, message: string, data?: array<string, mixed>}
+     */
+    private function transferLocked(int $viewerId, int $groupId, int $toUserId): array
     {
         // ── 1. viewer must own an existing group ─────────────────────
         $viewerStatus = $this->membershipStatus($viewerId, $groupId);
@@ -126,6 +167,19 @@ class CommunityCustodyService
             return [
                 'error'   => 'bcc_invalid_request',
                 'message' => 'The new owner must already be a member of this community.',
+            ];
+        }
+        // A read-only member (moderation-muted) holds a membership row
+        // but must not RECEIVE custody of the community. Collapse to
+        // the SAME generic receiver_ineligible convention as step 6 —
+        // the giver must never learn the member is read-only; the true
+        // reason is logged server-side only.
+        if ($receiverStatus === 'member_readonly') {
+            $this->logReceiverDenied($groupId, $viewerId, $toUserId, 'member_readonly');
+            return [
+                'error'   => 'bcc_forbidden',
+                'message' => self::receiverDenyMessage(),
+                'data'    => ['reason' => 'receiver_ineligible'],
             ];
         }
 
@@ -297,6 +351,17 @@ class CommunityCustodyService
     private static function custodyLockKey(int $userId): string
     {
         return 'bcc_community_custody_' . $userId;
+    }
+
+    /**
+     * Per-GROUP advisory-lock key serializing same-group transfers
+     * (owner-precondition read → writer call). Distinct namespace from
+     * the per-user key so a group id can never collide with a user id.
+     * Well under MySQL's 64-char GET_LOCK name limit.
+     */
+    private static function custodyGroupLockKey(int $groupId): string
+    {
+        return 'bcc_community_custody_group_' . $groupId;
     }
 
     /**

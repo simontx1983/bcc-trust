@@ -87,6 +87,15 @@ final class ContentReportService
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
         }
 
+        // §M suspension-gate parity — participation writes opt out of
+        // the suspension admin-bypass (Permissions::is_not_suspended
+        // ($id, false)): a suspended member, admin included, cannot
+        // seed the moderation queue. Mirrors PostsService /
+        // CommentService's inline gates.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($reporterUserId, false)) {
+            return ['error' => 'bcc_forbidden', 'message' => 'Your account is suspended.'];
+        }
+
         if (!in_array($targetKind, self::TARGET_KINDS, true)) {
             return ['error' => 'bcc_invalid_request', 'message' => 'Unsupported target kind.'];
         }

@@ -8,10 +8,12 @@
  *
  * Read-side hot path: BlogService::hydrateBlogBody calls
  * {@see findByPostId} per row. To keep the per-row cost bounded the
- * repository ships a {@see findByPostIds} bulk variant for any future
- * batched hydration (e.g. floor renderer hydrating multiple blog
- * excerpts at once). Both paths use a bounded `LIMIT` matching
- * BLOG_CHAIN_TAGS_MAX × max-batch.
+ * repository ships a {@see findByPostIds} bulk variant, and the feed
+ * pipeline warms a per-request memo through {@see prefetchForPostIds}
+ * before its per-row blog-body loop (FeedHydrationPipeline::
+ * loadBlogBodies) so the per-row calls become in-memory lookups. Both
+ * query paths use a bounded `LIMIT` matching BLOG_CHAIN_TAGS_MAX ×
+ * max-batch.
  *
  * Cache invalidation: chain-tag rows are written only by the blog
  * composer's create path (§D6 PR-A) — there's no public PATCH yet
@@ -56,9 +58,52 @@ final class BlogChainTagRepository
     private const CACHE_KEY_GEN  = 'gen';
     private const CACHE_TTL      = 300; // 5 min
 
+    /**
+     * Per-request prefetch memo the feed pipeline fills (via
+     * {@see prefetchForPostIds}) so the per-row {@see findByPostId}
+     * calls inside BlogService::loadBodyFromPost become in-memory
+     * lookups instead of one query each (the cold /feed/hot N+1).
+     *
+     * Static, not instance state: BlogService's legacy constructor
+     * fallback news up a fresh repository per call, which would drop
+     * an instance memo on the floor. Request-scoped by PHP lifecycle;
+     * {@see replace} evicts the written post so a write in the same
+     * request can never serve a stale memo entry.
+     *
+     * @var array<int, list<int>> post_id → chain ids ([] = none)
+     */
+    private static array $prefetched = [];
+
     public static function table(): string
     {
         return DB::table('blog_chain_tags');
+    }
+
+    /**
+     * Warm the per-request memo for a page of posts in ONE bounded
+     * query ({@see findByPostIds}). Ids already memoized are skipped;
+     * posts with no tags memoize [] so a later findByPostId doesn't
+     * fall through to a per-row query for them.
+     *
+     * @param list<int> $postIds
+     */
+    public function prefetchForPostIds(array $postIds): void
+    {
+        $need = [];
+        foreach ($postIds as $pid) {
+            $pid = (int) $pid;
+            if ($pid > 0 && !isset(self::$prefetched[$pid]) && !in_array($pid, $need, true)) {
+                $need[] = $pid;
+            }
+        }
+        if ($need === []) {
+            return;
+        }
+
+        $map = $this->findByPostIds($need);
+        foreach ($need as $pid) {
+            self::$prefetched[$pid] = $map[$pid] ?? [];
+        }
     }
 
     /**
@@ -119,6 +164,10 @@ final class BlogChainTagRepository
             );
         }
 
+        // Evict the per-request prefetch memo for this post so a
+        // read later in the same request observes the new tag set.
+        unset(self::$prefetched[$postId]);
+
         self::bustCache();
     }
 
@@ -133,6 +182,13 @@ final class BlogChainTagRepository
     {
         if ($postId <= 0) {
             return [];
+        }
+
+        // Per-request prefetch memo (feed pipeline) — checked BEFORE
+        // the object cache so a prefetched page issues zero per-row
+        // reads of any kind.
+        if (isset(self::$prefetched[$postId])) {
+            return self::$prefetched[$postId];
         }
 
         $genKey = self::cacheKey('post:' . $postId);

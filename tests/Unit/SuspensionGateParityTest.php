@@ -4,8 +4,15 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Tests\Unit;
 
+use BCC\Trust\Core\REST\CommentStokeEndpoint;
 use BCC\Trust\Core\REST\HallsEndpoint;
+use BCC\Trust\Core\REST\HelpfulMarkEndpoint;
 use BCC\Trust\Core\REST\MyGroupsEndpoint;
+use BCC\Trust\Core\REST\ReactionsEndpoint;
+use BCC\Trust\Core\REST\StokeEndpoint;
+use BCC\Trust\Core\Services\CommentService;
+use BCC\Trust\Core\Services\ContentReportService;
+use BCC\Trust\Core\Services\PostsService;
 use BCC\Trust\Onchain\REST\HolderGroupsEndpoint;
 use BCC\Trust\Onchain\Services\NftGroupGateService;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -26,6 +33,18 @@ use ReflectionClass;
  *   - POST /me/groups                   (MyGroupsEndpoint::postCreate)
  *   - NftGroupGateService::reconcileForUser (cron auto-join — the server
  *     itself must not re-add a suspended holder who has auto_join on)
+ *
+ * …and (2026-08-06 sweep) on the participation-write surfaces that were
+ * still ungated after #162's parity pass:
+ *
+ *   - POST/DELETE /reactions            (ReactionsEndpoint)
+ *   - POST/DELETE /feed/{id}/stoke      (StokeEndpoint)
+ *   - POST/DELETE /comments/{id}/stoke  (CommentStokeEndpoint)
+ *   - POST /feed|comments/{id}/helpful  (HelpfulMarkEndpoint — the
+ *     UN-mark path deliberately stays open: retracting your own prior
+ *     endorsement never mints evidence)
+ *   - PostsService::createStatus / CommentService::createComment /
+ *     ContentReportService::fileReport (service-boundary array envelopes)
  *
  * Every REST case asserts the gate fires with admin bypass OFF (second
  * arg false) — a suspended account is blocked regardless of role.
@@ -96,6 +115,75 @@ final class SuspensionGateParityTest extends TestCase
         self::assertSuspendedRejection($response);
     }
 
+    // ── 2026-08-06 sweep: participation-write surfaces ──────────────────
+
+    public function testReactionSetRejectsSuspendedUser(): void
+    {
+        $response = self::endpoint(ReactionsEndpoint::class)->setReaction(new \WP_REST_Request());
+        self::assertSuspendedRejection($response);
+    }
+
+    public function testReactionRemoveRejectsSuspendedUser(): void
+    {
+        $response = self::endpoint(ReactionsEndpoint::class)->removeReaction(new \WP_REST_Request());
+        self::assertSuspendedRejection($response);
+    }
+
+    public function testStokeAddRejectsSuspendedUser(): void
+    {
+        $response = self::endpoint(StokeEndpoint::class)->addStoke(new \WP_REST_Request());
+        self::assertSuspendedRejection($response);
+    }
+
+    public function testStokeRemoveRejectsSuspendedUser(): void
+    {
+        $response = self::endpoint(StokeEndpoint::class)->removeStoke(new \WP_REST_Request());
+        self::assertSuspendedRejection($response);
+    }
+
+    public function testCommentStokeAddRejectsSuspendedUser(): void
+    {
+        $response = self::endpoint(CommentStokeEndpoint::class)->addStoke(new \WP_REST_Request());
+        self::assertSuspendedRejection($response);
+    }
+
+    public function testHelpfulMarkAddRejectsSuspendedUser(): void
+    {
+        $response = self::endpoint(HelpfulMarkEndpoint::class)->addPostMark(new \WP_REST_Request());
+        self::assertSuspendedRejection($response);
+    }
+
+    /**
+     * Service-boundary gates return the array error envelope (the REST
+     * layer maps bcc_forbidden → 403). Same admin-bypass-OFF assertion.
+     *
+     * @param array<string, mixed> $result
+     */
+    private static function assertSuspendedServiceRejection(array $result): void
+    {
+        self::assertSame('bcc_forbidden', $result['error'] ?? null);
+        self::assertSame('Your account is suspended.', $result['message'] ?? null);
+        self::assertSame([false], $GLOBALS['__bcc_susp_fixture']['bypass_args']);
+    }
+
+    public function testStatusPostRejectsSuspendedUser(): void
+    {
+        $service = (new ReflectionClass(PostsService::class))->newInstanceWithoutConstructor();
+        self::assertSuspendedServiceRejection($service->createStatus(7, 'hello floor'));
+    }
+
+    public function testCommentCreateRejectsSuspendedUser(): void
+    {
+        $service = (new ReflectionClass(CommentService::class))->newInstanceWithoutConstructor();
+        self::assertSuspendedServiceRejection($service->createComment('feed_1', 7, 'hello thread'));
+    }
+
+    public function testContentReportRejectsSuspendedUser(): void
+    {
+        $service = (new ReflectionClass(ContentReportService::class))->newInstanceWithoutConstructor();
+        self::assertSuspendedServiceRejection($service->fileReport(7, 'feed_item', 5, 'spam', ''));
+    }
+
     // ── Throttle-before-credentials ordering ────────────────────────────
     //
     // The rate limiter must run BEFORE the suspension gate: with BOTH
@@ -139,6 +227,27 @@ final class SuspensionGateParityTest extends TestCase
     {
         $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
         $response = self::endpoint(MyGroupsEndpoint::class)->postCreate(new \WP_REST_Request());
+        self::assertThrottledBeforeSuspension($response);
+    }
+
+    public function testReactionSetThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        $response = self::endpoint(ReactionsEndpoint::class)->setReaction(new \WP_REST_Request());
+        self::assertThrottledBeforeSuspension($response);
+    }
+
+    public function testStokeAddThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        $response = self::endpoint(StokeEndpoint::class)->addStoke(new \WP_REST_Request());
+        self::assertThrottledBeforeSuspension($response);
+    }
+
+    public function testHelpfulMarkThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        $response = self::endpoint(HelpfulMarkEndpoint::class)->addPostMark(new \WP_REST_Request());
         self::assertThrottledBeforeSuspension($response);
     }
 

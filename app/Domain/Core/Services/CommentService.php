@@ -296,6 +296,15 @@ final class CommentService
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
         }
 
+        // §M suspension-gate parity — participation writes opt out of
+        // the suspension admin-bypass (Permissions::is_not_suspended
+        // ($id, false)): a suspended member, admin included, cannot
+        // comment. Gated once HERE (the authoritative layer both REST
+        // callers route through) — mirrors PostsService's create paths.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($authorId, false)) {
+            return ['error' => 'bcc_forbidden', 'message' => 'Your account is suspended.'];
+        }
+
         $trimmed = trim($content);
         $hasMedia = $attachmentId !== null || ($gifUrl !== null && trim($gifUrl) !== '');
         if ($trimmed === '' && !$hasMedia) {

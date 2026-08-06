@@ -410,6 +410,14 @@ final class FeedHydrationPipeline
             }
         }
         if ($extIdsAll !== []) {
+            // One batched wp_posts read primes the post object cache
+            // for every get_post() the per-kind loaders below make
+            // (PhotoBodyHydrator::resolvePhotoCaption for photo + gif
+            // captions, BlogService::hydrateForPostId for blog bodies)
+            // — on a cold page those were one SELECT per row. Term
+            // cache stays cold (no term reads here); meta priming is
+            // the separate call below.
+            _prime_post_caches(array_keys($extIdsAll), false, false);
             update_meta_cache('post', array_keys($extIdsAll));
         }
 
@@ -608,10 +616,12 @@ final class FeedHydrationPipeline
      * `BlogService::hydrateForPostId` carries the full body shape;
      * here we pass `$includeFullText = false` so the Floor payload
      * stays small (Floor renders excerpt + chips + title only; the
-     * full body lives on the blog tab). Per-row reads — V1.5 should
-     * batch through BlogChainTagRepository::findByPostIds + a single
-     * ChainRepository fetch when blog excerpts go multi-author on
-     * the Floor.
+     * full body lives on the blog tab). The chain-tag join is batched:
+     * one BlogChainTagRepository::findByPostIds read (via the prefetch
+     * memo) covers the whole page, so the per-row hydrateForPostId
+     * calls resolve tags in memory; wp_post reads hit the object cache
+     * primed in hydrateBodies. ChainRepository::getById inside is
+     * already cache-backed.
      *
      * @param list<int> $postIds
      * @return array<int, array<string, mixed>>
@@ -621,6 +631,9 @@ final class FeedHydrationPipeline
         if ($postIds === []) {
             return [];
         }
+        // Warm the chain-tag memo for the whole page up front — kills
+        // the per-row bcc_blog_chain_tags SELECTs on a cold page.
+        $this->blogService->prefetchChainTags($postIds);
         /** @var array<int, array<string, mixed>> $out */
         $out = [];
         foreach ($postIds as $postId) {

@@ -120,6 +120,21 @@ namespace BCC\Core\Security {
     }
 }
 
+namespace BCC\Core\Permissions {
+    // §M suspension gate at the top of the create paths — the members
+    // under test here are never suspended; SuspensionGateParityTest
+    // owns the suspended-path assertions.
+    if (!class_exists(Permissions::class, false)) {
+        class Permissions
+        {
+            public static function is_not_suspended(?int $user_id = null, bool $allowAdminBypass = true): bool
+            {
+                return true;
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Log {
     if (!class_exists(Logger::class, false)) {
         class Logger

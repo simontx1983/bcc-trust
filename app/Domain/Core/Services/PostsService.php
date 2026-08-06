@@ -278,6 +278,25 @@ final class PostsService
     }
 
     /**
+     * §M suspension-gate parity — participation writes opt out of the
+     * suspension admin-bypass (Permissions::is_not_suspended($id,
+     * false)): a suspended member, admin included, cannot post.
+     * Mirrors AttestationService's inline gate + the membership-write
+     * doors (MyGroupsEndpoint::postJoin / HallsEndpoint::join). Runs
+     * after auth resolution, before any validation/throttle work.
+     * Returns null when the account is clear.
+     *
+     * @return array{error: string, message: string}|null
+     */
+    private static function suspensionGateError(int $userId): ?array
+    {
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ['error' => 'bcc_forbidden', 'message' => 'Your account is suspended.'];
+        }
+        return null;
+    }
+
+    /**
      * Create a status post on the viewer's own wall.
      *
      * Auth is the caller's responsibility (REST endpoint checks
@@ -305,6 +324,14 @@ final class PostsService
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        // §M suspension-gate parity — wall + Hall main-channel posts
+        // gate here; the ranked channel already gates suspension inside
+        // gateGroupPost's post_ranked_hall_feed capability.
+        $suspensionError = self::suspensionGateError($authorId);
+        if ($suspensionError !== null) {
+            return $suspensionError;
         }
 
         // Defense in depth: anything outside the allowed set falls back
@@ -1771,6 +1798,13 @@ final class PostsService
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
         }
 
+        // §M suspension-gate parity — same gate as createStatus (a
+        // photo post is the same write surface through another door).
+        $suspensionError = self::suspensionGateError($authorId);
+        if ($suspensionError !== null) {
+            return $suspensionError;
+        }
+
         // Defense in depth — clamp to the allowed set (see createStatus).
         $visibility = self::normalizeVisibility($visibility);
         $hallFeed   = self::normalizeHallFeed($hallFeed);
@@ -1897,6 +1931,13 @@ final class PostsService
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        // §M suspension-gate parity — same gate as createStatus (a
+        // GIF post is the same write surface through another door).
+        $suspensionError = self::suspensionGateError($authorId);
+        if ($suspensionError !== null) {
+            return $suspensionError;
         }
 
         // Defense in depth — clamp to the allowed set (see createStatus).
