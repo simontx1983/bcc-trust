@@ -49,14 +49,19 @@ if (!function_exists('bcc_trust_backfill_display_name_placeholders')) {
         $batchSize     = 200;
         $maxIterations = 25;
 
-        // Leak predicate — kept in ONE place so selection and the
-        // remaining-rows check can never disagree. Matches:
+        // Leak predicate. The LIKE patterns are BOUND as %s values —
+        // NEVER written literally in the prepare() template: wpdb
+        // replaces literal '%' in templates with its placeholder-escape
+        // sentinel, which silently turns the pattern into a
+        // match-nothing string (the v1 run of this migration completed
+        // against zero rows exactly that way). Bound values keep their
+        // wildcards — the same idiom every search repository here uses.
         //   display_name containing '@' (email-shaped), or
         //   display_name = user_email, or
-        //   display_name LIKE 'u\_%' (internal login shape).
-        $predicate = "(u.display_name LIKE '%@%'
-                       OR u.display_name = u.user_email
-                       OR u.display_name LIKE 'u\\_%')";
+        //   display_name starting 'u_' literally (internal login shape;
+        //   esc_like keeps the underscore literal).
+        $emailPattern = '%' . $wpdb->esc_like('@') . '%';
+        $loginPattern = $wpdb->esc_like('u_') . '%';
 
         for ($i = 0; $i < $maxIterations; $i++) {
             /** @var list<object{ID: string, handle: string|null}> $rows */
@@ -65,9 +70,13 @@ if (!function_exists('bcc_trust_backfill_display_name_placeholders')) {
                    FROM {$wpdb->users} u
                    LEFT JOIN {$wpdb->usermeta} um
                           ON um.user_id = u.ID AND um.meta_key = %s
-                  WHERE {$predicate}
+                  WHERE (u.display_name LIKE %s
+                         OR u.display_name = u.user_email
+                         OR u.display_name LIKE %s)
                   LIMIT %d",
                 'bcc_handle',
+                $emailPattern,
+                $loginPattern,
                 $batchSize
             ));
             if ($wpdb->last_error !== '') {

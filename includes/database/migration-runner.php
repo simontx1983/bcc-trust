@@ -144,8 +144,8 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'callback'    => 'bcc_trust_purge_edge_cache_for_rest_exclusion',
             ],
             [
-                'id'          => 'display_name_placeholders_v1',
-                'done_option' => 'bcc_trust_display_name_placeholders_backfilled',
+                'id'          => 'display_name_placeholders_v2',
+                'done_option' => 'bcc_trust_display_name_placeholders_backfilled_v2',
                 'callback'    => 'bcc_trust_backfill_display_name_placeholders',
             ],
         ];
