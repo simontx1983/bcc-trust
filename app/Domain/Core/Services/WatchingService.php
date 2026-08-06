@@ -37,6 +37,8 @@ use BCC\Trust\Core\Repositories\PageFollowRepository;
 use BCC\Trust\Core\Repositories\WatchMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Core\Support\PageCardPrefetcher;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\ReputationTierMap;
 
@@ -46,6 +48,30 @@ if (!defined('ABSPATH')) {
 
 /**
  * @phpstan-import-type WatchingItemRow from WatchingRepository
+ *
+ * The emitted watch-item shape (contract §4.5). `card` is the v1.76
+ * additive hydration slot: absent entirely unless the request carried
+ * `include=cards`, and `null` within a hydrated response when the
+ * target doesn't resolve to a Card.
+ *
+ * @phpstan-type WatchingItem array{
+ *   follow_id: int,
+ *   follow_source: string,
+ *   card_kind: string,
+ *   is_resolved: bool,
+ *   card_id: int,
+ *   card_handle: string,
+ *   card_slug: string|null,
+ *   page_id: int|null,
+ *   reputation_tier_at_watch: string|null,
+ *   reputation_tier_label_at_watch: string|null,
+ *   batch_id: string|null,
+ *   watched_at: string|null,
+ *   is_legacy: bool,
+ *   links: array{card: string},
+ *   actions: array{view: array{method: string, href: string, idempotent: bool, requires_auth: bool}},
+ *   card?: array<string, mixed>|null
+ * }
  */
 final class WatchingService
 {
@@ -55,6 +81,22 @@ final class WatchingService
      * source of truth; the endpoint mirrors it.
      */
     public const MAX_PAGE_SIZE = 50;
+
+    /**
+     * Hard cap on page_size when the caller asks for full-Card
+     * hydration (`include=cards`, contract §4.5 / v1.76). Hydration
+     * runs one batch prefetch per kind, but the per-row builders still
+     * do real work, so the hydrated page is smaller than the
+     * identifier-only page. Clamped SILENTLY (no 400) and echoed back
+     * in `pagination.page_size`; the route arg max stays MAX_PAGE_SIZE.
+     *
+     * SCOPE (do not over-read this constant): it bounds the PeepSo page
+     * budget only. It does NOT bound the number of cards built on page
+     * 1 — getWatching prepends up to 100 bcc_page_follows rows there
+     * regardless of page_size, and every returned row is hydrated. See
+     * the bound note at the attachCards call site in getWatching.
+     */
+    public const HYDRATED_MAX_PAGE_SIZE = 24;
 
     /** @var list<string> */
     public const VALID_TARGET_KINDS = ['validator', 'project', 'creator', 'member'];
@@ -77,28 +119,35 @@ final class WatchingService
     /**
      * Build the watchlist view-model for a viewer.
      *
+     * `$includeCards` is the §4.5 `include=cards` switch: every item
+     * gains a `card` key (full §3.2 Card view-model, or null when the
+     * target is unhydratable).
+     *
+     * What hydration does and does not change (stated precisely — an
+     * earlier version of this docblock over-claimed full parity):
+     *   - `total` is IDENTICAL with and without `include=cards`. It is
+     *     computed below from $peepsoTotal + $pageFollowCount and
+     *     hydration never touches it.
+     *   - Hydration never drops, filters or reorders rows FROM A
+     *     RETURNED PAGE. An unhydratable target stays in place with
+     *     `card: null`.
+     *   - Requesting page_size > 24 with `include=cards` returns a
+     *     SMALLER page (clamped to HYDRATED_MAX_PAGE_SIZE), so both
+     *     `items` length and `total_pages` differ from the same
+     *     unclamped identifier-only request. That is the clamp, not
+     *     row dropping.
+     *
      * @return array{
-     *   items: list<array{
-     *     follow_id: int,
-     *     card_kind: string,
-     *     is_resolved: bool,
-     *     card_id: int,
-     *     card_handle: string,
-     *     reputation_tier_at_watch: string|null,
-     *     reputation_tier_label_at_watch: string|null,
-     *     batch_id: string|null,
-     *     watched_at: string|null,
-     *     is_legacy: bool,
-     *     links: array{card: string},
-     *     actions: array{view: array{method: string, href: string}}
-     *   }>,
+     *   items: list<WatchingItem>,
      *   pagination: array{page: int, page_size: int, total: int, total_pages: int}
      * }
      */
-    public function getWatching(int $userId, int $page, int $pageSize): array
+    public function getWatching(int $userId, int $page, int $pageSize, bool $includeCards = false): array
     {
-        $page     = max(1, $page);
-        $pageSize = max(1, min(self::MAX_PAGE_SIZE, $pageSize));
+        $page = max(1, $page);
+        // Clamp BEFORE the offset math so the LIMIT, the offset and the
+        // echoed pagination.page_size can never disagree.
+        $pageSize = self::clampPageSize($pageSize, $includeCards);
         $offset   = ($page - 1) * $pageSize;
 
         // ────────────────────────────────────────────────────────────
@@ -172,6 +221,33 @@ final class WatchingService
 
         $items = array_merge($pageFollowItems, $peepsoItems);
 
+        // ────────────────────────────────────────────────────────────
+        //  LOAD-BEARING FOR THE ADDITIVE CONTRACT (§4.5 / v1.76):
+        //  this `if` is the ONE line that makes `card` absent rather
+        //  than null on an identifier-only request. attachBuiltCards
+        //  writes a `card` key on EVERY row it walks (null included),
+        //  so the absent-vs-null distinction lives here and nowhere
+        //  else. Do not hoist, inline or "simplify" this guard.
+        //
+        //  HYDRATION BOUND ON PAGE 1 (accepted, deliberate):
+        //  page 1 prepends up to 100 bcc_page_follows rows on top of
+        //  the PeepSo budget, so the real hydrated bound there is
+        //  min(100, N_pageFollows) + pageSize — ~124 Cards worst case,
+        //  not the 24 the clamp implies. We do NOT bound the
+        //  page-follow fetch to $pageSize in hydrated mode: page
+        //  follows render on page 1 only, so the overflow would become
+        //  unreachable and rows would silently vanish from the user's
+        //  watchlist. Losing rows from the UI is worse than the build
+        //  cost. The cost is batched CPU/serialization, not queries:
+        //  the prefetch IN() lists are hard-capped at 100 by
+        //  PageFollowRepository::findByUserId and there is no per-row
+        //  query on a prefetch miss. Page follows also accrue slowly
+        //  and drain on claim (PeepSoIntegration::onPageClaimed).
+        // ────────────────────────────────────────────────────────────
+        if ($includeCards) {
+            $items = $this->attachCards($items, $userId);
+        }
+
         $total      = $peepsoTotal + $pageFollowCount;
         $totalPages = $total > 0 ? (int) ceil($total / $pageSize) : 0;
 
@@ -187,6 +263,249 @@ final class WatchingService
     }
 
     /**
+     * Effective page_size cap for a request. Pure — no WP, no DB — so
+     * the hydrated/identifier-only split is unit-testable without a
+     * live site.
+     */
+    private static function clampPageSize(int $pageSize, bool $includeCards): int
+    {
+        $max = $includeCards ? self::HYDRATED_MAX_PAGE_SIZE : self::MAX_PAGE_SIZE;
+        return max(1, min($max, $pageSize));
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Full-Card hydration (§4.5 `include=cards`, v1.76)
+    //
+    // Three phases, deliberately separated so the two that need no I/O
+    // stay pure statics:
+    //   1. group   — items → hydration targets      (pure)
+    //   2. prefetch+build — one batch per kind      (I/O)
+    //   3. attach  — targets + built cards → items  (pure)
+    //
+    // Reuses the canonical list-hydration seam (MemberCardPrefetcher /
+    // PageCardPrefetcher + CardViewService::get{Member,Page}CardForList)
+    // that /members, /cards and the followers lists already run on — no
+    // parallel card builder lives here.
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Derive the hydration target for every item, reading ONLY fields
+     * the item already carries. Pure: no DB, no WP.
+     *
+     * Grouping rules (LOCKED with the §4.5 field semantics):
+     *   - card_kind 'member' AND follow_source 'peepso' → member target
+     *     on `card_id`. `card_id` is the followee user_id ONLY on peepso
+     *     rows (see the card_id contract note on buildItem);
+     *     buildItemFromPageFollow sets it to the page's wp_post ID
+     *     instead, so hydrating a member card from a page row would
+     *     resolve user #<post_id> — a wrong-entity leak. The premise
+     *     that page rows are never 'member' is upheld three call-frames
+     *     away by watchPlaceholderPage's
+     *     `in_array($targetKind, ['validator','project','creator'])`
+     *     guard, which is the only writer of bcc_page_follows.card_kind.
+     *     Checking follow_source here makes that invariant local and
+     *     enforced rather than assumed: a member-kind page row yields NO
+     *     target and ships with card = null.
+     *     Deliberately NOT gated on `is_resolved`: {is_resolved: true,
+     *     card_kind: 'member'} is the valid "page-backed but no contract
+     *     kind" state (e.g. a dao page) and hydrates as the owner's
+     *     member card.
+     *   - card_kind validator/project/creator      → page target on
+     *     `page_id` (NOT card_id — for peepso rows card_id is the user).
+     *     A null/absent page_id yields no target rather than a guess.
+     *   - anything else                            → no target (the row
+     *     still ships, with card = null).
+     *
+     * `member_ids` / `page_ids` are deduped for the prefetch IN() lists;
+     * two rows pointing at the same target both resolve to the same
+     * built card at attach time.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return array{
+     *   member_targets: array<int, int>,
+     *   page_targets: array<int, array{kind: string, page_id: int}>,
+     *   member_ids: list<int>,
+     *   page_ids: list<int>
+     * }
+     */
+    private static function groupHydrationTargets(array $items): array
+    {
+        /** @var array<int, int> $memberTargets */
+        $memberTargets = [];
+        /** @var array<int, array{kind: string, page_id: int}> $pageTargets */
+        $pageTargets = [];
+        /** @var array<int, true> $memberIds */
+        $memberIds = [];
+        /** @var array<int, true> $pageIds */
+        $pageIds = [];
+
+        foreach ($items as $index => $item) {
+            $kind = isset($item['card_kind']) ? (string) $item['card_kind'] : '';
+
+            if ($kind === 'member') {
+                // Defensive: only peepso rows carry a user_id in
+                // card_id. A member-kind page row (which
+                // watchPlaceholderPage's kind guard prevents from ever
+                // being written) would otherwise hydrate the member
+                // card for user #<post_id>. No target → card: null.
+                $source = isset($item['follow_source']) ? (string) $item['follow_source'] : '';
+                if ($source !== 'peepso') {
+                    continue;
+                }
+
+                $userId = isset($item['card_id']) ? (int) $item['card_id'] : 0;
+                if ($userId > 0) {
+                    $memberTargets[$index] = $userId;
+                    $memberIds[$userId]    = true;
+                }
+                continue;
+            }
+
+            if (!in_array($kind, ['validator', 'project', 'creator'], true)) {
+                continue;
+            }
+
+            $pageId = isset($item['page_id']) ? (int) $item['page_id'] : 0;
+            if ($pageId <= 0) {
+                continue;
+            }
+            $pageTargets[$index] = ['kind' => $kind, 'page_id' => $pageId];
+            $pageIds[$pageId]    = true;
+        }
+
+        return [
+            'member_targets' => $memberTargets,
+            'page_targets'   => $pageTargets,
+            'member_ids'     => array_keys($memberIds),
+            'page_ids'       => array_keys($pageIds),
+        ];
+    }
+
+    /**
+     * Walk the items in their original order and append the built card
+     * as the LAST key of each. Pure: takes already-built card maps, so
+     * it is unit-testable without CardViewService.
+     *
+     * Every item gets a `card` key — null when no target was derived or
+     * the builder returned null. Nothing is filtered: count and order
+     * are identical to the input.
+     *
+     * This seam UNCONDITIONALLY writes `card` on every row it walks, so
+     * it can never produce the identifier-only shape. "Key absent unless
+     * `include=cards`" is owned solely by the `if ($includeCards)` guard
+     * in getWatching — see the note there.
+     *
+     * @param list<WatchingItem> $items
+     * @param array{
+     *   member_targets: array<int, int>,
+     *   page_targets: array<int, array{kind: string, page_id: int}>,
+     *   member_ids: list<int>,
+     *   page_ids: list<int>
+     * } $grouped
+     * @param array<int, array<string, mixed>>    $memberCards user_id => Card
+     * @param array<string, array<string, mixed>> $pageCards   "kind:page_id" => Card
+     * @return list<WatchingItem>
+     */
+    private static function attachBuiltCards(
+        array $items,
+        array $grouped,
+        array $memberCards,
+        array $pageCards
+    ): array {
+        $out = [];
+        foreach ($items as $index => $item) {
+            $card = null;
+            if (isset($grouped['member_targets'][$index])) {
+                $card = $memberCards[$grouped['member_targets'][$index]] ?? null;
+            } elseif (isset($grouped['page_targets'][$index])) {
+                $target = $grouped['page_targets'][$index];
+                $card   = $pageCards[self::pageCardKey($target['kind'], $target['page_id'])] ?? null;
+            }
+            // Assigned last so `card` is the final key of the item —
+            // the contract shows it as the trailing field.
+            $item['card'] = $card;
+            $out[]        = $item;
+        }
+        return $out;
+    }
+
+    private static function pageCardKey(string $kind, int $pageId): string
+    {
+        return $kind . ':' . $pageId;
+    }
+
+    /**
+     * Hydrate a page of watch items with full Card view-models.
+     *
+     * One MemberCardPrefetcher batch + one PageCardPrefetcher batch at
+     * most (each skipped when its list is empty), then per-target
+     * builders that read from the bundle. CardViewService is resolved
+     * here rather than injected so the identifier-only path never
+     * constructs it.
+     *
+     * @param list<WatchingItem> $items
+     * @return list<WatchingItem>
+     */
+    private function attachCards(array $items, int $viewerId): array
+    {
+        if ($items === []) {
+            return $items;
+        }
+
+        $grouped = self::groupHydrationTargets($items);
+
+        if ($grouped['member_ids'] === [] && $grouped['page_ids'] === []) {
+            // Nothing hydratable on this page — still emit `card: null`
+            // on every row so the shape is uniform.
+            return self::attachBuiltCards($items, $grouped, [], []);
+        }
+
+        $cardView = \BCC\Trust\Core\Plugin::instance()->cardViewService();
+
+        /** @var array<int, array<string, mixed>> $memberCards */
+        $memberCards = [];
+        if ($grouped['member_ids'] !== []) {
+            $memberBundle = MemberCardPrefetcher::primeFor($grouped['member_ids'], $viewerId);
+            foreach ($grouped['member_ids'] as $memberId) {
+                $card = $cardView->getMemberCardForList($memberId, $viewerId, $memberBundle);
+                if ($card !== null) {
+                    $memberCards[$memberId] = $card;
+                }
+            }
+        }
+
+        /** @var array<string, array<string, mixed>> $pageCards */
+        $pageCards = [];
+        if ($grouped['page_ids'] !== []) {
+            // Dedupe (kind, page_id) pairs — two rows watching the same
+            // page build the card once.
+            /** @var array<string, array{kind: string, page_id: int}> $uniqueTargets */
+            $uniqueTargets = [];
+            foreach ($grouped['page_targets'] as $target) {
+                $uniqueTargets[self::pageCardKey($target['kind'], $target['page_id'])] = $target;
+            }
+
+            $pageBundle = PageCardPrefetcher::primeFor($grouped['page_ids'], $viewerId);
+            foreach ($uniqueTargets as $key => $target) {
+                // getPageCardForList's internal _bcc_page_type check
+                // returns null on a kind/page mismatch — the null card
+                // for an unhydratable row falls out for free.
+                $card = $cardView->getPageCardForList(
+                    $target['kind'],
+                    $target['page_id'],
+                    $viewerId,
+                    $pageBundle
+                );
+                if ($card !== null) {
+                    $pageCards[$key] = $card;
+                }
+            }
+        }
+
+        return self::attachBuiltCards($items, $grouped, $memberCards, $pageCards);
+    }
+
+    /**
      * @param WatchingItemRow $row
      * @param object{user_id: int|numeric-string, page_id: int|numeric-string, page_slug: string, page_type: string}|null $pageInfo
      *        Phase-2 page resolution. Null when the followed user has
@@ -197,6 +516,7 @@ final class WatchingService
      *        don't have a contract kind for it yet).
      * @return array{
      *   follow_id: int,
+     *   follow_source: string,
      *   card_kind: string,
      *   is_resolved: bool,
      *   card_id: int,
@@ -362,6 +682,7 @@ final class WatchingService
      * } $row
      * @return array{
      *   follow_id: int,
+     *   follow_source: string,
      *   card_kind: string,
      *   is_resolved: bool,
      *   card_id: int,
