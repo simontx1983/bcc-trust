@@ -43,6 +43,7 @@ function bcc_onchain_create_chains_table(): void {
         decimals TINYINT UNSIGNED NOT NULL DEFAULT 6,
         bech32_prefix VARCHAR(20) DEFAULT NULL,
         icon_url VARCHAR(500) DEFAULT NULL,
+        color CHAR(7) DEFAULT NULL,
         marketplace_template TEXT DEFAULT NULL,
         description TEXT DEFAULT NULL,
         is_testnet TINYINT(1) NOT NULL DEFAULT 0,
