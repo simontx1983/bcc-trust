@@ -39,6 +39,30 @@ final class AuthSupport
 {
     public const ROUTE_NAMESPACE = 'bcc/v1';
 
+    /**
+     * Hygiene gate for a user-supplied PUBLIC display name
+     * (owner-directed 2026-08-06). Returns '' — which every signup path
+     * treats as "fall back to the handle" — when the candidate would
+     * leak non-public identity onto public surfaces:
+     *   - email-shaped values (any '@'): the observed leak class came
+     *     from WP-native account creation defaulting display_name to an
+     *     email login, and OAuth providers can return the email as the
+     *     "name";
+     *   - internal-login-shaped values ('u_' prefix, §B3): the login is
+     *     internal by design and must never render publicly.
+     *
+     * Pure static (unit-tested). Callers sanitize/trim before or after;
+     * this only decides accept-vs-fallback.
+     */
+    public static function sanitizePublicDisplayName(string $name): string
+    {
+        $name = trim($name);
+        if ($name === '' || str_contains($name, '@') || str_starts_with($name, 'u_')) {
+            return '';
+        }
+        return $name;
+    }
+
     /** Per-user-per-minute throttle (matches AJAX `wallet_challenge` budget). */
     public const NONCE_RATE_LIMIT = 10;
     /** Per-user-per-minute throttle (matches AJAX `wallet_verify` budget). */

@@ -166,7 +166,7 @@ final class PasswordAuthController
         $email       = sanitize_email((string) $request->get_param('email'));
         $password    = (string) $request->get_param('password');
         $handle      = strtolower(trim((string) $request->get_param('handle')));
-        $displayName = (string) $request->get_param('display_name');
+        $displayName = AuthSupport::sanitizePublicDisplayName((string) $request->get_param('display_name'));
 
         if ($email === '' || !is_email($email)) {
             return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 400);

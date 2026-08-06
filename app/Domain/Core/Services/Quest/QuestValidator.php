@@ -92,7 +92,22 @@ class QuestValidator {
     private const COMPLETE_PROFILE_MIN_FIELDS  = 4;
 
     private static function validateCompleteProfile(int $userId): bool {
-        if (!get_userdata($userId)) {
+        $user = get_userdata($userId);
+        if (!$user) {
+            return false;
+        }
+
+        // ── Mandatory AND-gate (owner-directed 2026-08-06): a public
+        // display name must be CHOSEN before any completeness path can
+        // succeed. The OR-chain below stays untouched — this is the one
+        // criterion that can't be substituted by verification proof,
+        // because the placeholder/email/internal-login classes leak on
+        // every public surface regardless of how verified the account
+        // is. Fresh signups default display_name to the user-chosen
+        // handle, which COUNTS as chosen — only backfilled placeholders
+        // ('Member N'), email-shaped, and internal-login-shaped values
+        // hold the gate closed.
+        if (!self::displayNameLooksChosen((string) $user->display_name)) {
             return false;
         }
 
@@ -138,6 +153,28 @@ class QuestValidator {
         }
 
         return false;
+    }
+
+    /**
+     * Whether a display name reads as USER-CHOSEN rather than derived
+     * or placeholder. Pure predicate (unit-tested):
+     *   - empty → not chosen;
+     *   - contains '@' → email-derived leak class;
+     *   - 'u_' prefix → internal login (§B3) leaked publicly;
+     *   - 'Member <n>' → the neutral placeholder the 2026-08-06
+     *     backfill assigns; the whole point is nudging these users to
+     *     pick a real name via the completeness gate above.
+     */
+    public static function displayNameLooksChosen(string $displayName): bool {
+        $displayName = trim($displayName);
+        if ($displayName === ''
+            || str_contains($displayName, '@')
+            || str_starts_with($displayName, 'u_')
+            || preg_match('/^Member \d+$/', $displayName) === 1
+        ) {
+            return false;
+        }
+        return true;
     }
 
     /**

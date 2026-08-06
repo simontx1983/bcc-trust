@@ -143,6 +143,11 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_edge_cache_rest_exclusion_purged',
                 'callback'    => 'bcc_trust_purge_edge_cache_for_rest_exclusion',
             ],
+            [
+                'id'          => 'display_name_placeholders_v1',
+                'done_option' => 'bcc_trust_display_name_placeholders_backfilled',
+                'callback'    => 'bcc_trust_backfill_display_name_placeholders',
+            ],
         ];
     }
 

@@ -65,6 +65,9 @@ final class MyProfileEndpoint
     /** Bio max length — matches PeepSo's typical profile-text cap. */
     private const BIO_MAX_LENGTH = 500;
 
+    /** wp_users.display_name is VARCHAR(250); 60 is the display budget. */
+    private const DISPLAY_NAME_MAX_LENGTH = 60;
+
     /** Avatar upload size cap in bytes (2 MB). PeepSo will resize smaller. */
     private const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -181,42 +184,75 @@ final class MyProfileEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        // Bio is the only field this PATCH supports right now. Future
-        // text-only profile fields (e.g., display_name) layer in here.
-        $bioRaw = $request->get_param('bio');
-        if ($bioRaw === null) {
+        // Text-only profile fields: `bio` and — since the display-name
+        // hygiene slice (owner-directed 2026-08-06) — `display_name`.
+        // At least one must be present.
+        $bioRaw     = $request->get_param('bio');
+        $displayRaw = $request->get_param('display_name');
+        if ($bioRaw === null && $displayRaw === null) {
             return ApiResponse::error(
                 'bcc_invalid_request',
-                'No profile fields provided. Pass at least `bio`.',
+                'No profile fields provided. Pass `bio` and/or `display_name`.',
                 422
             );
         }
 
-        if (!is_string($bioRaw)) {
-            return ApiResponse::error(
-                'bcc_invalid_request',
-                'Field `bio` must be a string.',
-                422
-            );
+        $update = ['ID' => $userId];
+
+        if ($bioRaw !== null) {
+            if (!is_string($bioRaw)) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    'Field `bio` must be a string.',
+                    422
+                );
+            }
+            $bio = sanitize_textarea_field($bioRaw);
+            if (strlen($bio) > self::BIO_MAX_LENGTH) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    sprintf('Bio must be %d characters or fewer.', self::BIO_MAX_LENGTH),
+                    422
+                );
+            }
+            $update['description'] = $bio;
         }
 
-        $bio = sanitize_textarea_field($bioRaw);
-        if (strlen($bio) > self::BIO_MAX_LENGTH) {
-            return ApiResponse::error(
-                'bcc_invalid_request',
-                sprintf('Bio must be %d characters or fewer.', self::BIO_MAX_LENGTH),
-                422
-            );
+        if ($displayRaw !== null) {
+            if (!is_string($displayRaw)) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    'Field `display_name` must be a string.',
+                    422
+                );
+            }
+            $display = sanitize_text_field($displayRaw);
+            if ($display === '' || mb_strlen($display) > self::DISPLAY_NAME_MAX_LENGTH) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    sprintf('Display name must be 1–%d characters.', self::DISPLAY_NAME_MAX_LENGTH),
+                    422
+                );
+            }
+            // Same hygiene gate the signup paths apply — but here an
+            // unacceptable value is a hard 422 (the user is explicitly
+            // choosing a name; silently substituting the handle would
+            // be a lie), with the reason spelled out.
+            if (\BCC\Trust\Core\REST\Auth\AuthSupport::sanitizePublicDisplayName($display) === '') {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    'Display names cannot contain "@" or start with the reserved "u_" prefix.',
+                    422
+                );
+            }
+            $update['display_name'] = $display;
         }
 
-        $result = wp_update_user([
-            'ID'          => $userId,
-            'description' => $bio,
-        ]);
+        $result = wp_update_user($update);
         if (is_wp_error($result)) {
             return ApiResponse::error(
                 'bcc_internal_error',
-                'Could not update bio. Please try again.',
+                'Could not update profile. Please try again.',
                 500
             );
         }
