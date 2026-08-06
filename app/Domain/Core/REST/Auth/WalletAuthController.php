@@ -564,7 +564,7 @@ final class WalletAuthController
         $walletAddress = (string) $request->get_param('wallet_address');
         $signature     = wp_strip_all_tags(wp_unslash((string) $request->get_param('signature')));
         $handle        = strtolower(trim((string) $request->get_param('handle')));
-        $displayName   = (string) $request->get_param('display_name');
+        $displayName   = AuthSupport::sanitizePublicDisplayName((string) $request->get_param('display_name'));
         $emailRaw      = trim((string) $request->get_param('email'));
         $extraParam    = $request->get_param('extra');
         $extra         = is_array($extraParam) ? $extraParam : [];

@@ -237,6 +237,7 @@ require_once BCC_TRUST_PATH . 'includes/database/cleanup-last-seen-rank-usermeta
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-panel.php';
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-participations.php';
 require_once BCC_TRUST_PATH . 'includes/database/purge-edge-cache.php';
+require_once BCC_TRUST_PATH . 'includes/database/backfill-display-name-placeholders.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a

@@ -350,7 +350,7 @@ final class OAuthController
         // mint, carrying server-stored (not client-supplied) provider data.
         $providerToken = sanitize_text_field((string) $request->get_param('provider_token'));
         $handle        = strtolower(trim((string) $request->get_param('handle')));
-        $displayName   = sanitize_text_field((string) $request->get_param('display_name'));
+        $displayName   = AuthSupport::sanitizePublicDisplayName(sanitize_text_field((string) $request->get_param('display_name')));
 
         if ($providerToken === '') {
             return ApiResponse::error('bcc_invalid_request', 'provider_token is required.', 400);
@@ -380,7 +380,7 @@ final class OAuthController
         $email      = (string) ($data['email'] ?? '');
 
         if ($displayName === '') {
-            $displayName = (string) ($data['display_name'] ?? '');
+            $displayName = AuthSupport::sanitizePublicDisplayName((string) ($data['display_name'] ?? ''));
         }
         if ($displayName === '') {
             $displayName = $handle;
