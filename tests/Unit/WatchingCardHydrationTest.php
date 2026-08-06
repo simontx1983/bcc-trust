@@ -31,6 +31,19 @@ use ReflectionMethod;
  * Isolation: all three are private statics with no DB and no WordPress
  * dependency, invoked by reflection. No bootstrap beyond the plugin
  * config the suite already loads.
+ *
+ * NOT covered here (honest boundary): `attachCards` itself — the I/O
+ * middle phase — needs a WP bootstrap (Plugin::instance(), the two
+ * prefetchers, CardViewService) that this suite deliberately does not
+ * stand up. So "the `card` key is ABSENT when include=cards was not
+ * requested", "exactly one primeFor per kind", "the viewer id is
+ * threaded into every builder", and "CardViewService is resolved lazily
+ * so the identifier-only path never constructs it" are verified by
+ * inspection plus the staging API probe, not by unit tests. What IS
+ * pinned below is the half that makes the absent-key claim checkable at
+ * all: the pure attach seam writes `card` on every row it walks, so the
+ * absent-vs-null distinction can only live in getWatching's
+ * `if ($includeCards)` guard.
  */
 final class WatchingCardHydrationTest extends TestCase
 {
@@ -254,12 +267,40 @@ final class WatchingCardHydrationTest extends TestCase
         self::assertSame(['id' => 1842, 'type' => 'validator'], $attached[3]['card']);
     }
 
+    public function testMemberKindIsOnlyHydratedOnPeepsoRows(): void
+    {
+        // Defensive guard (review finding 4). `card_id` is the followee
+        // user_id ONLY on peepso rows — buildItemFromPageFollow sets it
+        // to the page's wp_post ID. watchPlaceholderPage's kind guard
+        // means a member-kind page row can't be written today, but if one
+        // ever were, grouping it by card_id would hydrate the member card
+        // for user #<post_id>. It must yield NO target instead.
+        $grouped = self::group([
+            self::item(['follow_source' => 'page', 'card_kind' => 'member', 'card_id' => 1842, 'page_id' => 1842]),
+        ]);
+
+        self::assertSame([], $grouped['member_targets'], 'a member-kind PAGE row must never hydrate user #<post_id>');
+        self::assertSame([], $grouped['member_ids']);
+        self::assertSame([], $grouped['page_targets'], 'nor may it fall through to the page batch');
+        self::assertSame([], $grouped['page_ids']);
+
+        // The same row on the peepso source groups by card_id as normal.
+        $grouped = self::group([
+            self::item(['follow_source' => 'peepso', 'card_kind' => 'member', 'card_id' => 1842]),
+        ]);
+
+        self::assertSame([0 => 1842], $grouped['member_targets']);
+        self::assertSame([1842], $grouped['member_ids']);
+    }
+
     public function testMixedFollowSourceRowsGroupIdentically(): void
     {
         // A page-follow row (pre-claim placeholder) and a peepso row
-        // pointing at the same page must produce the same target shape —
-        // follow_source is a DELETE-routing discriminator, not a
-        // hydration input.
+        // pointing at the same page must produce the same target shape.
+        // For PAGE kinds the target is page_id, which means the same
+        // thing on both sources, so follow_source is not consulted. (It
+        // IS consulted for member kinds — see the test above, where
+        // card_id means different things per source.)
         $grouped = self::group([
             self::item(['follow_source' => 'page',   'card_kind' => 'validator', 'card_id' => 1842, 'page_id' => 1842]),
             self::item(['follow_source' => 'peepso', 'card_kind' => 'validator', 'card_id' => 7,    'page_id' => 1842]),
@@ -331,6 +372,52 @@ final class WatchingCardHydrationTest extends TestCase
     public function testAttachOnEmptyPageReturnsEmptyList(): void
     {
         self::assertSame([], self::attach([], self::group([])));
+    }
+
+    public function testAttachSeamAlwaysWritesCardSoAbsenceIsOwnedByTheIncludeGuard(): void
+    {
+        // The additive contract has two distinguishable states:
+        //   no `include=cards` → `card` key ABSENT
+        //   `include=cards`    → `card` key present, possibly null
+        //
+        // attachBuiltCards can only ever produce the second. This pins
+        // that: the item shape buildItem emits carries no `card` key,
+        // and the attach seam adds one to EVERY row it walks — targeted,
+        // untargeted, hydratable and not. Therefore the absent-vs-null
+        // distinction is structurally owned by the `if ($includeCards)`
+        // guard in getWatching and by nothing else; deleting that guard
+        // cannot be compensated for anywhere downstream.
+        $items = [
+            self::item(['follow_id' => 1, 'card_kind' => 'member',    'card_id' => 42]),                    // hydrates
+            self::item(['follow_id' => 2, 'card_kind' => 'validator', 'card_id' => 7, 'page_id' => 1842]),  // target, builder miss
+            self::item(['follow_id' => 3, 'card_kind' => 'dao',       'card_id' => 43]),                    // no target at all
+            self::item(['follow_id' => 4, 'card_kind' => 'member',    'card_id' => 0]),                     // member, unusable id
+        ];
+
+        foreach ($items as $i => $row) {
+            self::assertArrayNotHasKey(
+                'card',
+                $row,
+                "buildItem's shape must not carry `card` (row {$i}) — that is the identifier-only response"
+            );
+        }
+
+        $attached = self::attach($items, self::group($items), [42 => ['id' => 42]], []);
+
+        self::assertCount(count($items), $attached);
+        foreach ($attached as $i => $row) {
+            self::assertArrayHasKey(
+                'card',
+                $row,
+                "the attach seam must write `card` on EVERY row it walks (row {$i}) — it can never emit the absent-key shape"
+            );
+        }
+
+        // …and the values are exactly what each row's target warrants.
+        self::assertSame(['id' => 42], $attached[0]['card']);
+        self::assertNull($attached[1]['card']);
+        self::assertNull($attached[2]['card']);
+        self::assertNull($attached[3]['card']);
     }
 
     // ──────────────────────────────────────────────────────────────

@@ -89,6 +89,12 @@ final class WatchingService
      * do real work, so the hydrated page is smaller than the
      * identifier-only page. Clamped SILENTLY (no 400) and echoed back
      * in `pagination.page_size`; the route arg max stays MAX_PAGE_SIZE.
+     *
+     * SCOPE (do not over-read this constant): it bounds the PeepSo page
+     * budget only. It does NOT bound the number of cards built on page
+     * 1 — getWatching prepends up to 100 bcc_page_follows rows there
+     * regardless of page_size, and every returned row is hydrated. See
+     * the bound note at the attachCards call site in getWatching.
      */
     public const HYDRATED_MAX_PAGE_SIZE = 24;
 
@@ -115,9 +121,21 @@ final class WatchingService
      *
      * `$includeCards` is the §4.5 `include=cards` switch: every item
      * gains a `card` key (full §3.2 Card view-model, or null when the
-     * target is unhydratable). Rows are NEVER dropped for hydration
-     * reasons — items count, total and total_pages are identical either
-     * way; only the page_size cap tightens.
+     * target is unhydratable).
+     *
+     * What hydration does and does not change (stated precisely — an
+     * earlier version of this docblock over-claimed full parity):
+     *   - `total` is IDENTICAL with and without `include=cards`. It is
+     *     computed below from $peepsoTotal + $pageFollowCount and
+     *     hydration never touches it.
+     *   - Hydration never drops, filters or reorders rows FROM A
+     *     RETURNED PAGE. An unhydratable target stays in place with
+     *     `card: null`.
+     *   - Requesting page_size > 24 with `include=cards` returns a
+     *     SMALLER page (clamped to HYDRATED_MAX_PAGE_SIZE), so both
+     *     `items` length and `total_pages` differ from the same
+     *     unclamped identifier-only request. That is the clamp, not
+     *     row dropping.
      *
      * @return array{
      *   items: list<WatchingItem>,
@@ -203,6 +221,29 @@ final class WatchingService
 
         $items = array_merge($pageFollowItems, $peepsoItems);
 
+        // ────────────────────────────────────────────────────────────
+        //  LOAD-BEARING FOR THE ADDITIVE CONTRACT (§4.5 / v1.76):
+        //  this `if` is the ONE line that makes `card` absent rather
+        //  than null on an identifier-only request. attachBuiltCards
+        //  writes a `card` key on EVERY row it walks (null included),
+        //  so the absent-vs-null distinction lives here and nowhere
+        //  else. Do not hoist, inline or "simplify" this guard.
+        //
+        //  HYDRATION BOUND ON PAGE 1 (accepted, deliberate):
+        //  page 1 prepends up to 100 bcc_page_follows rows on top of
+        //  the PeepSo budget, so the real hydrated bound there is
+        //  min(100, N_pageFollows) + pageSize — ~124 Cards worst case,
+        //  not the 24 the clamp implies. We do NOT bound the
+        //  page-follow fetch to $pageSize in hydrated mode: page
+        //  follows render on page 1 only, so the overflow would become
+        //  unreachable and rows would silently vanish from the user's
+        //  watchlist. Losing rows from the UI is worse than the build
+        //  cost. The cost is batched CPU/serialization, not queries:
+        //  the prefetch IN() lists are hard-capped at 100 by
+        //  PageFollowRepository::findByUserId and there is no per-row
+        //  query on a prefetch miss. Page follows also accrue slowly
+        //  and drain on claim (PeepSoIntegration::onPageClaimed).
+        // ────────────────────────────────────────────────────────────
         if ($includeCards) {
             $items = $this->attachCards($items, $userId);
         }
@@ -252,12 +293,23 @@ final class WatchingService
      * the item already carries. Pure: no DB, no WP.
      *
      * Grouping rules (LOCKED with the §4.5 field semantics):
-     *   - card_kind 'member'                       → member target on
-     *     `card_id`, which is ALWAYS the followee user_id (see the
-     *     card_id contract note on buildItem). Deliberately NOT gated on
-     *     `is_resolved`: {is_resolved: true, card_kind: 'member'} is the
-     *     valid "page-backed but no contract kind" state (e.g. a dao
-     *     page) and hydrates as the owner's member card.
+     *   - card_kind 'member' AND follow_source 'peepso' → member target
+     *     on `card_id`. `card_id` is the followee user_id ONLY on peepso
+     *     rows (see the card_id contract note on buildItem);
+     *     buildItemFromPageFollow sets it to the page's wp_post ID
+     *     instead, so hydrating a member card from a page row would
+     *     resolve user #<post_id> — a wrong-entity leak. The premise
+     *     that page rows are never 'member' is upheld three call-frames
+     *     away by watchPlaceholderPage's
+     *     `in_array($targetKind, ['validator','project','creator'])`
+     *     guard, which is the only writer of bcc_page_follows.card_kind.
+     *     Checking follow_source here makes that invariant local and
+     *     enforced rather than assumed: a member-kind page row yields NO
+     *     target and ships with card = null.
+     *     Deliberately NOT gated on `is_resolved`: {is_resolved: true,
+     *     card_kind: 'member'} is the valid "page-backed but no contract
+     *     kind" state (e.g. a dao page) and hydrates as the owner's
+     *     member card.
      *   - card_kind validator/project/creator      → page target on
      *     `page_id` (NOT card_id — for peepso rows card_id is the user).
      *     A null/absent page_id yields no target rather than a guess.
@@ -291,6 +343,16 @@ final class WatchingService
             $kind = isset($item['card_kind']) ? (string) $item['card_kind'] : '';
 
             if ($kind === 'member') {
+                // Defensive: only peepso rows carry a user_id in
+                // card_id. A member-kind page row (which
+                // watchPlaceholderPage's kind guard prevents from ever
+                // being written) would otherwise hydrate the member
+                // card for user #<post_id>. No target → card: null.
+                $source = isset($item['follow_source']) ? (string) $item['follow_source'] : '';
+                if ($source !== 'peepso') {
+                    continue;
+                }
+
                 $userId = isset($item['card_id']) ? (int) $item['card_id'] : 0;
                 if ($userId > 0) {
                     $memberTargets[$index] = $userId;
@@ -327,6 +389,11 @@ final class WatchingService
      * Every item gets a `card` key — null when no target was derived or
      * the builder returned null. Nothing is filtered: count and order
      * are identical to the input.
+     *
+     * This seam UNCONDITIONALLY writes `card` on every row it walks, so
+     * it can never produce the identifier-only shape. "Key absent unless
+     * `include=cards`" is owned solely by the `if ($includeCards)` guard
+     * in getWatching — see the note there.
      *
      * @param list<WatchingItem> $items
      * @param array{
