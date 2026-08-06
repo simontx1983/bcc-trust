@@ -108,6 +108,12 @@ if (!function_exists('bcc_trust_backfill_display_name_placeholders')) {
                     return BCC_TRUST_MIGRATION_INCOMPLETE;
                 }
 
+                // Direct $wpdb writes bypass WP's user object cache —
+                // on hosts with a persistent backend (LSMCD on
+                // staging/prod) a stale WP_User would keep serving the
+                // old display_name from get_userdata() indefinitely.
+                clean_user_cache($userId);
+
                 // Keep the denormalized read-model copy honest.
                 $infoTable = $wpdb->prefix . 'bcc_user_info';
                 $wpdb->query($wpdb->prepare(
