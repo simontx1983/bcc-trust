@@ -117,6 +117,61 @@ namespace {
         }
     }
 
+    if (!class_exists('BccTestOptionStore', false)) {
+        /** In-memory options/transients fake shared by the shims below. */
+        final class BccTestOptionStore
+        {
+            /** @var array<string, mixed> */
+            public static array $options = [];
+
+            /** @var array<string, mixed> */
+            public static array $transients = [];
+
+            public static function reset(): void
+            {
+                self::$options    = [];
+                self::$transients = [];
+            }
+        }
+    }
+
+    if (!function_exists('get_option')) {
+        /**
+         * @param  mixed $default
+         * @return mixed
+         */
+        function get_option(string $option, $default = false)
+        {
+            return \BccTestOptionStore::$options[$option] ?? $default;
+        }
+    }
+
+    if (!function_exists('update_option')) {
+        /** @param mixed $value */
+        function update_option(string $option, $value, ?bool $autoload = null): bool
+        {
+            \BccTestOptionStore::$options[$option] = $value;
+            return true;
+        }
+    }
+
+    if (!function_exists('get_transient')) {
+        /** @return mixed */
+        function get_transient(string $transient)
+        {
+            return \BccTestOptionStore::$transients[$transient] ?? false;
+        }
+    }
+
+    if (!function_exists('set_transient')) {
+        /** @param mixed $value */
+        function set_transient(string $transient, $value, int $expiration = 0): bool
+        {
+            \BccTestOptionStore::$transients[$transient] = $value;
+            return true;
+        }
+    }
+
     if (!function_exists('apply_filters')) {
         /**
          * @param mixed $value
@@ -320,6 +375,32 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function listKnownByChain(int $chainId, int $limit): array
             {
                 return array_slice(self::$knownByChain[$chainId] ?? [], 0, $limit);
+            }
+
+            /**
+             * Presence-as-known map derived from $knownByChain, mirroring the
+             * production contract: only contracts that HAVE a row appear.
+             *
+             * @param  list<string> $contracts
+             * @return array<string, bool>
+             */
+            public static function verifiedMapForContracts(int $chainId, array $contracts): array
+            {
+                $rows = [];
+                foreach (self::$knownByChain[$chainId] ?? [] as $row) {
+                    $rows[strtolower((string) ($row->contract_address ?? ''))] =
+                        ((int) ($row->is_verified ?? 0) === 1);
+                }
+
+                $map = [];
+                foreach ($contracts as $contract) {
+                    $lower = strtolower($contract);
+                    if (array_key_exists($lower, $rows)) {
+                        $map[$lower] = $rows[$lower];
+                    }
+                }
+
+                return $map;
             }
         }
     }
