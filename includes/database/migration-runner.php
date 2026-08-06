@@ -148,6 +148,11 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_display_name_placeholders_backfilled_v2',
                 'callback'    => 'bcc_trust_backfill_display_name_placeholders',
             ],
+            [
+                'id'          => 'flush_object_cache_display_names_v1',
+                'done_option' => 'bcc_trust_display_name_object_cache_flushed',
+                'callback'    => 'bcc_trust_flush_object_cache_for_display_names',
+            ],
         ];
     }
 
