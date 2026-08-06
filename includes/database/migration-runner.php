@@ -153,6 +153,11 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_display_name_object_cache_flushed',
                 'callback'    => 'bcc_trust_flush_object_cache_for_display_names',
             ],
+            [
+                'id'          => 'repair_orphaned_cosmos_gates_v1',
+                'done_option' => 'bcc_trust_orphaned_cosmos_gates_repaired',
+                'callback'    => 'bcc_trust_repair_orphaned_cosmos_gates',
+            ],
         ];
     }
 

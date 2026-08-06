@@ -239,6 +239,11 @@ require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-participations.
 require_once BCC_TRUST_PATH . 'includes/database/purge-edge-cache.php';
 require_once BCC_TRUST_PATH . 'includes/database/backfill-display-name-placeholders.php';
 require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-names.php';
+// One-shot repair of NFT-gate pointers orphaned by retire-stargaze-chain.php
+// (deleted chain + collections, surviving PeepSo group posts). Repoints only
+// groups whose _bcc_gate_chain_id no longer resolves; healthy groups are left
+// untouched.
+require_once BCC_TRUST_PATH . 'includes/database/repair-orphaned-cosmos-gates.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
