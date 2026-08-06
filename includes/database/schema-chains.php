@@ -322,6 +322,51 @@ function bcc_onchain_create_chains_table(): void {
         ));
     }
 
+    // Chain-identity content backfill (Hall chain_profile, contract §4.7):
+    // seed a community-first "About this chain" description + a brand accent
+    // color for each chain, so a fresh Hall opens with real identity instead
+    // of a bare name. `WHERE ... IS NULL` guards operator edits made in
+    // wp-admin ▸ Chains ▸ Identity — an authored value is never clobbered on
+    // re-run. Icons are operator asset uploads (wp-content-hosted), not seeded
+    // here. Descriptions are factual + community-oriented: no price, no
+    // financial framing (owner Halls policy — "learn about the chain").
+    // @var array<string, array{0: string, 1: string}> slug => [hex color, description]
+    $identity_defaults = [
+        'ethereum'       => ['#627EEA', "Ethereum is the original smart-contract platform — the settlement layer where much of DeFi, NFTs, and on-chain identity first took shape. If something lives on-chain, there is a good chance it started here. This Hall is home for the builders, holders, and validators who make Ethereum their base."],
+        'polygon'        => ['#8247E5', "Polygon scales Ethereum with fast, low-cost transactions, making everyday on-chain activity — payments, games, NFTs — practical at scale. It has long been a landing pad for builders who want Ethereum compatibility without the fees. This Hall gathers the people building and collecting across Polygon."],
+        'arbitrum'       => ['#28A0F0', "Arbitrum One is one of Ethereum's leading layer-2 rollups: it inherits Ethereum's security while settling transactions faster and cheaper. It has become a major hub for DeFi and on-chain apps that want Ethereum's trust at lower cost. This Hall is home for the Arbitrum community."],
+        'optimism'       => ['#FF0420', "Optimism is an Ethereum layer-2 built around a simple idea — public goods should be funded by the people who benefit from them. Alongside fast, cheap transactions, it is known for retroactively funding the builders who improve the ecosystem. This Hall is home for the Optimism collective."],
+        'base'           => ['#0052FF', "Base is an Ethereum layer-2 incubated by Coinbase, built to bring the next wave of people and apps on-chain. It pairs Ethereum-grade security with low fees and a focus on consumer-friendly, creator-driven apps. This Hall is home for the Base community."],
+        'avalanche'      => ['#E84142', "Avalanche is a high-throughput smart-contract platform designed for speed and near-instant finality. Its EVM-compatible C-Chain runs Ethereum tooling out of the box, while its subnet design lets projects launch custom chains of their own. This Hall gathers the Avalanche community."],
+        'bsc'            => ['#F3BA2F', "BNB Smart Chain is a fast, low-fee EVM chain at the center of the BNB ecosystem — one of the most widely used networks for everyday trading, DeFi, and gaming. Low costs and deep liquidity have made it a common on-ramp for newcomers. This Hall is home for the BNB Chain community."],
+        'cosmos'         => ['#6F7390', "The Cosmos Hub is the heart of the Internet of Blockchains — the original chain behind the Cosmos SDK and IBC, the standard that lets sovereign chains talk to one another. ATOM secures the Hub and anchors a whole ecosystem of interconnected app-chains. This Hall is for the people who build and stake across Cosmos."],
+        'osmosis'        => ['#750BBB', "Osmosis is the largest decentralized exchange in the Cosmos ecosystem — the trading crossroads where IBC-connected chains meet. Beyond swaps, it is a full DeFi hub with liquidity, staking, and governance run by its community. This Hall gathers the Osmosis community."],
+        'akash'          => ['#FF414C', "Akash is a decentralized cloud — an open marketplace where anyone can rent computing power, including GPUs for AI, at a fraction of traditional cloud cost. Instead of renting from one big provider, you rent from a global network of independent operators. This Hall is for the Akash community."],
+        'juno'           => ['#F0827D', "Juno is a Cosmos smart-contract platform built for CosmWasm — an open, interoperable home for developers deploying decentralized apps across the interchain. It is a community-governed chain that grew out of the Cosmos ecosystem itself. This Hall gathers Juno's builders and community."],
+        'solana'         => ['#9945FF', "Solana is a high-performance blockchain built for speed — fast, low-cost transactions that have made it a home for consumer apps, NFTs, DePIN, and high-frequency DeFi. Its single global state makes on-chain activity feel instant. This Hall is home for the Solana community."],
+        'near'           => ['#00EC97', "NEAR is a layer-1 designed to be simple to use — human-readable account names, low fees, and a focus on onboarding people who are not already crypto-native. It has leaned increasingly into AI and user-owned data. This Hall is for the NEAR community."],
+        'injective'      => ['#0082FA', "Injective is a Cosmos layer-1 built specifically for finance — an interoperable chain with native on-chain orderbooks and infrastructure tuned for trading, derivatives, and real-world assets. It is fast, IBC-connected, and finance-first by design. This Hall gathers the Injective community."],
+        'cryptoorgchain' => ['#002D74', "Cronos POS, the Crypto.org Chain, is a Cosmos-based network focused on payments and everyday use, part of the wider Crypto.com ecosystem. CRO is its native token, used to stake and help secure the chain. This Hall is for the Cronos POS community."],
+        'jackal'         => ['#5D3FD3', "Jackal is a decentralized storage network on Cosmos — a private, self-custodial alternative to big-tech cloud storage. Files are encrypted and spread across independent storage providers, so only you hold the keys to your own data. This Hall is for the Jackal community."],
+        'kujira'         => ['#E63946', "Kujira is a sovereign Cosmos layer-1 built for sustainable DeFi — a semi-permissioned chain where new apps are voted in through governance to keep quality high. It grew a tight-knit community around practical tools for everyday DeFi users. This Hall is for the Kujira community."],
+        'thorchain'      => ['#23DCC8', "THORChain is a decentralized network for swapping native assets across chains — trade real BTC for real ETH with no wrapped tokens and no central custodian. RUNE is the settlement asset that ties the whole network together. This Hall is home for the THORChain community."],
+        'polkadot'       => ['#E6007A', "Polkadot is a network of specialized blockchains — parachains that share security and interoperate, a layer-0 designed for many chains to work as one. DOT secures the relay chain and drives its on-chain governance. This Hall gathers the Polkadot community."],
+        'dungeon'        => ['#C9A227', "Dungeon Chain is a Cosmos chain built for gaming — home to an on-chain idle RPG, a DEX, and games settled natively in DGN, with its own Bitcoin bridge. It is a purpose-built playground for on-chain gamers. This Hall is for the Dungeon Chain community."],
+        'bitcoin'        => ['#F7931A', "Bitcoin is the original blockchain — the first and most secure decentralized money, and the reference point every other chain is measured against. It is less about apps and more about sound, censorship-resistant value anyone can hold. This Hall is home for the Bitcoin community."],
+    ];
+    foreach ($identity_defaults as $identitySlug => $identity) {
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table} SET description = %s WHERE slug = %s AND description IS NULL",
+            $identity[1],
+            $identitySlug
+        ));
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table} SET color = %s WHERE slug = %s AND color IS NULL",
+            $identity[0],
+            $identitySlug
+        ));
+    }
+
     // Clear chain cache so newly seeded chains appear immediately.
     if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')) {
         \BCC\Trust\Onchain\Repositories\ChainRepository::clearCache();
