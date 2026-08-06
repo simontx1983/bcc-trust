@@ -163,16 +163,26 @@ final class CardsSearchEndpoint
         $upstream = rest_do_request($internal);
 
         if ($upstream->is_error()) {
-            // bcc-search returns 503 on degraded paths. Surface as an
-            // empty list — autocomplete should never block a user
-            // mid-type with an error toast.
-            return self::okEmpty();
+            // bcc-search returns 503 on degraded paths and 429 when the
+            // shared `search` throttle bucket is exhausted (trending +
+            // the /search Projects tab debit the same bucket).
+            if ($kindParam !== '') {
+                // Page-kind scope: pages ARE the response — degrade to
+                // an empty list; autocomplete never blocks mid-type.
+                return self::okEmpty();
+            }
+            // All scope: a degraded pages vertical must be silently
+            // ABSENT from the merge, not authoritative emptiness — the
+            // §4.9 contract promises communities/members still appear.
+            // (Pre-fix this returned okEmpty() and blanked the whole
+            // dropdown whenever the pages bucket 429'd.)
+            $rows = [];
+        } else {
+            $body = $upstream->get_data();
+            $rows = is_array($body) && isset($body['results']) && is_array($body['results'])
+                ? $body['results']
+                : [];
         }
-
-        $body = $upstream->get_data();
-        $rows = is_array($body) && isset($body['results']) && is_array($body['results'])
-            ? $body['results']
-            : [];
 
         // Batch-resolve on-chain claim-verified status for every result
         // page in a SINGLE bounded query (autocomplete tops out at
@@ -391,8 +401,13 @@ final class CardsSearchEndpoint
             // Real values — memo reads after the batch prime. ALL
             // tiers surface, risky/caution included: autocomplete is a
             // lookup surface, not an endorsement surface (§4.9).
-            $tier  = $repo->getTier($uid);
-            $label = ReputationTierMap::toReputationTierLabel($tier);
+            // resolveReputation() normalizes BOTH halves of the pair —
+            // an off-vocabulary tier string in bcc_trust_page_scores
+            // must not emit `reputation_tier: "<weird>"` beside a
+            // 'Neutral' label (the pages path normalizes identically).
+            $rep   = ReputationTierMap::resolveReputation($repo->getTier($uid));
+            $tier  = $rep['reputation_tier'];
+            $label = $rep['reputation_tier_label'];
             $score = (int) round($repo->getScore($uid));
 
             $suggestion = self::buildMemberSuggestion($rowArr, $tier, $label, $score);
