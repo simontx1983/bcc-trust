@@ -44,6 +44,7 @@ function bcc_onchain_create_chains_table(): void {
         bech32_prefix VARCHAR(20) DEFAULT NULL,
         icon_url VARCHAR(500) DEFAULT NULL,
         marketplace_template TEXT DEFAULT NULL,
+        description TEXT DEFAULT NULL,
         is_testnet TINYINT(1) NOT NULL DEFAULT 0,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -322,6 +323,48 @@ function bcc_onchain_create_chains_table(): void {
     }
 
     // Clear chain cache so newly seeded chains appear immediately.
+    if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')) {
+        \BCC\Trust\Onchain\Repositories\ChainRepository::clearCache();
+    }
+}
+
+/**
+ * Add the `description` column to bcc_onchain_chains (idempotent).
+ *
+ * The chains registry gained a per-chain "About this chain" description so
+ * a Hall detail view can surface chain-identity context — see the
+ * `chain_profile` block on HallsService::getHall (contract §4.7). Fresh
+ * installs get the column from the CREATE TABLE above; existing DBs get it
+ * here.
+ *
+ * Mirrors the idempotent ALTER pattern schema-blog-chain-tags.php uses for
+ * the `color` column: an INFORMATION_SCHEMA existence probe gates the ADD
+ * because `ADD COLUMN IF NOT EXISTS` is unavailable on MariaDB < 10.0 /
+ * MySQL < 8.0.29. TEXT NULL, so existing seeded rows need no backfill — the
+ * projection returns null when unset and operators author copy via the
+ * wp-admin Chains ▸ Identity editor. Never touches existing row values.
+ */
+function bcc_onchain_add_chains_description_column(): void {
+    global $wpdb;
+
+    $chains_table = \BCC\Core\DB\DB::table('chains');
+
+    $columnExists = (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME   = %s
+            AND COLUMN_NAME  = %s
+          LIMIT 1",
+        $chains_table,
+        'description'
+    ));
+
+    if ($columnExists === 0) {
+        $wpdb->query("ALTER TABLE {$chains_table} ADD COLUMN description TEXT NULL AFTER marketplace_template");
+    }
+
+    // Clear the chains cache so the new column is visible to the Hall
+    // chain_profile projection immediately.
     if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')) {
         \BCC\Trust\Onchain\Repositories\ChainRepository::clearCache();
     }

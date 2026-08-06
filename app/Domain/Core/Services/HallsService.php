@@ -241,6 +241,7 @@ final class HallsService
      *   collection_count: int,
      *   validators: list<array{id: int, moniker: string, logo_url: string|null, total_stake: string|null, delegator_count: int|null, uptime_30d: string|null, voting_power_rank: int|null, commission_rate: string|null}>,
      *   collections: list<array{id: int, name: string|null, image_url: string|null, contract_address: string}>,
+     *   chain_profile: array{slug: string, name: string, native_token: string|null, chain_type: string, explorer_url: string|null, icon_url: string|null, color: string|null, description: string|null}|null,
      *   viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
      *   links: array{self: string}
      * }|null
@@ -259,6 +260,7 @@ final class HallsService
         $chainSlug      = $chainSlugs[$groupId] ?? null;
         $contentCounts  = $this->loadChainContentCounts($chainSlugs);
         $preview        = $this->loadChainPreview($chainSlug);
+        $chainProfile   = $this->loadChainProfile($chainSlug);
 
         return [
             'id'                => $groupId,
@@ -270,6 +272,7 @@ final class HallsService
             'collection_count'  => (int) ($contentCounts[$groupId]['collections'] ?? 0),
             'validators'        => $preview['validators'],
             'collections'       => $preview['collections'],
+            'chain_profile'     => $chainProfile,
             'viewer_membership' => $this->renderViewerMembership(
                 $viewerId,
                 $groupId,
@@ -370,6 +373,63 @@ final class HallsService
         }
 
         return ['validators' => $validators, 'collections' => $collections];
+    }
+
+    /**
+     * The chain-identity block a Hall detail renders — "which chain is
+     * this, and what is it?".
+     *
+     * One cached read: ChainRepository::getBySlug serves from the in-memory
+     * active-chains set (no new SQL). A chainless Hall (null/empty slug) or
+     * a slug that resolves to no active chain yields null, so the detail
+     * page degrades to exactly what it rendered before this existed — a
+     * chainless Hall must never error.
+     *
+     * The projection itself is the pure chainProfileFromRow static (same
+     * I/O-wrapper / pure-core split as loadChainPreview + previewFromRows),
+     * so the whitelisted field set is testable without WordPress or MySQL.
+     *
+     * @return array{slug: string, name: string, native_token: string|null, chain_type: string, explorer_url: string|null, icon_url: string|null, color: string|null, description: string|null}|null
+     */
+    private function loadChainProfile(?string $chainSlug): ?array
+    {
+        if ($chainSlug === null || $chainSlug === '') {
+            return null;
+        }
+        return self::chainProfileFromRow(ChainRepository::getBySlug($chainSlug));
+    }
+
+    /**
+     * Pure projection of a chain-registry row → the chain_profile view-model.
+     *
+     * Split out from loadChainProfile (the I/O) so the field selection is
+     * testable without WordPress or a database, matching previewFromRows.
+     *
+     * PRIVACY / whitelist discipline (mirror of the validator preview): only
+     * the public chain-IDENTITY fields are projected. ChainRepository::COLUMNS
+     * also carries `rpc_url` and `rest_url` — internal infrastructure endpoints
+     * that have no business on a public read — and neither is projected here.
+     * HallsChainPreviewTest asserts their absence so a future "just add one
+     * more field" cannot quietly leak them onto the wire.
+     *
+     * @return array{slug: string, name: string, native_token: string|null, chain_type: string, explorer_url: string|null, icon_url: string|null, color: string|null, description: string|null}|null
+     */
+    public static function chainProfileFromRow(?object $row): ?array
+    {
+        if ($row === null) {
+            return null;
+        }
+
+        return [
+            'slug'         => (string) ($row->slug ?? ''),
+            'name'         => (string) ($row->name ?? ''),
+            'native_token' => self::nonEmptyString($row->native_token ?? null),
+            'chain_type'   => (string) ($row->chain_type ?? ''),
+            'explorer_url' => self::nonEmptyString($row->explorer_url ?? null),
+            'icon_url'     => self::nonEmptyString($row->icon_url ?? null),
+            'color'        => self::nonEmptyString($row->color ?? null),
+            'description'  => self::nonEmptyString($row->description ?? null),
+        ];
     }
 
     /**
