@@ -138,6 +138,11 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_dispute_participations_cleaned',
                 'callback'    => 'bcc_trust_cleanup_dispute_participations',
             ],
+            [
+                'id'          => 'purge_edge_cache_rest_exclusion_v1',
+                'done_option' => 'bcc_trust_edge_cache_rest_exclusion_purged',
+                'callback'    => 'bcc_trust_purge_edge_cache_for_rest_exclusion',
+            ],
         ];
     }
 
