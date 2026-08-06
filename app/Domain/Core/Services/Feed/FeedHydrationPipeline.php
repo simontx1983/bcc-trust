@@ -634,6 +634,23 @@ final class FeedHydrationPipeline
         // Warm the chain-tag memo for the whole page up front — kills
         // the per-row bcc_blog_chain_tags SELECTs on a cold page.
         $this->blogService->prefetchChainTags($postIds);
+        // Covers: BlogService resolves each cover via
+        // get_the_post_thumbnail_url(), which loads the attachment
+        // post AND its _wp_attachment_metadata per row. The blog
+        // posts' own meta is already warm (hydrateBodies primed it),
+        // so collecting _thumbnail_id here is free; one batched prime
+        // (with meta — the size lookup needs it) turns the per-cover
+        // attachment reads into cache hits.
+        $thumbIds = [];
+        foreach ($postIds as $postId) {
+            $thumbId = (int) get_post_thumbnail_id($postId);
+            if ($thumbId > 0) {
+                $thumbIds[] = $thumbId;
+            }
+        }
+        if ($thumbIds !== []) {
+            _prime_post_caches(array_values(array_unique($thumbIds)), false, true);
+        }
         /** @var array<int, array<string, mixed>> $out */
         $out = [];
         foreach ($postIds as $postId) {
