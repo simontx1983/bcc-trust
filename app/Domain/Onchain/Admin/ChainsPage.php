@@ -199,17 +199,27 @@ class ChainsPage
 
     public static function render_page(): void
     {
+        // Handle an Identity-editor POST BEFORE reading chains, so the table
+        // re-renders with the saved values (updateIdentity busts the cache).
+        $notice = self::handle_identity_save();
+
         $chains         = ChainRepository::getAll();
         $valCountMap    = ValidatorRepository::getCountsByChain();
         $collCountMap   = CollectionRepository::getCountsByChain();
         $nonce          = wp_create_nonce('bcc_chain_refresh');
         $activeTab      = sanitize_key($_GET['subtab'] ?? 'validators');
-        if (!in_array($activeTab, ['validators', 'collections'], true)) {
+        if (!in_array($activeTab, ['validators', 'collections', 'identity'], true)) {
             $activeTab = 'validators';
         }
         ?>
         <div class="wrap">
             <h1>Chains</h1>
+
+            <?php if ($notice !== null): ?>
+                <div class="notice notice-<?php echo esc_attr($notice['type']); ?> is-dismissible">
+                    <p><?php echo esc_html($notice['message']); ?></p>
+                </div>
+            <?php endif; ?>
 
             <?php
             // "Run cron now" — manual trigger for the all-chains indexers. Reuses
@@ -265,12 +275,18 @@ class ChainsPage
                    class="nav-tab <?php echo $activeTab === 'collections' ? 'nav-tab-active' : ''; ?>">
                     NFT Collections
                 </a>
+                <a href="<?php echo esc_url(add_query_arg('subtab', 'identity')); ?>"
+                   class="nav-tab <?php echo $activeTab === 'identity' ? 'nav-tab-active' : ''; ?>">
+                    Identity
+                </a>
             </nav>
 
             <?php if ($activeTab === 'validators'): ?>
                 <?php self::render_validators_tab($chains, $valCountMap); ?>
-            <?php else: ?>
+            <?php elseif ($activeTab === 'collections'): ?>
                 <?php self::render_collections_tab($chains, $collCountMap); ?>
+            <?php else: ?>
+                <?php self::render_identity_tab($chains); ?>
             <?php endif; ?>
         </div>
 
@@ -429,6 +445,119 @@ class ChainsPage
                     onclick="return confirm('Refresh top NFT collections for ALL chains? This fans out per-chain API calls (Alchemy / Helius / Cosmos LCD / etc.) and consumes provider quota. Confirm only if you actually want a full refresh — for one chain, use the per-row Refresh button instead.');">Refresh All Collections</button>
             <span id="bcc-refresh-all-status" style="margin-left:12px;font-size:13px;"></span>
         </p>
+        <?php
+    }
+
+    // ── Identity editor (per-chain "About this chain") ──────────────────────
+
+    /**
+     * Handle a POST from the Identity tab's per-chain editor.
+     *
+     * add_submenu_page already gates this page on `manage_options`; the
+     * write re-checks the capability and a per-action nonce before touching
+     * the DB (defense-in-depth). Sanitisation is strict: description →
+     * plain-text (sanitize_textarea_field), icon_url → esc_url_raw, color →
+     * validated #RRGGBB (sanitize_hex_color, which returns null on a bad
+     * value). All the actual DB work + cache-bust lives in
+     * ChainRepository::updateIdentity (§1 — no $wpdb in an Admin page).
+     *
+     * @return array{type: string, message: string}|null notice to render,
+     *         or null when this request is not an identity save.
+     */
+    private static function handle_identity_save(): ?array
+    {
+        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+            return null;
+        }
+        if (($_POST['bcc_chain_identity_action'] ?? '') !== 'save') {
+            return null;
+        }
+
+        if (!current_user_can('manage_options')) {
+            return ['type' => 'error', 'message' => 'You do not have permission to edit chains.'];
+        }
+
+        $nonce = isset($_POST['bcc_chain_identity_nonce'])
+            ? sanitize_text_field((string) wp_unslash($_POST['bcc_chain_identity_nonce']))
+            : '';
+        if (!wp_verify_nonce($nonce, 'bcc_chain_identity_save')) {
+            return ['type' => 'error', 'message' => 'Security check failed. Please reload and try again.'];
+        }
+
+        $chainId = (int) ($_POST['chain_id'] ?? 0);
+        if ($chainId <= 0) {
+            return ['type' => 'error', 'message' => 'Invalid chain.'];
+        }
+
+        $descriptionRaw = isset($_POST['description']) ? wp_unslash($_POST['description']) : '';
+        $iconUrlRaw     = isset($_POST['icon_url']) ? wp_unslash($_POST['icon_url']) : '';
+        $colorRaw       = isset($_POST['color']) ? wp_unslash($_POST['color']) : '';
+
+        $description = sanitize_textarea_field(is_string($descriptionRaw) ? $descriptionRaw : '');
+        $iconUrl     = esc_url_raw(is_string($iconUrlRaw) ? $iconUrlRaw : '');
+        $color       = sanitize_hex_color(is_string($colorRaw) ? $colorRaw : '');
+
+        $ok = ChainRepository::updateIdentity(
+            $chainId,
+            $description !== '' ? $description : null,
+            $iconUrl !== '' ? $iconUrl : null,
+            ($color !== null && $color !== '') ? $color : null
+        );
+
+        if (!$ok) {
+            return ['type' => 'error', 'message' => 'Chain not found — nothing was saved.'];
+        }
+
+        return ['type' => 'success', 'message' => 'Chain identity saved.'];
+    }
+
+    /**
+     * @param list<ChainRow> $chains
+     */
+    private static function render_identity_tab(array $chains): void
+    {
+        ?>
+        <p>
+            Edit the public chain-identity fields surfaced on each chain's Hall
+            (the <code>chain_profile</code> block of the
+            <code>/halls/:slug</code> payload): the &ldquo;About this
+            chain&rdquo; description, icon, and accent color. Infrastructure
+            endpoints (RPC / REST) are configured elsewhere and are never part
+            of the public payload.
+        </p>
+
+        <?php foreach ($chains as $chain):
+            $cid = (int) $chain->id;
+        ?>
+        <form method="post" action=""
+              style="margin:0 0 12px 0;padding:12px;background:#fff;border:1px solid #c3c4c7;max-width:1100px;">
+            <?php wp_nonce_field('bcc_chain_identity_save', 'bcc_chain_identity_nonce'); ?>
+            <input type="hidden" name="bcc_chain_identity_action" value="save">
+            <input type="hidden" name="chain_id" value="<?php echo esc_attr((string) $cid); ?>">
+            <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
+                <div style="min-width:150px;">
+                    <strong><?php echo esc_html($chain->name); ?></strong><br>
+                    <code><?php echo esc_html($chain->slug); ?></code>
+                </div>
+                <div style="flex:1 1 320px;min-width:280px;">
+                    <label style="display:block;font-weight:600;margin-bottom:4px;">About this chain</label>
+                    <textarea name="description" rows="3" style="width:100%;"
+                              placeholder="Short description shown on this chain's Hall…"><?php echo esc_textarea($chain->description ?? ''); ?></textarea>
+                </div>
+                <div style="flex:0 0 240px;">
+                    <label style="display:block;font-weight:600;margin-bottom:4px;">Icon URL</label>
+                    <input type="url" name="icon_url" style="width:100%;"
+                           value="<?php echo esc_attr($chain->icon_url ?? ''); ?>" placeholder="https://…">
+                    <label style="display:block;font-weight:600;margin:8px 0 4px;">Color</label>
+                    <input type="text" name="color" style="width:100px;" maxlength="7"
+                           value="<?php echo esc_attr($chain->color ?? ''); ?>" placeholder="#RRGGBB">
+                </div>
+                <div style="flex:0 0 auto;align-self:center;">
+                    <button type="submit" class="button button-primary">Save</button>
+                </div>
+            </div>
+        </form>
+        <?php endforeach; ?>
         <?php
     }
 

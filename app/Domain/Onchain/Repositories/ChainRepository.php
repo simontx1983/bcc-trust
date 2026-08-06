@@ -41,6 +41,7 @@ if (!defined('ABSPATH')) {
  *     icon_url: string|null,
  *     color: string|null,
  *     marketplace_template: string|null,
+ *     description: string|null,
  *     is_testnet: string,
  *     is_active: string,
  *     created_at: string
@@ -49,10 +50,11 @@ if (!defined('ABSPATH')) {
 final class ChainRepository
 {
     /** @var string Explicit column list — must match schema-chains.php
-     *  + schema-blog-chain-tags.php's ALTER (color). */
+     *  (CREATE TABLE + the description ALTER) + schema-blog-chain-tags.php's
+     *  ALTER (color). */
     private const COLUMNS = 'id, slug, name, chain_type, chain_id_hex, rpc_url, rest_url,
                  explorer_url, native_token, decimals, bech32_prefix, icon_url, color,
-                 marketplace_template, is_testnet, is_active, created_at';
+                 marketplace_template, description, is_testnet, is_active, created_at';
 
     /** @var string Object-cache / transient group. */
     private const CACHE_GROUP = 'bcc_chains';
@@ -344,6 +346,58 @@ final class ChainRepository
         // failure) is treated as "no chains available" — this is the admin path
         // so a quiet empty render is preferable to a WSOD.
         return is_array($rows) ? $rows : [];
+    }
+
+    /**
+     * Update the operator-editable chain-identity fields (the wp-admin
+     * Chains ▸ Identity editor): the "About this chain" description, icon,
+     * and accent color. Bounded to a single row by primary key.
+     *
+     * Callers pass ALREADY-sanitised values (ChainsPage runs
+     * sanitize_textarea_field / esc_url_raw / sanitize_hex_color). This
+     * method only builds the prepared UPDATE and busts the chains cache so
+     * the Hall chain_profile payload reflects the edit immediately — no
+     * fetcher run, no reseed, no other columns touched.
+     *
+     * A null value writes a true SQL NULL (not the empty string %s would
+     * coerce), mirroring NftCollectionPiecesRepository::upsert's nullable-
+     * text writes; the read projection treats '' and NULL identically, but
+     * NULL is the canonical "unset".
+     *
+     * @return bool true when the UPDATE executed without a DB error.
+     */
+    public static function updateIdentity(
+        int $chainId,
+        ?string $description,
+        ?string $iconUrl,
+        ?string $color
+    ): bool {
+        if ($chainId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $descriptionSql = $description !== null ? $wpdb->prepare('%s', $description) : 'NULL';
+        $iconUrlSql     = $iconUrl     !== null ? $wpdb->prepare('%s', $iconUrl)     : 'NULL';
+        $colorSql       = $color       !== null ? $wpdb->prepare('%s', $color)       : 'NULL';
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET description = {$descriptionSql},
+                    icon_url    = {$iconUrlSql},
+                    color       = {$colorSql}
+              WHERE id = %d
+              LIMIT 1",
+            $chainId
+        ));
+
+        // Bust the cache so a subsequent /halls/:slug read (chain_profile)
+        // and the admin re-render both see the new values at once.
+        self::clearCache();
+
+        return $result !== false;
     }
 
     /**

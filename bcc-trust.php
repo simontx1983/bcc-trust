@@ -367,6 +367,12 @@ function bcc_onchain_ensure_schema(): void {
     // references chain ids that the seed may have just inserted.
     bcc_blog_extend_chains_table();
     bcc_blog_create_chain_tags_table();
+    // §4.7 Hall chain_profile — per-chain "About this chain" description.
+    // Idempotent, INFORMATION_SCHEMA-gated ALTER so existing DBs gain the
+    // column without a reseed (fresh installs get it from the CREATE TABLE).
+    // Runs after the color ALTER above; column order is anchored to the base
+    // marketplace_template column, so ordering here is not load-bearing.
+    bcc_onchain_add_chains_description_column();
 
     // Signals table is owned by SignalRepository — included here so its
     // column-type migrations run on version bump, not just on fresh

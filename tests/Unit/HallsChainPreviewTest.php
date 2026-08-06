@@ -67,6 +67,31 @@ final class HallsChainPreviewTest extends TestCase
         ]);
     }
 
+    /** A chain-registry row shaped like ChainRepository::COLUMNS returns. */
+    private static function chainRow(array $overrides = []): object
+    {
+        return (object) ($overrides + [
+            'id'                   => '3',
+            'slug'                 => 'cosmos',
+            'name'                 => 'Cosmos Hub',
+            'chain_type'           => 'cosmos',
+            'chain_id_hex'         => null,
+            'rpc_url'              => 'https://rpc.cosmos.directory/cosmoshub', // MUST NOT be projected
+            'rest_url'             => 'https://rest.cosmos.directory/cosmoshub', // MUST NOT be projected
+            'explorer_url'         => 'https://www.mintscan.io/cosmos',
+            'native_token'         => 'ATOM',
+            'decimals'             => '6',
+            'bech32_prefix'        => 'cosmos',
+            'icon_url'             => 'https://cdn.example/atom.png',
+            'color'                => '#2E3148',
+            'marketplace_template' => 'https://www.stargaze.zone/m/{contract}/{token_id}',
+            'description'          => 'The Internet of Blockchains — Cosmos SDK app-chains.',
+            'is_testnet'           => '0',
+            'is_active'            => '1',
+            'created_at'           => '2026-01-01 00:00:00',
+        ]);
+    }
+
     // ── The privacy guard ────────────────────────────────────────────────
 
     public function testValidatorPreviewNeverProjectsWalletOrOperatorAddress(): void
@@ -178,6 +203,103 @@ final class HallsChainPreviewTest extends TestCase
         self::assertSame([0, 1], array_keys($out['validators']));
         self::assertSame([0, 1], array_keys($out['collections']));
         self::assertSame(13, $out['validators'][1]['id']);
+    }
+
+    // ── chain_profile projection (the /halls/:slug "About this chain" block) ─
+
+    public function testChainProfileExposesExactlyTheWhitelistedFields(): void
+    {
+        $profile = HallsService::chainProfileFromRow(self::chainRow());
+        self::assertNotNull($profile);
+
+        self::assertSame(
+            ['chain_type', 'color', 'description', 'explorer_url', 'icon_url', 'name', 'native_token', 'slug'],
+            self::sortedKeys($profile),
+            'chain_profile is a closed set — facts + description only; adding a field is a contract change'
+        );
+    }
+
+    public function testChainProfileNeverProjectsInfraEndpoints(): void
+    {
+        $profile = HallsService::chainProfileFromRow(self::chainRow());
+        self::assertNotNull($profile);
+
+        // rpc_url / rest_url are internal infrastructure endpoints — never
+        // part of a public payload.
+        self::assertArrayNotHasKey('rpc_url', $profile);
+        self::assertArrayNotHasKey('rest_url', $profile);
+
+        // Assert by VALUE too, so renaming an infra endpoint into the payload
+        // under a different key would still fail.
+        $values = array_map(static fn ($v) => (string) $v, $profile);
+        self::assertNotContains('https://rpc.cosmos.directory/cosmoshub', $values);
+        self::assertNotContains('https://rest.cosmos.directory/cosmoshub', $values);
+    }
+
+    public function testChainProfileNeverProjectsWalletOrValidatorLinkage(): void
+    {
+        // Belt-and-suspenders: even if a chain row somehow carried a
+        // wallet/validator-linkage column, the closed whitelist must not
+        // surface it (parity with the validator-preview privacy guard).
+        $profile = HallsService::chainProfileFromRow(self::chainRow([
+            'wallet_link_id'   => '77',
+            'operator_address' => 'cosmosvaloper1abc',
+        ]));
+        self::assertNotNull($profile);
+
+        self::assertArrayNotHasKey('wallet_link_id', $profile);
+        self::assertArrayNotHasKey('operator_address', $profile);
+        $values = array_map(static fn ($v) => (string) $v, $profile);
+        self::assertNotContains('cosmosvaloper1abc', $values);
+    }
+
+    public function testChainProfileProjectsTheFactsAndDescription(): void
+    {
+        $profile = HallsService::chainProfileFromRow(self::chainRow());
+        self::assertNotNull($profile);
+
+        self::assertSame('cosmos', $profile['slug']);
+        self::assertSame('Cosmos Hub', $profile['name']);
+        self::assertSame('ATOM', $profile['native_token']);
+        self::assertSame('cosmos', $profile['chain_type']);
+        self::assertSame('https://www.mintscan.io/cosmos', $profile['explorer_url']);
+        self::assertSame('https://cdn.example/atom.png', $profile['icon_url']);
+        self::assertSame('#2E3148', $profile['color']);
+        self::assertSame('The Internet of Blockchains — Cosmos SDK app-chains.', $profile['description']);
+    }
+
+    public function testChainProfileEmptyNullableStringsNormaliseToNull(): void
+    {
+        $profile = HallsService::chainProfileFromRow(self::chainRow([
+            'native_token' => '',
+            'explorer_url' => '',
+            'icon_url'     => '',
+            'color'        => '',
+            'description'  => '',
+        ]));
+        self::assertNotNull($profile);
+
+        self::assertNull($profile['native_token']);
+        self::assertNull($profile['explorer_url']);
+        self::assertNull($profile['icon_url']);
+        self::assertNull($profile['color']);
+        self::assertNull($profile['description']);
+        // slug / name / chain_type are non-nullable facts and stay strings.
+        self::assertSame('cosmos', $profile['slug']);
+    }
+
+    public function testChainProfileNullDescriptionSurvivesAsNull(): void
+    {
+        $profile = HallsService::chainProfileFromRow(self::chainRow(['description' => null]));
+        self::assertNotNull($profile);
+        self::assertNull($profile['description']);
+    }
+
+    public function testChainlessHallYieldsNullChainProfile(): void
+    {
+        // A Hall with no chain row (chainless Hall, or a slug that resolves
+        // to no active chain) must degrade to null, not error.
+        self::assertNull(HallsService::chainProfileFromRow(null));
     }
 
     /** @param array<string, mixed> $row */
