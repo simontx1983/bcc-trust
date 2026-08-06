@@ -1418,8 +1418,17 @@ class CosmosFetcher implements FetcherInterface
     /** Pages walked per cron cycle when BCC_CW721_PAGE_CAP is undefined. */
     private const CW721_DEFAULT_PAGE_CAP = 5;
 
-    /** Curated rows sampled to learn a chain's CW-721 code IDs. */
-    private const CW721_CODE_ID_SAMPLE = 25;
+    /**
+     * Curated rows sampled to learn a chain's CW-721 code IDs.
+     *
+     * Deliberately the repository's own ceiling rather than a token sample:
+     * `listKnownByChain` orders verified-first, so a narrow window can be
+     * filled entirely by the majority code-ID family and miss a minority one
+     * outright (Cosmos Hub carries both SG721 and an ics-721 debt-voucher
+     * family). The whole set resolves in ONE batched wave, at most once per
+     * CW721_CODE_IDS_TTL per chain, so width is close to free.
+     */
+    private const CW721_CODE_ID_SAMPLE = 200;
 
     /** Code IDs never change once a wasm binary is stored — cache hard. */
     private const CW721_CODE_IDS_TTL = 7 * DAY_IN_SECONDS;
@@ -1431,9 +1440,6 @@ class CosmosFetcher implements FetcherInterface
      * discovery within a day rather than a week.
      */
     private const CW721_CODE_IDS_EMPTY_TTL = DAY_IN_SECONDS;
-
-    /** Per-contract code-ID cache: `contract_info.code_id` is immutable. */
-    private const CW721_CODE_ID_TTL = 7 * DAY_IN_SECONDS;
 
     private const CW721_CODE_IDS_TRANSIENT_PREFIX = 'bcc_trust_cw721_code_ids_';
 
@@ -1635,13 +1641,30 @@ class CosmosFetcher implements FetcherInterface
             return [];
         }
 
-        $codeIds = [];
+        // Sample the WHOLE curated set concurrently rather than walking it
+        // one blocking request at a time. Minority code-ID families are the
+        // reason the sample is wide: on Cosmos Hub the curated set spans
+        // code 434 (SG721, ~3.4k contracts) AND code 467 (an ics-721
+        // debt-voucher cw-721 carrying IBC-bridged collections, ~32) — a
+        // narrow sample ordered verified-first can see only the majority
+        // family and silently never discover the other. One batched wave
+        // makes a wide sample as cheap as a narrow one, and it runs at most
+        // once per CW721_CODE_IDS_TTL per chain.
+        $paths     = [];
         foreach ($known as $row) {
             $contract = (string) ($row->contract_address ?? '');
             if ($contract === '') {
                 continue;
             }
-            $codeId = $this->fetchWasmCodeId($contract);
+            $paths[] = self::wasmContractPath($contract);
+        }
+        if ($paths === []) {
+            return [];
+        }
+
+        $codeIds = [];
+        foreach ($this->lcdGetBatch($paths) as $payload) {
+            $codeId = self::parseWasmCodeId(is_array($payload) ? $payload : null);
             if ($codeId !== null) {
                 $codeIds[] = $codeId;
             }
@@ -1715,41 +1738,13 @@ class CosmosFetcher implements FetcherInterface
     }
 
     /**
-     * Resolve a contract's wasm code ID via `/cosmwasm/wasm/v1/contract/{addr}`.
-     *
-     * NOTE this is NOT {@see fetchContractInfo}: that one is the CW-721
-     * `contract_info` SMART query (name/symbol from contract state). This is
-     * the wasm module's own metadata for the instantiated contract, and it is
-     * the only one carrying `code_id`.
-     *
-     * Cached for 7 days — a contract's code ID only changes on migration,
-     * which is rare enough that a week of staleness costs nothing.
+     * PURE. LCD path for the wasm module's metadata about one instantiated
+     * contract. Shared by the single-fetch and batched-sample paths so both
+     * always hit the same endpoint.
      */
-    private function fetchWasmCodeId(string $contract): ?int
+    private static function wasmContractPath(string $contract): string
     {
-        if ($contract === '') {
-            return null;
-        }
-
-        $chainId  = (int) ($this->chain->id ?? 0);
-        $cacheKey = sprintf('cw721_code_id_%d_%s', $chainId, strtolower($contract));
-
-        $cached = wp_cache_get($cacheKey, 'bcc_onchain');
-        if (is_int($cached) && $cached > 0) {
-            return $cached;
-        }
-
-        $data = $this->lcdGet('/cosmwasm/wasm/v1/contract/' . rawurlencode($contract));
-
-        $codeId = self::parseWasmCodeId($data);
-        if ($codeId === null) {
-            // Don't cache transport failures / non-wasm contracts.
-            return null;
-        }
-
-        wp_cache_set($cacheKey, $codeId, 'bcc_onchain', self::CW721_CODE_ID_TTL);
-
-        return $codeId;
+        return '/cosmwasm/wasm/v1/contract/' . rawurlencode($contract);
     }
 
     /**

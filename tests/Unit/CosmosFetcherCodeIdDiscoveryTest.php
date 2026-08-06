@@ -82,6 +82,21 @@ final class CosmosFetcherCodeIdDiscoveryTest extends TestCase
     }
 
     /**
+     * Register a BATCHED response. Code-ID sampling resolves the whole
+     * curated set in one same-host wave, so those responses are keyed by
+     * full URL rather than queued in call order.
+     *
+     * @param array<string, mixed> $payload
+     */
+    private function batchJson(string $path, array $payload): void
+    {
+        \BCC\Trust\Onchain\Support\ApiRetry::$batchResponses[self::REST . $path] = [
+            'code' => 200,
+            'body' => (string) json_encode($payload),
+        ];
+    }
+
+    /**
      * @param  array<int, mixed> $args
      * @return mixed
      */
@@ -355,8 +370,12 @@ final class CosmosFetcherCodeIdDiscoveryTest extends TestCase
             'is_verified'      => 1,
         ];
 
-        // 1) resolve the curated contract's code ID …
-        $this->queueJson(['contract_info' => ['code_id' => '434', 'label' => 'SG721-Bad Kids']]);
+        // 1) resolve the curated contract's code ID (BATCHED — the sample
+        //    walks the whole curated set in one same-host wave) …
+        $this->batchJson(
+            '/cosmwasm/wasm/v1/contract/' . self::CURATED,
+            ['contract_info' => ['code_id' => '434', 'label' => 'SG721-Bad Kids']]
+        );
         // 2) … then enumerate it (empty page — nothing new this cycle).
         $this->queueJson(['contracts' => [], 'pagination' => []]);
 
@@ -366,8 +385,15 @@ final class CosmosFetcherCodeIdDiscoveryTest extends TestCase
             [434],
             \BccTestOptionStore::$transients['bcc_trust_cw721_code_ids_' . self::CHAIN_ID] ?? null
         );
+        // Sampling goes over the BATCH channel (one same-host wave for the
+        // whole curated set), not the sequential one — assert there.
+        self::assertSame(
+            [self::REST . '/cosmwasm/wasm/v1/contract/' . self::CURATED],
+            \BCC\Trust\Onchain\Support\ApiRetry::$batchCalls[0]['urls'] ?? null
+        );
+        // …and the enumeration that follows is a plain sequential GET.
         self::assertStringContainsString(
-            '/cosmwasm/wasm/v1/contract/' . self::CURATED,
+            '/cosmwasm/wasm/v1/code/434/contracts',
             \BCC\Trust\Onchain\Support\ApiRetry::$calls[0]['url']
         );
     }
