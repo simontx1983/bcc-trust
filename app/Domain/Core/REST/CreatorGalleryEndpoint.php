@@ -38,6 +38,7 @@ use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Onchain\Services\CollectionService;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
+use BCC\Trust\Onchain\Support\ExplorerLinkBuilder;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -272,12 +273,13 @@ final class CreatorGalleryEndpoint
             ? $row->chain_name
             : ucfirst($chainSlug);
 
-        $explorerBase = isset($row->explorer_url) && is_string($row->explorer_url) && $row->explorer_url !== ''
-            ? rtrim($row->explorer_url, '/')
-            : null;
-        $explorerUrl = $explorerBase !== null
-            ? $explorerBase . '/address/' . $contract
-            : null;
+        // §11: the `<explorer base>/address/<addr>` convention is shared
+        // with the CosmWasm scanner admin panel, so it lives in ONE
+        // helper. Output is byte-identical to the previous inline form.
+        $explorerUrl = ExplorerLinkBuilder::addressUrl(
+            isset($row->explorer_url) && is_string($row->explorer_url) ? $row->explorer_url : null,
+            $contract
+        );
 
         $totalSupply = isset($row->total_supply) && is_numeric($row->total_supply)
             ? (int) $row->total_supply

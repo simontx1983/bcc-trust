@@ -715,18 +715,26 @@ final class CollectionRepository
      * state — `true` = verified only, `false` = unverified only, `null` =
      * both. Powers the Verified / Unverified sub-tabs on the admin page.
      *
+     * `total_supply` and `explorer_url` ride along for the CosmWasm
+     * scanner detail the admin page renders under each Cosmos row (token
+     * count when the upstream reported one; the chain's explorer base).
+     * Both come from rows the query already touches, so projecting them
+     * here is what keeps the page from issuing a per-row second lookup.
+     *
      * @return array{items: list<object{
      *     id: string,
      *     contract_address: string,
      *     collection_name: string|null,
      *     token_standard: string|null,
+     *     total_supply: string|null,
      *     unique_holders: string|null,
      *     image_url: string|null,
      *     is_verified: string,
      *     source: string,
      *     chain_id: string,
      *     chain_slug: string,
-     *     chain_type: string
+     *     chain_type: string,
+     *     explorer_url: string|null
      * }>, total: int, pages: int}
      */
     public static function listForAdminVerification(
@@ -789,23 +797,32 @@ final class CollectionRepository
             ));
         }
 
+        // `total_supply` and `explorer_url` are projected for the admin
+        // candidate detail (token count when the upstream reported one, and
+        // the per-chain explorer base). Both were already on the joined
+        // rows; naming them here is what keeps the admin page from issuing
+        // a second per-row lookup for either. §2: still an explicit column
+        // list, never SELECT *.
         /** @var list<object{
          *     id: string,
          *     contract_address: string,
          *     collection_name: string|null,
          *     token_standard: string|null,
+         *     total_supply: string|null,
          *     unique_holders: string|null,
          *     image_url: string|null,
          *     is_verified: string,
          *     source: string,
          *     chain_id: string,
          *     chain_slug: string,
-         *     chain_type: string
+         *     chain_type: string,
+         *     explorer_url: string|null
          * }>|null $items */
         $items = $wpdb->get_results($wpdb->prepare(
             "SELECT c.id, c.contract_address, c.collection_name, c.token_standard,
-                    c.unique_holders, c.image_url, c.is_verified, c.source, c.chain_id,
-                    ch.slug AS chain_slug, ch.chain_type
+                    c.total_supply, c.unique_holders, c.image_url, c.is_verified,
+                    c.source, c.chain_id,
+                    ch.slug AS chain_slug, ch.chain_type, ch.explorer_url
                FROM {$table} c
           LEFT JOIN {$chains} ch ON ch.id = c.chain_id
                {$whereSql}

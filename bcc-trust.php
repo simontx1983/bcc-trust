@@ -244,6 +244,12 @@ require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-name
 // groups whose _bcc_gate_chain_id no longer resolves; healthy groups are left
 // untouched.
 require_once BCC_TRUST_PATH . 'includes/database/repair-orphaned-cosmos-gates.php';
+// One-shot retirement of the pre-2026-08 CW-721 discovery scan state:
+// the per-chain `bcc_trust_cw721_scan_{id}` option cursor and the
+// `bcc_trust_cw721_code_ids_{id}` transient. Both belonged to the closed
+// curated-sampling loop and are superseded by
+// wp_bcc_chain_checkpoints.cw_* + the two cosmwasm tables.
+require_once BCC_TRUST_PATH . 'includes/database/cleanup-cw721-scan-options.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
@@ -278,6 +284,12 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-holdings.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-pieces.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-chain-checkpoints.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-spam-contracts.php';
+// CosmWasm CW-721 discovery (2026-08) — durable code-family inventory +
+// contract inventory. See each schema file's docblock for the five-table
+// division of responsibility and why non-NFT / inconclusive candidates
+// must NOT live on wp_bcc_onchain_collections.
+require_once BCC_TRUST_PATH . 'includes/database/schema-cosmwasm-code-families.php';
+require_once BCC_TRUST_PATH . 'includes/database/schema-cosmwasm-contracts.php';
 // V2 Phase 1b — Helius webhook replay protection (LRU)
 require_once BCC_TRUST_PATH . 'includes/database/schema-helius-seen-signatures.php';
 // V1.5 §D6 — crypto-blog composer chain-tag join + bcc_onchain_chains.color
@@ -366,6 +378,11 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_nft_holdings_table();
     bcc_onchain_create_chain_checkpoints_table();
     bcc_onchain_create_nft_spam_contracts_table();
+    // CosmWasm CW-721 discovery. Order matters only in the sense that the
+    // checkpoint table above gains its cw_* columns from the same dbDelta
+    // pass; these two are independent of everything else.
+    bcc_onchain_create_cosmwasm_code_families_table();
+    bcc_onchain_create_cosmwasm_contracts_table();
     // V2 Phase 1b Helius replay protection
     bcc_onchain_create_helius_seen_signatures_table();
     // V2 Phase 6 (§H1) NFT-piece detail metadata cache
@@ -851,6 +868,26 @@ add_action(
     [\BCC\Trust\Onchain\Services\NftEnrichmentService::class, 'runAllChains']
 );
 
+// CosmWasm CW-721 discovery handlers. Each one re-checks the fail-CLOSED
+// CosmwasmDiscoveryGate before doing any work, so binding them here costs
+// nothing on an environment that has not opted in.
+add_action(
+    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::BACKFILL_HOOK,
+    [\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class, 'runBackfillTick']
+);
+add_action(
+    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::DAILY_HOOK,
+    [\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class, 'runDailyDiscovery']
+);
+add_action(
+    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::WEEKLY_HOOK,
+    [\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class, 'runWeeklyRetry']
+);
+add_action(
+    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::METADATA_HOOK,
+    [\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class, 'runMetadataRefresh']
+);
+
 // V2 Phase 1 hardening: self-heal cron registration.
 //
 // ┌─ DO NOT REMOVE AS "REDUNDANT WITH ACTIVATION" ─────────────────┐
@@ -882,6 +919,14 @@ add_action(
 add_action('plugins_loaded', static function (): void {
     \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::register();
     \BCC\Trust\Onchain\Services\NftEnrichmentService::register();
+    // CosmWasm CW-721 discovery — four hooks, same anti-drift shape.
+    // REGISTRATION IS NOT PERMISSION: every handler re-checks the
+    // fail-CLOSED CosmwasmDiscoveryGate, so on an environment that has
+    // not defined BCC_COSMWASM_DISCOVERY_ENABLED these hooks fire and
+    // immediately return. Scheduling them unconditionally is what stops
+    // the "hook added by an update, never scheduled, silently never
+    // runs" failure mode documented above.
+    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::register();
     // Validator-messaging backlog delivery + its recovery sweep. Same
     // self-healing shape: registering from plugins_loaded means a hook
     // added by an update schedules itself without a reactivation.

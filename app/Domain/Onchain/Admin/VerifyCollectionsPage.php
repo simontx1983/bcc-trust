@@ -18,12 +18,20 @@ namespace BCC\Trust\Onchain\Admin;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Onchain\OnchainPlugin;
+use BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
+use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
+use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
+use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\Services\CollectionDemandService;
+use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
+use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
+use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -56,6 +64,40 @@ final class VerifyCollectionsPage
      * @var list<string>
      */
     private const PILL_CHAIN_SLUGS = ['ethereum', 'solana', 'cosmos'];
+
+    /**
+     * Column count of the verification table.
+     *
+     * The CosmWasm candidate detail renders as a full-width sub-row under
+     * its collection, so it needs the same colspan the "no rows" cell
+     * uses. Naming it once stops the two drifting apart the next time a
+     * column is added.
+     */
+    private const TABLE_COLSPAN = 12;
+
+    /**
+     * Rows a single operator "Force retry" click may clear the backoff on,
+     * per table, per chain.
+     *
+     * Bounded on purpose: the button is a nudge, not a reset. 100 families
+     * plus 100 contracts is comfortably more than one scheduled pass can
+     * chew through (25 + 25), so the queue is refilled without letting one
+     * click queue an unbounded amount of LCD traffic.
+     */
+    private const FORCE_RETRY_LIMIT = 100;
+
+    /**
+     * Request budget for an operator-triggered backfill slice.
+     *
+     * Deliberately smaller than the cron budget
+     * ({@see CosmwasmDiscoveryGate::DEFAULT_REQUEST_BUDGET}, 50) and on a
+     * shorter clock: a cron tick may spend its full 20 seconds because
+     * nobody is waiting on it, whereas this one runs INSIDE an admin page
+     * load. A slice that ties up the browser for 20 seconds gets clicked
+     * twice, and the second click is a wasted advisory-lock miss.
+     */
+    private const ADMIN_BACKFILL_REQUESTS = 20;
+    private const ADMIN_BACKFILL_SECONDS  = 8;
 
     public static function register_page(): void
     {
@@ -260,6 +302,43 @@ final class VerifyCollectionsPage
 
         $stateCounts = CollectionRepository::countByVerification($chainArg, $standardArg);
 
+        // CosmWasm scanner context for the rows about to render.
+        //
+        // TWO bounded batch reads for the WHOLE page, issued once the row
+        // set is final — not one lookup per row. The first pulls the
+        // scanner's inventory row for every visible contract; the second
+        // pulls the code families those rows point at, for the checksum.
+        // Rows the scanner has never seen (manual adds, wallet-link
+        // discoveries, non-Cosmos chains) simply have no entry and render
+        // no scanner detail.
+        $scannerCandidates = [];
+        $scannerFamilies   = [];
+        $scannerChainIds   = [];
+        $scannerAddresses  = [];
+        foreach ($listing['items'] as $listRow) {
+            if ((string) ($listRow->chain_type ?? '') !== 'cosmos') {
+                continue;
+            }
+            $scannerChainIds[]  = (int) $listRow->chain_id;
+            $scannerAddresses[] = (string) $listRow->contract_address;
+        }
+        if ($scannerAddresses !== []) {
+            $codeIds = [];
+            foreach (CosmwasmContractRepository::findManyForChains($scannerChainIds, $scannerAddresses) as $candidate) {
+                $scannerCandidates[(int) $candidate->chain_id . '|' . strtolower((string) $candidate->contract_address)] = $candidate;
+                $codeIds[] = (int) $candidate->code_id;
+            }
+            if ($codeIds !== []) {
+                foreach (CosmwasmCodeFamilyRepository::findManyForChains($scannerChainIds, $codeIds) as $family) {
+                    $scannerFamilies[(int) $family->chain_id . '|' . (int) $family->code_id] = $family;
+                }
+            }
+        }
+
+        // FOUR bounded aggregates for every chain — see the class docblock
+        // on CosmwasmDiscoveryHealthSnapshot. Not a per-chain loop.
+        $scannerSummary = CosmwasmDiscoveryHealthSnapshot::buildSummary();
+
         // Pill chains: intersection of PILL_CHAIN_SLUGS (filterable) and
         // the active chains registry, in the configured order. A
         // missing/disabled chain silently drops its pill.
@@ -294,6 +373,8 @@ final class VerifyCollectionsPage
                     <p><?php echo esc_html($notice['message']); ?></p>
                 </div>
             <?php endforeach; ?>
+
+            <?php CosmwasmScannerPanel::render($scannerSummary); ?>
 
             <?php
             // Verified / Unverified sub-tabs. Switching state resets
@@ -572,7 +653,7 @@ final class VerifyCollectionsPage
                     <tbody>
                         <?php if ($listing['items'] === []): ?>
                             <tr>
-                                <td colspan="12"><em>
+                                <td colspan="<?php echo (int) self::TABLE_COLSPAN; ?>"><em>
                                     <?php if ($isVerified): ?>
                                         No verified collections yet. Verify a collection in the Unverified tab to give its holders a community.
                                     <?php else: ?>
@@ -760,6 +841,23 @@ final class VerifyCollectionsPage
                                     </button>
                                 </td>
                             </tr>
+                            <?php
+                            // Scanner detail sub-row. Pre-fetched above; no
+                            // query here. Absent for anything the CosmWasm
+                            // scanner has no record of.
+                            $scannerKey = (int) $row->chain_id . '|' . strtolower((string) $row->contract_address);
+                            if (isset($scannerCandidates[$scannerKey])) {
+                                $candidateRow = $scannerCandidates[$scannerKey];
+                                $familyKey    = (int) $row->chain_id . '|' . (int) $candidateRow->code_id;
+                                CosmwasmScannerPanel::renderCandidateDetail(
+                                    $row,
+                                    $candidateRow,
+                                    $scannerFamilies[$familyKey] ?? null,
+                                    $rowVerified,
+                                    self::TABLE_COLSPAN
+                                );
+                            }
+                            ?>
                         <?php endforeach; endif; ?>
                     </tbody>
                 </table>
@@ -921,7 +1019,235 @@ final class VerifyCollectionsPage
             return self::handleHideToggle((int) substr($action, strlen('unhide_')), false);
         }
 
+        // CosmWasm scanner controls. Same `<verb>_<id>` encoding as the
+        // per-row buttons above, prefixed `cw_` so the scanner's chain ids
+        // can never be mistaken for a collection id.
+        if (strpos($action, 'cw_pause_') === 0) {
+            return self::handleScannerPause((int) substr($action, strlen('cw_pause_')), true);
+        }
+        if (strpos($action, 'cw_resume_') === 0) {
+            return self::handleScannerPause((int) substr($action, strlen('cw_resume_')), false);
+        }
+        if (strpos($action, 'cw_backfill_') === 0) {
+            return self::handleScannerBackfill((int) substr($action, strlen('cw_backfill_')));
+        }
+        if (strpos($action, 'cw_retry_') === 0) {
+            return self::handleScannerForceRetry((int) substr($action, strlen('cw_retry_')));
+        }
+
         return [];
+    }
+
+    /**
+     * Pause / resume the CosmWasm scanner for ONE chain.
+     *
+     * The switch is `wp_bcc_chain_checkpoints.cw_discovery_state`, which
+     * the worker already honours in two places — it refuses to prepare a
+     * paused chain, and the backfill rotation query excludes one. There is
+     * deliberately no separate "paused" option: a second flag is how
+     * "paused in the UI, still hammering the LCD" happens.
+     *
+     * Resume does NOT restore a remembered previous value (there is
+     * nowhere it was kept). It re-derives the state from the chain's own
+     * durable progress, so a chain whose backfill had completed comes back
+     * as `backfilled` and is not re-walked.
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function handleScannerPause(int $chainId, bool $pause): array
+    {
+        if ($chainId <= 0) {
+            return [['type' => 'error', 'message' => 'Scanner: invalid chain.']];
+        }
+
+        $chain = ChainRepository::getById($chainId);
+        $slug  = $chain !== null ? (string) $chain->slug : (string) $chainId;
+
+        $ok = $pause
+            ? ChainCheckpointRepository::pauseCwDiscovery($chainId)
+            : ChainCheckpointRepository::resumeCwDiscovery($chainId);
+
+        if (!$ok) {
+            return [[
+                'type'    => 'warning',
+                'message' => $pause
+                    ? sprintf('Scanner: %s could not be paused — it is already paused, or it has no CosmWasm module.', $slug)
+                    : sprintf('Scanner: %s is not paused, so there was nothing to resume.', $slug),
+            ]];
+        }
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner pause toggle', [
+            'action'   => 'cosmwasm_scanner_pause',
+            'chain_id' => $chainId,
+            'paused'   => $pause,
+            'operator' => get_current_user_id(),
+        ]);
+
+        if ($pause) {
+            return [[
+                'type'    => 'success',
+                'message' => sprintf(
+                    'Scanner paused for %s. Nothing runs for it — no backfill, no daily pass, no retries — and its progress is kept.',
+                    $slug
+                ),
+            ]];
+        }
+
+        $row   = ChainCheckpointRepository::get($chainId);
+        $state = $row !== null ? (string) $row->cw_discovery_state : '';
+
+        return [[
+            'type'    => 'success',
+            'message' => sprintf(
+                'Scanner resumed for %s (state: %s).',
+                $slug,
+                $state !== '' ? $state : 'unknown'
+            ),
+        ]];
+    }
+
+    /**
+     * Run ONE bounded slice of the historical backfill for a chain, now.
+     *
+     * The gates are re-checked here even though the button renders
+     * disabled without them: a disabled attribute is a UI hint, not
+     * authorization, and a crafted POST must hit the same fail-closed
+     * answer the cron path does.
+     *
+     * The slice runs with a SMALLER budget than a cron tick — see
+     * {@see ADMIN_BACKFILL_REQUESTS} — because this one executes inside an
+     * admin page load. It is genuinely one slice: the worker's advisory
+     * lock, wall clock and request budget all still apply, and progress is
+     * written durably as it goes, so clicking it is equivalent to the next
+     * scheduled tick arriving early.
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function handleScannerBackfill(int $chainId): array
+    {
+        if ($chainId <= 0) {
+            return [['type' => 'error', 'message' => 'Scanner: invalid chain.']];
+        }
+
+        if (!CosmwasmDiscoveryGate::discoveryEnabled()) {
+            return [[
+                'type'    => 'error',
+                'message' => 'Scanner: discovery is switched off (BCC_COSMWASM_DISCOVERY_ENABLED is not defined in wp-config.php). Nothing was run.',
+            ]];
+        }
+        if (!CosmwasmDiscoveryGate::backfillEnabled()) {
+            return [[
+                'type'    => 'error',
+                'message' => 'Scanner: the historical backfill is switched off (BCC_COSMWASM_BACKFILL_ENABLED is not defined in wp-config.php). Nothing was run.',
+            ]];
+        }
+
+        $chain = ChainRepository::getById($chainId);
+        if ($chain === null) {
+            return [['type' => 'error', 'message' => 'Scanner: chain not found.']];
+        }
+        $slug = (string) $chain->slug;
+
+        $checkpoint = ChainCheckpointRepository::get($chainId);
+        if ($checkpoint !== null
+            && (string) $checkpoint->cw_discovery_state === ChainCheckpointRepository::CW_STATE_PAUSED
+        ) {
+            return [[
+                'type'    => 'warning',
+                'message' => sprintf('Scanner: %s is paused. Resume it before running a slice.', $slug),
+            ]];
+        }
+
+        CosmwasmDiscoveryWorker::runBackfillForChain(
+            $chainId,
+            new CosmwasmTickBudget(self::ADMIN_BACKFILL_REQUESTS, self::ADMIN_BACKFILL_SECONDS)
+        );
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner manual backfill slice', [
+            'action'   => 'cosmwasm_scanner_backfill_slice',
+            'chain_id' => $chainId,
+            'operator' => get_current_user_id(),
+        ]);
+
+        $after = ChainCheckpointRepository::get($chainId);
+        $state = $after !== null ? (string) $after->cw_discovery_state : 'unknown';
+        $error = $after !== null && is_string($after->cw_last_error) && $after->cw_last_error !== ''
+            ? (string) $after->cw_last_error
+            : null;
+
+        if ($error !== null) {
+            return [[
+                'type'    => 'warning',
+                'message' => sprintf(
+                    'Scanner: ran a slice for %s and it recorded a problem (state: %s). Progress was kept and it will be retried. Reason: %s',
+                    $slug,
+                    $state,
+                    $error
+                ),
+            ]];
+        }
+
+        return [[
+            'type'    => 'success',
+            'message' => sprintf(
+                'Scanner: ran one backfill slice for %s (state: %s). Run it again to continue, or leave it to the scheduled ticks.',
+                $slug,
+                $state
+            ),
+        ]];
+    }
+
+    /**
+     * Clear the wait on unresolved scanner rows for one chain.
+     *
+     * "Unresolved" means `inconclusive` or `temporarily_unreachable` only.
+     * A settled `not_cw721` is never re-checked (that exclusion lives in
+     * the repository, not here), a decided CW-721 has nothing to redecide,
+     * and a DENY-ruled contract stays suppressed — a force-retry button
+     * must not become a back door around the operator's own hide.
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function handleScannerForceRetry(int $chainId): array
+    {
+        if ($chainId <= 0) {
+            return [['type' => 'error', 'message' => 'Scanner: invalid chain.']];
+        }
+
+        if (!CosmwasmDiscoveryGate::discoveryEnabled()) {
+            return [[
+                'type'    => 'error',
+                'message' => 'Scanner: discovery is switched off, so a retry would never run. Nothing was changed.',
+            ]];
+        }
+
+        $chain = ChainRepository::getById($chainId);
+        if ($chain === null) {
+            return [['type' => 'error', 'message' => 'Scanner: chain not found.']];
+        }
+
+        $families  = CosmwasmCodeFamilyRepository::forceRetryUnresolved($chainId, self::FORCE_RETRY_LIMIT);
+        $contracts = CosmwasmContractRepository::forceRetryUnresolved($chainId, self::FORCE_RETRY_LIMIT);
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner force retry', [
+            'action'    => 'cosmwasm_scanner_force_retry',
+            'chain_id'  => $chainId,
+            'families'  => $families,
+            'contracts' => $contracts,
+            'operator'  => get_current_user_id(),
+        ]);
+
+        return [[
+            'type'    => 'success',
+            'message' => sprintf(
+                'Scanner: queued %d code famil%s and %d contract%s on %s for another look. Settled non-NFT results and hidden contracts were left alone.',
+                $families,
+                $families === 1 ? 'y' : 'ies',
+                $contracts,
+                $contracts === 1 ? '' : 's',
+                (string) $chain->slug
+            ),
+        ]];
     }
 
     /**

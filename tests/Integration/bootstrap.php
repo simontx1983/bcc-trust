@@ -284,6 +284,23 @@ bcc_onchain_create_wallet_links_table();
 require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-holdings.php';
 bcc_onchain_create_nft_holdings_table();
 
+// CosmWasm CW-721 discovery. These four are what
+// CosmwasmRepositoryIntegrationTest runs its REAL SQL against — the unit
+// suite's `$wpdb` double returns queued fixtures regardless of the query
+// text, so it structurally cannot catch a malformed clause (an `ORDER BY 0`
+// shipped past 1,048 green unit tests). Only a real MySQL can.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-chain-checkpoints.php';
+bcc_onchain_create_chain_checkpoints_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-spam-contracts.php';
+bcc_onchain_create_nft_spam_contracts_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-code-families.php';
+bcc_onchain_create_cosmwasm_code_families_table();
+
+require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-contracts.php';
+bcc_onchain_create_cosmwasm_contracts_table();
+
 // ── Stubs the validator-message-queue worker/repo need ──────────────────────
 if (!function_exists('wp_generate_uuid4')) {
     // Deterministic unique id — tests need uniqueness, not randomness.

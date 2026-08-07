@@ -158,6 +158,16 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_orphaned_cosmos_gates_repaired',
                 'callback'    => 'bcc_trust_repair_orphaned_cosmos_gates',
             ],
+            // Retires the pre-2026-08 CW-721 discovery scan state (the
+            // per-chain option cursor + the 7-day code-ID transient).
+            // Superseded by wp_bcc_chain_checkpoints.cw_* and the two
+            // cosmwasm tables; leaving them would be a second, stale
+            // cursor store beside the new one.
+            [
+                'id'          => 'cleanup_cw721_scan_options_v1',
+                'done_option' => 'bcc_trust_cw721_scan_options_cleaned',
+                'callback'    => 'bcc_trust_cleanup_cw721_scan_options',
+            ],
         ];
     }
 
