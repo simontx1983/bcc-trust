@@ -786,6 +786,19 @@ check_read_model() {
 # within ±SCORE_TOLERANCE. This is the same formula the scorer uses; drift
 # here means the read model is lying to the UI.
 # ═════════════════════════════════════════════════════════════════════════════
+
+# id_list <id>... — a comma-separated list for a failure detail line, capped so
+# that `--sample=500` cannot turn one discrepancy into 500 lines of page ids.
+id_list() {
+    local out="" one n=0 cap=12
+    for one in "$@"; do
+        n=$((n+1))
+        (( n <= cap )) && out="${out:+$out, }$one"
+    done
+    (( n > cap )) && out="$out (+$((n - cap)) more)"
+    printf '%s' "$out"
+}
+
 check_trust_scores() {
     section "2. Trust Score Correctness (component recompute)"
 
@@ -878,6 +891,68 @@ check_trust_scores() {
     local tolerance
     tolerance=$(json_get "$results" '.[0].tolerance' 0.5)
 
+    # ── The pages the sample ASKED about ─────────────────────────────────────
+    #
+    # Counting is not verifying. A payload with the RIGHT COUNT but the same
+    # page twice — and therefore another page missing — balances the books and
+    # sails past a count-only test, while the page it dropped goes unchecked.
+    # So the requested ids and the processed ids are compared as SETS, and each
+    # kind of discrepancy is named: missing, duplicated, unexpected.
+    #
+    # ORDER IS NOT A CONTRACT. The producer's `ORDER BY updated_at DESC` is an
+    # implementation detail; a reordered but otherwise identical payload PASSES.
+    # Only membership and multiplicity are asserted.
+    #
+    # `declare -A`/`local -A` needs bash >= 4.0 (2009). Measured on every host
+    # that runs this guard: installed staging `GNU bash, version 4.4.20(1)`,
+    # CI ubuntu-latest bash 5.x, dev Git Bash `5.2.37(1)`. This is safe in a way
+    # /dev/fd was not: /dev/fd is a filesystem the host may simply not provide,
+    # whereas an associative array is a feature of the interpreter that is
+    # already executing this script. (The ServiceLocator probe below uses
+    # indexed arrays instead because its expected set is four fixed labels known
+    # when the probe was written; here the keys are arbitrary page ids that only
+    # the payload knows.)
+    local req_entries req_rc
+    req_entries="$(json_each_compact "$rows")"
+    req_rc=$?
+    if (( req_rc != 0 )); then
+        fail "could not read the sampled page ids" \
+             "json_each_compact exited $req_rc" \
+             "payload: $rows"
+        return
+    fi
+
+    local -A requested=()
+    local -a requested_order=()
+    local identity_bad=0
+    local req_row req_id
+    while IFS= read -r req_row; do
+        [[ -n "$req_row" ]] || continue
+        req_id="$(json_get "$req_row" '.page_id')"
+        if [[ -z "$req_id" || "$req_id" == "null" ]]; then
+            identity_bad=$((identity_bad+1))
+            fail "sampled row carries no page_id" \
+                 "row: $req_row" \
+                 "the guard cannot say WHICH page this is, so it cannot verify it"
+            continue
+        fi
+        if [[ -n "${requested["$req_id"]:-}" ]]; then
+            # page_read_model declares PRIMARY KEY (page_id), so the real
+            # producer — get_col() over that column — cannot emit a repeat.
+            # This branch is not about the query: `$rows` reaches bash as text
+            # through wp eval and json_encode, and a set comparison that trusts
+            # its own input is not a comparison. Naming it here also stops one
+            # duplicated request from being reported as a duplicated RESULT.
+            identity_bad=$((identity_bad+1))
+            fail "sample query returned page_id=$req_id more than once" \
+                 "page_read_model.page_id is the primary key — the sample cannot legitimately repeat one" \
+                 "the payload is not the sample it claims to be"
+            continue
+        fi
+        requested["$req_id"]=1
+        requested_order+=("$req_id")
+    done <<< "$req_entries"
+
     # ⚠️  HERE-STRING, DELIBERATELY. Do NOT change this back to
     #     `done < <(json_each_compact "$results")`.
     #
@@ -906,11 +981,28 @@ check_trust_scores() {
         return
     fi
 
+    # The pages the producer says it PROCESSED, with multiplicity.
+    local -A seen=()
+    local -a seen_order=()
+
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         iterated=$((iterated+1))
         local page_id stored expected diff ok_flag pos neg eb ob
         page_id=$(json_get "$entry" '.page_id')
+
+        if [[ -z "$page_id" || "$page_id" == "null" ]]; then
+            identity_bad=$((identity_bad+1))
+            fail "canonical-formula result carries no page_id" \
+                 "entry: $entry" \
+                 "an unidentifiable result discharges no requested page"
+        elif [[ -z "${seen["$page_id"]:-}" ]]; then
+            seen["$page_id"]=1
+            seen_order+=("$page_id")
+        else
+            seen["$page_id"]=$(( ${seen["$page_id"]} + 1 ))
+        fi
+
         stored=$(json_get "$entry"  '.stored')
         expected=$(json_get "$entry" '.expected')
         diff=$(json_get "$entry"    '.diff')
@@ -933,16 +1025,60 @@ check_trust_scores() {
         fi
     done <<< "$entries"
 
+    # ── Requested set vs processed set ───────────────────────────────────────
+    # Membership only — reordering is not a discrepancy.
+    local -a missing=() duplicated=() unexpected=()
+    local i id
+    for (( i = 0; i < ${#requested_order[@]}; i++ )); do
+        id="${requested_order[i]}"
+        if [[ -z "${seen["$id"]:-}" ]]; then
+            missing+=("$id")
+        elif (( ${seen["$id"]} > 1 )); then
+            duplicated+=("$id (x${seen["$id"]})")
+        fi
+    done
+    for (( i = 0; i < ${#seen_order[@]}; i++ )); do
+        id="${seen_order[i]}"
+        [[ -n "${requested["$id"]:-}" ]] || unexpected+=("$id")
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        fail "trust-score sample left page(s) unverified" \
+             "requested but never processed: $(id_list "${missing[@]}")" \
+             "requested: $count page(s), processed: $iterated row(s)" \
+             "PageScore::computeExpectedTotal was never applied to the page(s) above"
+    fi
+    if (( ${#duplicated[@]} > 0 )); then
+        fail "trust-score sample processed the same page more than once" \
+             "duplicated: $(id_list "${duplicated[@]}")" \
+             "a repeat pads the row count, which is how a page that was never processed hides"
+    fi
+    if (( ${#unexpected[@]} > 0 )); then
+        fail "trust-score sample processed page(s) it never asked about" \
+             "unexpected: $(id_list "${unexpected[@]}")" \
+             "requested set: $(id_list "${requested_order[@]}")" \
+             "the producer and this guard disagree about which pages are under test"
+    fi
+
+    local identity_discrepancies
+    identity_discrepancies=$(( ${#missing[@]} + ${#duplicated[@]} + ${#unexpected[@]} + identity_bad ))
+
     # This probe may PASS only on PRESENCE OF SUCCESS, never on absence of
     # failure. `bad == 0` alone was vacuous: with zero iterations bad=0 and
-    # ok=0, so a loop that never ran printed "PASS 0 page(s)". Every sampled
-    # row must have been iterated AND verified.
+    # ok=0, so a loop that never ran printed "PASS 0 page(s)". Matching COUNTS
+    # alone was vacuous in the same way one level up: ten results for ten
+    # requested pages says nothing about WHICH ten. Every sampled page must
+    # have been iterated, identified, and verified.
     if (( iterated != count )); then
         fail "trust-score sample incompletely evaluated" \
              "requested: $count row(s) (from page_read_model)" \
              "iterated:  $iterated row(s)" \
              "the canonical-formula invariant was NOT checked for every sampled page" \
              "this is an unevaluated probe, not a passing one"
+    elif (( identity_discrepancies > 0 )); then
+        # Each discrepancy already named itself above, with its page ids. Do
+        # not restate it as a count mismatch — the counts may well match.
+        :
     elif (( bad > 0 )); then
         # Each mismatch already emitted its own fail() above. Do not pass, and
         # do not double-count the same defect.

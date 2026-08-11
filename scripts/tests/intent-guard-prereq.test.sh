@@ -55,6 +55,23 @@
 #   16  parent-shell state retention    -> ok / bad / iteration counters and the
 #                                         PASS+FAIL tallies survive the loop
 #
+# IDENTITY (added with the set-comparison repair)
+# ----------------------------------------------
+# Counting is not verifying either. Ten results for ten requested pages says
+# nothing about WHICH ten: process page 101 twice and page 110 never and every
+# count still balances.
+#
+#   17  page identity as a SET          -> missing / duplicated / unexpected ids
+#                                         are each named; a reordered but
+#                                         identical set still PASSES
+#
+# OUTPUT
+# ------
+# Human-readable per-case output, then a summary, then a machine-readable final
+# line:  ORACLE jq_comparisons=<n> skipped=<n>. Half of this suite needs a real
+# jq binary as its oracle; without one the rest still passes and prints ALL
+# GREEN, so CI reads that line and demands skipped=0.
+#
 # Usage:  bash scripts/tests/intent-guard-prereq.test.sh
 # Exit:   0 = all cases green, 1 = at least one regression
 # ──────────────────────────────────────────────────────────────────────────────
@@ -85,6 +102,30 @@ notok() {
     [[ $# -gt 1 ]] && printf "         ${RED}└─${NC} %s\n" "$2"
 }
 case_banner() { printf "\n${CYAN}── Case %s ──${NC} %s\n" "$1" "$2"; }
+
+# ── jq-oracle accounting ─────────────────────────────────────────────────────
+# Half of this suite only exists when a REAL jq binary is present: the php leg
+# is checked against jq's actual bytes and exit statuses, not just against
+# values recorded in this file. On a host with no jq — or a jq too old for the
+# number-literal fixtures — those legs quietly do not run, the remaining
+# assertions all pass, and the harness prints ALL GREEN. That green is real but
+# SMALLER, and nothing in the output said by how much.
+#
+# Every jq-oracle leg therefore reports itself here, and the run ends with a
+# machine-readable line:
+#
+#     ORACLE jq_comparisons=<ran> skipped=<not run>
+#
+# CI demands skipped=0 and a nonzero comparison count, so "the reduced suite
+# passed" can never be mistaken for "the suite passed".
+ORACLE_COMPARISONS=0
+ORACLE_SKIPPED=0
+ORACLE_SKIP_REASONS=()
+oracle_ran()     { ORACLE_COMPARISONS=$((ORACLE_COMPARISONS+1)); }
+oracle_skipped() {
+    ORACLE_SKIPPED=$((ORACLE_SKIPPED+1))
+    ORACLE_SKIP_REASONS+=("$1")
+}
 
 # assert_eq <label> <expected> <actual>
 assert_eq() {
@@ -158,6 +199,18 @@ mk_results() {
     printf '[%s]' "$out"
 }
 
+# mk_results_ids <page_id>... — one ok:true result per id, in the order given.
+# Lets a payload state its identities explicitly: reordered, repeated, absent
+# or invented.
+mk_results_ids() {
+    local pid out=""
+    for pid in "$@"; do
+        [[ -n "$out" ]] && out+=","
+        out+="$(mk_result "$pid" true)"
+    done
+    printf '[%s]' "$out"
+}
+
 FX_ROWS_TEN="$(mk_rows 10)"
 FX_RESULTS_TEN="$(mk_results 10)"
 FX_RESULTS_TEN_ONE_BAD="$(mk_results 10 3)"
@@ -167,6 +220,34 @@ FX_RESULTS_ELEVEN="$(mk_results 11)"
 FX_RESULTS_TEN_DUP="[$(mk_result 101 true),$(mk_results 10 | sed 's/^\[//;s/\]$//')]"
 # A result row that is a bare string: json_get cannot read .ok out of it.
 FX_RESULTS_MALFORMED="[$(mk_results 9 | sed 's/^\[//;s/\]$//'),\"not-a-result-row\"]"
+
+# ── Identity fixtures (case 17) ──────────────────────────────────────────────
+# The requested set is always FX_ROWS_TEN, i.e. pages 101..110. Every payload
+# below except the last two keeps the count at EXACTLY TEN, which is the point:
+# ten results for ten requested pages says nothing about WHICH ten, and a
+# count-only test waves all of them through.
+#
+# Ordering is NOT part of the contract — the producer's ORDER BY updated_at
+# DESC is an implementation detail — so a shuffle must still PASS.
+FX_RESULTS_TEN_REORDERED="$(mk_results_ids 105 101 110 103 102 109 104 108 106 107)"
+# 101 twice, 110 never processed. Count balances at 10.
+FX_RESULTS_DUP_AND_MISSING="$(mk_results_ids 101 101 102 103 104 105 106 107 108 109)"
+# 101 twice AND a page nobody asked about; 109 and 110 never processed.
+FX_RESULTS_DUP_AND_EXTRA="$(mk_results_ids 101 101 102 103 104 105 106 107 108 999)"
+# Right count, right shape, not one of the requested pages.
+FX_RESULTS_TEN_WRONG_IDS="$(mk_results_ids 201 202 203 204 205 206 207 208 209 210)"
+# A well-formed result row that cannot say which page it is about.
+FX_RESULTS_NULL_PAGE_ID="[$(mk_results 9 | sed 's/^\[//;s/\]$//'),$(mk_result null true)]"
+FX_RESULTS_NO_PAGE_ID_KEY="[$(mk_results 9 | sed 's/^\[//;s/\]$//'),{\"stored\":85.0,\"expected\":85.0,\"diff\":0.0,\"ok\":true,\"tolerance\":0.5,\"pos\":10.0,\"neg\":0.0,\"ob\":5.0}]"
+# A REQUESTED list that repeats a page. page_read_model declares
+# PRIMARY KEY (page_id) (includes/database/schema-project.php), so the real
+# producer — get_col() over that column — structurally cannot emit this; the
+# fixture pins the guard's defensive branch, not a reachable producer state.
+# It is worth pinning because `$rows` reaches bash as text through wp eval and
+# json_encode, and because without it one repeated REQUEST would be reported
+# as a repeated RESULT — the wrong half of the system.
+FX_ROWS_DUP_REQUEST="[$(mk_rows 1 | sed 's/^\[//;s/\]$//'),$(mk_rows 9 | sed 's/^\[//;s/\]$//')]"
+FX_RESULTS_DUP_REQUEST="[$(mk_result 101 true),$(mk_results 9 | sed 's/^\[//;s/\]$//')]"
 
 # ── ServiceLocator payload variants ──────────────────────────────────────────
 FX_LOCATOR_EMPTY='{}'
@@ -195,6 +276,9 @@ REAL_CURL="$(type -P curl || true)"
 REAL_AWK="$(type -P awk || true)"
 REAL_PHP="$(type -P php || true)"
 REAL_JQ="$(type -P jq || true)"
+REAL_BASH="$(type -P bash || true)"
+REAL_TR="$(type -P tr || true)"
+REAL_SED="$(type -P sed || true)"
 
 for req in "$REAL_AWK" "$REAL_PHP"; do
     if [[ -z "$req" ]]; then
@@ -216,6 +300,18 @@ make_shim() {
 [[ -n "$REAL_CURL" ]] && make_shim curl "$REAL_CURL"
 make_shim awk "$REAL_AWK"
 make_shim php "$REAL_PHP"
+# bash, tr and sed too. On Linux jq is normally /usr/bin/jq, i.e. it shares a
+# directory with coreutils and with bash itself — so path_without_jq() below
+# drops that whole directory and takes them with it. Consequences, all silent:
+#   `PATH=$PATH_NO_JQ bash "$GUARD"`  -> 127, bash not found (a temporary
+#                                        assignment applies to the lookup too)
+#   _json_php's `| tr -d '\r'`        -> php's output vanishes and the helper
+#                                        still returns php's exit status
+#   the overdue-hook join `tr | sed`  -> the cron list comes back empty
+# On Windows this never bit: jq lives in its own WinGet Links directory.
+[[ -n "$REAL_BASH" ]] && make_shim bash "$REAL_BASH"
+[[ -n "$REAL_TR"   ]] && make_shim tr   "$REAL_TR"
+[[ -n "$REAL_SED"  ]] && make_shim sed  "$REAL_SED"
 # curl is hard-required by the guard; stub it if the host has none.
 if [[ -z "$REAL_CURL" ]]; then
     printf '#!/bin/sh\nexit 0\n' > "$SANDBOX/bin/curl"; chmod +x "$SANDBOX/bin/curl"
@@ -352,8 +448,10 @@ printf "php   : %s\n" "$REAL_PHP"
 # ═════════════════════════════════════════════════════════════════════════════
 case_banner 1 "real jq installed -> detection succeeds, no deferral"
 if [[ -z "$REAL_JQ" ]]; then
+    oracle_skipped "case 1: jq-present whole run"
     printf "    ${CYAN}skip${NC} no jq binary on this host; cannot exercise the jq-present path\n"
 else
+    oracle_ran
     run_guard "$PATH_WITH_JQ"
     assert_eq        "exit code is 0 (clean run)"              "0"  "$GUARD_RC"
     assert_not_contains "no prerequisite notice when jq exists" "$GUARD_OUT" "PREREQUISITE"
@@ -469,10 +567,13 @@ for row in "${JSON_TABLE[@]}"; do
     php_rc="$(json_valid_rc "$PATH_NO_JQ" 1 "$payload")"
     assert_eq "php fallback: $label" "$expected" "$php_rc"
     if [[ -n "$REAL_JQ" ]]; then
+        oracle_ran
         jq_rc="$(json_valid_rc "$PATH_WITH_JQ" 0 "$payload")"
         assert_eq "jq path    : $label" "$expected" "$jq_rc"
         # Real jq is the oracle: the two implementations must agree.
         assert_eq "parity     : $label" "$jq_rc" "$php_rc"
+    else
+        oracle_skipped "case 4/5/6a json_valid: $label"
     fi
 done
 
@@ -492,11 +593,13 @@ done
 case_banner 6b "false predicates and malformed payloads are never masked"
 
 if [[ -n "$REAL_JQ" ]]; then
+    oracle_ran
     FIXTURE_LOCATOR="$FX_LOCATOR_UNHEALTHY" run_guard "$PATH_WITH_JQ"
     assert_eq       "unhealthy ServiceLocator -> exit 1"        "1" "$GUARD_RC"
     assert_contains "unhealthy predicate reported as FAIL"      "$GUARD_OUT" "TrustReadService → NullObject fallback"
     assert_contains "and NOT deferred"                          "$GUARD_OUT" "DEFERRED: 0"
 else
+    oracle_skipped "case 6b: jq-present false predicate"
     printf "    ${CYAN}skip${NC} no jq binary; cannot exercise the jq-present false-predicate path\n"
 fi
 
@@ -568,12 +671,17 @@ _parity() {
               "expected rc=$exp_rc out=[$(vis "$SANDBOX/exp.out")] got rc=$php_rc out=[$(vis "$SANDBOX/php.out")]"
     fi
 
-    [[ -n "$REAL_JQ" ]] || return 0
+    if [[ -z "$REAL_JQ" ]]; then
+        oracle_skipped "case 7 $label: no jq binary"
+        return 0
+    fi
     if (( lit == 1 && JQ_KEEPS_LITERALS == 0 )); then
         PARITY_SKIPPED_LEGS=$((PARITY_SKIPPED_LEGS+1))
+        oracle_skipped "case 7 $label: host jq predates 1.7 number-literal handling"
         return 0
     fi
 
+    oracle_ran
     op_exec "$PATH_WITH_JQ" 0 "$@" > "$SANDBOX/jq.out"; local jq_rc=$?
     if [[ "$jq_rc" == "$exp_rc" ]] && cmp -s "$SANDBOX/exp.out" "$SANDBOX/jq.out" \
        && [[ "$jq_rc" == "$php_rc" ]] && cmp -s "$SANDBOX/jq.out" "$SANDBOX/php.out"; then
@@ -814,8 +922,10 @@ assert_contains "overdue hooks reported"       "$PHP_RUN_OUT" "hooks: bcc_alpha,
 assert_contains "nothing deferred"             "$PHP_RUN_OUT" "DEFERRED: 0"
 
 if [[ -z "$REAL_JQ" ]]; then
+    oracle_skipped "case 9: whole-run byte diff between the two legs"
     printf "    ${CYAN}skip${NC} no jq binary; cannot diff the two legs on this host\n"
 else
+    oracle_ran
     env "${BROKEN_ENV[@]}" PATH="$PATH_WITH_JQ" bash "$GUARD" > "$SANDBOX/run-jq.out" 2>&1
     RUN_JQ_RC=$?
     assert_eq "broken world with jq present -> exit 1" "1" "$RUN_JQ_RC"
@@ -847,9 +957,12 @@ else
     notok "probes actually passed with jq absent" "PASS was [$PASS_COUNT], expected >= 9"
 fi
 if [[ -n "$REAL_JQ" ]]; then
+    oracle_ran
     run_guard "$PATH_WITH_JQ"
     JQ_PASS_COUNT="$(printf '%s\n' "$GUARD_OUT" | sed -n 's/.*PASS: \([0-9][0-9]*\).*/\1/p' | tail -1)"
     assert_eq "same PASS count with and without jq" "$JQ_PASS_COUNT" "$PASS_COUNT"
+else
+    oracle_skipped "case 10: PASS count with jq vs without"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -883,10 +996,15 @@ else
           "$(printf '%s' "$PROCSUB_CODE_LINES" | tr '\n' '~')"
 fi
 
+# Three loops now: the trust-score probe reads the REQUESTED ids as well as the
+# processed results (case 17), and both of its loops are subject to the same
+# /dev/fd condition as the ServiceLocator one.
 HS_LOOPS="$(grep -c '^[[:space:]]*done <<< ' "$GUARD" || true)"
-assert_eq "both probe loops read from a here-string" "2" "$HS_LOOPS"
+assert_eq "all three probe loops read from a here-string" "3" "$HS_LOOPS"
 assert_contains "trust-score loop feeds from the captured producer output" \
     "$(sed -n '/check_trust_scores()/,/^}/p' "$GUARD")" 'done <<< "$entries"'
+assert_contains "requested-id loop feeds from the captured producer output" \
+    "$(sed -n '/check_trust_scores()/,/^}/p' "$GUARD")" 'done <<< "$req_entries"'
 assert_contains "ServiceLocator loop feeds from the captured producer output" \
     "$(sed -n '/check_service_locator()/,/^}/p' "$GUARD")" 'done <<< "$entries"'
 
@@ -963,12 +1081,15 @@ HEALTHY_PASS="$(printf '%s\n' "$GUARD_OUT" | sed -n 's/.*PASS: \([0-9][0-9]*\).*
 assert_eq       "healthy world yields 12 PASS verdicts"  "12" "$HEALTHY_PASS"
 
 if [[ -n "$REAL_JQ" ]]; then
+    oracle_ran
     run_guard_fx "$PATH_WITH_JQ" \
         "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN" \
         "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
     assert_eq "healthy world -> exit 0 on the jq leg too" "0" "$GUARD_RC"
     assert_eq "same 12 PASS verdicts on the jq leg" "12" \
         "$(printf '%s\n' "$GUARD_OUT" | sed -n 's/.*PASS: \([0-9][0-9]*\).*/\1/p' | tail -1)"
+else
+    oracle_skipped "case 12: healthy sample on the jq leg"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1137,7 +1258,10 @@ assert_contains "FAILED mutated inside the loop survived"      "$TALLY_OUT" "TAL
 TALLY_OUT="$(probe_run check_trust_scores \
     "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_SEVEN")"
 assert_contains "iteration counter survived the loop"          "$TALLY_OUT" "iterated:  7 row(s)"
-assert_contains "and drove exactly one failure"                "$TALLY_OUT" "TALLY PASSED=0 FAILED=1"
+# Two failures, not one: the short count AND the three requested pages the
+# short payload left unverified (case 17). Both are computed after the loop
+# from state the loop built, so both prove parent-shell retention.
+assert_contains "and drove two failures: short count + missing ids" "$TALLY_OUT" "TALLY PASSED=0 FAILED=2"
 
 TALLY_OUT="$(probe_run check_service_locator "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY")"
 assert_contains "four locator verdicts reached the parent"     "$TALLY_OUT" "TALLY PASSED=4 FAILED=0"
@@ -1149,12 +1273,142 @@ TALLY_OUT="$(probe_run check_service_locator "FIXTURE_LOCATOR=$FX_LOCATOR_EMPTY"
 assert_contains "zero entries produce five failures, not zero" "$TALLY_OUT" "TALLY PASSED=0 FAILED=5"
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Case 17 — page IDENTITY, not just row count
+#
+# The iteration repair made the Trust Score probe count: it now insists that
+# every sampled row was iterated and verified. Counting is still not verifying.
+# A payload that processes page 101 TWICE and page 110 never has ten results
+# for ten requested pages, ten ok:true flags and iterated == count — a clean
+# sweep by every test the probe had, with one requested page silently
+# unchecked. The probe therefore compares the requested ids and the processed
+# ids as SETS and names each discrepancy: missing, duplicated, unexpected.
+#
+# The converse matters just as much: ORDER IS NOT A CONTRACT. The producer
+# orders by updated_at DESC, which is an implementation detail, so a reordered
+# payload of the same unique pages must still PASS.
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 17 "page identity: sets, not counts (order is not a contract)"
+
+# 17a — ten unique requested pages, processed exactly once each.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "ten unique pages -> exit 0"             "0" "$GUARD_RC"
+assert_contains "and all ten are verified"               "$GUARD_OUT" "10 page(s) pass canonical-formula invariant"
+assert_not_contains "no page reported unverified"        "$GUARD_OUT" "left page(s) unverified"
+assert_not_contains "no page reported duplicated"        "$GUARD_OUT" "processed the same page more than once"
+assert_not_contains "no page reported unexpected"        "$GUARD_OUT" "never asked about"
+
+# 17b — the same ten pages, shuffled. Ordering is not a contract.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN_REORDERED" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "reordered but identical set -> exit 0"  "0" "$GUARD_RC"
+assert_contains "reordered set still verifies all ten"   "$GUARD_OUT" "10 page(s) pass canonical-formula invariant"
+assert_not_contains "reordering is not 'unverified'"     "$GUARD_OUT" "left page(s) unverified"
+assert_not_contains "reordering is not 'unexpected'"     "$GUARD_OUT" "never asked about"
+
+# 17c — THE DEFECT THIS CASE EXISTS FOR: one page twice, one page never, and
+# a count that balances perfectly at ten.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_DUP_AND_MISSING" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "duplicate + missing at the right count -> exit 1" "1" "$GUARD_RC"
+assert_contains "the unverified page is reported"        "$GUARD_OUT" "trust-score sample left page(s) unverified"
+assert_contains "and named by id"                        "$GUARD_OUT" "requested but never processed: 110"
+assert_contains "the duplicate is reported"              "$GUARD_OUT" "trust-score sample processed the same page more than once"
+assert_contains "and named with its multiplicity"        "$GUARD_OUT" "duplicated: 101 (x2)"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+# The counts DID match; a count mismatch would be the wrong diagnosis.
+assert_not_contains "not reported as a count mismatch"   "$GUARD_OUT" "incompletely evaluated"
+
+# 17d — a duplicate plus a page nobody asked about.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_DUP_AND_EXTRA" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "duplicate + stranger -> exit 1"         "1" "$GUARD_RC"
+assert_contains "the stranger is reported"               "$GUARD_OUT" "trust-score sample processed page(s) it never asked about"
+assert_contains "and named by id"                        "$GUARD_OUT" "unexpected: 999"
+assert_contains "the duplicate is still named"           "$GUARD_OUT" "duplicated: 101 (x2)"
+assert_contains "and both dropped pages are named"       "$GUARD_OUT" "requested but never processed: 109, 110"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17e — right count, entirely wrong pages.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN_WRONG_IDS" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "ten results for the wrong ten pages -> exit 1" "1" "$GUARD_RC"
+assert_contains "every requested page is named unverified" "$GUARD_OUT" "requested but never processed: 101, 102, 103, 104, 105, 106, 107, 108, 109, 110"
+assert_contains "every processed page is named unexpected" "$GUARD_OUT" "unexpected: 201, 202, 203, 204, 205, 206, 207, 208, 209, 210"
+assert_not_contains "not reported as a count mismatch"   "$GUARD_OUT" "incompletely evaluated"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17f — a result row whose page_id is null.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_NULL_PAGE_ID" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "a null page_id -> exit 1"               "1" "$GUARD_RC"
+assert_contains "the unidentifiable row is reported"     "$GUARD_OUT" "canonical-formula result carries no page_id"
+assert_contains "and the page it failed to discharge is named" "$GUARD_OUT" "requested but never processed: 110"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17g — a result row with no page_id key at all.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_NO_PAGE_ID_KEY" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "an absent page_id key -> exit 1"        "1" "$GUARD_RC"
+assert_contains "the unidentifiable row is reported"     "$GUARD_OUT" "canonical-formula result carries no page_id"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17h — a REQUESTED list that repeats a page (defensive branch; see the
+# fixture comment: page_read_model.page_id is the primary key).
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_DUP_REQUEST" "FIXTURE_RESULTS=$FX_RESULTS_DUP_REQUEST" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "a repeated request -> exit 1"           "1" "$GUARD_RC"
+assert_contains "the repeat is reported against the SAMPLE" "$GUARD_OUT" "sample query returned page_id=101 more than once"
+assert_contains "and says why that cannot be legitimate" "$GUARD_OUT" "page_read_model.page_id is the primary key"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17i — the flagship defect must read the same through the jq leg. The identity
+# comparison is bash, but the ids reach it through json_each_compact/json_get,
+# so it is only leg-independent if both legs hand it the same ids.
+if [[ -n "$REAL_JQ" ]]; then
+    oracle_ran
+    run_guard_fx "$PATH_WITH_JQ" \
+        "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_DUP_AND_MISSING" \
+        "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+    assert_eq       "duplicate + missing -> exit 1 on the jq leg too" "1" "$GUARD_RC"
+    assert_contains "same missing-page verdict on the jq leg"  "$GUARD_OUT" "requested but never processed: 110"
+    assert_contains "same duplicate verdict on the jq leg"     "$GUARD_OUT" "duplicated: 101 (x2)"
+else
+    oracle_skipped "case 17i: identity verdicts on the jq leg"
+fi
+
+# 17j — the identity sets are built INSIDE the loop and read after it, so they
+# are subject to the same parent-shell requirement as the counters (case 16).
+TALLY_OUT="$(probe_run check_trust_scores \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_DUP_AND_MISSING")"
+assert_contains "identity sets survived the loop"        "$TALLY_OUT" "duplicated: 101 (x2)"
+assert_contains "and drove exactly two failures"         "$TALLY_OUT" "TALLY PASSED=0 FAILED=2"
+
+# ═════════════════════════════════════════════════════════════════════════════
 printf "\n──────────────────────────────────────────\n"
+if (( ORACLE_SKIPPED > 0 )); then
+    printf "${CYAN}jq-oracle legs SKIPPED${NC} (%d). This run is smaller than a full one:\n" \
+        "$ORACLE_SKIPPED"
+    for reason in "${ORACLE_SKIP_REASONS[@]}"; do
+        printf "    - %s\n" "$reason"
+    done
+fi
 if (( TESTS_FAILED == 0 )); then
     printf "${GREEN}ALL GREEN${NC}  %d assertion(s)\n" "$TESTS_RUN"
-    printf "──────────────────────────────────────────\n"
-    exit 0
+else
+    printf "${RED}REGRESSION${NC}  %d of %d assertion(s) failed\n" "$TESTS_FAILED" "$TESTS_RUN"
 fi
-printf "${RED}REGRESSION${NC}  %d of %d assertion(s) failed\n" "$TESTS_FAILED" "$TESTS_RUN"
 printf "──────────────────────────────────────────\n"
+# Machine-readable, always last. CI requires skipped=0 and a nonzero
+# comparison count so a reduced suite cannot pass for a complete one.
+printf "ORACLE jq_comparisons=%d skipped=%d\n" "$ORACLE_COMPARISONS" "$ORACLE_SKIPPED"
+(( TESTS_FAILED == 0 )) && exit 0
 exit 1

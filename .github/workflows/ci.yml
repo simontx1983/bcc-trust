@@ -65,6 +65,86 @@ jobs:
       - name: Golden-fixture staleness guard
         run: php scripts/golden-staleness-guard.php
 
+      # scripts/intent-guard.sh cannot run in CI (it needs a live WordPress and
+      # a seeded DB), which is how it shipped three defects that produced green
+      # runs having checked nothing: `command -v` matching the script's own jq
+      # wrapper, `done < <(...)` iterating zero times on a host with no /dev/fd,
+      # and a closing test of `bad == 0` that a zero-iteration loop satisfies.
+      # This harness needs neither WordPress nor a DB — it replays captured
+      # payloads through a `wp` shim — so the guard's own logic can be pinned
+      # here even though the guard cannot be.
+      #
+      # The suite has two legs. The php leg always runs. The jq leg only runs
+      # when a REAL jq binary is present, and it is the leg that checks the php
+      # parity implementation against jq's actual bytes and exit statuses — so
+      # a jq-less runner would print ALL GREEN for roughly half the suite. Both
+      # tools are therefore asserted with `type -P` (PATH executables only,
+      # never a function or alias — the exact distinction this PR family
+      # exists over), and both the assertion total and the jq-oracle skip count
+      # are pinned so a smaller green cannot pass for a complete one.
+      - name: Intent-guard prerequisite + jq-parity harness
+        run: |
+          set -uo pipefail
+
+          # 456 php-leg + jq-leg assertions, plus the 3 from the dynamic
+          # /dev/fd case, which needs Linux and a usable mount namespace and so
+          # is skipped on the Windows dev host. Update this deliberately when
+          # the harness gains or loses assertions: it is the only thing
+          # standing between "the suite passed" and "some of the suite passed".
+          EXPECTED_ASSERTIONS=459
+
+          JQ_BIN="$(type -P jq || true)"
+          PHP_BIN="$(type -P php || true)"
+          if [ -z "$JQ_BIN" ]; then
+            echo "::error::no jq EXECUTABLE on PATH (type -P jq found nothing). Half of this"
+            echo "::error::suite is jq-vs-php parity and cannot run without one."
+            exit 1
+          fi
+          if [ -z "$PHP_BIN" ]; then
+            echo "::error::no php EXECUTABLE on PATH (type -P php found nothing)."
+            exit 1
+          fi
+          echo "jq  : $JQ_BIN  ($("$JQ_BIN" --version))"
+          echo "php : $PHP_BIN ($("$PHP_BIN" -r 'echo PHP_VERSION;'))"
+
+          LOG="$RUNNER_TEMP/intent-guard-harness.log"
+          HARNESS_RC=0
+          bash scripts/tests/intent-guard-prereq.test.sh 2>&1 | tee "$LOG" || HARNESS_RC=$?
+          if [ "$HARNESS_RC" -ne 0 ]; then
+            echo "::error::intent-guard harness exited $HARNESS_RC — see the assertions above"
+            exit "$HARNESS_RC"
+          fi
+
+          ACTUAL="$(sed -n 's/^ALL GREEN[^0-9]*\([0-9][0-9]*\) assertion(s).*/\1/p' "$LOG" | tail -1)"
+          if [ "$ACTUAL" != "$EXPECTED_ASSERTIONS" ]; then
+            echo "::error::harness ran $ACTUAL assertion(s), expected $EXPECTED_ASSERTIONS."
+            echo "::error::A LOWER number means part of the suite silently did not run —"
+            echo "::error::the two legs that can drop out are the jq oracle (see the ORACLE"
+            echo "::error::line) and case 11c, which masks /dev/fd and needs a usable mount"
+            echo "::error::namespace. A HIGHER number means assertions were added and this"
+            echo "::error::pin was not updated with them."
+            exit 1
+          fi
+          echo "assertions : $ACTUAL (expected $EXPECTED_ASSERTIONS)"
+
+          ORACLE="$(grep -E '^ORACLE ' "$LOG" | tail -1 || true)"
+          if [ -z "$ORACLE" ]; then
+            echo "::error::harness printed no ORACLE line; cannot tell how much of it ran."
+            exit 1
+          fi
+          COMPARISONS="${ORACLE#*jq_comparisons=}"; COMPARISONS="${COMPARISONS%% *}"
+          SKIPPED="${ORACLE##*skipped=}"
+          echo "oracle     : $ORACLE"
+          if [ "$SKIPPED" != "0" ]; then
+            echo "::error::$SKIPPED jq-oracle comparison(s) were skipped — the php parity"
+            echo "::error::implementation was not checked against real jq everywhere."
+            exit 1
+          fi
+          if [ "$COMPARISONS" -lt 1 ]; then
+            echo "::error::zero jq-oracle comparisons ran; the jq leg did not execute."
+            exit 1
+          fi
+
   integration:
     name: PHP integration (MySQL)
     runs-on: ubuntu-latest
