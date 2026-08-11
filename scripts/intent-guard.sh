@@ -24,6 +24,18 @@
 #
 # Env alternatives: BCC_BASE_URL, WP_PATH, INTENT_CI=1, INTENT_DESTRUCTIVE=1,
 #                   INTENT_SAMPLE, BCC_RL_TEST_ROUTE
+#
+# Exit codes:
+#   0  all probes ran and passed (or were legitimately SKIPped)
+#   1  one or more probes FAILED — a real invariant is broken
+#   2  a hard-required tool is missing (wp / curl / awk / php)
+#   3  the run completed with no failures but one or more probes were
+#      DEFERRED — the guard could not evaluate them (e.g. jq absent). A
+#      deferred run is NOT a pass; never treat 3 as success in CI.
+#
+# Tooling: wp, curl, awk and php are hard-required. jq is OPTIONAL — JSON
+# validation falls back to php, and probes that need real jq *filters* are
+# reported as DEFERRED rather than silently passing or falsely failing.
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -uo pipefail
@@ -44,7 +56,7 @@ for arg in "$@"; do
         --wp-path=*)         WP_PATH="${arg#*=}" ;;
         --sample=*)          SAMPLE="${arg#*=}" ;;
         --rl-route=*)        RL_ROUTE="${arg#*=}" ;;
-        --help|-h)           sed -n '2,27p' "$0"; exit 0 ;;
+        --help|-h)           sed -n '2,39p' "$0"; exit 0 ;;
         *)                   echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
@@ -77,14 +89,15 @@ fi
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
-    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'; NC='\033[0m'
 else
-    RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; NC=''
+    RED=''; GREEN=''; YELLOW=''; CYAN=''; MAGENTA=''; BOLD=''; NC=''
 fi
 
 # ── Result tracking ──────────────────────────────────────────────────────────
-PASSED=0; FAILED=0; SKIPPED=0
+PASSED=0; FAILED=0; SKIPPED=0; DEFERRED=0
 FAIL_DETAILS=()
+DEFER_DETAILS=()
 
 pass() { printf "  ${GREEN}PASS${NC}  %s\n" "$1"; PASSED=$((PASSED+1)); }
 # fail <short> [<detail-line>]... — always loud. Short form is summary-ready;
@@ -99,6 +112,20 @@ fail() {
     FAIL_DETAILS+=("$short")
 }
 skip() { printf "  ${YELLOW}SKIP${NC}  %s\n" "$1"; SKIPPED=$((SKIPPED+1)); }
+# defer <short> [<detail-line>]... — "the guard could not evaluate this".
+# NOT a pass and NOT a skip: a skip means the probe legitimately does not
+# apply (feature off, no rows); a defer means the invariant is still unknown
+# because the guard lacked a tool it needed. Deferrals drive exit code 3 so
+# an unevaluated run can never be mistaken for a green one.
+defer() {
+    local short="$1"; shift
+    printf "  ${MAGENTA}DEFER${NC} ${BOLD}%s${NC}\n" "$short"
+    for line in "$@"; do
+        printf "        ${MAGENTA}└─${NC} %s\n" "$line"
+    done
+    DEFERRED=$((DEFERRED+1))
+    DEFER_DETAILS+=("$short")
+}
 note() { printf "        ${CYAN}info${NC}  %s\n" "$1"; }
 
 section() {
@@ -107,19 +134,112 @@ section() {
 }
 
 # ── Prereqs ──────────────────────────────────────────────────────────────────
+#
+# ⚠️  DO NOT change `type -P` back to `command -v` here. Read this first.
+#
+# `command -v NAME` resolves shell FUNCTIONS and ALIASES as well as PATH
+# executables, and this very script defines a wrapper function named `jq`
+# (see below). So `command -v jq` answered "yes, found: jq" on hosts where
+# no jq binary exists at all — the wrapper shadowed the check. Proof:
+#
+#     $ PATH=/usr/bin:/bin        # no jq binary anywhere on PATH
+#     $ jq() { command jq "$@"; } # the wrapper this script defines
+#     $ command -v jq  ->  jq            (exit 0 — WRONG, claims present)
+#     $ type -P jq     ->  <empty>       (exit 1 — correct, truly absent)
+#     $ echo '{}' | jq .  ->  exit 127   (reality: cannot run)
+#
+# The consequence was not a clean error: require_tools passed, then every
+# `jq -e .` validation site failed, reporting "returned non-JSON" for
+# payloads that were perfectly valid JSON. The guard gave a confidently
+# wrong reading. An alias has the same effect.
+#
+# `type -P` is a bash builtin that searches PATH for EXECUTABLES ONLY and
+# ignores functions, aliases, builtins and keywords. It is the only correct
+# primitive for "can I actually exec this program?".
+#
+# The wrapper below deliberately keeps the name `jq` (renaming it would churn
+# 40+ call sites for no safety gain now that detection is correct). This
+# comment and scripts/tests/intent-guard-prereq.test.sh are the guard against
+# this regressing.
+#
+# Hard-required: wp, curl, awk, php. php is required because it powers the
+# portable json_valid() fallback — every installed WordPress environment has
+# one, which is what makes the fallback safe to depend on.
+HAVE_JQ=0
+PHP_BIN=""
+
 require_tools() {
-    for t in wp jq curl awk; do
-        command -v "$t" >/dev/null 2>&1 || {
+    local t
+    for t in wp curl awk php; do
+        # type -P, NOT command -v — see the block comment above.
+        type -P "$t" >/dev/null 2>&1 || {
             echo -e "${RED}Missing required tool:${NC} $t" >&2; exit 2
         }
     done
+    PHP_BIN="$(type -P php)"
+
+    # jq is OPTIONAL. Detect the real binary only; never trust a function.
+    if type -P jq >/dev/null 2>&1; then
+        HAVE_JQ=1
+    else
+        HAVE_JQ=0
+    fi
 }
 
 # Windows jq builds emit CRLF line endings; the stray \r makes string
 # compares fail ($status == "real" vs "real\r") and silently breaks the
 # numeric [[ -gt ]] checks (which error → false → fake PASS on drift).
 # Strip \r from all jq output while preserving jq's exit status for -e.
+# Every call site is gated on HAVE_JQ==1; this is never reached without a
+# real jq binary on PATH.
 jq() { command jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
+
+# json_valid <payload> — "is this valid JSON, and is its value truthy?"
+#
+# Drop-in replacement for `echo "$payload" | jq -e . >/dev/null` that works
+# without jq. It reproduces `jq -e`'s exit-status contract exactly, because
+# -e derives its status from the LAST OUTPUT VALUE, not from parseability:
+#
+#     input        jq -e .   json_valid
+#     {"a":1}        0          0        valid, truthy
+#     []  {}  0  ""  0          0        valid, truthy (empty ≠ falsy in jq)
+#     true           0          0
+#     null           1          1        valid JSON, but a falsy value
+#     false          1          1        valid JSON, but a falsy value
+#     garbage        5          5        parse error
+#     <empty>        4          4        no input, so no output value
+#
+# Uses the real jq binary when one exists so the two paths cannot diverge;
+# otherwise php + json_decode(JSON_THROW_ON_ERROR). Deliberately limited to
+# VALIDATION: jq *filters* are not reimplemented in php (see defer()).
+json_valid() {
+    if (( HAVE_JQ == 1 )); then
+        # `command jq` bypasses the wrapper function above.
+        printf '%s' "$1" | command jq -e . >/dev/null 2>&1
+        return $?
+    fi
+    [[ -n "$PHP_BIN" ]] || PHP_BIN="$(type -P php)"
+    printf '%s' "$1" | "$PHP_BIN" -r '
+        $raw = stream_get_contents(STDIN);
+        if (trim($raw) === "") { exit(4); }          // jq: no output value
+        try {
+            $v = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $e) {
+            exit(5);                                  // jq: parse error
+        }
+        exit(($v === null || $v === false) ? 1 : 0);  // jq -e falsy rule
+    ' >/dev/null 2>&1
+    return $?
+}
+
+# jq_required <what> <why> — emit a single DEFER for a probe that needs real
+# jq filters. Returns 0 when the caller must bail out (jq absent), 1 when jq
+# is present and the caller should continue.
+jq_required() {
+    (( HAVE_JQ == 1 )) && return 1
+    defer "$1" "$2" "install jq to evaluate this probe"
+    return 0
+}
 
 wp_eval() { wp "${WP_ARGS[@]}" eval "$1" 2>&1; }
 
@@ -148,8 +268,12 @@ check_read_model() {
     body="$(wp_rest_get /bcc-trust/v1/health/read-model)" || {
         fail "read-model endpoint unreachable"; return
     }
-    if ! echo "$body" | jq -e . >/dev/null 2>&1; then
+    if ! json_valid "$body"; then
         fail "read-model response not valid JSON" "body: $body"; return
+    fi
+    if jq_required "read-model drift / coverage / sync-lag invariants" \
+                   "payload IS valid JSON, but reading .drift/.coverage/.freshness needs jq filters"; then
+        return
     fi
 
     local status drift coverage gap lag dirty total rm_rows
@@ -242,6 +366,18 @@ check_trust_scores() {
 
     if [[ "$rows" == "ERR no_repo" ]]; then
         skip "PageReadModelRepository unavailable — trust-engine not active"; return
+    fi
+    if (( HAVE_JQ == 0 )); then
+        # Array-ness is a jq filter, so it defers — but malformed output is
+        # still called out honestly: something that will not even parse is
+        # certainly not an array, which is exactly what jq -e would report.
+        if ! json_valid "$rows"; then
+            fail "sample query returned non-array" "wp eval output: $rows"; return
+        fi
+        defer "trust-score canonical-formula invariant" \
+              "row sample IS valid JSON, but shape + per-row extraction need jq filters (type==\"array\", length, .[])" \
+              "install jq to evaluate this probe"
+        return
     fi
     if ! echo "$rows" | jq -e 'type == "array"' >/dev/null 2>&1; then
         fail "sample query returned non-array" "wp eval output: $rows"; return
@@ -462,8 +598,12 @@ check_fraud_enforcement() {
     if [[ "$out" == "ERR trust_engine_missing" ]]; then
         skip "trust-engine not active"; return
     fi
-    if ! echo "$out" | jq -e . >/dev/null 2>&1; then
+    if ! json_valid "$out"; then
         fail "fraud probe returned non-JSON" "output: $out"; return
+    fi
+    if jq_required "fraud-gate invariants (is_suspended / vote / endorsement)" \
+                   "probe output IS valid JSON, but reading its result flags needs jq filters"; then
+        return
     fi
 
     local suspend vote_test_ran vote_high vote_low endorse_high endorse_low reason_high
@@ -544,20 +684,28 @@ check_rate_limiter() {
     if [[ "$h" == "ERR no_throttle" ]]; then
         skip "Throttle class not loaded"; return
     fi
-    if ! echo "$h" | jq -e . >/dev/null 2>&1; then
+    if ! json_valid "$h"; then
         fail "Throttle::health() returned non-JSON" "output: $h"; return
     fi
-    local ready backend degraded
-    ready=$(echo "$h"    | jq -r '.rate_limiter_ready')
-    backend=$(echo "$h"  | jq -r '.backend')
-    degraded=$(echo "$h" | jq -r '.degraded')
-    note "health: backend=$backend ready=$ready degraded=$degraded"
-    if [[ "$ready" != "true" ]]; then
-        fail "limiter not ready (allow() fails closed)" "backend: $backend"
-    elif [[ "$degraded" == "true" ]]; then
-        fail "limiter in DEGRADED mode" "backend: $backend — cache layer flapping"
+    # Only (a) needs jq. The behavioral probe (b) and HTTP hammer (c) below
+    # are pure bash/curl, so they still run and still report honestly when
+    # jq is absent — do NOT return here.
+    if jq_required "limiter health contract (ready / degraded / backend)" \
+                   "health payload IS valid JSON, but reading its fields needs jq filters"; then
+        :
     else
-        pass "limiter health: backend=$backend"
+        local ready backend degraded
+        ready=$(echo "$h"    | jq -r '.rate_limiter_ready')
+        backend=$(echo "$h"  | jq -r '.backend')
+        degraded=$(echo "$h" | jq -r '.degraded')
+        note "health: backend=$backend ready=$ready degraded=$degraded"
+        if [[ "$ready" != "true" ]]; then
+            fail "limiter not ready (allow() fails closed)" "backend: $backend"
+        elif [[ "$degraded" == "true" ]]; then
+            fail "limiter in DEGRADED mode" "backend: $backend — cache layer flapping"
+        else
+            pass "limiter health: backend=$backend"
+        fi
     fi
 
     # (b) Behavioral probe: limit=3/60s, 4 calls, 4th must fail.
@@ -644,8 +792,12 @@ check_service_locator() {
         echo wp_json_encode($out);
     ')"
 
-    if ! echo "$out" | jq -e . >/dev/null 2>&1; then
+    if ! json_valid "$out"; then
         fail "ServiceLocator probe returned non-JSON" "output: $out"; return
+    fi
+    if jq_required "ServiceLocator real-vs-NullObject wiring" \
+                   "probe output IS valid JSON, but per-contract iteration needs jq filters (to_entries)"; then
+        return
     fi
 
     while IFS="=" read -r label status; do
@@ -683,60 +835,70 @@ check_cron_health() {
         ]);
     ')"
 
-    if ! echo "$snapshot" | jq -e . >/dev/null 2>&1; then
+    if ! json_valid "$snapshot"; then
         fail "cron snapshot returned non-JSON" "output: $snapshot"; return
     fi
-
-    local cron_disabled last_run last_success now
-    cron_disabled=$(echo "$snapshot" | jq -r '.cron_disabled')
-    last_run=$(echo "$snapshot"      | jq -r '.last_run')
-    last_success=$(echo "$snapshot"  | jq -r '.last_success')
-    now=$(echo "$snapshot"           | jq -r '.now')
-
-    if [[ "$cron_disabled" == "true" ]]; then
-        note "WP cron DISABLED (system cron expected)"
+    # Only the snapshot assertions need jq; the overdue-hook probe below has
+    # its own deferral, so don't return out of the whole section here.
+    if jq_required "auto_resolve run-vs-success invariant + success staleness" \
+                   "cron snapshot IS valid JSON, but reading .last_run/.last_success needs jq filters"; then
+        :
     else
-        note "WP cron enabled"
-    fi
+        local cron_disabled last_run last_success now
+        cron_disabled=$(echo "$snapshot" | jq -r '.cron_disabled')
+        last_run=$(echo "$snapshot"      | jq -r '.last_run')
+        last_success=$(echo "$snapshot"  | jq -r '.last_success')
+        now=$(echo "$snapshot"           | jq -r '.now')
 
-    # Outcome divergence: if the job has run but never succeeded, fail hard.
-    # This is the exact failure mode the user flagged — "wakes up, chokes,
-    # updates a timestamp, check smiles like an idiot."
-    if [[ "$last_run" != "0" && "$last_success" == "0" ]]; then
-        local fail_msg
-        fail_msg=$(echo "$snapshot" | jq -r '.last_failure.message // "unknown"')
-        fail "auto_resolve runs but never succeeds" \
-             "last_run:     $(( now - last_run ))s ago" \
-             "last_success: never" \
-             "last_failure: $fail_msg" \
-             "job is firing but throwing every time — check logs"
-        return
-    fi
-
-    if [[ "$last_success" == "0" ]]; then
-        if [[ "$CI_MODE" == "1" ]]; then
-            fail "auto_resolve has never succeeded" "CI requires at least one successful cron tick"
+        if [[ "$cron_disabled" == "true" ]]; then
+            note "WP cron DISABLED (system cron expected)"
         else
-            skip "auto_resolve never succeeded yet (fresh site)"
+            note "WP cron enabled"
         fi
-    else
-        local success_age budget
-        success_age=$(( now - last_success ))
-        budget=$(( CI_MODE == 1 ? 86400 : 2 * 86400 ))
-        if (( success_age > budget )); then
-            # Drift between last_run and last_success — job may be succeeding
-            # overall but getting slower, OR it has started failing recently.
-            local run_age=$(( now - last_run ))
-            fail "cron success is stale" \
-                 "last_success: ${success_age}s ago" \
-                 "last_run:     ${run_age}s ago" \
-                 "budget (${PROFILE_LABEL}): ${budget}s"
+
+        # Outcome divergence: if the job has run but never succeeded, fail hard.
+        # This is the exact failure mode the user flagged — "wakes up, chokes,
+        # updates a timestamp, check smiles like an idiot."
+        if [[ "$last_run" != "0" && "$last_success" == "0" ]]; then
+            local fail_msg
+            fail_msg=$(echo "$snapshot" | jq -r '.last_failure.message // "unknown"')
+            fail "auto_resolve runs but never succeeds" \
+                 "last_run:     $(( now - last_run ))s ago" \
+                 "last_success: never" \
+                 "last_failure: $fail_msg" \
+                 "job is firing but throwing every time — check logs"
+            return
+        fi
+
+        if [[ "$last_success" == "0" ]]; then
+            if [[ "$CI_MODE" == "1" ]]; then
+                fail "auto_resolve has never succeeded" "CI requires at least one successful cron tick"
+            else
+                skip "auto_resolve never succeeded yet (fresh site)"
+            fi
         else
-            pass "auto_resolve last succeeded ${success_age}s ago"
+            local success_age budget
+            success_age=$(( now - last_success ))
+            budget=$(( CI_MODE == 1 ? 86400 : 2 * 86400 ))
+            if (( success_age > budget )); then
+                # Drift between last_run and last_success — job may be succeeding
+                # overall but getting slower, OR it has started failing recently.
+                local run_age=$(( now - last_run ))
+                fail "cron success is stale" \
+                     "last_success: ${success_age}s ago" \
+                     "last_run:     ${run_age}s ago" \
+                     "budget (${PROFILE_LABEL}): ${budget}s"
+            else
+                pass "auto_resolve last succeeded ${success_age}s ago"
+            fi
         fi
     fi
 
     # Overdue events — any hook still in the past after wp-cli dispatch.
+    if jq_required "overdue cron events" \
+                   "selecting hooks whose next_run_relative matches \"ago\" needs jq filters (select/map/unique)"; then
+        return
+    fi
     local overdue_json
     overdue_json="$(wp "${WP_ARGS[@]}" cron event list --fields=hook,next_run_relative --format=json 2>/dev/null || echo '[]')"
     local overdue_hooks
@@ -765,6 +927,19 @@ main() {
     echo "  sample      : $SAMPLE"
     echo "  destructive : $DESTRUCTIVE"
     echo "  rl-route    : ${RL_ROUTE:-<unset>}"
+    echo "  jq          : $( (( HAVE_JQ == 1 )) && echo "$(type -P jq)" || echo "<absent — php fallback>" )"
+
+    # ONE prerequisite notice, printed once, up front. Previously a missing
+    # jq produced five separate "returned non-JSON" failures against payloads
+    # that were valid JSON; now the operator is told exactly what is going on
+    # before any probe runs.
+    if (( HAVE_JQ == 0 )); then
+        echo ""
+        printf "${MAGENTA}PREREQUISITE${NC}  jq is not installed (no jq executable on PATH).\n"
+        printf "              • JSON validation falls back to php — malformed payloads are still reported.\n"
+        printf "              • Probes needing real jq filters will be ${MAGENTA}DEFERRED${NC}, not passed or failed.\n"
+        printf "              • Install jq for a complete run; this run will exit 3 if anything defers.\n"
+    fi
 
     check_read_model
     check_trust_scores
@@ -775,10 +950,11 @@ main() {
 
     echo ""
     echo "──────────────────────────────────────────"
-    printf "%sPASS%s: %d   %sFAIL%s: %d   %sSKIP%s: %d   (profile: %s)\n" \
+    printf "%sPASS%s: %d   %sFAIL%s: %d   %sSKIP%s: %d   %sDEFERRED%s: %d   (profile: %s)\n" \
         "$GREEN" "$NC" "$PASSED" \
         "$RED" "$NC" "$FAILED" \
         "$YELLOW" "$NC" "$SKIPPED" \
+        "$MAGENTA" "$NC" "$DEFERRED" \
         "$PROFILE_LABEL"
     echo "──────────────────────────────────────────"
 
@@ -791,7 +967,23 @@ main() {
         exit 1
     fi
 
+    # No failures, but something could not be evaluated. Exit 3 so a CI job
+    # or operator cannot read an incomplete run as a green one.
+    if (( DEFERRED > 0 )); then
+        echo ""
+        echo "Deferred (NOT evaluated — this run is incomplete):"
+        for d in "${DEFER_DETAILS[@]}"; do
+            printf "  ${MAGENTA}•${NC} %s\n" "$d"
+        done
+        exit 3
+    fi
+
     exit 0
 }
 
-main
+# Sourcing with BCC_INTENT_GUARD_LIB=1 exposes require_tools/json_valid/etc
+# WITHOUT running any probe, so scripts/tests/intent-guard-prereq.test.sh can
+# unit-test the prerequisite logic with no WordPress present.
+if [[ "${BCC_INTENT_GUARD_LIB:-0}" != "1" ]]; then
+    main
+fi
