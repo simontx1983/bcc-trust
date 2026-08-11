@@ -874,11 +874,41 @@ check_trust_scores() {
         fail "canonical formula call failed" "wp eval output: $results"; return
     fi
 
-    local bad=0 ok=0
+    local bad=0 ok=0 iterated=0
     local tolerance
     tolerance=$(json_get "$results" '.[0].tolerance' 0.5)
 
+    # ⚠️  HERE-STRING, DELIBERATELY. Do NOT change this back to
+    #     `done < <(json_each_compact "$results")`.
+    #
+    # The deploy host (installed staging) has NO /dev/fd, so bash cannot open
+    # the file descriptor a process substitution hands to the redirect. The
+    # redirect fails with "/dev/fd/63: No such file or directory" and the loop
+    # body runs ZERO times — measured on that host:
+    #     done < <(printf 'a\nb\nc\n')   ->  0 iterations + that error
+    #     done <<< "$data"               ->  3 iterations
+    # A pipe is not an alternative: `ok`, `bad` and `iterated` must survive in
+    # the PARENT shell, and a pipeline runs the loop body in a subshell (which
+    # is why process substitution was reached for in the first place). A
+    # here-string needs no /dev/fd, no temp file, no cleanup and no signal
+    # handling, and it preserves parent-shell scope.
+    #
+    # `<<<` appends a newline, so a payload that already ends in one yields a
+    # trailing EMPTY line. Empty lines are skipped rather than counted, so the
+    # iteration count below stays honest.
+    local entries entries_rc
+    entries="$(json_each_compact "$results")"
+    entries_rc=$?
+    if (( entries_rc != 0 )); then
+        fail "could not iterate canonical-formula results" \
+             "json_each_compact exited $entries_rc" \
+             "payload: $results"
+        return
+    fi
+
     while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        iterated=$((iterated+1))
         local page_id stored expected diff ok_flag pos neg eb ob
         page_id=$(json_get "$entry" '.page_id')
         stored=$(json_get "$entry"  '.stored')
@@ -901,9 +931,27 @@ check_trust_scores() {
                  "components pos=$pos neg=$neg endorsement=$eb onchain=$ob" \
                  "formula source: app/ValueObjects/PageScore.php"
         fi
-    done < <(json_each_compact "$results")
+    done <<< "$entries"
 
-    if (( bad == 0 )); then
+    # This probe may PASS only on PRESENCE OF SUCCESS, never on absence of
+    # failure. `bad == 0` alone was vacuous: with zero iterations bad=0 and
+    # ok=0, so a loop that never ran printed "PASS 0 page(s)". Every sampled
+    # row must have been iterated AND verified.
+    if (( iterated != count )); then
+        fail "trust-score sample incompletely evaluated" \
+             "requested: $count row(s) (from page_read_model)" \
+             "iterated:  $iterated row(s)" \
+             "the canonical-formula invariant was NOT checked for every sampled page" \
+             "this is an unevaluated probe, not a passing one"
+    elif (( bad > 0 )); then
+        # Each mismatch already emitted its own fail() above. Do not pass, and
+        # do not double-count the same defect.
+        :
+    elif (( ok != count )); then
+        fail "trust-score probe verified fewer rows than it sampled" \
+             "requested: $count row(s)" \
+             "verified:  $ok row(s)"
+    else
         pass "$ok page(s) pass canonical-formula invariant"
     fi
 }
@@ -1223,15 +1271,123 @@ check_service_locator() {
         fail "ServiceLocator probe returned non-JSON" "output: $out"; return
     fi
 
-    while IFS="=" read -r label status; do
-        if [[ "$status" == "real" ]]; then
+    # The contracts this probe owes a verdict for. SINGLE SOURCE OF TRUTH for
+    # the expected set: the wp eval above builds its payload from the same four
+    # labels, and the checks below prove that what came back is exactly this
+    # set — no missing contract, no duplicate, no stranger.
+    #
+    # Indexed arrays, not an associative array: `declare -A` needs bash 4, and
+    # the whole reason this function is being repaired is a deploy host whose
+    # shell environment did not behave as assumed.
+    local -ra expected=(
+        TrustReadService
+        ScoreReadService
+        DisputeAdjudicator
+        PageOwnerResolver
+    )
+    local -a seen_status=() seen_count=()
+    local i
+    for (( i = 0; i < ${#expected[@]}; i++ )); do
+        seen_status[i]=""
+        seen_count[i]=0
+    done
+
+    # ⚠️  HERE-STRING, DELIBERATELY. Do NOT change this back to
+    #     `done < <(json_entries_kv "$out")`. The deploy host has no /dev/fd,
+    # so a process substitution redirect fails outright and the loop body runs
+    # ZERO times — which, before this probe was rewritten, meant no pass, no
+    # fail, no skip: total silence, and the guard still exited 0. See the
+    # longer note in check_trust_scores(). `<<<` appends a newline, so empty
+    # lines are skipped rather than counted as entries.
+    local entries entries_rc
+    entries="$(json_entries_kv "$out")"
+    entries_rc=$?
+    if (( entries_rc != 0 )); then
+        fail "ServiceLocator probe output could not be read as contract entries" \
+             "json_entries_kv exited $entries_rc" \
+             "output: $out"
+        return
+    fi
+
+    local total=0 line label status idx
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        total=$((total+1))
+
+        if [[ "$line" != *"="* ]]; then
+            fail "ServiceLocator probe emitted a malformed entry" \
+                 "entry:    $line" \
+                 "expected: <contract>=<real|null>"
+            continue
+        fi
+        label="${line%%=*}"
+        status="${line#*=}"
+        if [[ -z "$label" ]]; then
+            fail "ServiceLocator probe emitted an entry with no contract name" \
+                 "entry: $line"
+            continue
+        fi
+        if [[ -z "$status" ]]; then
+            fail "ServiceLocator probe emitted an entry with no status" \
+                 "entry:    $line" \
+                 "expected: ${label}=real or ${label}=null"
+            continue
+        fi
+
+        idx=-1
+        for (( i = 0; i < ${#expected[@]}; i++ )); do
+            if [[ "${expected[i]}" == "$label" ]]; then idx=$i; break; fi
+        done
+        if (( idx < 0 )); then
+            fail "ServiceLocator probe returned an unexpected contract" \
+                 "contract: $label=$status" \
+                 "expected set: ${expected[*]}" \
+                 "the probe and this guard disagree about what is being checked"
+            continue
+        fi
+
+        seen_count[idx]=$(( seen_count[idx] + 1 ))
+        if (( seen_count[idx] > 1 )); then
+            fail "ServiceLocator probe returned $label more than once" \
+                 "occurrence ${seen_count[idx]}: $label=$status" \
+                 "first occurrence: $label=${seen_status[idx]}" \
+                 "a duplicated contract means the payload is not the map it claims to be"
+            continue
+        fi
+        seen_status[idx]="$status"
+    done <<< "$entries"
+
+    # Zero entries used to be SILENT — the loop was the entire probe, so an
+    # empty payload produced no verdict at all and the run still exited 0.
+    if (( total == 0 )); then
+        fail "ServiceLocator probe returned no contract entries" \
+             "expected: ${#expected[@]} entries (${expected[*]})" \
+             "actual:   0" \
+             "nothing was evaluated — this is an unevaluated probe, not a healthy one"
+    fi
+
+    # One VISIBLE verdict per expected contract, in a fixed order, whatever the
+    # payload did or did not contain.
+    for (( i = 0; i < ${#expected[@]}; i++ )); do
+        label="${expected[i]}"
+        status="${seen_status[i]}"
+        if (( seen_count[i] == 0 )); then
+            fail "$label → no verdict returned by the ServiceLocator probe" \
+                 "expected: ${label}=real" \
+                 "actual:   contract absent from the probe payload" \
+                 "the invariant is UNKNOWN for this contract, which is not a pass"
+        elif [[ "$status" == "real" ]]; then
             pass "$label → real implementation"
-        else
+        elif [[ "$status" == "null" ]]; then
             fail "$label → NullObject fallback" \
                  "contract is wired to a null implementation" \
                  "dependent plugin probably failed to init or registerProviders never ran"
+        else
+            fail "$label → unrecognised ServiceLocator status" \
+                 "status:   $status" \
+                 "expected: real or null"
         fi
-    done < <(json_entries_kv "$out")
+    done
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
