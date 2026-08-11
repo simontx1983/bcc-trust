@@ -51,6 +51,16 @@ return [
         'bcc_helius_dedupe_sweep'               => ['interval' => 'bcc_five_minutes',             'description' => 'Helius signature replay LRU eviction'],
         'bcc_helius_subscription_reconcile'     => ['interval' => 'twicedaily',                   'description' => 'Helius subscription address-list reconcile (covers dropped subscribe/unsubscribe)'],
         'bcc_nft_enrichment_tick'               => ['interval' => 'bcc_five_minutes',             'description' => 'NFT metadata backfill (name + image_url)'],
+        // CosmWasm CW-721 discovery. All four handlers re-check the
+        // fail-CLOSED CosmwasmDiscoveryGate, so a scheduled hook on an
+        // environment that has not opted in is a no-op — being listed here
+        // is drift tracking, not permission. The "monthly" pass rides a
+        // DAILY interval plus a durable >=30-day elapsed guard, because
+        // wp-cron has no monthly interval and we do not invent one.
+        'bcc_cosmwasm_backfill_tick'            => ['interval' => 'bcc_five_minutes',             'description' => 'CosmWasm CW-721 historical backfill (one chain slice per tick; needs BCC_COSMWASM_BACKFILL_ENABLED)'],
+        'bcc_cosmwasm_daily_discovery'          => ['interval' => 'daily',                        'description' => 'CosmWasm CW-721 incremental discovery — new code ids + new contracts under known families'],
+        'bcc_cosmwasm_weekly_retry'             => ['interval' => 'bcc_weekly',                   'description' => 'CosmWasm CW-721 retry sweep — temporarily_unreachable + inconclusive, capped and backed off'],
+        'bcc_cosmwasm_metadata_refresh'         => ['interval' => 'daily',                        'description' => 'CosmWasm CW-721 migration check + mutable metadata refresh (monthly via a durable elapsed guard)'],
         'bcc_watch_batch_sweep'                 => ['interval' => 'bcc_pull_batch_sweep_minute',  'description' => 'WatchBatchAggregator sweep'],
         // Disputes domain
         'bcc_disputes_auto_resolve'             => ['interval' => 'daily',                        'description' => 'dispute auto-resolve sweep'],
