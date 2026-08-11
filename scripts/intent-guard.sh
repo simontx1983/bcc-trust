@@ -30,12 +30,16 @@
 #   1  one or more probes FAILED — a real invariant is broken
 #   2  a hard-required tool is missing (wp / curl / awk / php)
 #   3  the run completed with no failures but one or more probes were
-#      DEFERRED — the guard could not evaluate them (e.g. jq absent). A
-#      deferred run is NOT a pass; never treat 3 as success in CI.
+#      DEFERRED — the guard could not evaluate them. A deferred run is NOT a
+#      pass; never treat 3 as success in CI. NO current probe defers: every
+#      JSON read this script performs has a php implementation with the same
+#      verdict as jq (see "jq-parity JSON helpers" below). defer() is kept
+#      for a FUTURE read that genuinely cannot be evaluated.
 #
-# Tooling: wp, curl, awk and php are hard-required. jq is OPTIONAL — JSON
-# validation falls back to php, and probes that need real jq *filters* are
-# reported as DEFERRED rather than silently passing or falsely failing.
+# Tooling: wp, curl, awk and php are hard-required. jq is OPTIONAL and the
+# run is COMPLETE either way: every jq expression this script uses has a
+# named php equivalent that reproduces jq's output bytes and exit status, so
+# a host without jq gets the same PASS/FAIL verdicts and DEFERRED: 0.
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -uo pipefail
@@ -56,7 +60,7 @@ for arg in "$@"; do
         --wp-path=*)         WP_PATH="${arg#*=}" ;;
         --sample=*)          SAMPLE="${arg#*=}" ;;
         --rl-route=*)        RL_ROUTE="${arg#*=}" ;;
-        --help|-h)           sed -n '2,39p' "$0"; exit 0 ;;
+        --help|-h)           sed -n '2,43p' "$0"; exit 0 ;;
         *)                   echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
@@ -115,8 +119,14 @@ skip() { printf "  ${YELLOW}SKIP${NC}  %s\n" "$1"; SKIPPED=$((SKIPPED+1)); }
 # defer <short> [<detail-line>]... — "the guard could not evaluate this".
 # NOT a pass and NOT a skip: a skip means the probe legitimately does not
 # apply (feature off, no rows); a defer means the invariant is still unknown
-# because the guard lacked a tool it needed. Deferrals drive exit code 3 so
-# an unevaluated run can never be mistaken for a green one.
+# because the guard lacked something it needed. Deferrals drive exit code 3
+# so an unevaluated run can never be mistaken for a green one.
+#
+# NO probe defers today, and a missing jq must never make one defer: every
+# jq expression in this script has a php equivalent below with the same
+# verdict. This stays for a FUTURE read that genuinely cannot be evaluated
+# on some host — reach for it only when there is no parity implementation
+# to write, and say plainly what could not be evaluated and why.
 defer() {
     local short="$1"; shift
     printf "  ${MAGENTA}DEFER${NC} ${BOLD}%s${NC}\n" "$short"
@@ -210,8 +220,9 @@ jq() { command jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 #     <empty>        4          4        no input, so no output value
 #
 # Uses the real jq binary when one exists so the two paths cannot diverge;
-# otherwise php + json_decode(JSON_THROW_ON_ERROR). Deliberately limited to
-# VALIDATION: jq *filters* are not reimplemented in php (see defer()).
+# otherwise php + json_decode(JSON_THROW_ON_ERROR). This is the VALIDATION
+# operation only; the reads (.a, to_entries, @csv, unique …) are the seven
+# named helpers below.
 json_valid() {
     if (( HAVE_JQ == 1 )); then
         # `command jq` bypasses the wrapper function above.
@@ -232,13 +243,457 @@ json_valid() {
     return $?
 }
 
-# jq_required <what> <why> — emit a single DEFER for a probe that needs real
-# jq filters. Returns 0 when the caller must bail out (jq absent), 1 when jq
-# is present and the caller should continue.
-jq_required() {
-    (( HAVE_JQ == 1 )) && return 1
-    defer "$1" "$2" "install jq to evaluate this probe"
-    return 0
+# ═════════════════════════════════════════════════════════════════════════════
+# jq-parity JSON helpers
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Every JSON read this script performs goes through one of the seven named
+# helpers below (plus json_valid above — eight operations in total). Each one
+# dispatches to the REAL jq binary when there is one, and to a php
+# implementation when there is not. The php side is a parity implementation,
+# not an approximation and not a deferral: same stdout bytes, same exit
+# status. That is what lets a jq-less host (installed staging) produce a
+# complete verdict with DEFERRED: 0.
+#
+#   helper                  jq expression it stands in for
+#   ─────────────────────── ────────────────────────────────────────────────
+#   json_get                jq -r '.a'  /  jq -r '.a.b // 0'  /  '.[0].t // 0.5'
+#   json_is_array           jq -e 'type == "array"'
+#   json_length             jq 'length'
+#   json_each_compact       jq -c '.[]'
+#   json_entries_kv         jq -r 'to_entries[] | "\(.key)=\(.value)"'
+#   json_drift_sample_csv   jq -r '.drift.samples // [] | map(.page_id // .) | @csv'
+#   json_overdue_hooks      jq -r '[.[] | select(.next_run_relative | test("ago"))]
+#                                   | map(.hook) | unique | .[]'
+#   json_valid              jq -e .
+#
+# This is deliberately NOT a jq interpreter. There is no filter evaluator:
+# the php side switches on an operation NAME, and json_get takes a path made
+# only of `.key` and `.[N]` segments (validated below). Adding a new jq
+# expression to this script means adding a new named helper here — which is
+# the point, because the parity obligation stays visible.
+#
+# jq semantics reproduced exactly (each one is a trap that silently changes
+# verdicts if you get it wrong, and each one is pinned by
+# scripts/tests/intent-guard-prereq.test.sh):
+#
+#   `//`      substitutes ONLY when the left side is null or false. NOT for
+#             0, "", [] or {}. A coverage_pct of 0 stays 0; it does not
+#             become the default and quietly pass the coverage check.
+#   -r        strings print unquoted, null prints "null", booleans print
+#             true/false, containers print as jq pretty-prints them.
+#   -e        exit 1 when the last value is false/null, 4 when there was no
+#             output at all, 5 on a parse or runtime error.
+#   numbers   keep their SOURCE LITERAL (jq >= 1.7 behaviour: 85.0 prints as
+#             85.0, 1.100 as 1.100, 1e2 as 1E+2), so php float formatting —
+#             which varies with serialize_precision — can never leak in.
+#   errors    indexing a non-object with a key, iterating a scalar, @csv on a
+#             container, test() on a non-string: all exit 5, as in jq.
+#   unique    SORTS as well as deduplicating (jq total order:
+#             null < false < true < numbers < strings < arrays < objects),
+#             so overdue-hook output order matches jq, not input order.
+#
+# Known, deliberate narrowings (neither occurs in this script's payloads):
+#   • exactly ONE JSON document per payload — jq would process a stream.
+#   • json_get paths use the dotted index form `.a.[0]`, not `.a[0]`.
+BCC_JSON_PHP=$(cat <<'BCC_JSON_PHP_EOF'
+ini_set("display_errors", "stderr");
+error_reporting(E_ALL);
+
+// Numbers are tagged with this sentinel during decode so the SOURCE LITERAL
+// survives (php floats would re-format them). NUL cannot appear unescaped in
+// JSON text, so a payload can only collide with this by containing a literal
+// NUL followed by "jqnum:" and a well-formed number.
+const NT    = "\x00jqnum:";
+const NUMRE = "/^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$/";
+
+function jq_die($msg) {
+    fwrite(STDERR, "intent-guard json: " . $msg . "\n");
+    exit(5);
+}
+
+// Rewrite every JSON number token as a tagged string, leaving strings (and
+// anything malformed, so json_decode still rejects it) untouched.
+function wrap_numbers($s) {
+    $out = ""; $n = strlen($s); $i = 0; $inStr = false;
+    while ($i < $n) {
+        $c = $s[$i];
+        if ($inStr) {
+            if ($c === "\\" && $i + 1 < $n) { $out .= $c . $s[$i + 1]; $i += 2; continue; }
+            if ($c === '"') { $inStr = false; }
+            $out .= $c; $i++; continue;
+        }
+        if ($c === '"') { $inStr = true; $out .= $c; $i++; continue; }
+        if ($c === "-" || ($c >= "0" && $c <= "9")) {
+            $j = $i;
+            while ($j < $n && strpos("+-0123456789.eE", $s[$j]) !== false) { $j++; }
+            $tok = substr($s, $i, $j - $i);
+            $out .= (preg_match(NUMRE, $tok) === 1) ? '"\u0000jqnum:' . $tok . '"' : $tok;
+            $i = $j; continue;
+        }
+        $out .= $c; $i++;
+    }
+    return $out;
+}
+
+function is_num($v) {
+    return is_string($v)
+        && strncmp($v, NT, strlen(NT)) === 0
+        && preg_match(NUMRE, substr($v, strlen(NT))) === 1;
+}
+function is_str($v)  { return is_string($v) && !is_num($v); }
+function num_lit($v) { return substr($v, strlen(NT)); }
+function truthy($v)  { return !($v === null || $v === false); }
+
+function jq_type($v) {
+    if ($v === null)    { return "null"; }
+    if (is_bool($v))    { return "boolean"; }
+    if (is_num($v))     { return "number"; }
+    if (is_string($v))  { return "string"; }
+    if (is_array($v))   { return "array"; }
+    return "object";
+}
+
+// decNumber to-scientific-string, which is how jq >= 1.7 re-prints a number
+// literal it has not mutated: 85.0 -> 85.0, 0.50 -> 0.50, 1e2 -> 1E+2,
+// 5e-1 -> 0.5, 0.0000001 -> 1E-7.
+function canon_num($lit) {
+    if (preg_match("/^(-?)([0-9]+)(?:\\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$/", $lit, $m) !== 1) {
+        return $lit;
+    }
+    $sign  = $m[1];
+    $frac  = isset($m[3]) ? $m[3] : "";
+    $exp   = (isset($m[4]) && $m[4] !== "") ? (int) $m[4] : 0;
+    $exp  -= strlen($frac);
+    $digits = ltrim($m[2] . $frac, "0");
+    if ($digits === "") { $digits = "0"; }
+    $n   = strlen($digits);
+    $adj = $exp + $n - 1;
+    if ($exp <= 0 && $adj >= -6) {
+        if ($exp === 0)   { $out = $digits; }
+        elseif ($adj >= 0) { $out = substr($digits, 0, $adj + 1) . "." . substr($digits, $adj + 1); }
+        else               { $out = "0." . str_repeat("0", -$adj - 1) . $digits; }
+    } else {
+        $out = substr($digits, 0, 1)
+             . ($n > 1 ? "." . substr($digits, 1) : "")
+             . "E" . ($adj >= 0 ? "+" : "-") . abs($adj);
+    }
+    return $sign . $out;
+}
+
+// jq escapes U+007F; php does not. Everything else matches with slashes and
+// unicode left unescaped, which is jq's default output.
+function enc_str($s) {
+    $e = json_encode($s, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($e === false) { jq_die("string is not valid UTF-8"); }
+    return str_replace("\x7f", "\\u007f", $e);
+}
+
+// enc($v, false) == jq -c output. enc($v, true) == jq's pretty output
+// (2-space indent), which is what -r prints for a container.
+function enc($v, $pretty = false, $ind = 0) {
+    if ($v === null)  { return "null"; }
+    if ($v === true)  { return "true"; }
+    if ($v === false) { return "false"; }
+    if (is_num($v))   { return canon_num(num_lit($v)); }
+    if (is_string($v)) { return enc_str($v); }
+    $isList = is_array($v);
+    $items  = $isList ? $v : (array) $v;
+    $open   = $isList ? "[" : "{";
+    $close  = $isList ? "]" : "}";
+    if (count($items) === 0) { return $open . $close; }
+    $nl   = $pretty ? "\n" : "";
+    $pad  = $pretty ? str_repeat(" ", $ind + 2) : "";
+    $cpad = $pretty ? str_repeat(" ", $ind) : "";
+    $parts = [];
+    foreach ($items as $k => $val) {
+        $piece = enc($val, $pretty, $ind + 2);
+        if (!$isList) { $piece = enc_str((string) $k) . ($pretty ? ": " : ":") . $piece; }
+        $parts[] = $pad . $piece;
+    }
+    return $open . $nl . implode("," . $nl, $parts) . $nl . $cpad . $close;
+}
+
+// jq -r: a string prints as itself, anything else as pretty JSON.
+function raw_out($v) { return is_str($v) ? $v : enc($v, true, 0); }
+
+function short_repr($v) {
+    $s = enc($v, false, 0);
+    return strlen($s) > 11 ? substr($s, 0, 11) . "..." : $s;
+}
+
+function idx_key($v, $k) {
+    if ($v === null) { return null; }
+    if ($v instanceof stdClass) { return property_exists($v, $k) ? $v->{$k} : null; }
+    jq_die("Cannot index " . jq_type($v) . " with string \"" . $k . "\"");
+}
+function idx_at($v, $i) {
+    if ($v === null) { return null; }
+    if (is_array($v)) { return array_key_exists($i, $v) ? $v[$i] : null; }
+    jq_die("Cannot index " . jq_type($v) . " with number");
+}
+function iterate($v) {
+    if (is_array($v)) { return $v; }
+    if ($v instanceof stdClass) { return array_values((array) $v); }
+    jq_die("Cannot iterate over " . jq_type($v) . " (" . short_repr($v) . ")");
+}
+
+// jq total order: null < false < true < numbers < strings < arrays < objects.
+function rankv($v) {
+    if ($v === null)  { return 0; }
+    if ($v === false) { return 1; }
+    if ($v === true)  { return 2; }
+    if (is_num($v))   { return 3; }
+    if (is_string($v)) { return 4; }
+    if (is_array($v)) { return 5; }
+    return 6;
+}
+function cmpv($a, $b) {
+    $ra = rankv($a); $rb = rankv($b);
+    if ($ra !== $rb) { return $ra < $rb ? -1 : 1; }
+    if ($ra === 3) {
+        $x = (float) num_lit($a); $y = (float) num_lit($b);
+        return $x < $y ? -1 : ($x > $y ? 1 : 0);
+    }
+    if ($ra === 4) { $c = strcmp($a, $b); return $c < 0 ? -1 : ($c > 0 ? 1 : 0); }
+    if ($ra === 5) {
+        $n = min(count($a), count($b));
+        for ($i = 0; $i < $n; $i++) {
+            $c = cmpv($a[$i], $b[$i]);
+            if ($c !== 0) { return $c; }
+        }
+        return count($a) < count($b) ? -1 : (count($a) > count($b) ? 1 : 0);
+    }
+    if ($ra === 6) {
+        $aa = (array) $a; $bb = (array) $b;
+        $ka = array_map("strval", array_keys($aa)); sort($ka, SORT_STRING);
+        $kb = array_map("strval", array_keys($bb)); sort($kb, SORT_STRING);
+        $c = cmpv($ka, $kb);
+        if ($c !== 0) { return $c; }
+        foreach ($ka as $k) {
+            $c = cmpv($aa[$k], $bb[$k]);
+            if ($c !== 0) { return $c; }
+        }
+    }
+    return 0;
+}
+// jq's unique: sort by the total order above, then drop equal neighbours.
+function uniq_sorted($vals) {
+    usort($vals, "cmpv");
+    $out = [];
+    foreach ($vals as $v) {
+        if (count($out) === 0 || cmpv($out[count($out) - 1], $v) !== 0) { $out[] = $v; }
+    }
+    return $out;
+}
+
+function str_len_cp($s) {
+    if (function_exists("mb_strlen")) { return (int) mb_strlen($s, "UTF-8"); }
+    return (int) preg_match_all("/./us", $s);
+}
+
+// ── entry point ──────────────────────────────────────────────────────────
+$op  = (string) getenv("BCC_JSON_OP");
+$raw = stream_get_contents(STDIN);
+if ($raw === false) { $raw = ""; }
+
+// No input at all: jq emits nothing and exits 0, except under -e where "no
+// output was ever produced" is exit 4.
+if (trim($raw) === "") { exit($op === "is_array" ? 4 : 0); }
+
+// Validate the ORIGINAL text first, so number rewriting can never turn a
+// malformed literal (e.g. 01) into something that parses.
+json_decode($raw);
+if (json_last_error() !== JSON_ERROR_NONE) { jq_die("parse error: " . json_last_error_msg()); }
+$doc = json_decode(wrap_numbers($raw));
+if (json_last_error() !== JSON_ERROR_NONE) { jq_die("parse error: " . json_last_error_msg()); }
+
+switch ($op) {
+
+    case "get":
+        $cur  = $doc;
+        $path = (string) getenv("BCC_JSON_PATH");
+        preg_match_all("/\\.([A-Za-z_][A-Za-z0-9_]*)|\\.\\[([0-9]+)\\]/", $path, $segs, PREG_SET_ORDER);
+        foreach ($segs as $seg) {
+            if (isset($seg[2]) && $seg[2] !== "") { $cur = idx_at($cur, (int) $seg[2]); }
+            else                                  { $cur = idx_key($cur, $seg[1]); }
+        }
+        if (getenv("BCC_JSON_HAS_DEFAULT") === "1" && !truthy($cur)) {
+            echo (string) getenv("BCC_JSON_DEFAULT"), "\n";
+        } else {
+            echo raw_out($cur), "\n";
+        }
+        exit(0);
+
+    case "is_array":
+        $isArray = is_array($doc);
+        echo $isArray ? "true\n" : "false\n";
+        exit($isArray ? 0 : 1);
+
+    case "length":
+        if ($doc === null)               { echo "0\n"; }
+        elseif (is_num($doc))            { echo canon_num(ltrim(num_lit($doc), "-")), "\n"; }
+        elseif (is_string($doc))         { echo str_len_cp($doc), "\n"; }
+        elseif (is_array($doc))          { echo count($doc), "\n"; }
+        elseif ($doc instanceof stdClass) { echo count((array) $doc), "\n"; }
+        else { jq_die("boolean (" . ($doc ? "true" : "false") . ") has no length"); }
+        exit(0);
+
+    case "each_compact":
+        foreach (iterate($doc) as $e) { echo enc($e, false, 0), "\n"; }
+        exit(0);
+
+    case "entries_kv":
+        $pairs = [];
+        if ($doc instanceof stdClass) { $pairs = (array) $doc; }
+        elseif (is_array($doc))       { $pairs = $doc; }
+        else { jq_die(jq_type($doc) . " (" . short_repr($doc) . ") has no keys"); }
+        foreach ($pairs as $k => $v) {
+            echo $k, "=", (is_str($v) ? $v : enc($v, false, 0)), "\n";
+        }
+        exit(0);
+
+    case "drift_csv":
+        $samples = idx_key(idx_key($doc, "drift"), "samples");
+        if (!truthy($samples)) { $samples = []; }
+        $cells = [];
+        foreach (iterate($samples) as $e) {
+            $pid  = idx_key($e, "page_id");
+            $cell = truthy($pid) ? $pid : $e;
+            if ($cell === null)      { $cells[] = ""; }
+            elseif ($cell === true)  { $cells[] = "true"; }
+            elseif ($cell === false) { $cells[] = "false"; }
+            elseif (is_num($cell))   { $cells[] = canon_num(num_lit($cell)); }
+            elseif (is_string($cell)) { $cells[] = '"' . str_replace('"', '""', $cell) . '"'; }
+            else { jq_die(jq_type($cell) . " (" . short_repr($cell) . ") is not valid in a csv row"); }
+        }
+        echo implode(",", $cells), "\n";
+        exit(0);
+
+    case "overdue_hooks":
+        $hooks = [];
+        foreach (iterate($doc) as $e) {
+            $nrr = idx_key($e, "next_run_relative");
+            if (!is_str($nrr)) {
+                jq_die(jq_type($nrr) . " (" . short_repr($nrr) . ") cannot be matched, as it is not a string");
+            }
+            if (preg_match("/ago/", $nrr) === 1) { $hooks[] = idx_key($e, "hook"); }
+        }
+        foreach (uniq_sorted($hooks) as $h) { echo raw_out($h), "\n"; }
+        exit(0);
+}
+
+fwrite(STDERR, "intent-guard json: unknown operation \"" . $op . "\"\n");
+exit(2);
+BCC_JSON_PHP_EOF
+)
+
+# _json_php <op> <payload> [path] [default] [has-default] — run the php
+# parity implementation. The payload goes in on STDIN, never in argv: these
+# payloads carry quotes, braces and newlines. Output is passed through the
+# same CR filter as the jq wrapper so the two legs cannot diverge on a
+# payload containing a carriage return.
+_json_php() {
+    [[ -n "$PHP_BIN" ]] || PHP_BIN="$(type -P php)"
+    printf '%s' "$2" \
+        | BCC_JSON_OP="$1" \
+          BCC_JSON_PATH="${3-}" \
+          BCC_JSON_DEFAULT="${4-}" \
+          BCC_JSON_HAS_DEFAULT="${5-0}" \
+          "$PHP_BIN" -r "$BCC_JSON_PHP" \
+        | tr -d '\r'
+    return "${PIPESTATUS[1]}"
+}
+
+# json_get <payload> <path> [default] — `jq -r '<path>'`, or
+# `jq -r '<path> // $default'` when a default is supplied.
+#
+# <path> is a sequence of `.key` and `.[N]` segments and nothing else; a path
+# outside that grammar is a call-site bug and is refused on BOTH legs (5).
+# The default is supplied as the RAW TEXT jq would print, and reaches jq via
+# --arg (so it is never spliced into the filter): under -r a string default
+# prints byte-identically to the numeric or boolean literal it stands for.
+json_get() {
+    local payload="$1" path="$2" default="" has_default=0
+    if (( $# >= 3 )); then has_default=1; default="$3"; fi
+
+    local grammar='^(\.[A-Za-z_][A-Za-z0-9_]*|\.\[[0-9]+\])+$'
+    if [[ ! "$path" =~ $grammar ]]; then
+        echo "json_get: unsupported path '$path' (use .key / .[N] segments only)" >&2
+        return 5
+    fi
+
+    if (( HAVE_JQ == 1 )); then
+        local filter="$path"
+        (( has_default == 1 )) && filter="$path // \$__def"
+        printf '%s' "$payload" | jq -r --arg __def "$default" "$filter"
+        return $?
+    fi
+    _json_php get "$payload" "$path" "$default" "$has_default"
+}
+
+# json_is_array <payload> — `jq -e 'type == "array"'`.
+# Prints true/false; exit 0 array, 1 not, 4 no input, 5 unparseable.
+json_is_array() {
+    if (( HAVE_JQ == 1 )); then
+        printf '%s' "$1" | jq -e 'type == "array"'
+        return $?
+    fi
+    _json_php is_array "$1"
+}
+
+# json_length <payload> — `jq 'length'`.
+json_length() {
+    if (( HAVE_JQ == 1 )); then
+        printf '%s' "$1" | jq 'length'
+        return $?
+    fi
+    _json_php length "$1"
+}
+
+# json_each_compact <payload> — `jq -c '.[]'`: one compact JSON document per
+# line, in source order.
+json_each_compact() {
+    if (( HAVE_JQ == 1 )); then
+        printf '%s' "$1" | jq -c '.[]'
+        return $?
+    fi
+    _json_php each_compact "$1"
+}
+
+# json_entries_kv <payload> — `jq -r 'to_entries[] | "\(.key)=\(.value)"'`:
+# one key=value line per entry, insertion order, container values compact.
+json_entries_kv() {
+    if (( HAVE_JQ == 1 )); then
+        printf '%s' "$1" | jq -r 'to_entries[] | "\(.key)=\(.value)"'
+        return $?
+    fi
+    _json_php entries_kv "$1"
+}
+
+# json_drift_sample_csv <payload> —
+# `jq -r '.drift.samples // [] | map(.page_id // .) | @csv'`: one CSV line of
+# sample identifiers. Per element: .page_id when it is neither null nor
+# false, otherwise the element itself.
+json_drift_sample_csv() {
+    if (( HAVE_JQ == 1 )); then
+        printf '%s' "$1" | jq -r '.drift.samples // [] | map(.page_id // .) | @csv'
+        return $?
+    fi
+    _json_php drift_csv "$1"
+}
+
+# json_overdue_hooks <payload> — `jq -r '[.[] | select(.next_run_relative |
+# test("ago"))] | map(.hook) | unique | .[]'`: hook names whose next run is
+# in the past, one per line. `unique` sorts, so output is in jq's order and
+# not input order.
+json_overdue_hooks() {
+    if (( HAVE_JQ == 1 )); then
+        printf '%s' "$1" \
+            | jq -r '[.[] | select(.next_run_relative | test("ago"))] | map(.hook) | unique | .[]'
+        return $?
+    fi
+    _json_php overdue_hooks "$1"
 }
 
 wp_eval() { wp "${WP_ARGS[@]}" eval "$1" 2>&1; }
@@ -271,27 +726,23 @@ check_read_model() {
     if ! json_valid "$body"; then
         fail "read-model response not valid JSON" "body: $body"; return
     fi
-    if jq_required "read-model drift / coverage / sync-lag invariants" \
-                   "payload IS valid JSON, but reading .drift/.coverage/.freshness needs jq filters"; then
-        return
-    fi
 
     local status drift coverage gap lag dirty total rm_rows
-    status=$(echo "$body"   | jq -r '.status // "unknown"')
-    drift=$(echo "$body"    | jq -r '.drift.divergent_pages // 0')
-    coverage=$(echo "$body" | jq -r '.coverage.coverage_pct // 0')
-    total=$(echo "$body"    | jq -r '.coverage.total_pages // 0')
-    rm_rows=$(echo "$body"  | jq -r '.coverage.rm_rows // 0')
-    gap=$(echo "$body"      | jq -r '.coverage.gap_count // 0')
-    lag=$(echo "$body"      | jq -r '.freshness.lag_seconds // 0')
-    dirty=$(echo "$body"    | jq -r '.freshness.dirty_queue_size // 0')
+    status=$(json_get   "$body" '.status'                     'unknown')
+    drift=$(json_get    "$body" '.drift.divergent_pages'      0)
+    coverage=$(json_get "$body" '.coverage.coverage_pct'      0)
+    total=$(json_get    "$body" '.coverage.total_pages'       0)
+    rm_rows=$(json_get  "$body" '.coverage.rm_rows'           0)
+    gap=$(json_get      "$body" '.coverage.gap_count'         0)
+    lag=$(json_get      "$body" '.freshness.lag_seconds'      0)
+    dirty=$(json_get    "$body" '.freshness.dirty_queue_size' 0)
 
     note "status=$status cov=${coverage}% ($rm_rows/$total) drift=$drift gap=$gap lag=${lag}s queue=$dirty"
 
     # Drift: any drift is a correctness bug. Fail in both profiles.
     if [[ "$drift" -gt 0 ]]; then
         local samples
-        samples=$(echo "$body" | jq -r '.drift.samples // [] | map(.page_id // .) | @csv' 2>/dev/null)
+        samples=$(json_drift_sample_csv "$body" 2>/dev/null)
         fail "read-model drift: $drift page(s) diverge from scores table" \
              "sample page_ids: $samples"
     else
@@ -367,24 +818,12 @@ check_trust_scores() {
     if [[ "$rows" == "ERR no_repo" ]]; then
         skip "PageReadModelRepository unavailable — trust-engine not active"; return
     fi
-    if (( HAVE_JQ == 0 )); then
-        # Array-ness is a jq filter, so it defers — but malformed output is
-        # still called out honestly: something that will not even parse is
-        # certainly not an array, which is exactly what jq -e would report.
-        if ! json_valid "$rows"; then
-            fail "sample query returned non-array" "wp eval output: $rows"; return
-        fi
-        defer "trust-score canonical-formula invariant" \
-              "row sample IS valid JSON, but shape + per-row extraction need jq filters (type==\"array\", length, .[])" \
-              "install jq to evaluate this probe"
-        return
-    fi
-    if ! echo "$rows" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    if ! json_is_array "$rows" >/dev/null 2>&1; then
         fail "sample query returned non-array" "wp eval output: $rows"; return
     fi
 
     local count
-    count=$(echo "$rows" | jq 'length')
+    count=$(json_length "$rows")
     if (( count == 0 )); then
         if [[ "$CI_MODE" == "1" ]]; then
             fail "no rows in page_read_model — cannot validate invariant in CI"
@@ -431,25 +870,25 @@ check_trust_scores() {
         echo wp_json_encode(\$out);
     ")"
 
-    if ! echo "$results" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    if ! json_is_array "$results" >/dev/null 2>&1; then
         fail "canonical formula call failed" "wp eval output: $results"; return
     fi
 
     local bad=0 ok=0
     local tolerance
-    tolerance=$(echo "$results" | jq -r '.[0].tolerance // 0.5')
+    tolerance=$(json_get "$results" '.[0].tolerance' 0.5)
 
     while IFS= read -r entry; do
         local page_id stored expected diff ok_flag pos neg eb ob
-        page_id=$(echo "$entry"  | jq -r '.page_id')
-        stored=$(echo "$entry"   | jq -r '.stored')
-        expected=$(echo "$entry" | jq -r '.expected')
-        diff=$(echo "$entry"     | jq -r '.diff')
-        ok_flag=$(echo "$entry"  | jq -r '.ok')
-        pos=$(echo "$entry"      | jq -r '.pos')
-        neg=$(echo "$entry"      | jq -r '.neg')
-        eb=$(echo "$entry"       | jq -r '.eb')
-        ob=$(echo "$entry"       | jq -r '.ob')
+        page_id=$(json_get "$entry" '.page_id')
+        stored=$(json_get "$entry"  '.stored')
+        expected=$(json_get "$entry" '.expected')
+        diff=$(json_get "$entry"    '.diff')
+        ok_flag=$(json_get "$entry" '.ok')
+        pos=$(json_get "$entry"     '.pos')
+        neg=$(json_get "$entry"     '.neg')
+        eb=$(json_get "$entry"      '.eb')
+        ob=$(json_get "$entry"      '.ob')
 
         if [[ "$ok_flag" == "true" ]]; then
             ok=$((ok+1))
@@ -462,7 +901,7 @@ check_trust_scores() {
                  "components pos=$pos neg=$neg endorsement=$eb onchain=$ob" \
                  "formula source: app/ValueObjects/PageScore.php"
         fi
-    done < <(echo "$results" | jq -c '.[]')
+    done < <(json_each_compact "$results")
 
     if (( bad == 0 )); then
         pass "$ok page(s) pass canonical-formula invariant"
@@ -601,19 +1040,15 @@ check_fraud_enforcement() {
     if ! json_valid "$out"; then
         fail "fraud probe returned non-JSON" "output: $out"; return
     fi
-    if jq_required "fraud-gate invariants (is_suspended / vote / endorsement)" \
-                   "probe output IS valid JSON, but reading its result flags needs jq filters"; then
-        return
-    fi
 
     local suspend vote_test_ran vote_high vote_low endorse_high endorse_low reason_high
-    suspend=$(echo "$out"       | jq -r '.is_suspended_honored')
-    vote_test_ran=$(echo "$out" | jq -r '.vote_test_ran // false')
-    vote_high=$(echo "$out"     | jq -r '.vote_blocked_at_HIGH_by_fraud // false')
-    vote_low=$(echo "$out"      | jq -r '.vote_NOT_blocked_as_fraud_at_LOW // false')
-    reason_high=$(echo "$out"   | jq -r '.vote_block_reason // ""')
-    endorse_high=$(echo "$out"  | jq -r '.endorsement_would_block_at_HIGH')
-    endorse_low=$(echo "$out"   | jq -r '.endorsement_would_NOT_block_at_LOW')
+    suspend=$(json_get "$out"       '.is_suspended_honored')
+    vote_test_ran=$(json_get "$out" '.vote_test_ran'                    false)
+    vote_high=$(json_get "$out"     '.vote_blocked_at_HIGH_by_fraud'    false)
+    vote_low=$(json_get "$out"      '.vote_NOT_blocked_as_fraud_at_LOW' false)
+    reason_high=$(json_get "$out"   '.vote_block_reason'                '')
+    endorse_high=$(json_get "$out"  '.endorsement_would_block_at_HIGH')
+    endorse_low=$(json_get "$out"   '.endorsement_would_NOT_block_at_LOW')
 
     # 3a
     if [[ "$suspend" == "true" ]]; then
@@ -687,25 +1122,17 @@ check_rate_limiter() {
     if ! json_valid "$h"; then
         fail "Throttle::health() returned non-JSON" "output: $h"; return
     fi
-    # Only (a) needs jq. The behavioral probe (b) and HTTP hammer (c) below
-    # are pure bash/curl, so they still run and still report honestly when
-    # jq is absent — do NOT return here.
-    if jq_required "limiter health contract (ready / degraded / backend)" \
-                   "health payload IS valid JSON, but reading its fields needs jq filters"; then
-        :
+    local ready backend degraded
+    ready=$(json_get "$h"    '.rate_limiter_ready')
+    backend=$(json_get "$h"  '.backend')
+    degraded=$(json_get "$h" '.degraded')
+    note "health: backend=$backend ready=$ready degraded=$degraded"
+    if [[ "$ready" != "true" ]]; then
+        fail "limiter not ready (allow() fails closed)" "backend: $backend"
+    elif [[ "$degraded" == "true" ]]; then
+        fail "limiter in DEGRADED mode" "backend: $backend — cache layer flapping"
     else
-        local ready backend degraded
-        ready=$(echo "$h"    | jq -r '.rate_limiter_ready')
-        backend=$(echo "$h"  | jq -r '.backend')
-        degraded=$(echo "$h" | jq -r '.degraded')
-        note "health: backend=$backend ready=$ready degraded=$degraded"
-        if [[ "$ready" != "true" ]]; then
-            fail "limiter not ready (allow() fails closed)" "backend: $backend"
-        elif [[ "$degraded" == "true" ]]; then
-            fail "limiter in DEGRADED mode" "backend: $backend — cache layer flapping"
-        else
-            pass "limiter health: backend=$backend"
-        fi
+        pass "limiter health: backend=$backend"
     fi
 
     # (b) Behavioral probe: limit=3/60s, 4 calls, 4th must fail.
@@ -795,10 +1222,6 @@ check_service_locator() {
     if ! json_valid "$out"; then
         fail "ServiceLocator probe returned non-JSON" "output: $out"; return
     fi
-    if jq_required "ServiceLocator real-vs-NullObject wiring" \
-                   "probe output IS valid JSON, but per-contract iteration needs jq filters (to_entries)"; then
-        return
-    fi
 
     while IFS="=" read -r label status; do
         if [[ "$status" == "real" ]]; then
@@ -808,7 +1231,7 @@ check_service_locator() {
                  "contract is wired to a null implementation" \
                  "dependent plugin probably failed to init or registerProviders never ran"
         fi
-    done < <(echo "$out" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
+    done < <(json_entries_kv "$out")
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -838,71 +1261,60 @@ check_cron_health() {
     if ! json_valid "$snapshot"; then
         fail "cron snapshot returned non-JSON" "output: $snapshot"; return
     fi
-    # Only the snapshot assertions need jq; the overdue-hook probe below has
-    # its own deferral, so don't return out of the whole section here.
-    if jq_required "auto_resolve run-vs-success invariant + success staleness" \
-                   "cron snapshot IS valid JSON, but reading .last_run/.last_success needs jq filters"; then
-        :
+    local cron_disabled last_run last_success now
+    cron_disabled=$(json_get "$snapshot" '.cron_disabled')
+    last_run=$(json_get "$snapshot"      '.last_run')
+    last_success=$(json_get "$snapshot"  '.last_success')
+    now=$(json_get "$snapshot"           '.now')
+
+    if [[ "$cron_disabled" == "true" ]]; then
+        note "WP cron DISABLED (system cron expected)"
     else
-        local cron_disabled last_run last_success now
-        cron_disabled=$(echo "$snapshot" | jq -r '.cron_disabled')
-        last_run=$(echo "$snapshot"      | jq -r '.last_run')
-        last_success=$(echo "$snapshot"  | jq -r '.last_success')
-        now=$(echo "$snapshot"           | jq -r '.now')
+        note "WP cron enabled"
+    fi
 
-        if [[ "$cron_disabled" == "true" ]]; then
-            note "WP cron DISABLED (system cron expected)"
+    # Outcome divergence: if the job has run but never succeeded, fail hard.
+    # This is the exact failure mode the user flagged — "wakes up, chokes,
+    # updates a timestamp, check smiles like an idiot."
+    if [[ "$last_run" != "0" && "$last_success" == "0" ]]; then
+        local fail_msg
+        fail_msg=$(json_get "$snapshot" '.last_failure.message' 'unknown')
+        fail "auto_resolve runs but never succeeds" \
+             "last_run:     $(( now - last_run ))s ago" \
+             "last_success: never" \
+             "last_failure: $fail_msg" \
+             "job is firing but throwing every time — check logs"
+        return
+    fi
+
+    if [[ "$last_success" == "0" ]]; then
+        if [[ "$CI_MODE" == "1" ]]; then
+            fail "auto_resolve has never succeeded" "CI requires at least one successful cron tick"
         else
-            note "WP cron enabled"
+            skip "auto_resolve never succeeded yet (fresh site)"
         fi
-
-        # Outcome divergence: if the job has run but never succeeded, fail hard.
-        # This is the exact failure mode the user flagged — "wakes up, chokes,
-        # updates a timestamp, check smiles like an idiot."
-        if [[ "$last_run" != "0" && "$last_success" == "0" ]]; then
-            local fail_msg
-            fail_msg=$(echo "$snapshot" | jq -r '.last_failure.message // "unknown"')
-            fail "auto_resolve runs but never succeeds" \
-                 "last_run:     $(( now - last_run ))s ago" \
-                 "last_success: never" \
-                 "last_failure: $fail_msg" \
-                 "job is firing but throwing every time — check logs"
-            return
-        fi
-
-        if [[ "$last_success" == "0" ]]; then
-            if [[ "$CI_MODE" == "1" ]]; then
-                fail "auto_resolve has never succeeded" "CI requires at least one successful cron tick"
-            else
-                skip "auto_resolve never succeeded yet (fresh site)"
-            fi
+    else
+        local success_age budget
+        success_age=$(( now - last_success ))
+        budget=$(( CI_MODE == 1 ? 86400 : 2 * 86400 ))
+        if (( success_age > budget )); then
+            # Drift between last_run and last_success — job may be succeeding
+            # overall but getting slower, OR it has started failing recently.
+            local run_age=$(( now - last_run ))
+            fail "cron success is stale" \
+                 "last_success: ${success_age}s ago" \
+                 "last_run:     ${run_age}s ago" \
+                 "budget (${PROFILE_LABEL}): ${budget}s"
         else
-            local success_age budget
-            success_age=$(( now - last_success ))
-            budget=$(( CI_MODE == 1 ? 86400 : 2 * 86400 ))
-            if (( success_age > budget )); then
-                # Drift between last_run and last_success — job may be succeeding
-                # overall but getting slower, OR it has started failing recently.
-                local run_age=$(( now - last_run ))
-                fail "cron success is stale" \
-                     "last_success: ${success_age}s ago" \
-                     "last_run:     ${run_age}s ago" \
-                     "budget (${PROFILE_LABEL}): ${budget}s"
-            else
-                pass "auto_resolve last succeeded ${success_age}s ago"
-            fi
+            pass "auto_resolve last succeeded ${success_age}s ago"
         fi
     fi
 
     # Overdue events — any hook still in the past after wp-cli dispatch.
-    if jq_required "overdue cron events" \
-                   "selecting hooks whose next_run_relative matches \"ago\" needs jq filters (select/map/unique)"; then
-        return
-    fi
     local overdue_json
     overdue_json="$(wp "${WP_ARGS[@]}" cron event list --fields=hook,next_run_relative --format=json 2>/dev/null || echo '[]')"
     local overdue_hooks
-    overdue_hooks=$(echo "$overdue_json" | jq -r '[.[] | select(.next_run_relative | test("ago"))] | map(.hook) | unique | .[]' 2>/dev/null)
+    overdue_hooks=$(json_overdue_hooks "$overdue_json" 2>/dev/null)
 
     if [[ -n "$overdue_hooks" ]]; then
         local list
@@ -929,16 +1341,16 @@ main() {
     echo "  rl-route    : ${RL_ROUTE:-<unset>}"
     echo "  jq          : $( (( HAVE_JQ == 1 )) && echo "$(type -P jq)" || echo "<absent — php fallback>" )"
 
-    # ONE prerequisite notice, printed once, up front. Previously a missing
-    # jq produced five separate "returned non-JSON" failures against payloads
-    # that were valid JSON; now the operator is told exactly what is going on
-    # before any probe runs.
+    # ONE prerequisite notice, printed once, up front. It records which JSON
+    # engine produced the verdicts; it does NOT warn of a degraded run,
+    # because there is not one. Originally a missing jq produced five
+    # "returned non-JSON" failures against payloads that were valid JSON.
     if (( HAVE_JQ == 0 )); then
         echo ""
         printf "${MAGENTA}PREREQUISITE${NC}  jq is not installed (no jq executable on PATH).\n"
-        printf "              • JSON validation falls back to php — malformed payloads are still reported.\n"
-        printf "              • Probes needing real jq filters will be ${MAGENTA}DEFERRED${NC}, not passed or failed.\n"
-        printf "              • Install jq for a complete run; this run will exit 3 if anything defers.\n"
+        printf "              • JSON reading falls back to php, which is a parity implementation:\n"
+        printf "                same output bytes, same exit status, same PASS/FAIL verdicts.\n"
+        printf "              • This run is COMPLETE — nothing is deferred on account of jq.\n"
     fi
 
     check_read_model
