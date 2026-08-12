@@ -786,6 +786,19 @@ check_read_model() {
 # within ±SCORE_TOLERANCE. This is the same formula the scorer uses; drift
 # here means the read model is lying to the UI.
 # ═════════════════════════════════════════════════════════════════════════════
+
+# id_list <id>... — a comma-separated list for a failure detail line, capped so
+# that `--sample=500` cannot turn one discrepancy into 500 lines of page ids.
+id_list() {
+    local out="" one n=0 cap=12
+    for one in "$@"; do
+        n=$((n+1))
+        (( n <= cap )) && out="${out:+$out, }$one"
+    done
+    (( n > cap )) && out="$out (+$((n - cap)) more)"
+    printf '%s' "$out"
+}
+
 check_trust_scores() {
     section "2. Trust Score Correctness (component recompute)"
 
@@ -874,13 +887,122 @@ check_trust_scores() {
         fail "canonical formula call failed" "wp eval output: $results"; return
     fi
 
-    local bad=0 ok=0
+    local bad=0 ok=0 iterated=0
     local tolerance
     tolerance=$(json_get "$results" '.[0].tolerance' 0.5)
 
+    # ── The pages the sample ASKED about ─────────────────────────────────────
+    #
+    # Counting is not verifying. A payload with the RIGHT COUNT but the same
+    # page twice — and therefore another page missing — balances the books and
+    # sails past a count-only test, while the page it dropped goes unchecked.
+    # So the requested ids and the processed ids are compared as SETS, and each
+    # kind of discrepancy is named: missing, duplicated, unexpected.
+    #
+    # ORDER IS NOT A CONTRACT. The producer's `ORDER BY updated_at DESC` is an
+    # implementation detail; a reordered but otherwise identical payload PASSES.
+    # Only membership and multiplicity are asserted.
+    #
+    # `declare -A`/`local -A` needs bash >= 4.0 (2009). Measured on every host
+    # that runs this guard: installed staging `GNU bash, version 4.4.20(1)`,
+    # CI ubuntu-latest bash 5.x, dev Git Bash `5.2.37(1)`. This is safe in a way
+    # /dev/fd was not: /dev/fd is a filesystem the host may simply not provide,
+    # whereas an associative array is a feature of the interpreter that is
+    # already executing this script. (The ServiceLocator probe below uses
+    # indexed arrays instead because its expected set is four fixed labels known
+    # when the probe was written; here the keys are arbitrary page ids that only
+    # the payload knows.)
+    local req_entries req_rc
+    req_entries="$(json_each_compact "$rows")"
+    req_rc=$?
+    if (( req_rc != 0 )); then
+        fail "could not read the sampled page ids" \
+             "json_each_compact exited $req_rc" \
+             "payload: $rows"
+        return
+    fi
+
+    local -A requested=()
+    local -a requested_order=()
+    local identity_bad=0
+    local req_row req_id
+    while IFS= read -r req_row; do
+        [[ -n "$req_row" ]] || continue
+        req_id="$(json_get "$req_row" '.page_id')"
+        if [[ -z "$req_id" || "$req_id" == "null" ]]; then
+            identity_bad=$((identity_bad+1))
+            fail "sampled row carries no page_id" \
+                 "row: $req_row" \
+                 "the guard cannot say WHICH page this is, so it cannot verify it"
+            continue
+        fi
+        if [[ -n "${requested["$req_id"]:-}" ]]; then
+            # page_read_model declares PRIMARY KEY (page_id), so the real
+            # producer — get_col() over that column — cannot emit a repeat.
+            # This branch is not about the query: `$rows` reaches bash as text
+            # through wp eval and json_encode, and a set comparison that trusts
+            # its own input is not a comparison. Naming it here also stops one
+            # duplicated request from being reported as a duplicated RESULT.
+            identity_bad=$((identity_bad+1))
+            fail "sample query returned page_id=$req_id more than once" \
+                 "page_read_model.page_id is the primary key — the sample cannot legitimately repeat one" \
+                 "the payload is not the sample it claims to be"
+            continue
+        fi
+        requested["$req_id"]=1
+        requested_order+=("$req_id")
+    done <<< "$req_entries"
+
+    # ⚠️  HERE-STRING, DELIBERATELY. Do NOT change this back to
+    #     `done < <(json_each_compact "$results")`.
+    #
+    # The deploy host (installed staging) has NO /dev/fd, so bash cannot open
+    # the file descriptor a process substitution hands to the redirect. The
+    # redirect fails with "/dev/fd/63: No such file or directory" and the loop
+    # body runs ZERO times — measured on that host:
+    #     done < <(printf 'a\nb\nc\n')   ->  0 iterations + that error
+    #     done <<< "$data"               ->  3 iterations
+    # A pipe is not an alternative: `ok`, `bad` and `iterated` must survive in
+    # the PARENT shell, and a pipeline runs the loop body in a subshell (which
+    # is why process substitution was reached for in the first place). A
+    # here-string needs no /dev/fd, no temp file, no cleanup and no signal
+    # handling, and it preserves parent-shell scope.
+    #
+    # `<<<` appends a newline, so a payload that already ends in one yields a
+    # trailing EMPTY line. Empty lines are skipped rather than counted, so the
+    # iteration count below stays honest.
+    local entries entries_rc
+    entries="$(json_each_compact "$results")"
+    entries_rc=$?
+    if (( entries_rc != 0 )); then
+        fail "could not iterate canonical-formula results" \
+             "json_each_compact exited $entries_rc" \
+             "payload: $results"
+        return
+    fi
+
+    # The pages the producer says it PROCESSED, with multiplicity.
+    local -A seen=()
+    local -a seen_order=()
+
     while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        iterated=$((iterated+1))
         local page_id stored expected diff ok_flag pos neg eb ob
         page_id=$(json_get "$entry" '.page_id')
+
+        if [[ -z "$page_id" || "$page_id" == "null" ]]; then
+            identity_bad=$((identity_bad+1))
+            fail "canonical-formula result carries no page_id" \
+                 "entry: $entry" \
+                 "an unidentifiable result discharges no requested page"
+        elif [[ -z "${seen["$page_id"]:-}" ]]; then
+            seen["$page_id"]=1
+            seen_order+=("$page_id")
+        else
+            seen["$page_id"]=$(( ${seen["$page_id"]} + 1 ))
+        fi
+
         stored=$(json_get "$entry"  '.stored')
         expected=$(json_get "$entry" '.expected')
         diff=$(json_get "$entry"    '.diff')
@@ -901,9 +1023,71 @@ check_trust_scores() {
                  "components pos=$pos neg=$neg endorsement=$eb onchain=$ob" \
                  "formula source: app/ValueObjects/PageScore.php"
         fi
-    done < <(json_each_compact "$results")
+    done <<< "$entries"
 
-    if (( bad == 0 )); then
+    # ── Requested set vs processed set ───────────────────────────────────────
+    # Membership only — reordering is not a discrepancy.
+    local -a missing=() duplicated=() unexpected=()
+    local i id
+    for (( i = 0; i < ${#requested_order[@]}; i++ )); do
+        id="${requested_order[i]}"
+        if [[ -z "${seen["$id"]:-}" ]]; then
+            missing+=("$id")
+        elif (( ${seen["$id"]} > 1 )); then
+            duplicated+=("$id (x${seen["$id"]})")
+        fi
+    done
+    for (( i = 0; i < ${#seen_order[@]}; i++ )); do
+        id="${seen_order[i]}"
+        [[ -n "${requested["$id"]:-}" ]] || unexpected+=("$id")
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        fail "trust-score sample left page(s) unverified" \
+             "requested but never processed: $(id_list "${missing[@]}")" \
+             "requested: $count page(s), processed: $iterated row(s)" \
+             "PageScore::computeExpectedTotal was never applied to the page(s) above"
+    fi
+    if (( ${#duplicated[@]} > 0 )); then
+        fail "trust-score sample processed the same page more than once" \
+             "duplicated: $(id_list "${duplicated[@]}")" \
+             "a repeat pads the row count, which is how a page that was never processed hides"
+    fi
+    if (( ${#unexpected[@]} > 0 )); then
+        fail "trust-score sample processed page(s) it never asked about" \
+             "unexpected: $(id_list "${unexpected[@]}")" \
+             "requested set: $(id_list "${requested_order[@]}")" \
+             "the producer and this guard disagree about which pages are under test"
+    fi
+
+    local identity_discrepancies
+    identity_discrepancies=$(( ${#missing[@]} + ${#duplicated[@]} + ${#unexpected[@]} + identity_bad ))
+
+    # This probe may PASS only on PRESENCE OF SUCCESS, never on absence of
+    # failure. `bad == 0` alone was vacuous: with zero iterations bad=0 and
+    # ok=0, so a loop that never ran printed "PASS 0 page(s)". Matching COUNTS
+    # alone was vacuous in the same way one level up: ten results for ten
+    # requested pages says nothing about WHICH ten. Every sampled page must
+    # have been iterated, identified, and verified.
+    if (( iterated != count )); then
+        fail "trust-score sample incompletely evaluated" \
+             "requested: $count row(s) (from page_read_model)" \
+             "iterated:  $iterated row(s)" \
+             "the canonical-formula invariant was NOT checked for every sampled page" \
+             "this is an unevaluated probe, not a passing one"
+    elif (( identity_discrepancies > 0 )); then
+        # Each discrepancy already named itself above, with its page ids. Do
+        # not restate it as a count mismatch — the counts may well match.
+        :
+    elif (( bad > 0 )); then
+        # Each mismatch already emitted its own fail() above. Do not pass, and
+        # do not double-count the same defect.
+        :
+    elif (( ok != count )); then
+        fail "trust-score probe verified fewer rows than it sampled" \
+             "requested: $count row(s)" \
+             "verified:  $ok row(s)"
+    else
         pass "$ok page(s) pass canonical-formula invariant"
     fi
 }
@@ -1223,15 +1407,123 @@ check_service_locator() {
         fail "ServiceLocator probe returned non-JSON" "output: $out"; return
     fi
 
-    while IFS="=" read -r label status; do
-        if [[ "$status" == "real" ]]; then
+    # The contracts this probe owes a verdict for. SINGLE SOURCE OF TRUTH for
+    # the expected set: the wp eval above builds its payload from the same four
+    # labels, and the checks below prove that what came back is exactly this
+    # set — no missing contract, no duplicate, no stranger.
+    #
+    # Indexed arrays, not an associative array: `declare -A` needs bash 4, and
+    # the whole reason this function is being repaired is a deploy host whose
+    # shell environment did not behave as assumed.
+    local -ra expected=(
+        TrustReadService
+        ScoreReadService
+        DisputeAdjudicator
+        PageOwnerResolver
+    )
+    local -a seen_status=() seen_count=()
+    local i
+    for (( i = 0; i < ${#expected[@]}; i++ )); do
+        seen_status[i]=""
+        seen_count[i]=0
+    done
+
+    # ⚠️  HERE-STRING, DELIBERATELY. Do NOT change this back to
+    #     `done < <(json_entries_kv "$out")`. The deploy host has no /dev/fd,
+    # so a process substitution redirect fails outright and the loop body runs
+    # ZERO times — which, before this probe was rewritten, meant no pass, no
+    # fail, no skip: total silence, and the guard still exited 0. See the
+    # longer note in check_trust_scores(). `<<<` appends a newline, so empty
+    # lines are skipped rather than counted as entries.
+    local entries entries_rc
+    entries="$(json_entries_kv "$out")"
+    entries_rc=$?
+    if (( entries_rc != 0 )); then
+        fail "ServiceLocator probe output could not be read as contract entries" \
+             "json_entries_kv exited $entries_rc" \
+             "output: $out"
+        return
+    fi
+
+    local total=0 line label status idx
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        total=$((total+1))
+
+        if [[ "$line" != *"="* ]]; then
+            fail "ServiceLocator probe emitted a malformed entry" \
+                 "entry:    $line" \
+                 "expected: <contract>=<real|null>"
+            continue
+        fi
+        label="${line%%=*}"
+        status="${line#*=}"
+        if [[ -z "$label" ]]; then
+            fail "ServiceLocator probe emitted an entry with no contract name" \
+                 "entry: $line"
+            continue
+        fi
+        if [[ -z "$status" ]]; then
+            fail "ServiceLocator probe emitted an entry with no status" \
+                 "entry:    $line" \
+                 "expected: ${label}=real or ${label}=null"
+            continue
+        fi
+
+        idx=-1
+        for (( i = 0; i < ${#expected[@]}; i++ )); do
+            if [[ "${expected[i]}" == "$label" ]]; then idx=$i; break; fi
+        done
+        if (( idx < 0 )); then
+            fail "ServiceLocator probe returned an unexpected contract" \
+                 "contract: $label=$status" \
+                 "expected set: ${expected[*]}" \
+                 "the probe and this guard disagree about what is being checked"
+            continue
+        fi
+
+        seen_count[idx]=$(( seen_count[idx] + 1 ))
+        if (( seen_count[idx] > 1 )); then
+            fail "ServiceLocator probe returned $label more than once" \
+                 "occurrence ${seen_count[idx]}: $label=$status" \
+                 "first occurrence: $label=${seen_status[idx]}" \
+                 "a duplicated contract means the payload is not the map it claims to be"
+            continue
+        fi
+        seen_status[idx]="$status"
+    done <<< "$entries"
+
+    # Zero entries used to be SILENT — the loop was the entire probe, so an
+    # empty payload produced no verdict at all and the run still exited 0.
+    if (( total == 0 )); then
+        fail "ServiceLocator probe returned no contract entries" \
+             "expected: ${#expected[@]} entries (${expected[*]})" \
+             "actual:   0" \
+             "nothing was evaluated — this is an unevaluated probe, not a healthy one"
+    fi
+
+    # One VISIBLE verdict per expected contract, in a fixed order, whatever the
+    # payload did or did not contain.
+    for (( i = 0; i < ${#expected[@]}; i++ )); do
+        label="${expected[i]}"
+        status="${seen_status[i]}"
+        if (( seen_count[i] == 0 )); then
+            fail "$label → no verdict returned by the ServiceLocator probe" \
+                 "expected: ${label}=real" \
+                 "actual:   contract absent from the probe payload" \
+                 "the invariant is UNKNOWN for this contract, which is not a pass"
+        elif [[ "$status" == "real" ]]; then
             pass "$label → real implementation"
-        else
+        elif [[ "$status" == "null" ]]; then
             fail "$label → NullObject fallback" \
                  "contract is wired to a null implementation" \
                  "dependent plugin probably failed to init or registerProviders never ran"
+        else
+            fail "$label → unrecognised ServiceLocator status" \
+                 "status:   $status" \
+                 "expected: real or null"
         fi
-    done < <(json_entries_kv "$out")
+    done
 }
 
 # ═════════════════════════════════════════════════════════════════════════════

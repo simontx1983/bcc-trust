@@ -34,6 +34,47 @@
 #                                         produce identical reports
 #   10  end-to-end with jq absent       -> DEFERRED: 0 and the right exit code
 #
+# ITERATION / /dev/fd (added with the here-string repair)
+# ------------------------------------------------------
+# The same deploy host has NO /dev/fd, so `done < <(producer)` could not open
+# its redirect: the loop body ran ZERO times and the two probes built on it
+# went quiet. The Trust Score probe then printed "PASS 0 page(s)" (its closing
+# test was `bad == 0`, i.e. absence of failure, never presence of success), and
+# the ServiceLocator probe — whose loop WAS the entire probe — emitted no
+# verdict at all while the run still exited 0.
+#
+#   11  /dev/fd unavailable             -> no process substitution survives in
+#                                         the guard, and the shipped here-string
+#                                         construct still iterates with /dev/fd
+#                                         genuinely absent
+#   12  healthy samples                 -> 10/10 rows and 4/4 contracts PASS
+#   13  zero iterations                 -> both probes FAIL loudly, exit 1
+#   14  partial / excessive / duplicate -> counted against the requested total
+#   15  malformed / failing / producer  -> never masked into a pass
+#       failure
+#   16  parent-shell state retention    -> ok / bad / iteration counters and the
+#                                         PASS+FAIL tallies survive the loop
+#
+# IDENTITY (added with the set-comparison repair)
+# ----------------------------------------------
+# Counting is not verifying either. Ten results for ten requested pages says
+# nothing about WHICH ten: process page 101 twice and page 110 never and every
+# count still balances.
+#
+#   17  page identity as a SET          -> missing / duplicated / unexpected ids
+#                                         are each named; a reordered but
+#                                         identical set still PASSES
+#   18  external tool surface           -> the guard still produces a complete,
+#                                         correct run with nothing on PATH but
+#                                         wp/curl/awk/php/bash/cat/tr/sed
+#
+# OUTPUT
+# ------
+# Human-readable per-case output, then a summary, then a machine-readable final
+# line:  ORACLE jq_comparisons=<n> skipped=<n>. Half of this suite needs a real
+# jq binary as its oracle; without one the rest still passes and prints ALL
+# GREEN, so CI reads that line and demands skipped=0.
+#
 # Usage:  bash scripts/tests/intent-guard-prereq.test.sh
 # Exit:   0 = all cases green, 1 = at least one regression
 # ──────────────────────────────────────────────────────────────────────────────
@@ -64,6 +105,30 @@ notok() {
     [[ $# -gt 1 ]] && printf "         ${RED}└─${NC} %s\n" "$2"
 }
 case_banner() { printf "\n${CYAN}── Case %s ──${NC} %s\n" "$1" "$2"; }
+
+# ── jq-oracle accounting ─────────────────────────────────────────────────────
+# Half of this suite only exists when a REAL jq binary is present: the php leg
+# is checked against jq's actual bytes and exit statuses, not just against
+# values recorded in this file. On a host with no jq — or a jq too old for the
+# number-literal fixtures — those legs quietly do not run, the remaining
+# assertions all pass, and the harness prints ALL GREEN. That green is real but
+# SMALLER, and nothing in the output said by how much.
+#
+# Every jq-oracle leg therefore reports itself here, and the run ends with a
+# machine-readable line:
+#
+#     ORACLE jq_comparisons=<ran> skipped=<not run>
+#
+# CI demands skipped=0 and a nonzero comparison count, so "the reduced suite
+# passed" can never be mistaken for "the suite passed".
+ORACLE_COMPARISONS=0
+ORACLE_SKIPPED=0
+ORACLE_SKIP_REASONS=()
+oracle_ran()     { ORACLE_COMPARISONS=$((ORACLE_COMPARISONS+1)); }
+oracle_skipped() {
+    ORACLE_SKIPPED=$((ORACLE_SKIPPED+1))
+    ORACLE_SKIP_REASONS+=("$1")
+}
 
 # assert_eq <label> <expected> <actual>
 assert_eq() {
@@ -99,6 +164,112 @@ FX_ROWS_TWO='[{"page_id":41,"trust_score":85.0,"positive_score":10.0,"negative_s
 FX_RESULTS_ONE_BAD='[{"page_id":41,"stored":85.0,"expected":85.0,"diff":0.0,"ok":true,"tolerance":0.5,"pos":10.0,"neg":0.0,"ob":5.0},{"page_id":77,"stored":70.0,"expected":72.25,"diff":2.25,"ok":false,"tolerance":0.5,"pos":6,"neg":0,"ob":0}]'
 FX_CRON_EVENTS_OVERDUE='[{"hook":"bcc_zeta","next_run_relative":"3 hours ago"},{"hook":"bcc_alpha","next_run_relative":"2 minutes ago"},{"hook":"bcc_zeta","next_run_relative":"1 day ago"},{"hook":"bcc_later","next_run_relative":"in 5 minutes"}]'
 
+# ── Sample generators for the iteration cases ────────────────────────────────
+# The guard samples $SAMPLE (default 10) page_read_model rows, then asks
+# PageScore::computeExpectedTotal for one result per row. These build both
+# halves so a run can be given a sample that is complete, short, long,
+# duplicated or malformed.
+
+# mk_rows <n> — n page_read_model rows, page_id 101..100+n.
+mk_rows() {
+    local n="$1" i out=""
+    for (( i = 1; i <= n; i++ )); do
+        [[ -n "$out" ]] && out+=","
+        out+="{\"page_id\":$((100+i)),\"trust_score\":85.0,\"positive_score\":10.0"
+        out+=",\"negative_score\":0.0,\"onchain_bonus\":5.0}"
+    done
+    printf '[%s]' "$out"
+}
+
+# mk_result <page_id> <ok:true|false>
+mk_result() {
+    local pid="$1" okflag="$2" stored=85.0 expected=85.0 diff=0.0
+    if [[ "$okflag" == "false" ]]; then stored=70.0; diff=15.0; fi
+    printf '{"page_id":%s,"stored":%s,"expected":%s,"diff":%s,"ok":%s' \
+        "$pid" "$stored" "$expected" "$diff" "$okflag"
+    printf ',"tolerance":0.5,"pos":10.0,"neg":0.0,"ob":5.0}'
+}
+
+# mk_results <n> [bad-index] — n results, page_id 101..100+n. bad-index is
+# 1-based; that row reports ok:false.
+mk_results() {
+    local n="$1" bad="${2:-0}" i out="" flag
+    for (( i = 1; i <= n; i++ )); do
+        flag=true; (( i == bad )) && flag=false
+        [[ -n "$out" ]] && out+=","
+        out+="$(mk_result "$((100+i))" "$flag")"
+    done
+    printf '[%s]' "$out"
+}
+
+# mk_results_ids <page_id>... — one ok:true result per id, in the order given.
+# Lets a payload state its identities explicitly: reordered, repeated, absent
+# or invented.
+mk_results_ids() {
+    local pid out=""
+    for pid in "$@"; do
+        [[ -n "$out" ]] && out+=","
+        out+="$(mk_result "$pid" true)"
+    done
+    printf '[%s]' "$out"
+}
+
+FX_ROWS_TEN="$(mk_rows 10)"
+FX_RESULTS_TEN="$(mk_results 10)"
+FX_RESULTS_TEN_ONE_BAD="$(mk_results 10 3)"
+FX_RESULTS_SEVEN="$(mk_results 7)"
+FX_RESULTS_ELEVEN="$(mk_results 11)"
+# Eleven results for a ten-row sample because page 101 was emitted twice.
+FX_RESULTS_TEN_DUP="[$(mk_result 101 true),$(mk_results 10 | sed 's/^\[//;s/\]$//')]"
+# A result row that is a bare string: json_get cannot read .ok out of it.
+FX_RESULTS_MALFORMED="[$(mk_results 9 | sed 's/^\[//;s/\]$//'),\"not-a-result-row\"]"
+
+# ── Identity fixtures (case 17) ──────────────────────────────────────────────
+# The requested set is always FX_ROWS_TEN, i.e. pages 101..110. Every payload
+# below except the last two keeps the count at EXACTLY TEN, which is the point:
+# ten results for ten requested pages says nothing about WHICH ten, and a
+# count-only test waves all of them through.
+#
+# Ordering is NOT part of the contract — the producer's ORDER BY updated_at
+# DESC is an implementation detail — so a shuffle must still PASS.
+FX_RESULTS_TEN_REORDERED="$(mk_results_ids 105 101 110 103 102 109 104 108 106 107)"
+# 101 twice, 110 never processed. Count balances at 10.
+FX_RESULTS_DUP_AND_MISSING="$(mk_results_ids 101 101 102 103 104 105 106 107 108 109)"
+# 101 twice AND a page nobody asked about; 109 and 110 never processed.
+FX_RESULTS_DUP_AND_EXTRA="$(mk_results_ids 101 101 102 103 104 105 106 107 108 999)"
+# Right count, right shape, not one of the requested pages.
+FX_RESULTS_TEN_WRONG_IDS="$(mk_results_ids 201 202 203 204 205 206 207 208 209 210)"
+# A well-formed result row that cannot say which page it is about.
+FX_RESULTS_NULL_PAGE_ID="[$(mk_results 9 | sed 's/^\[//;s/\]$//'),$(mk_result null true)]"
+FX_RESULTS_NO_PAGE_ID_KEY="[$(mk_results 9 | sed 's/^\[//;s/\]$//'),{\"stored\":85.0,\"expected\":85.0,\"diff\":0.0,\"ok\":true,\"tolerance\":0.5,\"pos\":10.0,\"neg\":0.0,\"ob\":5.0}]"
+# A REQUESTED list that repeats a page. page_read_model declares
+# PRIMARY KEY (page_id) (includes/database/schema-project.php), so the real
+# producer — get_col() over that column — structurally cannot emit this; the
+# fixture pins the guard's defensive branch, not a reachable producer state.
+# It is worth pinning because `$rows` reaches bash as text through wp eval and
+# json_encode, and because without it one repeated REQUEST would be reported
+# as a repeated RESULT — the wrong half of the system.
+FX_ROWS_DUP_REQUEST="[$(mk_rows 1 | sed 's/^\[//;s/\]$//'),$(mk_rows 9 | sed 's/^\[//;s/\]$//')]"
+FX_RESULTS_DUP_REQUEST="[$(mk_result 101 true),$(mk_results 9 | sed 's/^\[//;s/\]$//')]"
+
+# ── ServiceLocator payload variants ──────────────────────────────────────────
+FX_LOCATOR_EMPTY='{}'
+FX_LOCATOR_PARTIAL='{"TrustReadService":"real","ScoreReadService":"real","DisputeAdjudicator":"real"}'
+FX_LOCATOR_EXTRA='{"TrustReadService":"real","ScoreReadService":"real","DisputeAdjudicator":"real","PageOwnerResolver":"real","ExtraService":"real"}'
+# jq/php render a value containing a newline across two lines, so the second
+# line arrives at the loop with no "=" in it at all.
+FX_LOCATOR_SPLIT_LINE='{"TrustReadService":"real\nbogus-line","ScoreReadService":"real","DisputeAdjudicator":"real","PageOwnerResolver":"real"}'
+FX_LOCATOR_EMPTY_LABEL='{"":"real","ScoreReadService":"real","DisputeAdjudicator":"real","PageOwnerResolver":"real"}'
+# A JSON object cannot carry the same key twice, so the duplicate is produced
+# the only way it can reach the loop: a value that spans two lines, the second
+# of which is itself a well-formed "TrustReadService=real" entry.
+FX_LOCATOR_DUP='{"TrustReadService":"real\nTrustReadService=real","ScoreReadService":"real","DisputeAdjudicator":"real","PageOwnerResolver":"real"}'
+FX_LOCATOR_EMPTY_STATUS='{"TrustReadService":"","ScoreReadService":"real","DisputeAdjudicator":"real","PageOwnerResolver":"real"}'
+FX_LOCATOR_BAD_STATUS='{"TrustReadService":"maybe","ScoreReadService":"real","DisputeAdjudicator":"real","PageOwnerResolver":"real"}'
+# Valid JSON that has no keys at all: to_entries errors, so the producer fails
+# even though json_valid is satisfied.
+FX_LOCATOR_KEYLESS='"boom"'
+
 # ── Sandbox: a PATH we fully control ─────────────────────────────────────────
 SANDBOX="$(mktemp -d 2>/dev/null || mktemp -d -t bccguard)"
 cleanup() { rm -rf "$SANDBOX"; }
@@ -108,6 +279,10 @@ REAL_CURL="$(type -P curl || true)"
 REAL_AWK="$(type -P awk || true)"
 REAL_PHP="$(type -P php || true)"
 REAL_JQ="$(type -P jq || true)"
+REAL_BASH="$(type -P bash || true)"
+REAL_TR="$(type -P tr || true)"
+REAL_SED="$(type -P sed || true)"
+REAL_CAT="$(type -P cat || true)"
 
 for req in "$REAL_AWK" "$REAL_PHP"; do
     if [[ -z "$req" ]]; then
@@ -129,6 +304,25 @@ make_shim() {
 [[ -n "$REAL_CURL" ]] && make_shim curl "$REAL_CURL"
 make_shim awk "$REAL_AWK"
 make_shim php "$REAL_PHP"
+# bash, tr, sed and cat too. On Linux jq is normally /usr/bin/jq, i.e. it
+# shares a directory with coreutils and with bash itself — so path_without_jq()
+# below drops that whole directory and takes them with it. Consequences, every
+# one of them silent:
+#   `PATH=$PATH_NO_JQ bash "$GUARD"`  -> 127, bash not found (a temporary
+#                                        assignment applies to the lookup too)
+#   the guard's `BCC_JSON_PHP=$(cat <<'EOF' ...)` -> the php parity program is
+#                                        the EMPTY STRING, so `php -r ''`
+#                                        prints nothing and exits 0, and every
+#                                        JSON read returns "" with rc 0
+#   _json_php's `| tr -d '\r'`        -> php's output vanishes and the helper
+#                                        still returns php's exit status
+#   the overdue-hook join `tr | sed`  -> the cron list comes back empty
+# On Windows this never bit: jq lives in its own WinGet Links directory, so
+# dropping it costs nothing else. Case 18 pins the list from any platform.
+[[ -n "$REAL_BASH" ]] && make_shim bash "$REAL_BASH"
+[[ -n "$REAL_TR"   ]] && make_shim tr   "$REAL_TR"
+[[ -n "$REAL_SED"  ]] && make_shim sed  "$REAL_SED"
+[[ -n "$REAL_CAT"  ]] && make_shim cat  "$REAL_CAT"
 # curl is hard-required by the guard; stub it if the host has none.
 if [[ -z "$REAL_CURL" ]]; then
     printf '#!/bin/sh\nexit 0\n' > "$SANDBOX/bin/curl"; chmod +x "$SANDBOX/bin/curl"
@@ -215,6 +409,39 @@ run_guard_with_jq_function() {
     GUARD_RC=$?
 }
 
+# run_guard_fx <path> <VAR=value>... -> sets GUARD_OUT / GUARD_RC
+# Whole-run with an explicit fixture set, so each iteration scenario asserts a
+# real verdict AND a real process exit status.
+run_guard_fx() {
+    local use_path="$1"; shift
+    GUARD_OUT="$(env "$@" PATH="$use_path" bash "$GUARD" 2>&1)"
+    GUARD_RC=$?
+}
+
+# probe_run <fn> <VAR=value>... -> stdout is the probe's output followed by the
+# guard's PARENT-SHELL tallies. The guard is sourced as a library so a single
+# probe function can be driven in isolation; PASSED/FAILED are globals the loop
+# bodies mutate, so printing them AFTER the probe returns proves the loop did
+# not run in a subshell.
+probe_run() {
+    local fn="$1"; shift
+    # Stash the fixture assignments in an array FIRST: `set --` below wipes the
+    # positional parameters (intent-guard.sh parses "$@" at load time and would
+    # otherwise read a fixture as a CLI argument).
+    local -a fixtures=("$@")
+    (
+        set --
+        export BCC_INTENT_GUARD_LIB=1
+        (( ${#fixtures[@]} > 0 )) && export "${fixtures[@]}"
+        PATH="$PATH_NO_JQ"
+        # shellcheck source=/dev/null
+        source "$GUARD" >/dev/null 2>&1
+        require_tools
+        "$fn"
+        printf 'TALLY PASSED=%d FAILED=%d SKIPPED=%d\n' "$PASSED" "$FAILED" "$SKIPPED"
+    ) 2>&1
+}
+
 count_lines() { printf '%s\n' "$1" | grep -c -- "$2" 2>/dev/null || true; }
 
 # deferred_count <guard output>
@@ -232,8 +459,10 @@ printf "php   : %s\n" "$REAL_PHP"
 # ═════════════════════════════════════════════════════════════════════════════
 case_banner 1 "real jq installed -> detection succeeds, no deferral"
 if [[ -z "$REAL_JQ" ]]; then
+    oracle_skipped "case 1: jq-present whole run"
     printf "    ${CYAN}skip${NC} no jq binary on this host; cannot exercise the jq-present path\n"
 else
+    oracle_ran
     run_guard "$PATH_WITH_JQ"
     assert_eq        "exit code is 0 (clean run)"              "0"  "$GUARD_RC"
     assert_not_contains "no prerequisite notice when jq exists" "$GUARD_OUT" "PREREQUISITE"
@@ -349,10 +578,13 @@ for row in "${JSON_TABLE[@]}"; do
     php_rc="$(json_valid_rc "$PATH_NO_JQ" 1 "$payload")"
     assert_eq "php fallback: $label" "$expected" "$php_rc"
     if [[ -n "$REAL_JQ" ]]; then
+        oracle_ran
         jq_rc="$(json_valid_rc "$PATH_WITH_JQ" 0 "$payload")"
         assert_eq "jq path    : $label" "$expected" "$jq_rc"
         # Real jq is the oracle: the two implementations must agree.
         assert_eq "parity     : $label" "$jq_rc" "$php_rc"
+    else
+        oracle_skipped "case 4/5/6a json_valid: $label"
     fi
 done
 
@@ -372,11 +604,13 @@ done
 case_banner 6b "false predicates and malformed payloads are never masked"
 
 if [[ -n "$REAL_JQ" ]]; then
+    oracle_ran
     FIXTURE_LOCATOR="$FX_LOCATOR_UNHEALTHY" run_guard "$PATH_WITH_JQ"
     assert_eq       "unhealthy ServiceLocator -> exit 1"        "1" "$GUARD_RC"
     assert_contains "unhealthy predicate reported as FAIL"      "$GUARD_OUT" "TrustReadService → NullObject fallback"
     assert_contains "and NOT deferred"                          "$GUARD_OUT" "DEFERRED: 0"
 else
+    oracle_skipped "case 6b: jq-present false predicate"
     printf "    ${CYAN}skip${NC} no jq binary; cannot exercise the jq-present false-predicate path\n"
 fi
 
@@ -448,12 +682,17 @@ _parity() {
               "expected rc=$exp_rc out=[$(vis "$SANDBOX/exp.out")] got rc=$php_rc out=[$(vis "$SANDBOX/php.out")]"
     fi
 
-    [[ -n "$REAL_JQ" ]] || return 0
+    if [[ -z "$REAL_JQ" ]]; then
+        oracle_skipped "case 7 $label: no jq binary"
+        return 0
+    fi
     if (( lit == 1 && JQ_KEEPS_LITERALS == 0 )); then
         PARITY_SKIPPED_LEGS=$((PARITY_SKIPPED_LEGS+1))
+        oracle_skipped "case 7 $label: host jq predates 1.7 number-literal handling"
         return 0
     fi
 
+    oracle_ran
     op_exec "$PATH_WITH_JQ" 0 "$@" > "$SANDBOX/jq.out"; local jq_rc=$?
     if [[ "$jq_rc" == "$exp_rc" ]] && cmp -s "$SANDBOX/exp.out" "$SANDBOX/jq.out" \
        && [[ "$jq_rc" == "$php_rc" ]] && cmp -s "$SANDBOX/jq.out" "$SANDBOX/php.out"; then
@@ -694,8 +933,10 @@ assert_contains "overdue hooks reported"       "$PHP_RUN_OUT" "hooks: bcc_alpha,
 assert_contains "nothing deferred"             "$PHP_RUN_OUT" "DEFERRED: 0"
 
 if [[ -z "$REAL_JQ" ]]; then
+    oracle_skipped "case 9: whole-run byte diff between the two legs"
     printf "    ${CYAN}skip${NC} no jq binary; cannot diff the two legs on this host\n"
 else
+    oracle_ran
     env "${BROKEN_ENV[@]}" PATH="$PATH_WITH_JQ" bash "$GUARD" > "$SANDBOX/run-jq.out" 2>&1
     RUN_JQ_RC=$?
     assert_eq "broken world with jq present -> exit 1" "1" "$RUN_JQ_RC"
@@ -727,18 +968,499 @@ else
     notok "probes actually passed with jq absent" "PASS was [$PASS_COUNT], expected >= 9"
 fi
 if [[ -n "$REAL_JQ" ]]; then
+    oracle_ran
     run_guard "$PATH_WITH_JQ"
     JQ_PASS_COUNT="$(printf '%s\n' "$GUARD_OUT" | sed -n 's/.*PASS: \([0-9][0-9]*\).*/\1/p' | tail -1)"
     assert_eq "same PASS count with and without jq" "$JQ_PASS_COUNT" "$PASS_COUNT"
+else
+    oracle_skipped "case 10: PASS count with jq vs without"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Case 11 — /dev/fd unavailable
+#
+# The deploy host has no /dev/fd, so `done < <(producer)` cannot open its
+# redirect and the loop body runs ZERO times. Two halves:
+#
+#   11a/11b  STATIC — no process substitution may survive on an executable line
+#            of the guard, and both probe loops must read from a here-string.
+#            This half fails the moment `< <(` is reintroduced.
+#   11c      DYNAMIC — with /dev/fd GENUINELY absent, process substitution
+#            iterates 0 times while the shipped here-string construct iterates
+#            fully and keeps its counter in the parent shell.
+#
+# 11c needs a private mount namespace to hide /proc (which is what /dev/fd is a
+# symlink to). Where that cannot be established — no unshare, not Linux,
+# unprivileged user namespaces disabled — it reports INCONCLUSIVE and skips
+# rather than pretending. It never asserts unless the control has first proved
+# the mask is real.
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 11 "/dev/fd unavailable -> the guard must not depend on it"
+
+# Comment lines are allowed to name the construct (they warn against it); an
+# executable line is not.
+PROCSUB_CODE_LINES="$(grep -n '< <(' "$GUARD" | grep -v '^[0-9]*:[[:space:]]*#' || true)"
+if [[ -z "$PROCSUB_CODE_LINES" ]]; then
+    ok "no process substitution on any executable line of intent-guard.sh"
+else
+    notok "no process substitution on any executable line of intent-guard.sh" \
+          "$(printf '%s' "$PROCSUB_CODE_LINES" | tr '\n' '~')"
+fi
+
+# Three loops now: the trust-score probe reads the REQUESTED ids as well as the
+# processed results (case 17), and both of its loops are subject to the same
+# /dev/fd condition as the ServiceLocator one.
+HS_LOOPS="$(grep -c '^[[:space:]]*done <<< ' "$GUARD" || true)"
+assert_eq "all three probe loops read from a here-string" "3" "$HS_LOOPS"
+assert_contains "trust-score loop feeds from the captured producer output" \
+    "$(sed -n '/check_trust_scores()/,/^}/p' "$GUARD")" 'done <<< "$entries"'
+assert_contains "requested-id loop feeds from the captured producer output" \
+    "$(sed -n '/check_trust_scores()/,/^}/p' "$GUARD")" 'done <<< "$req_entries"'
+assert_contains "ServiceLocator loop feeds from the captured producer output" \
+    "$(sed -n '/check_service_locator()/,/^}/p' "$GUARD")" 'done <<< "$entries"'
+
+# 11c — the genuine host condition.
+cat > "$SANDBOX/devfd-inner.sh" <<'DEVFD'
+#!/usr/bin/env bash
+# Runs INSIDE the masked mount namespace. Prints exactly one DEVFD_RESULT line.
+set -u
+if [[ -e /dev/fd ]]; then echo "DEVFD_RESULT=INCONCLUSIVE mask-ineffective"; exit 0; fi
+
+# Control: the construct that was there before. Must iterate zero times.
+n=0
+while IFS= read -r _l; do n=$((n+1)); done < <(printf 'a\nb\nc\n') 2>/dev/null
+
+# Shipped: the construct the guard now uses, including the empty-line skip.
+data="$(printf 'a\nb\nc\n')"
+m=0
+while IFS= read -r l; do
+    [[ -n "$l" ]] || continue
+    m=$((m+1))
+done <<< "$data"
+
+if (( n == 0 && m == 3 )); then
+    echo "DEVFD_RESULT=PROVEN procsub=$n herestring=$m"
+else
+    echo "DEVFD_RESULT=BROKEN procsub=$n herestring=$m"
+fi
+DEVFD
+
+DEVFD_OUT=""
+if [[ "$(uname -s)" == "Linux" ]] && type -P unshare >/dev/null 2>&1; then
+    mkdir -p "$SANDBOX/devfd-empty"
+    DEVFD_OUT="$(unshare -r -m bash -c "
+        mount --make-rprivate / 2>/dev/null
+        mount --bind '$SANDBOX/devfd-empty' /proc 2>/dev/null || exit 0
+        exec bash '$SANDBOX/devfd-inner.sh'
+    " 2>/dev/null || true)"
+fi
+
+case "$DEVFD_OUT" in
+    *"DEVFD_RESULT=PROVEN"*)
+        ok "with /dev/fd genuinely absent: process substitution iterates 0 times"
+        ok "with /dev/fd genuinely absent: the here-string form iterates 3 times"
+        ok "and the counter survived in the parent shell (${DEVFD_OUT#*herestring=})"
+        ;;
+    *"DEVFD_RESULT=BROKEN"*)
+        notok "here-string iteration survives an absent /dev/fd" "$DEVFD_OUT"
+        ;;
+    *)
+        printf "    ${CYAN}skip${NC} cannot hide /dev/fd on this host (needs Linux + a usable\n"
+        printf "         mount namespace); the static half of case 11 still holds, and the\n"
+        printf "         iteration behaviour is pinned by cases 12-16. Reported: [%s]\n" \
+               "${DEVFD_OUT:-<no run>}"
+        ;;
+esac
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Case 12 — the healthy samples must PASS, and say so with real numbers
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 12 "healthy 10-page sample and healthy four-service map -> PASS"
+
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "healthy world -> exit 0"                "0" "$GUARD_RC"
+assert_contains "all ten sampled pages verified"         "$GUARD_OUT" "10 page(s) pass canonical-formula invariant"
+assert_contains "sample size announced"                  "$GUARD_OUT" "sampling 10 page(s)"
+assert_contains "contract 1 of 4 has a verdict"          "$GUARD_OUT" "TrustReadService → real implementation"
+assert_contains "contract 2 of 4 has a verdict"          "$GUARD_OUT" "ScoreReadService → real implementation"
+assert_contains "contract 3 of 4 has a verdict"          "$GUARD_OUT" "DisputeAdjudicator → real implementation"
+assert_contains "contract 4 of 4 has a verdict"          "$GUARD_OUT" "PageOwnerResolver → real implementation"
+assert_contains "healthy world reports FAIL: 0"          "$GUARD_OUT" "FAIL: 0"
+HEALTHY_PASS="$(printf '%s\n' "$GUARD_OUT" | sed -n 's/.*PASS: \([0-9][0-9]*\).*/\1/p' | tail -1)"
+assert_eq       "healthy world yields 12 PASS verdicts"  "12" "$HEALTHY_PASS"
+
+if [[ -n "$REAL_JQ" ]]; then
+    oracle_ran
+    run_guard_fx "$PATH_WITH_JQ" \
+        "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN" \
+        "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+    assert_eq "healthy world -> exit 0 on the jq leg too" "0" "$GUARD_RC"
+    assert_eq "same 12 PASS verdicts on the jq leg" "12" \
+        "$(printf '%s\n' "$GUARD_OUT" | sed -n 's/.*PASS: \([0-9][0-9]*\).*/\1/p' | tail -1)"
+else
+    oracle_skipped "case 12: healthy sample on the jq leg"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Case 13 — ZERO iterations. This is exactly what the deploy host produced.
+# Before the repair the Trust Score probe printed "PASS 0 page(s)" and the
+# ServiceLocator probe printed nothing at all, and the run exited 0.
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 13 "zero iterations -> loud FAIL and a nonzero exit, never silence"
+
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=[]" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "empty result set -> exit 1"                  "1" "$GUARD_RC"
+assert_contains "empty result set FAILs explicitly"           "$GUARD_OUT" "trust-score sample incompletely evaluated"
+assert_contains "the failure names the requested count"       "$GUARD_OUT" "requested: 10 row(s)"
+assert_contains "the failure names the iterated count"        "$GUARD_OUT" "iterated:  0 row(s)"
+assert_not_contains "and never claims a pass"                 "$GUARD_OUT" "pass canonical-formula invariant"
+assert_not_contains "specifically not the vacuous 'PASS 0'"   "$GUARD_OUT" "0 page(s) pass"
+
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_EMPTY"
+assert_eq       "empty ServiceLocator map -> exit 1"          "1" "$GUARD_RC"
+assert_contains "empty map FAILs explicitly"                  "$GUARD_OUT" "ServiceLocator probe returned no contract entries"
+assert_contains "and still names every expected contract (1)" "$GUARD_OUT" "TrustReadService → no verdict returned"
+assert_contains "and still names every expected contract (2)" "$GUARD_OUT" "ScoreReadService → no verdict returned"
+assert_contains "and still names every expected contract (3)" "$GUARD_OUT" "DisputeAdjudicator → no verdict returned"
+assert_contains "and still names every expected contract (4)" "$GUARD_OUT" "PageOwnerResolver → no verdict returned"
+assert_not_contains "silence is impossible now"               "$GUARD_OUT" "FAIL: 0"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Case 14 — partial, excessive and duplicated work
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 14 "partial / excessive / duplicate iteration -> counted, not trusted"
+
+# 14a — 7 of 10 rows.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_SEVEN" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "7 of 10 rows -> exit 1"                "1" "$GUARD_RC"
+assert_contains "7 of 10 rows FAILs"                    "$GUARD_OUT" "trust-score sample incompletely evaluated"
+assert_contains "and names both numbers"                "$GUARD_OUT" "iterated:  7 row(s)"
+assert_not_contains "no pass on a short sample"         "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 14b — 11 of 10 rows.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_ELEVEN" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "11 of 10 rows -> exit 1"               "1" "$GUARD_RC"
+assert_contains "more rows than requested also FAILs"   "$GUARD_OUT" "iterated:  11 row(s)"
+assert_not_contains "no pass on an oversized sample"    "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 14c — the same page twice (11 entries for a 10-row sample).
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN_DUP" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "a duplicated page -> exit 1"           "1" "$GUARD_RC"
+assert_contains "a duplicated page is counted"          "$GUARD_OUT" "iterated:  11 row(s)"
+
+# 14d — 3 of 4 contracts.
+run_guard_fx "$PATH_NO_JQ" "FIXTURE_LOCATOR=$FX_LOCATOR_PARTIAL"
+assert_eq       "3 of 4 contracts -> exit 1"            "1" "$GUARD_RC"
+assert_contains "the missing contract is named"         "$GUARD_OUT" "PageOwnerResolver → no verdict returned"
+assert_contains "the present ones still pass"           "$GUARD_OUT" "TrustReadService → real implementation"
+
+# 14e — a fifth, unexpected contract.
+run_guard_fx "$PATH_NO_JQ" "FIXTURE_LOCATOR=$FX_LOCATOR_EXTRA"
+assert_eq       "a 5th contract -> exit 1"              "1" "$GUARD_RC"
+assert_contains "the stranger is named"                 "$GUARD_OUT" "ServiceLocator probe returned an unexpected contract"
+assert_contains "and the expected set is printed"       "$GUARD_OUT" "contract: ExtraService=real"
+assert_contains "the four expected ones still pass"     "$GUARD_OUT" "PageOwnerResolver → real implementation"
+
+# 14f — the same contract twice.
+run_guard_fx "$PATH_NO_JQ" "FIXTURE_LOCATOR=$FX_LOCATOR_DUP"
+assert_eq       "a repeated contract -> exit 1"         "1" "$GUARD_RC"
+assert_contains "the repeat is named"                   "$GUARD_OUT" "ServiceLocator probe returned TrustReadService more than once"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Case 15 — malformed entries, one failing entry, and producer failure
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 15 "malformed / failing / producer failure -> never masked"
+
+# 15a — an unparseable result row.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_MALFORMED" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "an unparseable row -> exit 1"          "1" "$GUARD_RC"
+assert_contains "an unparseable row is reported"        "$GUARD_OUT" "trust_score mismatch"
+assert_not_contains "and never passes"                  "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 15b — one genuinely mismatched page out of ten.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN_ONE_BAD" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "one bad page -> exit 1"                "1" "$GUARD_RC"
+assert_contains "the bad page is named"                 "$GUARD_OUT" "trust_score mismatch page_id=103"
+assert_not_contains "nine good pages do not earn a pass" "$GUARD_OUT" "pass canonical-formula invariant"
+assert_not_contains "and no second, redundant failure"   "$GUARD_OUT" "verified fewer rows than it sampled"
+
+# 15c — the trust-score producer itself failed.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=PHP Fatal error: boom" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "a failed producer -> exit 1"           "1" "$GUARD_RC"
+assert_contains "a failed producer is reported"         "$GUARD_OUT" "canonical formula call failed"
+assert_not_contains "and never passes"                  "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 15d — the ServiceLocator producer returned valid JSON with no keys.
+run_guard_fx "$PATH_NO_JQ" "FIXTURE_LOCATOR=$FX_LOCATOR_KEYLESS"
+assert_eq       "a keyless payload -> exit 1"           "1" "$GUARD_RC"
+assert_contains "a keyless payload is reported"         "$GUARD_OUT" "could not be read as contract entries"
+assert_not_contains "and yields no locator pass"        "$GUARD_OUT" "→ real implementation"
+
+# 15e — the ServiceLocator producer returned no JSON at all (pre-existing guard,
+# re-asserted here for its exit status).
+run_guard_fx "$PATH_NO_JQ" "FIXTURE_LOCATOR=$FX_LOCATOR_MALFORMED"
+assert_eq       "a non-JSON payload -> exit 1"          "1" "$GUARD_RC"
+assert_contains "a non-JSON payload is reported"        "$GUARD_OUT" "ServiceLocator probe returned non-JSON"
+
+# 15f — one NullObject binding: the pre-existing semantics and wording.
+run_guard_fx "$PATH_NO_JQ" "FIXTURE_LOCATOR=$FX_LOCATOR_UNHEALTHY"
+assert_eq       "a null binding -> exit 1"              "1" "$GUARD_RC"
+assert_contains "wording unchanged"                     "$GUARD_OUT" "TrustReadService → NullObject fallback"
+assert_contains "detail line unchanged"                 "$GUARD_OUT" "contract is wired to a null implementation"
+assert_contains "the other three still pass"            "$GUARD_OUT" "ScoreReadService → real implementation"
+
+# 15g — malformed entry shapes, driven through the probe directly.
+MAL_OUT="$(probe_run check_service_locator "FIXTURE_LOCATOR=$FX_LOCATOR_SPLIT_LINE")"
+assert_contains "a line with no '=' is reported"        "$MAL_OUT" "ServiceLocator probe emitted a malformed entry"
+assert_contains "and the offending text is shown"       "$MAL_OUT" "entry:    bogus-line"
+MAL_OUT="$(probe_run check_service_locator "FIXTURE_LOCATOR=$FX_LOCATOR_EMPTY_LABEL")"
+assert_contains "an empty contract name is reported"    "$MAL_OUT" "emitted an entry with no contract name"
+MAL_OUT="$(probe_run check_service_locator "FIXTURE_LOCATOR=$FX_LOCATOR_EMPTY_STATUS")"
+assert_contains "an empty status is reported"           "$MAL_OUT" "emitted an entry with no status"
+MAL_OUT="$(probe_run check_service_locator "FIXTURE_LOCATOR=$FX_LOCATOR_BAD_STATUS")"
+assert_contains "a status that is neither real nor null" "$MAL_OUT" "unrecognised ServiceLocator status"
+assert_contains "and the bad status is shown"            "$MAL_OUT" "status:   maybe"
+
+# The pre-existing skip/short-circuit behaviour must be untouched.
+run_guard_fx "$PATH_NO_JQ" "FIXTURE_ROWS=ERR no_repo" "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "ERR no_repo still SKIPs, exit 0"       "0" "$GUARD_RC"
+assert_contains "ERR no_repo wording unchanged"         "$GUARD_OUT" "PageReadModelRepository unavailable"
+run_guard_fx "$PATH_NO_JQ" "FIXTURE_ROWS=[]" "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "zero sampled rows still SKIPs, exit 0" "0" "$GUARD_RC"
+assert_contains "zero-row wording unchanged"            "$GUARD_OUT" "no rows in page_read_model"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Case 16 — parent-shell state retention
+#
+# The reason process substitution was reached for originally: a pipe would run
+# the loop body in a subshell and every counter would be discarded. A
+# here-string keeps parent scope, and these assertions prove it — the tallies
+# are read AFTER the probe returns.
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 16 "counters mutated inside the loop survive in the parent shell"
+
+TALLY_OUT="$(probe_run check_trust_scores \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN")"
+assert_contains "ok counter survived (printed after the loop)" "$TALLY_OUT" "10 page(s) pass canonical-formula invariant"
+assert_contains "PASSED survived the loop"                     "$TALLY_OUT" "TALLY PASSED=1 FAILED=0"
+
+TALLY_OUT="$(probe_run check_trust_scores \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN_ONE_BAD")"
+assert_contains "bad counter survived: no pass was printed"    "$TALLY_OUT" "trust_score mismatch page_id=103"
+assert_contains "FAILED mutated inside the loop survived"      "$TALLY_OUT" "TALLY PASSED=0 FAILED=1"
+
+TALLY_OUT="$(probe_run check_trust_scores \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_SEVEN")"
+assert_contains "iteration counter survived the loop"          "$TALLY_OUT" "iterated:  7 row(s)"
+# Two failures, not one: the short count AND the three requested pages the
+# short payload left unverified (case 17). Both are computed after the loop
+# from state the loop built, so both prove parent-shell retention.
+assert_contains "and drove two failures: short count + missing ids" "$TALLY_OUT" "TALLY PASSED=0 FAILED=2"
+
+TALLY_OUT="$(probe_run check_service_locator "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY")"
+assert_contains "four locator verdicts reached the parent"     "$TALLY_OUT" "TALLY PASSED=4 FAILED=0"
+
+TALLY_OUT="$(probe_run check_service_locator "FIXTURE_LOCATOR=$FX_LOCATOR_DUP")"
+assert_contains "a duplicate detected inside the loop counted" "$TALLY_OUT" "TALLY PASSED=4 FAILED=1"
+
+TALLY_OUT="$(probe_run check_service_locator "FIXTURE_LOCATOR=$FX_LOCATOR_EMPTY")"
+assert_contains "zero entries produce five failures, not zero" "$TALLY_OUT" "TALLY PASSED=0 FAILED=5"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Case 17 — page IDENTITY, not just row count
+#
+# The iteration repair made the Trust Score probe count: it now insists that
+# every sampled row was iterated and verified. Counting is still not verifying.
+# A payload that processes page 101 TWICE and page 110 never has ten results
+# for ten requested pages, ten ok:true flags and iterated == count — a clean
+# sweep by every test the probe had, with one requested page silently
+# unchecked. The probe therefore compares the requested ids and the processed
+# ids as SETS and names each discrepancy: missing, duplicated, unexpected.
+#
+# The converse matters just as much: ORDER IS NOT A CONTRACT. The producer
+# orders by updated_at DESC, which is an implementation detail, so a reordered
+# payload of the same unique pages must still PASS.
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 17 "page identity: sets, not counts (order is not a contract)"
+
+# 17a — ten unique requested pages, processed exactly once each.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "ten unique pages -> exit 0"             "0" "$GUARD_RC"
+assert_contains "and all ten are verified"               "$GUARD_OUT" "10 page(s) pass canonical-formula invariant"
+assert_not_contains "no page reported unverified"        "$GUARD_OUT" "left page(s) unverified"
+assert_not_contains "no page reported duplicated"        "$GUARD_OUT" "processed the same page more than once"
+assert_not_contains "no page reported unexpected"        "$GUARD_OUT" "never asked about"
+
+# 17b — the same ten pages, shuffled. Ordering is not a contract.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN_REORDERED" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "reordered but identical set -> exit 0"  "0" "$GUARD_RC"
+assert_contains "reordered set still verifies all ten"   "$GUARD_OUT" "10 page(s) pass canonical-formula invariant"
+assert_not_contains "reordering is not 'unverified'"     "$GUARD_OUT" "left page(s) unverified"
+assert_not_contains "reordering is not 'unexpected'"     "$GUARD_OUT" "never asked about"
+
+# 17c — THE DEFECT THIS CASE EXISTS FOR: one page twice, one page never, and
+# a count that balances perfectly at ten.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_DUP_AND_MISSING" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "duplicate + missing at the right count -> exit 1" "1" "$GUARD_RC"
+assert_contains "the unverified page is reported"        "$GUARD_OUT" "trust-score sample left page(s) unverified"
+assert_contains "and named by id"                        "$GUARD_OUT" "requested but never processed: 110"
+assert_contains "the duplicate is reported"              "$GUARD_OUT" "trust-score sample processed the same page more than once"
+assert_contains "and named with its multiplicity"        "$GUARD_OUT" "duplicated: 101 (x2)"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+# The counts DID match; a count mismatch would be the wrong diagnosis.
+assert_not_contains "not reported as a count mismatch"   "$GUARD_OUT" "incompletely evaluated"
+
+# 17d — a duplicate plus a page nobody asked about.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_DUP_AND_EXTRA" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "duplicate + stranger -> exit 1"         "1" "$GUARD_RC"
+assert_contains "the stranger is reported"               "$GUARD_OUT" "trust-score sample processed page(s) it never asked about"
+assert_contains "and named by id"                        "$GUARD_OUT" "unexpected: 999"
+assert_contains "the duplicate is still named"           "$GUARD_OUT" "duplicated: 101 (x2)"
+assert_contains "and both dropped pages are named"       "$GUARD_OUT" "requested but never processed: 109, 110"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17e — right count, entirely wrong pages.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN_WRONG_IDS" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "ten results for the wrong ten pages -> exit 1" "1" "$GUARD_RC"
+assert_contains "every requested page is named unverified" "$GUARD_OUT" "requested but never processed: 101, 102, 103, 104, 105, 106, 107, 108, 109, 110"
+assert_contains "every processed page is named unexpected" "$GUARD_OUT" "unexpected: 201, 202, 203, 204, 205, 206, 207, 208, 209, 210"
+assert_not_contains "not reported as a count mismatch"   "$GUARD_OUT" "incompletely evaluated"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17f — a result row whose page_id is null.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_NULL_PAGE_ID" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "a null page_id -> exit 1"               "1" "$GUARD_RC"
+assert_contains "the unidentifiable row is reported"     "$GUARD_OUT" "canonical-formula result carries no page_id"
+assert_contains "and the page it failed to discharge is named" "$GUARD_OUT" "requested but never processed: 110"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17g — a result row with no page_id key at all.
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_NO_PAGE_ID_KEY" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "an absent page_id key -> exit 1"        "1" "$GUARD_RC"
+assert_contains "the unidentifiable row is reported"     "$GUARD_OUT" "canonical-formula result carries no page_id"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17h — a REQUESTED list that repeats a page (defensive branch; see the
+# fixture comment: page_read_model.page_id is the primary key).
+run_guard_fx "$PATH_NO_JQ" \
+    "FIXTURE_ROWS=$FX_ROWS_DUP_REQUEST" "FIXTURE_RESULTS=$FX_RESULTS_DUP_REQUEST" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "a repeated request -> exit 1"           "1" "$GUARD_RC"
+assert_contains "the repeat is reported against the SAMPLE" "$GUARD_OUT" "sample query returned page_id=101 more than once"
+assert_contains "and says why that cannot be legitimate" "$GUARD_OUT" "page_read_model.page_id is the primary key"
+assert_not_contains "and never passes"                   "$GUARD_OUT" "pass canonical-formula invariant"
+
+# 17i — the flagship defect must read the same through the jq leg. The identity
+# comparison is bash, but the ids reach it through json_each_compact/json_get,
+# so it is only leg-independent if both legs hand it the same ids.
+if [[ -n "$REAL_JQ" ]]; then
+    oracle_ran
+    run_guard_fx "$PATH_WITH_JQ" \
+        "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_DUP_AND_MISSING" \
+        "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+    assert_eq       "duplicate + missing -> exit 1 on the jq leg too" "1" "$GUARD_RC"
+    assert_contains "same missing-page verdict on the jq leg"  "$GUARD_OUT" "requested but never processed: 110"
+    assert_contains "same duplicate verdict on the jq leg"     "$GUARD_OUT" "duplicated: 101 (x2)"
+else
+    oracle_skipped "case 17i: identity verdicts on the jq leg"
+fi
+
+# 17j — the identity sets are built INSIDE the loop and read after it, so they
+# are subject to the same parent-shell requirement as the counters (case 16).
+TALLY_OUT="$(probe_run check_trust_scores \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_DUP_AND_MISSING")"
+assert_contains "identity sets survived the loop"        "$TALLY_OUT" "duplicated: 101 (x2)"
+assert_contains "and drove exactly two failures"         "$TALLY_OUT" "TALLY PASSED=0 FAILED=2"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Case 18 — the guard's EXTERNAL TOOL SURFACE
+#
+# path_without_jq() removes whole directories, because that is the only way to
+# make a binary unreachable. On Linux that directory is /usr/bin, which also
+# holds bash, cat, tr and sed — and the guard needs all four. Losing them is
+# silent, not loud:
+#
+#   cat  the guard builds its php parity program with `$(cat <<'EOF' ...)`.
+#        No cat -> the program is "" -> `php -r ''` prints nothing and exits 0
+#        -> every JSON read returns empty WITH A SUCCESS STATUS. The first CI
+#        run of this harness failed 286 of 456 assertions on exactly this.
+#   tr   _json_php pipes php through `tr -d '\r'` and returns PIPESTATUS[1],
+#        so a missing tr also empties the output while keeping php's status.
+#   bash a temporary PATH assignment applies to the command lookup too, so
+#        `PATH=$PATH_NO_JQ bash "$GUARD"` is 127 with no bash on that PATH.
+#
+# So the shim list is load-bearing, and this case pins it: with NOTHING on PATH
+# but $SANDBOX/bin, the guard must still produce a complete, correct run. It
+# also states the guard's external surface as an executable fact —
+# wp, curl, awk, php, bash, cat, tr, sed and nothing else.
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 18 "guard runs with ONLY its declared tools on PATH"
+
+run_guard_fx "$SANDBOX/bin" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "nothing on PATH but the shims -> exit 0"  "0" "$GUARD_RC"
+assert_contains "and the run reports no failures"          "$GUARD_OUT" "FAIL: 0"
+assert_contains "and nothing deferred"                     "$GUARD_OUT" "DEFERRED: 0"
+assert_not_contains "no tool went missing"                 "$GUARD_OUT" "command not found"
+assert_eq       "the same 12 PASS verdicts"                "12" \
+    "$(printf '%s\n' "$GUARD_OUT" | sed -n 's/.*PASS: \([0-9][0-9]*\).*/\1/p' | tail -1)"
+# Named probes, because "FAIL: 0" is satisfied by a run that checked nothing —
+# which is the defect this whole PR family is about.
+assert_contains "read-model drift still evaluated"         "$GUARD_OUT" "no read-model drift"
+assert_contains "coverage still evaluated"                 "$GUARD_OUT" "coverage 100% >= 95%"
+assert_contains "trust-score sample still evaluated"       "$GUARD_OUT" "10 page(s) pass canonical-formula invariant"
+assert_contains "ServiceLocator still evaluated"           "$GUARD_OUT" "TrustReadService → real implementation"
+assert_contains "overdue-cron probe still evaluated"       "$GUARD_OUT" "no overdue cron events"
+
+# ═════════════════════════════════════════════════════════════════════════════
 printf "\n──────────────────────────────────────────\n"
+if (( ORACLE_SKIPPED > 0 )); then
+    printf "${CYAN}jq-oracle legs SKIPPED${NC} (%d). This run is smaller than a full one:\n" \
+        "$ORACLE_SKIPPED"
+    for reason in "${ORACLE_SKIP_REASONS[@]}"; do
+        printf "    - %s\n" "$reason"
+    done
+fi
 if (( TESTS_FAILED == 0 )); then
     printf "${GREEN}ALL GREEN${NC}  %d assertion(s)\n" "$TESTS_RUN"
-    printf "──────────────────────────────────────────\n"
-    exit 0
+else
+    printf "${RED}REGRESSION${NC}  %d of %d assertion(s) failed\n" "$TESTS_FAILED" "$TESTS_RUN"
 fi
-printf "${RED}REGRESSION${NC}  %d of %d assertion(s) failed\n" "$TESTS_FAILED" "$TESTS_RUN"
 printf "──────────────────────────────────────────\n"
+# Machine-readable, always last. CI requires skipped=0 and a nonzero
+# comparison count so a reduced suite cannot pass for a complete one.
+printf "ORACLE jq_comparisons=%d skipped=%d\n" "$ORACLE_COMPARISONS" "$ORACLE_SKIPPED"
+(( TESTS_FAILED == 0 )) && exit 0
 exit 1
