@@ -64,6 +64,9 @@
 #   17  page identity as a SET          -> missing / duplicated / unexpected ids
 #                                         are each named; a reordered but
 #                                         identical set still PASSES
+#   18  external tool surface           -> the guard still produces a complete,
+#                                         correct run with nothing on PATH but
+#                                         wp/curl/awk/php/bash/cat/tr/sed
 #
 # OUTPUT
 # ------
@@ -279,6 +282,7 @@ REAL_JQ="$(type -P jq || true)"
 REAL_BASH="$(type -P bash || true)"
 REAL_TR="$(type -P tr || true)"
 REAL_SED="$(type -P sed || true)"
+REAL_CAT="$(type -P cat || true)"
 
 for req in "$REAL_AWK" "$REAL_PHP"; do
     if [[ -z "$req" ]]; then
@@ -300,18 +304,25 @@ make_shim() {
 [[ -n "$REAL_CURL" ]] && make_shim curl "$REAL_CURL"
 make_shim awk "$REAL_AWK"
 make_shim php "$REAL_PHP"
-# bash, tr and sed too. On Linux jq is normally /usr/bin/jq, i.e. it shares a
-# directory with coreutils and with bash itself — so path_without_jq() below
-# drops that whole directory and takes them with it. Consequences, all silent:
+# bash, tr, sed and cat too. On Linux jq is normally /usr/bin/jq, i.e. it
+# shares a directory with coreutils and with bash itself — so path_without_jq()
+# below drops that whole directory and takes them with it. Consequences, every
+# one of them silent:
 #   `PATH=$PATH_NO_JQ bash "$GUARD"`  -> 127, bash not found (a temporary
 #                                        assignment applies to the lookup too)
+#   the guard's `BCC_JSON_PHP=$(cat <<'EOF' ...)` -> the php parity program is
+#                                        the EMPTY STRING, so `php -r ''`
+#                                        prints nothing and exits 0, and every
+#                                        JSON read returns "" with rc 0
 #   _json_php's `| tr -d '\r'`        -> php's output vanishes and the helper
 #                                        still returns php's exit status
 #   the overdue-hook join `tr | sed`  -> the cron list comes back empty
-# On Windows this never bit: jq lives in its own WinGet Links directory.
+# On Windows this never bit: jq lives in its own WinGet Links directory, so
+# dropping it costs nothing else. Case 18 pins the list from any platform.
 [[ -n "$REAL_BASH" ]] && make_shim bash "$REAL_BASH"
 [[ -n "$REAL_TR"   ]] && make_shim tr   "$REAL_TR"
 [[ -n "$REAL_SED"  ]] && make_shim sed  "$REAL_SED"
+[[ -n "$REAL_CAT"  ]] && make_shim cat  "$REAL_CAT"
 # curl is hard-required by the guard; stub it if the host has none.
 if [[ -z "$REAL_CURL" ]]; then
     printf '#!/bin/sh\nexit 0\n' > "$SANDBOX/bin/curl"; chmod +x "$SANDBOX/bin/curl"
@@ -1391,6 +1402,47 @@ TALLY_OUT="$(probe_run check_trust_scores \
     "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_DUP_AND_MISSING")"
 assert_contains "identity sets survived the loop"        "$TALLY_OUT" "duplicated: 101 (x2)"
 assert_contains "and drove exactly two failures"         "$TALLY_OUT" "TALLY PASSED=0 FAILED=2"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Case 18 — the guard's EXTERNAL TOOL SURFACE
+#
+# path_without_jq() removes whole directories, because that is the only way to
+# make a binary unreachable. On Linux that directory is /usr/bin, which also
+# holds bash, cat, tr and sed — and the guard needs all four. Losing them is
+# silent, not loud:
+#
+#   cat  the guard builds its php parity program with `$(cat <<'EOF' ...)`.
+#        No cat -> the program is "" -> `php -r ''` prints nothing and exits 0
+#        -> every JSON read returns empty WITH A SUCCESS STATUS. The first CI
+#        run of this harness failed 286 of 456 assertions on exactly this.
+#   tr   _json_php pipes php through `tr -d '\r'` and returns PIPESTATUS[1],
+#        so a missing tr also empties the output while keeping php's status.
+#   bash a temporary PATH assignment applies to the command lookup too, so
+#        `PATH=$PATH_NO_JQ bash "$GUARD"` is 127 with no bash on that PATH.
+#
+# So the shim list is load-bearing, and this case pins it: with NOTHING on PATH
+# but $SANDBOX/bin, the guard must still produce a complete, correct run. It
+# also states the guard's external surface as an executable fact —
+# wp, curl, awk, php, bash, cat, tr, sed and nothing else.
+# ═════════════════════════════════════════════════════════════════════════════
+case_banner 18 "guard runs with ONLY its declared tools on PATH"
+
+run_guard_fx "$SANDBOX/bin" \
+    "FIXTURE_ROWS=$FX_ROWS_TEN" "FIXTURE_RESULTS=$FX_RESULTS_TEN" \
+    "FIXTURE_LOCATOR=$FX_LOCATOR_HEALTHY"
+assert_eq       "nothing on PATH but the shims -> exit 0"  "0" "$GUARD_RC"
+assert_contains "and the run reports no failures"          "$GUARD_OUT" "FAIL: 0"
+assert_contains "and nothing deferred"                     "$GUARD_OUT" "DEFERRED: 0"
+assert_not_contains "no tool went missing"                 "$GUARD_OUT" "command not found"
+assert_eq       "the same 12 PASS verdicts"                "12" \
+    "$(printf '%s\n' "$GUARD_OUT" | sed -n 's/.*PASS: \([0-9][0-9]*\).*/\1/p' | tail -1)"
+# Named probes, because "FAIL: 0" is satisfied by a run that checked nothing —
+# which is the defect this whole PR family is about.
+assert_contains "read-model drift still evaluated"         "$GUARD_OUT" "no read-model drift"
+assert_contains "coverage still evaluated"                 "$GUARD_OUT" "coverage 100% >= 95%"
+assert_contains "trust-score sample still evaluated"       "$GUARD_OUT" "10 page(s) pass canonical-formula invariant"
+assert_contains "ServiceLocator still evaluated"           "$GUARD_OUT" "TrustReadService → real implementation"
+assert_contains "overdue-cron probe still evaluated"       "$GUARD_OUT" "no overdue cron events"
 
 # ═════════════════════════════════════════════════════════════════════════════
 printf "\n──────────────────────────────────────────\n"

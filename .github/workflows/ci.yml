@@ -86,12 +86,14 @@ jobs:
         run: |
           set -uo pipefail
 
-          # 456 php-leg + jq-leg assertions, plus the 3 from the dynamic
-          # /dev/fd case, which needs Linux and a usable mount namespace and so
-          # is skipped on the Windows dev host. Update this deliberately when
-          # the harness gains or loses assertions: it is the only thing
-          # standing between "the suite passed" and "some of the suite passed".
-          EXPECTED_ASSERTIONS=459
+          # Same number here and on the dev host: the only environment-
+          # dependent case is 11c, which masks /dev/fd and needs a mount
+          # namespace it can establish — neither Git Bash nor this runner can,
+          # so it skips on both and the static half of case 11 carries it.
+          # Update this deliberately when the harness gains or loses
+          # assertions: it is the only thing standing between "the suite
+          # passed" and "some of the suite passed".
+          EXPECTED_ASSERTIONS=466
 
           JQ_BIN="$(type -P jq || true)"
           PHP_BIN="$(type -P php || true)"
