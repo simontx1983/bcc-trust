@@ -71,6 +71,9 @@ if (!defined('ABSPATH')) {
  *     state_label: string,
  *     paused: bool,
  *     unsupported: bool,
+ *     discovery_opted_in: bool,
+ *     eligibility: string,
+ *     eligibility_reason: string,
  *     backfill_complete: bool,
  *     progress_label: string,
  *     max_code_id: int,
@@ -108,6 +111,47 @@ final class CosmwasmDiscoveryHealthSnapshot
      */
     public const STATUS_UNAVAILABLE = 'unavailable';
 
+    // ── PER-CHAIN ELIGIBILITY ───────────────────────────────────────────
+    //
+    // The panel used to list every active Cosmos chain with no indication
+    // of which ones the scanner will actually walk, so an operator read a
+    // table of rows that were never going to move and had nothing to tell
+    // them why. These five values are the answer, and they are the ONLY
+    // values the panel may key on.
+    //
+    // EXACTLY ONE OF THEM MEANS "WILL BE SCANNED": ELIGIBLE. Every other
+    // value — including the one that means "we could not tell" — is a NO.
+    // That is deliberate: this is a display of a fail-closed rule, and a
+    // display that guesses in the permissive direction is worse than no
+    // display, because it invites an operator to conclude a chain is
+    // covered when it is not.
+
+    /** Nothing is blocking this chain; it is in the scanner's rotation. */
+    public const ELIGIBILITY_ELIGIBLE = 'eligible';
+
+    /** OPERATOR INTENT: `wp_bcc_chains.cosmwasm_nft_discovery_enabled` = 0. */
+    public const ELIGIBILITY_NOT_OPTED_IN = 'not_opted_in';
+
+    /** MEASURED CAPABILITY: the chain's wasm module answered with a 501. */
+    public const ELIGIBILITY_UNSUPPORTED = 'unsupported';
+
+    /** Outside the temporary `BCC_COSMWASM_CHAIN_ALLOWLIST` canary scope. */
+    public const ELIGIBILITY_ALLOWLIST_EXCLUDED = 'allowlist_excluded';
+
+    /**
+     * The opt-in could not be read at all — the projection carries no
+     * `cosmwasm_nft_discovery_enabled` property, which is what a
+     * pre-migration install (or a stale pre-migration transient) looks
+     * like.
+     *
+     * It is a SEPARATE value from `not_opted_in` because the two are
+     * different facts: one says an operator decided no, the other says
+     * nobody has been able to decide anything yet. Both are treated as
+     * NOT eligible, which is the same answer
+     * {@see CosmwasmDiscoveryWorker::eligibleChainIds()} gives.
+     */
+    public const ELIGIBILITY_UNKNOWN = 'unknown';
+
     /**
      * A chain that has not been touched in this long, while discovery is
      * enabled and the chain is neither paused nor unsupported, is stale.
@@ -132,6 +176,11 @@ final class CosmwasmDiscoveryHealthSnapshot
      * invented 0: there is no number to read, so the type says so and the
      * panel has to handle it.
      *
+     * `eligible_chain_count` is nullable for exactly the same reason: "no
+     * chain is eligible" and "nobody could work out which chains are
+     * eligible" are different facts, and 0 is only allowed to mean the
+     * first one.
+     *
      * @return array{
      *     discovery_enabled: bool,
      *     backfill_enabled: bool,
@@ -141,6 +190,8 @@ final class CosmwasmDiscoveryHealthSnapshot
      *     unavailable_reason: string|null,
      *     schedule: list<ScheduleEntry>,
      *     chains: list<ChainPanelRow>,
+     *     allowlist_chain_ids: list<int>|null,
+     *     eligible_chain_count: int|null,
      *     working_chain: array{chain_id: int, slug: string}|null,
      *     next_chain: array{chain_id: int, slug: string}|null,
      *     totals: array{
@@ -163,6 +214,14 @@ final class CosmwasmDiscoveryHealthSnapshot
         $discoveryEnabled = CosmwasmDiscoveryGate::discoveryEnabled();
         $backfillEnabled  = CosmwasmDiscoveryGate::backfillEnabled();
         $now              = time();
+
+        // The canary scope, read ONCE for the whole panel. null = the
+        // constant is undefined (no extra restriction); [] = defined but
+        // names no usable chain id, which means NOTHING is scanned. See
+        // CosmwasmDiscoveryGate::chainAllowlist() — the two-value contract
+        // is the whole point, and collapsing it here would reintroduce the
+        // fail-open bug at the display layer.
+        $allowlist = CosmwasmDiscoveryGate::chainAllowlist();
 
         // READ 0 (cached): the chain registry, filtered to CosmWasm-capable
         // chains in PHP. Mirrors CosmwasmDiscoveryWorker::cosmosChainIds().
@@ -209,6 +268,8 @@ final class CosmwasmDiscoveryHealthSnapshot
             'denied'                   => 0,
         ];
 
+        $eligibleCount = 0;
+
         foreach ($chainRows as $chainId => $chain) {
             $row = self::deriveChainRow(
                 $chainId,
@@ -218,10 +279,20 @@ final class CosmwasmDiscoveryHealthSnapshot
                 $familyCounts[$chainId] ?? [],
                 $familyPending[$chainId] ?? 0,
                 $contractStats[$chainId] ?? null,
-                $now
+                $now,
+                // THE SAME READER THE WORKER USES, not a second copy of the
+                // presence check. A panel that computed the opt-in its own
+                // way could disagree with the chokepoint, and the operator
+                // would believe the panel.
+                CosmwasmDiscoveryWorker::discoveryOptInState($chain),
+                $allowlist
             );
 
             $chains[] = $row;
+
+            if ($row['eligibility'] === self::ELIGIBILITY_ELIGIBLE) {
+                $eligibleCount++;
+            }
 
             $totals['families']                 += $row['families_total'];
             $totals['families_pending']         += $row['families_pending'];
@@ -246,12 +317,14 @@ final class CosmwasmDiscoveryHealthSnapshot
             'status'             => self::deriveStatus($discoveryEnabled, $chains, $schedule),
             'data_unavailable'   => false,
             'unavailable_reason' => null,
-            'schedule'           => $schedule,
-            'chains'             => $chains,
-            'working_chain'      => self::deriveWorkingChain($chains),
-            'next_chain'         => self::deriveNextChain($chains),
-            'totals'             => $totals,
-            'issues'             => $issues,
+            'schedule'             => $schedule,
+            'chains'               => $chains,
+            'allowlist_chain_ids'  => $allowlist,
+            'eligible_chain_count' => $eligibleCount,
+            'working_chain'        => self::deriveWorkingChain($chains),
+            'next_chain'           => self::deriveNextChain($chains),
+            'totals'               => $totals,
+            'issues'               => $issues,
         ];
     }
 
@@ -265,6 +338,13 @@ final class CosmwasmDiscoveryHealthSnapshot
      * answering, since a stalled cron and a broken DB look identical from
      * the outside otherwise.
      *
+     * `eligible_chain_count` is null here for the same reason `totals` is.
+     * The eligibility of a chain depends on the checkpoint read that just
+     * failed, so "0 chains are eligible" would be an invented answer to a
+     * question nobody managed to ask — and it is the WORST invented answer
+     * available, because 0 eligible chains is also a real and alarming
+     * state an operator would act on.
+     *
      * @return array{
      *     discovery_enabled: bool,
      *     backfill_enabled: bool,
@@ -274,6 +354,8 @@ final class CosmwasmDiscoveryHealthSnapshot
      *     unavailable_reason: string|null,
      *     schedule: list<ScheduleEntry>,
      *     chains: list<ChainPanelRow>,
+     *     allowlist_chain_ids: list<int>|null,
+     *     eligible_chain_count: null,
      *     working_chain: array{chain_id: int, slug: string}|null,
      *     next_chain: array{chain_id: int, slug: string}|null,
      *     totals: null,
@@ -297,15 +379,19 @@ final class CosmwasmDiscoveryHealthSnapshot
             'discovery_enabled'  => $discoveryEnabled,
             'backfill_enabled'   => $backfillEnabled,
             'disabled_reason'    => self::disabledReason($discoveryEnabled, $backfillEnabled),
-            'status'             => self::STATUS_UNAVAILABLE,
-            'data_unavailable'   => true,
-            'unavailable_reason' => $reason,
-            'schedule'           => self::deriveSchedule($now),
-            'chains'             => [],
-            'working_chain'      => null,
-            'next_chain'         => null,
-            'totals'             => null,
-            'issues'             => [$reason],
+            'status'               => self::STATUS_UNAVAILABLE,
+            'data_unavailable'     => true,
+            'unavailable_reason'   => $reason,
+            'schedule'             => self::deriveSchedule($now),
+            'chains'               => [],
+            // The allowlist is read from a CONSTANT, not the database, so
+            // it survives the failure the way the cron schedule does.
+            'allowlist_chain_ids'  => CosmwasmDiscoveryGate::chainAllowlist(),
+            'eligible_chain_count' => null,
+            'working_chain'        => null,
+            'next_chain'           => null,
+            'totals'               => null,
+            'issues'               => [$reason],
         ];
     }
 
@@ -313,9 +399,20 @@ final class CosmwasmDiscoveryHealthSnapshot
      * PURE. One chain's panel row, assembled from the already-loaded
      * checkpoint + aggregate slices. No I/O.
      *
+     * ── THE TWO ELIGIBILITY ARGUMENTS DEFAULT TO "DON'T KNOW" ───────────
+     * `$discoveryOptedIn` is `?bool`, not `bool`, because there are three
+     * distinct answers and only two of them are booleans: yes, no, and
+     * "this projection has no such column" (a pre-migration install). Its
+     * default is null — a caller that does not supply the opt-in gets
+     * {@see ELIGIBILITY_UNKNOWN}, which the panel renders as NOT eligible.
+     * That direction is not an accident: an omitted argument must never be
+     * able to produce an "eligible" row.
+     *
      * @param  CheckpointRow|null           $checkpoint
      * @param  array<string, int>           $familyCounts
      * @param  array{total: int, inspected: int, denied: int, candidates: int, candidates_awaiting_emit: int, by_classification: array<string, int>}|null $contractStats
+     * @param  bool|null                    $discoveryOptedIn null = the opt-in column is absent from the projection
+     * @param  list<int>|null               $allowlist        null = BCC_COSMWASM_CHAIN_ALLOWLIST is undefined
      * @return ChainPanelRow
      */
     public static function deriveChainRow(
@@ -326,7 +423,9 @@ final class CosmwasmDiscoveryHealthSnapshot
         array $familyCounts,
         int $familyPending,
         ?array $contractStats,
-        int $now
+        int $now,
+        ?bool $discoveryOptedIn = null,
+        ?array $allowlist = null
     ): array {
         $state = $checkpoint !== null
             ? (string) $checkpoint->cw_discovery_state
@@ -363,6 +462,9 @@ final class CosmwasmDiscoveryHealthSnapshot
             'by_classification'        => [],
         ];
 
+        $unsupported = $state === ChainCheckpointRepository::CW_STATE_UNSUPPORTED;
+        $eligibility = self::deriveEligibility($chainId, $unsupported, $discoveryOptedIn, $allowlist);
+
         return [
             'chain_id'                    => $chainId,
             'slug'                        => $slug,
@@ -370,7 +472,13 @@ final class CosmwasmDiscoveryHealthSnapshot
             'state'                       => $state,
             'state_label'                 => self::stateLabel($state),
             'paused'                      => $state === ChainCheckpointRepository::CW_STATE_PAUSED,
-            'unsupported'                 => $state === ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+            'unsupported'                 => $unsupported,
+            // FAIL CLOSED: only a literal true is "opted in". null (column
+            // absent) collapses to false here, and the reason WHY it is
+            // false stays visible in `eligibility` as `unknown`.
+            'discovery_opted_in'          => $discoveryOptedIn === true,
+            'eligibility'                 => $eligibility,
+            'eligibility_reason'          => self::eligibilityReason($eligibility, $allowlist),
             'backfill_complete'           => $state === ChainCheckpointRepository::CW_STATE_BACKFILLED,
             'progress_label'              => self::progressLabel($state, $maxCodeId, $cursorOpen, $familyTotal),
             'max_code_id'                 => $maxCodeId,
@@ -390,6 +498,130 @@ final class CosmwasmDiscoveryHealthSnapshot
             'candidates'                  => $stats['candidates'],
             'candidates_awaiting_emit'    => $stats['candidates_awaiting_emit'],
         ];
+    }
+
+    /**
+     * PURE. Will the scanner walk this chain, and if not, why not?
+     *
+     * ── IT MIRRORS THE CHOKEPOINT, IT IS NOT A SECOND COPY OF IT ────────
+     * The authority is {@see CosmwasmDiscoveryWorker::eligibleChainIds()};
+     * this answers the SAME question for display, over data the caller has
+     * already loaded. The two must never disagree on the BOOLEAN — a panel
+     * that says "eligible" about a chain the worker skips is worse than a
+     * panel with no eligibility column at all — so every condition here is
+     * one of the worker's, in the same direction:
+     *
+     *     unsupported            → checkpoint.cw_discovery_state
+     *     opted in               → chains.cosmwasm_nft_discovery_enabled
+     *     inside the canary list → BCC_COSMWASM_CHAIN_ALLOWLIST
+     *
+     * WHAT IT DOES NOT MIRROR is the ORDER, and only because the worker's
+     * order is a short-circuit and this one is an explanation. The worker
+     * drops a chain at the first failing condition and never looks at the
+     * rest; a reader wants the reason that is hardest to act on named
+     * FIRST, so `unsupported` — a measured fact about the chain that no
+     * operator action can change, and the one case where opting in would
+     * achieve nothing — is checked before the opt-in. The set of eligible
+     * chains is identical either way; only the sentence differs.
+     *
+     * The `is_active`/`chain_type` conditions are not repeated because the
+     * caller's chain list is already filtered to active Cosmos chains.
+     *
+     * @param list<int>|null $allowlist null = the constant is undefined
+     */
+    public static function deriveEligibility(
+        int $chainId,
+        bool $unsupported,
+        ?bool $optedIn,
+        ?array $allowlist
+    ): string {
+        if ($unsupported) {
+            return self::ELIGIBILITY_UNSUPPORTED;
+        }
+        // ORDER MATTERS between these two: "nobody could read the column"
+        // is not the same statement as "an operator said no", and telling
+        // an operator they declined something they were never offered
+        // sends them looking for a switch that is not there.
+        if ($optedIn === null) {
+            return self::ELIGIBILITY_UNKNOWN;
+        }
+        if ($optedIn === false) {
+            return self::ELIGIBILITY_NOT_OPTED_IN;
+        }
+        // `$allowlist === []` lands here too — defined but naming no usable
+        // chain id, which the gate documents as "scan nothing". in_array on
+        // an empty list is false, so it needs no special case, but it does
+        // get its own sentence in eligibilityReason().
+        if ($allowlist !== null && !in_array($chainId, $allowlist, true)) {
+            return self::ELIGIBILITY_ALLOWLIST_EXCLUDED;
+        }
+
+        return self::ELIGIBILITY_ELIGIBLE;
+    }
+
+    /** PURE. Short operator label for an eligibility value. */
+    public static function eligibilityLabel(string $eligibility): string
+    {
+        switch ($eligibility) {
+            case self::ELIGIBILITY_ELIGIBLE:
+                return 'Eligible';
+            case self::ELIGIBILITY_NOT_OPTED_IN:
+                return 'Not opted in';
+            case self::ELIGIBILITY_UNSUPPORTED:
+                return 'No wasm module';
+            case self::ELIGIBILITY_ALLOWLIST_EXCLUDED:
+                return 'Outside canary scope';
+            default:
+                // Every unrecognised value — including a missing one — is
+                // "we do not know", never "eligible".
+                return 'Unknown';
+        }
+    }
+
+    /**
+     * PURE. The same answer in a sentence. Plain text — escape at render.
+     *
+     * @param list<int>|null $allowlist null = the constant is undefined
+     */
+    public static function eligibilityReason(string $eligibility, ?array $allowlist): string
+    {
+        switch ($eligibility) {
+            case self::ELIGIBILITY_ELIGIBLE:
+                return 'Nothing is blocking this chain — it is in the rotation whenever discovery runs.';
+
+            case self::ELIGIBILITY_NOT_OPTED_IN:
+                return 'Discovery is switched off for this chain, so no pass will scan it. '
+                    . 'Turn it on with Enable discovery below; nothing starts until you do.';
+
+            case self::ELIGIBILITY_UNSUPPORTED:
+                // Same register as the existing panel copy for this case:
+                // it is a fact about the chain, not a failure.
+                return 'This chain has no CosmWasm module — it answered the code listing with a 501, '
+                    . 'so it is permanently skipped. Opting it in would change nothing.';
+
+            case self::ELIGIBILITY_ALLOWLIST_EXCLUDED:
+                // null cannot reach here from deriveEligibility() — it only
+                // returns this value once it has established the constant is
+                // defined. It is folded in with [] anyway rather than given a
+                // cheerier branch, because the fallback for a value nobody can
+                // produce still has to point AWAY from "eligible".
+                if ($allowlist === null || $allowlist === []) {
+                    return 'BCC_COSMWASM_CHAIN_ALLOWLIST is defined but names no usable chain id, '
+                        . 'so NO chain is scanned while it stays that way. Fix or remove the constant in wp-config.php.';
+                }
+
+                return sprintf(
+                    'Opted in, but outside the canary scope: BCC_COSMWASM_CHAIN_ALLOWLIST names only %s %s, '
+                        . 'so this chain is not scanned. Widen or remove the constant in wp-config.php.',
+                    count($allowlist) === 1 ? 'chain' : 'chains',
+                    implode(', ', $allowlist)
+                );
+
+            default:
+                return 'The discovery opt-in for this chain could not be read, so it is treated as NOT eligible. '
+                    . 'That is what a pre-migration install looks like — the cosmwasm_nft_discovery_enabled column '
+                    . 'is missing from the chain registry. Check the bcc-trust error log.';
+        }
     }
 
     /**

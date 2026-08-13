@@ -56,6 +56,25 @@ final class CosmwasmScannerPanel
     ];
 
     /**
+     * Colour per eligibility value.
+     *
+     * GREEN IS RESERVED FOR `eligible`, and the lookup below defaults to
+     * the UNKNOWN colour rather than to grey — an eligibility value this
+     * build has never heard of is not a quiet "no", it is a "something is
+     * wrong with this panel", and it must not be able to borrow the calm
+     * colour of a deliberately-disabled chain.
+     *
+     * @var array<string, string>
+     */
+    private const ELIGIBILITY_COLOR = [
+        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE           => '#00a32a',
+        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_NOT_OPTED_IN       => '#646970',
+        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNSUPPORTED        => '#646970',
+        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED => '#dba617',
+        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN            => '#d63638',
+    ];
+
+    /**
      * Render the whole scanner panel.
      *
      * When the summary reports `data_unavailable`, EVERY DB-derived block
@@ -305,7 +324,27 @@ final class CosmwasmScannerPanel
 
         $working = is_array($summary['working_chain'] ?? null) ? $summary['working_chain'] : null;
         $next    = is_array($summary['next_chain'] ?? null) ? $summary['next_chain'] : null;
+
+        // "How many of these will actually be scanned?" — the question the
+        // table used to leave an operator to work out for themselves.
+        // int|null on purpose: null means the summary could not work it out,
+        // and printing "0 of 21" for that would be an invented finding.
+        $eligibleCount = is_int($summary['eligible_chain_count'] ?? null)
+            ? (int) $summary['eligible_chain_count']
+            : null;
         ?>
+        <p style="font-size:12px;color:#646970;margin:0 0 6px 0;">
+            <?php if ($eligibleCount !== null): ?>
+                <strong><?php echo esc_html(number_format_i18n($eligibleCount)); ?>
+                of <?php echo esc_html(number_format_i18n(count($chains))); ?></strong>
+                listed chains are eligible for the scanner.
+                A chain is scanned only when an operator has opted it in <em>and</em> the chain has a
+                working wasm module — the Discovery column says which, per chain, and why not.
+            <?php else: ?>
+                How many of these chains are eligible could not be worked out.
+            <?php endif; ?>
+        </p>
+
         <p style="font-size:12px;color:#646970;margin:0 0 6px 0;">
             <?php if ($working !== null): ?>
                 Currently working through <strong><?php echo esc_html((string) ($working['slug'] ?? '')); ?></strong>.
@@ -324,6 +363,7 @@ final class CosmwasmScannerPanel
                 <thead>
                     <tr>
                         <th style="width:110px;">Chain</th>
+                        <th style="width:250px;">Discovery</th>
                         <th style="width:100px;">State</th>
                         <th>Progress</th>
                         <th style="width:210px;">Inventory</th>
@@ -362,6 +402,7 @@ final class CosmwasmScannerPanel
             <td>
                 <code><?php echo esc_html($slug); ?></code>
             </td>
+            <?php self::renderDiscoveryCell($chain, $chainId, $slug); ?>
             <td>
                 <span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr(self::stateColor($chain)); ?>;">
                     <?php echo esc_html((string) ($chain['state_label'] ?? '')); ?>
@@ -446,6 +487,93 @@ final class CosmwasmScannerPanel
             </td>
         </tr>
         <?php
+    }
+
+    /**
+     * The Discovery cell: opt-in state, eligibility verdict, the reason,
+     * and the control that changes it.
+     *
+     * ── EVERY READ HERE FAILS CLOSED ────────────────────────────────────
+     * `eligibility` is taken from the row only when it is a NON-EMPTY
+     * STRING, and anything else — a missing key, a null, an int, an empty
+     * string — becomes `unknown`. `discovery_opted_in` is compared with
+     * `=== true`, so `'1'`, `1` and a missing key all read as NOT opted in.
+     *
+     * That is not defensive noise. The panel is a display of a fail-closed
+     * rule, and the one thing it must never do is let an ABSENT field read
+     * as a permission: "this key is missing" and "an operator switched
+     * this on" have to be different answers, or a summary built by older
+     * code would quietly show every chain as opted in and eligible.
+     *
+     * `eligibility_reason` is a plain sentence produced by the snapshot and
+     * escaped here — the view derives no policy of its own, it only prints
+     * what it was handed.
+     *
+     * @param array<string, mixed> $chain
+     */
+    private static function renderDiscoveryCell(array $chain, int $chainId, string $slug): void
+    {
+        $eligibility = is_string($chain['eligibility'] ?? null) && $chain['eligibility'] !== ''
+            ? (string) $chain['eligibility']
+            : CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN;
+
+        $optedIn = ($chain['discovery_opted_in'] ?? null) === true;
+
+        $reason = is_string($chain['eligibility_reason'] ?? null) && $chain['eligibility_reason'] !== ''
+            ? (string) $chain['eligibility_reason']
+            : CosmwasmDiscoveryHealthSnapshot::eligibilityReason(
+                CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN,
+                null
+            );
+
+        $color = self::ELIGIBILITY_COLOR[$eligibility]
+            ?? self::ELIGIBILITY_COLOR[CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN];
+        ?>
+        <td style="font-size:12px;">
+            <span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($color); ?>;">
+                <?php echo esc_html(CosmwasmDiscoveryHealthSnapshot::eligibilityLabel($eligibility)); ?>
+            </span>
+            <span style="margin-left:6px;color:#646970;">
+                opt-in <strong><?php echo esc_html($optedIn ? 'ON' : 'OFF'); ?></strong>
+            </span>
+
+            <div style="margin-top:4px;color:#646970;"><?php echo esc_html($reason); ?></div>
+
+            <?php
+            // The control is offered in EVERY state, including `unsupported`
+            // and `unknown`. It writes operator intent, which is meaningful
+            // (and reversible) whatever the chain itself is doing — hiding it
+            // on an unsupported chain would strand an already-opted-in chain
+            // with no way to switch it back off.
+            ?>
+            <button type="submit"
+                    name="bcc_vc_action"
+                    value="<?php echo esc_attr(($optedIn ? 'cw_discovery_off_' : 'cw_discovery_on_') . $chainId); ?>"
+                    class="button button-small"
+                    style="margin-top:4px;"
+                    title="<?php echo esc_attr(self::discoveryToggleTitle($optedIn, $slug)); ?>">
+                <?php echo esc_html($optedIn ? 'Disable discovery' : 'Enable discovery'); ?>
+            </button>
+        </td>
+        <?php
+    }
+
+    /** What the discovery toggle will and will not do, in one sentence. */
+    private static function discoveryToggleTitle(bool $optedIn, string $slug): string
+    {
+        if ($optedIn) {
+            return sprintf(
+                'Stop the scanner considering %s at all. Everything it has already found is kept, '
+                    . 'and no collection is un-verified or removed.',
+                $slug
+            );
+        }
+
+        return sprintf(
+            'Let the scanner consider %s. It still has to be scheduled, gated on and supported by the chain '
+                . 'before anything is scanned, and everything it finds arrives unverified.',
+            $slug
+        );
     }
 
     /** Why the start control is or is not usable, in one sentence. */

@@ -1,0 +1,749 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Onchain\Tests\Unit;
+
+use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
+use BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel;
+use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\CollectionRepository;
+use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
+use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
+use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
+use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
+use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
+
+/**
+ * The per-chain CosmWasm discovery opt-in: the operator CONTROL and the
+ * panel STATUS that explains it.
+ *
+ * ── WHAT THIS FILE IS DEFENDING ─────────────────────────────────────────
+ * `wp_bcc_chains.cosmwasm_nft_discovery_enabled` is one of the five
+ * conditions {@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker}
+ * intersects before it will scan a chain, and it ships 0 on every row.
+ * Two things can go wrong with putting a switch on it, and they are
+ * opposites:
+ *
+ *   1. THE WRITE DOES TOO MUCH. A chain row also carries `is_active`, the
+ *      RPC/LCD endpoints and the Hall identity fields. An operator turning
+ *      the scanner off for a chain must not be able to deactivate it,
+ *      blank its endpoints or lose its description — every one of those
+ *      would break wallet linking, holdings or Halls, and none of them
+ *      would look like a scanner bug afterwards.
+ *
+ *   2. THE DISPLAY SAYS TOO MUCH. The panel lists every active Cosmos
+ *      chain. If a row that will never be scanned looks the same as one
+ *      that will — or worse, if a field the panel cannot read defaults to
+ *      "opted in" — the operator concludes a chain is covered when it is
+ *      not, which is the failure this whole feature exists to make
+ *      visible.
+ *
+ * So the write is asserted to be surgical (every other column byte-for-
+ * byte identical), and the display is asserted to fail CLOSED: exactly one
+ * value means "will be scanned", and an absent field is never it.
+ *
+ * ── AND BOTH GATES, PROVEN SEPARATELY ───────────────────────────────────
+ * A nonce proves the request came from our form. A capability proves the
+ * person may use it. Neither implies the other, so each refusal is proven
+ * on its own with the other gate satisfied — a test that failed both at
+ * once would still pass if one of the two checks were deleted.
+ *
+ * Isolation: the cosmwasm-discovery stubs. Every repository faked at its
+ * production FQN inside a subprocess, no database, no network. The real
+ * classes under test are VerifyCollectionsPage, CosmwasmScannerPanel and
+ * CosmwasmDiscoveryHealthSnapshot.
+ */
+#[CoversClass(VerifyCollectionsPage::class)]
+#[CoversClass(CosmwasmScannerPanel::class)]
+#[CoversClass(CosmwasmDiscoveryHealthSnapshot::class)]
+#[RunTestsInSeparateProcesses]
+#[PreserveGlobalState(false)]
+final class CosmwasmChainDiscoveryAdminTest extends TestCase
+{
+    private const CHAIN_ID = 8;
+    private const SLUG     = 'cosmos';
+
+    /** A second chain, so "only the one you named" is checkable. */
+    private const OTHER_CHAIN_ID = 9;
+    private const OTHER_SLUG     = 'juno';
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        require_once __DIR__ . '/../Stubs/cosmwasm-discovery-stubs.php';
+
+        CosmwasmCodeFamilyRepository::reset();
+        CosmwasmContractRepository::reset();
+        CollectionRepository::reset();
+        ChainCheckpointRepository::reset();
+        ChainRepository::reset();
+        NftSpamContractRepository::reset();
+        \BCC\Core\Log\Logger::reset();
+        \BccTestCronStore::reset();
+        \BccTestCapabilities::reset();
+
+        // Both chains ship DISABLED, which is the production default the
+        // migration guarantees. A test that wants one enabled says so.
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 0);
+        ChainRepository::seed(self::OTHER_CHAIN_ID, self::OTHER_SLUG, 'https://b.example', 'cosmos', 0);
+
+        $_POST = [];
+    }
+
+    protected function tearDown(): void
+    {
+        $_POST = [];
+        parent::tearDown();
+    }
+
+    // ── helpers ─────────────────────────────────────────────────────────
+
+    /**
+     * Post one admin action through the REAL dispatcher, exactly as the
+     * browser does.
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private function post(string $action, string $nonce = 'test-nonce'): array
+    {
+        $_POST = [
+            'bcc_vc_action'                   => $action,
+            VerifyCollectionsPage::NONCE_NAME => $nonce,
+        ];
+
+        $handler = new ReflectionMethod(VerifyCollectionsPage::class, 'handlePost');
+        $handler->setAccessible(true);
+
+        /** @var list<array{type: string, message: string}> $notices */
+        $notices = $handler->invoke(null);
+
+        return $notices;
+    }
+
+    /** The opt-in as the registry currently holds it. */
+    private function flag(int $chainId = self::CHAIN_ID): ?string
+    {
+        $chain = ChainRepository::getById($chainId);
+
+        return $chain === null ? null : (string) $chain->cosmwasm_nft_discovery_enabled;
+    }
+
+    /**
+     * Every property of a chain row, so "nothing else moved" is a
+     * comparison rather than a hope.
+     *
+     * @return array<string, mixed>
+     */
+    private function rowSnapshot(int $chainId): array
+    {
+        $chain = ChainRepository::getById($chainId);
+        self::assertNotNull($chain, "chain {$chainId} must exist to be snapshotted");
+
+        return get_object_vars($chain);
+    }
+
+    /** @param list<array{type: string, message: string}> $notices */
+    private function joined(array $notices): string
+    {
+        return implode(' ', array_column($notices, 'message'));
+    }
+
+    /** @param list<array{type: string, message: string}> $notices */
+    private function types(array $notices): string
+    {
+        return implode(',', array_column($notices, 'type'));
+    }
+
+    /** @return list<array<string, mixed>> the audit lines at one level */
+    private function logLines(string $level): array
+    {
+        return array_values(array_filter(
+            \BCC\Core\Log\Logger::$lines,
+            static fn(array $line): bool => $line['level'] === $level
+        ));
+    }
+
+    private function renderPanel(): string
+    {
+        ob_start();
+        CosmwasmScannerPanel::render(CosmwasmDiscoveryHealthSnapshot::buildSummary());
+        $html = ob_get_clean();
+
+        self::assertIsString($html);
+
+        return $html;
+    }
+
+    /** The panel row for one chain, as the summary describes it. */
+    private function summaryRow(int $chainId): array
+    {
+        foreach (CosmwasmDiscoveryHealthSnapshot::buildSummary()['chains'] as $row) {
+            if ($row['chain_id'] === $chainId) {
+                return $row;
+            }
+        }
+
+        self::fail("chain {$chainId} is not in the summary");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  AUTHORISATION — both gates, each proven alone
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * A VALID nonce and no capability. The nonce is deliberately correct:
+     * if this test sent a bad one too, deleting the capability check would
+     * not fail anything.
+     */
+    public function test_a_valid_nonce_without_the_capability_writes_nothing(): void
+    {
+        \BccTestCapabilities::$granted = [];
+
+        $notices = $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        self::assertSame('error', $notices[0]['type']);
+        self::assertStringContainsString('do not have permission', $notices[0]['message']);
+        self::assertStringContainsString('Nothing was changed', $notices[0]['message']);
+
+        self::assertSame('0', $this->flag(), 'a request without the capability must not move the flag');
+        self::assertSame([], ChainRepository::$discoveryWrites, 'and must not reach the repository at all');
+        self::assertSame(0, ChainRepository::$cacheBusts);
+    }
+
+    /**
+     * The capability IS held; only the nonce is wrong. Same reasoning in
+     * the mirror direction — this is what fails if the nonce check goes.
+     */
+    public function test_the_capability_without_a_valid_nonce_writes_nothing(): void
+    {
+        self::assertSame(['manage_options'], \BccTestCapabilities::$granted, 'precondition: fully authorised user');
+
+        $notices = $this->post('cw_discovery_on_' . self::CHAIN_ID, 'not-the-nonce');
+
+        self::assertStringContainsString('Security check failed', $this->joined($notices));
+        self::assertSame('0', $this->flag(), 'a forged POST must not move the flag');
+        self::assertSame([], ChainRepository::$discoveryWrites);
+        self::assertSame(0, ChainRepository::$cacheBusts);
+    }
+
+    /** The disable direction is gated identically — it is a write too. */
+    public function test_the_disable_direction_is_gated_by_both_checks_as_well(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+
+        \BccTestCapabilities::$granted = [];
+        $notices = $this->post('cw_discovery_off_' . self::CHAIN_ID);
+        self::assertSame('error', $notices[0]['type']);
+        self::assertSame('1', $this->flag(), 'still enabled — the refusal changed nothing');
+
+        \BccTestCapabilities::reset();
+        $notices = $this->post('cw_discovery_off_' . self::CHAIN_ID, 'not-the-nonce');
+        self::assertStringContainsString('Security check failed', $this->joined($notices));
+        self::assertSame('1', $this->flag());
+
+        self::assertSame([], ChainRepository::$discoveryWrites);
+    }
+
+    public function test_a_refused_request_leaves_a_trace(): void
+    {
+        \BccTestCapabilities::$granted = [];
+
+        $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        $warnings = $this->logLines('warning');
+        self::assertNotSame([], $warnings, 'an unauthorised attempt on a write must be recorded');
+        self::assertSame('cosmwasm_chain_discovery_denied', $warnings[0]['context']['action'] ?? null);
+        self::assertSame(self::CHAIN_ID, $warnings[0]['context']['chain_id'] ?? null);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  THE WRITE — surgical, confirmed, and nothing else
+    // ═══════════════════════════════════════════════════════════════════
+
+    public function test_enabling_moves_the_opt_in_and_nothing_else_on_the_row(): void
+    {
+        $before = $this->rowSnapshot(self::CHAIN_ID);
+        self::assertSame('0', $before['cosmwasm_nft_discovery_enabled'], 'precondition: ships disabled');
+
+        $notices = $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        self::assertSame('success', $notices[0]['type']);
+        self::assertSame('1', $this->flag());
+
+        $after = $this->rowSnapshot(self::CHAIN_ID);
+
+        // EVERY other property, byte for byte. Not a spot-check of the
+        // fields somebody happened to think of.
+        unset($before['cosmwasm_nft_discovery_enabled'], $after['cosmwasm_nft_discovery_enabled']);
+        self::assertSame(
+            $before,
+            $after,
+            'the discovery toggle must touch exactly one column — everything else on the chain row is somebody '
+                . 'else\'s (wallet linking, holdings, validators, Halls)'
+        );
+
+        // …and named explicitly, because these are the ones whose loss
+        // would break something far away from this page.
+        self::assertSame('1', (string) $after['is_active'], 'the chain must stay active');
+        self::assertSame('https://a.example', (string) $after['rest_url'], 'the endpoint must be untouched');
+        self::assertSame('https://cdn.example/cosmos.png', (string) $after['icon_url'], 'Hall identity: icon');
+        self::assertSame('#123456', (string) $after['color'], 'Hall identity: colour');
+        self::assertSame('About cosmos.', (string) $after['description'], 'Hall identity: description');
+    }
+
+    public function test_disabling_moves_the_opt_in_and_nothing_else_on_the_row(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        $before = $this->rowSnapshot(self::CHAIN_ID);
+
+        $notices = $this->post('cw_discovery_off_' . self::CHAIN_ID);
+
+        self::assertSame('success', $notices[0]['type']);
+        self::assertStringContainsString('discovery is OFF for cosmos', $notices[0]['message']);
+        self::assertStringContainsString('no collection was un-verified or removed', $notices[0]['message']);
+        self::assertSame('0', $this->flag());
+
+        $after = $this->rowSnapshot(self::CHAIN_ID);
+        unset($before['cosmwasm_nft_discovery_enabled'], $after['cosmwasm_nft_discovery_enabled']);
+        self::assertSame($before, $after);
+    }
+
+    public function test_the_toggle_touches_only_the_chain_it_names(): void
+    {
+        $otherBefore = $this->rowSnapshot(self::OTHER_CHAIN_ID);
+
+        $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        self::assertSame('1', $this->flag(self::CHAIN_ID));
+        self::assertSame('0', $this->flag(self::OTHER_CHAIN_ID), 'the neighbouring chain must be untouched');
+        self::assertSame($otherBefore, $this->rowSnapshot(self::OTHER_CHAIN_ID));
+
+        self::assertSame(
+            [['chain_id' => self::CHAIN_ID, 'enabled' => true]],
+            ChainRepository::$discoveryWrites,
+            'exactly one write, naming exactly one chain'
+        );
+    }
+
+    /**
+     * THE CACHE BUST. `getActive()` — which is what the worker's
+     * eligibility chokepoint reads — is served from a 5-minute
+     * object-cache/transient pair. A toggle that did not invalidate would
+     * leave the scanner working from the OLD answer for the rest of the
+     * TTL while this page displayed the new one, so the operator would
+     * have no way to notice.
+     *
+     * The invalidation lives INSIDE
+     * ChainRepository::setCosmwasmNftDiscoveryEnabled() precisely so no
+     * caller can forget it; this asserts the control goes through that
+     * path. (The real cache being genuinely cold afterwards is pinned
+     * against MySQL in ChainCosmwasmDiscoveryFlagIntegrationTest.)
+     */
+    public function test_the_toggle_busts_the_chain_cache(): void
+    {
+        self::assertSame(0, ChainRepository::$cacheBusts, 'precondition');
+
+        $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        self::assertGreaterThan(
+            0,
+            ChainRepository::$cacheBusts,
+            'a stale chains cache keeps the scanner working from the pre-toggle answer'
+        );
+    }
+
+    /**
+     * End to end: the control changes what the ELIGIBILITY VIEW says, not
+     * merely what a column holds. A write that landed but left the panel
+     * (and therefore the worker's view of the world) unchanged would be
+     * indistinguishable from no write at all.
+     */
+    public function test_the_toggle_changes_the_eligibility_the_panel_reports(): void
+    {
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_NOT_OPTED_IN,
+            $this->summaryRow(self::CHAIN_ID)['eligibility'],
+            'precondition: not opted in'
+        );
+
+        $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE,
+            $this->summaryRow(self::CHAIN_ID)['eligibility']
+        );
+        self::assertTrue($this->summaryRow(self::CHAIN_ID)['discovery_opted_in']);
+        self::assertSame(1, CosmwasmDiscoveryHealthSnapshot::buildSummary()['eligible_chain_count']);
+
+        $this->post('cw_discovery_off_' . self::CHAIN_ID);
+
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_NOT_OPTED_IN,
+            $this->summaryRow(self::CHAIN_ID)['eligibility'],
+            'and back — the disable direction is the one with teeth'
+        );
+        self::assertSame(0, CosmwasmDiscoveryHealthSnapshot::buildSummary()['eligible_chain_count']);
+    }
+
+    public function test_the_transition_is_audit_logged_with_the_actor_and_both_states(): void
+    {
+        $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        $info = array_values(array_filter(
+            $this->logLines('info'),
+            static fn(array $line): bool => ($line['context']['action'] ?? null) === 'cosmwasm_chain_discovery_toggle'
+        ));
+
+        self::assertCount(1, $info, 'exactly one audit line per transition');
+        self::assertSame(self::CHAIN_ID, $info[0]['context']['chain_id'] ?? null);
+        self::assertSame(self::SLUG, $info[0]['context']['chain'] ?? null);
+        self::assertFalse($info[0]['context']['enabled_before'] ?? null, 'old value');
+        self::assertTrue($info[0]['context']['enabled_after'] ?? null, 'new value');
+        self::assertSame(1, $info[0]['context']['operator'] ?? null, 'who did it');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  WHEN THE WRITE DOES NOT LAND
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * The database refused. The operator is told NOTHING happened and what
+     * state the chain is still in — a failed write that reports success is
+     * how a chain silently stays out of (or in) the rotation.
+     */
+    public function test_a_failed_write_reports_an_error_and_never_claims_success(): void
+    {
+        ChainRepository::$rejectWrites = true;
+
+        $notices = $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        self::assertSame('error', $this->types($notices));
+        self::assertStringContainsString('database write failed', $notices[0]['message']);
+        self::assertStringContainsString('NOTHING was changed', $notices[0]['message']);
+        self::assertStringContainsString('still disabled', $notices[0]['message']);
+
+        self::assertSame('0', $this->flag(), 'the flag genuinely did not move');
+
+        $errors = $this->logLines('error');
+        self::assertNotSame([], $errors);
+        self::assertSame('cosmwasm_chain_discovery_write_failed', $errors[0]['context']['action'] ?? null);
+    }
+
+    /**
+     * The quieter failure: the statement RAN and reported no error, but
+     * the value did not move. `$wpdb->query()` not returning false says
+     * the SQL executed, not that the row now holds what was asked for —
+     * which is exactly why the handler reads the flag back instead of
+     * trusting the return value.
+     */
+    public function test_a_write_that_does_not_stick_is_not_reported_as_done(): void
+    {
+        ChainRepository::$swallowWrites = true;
+
+        $notices = $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        self::assertSame('error', $this->types($notices), 'an unconfirmed change is not a success');
+        self::assertStringContainsString('does not read back as enabled', $notices[0]['message']);
+        self::assertStringContainsString('NOT being reported as done', $notices[0]['message']);
+
+        self::assertSame('0', $this->flag(), 'the flag really did not move — that is the point');
+
+        $errors = $this->logLines('error');
+        self::assertNotSame([], $errors);
+        self::assertSame('cosmwasm_chain_discovery_unconfirmed', $errors[0]['context']['action'] ?? null);
+
+        // And no audit line claims a transition that did not happen.
+        self::assertSame([], array_values(array_filter(
+            $this->logLines('info'),
+            static fn(array $line): bool => ($line['context']['action'] ?? null) === 'cosmwasm_chain_discovery_toggle'
+        )));
+    }
+
+    public function test_an_unknown_chain_is_refused_before_any_write(): void
+    {
+        $notices = $this->post('cw_discovery_on_999999');
+
+        self::assertSame('error', $notices[0]['type']);
+        self::assertStringContainsString('chain not found', $notices[0]['message']);
+        self::assertSame([], ChainRepository::$discoveryWrites);
+    }
+
+    public function test_a_non_positive_chain_id_is_refused_before_any_write(): void
+    {
+        $notices = $this->post('cw_discovery_on_0');
+
+        self::assertSame('error', $notices[0]['type']);
+        self::assertStringContainsString('invalid chain', $notices[0]['message']);
+        self::assertSame([], ChainRepository::$discoveryWrites);
+    }
+
+    /**
+     * A double-submit, a stale tab, a back-button re-post. It must not
+     * report a transition that did not occur, and it must not write.
+     */
+    public function test_repeating_the_current_state_changes_nothing_and_says_so(): void
+    {
+        $this->post('cw_discovery_on_' . self::CHAIN_ID);
+        ChainRepository::$discoveryWrites = [];
+        \BCC\Core\Log\Logger::reset();
+
+        $notices = $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        self::assertSame('info', $notices[0]['type']);
+        self::assertStringContainsString('was already enabled', $notices[0]['message']);
+        self::assertSame([], ChainRepository::$discoveryWrites, 'a no-op must not write');
+        self::assertSame('1', $this->flag());
+        self::assertSame([], $this->logLines('info'), 'and must not claim a transition in the audit log');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  THE PANEL — four status cases, each named
+    // ═══════════════════════════════════════════════════════════════════
+
+    public function test_the_panel_reports_an_eligible_chain(): void
+    {
+        ChainRepository::reset();
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString('Eligible', $html);
+        self::assertStringContainsString('opt-in <strong>ON</strong>', $html);
+        self::assertStringContainsString('Nothing is blocking this chain', $html);
+        // The control offers the other direction.
+        self::assertStringContainsString('cw_discovery_off_' . self::CHAIN_ID, $html);
+        self::assertStringContainsString('Disable discovery', $html);
+
+        // The line that answers "how many of these will ever be scanned?"
+        // — the question the table used to leave the operator to work out.
+        self::assertStringContainsString('<strong>1 of 1</strong>', self::flatten($html));
+    }
+
+    /** Collapse HTML whitespace so an assertion can span line breaks. */
+    private static function flatten(string $html): string
+    {
+        return (string) preg_replace('/\s+/', ' ', $html);
+    }
+
+    public function test_the_panel_reports_a_chain_nobody_opted_in(): void
+    {
+        ChainRepository::reset();
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 0);
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString('Not opted in', $html);
+        self::assertStringContainsString('opt-in <strong>OFF</strong>', $html);
+        self::assertStringContainsString('Discovery is switched off for this chain', $html);
+        self::assertStringNotContainsString('Nothing is blocking this chain', $html);
+        self::assertStringContainsString('cw_discovery_on_' . self::CHAIN_ID, $html);
+        self::assertStringContainsString('Enable discovery', $html);
+    }
+
+    /**
+     * MEASURED capability, not operator intent: the chain answered the
+     * code listing with a 501. It is opted IN here on purpose — the point
+     * is that opting in cannot override a fact about the chain, and the
+     * panel must say so rather than showing a green row that never moves.
+     */
+    public function test_the_panel_reports_a_chain_with_no_wasm_module(): void
+    {
+        ChainRepository::reset();
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainCheckpointRepository::setCwDiscoveryState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString('No wasm module', $html);
+        self::assertStringContainsString('opt-in <strong>ON</strong>', $html, 'the opt-in is still shown honestly');
+        self::assertStringContainsString('Opting it in would change nothing', $html);
+        self::assertStringNotContainsString('Nothing is blocking this chain', $html);
+
+        // Still reversible: an opted-in unsupported chain must not be
+        // stranded with no way to switch it back off.
+        self::assertStringContainsString('cw_discovery_off_' . self::CHAIN_ID, $html);
+    }
+
+    /**
+     * The canary scope. The chain is opted in AND supported, and is still
+     * not scanned — the case with no other visible symptom whatsoever,
+     * which is exactly why it needs saying out loud.
+     */
+    public function test_the_panel_reports_a_chain_outside_the_canary_allowlist(): void
+    {
+        define('BCC_COSMWASM_CHAIN_ALLOWLIST', '4321');
+
+        ChainRepository::reset();
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString('Outside canary scope', $html);
+        self::assertStringContainsString('BCC_COSMWASM_CHAIN_ALLOWLIST names only chain 4321', $html);
+        self::assertStringNotContainsString('Nothing is blocking this chain', $html);
+        self::assertSame(0, CosmwasmDiscoveryHealthSnapshot::buildSummary()['eligible_chain_count']);
+    }
+
+    /**
+     * THE FAIL-CLOSED CASE, and the reason the panel reads its eligibility
+     * the pedantic way.
+     *
+     * The row here carries NO eligibility fields at all — the shape a
+     * summary built by older code, or a partially-populated fixture,
+     * produces. It must render as NOT eligible. If a missing field can
+     * read as "opted in" or "eligible", the panel will confidently tell an
+     * operator a chain is covered on the strength of a key nobody set.
+     *
+     * `Eligible` (capital E) appears in this panel ONLY as the eligible
+     * badge — the summary line above the table says "are eligible" in
+     * lower case — so its absence is a real assertion and not an accident
+     * of wording. test_the_panel_reports_an_eligible_chain() is the
+     * positive control that proves the string is printable at all.
+     */
+    public function test_a_chain_row_with_no_eligibility_fields_is_never_rendered_as_eligible(): void
+    {
+        $html = $this->renderPanelFor([
+            'chain_id'                   => self::CHAIN_ID,
+            'slug'                       => self::SLUG,
+            'name'                       => 'Cosmos Hub',
+            'state'                      => ChainCheckpointRepository::CW_STATE_IDLE,
+            'state_label'                => 'Idle',
+            'paused'                     => false,
+            'unsupported'                => false,
+            'progress_label'             => 'Never started.',
+            'families_by_classification' => [],
+            'last_discovery_age_seconds' => null,
+            'last_error'                 => null,
+            // NO 'eligibility', NO 'discovery_opted_in', NO
+            // 'eligibility_reason'. That is the whole test.
+        ]);
+
+        self::assertStringContainsString('Unknown', $html);
+        self::assertStringNotContainsString('Eligible', $html);
+        self::assertStringNotContainsString('Nothing is blocking this chain', $html);
+        self::assertStringContainsString('opt-in <strong>OFF</strong>', $html);
+        self::assertStringContainsString('could not be read', $html);
+    }
+
+    /**
+     * The same pedantry against values that are merely truthy. `'1'` is
+     * what a raw DB projection carries, and it must NOT satisfy a check
+     * the snapshot is supposed to have already made — the panel prints a
+     * decision, it does not make one.
+     */
+    public function test_a_truthy_but_non_boolean_opt_in_is_not_treated_as_opted_in(): void
+    {
+        $html = $this->renderPanelFor([
+            'chain_id'                   => self::CHAIN_ID,
+            'slug'                       => self::SLUG,
+            'name'                       => 'Cosmos Hub',
+            'state'                      => ChainCheckpointRepository::CW_STATE_IDLE,
+            'state_label'                => 'Idle',
+            'paused'                     => false,
+            'unsupported'                => false,
+            'progress_label'             => 'Never started.',
+            'families_by_classification' => [],
+            'last_discovery_age_seconds' => null,
+            'last_error'                 => null,
+            'discovery_opted_in'         => '1',
+            'eligibility'                => '',
+        ]);
+
+        self::assertStringContainsString('opt-in <strong>OFF</strong>', $html);
+        self::assertStringContainsString('Unknown', $html);
+        self::assertStringNotContainsString('Eligible', $html);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  THE PANEL — a failed read is still "unavailable"
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * The eligibility column must not become a back door around the
+     * fail-closed rule the rest of the panel already obeys. When a
+     * required read did not run there are no chain rows to describe, so
+     * there is no eligibility to report either — and above all no "0 of 0
+     * chains are eligible", which is a real and alarming state an operator
+     * would act on.
+     */
+    public function test_the_panel_still_reports_unavailable_when_a_required_read_fails(): void
+    {
+        ChainRepository::reset();
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainCheckpointRepository::$failGetAll = true;
+
+        $summary = CosmwasmDiscoveryHealthSnapshot::buildSummary();
+
+        self::assertTrue($summary['data_unavailable']);
+        self::assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_UNAVAILABLE, $summary['status']);
+        self::assertNull(
+            $summary['eligible_chain_count'],
+            '"nobody could look" must not be reported as a count of eligible chains'
+        );
+        self::assertSame([], $summary['chains']);
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString('Scanner figures are unavailable', $html);
+        self::assertStringNotContainsString('Eligible', $html);
+        self::assertStringNotContainsString('opt-in', $html);
+        self::assertStringNotContainsString('Enable discovery', $html);
+        self::assertStringNotContainsString('listed chains are eligible', $html);
+    }
+
+    // ── helper: render the panel around ONE hand-built chain row ────────
+
+    /**
+     * A summary whose only interesting content is the chain row supplied.
+     * Everything else is the minimum the panel needs, so an assertion
+     * about the Discovery cell cannot accidentally be satisfied by
+     * something else on the page.
+     *
+     * @param  array<string, mixed> $chain
+     */
+    private function renderPanelFor(array $chain): string
+    {
+        ob_start();
+        CosmwasmScannerPanel::render([
+            'discovery_enabled'    => true,
+            'backfill_enabled'     => true,
+            'disabled_reason'      => null,
+            'status'               => CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+            'data_unavailable'     => false,
+            'unavailable_reason'   => null,
+            'schedule'             => [],
+            'chains'               => [$chain],
+            'allowlist_chain_ids'  => null,
+            'eligible_chain_count' => 0,
+            'working_chain'        => null,
+            'next_chain'           => null,
+            'totals'               => [
+                'families'                 => 0,
+                'families_pending'         => 0,
+                'families_cw721'           => 0,
+                'families_not_cw721'       => 0,
+                'families_inconclusive'    => 0,
+                'contracts'                => 0,
+                'contracts_inspected'      => 0,
+                'candidates'               => 0,
+                'candidates_awaiting_emit' => 0,
+                'denied'                   => 0,
+            ],
+            'issues'               => [],
+        ]);
+        $html = ob_get_clean();
+
+        self::assertIsString($html);
+
+        return $html;
+    }
+}
