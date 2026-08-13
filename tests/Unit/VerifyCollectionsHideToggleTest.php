@@ -5,12 +5,15 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
+use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
+use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
+use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -47,6 +50,16 @@ final class VerifyCollectionsHideToggleTest extends TestCase
     private const CHAIN_ID      = 8;
     private const COLLECTION_ID = 4242;
     private const CONTRACT      = 'cosmos1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+    /**
+     * An innocent bystander. Every "the lookup came back wrong" test
+     * below puts THIS contract in the returned row, so a handler that
+     * takes the first row it is handed instead of the one it asked for
+     * writes a permanent DENY rule against a collection nobody touched.
+     * The assertions name it explicitly.
+     */
+    private const OTHER_COLLECTION_ID = 9999;
+    private const OTHER_CONTRACT      = 'cosmos1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
     protected function setUp(): void
     {
@@ -115,6 +128,118 @@ final class VerifyCollectionsHideToggleTest extends TestCase
     private function joined(array $notices): string
     {
         return implode(' ', array_column($notices, 'message'));
+    }
+
+    /** A row shaped like the admin lookup's, for the wrong collection. */
+    private static function otherCollectionRow(): object
+    {
+        return (object) [
+            'id'               => (string) self::OTHER_COLLECTION_ID,
+            'chain_id'         => (string) self::CHAIN_ID,
+            'contract_address' => self::OTHER_CONTRACT,
+            'collection_name'  => 'Somebody Else',
+        ];
+    }
+
+    /** Nothing was written, anywhere, for either contract. */
+    private function assertNothingWasWritten(): void
+    {
+        self::assertNull(
+            NftSpamContractRepository::getRule(self::CHAIN_ID, self::CONTRACT),
+            'a lookup that did not answer must not produce a rule'
+        );
+        self::assertNull(
+            NftSpamContractRepository::getRule(self::CHAIN_ID, self::OTHER_CONTRACT),
+            'and above all not a rule against the collection nobody asked about'
+        );
+        self::assertSame('0', $this->deniedFlag(), 'no rule, no cached flag');
+        self::assertCount(
+            1,
+            CosmwasmContractRepository::findEmittable(self::CHAIN_ID, 10),
+            'the inventory is untouched'
+        );
+    }
+
+    // ── THE LOOKUP CONTRACT ─────────────────────────────────────────────
+
+    /**
+     * `findManyByIds()` returns `collection id → row`. The handler read
+     * `$rows[0]`, which is null for every id the page can emit, so every
+     * hide and unhide answered "collection not found" and wrote nothing —
+     * for as long as the button existed.
+     *
+     * The suite did not catch it because the DOUBLE returned a convenient
+     * zero-indexed list. This test pins the double to the production
+     * shape; if anybody makes it a list again, this fails first and says
+     * why, before the handler tests fail for a reason that looks unrelated.
+     */
+    public function test_the_bulk_lookup_returns_a_map_keyed_by_collection_id(): void
+    {
+        $rows = CollectionRepository::findManyByIds([self::COLLECTION_ID]);
+
+        self::assertSame(
+            [self::COLLECTION_ID],
+            array_keys($rows),
+            'findManyByIds is keyed by collection id — see CollectionRepository::findManyByIds()'
+        );
+        self::assertArrayNotHasKey(0, $rows, 'a zero-indexed list is NOT this contract');
+        self::assertSame(self::COLLECTION_ID, (int) $rows[self::COLLECTION_ID]->id);
+    }
+
+    /**
+     * The map came back without the id that was asked for — the shape the
+     * defect produced on every single call.
+     *
+     * The refusal has to survive a NON-EMPTY map: `reset()`,
+     * `current()` and `array_values($rows)[0]` all "find" the bystander
+     * here and would hide it instead. Only indexing by the requested id
+     * is safe.
+     */
+    public function test_a_map_without_the_requested_id_is_refused_before_any_write(): void
+    {
+        CollectionRepository::$findManyByIdsOverride = [
+            self::OTHER_COLLECTION_ID => self::otherCollectionRow(),
+        ];
+
+        $notices = $this->post('hide_' . self::COLLECTION_ID);
+
+        self::assertSame('error', $notices[0]['type']);
+        self::assertStringContainsString('collection not found', $notices[0]['message']);
+        $this->assertNothingWasWritten();
+    }
+
+    /**
+     * The key says one collection, the row says another.
+     *
+     * The real repository keys off the row's own id, so it cannot produce
+     * this — which is the point of asserting it anyway. The check costs
+     * one integer comparison and is what stops a future re-implementation
+     * of the lookup from silently denying the wrong contract.
+     */
+    public function test_a_row_whose_id_disagrees_with_the_key_is_refused_before_any_write(): void
+    {
+        CollectionRepository::$findManyByIdsOverride = [
+            self::COLLECTION_ID => self::otherCollectionRow(),
+        ];
+
+        $notices = $this->post('hide_' . self::COLLECTION_ID);
+
+        self::assertSame('error', $notices[0]['type']);
+        self::assertStringContainsString(
+            'different collection than the one asked for',
+            $notices[0]['message'],
+            'a mismatched row is a data-integrity anomaly, not a plain miss — say so'
+        );
+        $this->assertNothingWasWritten();
+
+        $errors = array_values(array_filter(
+            \BCC\Core\Log\Logger::$lines,
+            static fn(array $line): bool => $line['level'] === 'error'
+        ));
+        self::assertNotSame([], $errors, 'a mismatched lookup must leave a trace');
+        self::assertSame('verify_collections_hide_id_mismatch', $errors[0]['context']['action'] ?? null);
+        self::assertSame(self::COLLECTION_ID, $errors[0]['context']['requested_id'] ?? null);
+        self::assertSame(self::OTHER_COLLECTION_ID, $errors[0]['context']['returned_id'] ?? null);
     }
 
     // ── HIDE ────────────────────────────────────────────────────────────
@@ -301,5 +426,55 @@ final class VerifyCollectionsHideToggleTest extends TestCase
         self::assertSame('error', $notices[0]['type']);
         self::assertStringContainsString('collection not found', $notices[0]['message']);
         self::assertSame('0', $this->deniedFlag());
+    }
+
+    // ── the emit path's own guard ───────────────────────────────────────
+
+    /**
+     * DENY POINT 3 still stands on its own.
+     *
+     * The cached flag is a queue optimisation, not the enforcement. If it
+     * goes stale — a failed sync, a row re-inventoried by a sweep, the
+     * partial-completion case two tests above — the candidate walks back
+     * into the emit queue, and the ONLY thing between it and a
+     * user-facing collection row is the live `NftSpamFilter::isSpam()`
+     * re-check inside `emitCollections()`.
+     *
+     * The stale flag is restored deliberately here and the queue is
+     * asserted non-empty first, so the "it was denied" conclusion cannot
+     * come from an empty queue.
+     */
+    public function test_the_live_rule_recheck_still_blocks_the_emit_when_the_cached_flag_goes_stale(): void
+    {
+        $this->post('hide_' . self::COLLECTION_ID);
+        self::assertSame(
+            NftSpamContractRepository::RULE_DENY,
+            NftSpamContractRepository::getRule(self::CHAIN_ID, self::CONTRACT),
+            'precondition: the authoritative rule is in force'
+        );
+
+        // The cache goes stale behind the rule's back.
+        CosmwasmContractRepository::setDenied(self::CHAIN_ID, self::CONTRACT, false);
+        self::assertSame('0', $this->deniedFlag());
+        self::assertCount(
+            1,
+            CosmwasmContractRepository::findEmittable(self::CHAIN_ID, 10),
+            'POSITIVE CONTROL: a stale flag really does put the candidate back in the emit queue'
+        );
+
+        $chain = ChainRepository::getById(self::CHAIN_ID);
+        self::assertNotNull($chain);
+
+        $emit = CosmwasmDiscoveryService::emitCollections(
+            self::CHAIN_ID,
+            new CosmosFetcher($chain),
+            new CosmwasmTickBudget(100, 60),
+            10
+        );
+
+        self::assertSame(0, $emit['emitted'], 'a hidden contract must never become a collection row');
+        self::assertSame(1, $emit['denied']);
+        self::assertSame([], CollectionRepository::$upserted);
+        self::assertSame('1', $this->deniedFlag(), 'and the emit path repairs the cache on its way past');
     }
 }

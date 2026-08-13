@@ -830,9 +830,10 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static function reset(): void
             {
-                self::$knownByChain = [];
-                self::$upserted     = [];
-                self::$adminRows    = [];
+                self::$knownByChain          = [];
+                self::$upserted              = [];
+                self::$adminRows             = [];
+                self::$findManyByIdsOverride = null;
             }
 
             /** @return array<int, object> */
@@ -872,11 +873,25 @@ namespace BCC\Trust\Onchain\Repositories {
              */
             public static array $adminRows = [];
 
+            /**
+             * A verbatim `findManyByIds()` result, for tests that need a
+             * shape the faithful fake below cannot produce.
+             *
+             * The fake keys by the row's own id exactly as production
+             * does, which makes "key present, row id different" genuinely
+             * unreachable through it — and that shape is precisely what
+             * the handler's identity check exists to survive. Rather than
+             * weaken the fake, hostile maps are injected here.
+             *
+             * @var array<int, object>|null
+             */
+            public static ?array $findManyByIdsOverride = null;
+
             /** Test helper: one row as the admin page sees it. */
-            public static function seedAdminRow(int $id, int $chainId, string $contract, string $name): void
+            public static function seedAdminRow(int $id, int $chainId, string $contract, string $name, ?int $rowId = null): void
             {
                 self::$adminRows[$id] = (object) [
-                    'id'               => (string) $id,
+                    'id'               => (string) ($rowId ?? $id),
                     'chain_id'         => (string) $chainId,
                     'contract_address' => $contract,
                     'collection_name'  => $name,
@@ -884,15 +899,32 @@ namespace BCC\Trust\Onchain\Repositories {
             }
 
             /**
+             * Faithful to production: a MAP KEYED BY COLLECTION ID, built
+             * from each ROW's own id — `$map[(int) $row->id] = $row`, the
+             * literal shape of
+             * {@see \BCC\Trust\Onchain\Repositories\CollectionRepository::findManyByIds()}.
+             *
+             * This used to return `$out[] = $row` — a convenient
+             * zero-indexed list. That single divergence is why a handler
+             * reading `$rows[0]` passed every test while answering
+             * "collection not found" for every collection in production.
+             * A double that is more convenient than the thing it doubles
+             * is a test that proves nothing. Do not re-introduce the list.
+             *
              * @param  list<int> $ids
-             * @return list<object>
+             * @return array<int, object> collection id → row
              */
             public static function findManyByIds(array $ids): array
             {
+                if (self::$findManyByIdsOverride !== null) {
+                    return self::$findManyByIdsOverride;
+                }
+
                 $out = [];
                 foreach ($ids as $id) {
-                    if (isset(self::$adminRows[$id])) {
-                        $out[] = self::$adminRows[$id];
+                    $row = self::$adminRows[$id] ?? null;
+                    if ($row !== null) {
+                        $out[(int) $row->id] = $row;
                     }
                 }
 

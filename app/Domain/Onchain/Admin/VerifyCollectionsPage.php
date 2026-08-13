@@ -1298,14 +1298,57 @@ final class VerifyCollectionsPage
      * with the SINGLE affected contract; it is already bounded to 200 and
      * needs no widening, and nothing here scans the table.
      *
+     * ── THE LOOKUP IS KEYED, NOT POSITIONAL ─────────────────────────────
+     * {@see CollectionRepository::findManyByIds()} returns a map keyed by
+     * collection id. This handler read `$rows[0]`, which is null for every
+     * id the admin page can actually emit, so hide and unhide both stopped
+     * at "collection not found" and never wrote a rule at all. See the
+     * comment on the lookup below before touching it.
+     *
      * @return list<array{type: string, message: string}>
      */
     private static function handleHideToggle(int $collectionId, bool $hide): array
     {
+        // THE LOOKUP CONTRACT. `findManyByIds()` ends
+        // `$map[(int) $row->id] = $row` — a MAP KEYED BY COLLECTION ID,
+        // not a positional list. The original `$rows[0]` therefore
+        // resolved to null for every id except the impossible 0, and
+        // EVERY hide and unhide answered "Hide: collection not found."
+        // while writing nothing. Proven on staging:
+        // `findManyByIds_keys=261764, rows[0]_is_NULL`.
+        //
+        // Index by the id that was asked for. NOT `reset()`, NOT
+        // `array_values()[0]`, NOT `current()` — a first-row shortcut
+        // turns a wrongly-shaped map into a plausible WRONG answer, and
+        // the wrong answer here is a permanent DENY rule on somebody
+        // else's contract.
         $rows = CollectionRepository::findManyByIds([$collectionId]);
-        $row  = $rows[0] ?? null;
+        $row  = $rows[$collectionId] ?? null;
         if ($row === null) {
             return [['type' => 'error', 'message' => 'Hide: collection not found.']];
+        }
+
+        // Belt AND braces. The map key already implies this for the real
+        // repository — that is exactly why it is cheap to assert and why
+        // it stays: one comparison makes "we denied the wrong contract"
+        // unreachable however the lookup is re-implemented later. A row
+        // whose own id disagrees with the key is a data-integrity anomaly,
+        // not a miss, so it is logged and NOTHING is written: no rule, no
+        // cached flag, no inventory sync.
+        $rowId = (int) $row->id;
+        if ($rowId !== $collectionId) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] hide toggle: collection lookup returned a mismatched row', [
+                'action'       => 'verify_collections_hide_id_mismatch',
+                'requested_id' => $collectionId,
+                'returned_id'  => $rowId,
+                'operator'     => get_current_user_id(),
+            ]);
+
+            return [[
+                'type'    => 'error',
+                'message' => 'Hide: the collection lookup returned a different collection than the one asked for. '
+                    . 'Nothing was changed. Check the bcc-trust error log.',
+            ]];
         }
 
         $chainId  = (int) $row->chain_id;

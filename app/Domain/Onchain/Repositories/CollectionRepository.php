@@ -1071,7 +1071,19 @@ final class CollectionRepository
      * groups discovery endpoint to enrich each gated group with its
      * underlying collection metadata + decision-grade trade signals.
      *
-     * @param int[] $ids
+     * ── THE RETURN IS A MAP KEYED BY COLLECTION ID ──────────────────
+     * `collection id → row`, NOT a positional list, and NOT ordered:
+     * ids that matched no row are simply absent, so the result is
+     * shorter than `$ids` whenever one is unknown. Callers index by
+     * the id they asked for (`$map[$id] ?? null`) or iterate the pairs.
+     * A caller that reads `$result[0]` gets null for every real id —
+     * that was a live defect in the Verify Collections hide/unhide
+     * button, which answered "collection not found" for every
+     * collection until 2026-08-13. Any test double for this method
+     * MUST key by id too; the one that returned a convenient
+     * zero-indexed list is what let the defect ship green.
+     *
+     * @param list<int> $ids
      * @return array<int, object{
      *     id: string,
      *     chain_id: string,
@@ -1131,6 +1143,8 @@ final class CollectionRepository
             ...$ids
         ));
 
+        // Keyed by the ROW's own id (not the requested one) so the key and
+        // the row can never disagree — see the contract note above.
         $map = [];
         foreach ($rows ?: [] as $row) {
             $map[(int) $row->id] = $row;
