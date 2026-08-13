@@ -373,3 +373,19 @@ require_once dirname(__DIR__, 2) . '/includes/database/schema-validator-msg-queu
 bcc_create_validator_msg_queue_table();
 require_once dirname(__DIR__, 2) . '/includes/database/schema-validator-msg-activation.php';
 bcc_create_validator_msg_activation_table();
+
+// ── the chain registry ──────────────────────────────────────────────────────
+//
+// `bcc_onchain_collections.chain_id` points here, and EVERY real read of a
+// collection (findManyByIds, listVerified, …) INNER JOINs this table for the
+// slug + chain_type. Installing collections without chains means those queries
+// simply cannot be executed against a real server — which is the gap a
+// keyed-vs-list return-shape defect in findManyByIds() slipped through.
+//
+// Deliberately LAST, not next to schema-collections.php: the installer seeds
+// the default chain rows and then calls ChainRepository::clearCache(), which
+// needs the delete_transient() stub defined above. Table creation order is
+// free — the collections schema declares no FOREIGN KEY, only a chain_id
+// column and an index.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-chains.php';
+bcc_onchain_create_chains_table();
