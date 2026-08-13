@@ -188,6 +188,22 @@ if (!function_exists('wp_json_encode')) {
     }
 }
 
+// Filter shim. ChainRepository::ttl() runs its cache TTL through
+// `bcc_chains_cache_ttl` on EVERY cached read, so getActive() cannot execute
+// at all without this. Pass-through (no filters registered) — which is also
+// what a stock WP install does, so the TTL under test is the real default.
+if (!function_exists('apply_filters')) {
+    /**
+     * @param  mixed $value
+     * @param  mixed ...$args
+     * @return mixed
+     */
+    function apply_filters(string $hook, $value, ...$args)
+    {
+        return $value;
+    }
+}
+
 // Object-cache stubs — repositories bump §5 generation counters via
 // wp_cache_* after a write commits (e.g. NftHoldingsRepository::ingestBatch →
 // bumpWalletGeneration). A tiny in-memory store keeps those functional so the

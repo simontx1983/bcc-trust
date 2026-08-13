@@ -44,17 +44,20 @@ if (!defined('ABSPATH')) {
  *     description: string|null,
  *     is_testnet: string,
  *     is_active: string,
+ *     cosmwasm_nft_discovery_enabled: string,
  *     created_at: string
  * }
  */
 final class ChainRepository
 {
     /** @var string Explicit column list — must match schema-chains.php
-     *  (CREATE TABLE + the description ALTER) + schema-blog-chain-tags.php's
+     *  (CREATE TABLE + the description ALTER + the
+     *  cosmwasm_nft_discovery_enabled ALTER) + schema-blog-chain-tags.php's
      *  ALTER (color). */
     private const COLUMNS = 'id, slug, name, chain_type, chain_id_hex, rpc_url, rest_url,
                  explorer_url, native_token, decimals, bech32_prefix, icon_url, color,
-                 marketplace_template, description, is_testnet, is_active, created_at';
+                 marketplace_template, description, is_testnet, is_active,
+                 cosmwasm_nft_discovery_enabled, created_at';
 
     /** @var string Object-cache / transient group. */
     private const CACHE_GROUP = 'bcc_chains';
@@ -395,6 +398,48 @@ final class ChainRepository
 
         // Bust the cache so a subsequent /halls/:slug read (chain_profile)
         // and the admin re-render both see the new values at once.
+        self::clearCache();
+
+        return $result !== false;
+    }
+
+    /**
+     * Turn the per-chain CosmWasm NFT-discovery opt-in on or off.
+     *
+     * THE ONLY WRITE PATH for `cosmwasm_nft_discovery_enabled`, and it
+     * busts the chains cache as part of the write rather than leaving that
+     * to the caller. That is not politeness — {@see getActive()} serves the
+     * scanner's eligibility read from a 5-minute object-cache/transient
+     * pair, so a toggle that did not invalidate would leave the worker
+     * scanning a just-disabled chain (or ignoring a just-enabled one) for
+     * up to the whole TTL, with the admin screen showing the new value the
+     * entire time. Putting the invalidation here means no future caller can
+     * forget it.
+     *
+     * Bounded to a single row by primary key. Touches exactly one column —
+     * an operator flipping discovery must never be able to disturb chain
+     * identity, RPC config or `is_active`.
+     *
+     * @return bool true when the UPDATE executed without a DB error.
+     */
+    public static function setCosmwasmNftDiscoveryEnabled(int $chainId, bool $enabled): bool
+    {
+        if ($chainId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET cosmwasm_nft_discovery_enabled = %d
+              WHERE id = %d
+              LIMIT 1",
+            $enabled ? 1 : 0,
+            $chainId
+        ));
+
         self::clearCache();
 
         return $result !== false;

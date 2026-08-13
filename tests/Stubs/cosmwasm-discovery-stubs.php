@@ -1224,7 +1224,22 @@ namespace BCC\Trust\Onchain\Repositories {
     }
 
     if (!class_exists(__NAMESPACE__ . '\\ChainRepository', false)) {
-        /** Chain registry fake. */
+        /**
+         * Chain registry fake.
+         *
+         * `getActive()` is the projection the worker's eligibility
+         * chokepoint reads, so the fake rows carry
+         * `cosmwasm_nft_discovery_enabled` exactly as the real
+         * ChainRepository::COLUMNS projection does.
+         *
+         * seed() defaults it to 1 — NOT because the production default is
+         * 1 (it is 0; ChainCosmwasmDiscoveryFlagIntegrationTest pins that
+         * against a real MySQL), but because "an operator has opted this
+         * chain in" is the precondition of every OTHER discovery test in
+         * this suite. Tests about the opt-in itself pass 0 explicitly, and
+         * {@see seedWithoutDiscoveryColumn()} models the pre-migration row
+         * where the column is ABSENT rather than 0.
+         */
         final class ChainRepository
         {
             /** @var array<int, object> */
@@ -1235,8 +1250,35 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$chains = [];
             }
 
-            public static function seed(int $id, string $slug, string $rest = 'https://lcd.example', string $type = 'cosmos'): void
-            {
+            public static function seed(
+                int $id,
+                string $slug,
+                string $rest = 'https://lcd.example',
+                string $type = 'cosmos',
+                int $cosmwasmNftDiscoveryEnabled = 1
+            ): void {
+                self::$chains[$id] = (object) [
+                    'id'                             => $id,
+                    'slug'                           => $slug,
+                    'chain_type'                     => $type,
+                    'rest_url'                       => $rest,
+                    'decimals'                       => 6,
+                    'cosmwasm_nft_discovery_enabled' => (string) $cosmwasmNftDiscoveryEnabled,
+                ];
+            }
+
+            /**
+             * A row from an install where the ALTER has NOT run: the
+             * property is absent, not 0. Reading an absent property would
+             * raise a PHP warning and evaluate to null, so the production
+             * code must probe for presence — this is how that is exercised.
+             */
+            public static function seedWithoutDiscoveryColumn(
+                int $id,
+                string $slug,
+                string $rest = 'https://lcd.example',
+                string $type = 'cosmos'
+            ): void {
                 self::$chains[$id] = (object) [
                     'id'         => $id,
                     'slug'       => $slug,
