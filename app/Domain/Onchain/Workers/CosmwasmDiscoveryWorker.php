@@ -872,9 +872,33 @@ final class CosmwasmDiscoveryWorker
      */
     private static function discoveryOptedIn(object $chain): bool
     {
+        return self::discoveryOptInState($chain) === true;
+    }
+
+    /**
+     * The same read, with the third answer kept.
+     *
+     * ── WHY TWO METHODS FOR ONE COLUMN ──────────────────────────────────
+     * The chokepoint above needs a yes/no, and "I cannot tell" has to
+     * collapse to NO there — that is the fail-closed rule and it does not
+     * change. The ADMIN PANEL needs the distinction back, because "an
+     * operator switched this off" and "this install has no such column"
+     * are different things to tell somebody, and the second one sends them
+     * looking for a switch that does not exist yet.
+     *
+     * Both callers read the column through THIS method so there is exactly
+     * one place that knows how the flag is stored. A panel with its own
+     * copy of the presence check could drift from the chokepoint, and the
+     * operator would believe the panel.
+     *
+     * @return bool|null null = the projection carries no such property,
+     *                   i.e. the migration has not run on this install
+     */
+    public static function discoveryOptInState(object $chain): ?bool
+    {
         $vars = get_object_vars($chain);
         if (!array_key_exists(self::DISCOVERY_FLAG_COLUMN, $vars)) {
-            return false;
+            return null;
         }
 
         return (int) $vars[self::DISCOVERY_FLAG_COLUMN] === 1;

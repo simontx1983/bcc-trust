@@ -1245,9 +1245,46 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @var array<int, object> */
             public static array $chains = [];
 
+            /**
+             * Every setCosmwasmNftDiscoveryEnabled() call, in order.
+             *
+             * @var list<array{chain_id: int, enabled: bool}>
+             */
+            public static array $discoveryWrites = [];
+
+            /**
+             * How many times the chains cache was invalidated.
+             *
+             * The REAL repository busts the cache INSIDE the write (see
+             * ChainRepository::setCosmwasmNftDiscoveryEnabled) because
+             * getActive() serves the scanner's eligibility read from a
+             * 5-minute cache — a toggle that skipped invalidation would
+             * leave the worker scanning a just-disabled chain for the rest
+             * of the TTL. The counter is how a unit test observes that the
+             * admin control went through that write path.
+             */
+            public static int $cacheBusts = 0;
+
+            /** Make the write report a DB error, the way $wpdb->query === false does. */
+            public static bool $rejectWrites = false;
+
+            /**
+             * Make the write REPORT success while changing nothing.
+             *
+             * The quiet half of the failure space: `$wpdb->query()` not
+             * returning false says the statement ran, not that the row now
+             * holds the value asked for. This is what the handler's
+             * read-back exists to catch.
+             */
+            public static bool $swallowWrites = false;
+
             public static function reset(): void
             {
-                self::$chains = [];
+                self::$chains         = [];
+                self::$discoveryWrites = [];
+                self::$cacheBusts     = 0;
+                self::$rejectWrites   = false;
+                self::$swallowWrites  = false;
             }
 
             public static function seed(
@@ -1263,6 +1300,13 @@ namespace BCC\Trust\Onchain\Repositories {
                     'chain_type'                     => $type,
                     'rest_url'                       => $rest,
                     'decimals'                       => 6,
+                    // Inert here, load-bearing in the assertions: the
+                    // discovery toggle must not disturb any of them.
+                    'is_active'                      => '1',
+                    'explorer_url'                   => 'https://explorer.example/' . $slug,
+                    'icon_url'                       => 'https://cdn.example/' . $slug . '.png',
+                    'color'                          => '#123456',
+                    'description'                    => 'About ' . $slug . '.',
                     'cosmwasm_nft_discovery_enabled' => (string) $cosmwasmNftDiscoveryEnabled,
                 ];
             }
@@ -1297,6 +1341,54 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function getActive(): array
             {
                 return array_values(self::$chains);
+            }
+
+            /**
+             * THE ONLY WRITE PATH for the opt-in, faked at the seam.
+             *
+             * Mirrors the production contract exactly, including the parts
+             * that are easy to get wrong:
+             *   - a non-positive id is refused WITHOUT touching anything;
+             *   - the cache is busted as part of the write, not by the
+             *     caller;
+             *   - the return value means "the UPDATE did not error", which
+             *     is NOT the same as "the value is now what you asked for"
+             *     ($swallowWrites is that gap made observable);
+             *   - EXACTLY ONE PROPERTY MOVES. Everything else on the row is
+             *     left byte-identical, which is what lets a test assert the
+             *     toggle cannot disturb is_active, the endpoints or the
+             *     Hall identity fields.
+             */
+            public static function setCosmwasmNftDiscoveryEnabled(int $chainId, bool $enabled): bool
+            {
+                if ($chainId <= 0) {
+                    return false;
+                }
+
+                self::$discoveryWrites[] = ['chain_id' => $chainId, 'enabled' => $enabled];
+
+                if (self::$rejectWrites) {
+                    // The real one still busts the cache after a failed
+                    // query (clearCache() is unconditional), so this does
+                    // too — otherwise a test could "prove" invalidation
+                    // that production does not actually order this way.
+                    self::clearCache();
+
+                    return false;
+                }
+
+                if (!self::$swallowWrites && isset(self::$chains[$chainId])) {
+                    self::$chains[$chainId]->cosmwasm_nft_discovery_enabled = $enabled ? '1' : '0';
+                }
+
+                self::clearCache();
+
+                return true;
+            }
+
+            public static function clearCache(): void
+            {
+                self::$cacheBusts++;
             }
         }
     }
@@ -1484,6 +1576,35 @@ namespace {
         function get_current_user_id(): int
         {
             return 1;
+        }
+    }
+
+    if (!class_exists('BccTestCapabilities', false)) {
+        /**
+         * Who the current user is allowed to be.
+         *
+         * Defaults to a full administrator, because that is the
+         * precondition of every OTHER admin test in this suite. A test
+         * about the capability gate itself empties the list, which is the
+         * only way to reach the refusal branch — a nonce and a capability
+         * are separate gates and each has to be provable on its own.
+         */
+        final class BccTestCapabilities
+        {
+            /** @var list<string> */
+            public static array $granted = ['manage_options'];
+
+            public static function reset(): void
+            {
+                self::$granted = ['manage_options'];
+            }
+        }
+    }
+
+    if (!function_exists('current_user_can')) {
+        function current_user_can(string $capability): bool
+        {
+            return in_array($capability, \BccTestCapabilities::$granted, true);
         }
     }
 

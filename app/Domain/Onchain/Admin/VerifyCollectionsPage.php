@@ -1044,6 +1044,21 @@ final class VerifyCollectionsPage
             return self::handleHideToggle((int) substr($action, strlen('unhide_')), false);
         }
 
+        // Per-chain discovery opt-in. Checked BEFORE the shorter `cw_`
+        // prefixes purely for readability — none of these five prefixes is
+        // a prefix of another, so the order cannot change which handler
+        // runs. `on`/`off` are separate actions rather than one "toggle"
+        // action on purpose: a toggle decides what to do from the state at
+        // RENDER time, so a double-submit or a stale tab silently flips a
+        // chain back the other way. The button says which direction it
+        // means, and the handler does exactly that.
+        if (strpos($action, 'cw_discovery_on_') === 0) {
+            return self::handleChainDiscoveryToggle((int) substr($action, strlen('cw_discovery_on_')), true);
+        }
+        if (strpos($action, 'cw_discovery_off_') === 0) {
+            return self::handleChainDiscoveryToggle((int) substr($action, strlen('cw_discovery_off_')), false);
+        }
+
         // CosmWasm scanner controls. Same `<verb>_<id>` encoding as the
         // per-row buttons above, prefixed `cw_` so the scanner's chain ids
         // can never be mistaken for a collection id.
@@ -1061,6 +1076,192 @@ final class VerifyCollectionsPage
         }
 
         return [];
+    }
+
+    /**
+     * Turn the per-chain CosmWasm NFT-discovery opt-in on or off.
+     *
+     * ── WHAT THIS SWITCH IS ─────────────────────────────────────────────
+     * `wp_bcc_chains.cosmwasm_nft_discovery_enabled` — OPERATOR INTENT, one
+     * of the five conditions
+     * {@see CosmwasmDiscoveryWorker::eligibleChainIds()} intersects. It is
+     * not the same thing as Pause: pause is a temporary hold on a chain the
+     * scanner is already responsible for (and lives on the checkpoint row),
+     * whereas this decides whether the scanner is responsible for the chain
+     * at all. Both exist because "stop for now" and "this is not ours" are
+     * different statements and collapsing them loses the difference.
+     *
+     * Enabling a chain here does NOT start a scan. The environment gate,
+     * the schedule, the canary allowlist and the chain's own measured wasm
+     * capability all still apply, and everything discovered still arrives
+     * UNVERIFIED for an operator to approve.
+     *
+     * ── AUTHORISATION: BOTH, NOT EITHER ─────────────────────────────────
+     * A valid nonce proves the request came from our form; a capability
+     * proves the person is allowed to use it. Neither implies the other —
+     * a nonce is not a permission, and a permission does not make a
+     * cross-site POST legitimate — so this write requires both. The nonce
+     * is verified by {@see handlePost()} before dispatch (one check for the
+     * whole page); the capability is re-checked HERE rather than relying on
+     * the page-level `wp_die()` in {@see render_page()}, so the gate sits
+     * on the write itself and survives any future caller.
+     *
+     * ── THE WRITE PATH IS FIXED ─────────────────────────────────────────
+     * {@see ChainRepository::setCosmwasmNftDiscoveryEnabled()} and nothing
+     * else. It touches exactly one column and busts the chains cache as
+     * part of the write — `getActive()` serves the scanner's eligibility
+     * read from a 5-minute cache, so a write that skipped invalidation
+     * would leave the worker scanning a just-disabled chain for the rest of
+     * the TTL while this screen showed the new value the whole time.
+     *
+     * ── AND IT VERIFIES INSTEAD OF ASSUMING ─────────────────────────────
+     * Same posture as {@see handleHideToggle()}: the repository returns
+     * "the UPDATE did not error", which is not the same as "the flag is
+     * now what you asked for" — the row may have gone, or the projection
+     * may not carry the column at all on a pre-migration install. So the
+     * value is READ BACK and a disagreement is reported as a failure. An
+     * operator who is told "enabled" must be able to believe it.
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function handleChainDiscoveryToggle(int $chainId, bool $enable): array
+    {
+        if (!current_user_can('manage_options')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] CosmWasm chain discovery toggle refused', [
+                'action'   => 'cosmwasm_chain_discovery_denied',
+                'chain_id' => $chainId,
+                'enable'   => $enable,
+                'operator' => get_current_user_id(),
+            ]);
+
+            return [[
+                'type'    => 'error',
+                'message' => 'Scanner: you do not have permission to change chain discovery. Nothing was changed.',
+            ]];
+        }
+
+        if ($chainId <= 0) {
+            return [['type' => 'error', 'message' => 'Scanner: invalid chain. Nothing was changed.']];
+        }
+
+        $chain = ChainRepository::getById($chainId);
+        if ($chain === null) {
+            return [['type' => 'error', 'message' => 'Scanner: chain not found. Nothing was changed.']];
+        }
+        $slug = (string) $chain->slug;
+
+        // null = the projection has no such column (pre-migration install).
+        // Reported as-is rather than folded into false: the operator needs
+        // to know the difference between "it was off" and "this install
+        // cannot store the answer yet".
+        $before = CosmwasmDiscoveryWorker::discoveryOptInState($chain);
+
+        if ($before === $enable) {
+            return [[
+                'type'    => 'info',
+                'message' => sprintf(
+                    'Scanner: discovery for %s was already %s. Nothing was changed.',
+                    $slug,
+                    $enable ? 'enabled' : 'disabled'
+                ),
+            ]];
+        }
+
+        if (!ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, $enable)) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] CosmWasm chain discovery write failed', [
+                'action'   => 'cosmwasm_chain_discovery_write_failed',
+                'chain_id' => $chainId,
+                'chain'    => $slug,
+                'enable'   => $enable,
+                'operator' => get_current_user_id(),
+            ]);
+
+            return [[
+                'type'    => 'error',
+                'message' => sprintf(
+                    'Scanner: could not %s discovery for %s — the database write failed and NOTHING was changed. '
+                        . 'The chain is still %s. Check the bcc-trust error log.',
+                    $enable ? 'enable' : 'disable',
+                    $slug,
+                    $before === true ? 'enabled' : ($before === false ? 'disabled' : 'in its previous state')
+                ),
+            ]];
+        }
+
+        // The read-back. The cache was busted inside the write, so this
+        // reaches the database rather than the projection we just changed.
+        $after = self::readDiscoveryOptIn($chainId);
+
+        if ($after !== $enable) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] CosmWasm chain discovery toggle could not be confirmed', [
+                'action'   => 'cosmwasm_chain_discovery_unconfirmed',
+                'chain_id' => $chainId,
+                'chain'    => $slug,
+                'wanted'   => $enable,
+                'observed' => $after,
+                'operator' => get_current_user_id(),
+            ]);
+
+            return [[
+                'type'    => 'error',
+                'message' => sprintf(
+                    'Scanner: the database accepted the change but discovery for %s does not read back as %s, '
+                        . 'so it is NOT being reported as done. Nothing else was touched — no collection, no chain '
+                        . 'setting, no verification. Reload the page to see the current state and check the '
+                        . 'bcc-trust error log.',
+                    $slug,
+                    $enable ? 'enabled' : 'disabled'
+                ),
+            ]];
+        }
+
+        // THE AUDIT LINE: who, which chain, and old → new.
+        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm chain discovery toggle', [
+            'action'         => 'cosmwasm_chain_discovery_toggle',
+            'chain_id'       => $chainId,
+            'chain'          => $slug,
+            'enabled_before' => $before,
+            'enabled_after'  => $after,
+            'operator'       => get_current_user_id(),
+        ]);
+
+        if ($enable) {
+            return [[
+                'type'    => 'success',
+                'message' => sprintf(
+                    'Scanner: discovery is ON for %s. Nothing has been scanned yet — the scheduled passes still '
+                        . 'apply, and anything found arrives here unverified for you to approve.',
+                    $slug
+                ),
+            ]];
+        }
+
+        return [[
+            'type'    => 'success',
+            'message' => sprintf(
+                'Scanner: discovery is OFF for %s. No pass will consider it from now on. Everything already '
+                    . 'discovered is kept, and no collection was un-verified or removed.',
+                $slug
+            ),
+        ]];
+    }
+
+    /**
+     * Read the per-chain discovery opt-in back from the registry.
+     *
+     * Deliberately re-resolves the chain instead of reusing the row the
+     * handler already had: that row is the BEFORE picture, and comparing a
+     * write against the value it was supposed to replace proves nothing.
+     *
+     * @return bool|null null when the chain is gone or the projection
+     *                   carries no such column — both of which mean "could
+     *                   not confirm", never "it worked"
+     */
+    private static function readDiscoveryOptIn(int $chainId): ?bool
+    {
+        $chain = ChainRepository::getById($chainId);
+
+        return $chain === null ? null : CosmwasmDiscoveryWorker::discoveryOptInState($chain);
     }
 
     /**

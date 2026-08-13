@@ -305,6 +305,154 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
         self::assertFalse(ChainRepository::setCosmwasmNftDiscoveryEnabled(-1, true));
     }
 
+    /**
+     * EVERY OTHER COLUMN, BYTE FOR BYTE.
+     *
+     * The other tests in this file name the columns somebody thought of.
+     * This one enumerates the table from INFORMATION_SCHEMA and compares
+     * the whole row, so a column added later is covered the day it is
+     * added rather than the day somebody remembers to extend a list — and
+     * so an UPDATE that grew a second SET clause cannot pass by touching
+     * something nobody is asserting on.
+     *
+     * The chain row is shared property: `is_active` gates every reader,
+     * `rpc_url`/`rest_url` are what wallet linking and holdings dial, and
+     * the identity fields are what a Hall renders. An operator switching
+     * the SCANNER off for a chain must not be able to disturb any of it.
+     */
+    public function testTheToggleLeavesEveryOtherColumnByteIdentical(): void
+    {
+        $chainId = $this->firstChainId();
+
+        $before = $this->rowSnapshot($chainId);
+        self::assertNotSame([], $before, 'the chain row must be readable to be compared');
+        self::assertArrayHasKey(self::COLUMN, $before);
+        self::assertGreaterThan(
+            5,
+            count($before),
+            'a snapshot of one or two columns would make the comparison below vacuous'
+        );
+        self::assertSame('0', (string) $before[self::COLUMN], 'precondition: ships disabled');
+
+        self::assertTrue(ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, true));
+
+        $after = $this->rowSnapshot($chainId);
+        self::assertSame('1', (string) $after[self::COLUMN], 'the one column that was supposed to move');
+
+        unset($before[self::COLUMN], $after[self::COLUMN]);
+        self::assertSame(
+            $before,
+            $after,
+            'enabling discovery must change exactly one column of wp_bcc_chains'
+        );
+
+        // Named explicitly as well, because these are the ones whose loss
+        // would surface far away from the scanner.
+        self::assertSame('1', (string) $after['is_active'], 'the chain must stay active');
+        self::assertArrayHasKey('rest_url', $after);
+        self::assertArrayHasKey('rpc_url', $after);
+        self::assertArrayHasKey('icon_url', $after);
+        self::assertArrayHasKey('color', $after);
+        self::assertArrayHasKey('description', $after);
+
+        // …and the disable direction, from the enabled state.
+        $enabled = $this->rowSnapshot($chainId);
+        self::assertTrue(ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, false));
+        $disabled = $this->rowSnapshot($chainId);
+
+        self::assertSame('0', (string) $disabled[self::COLUMN]);
+        unset($enabled[self::COLUMN], $disabled[self::COLUMN]);
+        self::assertSame($enabled, $disabled, 'disabling discovery must change exactly one column too');
+    }
+
+    /**
+     * And the chain is still a chain afterwards.
+     *
+     * Same claim as testADisabledChainIsStillReturnedByEveryGeneralAccessor
+     * but taken around BOTH edges of the toggle rather than from a resting
+     * state: the accessors are re-checked immediately after a write, i.e.
+     * against the cache the write just invalidated, which is where a
+     * botched invalidation would actually show up.
+     */
+    public function testEveryAccessorStillResolvesTheChainAfterEitherDirection(): void
+    {
+        $wpdb    = $GLOBALS['wpdb'];
+        $chainId = $this->firstChainId();
+
+        $slug = (string) $wpdb->get_var($wpdb->prepare(
+            'SELECT slug FROM `' . ChainRepository::table() . '` WHERE id = %d',
+            $chainId
+        ));
+        self::assertNotSame('', $slug);
+
+        foreach ([true, false] as $enabled) {
+            self::assertTrue(ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, $enabled));
+
+            $direction = $enabled ? 'after enabling' : 'after disabling';
+
+            self::assertNotNull(ChainRepository::getById($chainId), "getById {$direction}");
+            self::assertNotNull(ChainRepository::getBySlug($slug), "getBySlug {$direction}");
+            self::assertSame($chainId, ChainRepository::resolveId($slug), "resolveId {$direction}");
+            self::assertSame($chainId, ChainRepository::resolveIdAnyState($slug), "resolveIdAnyState {$direction}");
+
+            $activeIds = array_map(static fn(object $c): int => (int) $c->id, ChainRepository::getActive());
+            self::assertContains($chainId, $activeIds, "getActive {$direction}");
+
+            // The projection still carries the flag, and it reads back as
+            // the value just written — the accessors and the toggle agree.
+            self::assertSame($enabled, $this->cachedFlag($chainId), "cached projection {$direction}");
+        }
+    }
+
+    /**
+     * Every column of one chain row, keyed by column name.
+     *
+     * Explicit projection built from INFORMATION_SCHEMA rather than
+     * `SELECT *`: §2 is about repositories, but an assertion that names
+     * its columns is also the one that notices when the set of columns
+     * changes. Names are filtered to `[A-Za-z0-9_]` before interpolation
+     * — they come from the schema, not from input, and they still get
+     * checked.
+     *
+     * @return array<string, string|null>
+     */
+    private function rowSnapshot(int $chainId): array
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = ChainRepository::table();
+
+        $columns = [];
+        foreach ($wpdb->get_col($wpdb->prepare(
+            'SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+              ORDER BY ORDINAL_POSITION',
+            $table
+        )) as $column) {
+            $name = (string) $column;
+            if (preg_match('/^[A-Za-z0-9_]+$/', $name) === 1) {
+                $columns[] = '`' . $name . '`';
+            }
+        }
+        if ($columns === []) {
+            return [];
+        }
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            'SELECT ' . implode(', ', $columns) . ' FROM `' . $table . '` WHERE id = %d LIMIT 1',
+            $chainId
+        ));
+        if ($row === null) {
+            return [];
+        }
+
+        $out = [];
+        foreach (get_object_vars($row) as $key => $value) {
+            $out[(string) $key] = $value === null ? null : (string) $value;
+        }
+
+        return $out;
+    }
+
     /** The flag as the CACHED projection currently reports it. */
     private function cachedFlag(int $chainId): bool
     {

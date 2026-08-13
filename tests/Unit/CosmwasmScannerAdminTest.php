@@ -196,6 +196,148 @@ final class CosmwasmScannerAdminTest extends TestCase
         $this->assertStringContainsString('No wasm module', $row['progress_label']);
     }
 
+    // ── per-chain eligibility (PURE) ────────────────────────────────────
+
+    /**
+     * The control case. Every condition satisfied — and note that it takes
+     * ALL of them, which is what the rest of these tests take away one at
+     * a time.
+     */
+    public function test_a_chain_is_eligible_only_when_every_condition_holds(): void
+    {
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE,
+            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, true, null)
+        );
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE,
+            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, true, [8, 12]),
+            'being named in the canary list is not an extra hurdle'
+        );
+    }
+
+    public function test_an_opt_in_of_false_is_reported_as_not_opted_in(): void
+    {
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_NOT_OPTED_IN,
+            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, false, null)
+        );
+    }
+
+    /**
+     * THE FAIL-CLOSED ONE. `null` means the projection has no such column
+     * — a pre-migration install — and it must not be able to produce an
+     * eligible chain by any route, allowlist or not.
+     */
+    public function test_an_unreadable_opt_in_is_never_eligible(): void
+    {
+        foreach ([null, [8], []] as $allowlist) {
+            self::assertSame(
+                CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN,
+                CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, null, $allowlist)
+            );
+        }
+    }
+
+    public function test_a_measured_unsupported_chain_is_never_eligible_however_it_is_configured(): void
+    {
+        // Opted in, in the allowlist, and it still cannot be scanned:
+        // operator intent does not create a wasm module.
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNSUPPORTED,
+            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, true, true, [8])
+        );
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNSUPPORTED,
+            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, true, false, null)
+        );
+    }
+
+    public function test_a_chain_outside_the_canary_allowlist_is_not_eligible(): void
+    {
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
+            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, true, [12])
+        );
+    }
+
+    /**
+     * `[]` is the gate's "defined but names no usable chain id" answer,
+     * which means scan NOTHING. It must not fall through to "no
+     * restriction" — that is the fail-open shape this codebase already
+     * shipped once.
+     */
+    public function test_a_defined_but_unusable_allowlist_excludes_every_chain(): void
+    {
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
+            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, true, [])
+        );
+        self::assertStringContainsString(
+            'names no usable chain id',
+            CosmwasmDiscoveryHealthSnapshot::eligibilityReason(
+                CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
+                []
+            )
+        );
+    }
+
+    /**
+     * A value from a newer build, or a typo. It degrades to "unknown" —
+     * never to the one value that means "this chain will be scanned".
+     */
+    public function test_an_unrecognised_eligibility_value_degrades_to_unknown(): void
+    {
+        self::assertSame('Unknown', CosmwasmDiscoveryHealthSnapshot::eligibilityLabel('some_future_value'));
+        self::assertSame('Unknown', CosmwasmDiscoveryHealthSnapshot::eligibilityLabel(''));
+        self::assertStringContainsString(
+            'could not be read',
+            CosmwasmDiscoveryHealthSnapshot::eligibilityReason('some_future_value', null)
+        );
+    }
+
+    /**
+     * The row builder's defaults point the same way: a caller that does
+     * not say whether the chain is opted in gets a row that is NOT
+     * eligible and NOT opted in.
+     */
+    public function test_a_chain_row_built_without_an_opt_in_defaults_to_not_eligible(): void
+    {
+        $row = CosmwasmDiscoveryHealthSnapshot::deriveChainRow(
+            8,
+            'cosmos',
+            'Cosmos Hub',
+            $this->checkpoint(),
+            [],
+            0,
+            null,
+            self::NOW
+        );
+
+        self::assertSame(CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN, $row['eligibility']);
+        self::assertFalse($row['discovery_opted_in']);
+        self::assertStringContainsString('NOT eligible', $row['eligibility_reason']);
+    }
+
+    public function test_a_chain_row_carries_the_opt_in_it_was_given(): void
+    {
+        $optedIn = CosmwasmDiscoveryHealthSnapshot::deriveChainRow(
+            8,
+            'cosmos',
+            'Cosmos Hub',
+            $this->checkpoint(),
+            [],
+            0,
+            null,
+            self::NOW,
+            true,
+            null
+        );
+
+        self::assertTrue($optedIn['discovery_opted_in']);
+        self::assertSame(CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE, $optedIn['eligibility']);
+    }
+
     // ── the no-percentage invariant ─────────────────────────────────────
 
     /**
