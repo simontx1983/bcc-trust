@@ -27,6 +27,7 @@ use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CollectionDemandService;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
@@ -323,15 +324,39 @@ final class VerifyCollectionsPage
             $scannerAddresses[] = (string) $listRow->contract_address;
         }
         if ($scannerAddresses !== []) {
-            $codeIds = [];
-            foreach (CosmwasmContractRepository::findManyForChains($scannerChainIds, $scannerAddresses) as $candidate) {
-                $scannerCandidates[(int) $candidate->chain_id . '|' . strtolower((string) $candidate->contract_address)] = $candidate;
-                $codeIds[] = (int) $candidate->code_id;
-            }
-            if ($codeIds !== []) {
-                foreach (CosmwasmCodeFamilyRepository::findManyForChains($scannerChainIds, $codeIds) as $family) {
-                    $scannerFamilies[(int) $family->chain_id . '|' . (int) $family->code_id] = $family;
+            // Both reads FAIL CLOSED. A row with no scanner entry renders no
+            // scanner detail at all — which is correct when the collection
+            // genuinely came from another path, and a lie when the lookup
+            // simply failed. So a failed read drops the detail for the whole
+            // page and SAYS SO, rather than quietly presenting every row as
+            // "the scanner has never seen this".
+            try {
+                $codeIds = [];
+                foreach (CosmwasmContractRepository::findManyForChains($scannerChainIds, $scannerAddresses) as $candidate) {
+                    $scannerCandidates[(int) $candidate->chain_id . '|' . strtolower((string) $candidate->contract_address)] = $candidate;
+                    $codeIds[] = (int) $candidate->code_id;
                 }
+                if ($codeIds !== []) {
+                    foreach (CosmwasmCodeFamilyRepository::findManyForChains($scannerChainIds, $codeIds) as $family) {
+                        $scannerFamilies[(int) $family->chain_id . '|' . (int) $family->code_id] = $family;
+                    }
+                }
+            } catch (RepositoryReadFailure $e) {
+                $scannerCandidates = [];
+                $scannerFamilies   = [];
+
+                \BCC\Core\Log\Logger::error('[bcc-trust] Verify Collections: scanner detail read failed', [
+                    'action'   => 'verify_collections_scanner_detail_failed',
+                    'method'   => $e->repositoryMethod(),
+                    'db_error' => $e->dbError(),
+                ]);
+
+                $notices[] = [
+                    'type'    => 'error',
+                    'message' => 'The CosmWasm scanner detail could not be loaded for this page (a database read failed), '
+                        . 'so the per-row scanner evidence is hidden rather than shown as "not seen by the scanner". '
+                        . 'The collection rows themselves are unaffected. Check the bcc-trust error log.',
+                ];
             }
         }
 
@@ -1256,6 +1281,23 @@ final class VerifyCollectionsPage
      * wins over the name heuristics, which is exactly what "I looked at
      * this and it's fine" means).
      *
+     * ── THE RULE IS AUTHORITY; THE SCANNER FLAG IS A CACHE ──────────────
+     * Writing the rule is not the whole job. The CosmWasm scanner keeps a
+     * `denied` flag ON ITS OWN INVENTORY so its queue predicates stay
+     * cheap and indexed, and that flag is what
+     * {@see CosmwasmContractRepository::findEmittable()} and
+     * {@see CosmwasmContractRepository::countDenied()} read. Leaving it
+     * stale means the hidden contract keeps sitting in the emit queue and
+     * the panel keeps counting it as visible — the emit path's live rule
+     * re-check catches it every single sweep, forever, instead of it
+     * being dropped once.
+     *
+     * So the rule write is followed by
+     * {@see CosmwasmDiscoveryService::syncDenyFlags()} — DENY POINT 4,
+     * which had no production caller at all before this. It is called
+     * with the SINGLE affected contract; it is already bounded to 200 and
+     * needs no widening, and nothing here scans the table.
+     *
      * @return list<array{type: string, message: string}>
      */
     private static function handleHideToggle(int $collectionId, bool $hide): array
@@ -1280,28 +1322,99 @@ final class VerifyCollectionsPage
         );
 
         if (!$ok) {
+            // The rule did not land, so the cached flag is deliberately NOT
+            // touched: syncing it here would suppress (or un-suppress) a
+            // contract on the strength of a rule that does not exist.
             return [['type' => 'error', 'message' => 'Hide: rule write failed. Check the bcc-trust error log.']];
         }
 
+        $scannerSynced = self::syncScannerDenyFlag($chainId, $contract, $hide);
+
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections hide toggle', [
-            'action'        => 'verify_collections_hide',
-            'collection_id' => $collectionId,
-            'chain_id'      => $chainId,
-            'contract'      => $contract,
-            'rule'          => $rule,
-            'operator'      => get_current_user_id(),
+            'action'         => 'verify_collections_hide',
+            'collection_id'  => $collectionId,
+            'chain_id'       => $chainId,
+            'contract'       => $contract,
+            'rule'           => $rule,
+            'scanner_synced' => $scannerSynced,
+            'operator'       => get_current_user_id(),
         ]);
+
+        $name = (string) ($row->collection_name ?? $contract);
+
+        if (!$scannerSynced) {
+            // PARTIAL COMPLETION. Naming both halves matters: the operator's
+            // intent IS in force (the rule is authoritative and every emit
+            // re-checks it live), but the scanner's cached flag and the
+            // "hidden by a rule" count derived from it are now stale, so the
+            // page they are looking at will disagree with reality.
+            return [[
+                'type'    => 'warning',
+                'message' => sprintf(
+                    '%s "%s" %s users — the %s rule was written and IS in force. '
+                        . 'What did NOT happen: the CosmWasm scanner\'s cached flag for this contract could not be updated, '
+                        . 'so its inventory still lists the contract the old way and the "hidden by a rule" count on this page is stale. '
+                        . 'Nothing is exposed by that — the emit path re-checks the live rule on every pass — but click %s again once the '
+                        . 'database error clears so the scanner stops reconsidering it. Check the bcc-trust error log.',
+                    $hide ? 'Hid' : 'Restored',
+                    $name,
+                    $hide ? 'from' : 'for',
+                    $rule,
+                    $hide ? 'Hide' : 'Unhide'
+                ),
+            ]];
+        }
 
         return [[
             'type'    => 'success',
             'message' => sprintf(
                 '%s "%s" %s users (%s rule on the contract).',
                 $hide ? 'Hid' : 'Restored',
-                (string) ($row->collection_name ?? $contract),
+                $name,
                 $hide ? 'from' : 'for',
                 $rule
             ),
         ]];
+    }
+
+    /**
+     * Sync the scanner's cached deny flag for ONE contract, and report
+     * whether it actually landed.
+     *
+     * ── WHY IT VERIFIES INSTEAD OF TRUSTING THE RETURN ──────────────────
+     * {@see CosmwasmDiscoveryService::syncDenyFlags()} returns "how many
+     * flags changed", and 0 is a perfectly good answer (the flag was
+     * already right). It is therefore useless as a success signal, and it
+     * is 0 in both of the ways this can fail: its per-contract read came
+     * back empty because the query errored, or its UPDATE did not stick.
+     *
+     * So the flag is READ BACK through
+     * {@see CosmwasmContractRepository::deniedFlag()}, which throws rather
+     * than confusing "no row" with "could not read". Three outcomes:
+     *   null  → the scanner has never inventoried this contract, so there
+     *           was nothing to sync and that is a success;
+     *   ===   → the cache agrees with the rule;
+     *   !==   → the write silently did not land — report partial.
+     */
+    private static function syncScannerDenyFlag(int $chainId, string $contract, bool $hide): bool
+    {
+        try {
+            \BCC\Trust\Onchain\Services\CosmwasmDiscoveryService::syncDenyFlags($chainId, [$contract]);
+
+            $flag = CosmwasmContractRepository::deniedFlag($chainId, $contract);
+        } catch (RepositoryReadFailure $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] hide toggle: scanner deny-flag sync could not be confirmed', [
+                'action'   => 'verify_collections_hide_sync_failed',
+                'chain_id' => $chainId,
+                'contract' => $contract,
+                'method'   => $e->repositoryMethod(),
+                'db_error' => $e->dbError(),
+            ]);
+
+            return false;
+        }
+
+        return $flag === null || $flag === $hide;
     }
 
     /**

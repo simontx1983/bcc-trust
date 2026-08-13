@@ -49,7 +49,11 @@ if (!defined('ABSPATH')) {
  *      purpose.
  *   4. {@see syncDenyFlags()} — an operator hide/unhide is reflected on
  *      the inventory, so unhiding genuinely permits later discovery
- *      rather than leaving the candidate permanently suppressed.
+ *      rather than leaving the candidate permanently suppressed. Called
+ *      from
+ *      {@see \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::handleHideToggle()}
+ *      immediately after the rule write succeeds — with the one affected
+ *      contract, never a sweep.
  *
  * `RULE_ALLOW` overrides the name heuristics and nothing else: an
  * allowed contract still lands `is_verified = 0` (the collections schema
@@ -899,6 +903,16 @@ final class CosmwasmDiscoveryService
      * would re-emit it. Unhiding writes `RULE_ALLOW`, which clears the
      * flag and genuinely PERMITS later discovery / an explicit retry
      * rather than leaving the contract permanently suppressed.
+     *
+     * Bounded to 200 contracts by the slice below, which is why the
+     * hide/unhide caller can pass its one affected contract straight in
+     * and no caller ever needs a full-inventory pass.
+     *
+     * THE RETURN VALUE IS NOT A SUCCESS SIGNAL. 0 legitimately means
+     * "every flag was already correct". A caller that must know whether
+     * the cache actually agrees with the rule has to read the flag back —
+     * see
+     * {@see \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::syncScannerDenyFlag()}.
      *
      * @param  list<string> $contracts
      * @return int rows whose flag changed

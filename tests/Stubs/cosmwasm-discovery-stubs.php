@@ -56,6 +56,20 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @var list<array{chain_id: int, code_id: int}> */
             public static array $metadataTouches = [];
 
+            /**
+             * Methods that must behave as though their SQL failed.
+             *
+             * The production repository answers a failed read by throwing
+             * {@see \BCC\Trust\Onchain\Repositories\RepositoryReadFailure}
+             * from the fail-closed reads; this reproduces that at the seam
+             * so the summary/panel composition can be tested without a
+             * database. The REAL throw-on-SQL-error is pinned against a
+             * live MySQL in CosmwasmReadFailureIntegrationTest.
+             *
+             * @var list<string>
+             */
+            public static array $failReads = [];
+
             public static function reset(): void
             {
                 self::$families        = [];
@@ -65,6 +79,18 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$requeues        = [];
                 self::$progress        = [];
                 self::$metadataTouches = [];
+                self::$failReads       = [];
+            }
+
+            private static function failIfArmed(string $method): void
+            {
+                if (in_array($method, self::$failReads, true)) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                        self::class,
+                        $method,
+                        "Table 'bcc_test.wp_bcc_cosmwasm_code_families' doesn't exist"
+                    );
+                }
             }
 
             /** Test helper: seed one family row. */
@@ -337,6 +363,64 @@ namespace BCC\Trust\Onchain\Repositories {
 
                 return true;
             }
+
+            // ── all-chain aggregates behind the admin panel ─────────────
+
+            /** @return array<int, array<string, int>> */
+            public static function countsByChainAndClassification(): array
+            {
+                self::failIfArmed(__FUNCTION__);
+
+                $out = [];
+                foreach (self::$families as $chainId => $rows) {
+                    foreach ($rows as $row) {
+                        if (!isset($out[$chainId])) {
+                            $out[$chainId] = [];
+                            foreach (\BCC\Trust\Onchain\Services\CosmwasmClassifier::allClassifications() as $c) {
+                                $out[$chainId][$c] = 0;
+                            }
+                        }
+                        $classification                 = (string) $row->classification;
+                        $out[$chainId][$classification] = ($out[$chainId][$classification] ?? 0) + 1;
+                    }
+                }
+
+                return $out;
+            }
+
+            /** @return array<int, int> */
+            public static function pendingCountsByChain(int $classifierVersion): array
+            {
+                self::failIfArmed(__FUNCTION__);
+
+                $out = [];
+                foreach (self::$families as $chainId => $_rows) {
+                    $out[$chainId] = count(self::findPendingClassification($chainId, 1000, $classifierVersion));
+                }
+
+                return $out;
+            }
+
+            /**
+             * @param  list<int> $chainIds
+             * @param  list<int> $codeIds
+             * @return list<object>
+             */
+            public static function findManyForChains(array $chainIds, array $codeIds): array
+            {
+                self::failIfArmed(__FUNCTION__);
+
+                $out = [];
+                foreach ($chainIds as $chainId) {
+                    foreach (self::$families[$chainId] ?? [] as $row) {
+                        if (in_array((int) $row->code_id, $codeIds, true)) {
+                            $out[] = $row;
+                        }
+                    }
+                }
+
+                return $out;
+            }
         }
     }
 
@@ -356,12 +440,44 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @var list<string> */
             public static array $marked = [];
 
+            /**
+             * Methods that must behave as though their SQL failed.
+             * See the twin on the code-family fake.
+             *
+             * @var list<string>
+             */
+            public static array $failReads = [];
+
+            /**
+             * Make `setDenied()` a silent no-op that still reports true.
+             *
+             * The nastier half of "the cache sync failed": the rule IS
+             * written, `syncDenyFlags()` runs and reports rows changed,
+             * and the flag never moved. Nothing throws — which is exactly
+             * why the hide/unhide path reads the flag back instead of
+             * trusting a return value.
+             */
+            public static bool $swallowSetDenied = false;
+
             public static function reset(): void
             {
-                self::$contracts       = [];
-                self::$classifications = [];
-                self::$migrations      = [];
-                self::$marked          = [];
+                self::$contracts        = [];
+                self::$classifications  = [];
+                self::$migrations       = [];
+                self::$marked           = [];
+                self::$failReads        = [];
+                self::$swallowSetDenied = false;
+            }
+
+            private static function failIfArmed(string $method): void
+            {
+                if (in_array($method, self::$failReads, true)) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                        self::class,
+                        $method,
+                        "Table 'bcc_test.wp_bcc_cosmwasm_contracts' doesn't exist"
+                    );
+                }
             }
 
             public static function seed(int $chainId, string $address, string $classification = 'inconclusive', int $codeId = 0, bool $denied = false, bool $written = false, int $classifierVersion = 0, ?string $classifiedAt = null): void
@@ -520,12 +636,25 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static function setDenied(int $chainId, string $contract, bool $denied): bool
             {
+                if (self::$swallowSetDenied) {
+                    return true;
+                }
+
                 $address = strtolower($contract);
                 if (isset(self::$contracts[$chainId][$address])) {
                     self::$contracts[$chainId][$address]->denied = $denied ? '1' : '0';
                 }
 
                 return true;
+            }
+
+            public static function deniedFlag(int $chainId, string $contract): ?bool
+            {
+                self::failIfArmed(__FUNCTION__);
+
+                $row = self::$contracts[$chainId][strtolower($contract)] ?? null;
+
+                return $row === null ? null : ((int) $row->denied === 1);
             }
 
             public static function recordAttemptFailure(int $chainId, string $contract, string $error, int $retryCount): bool
@@ -605,6 +734,87 @@ namespace BCC\Trust\Onchain\Repositories {
             {
                 return count(self::$contracts[$chainId] ?? []);
             }
+
+            // ── all-chain aggregates behind the admin panel ─────────────
+
+            /**
+             * @return array<int, array{
+             *     total: int,
+             *     inspected: int,
+             *     denied: int,
+             *     candidates: int,
+             *     candidates_awaiting_emit: int,
+             *     by_classification: array<string, int>
+             * }>
+             */
+            public static function inventoryByChain(): array
+            {
+                self::failIfArmed(__FUNCTION__);
+
+                $out = [];
+                foreach (self::$contracts as $chainId => $rows) {
+                    foreach ($rows as $row) {
+                        if (!isset($out[$chainId])) {
+                            $out[$chainId] = [
+                                'total'                    => 0,
+                                'inspected'                => 0,
+                                'denied'                   => 0,
+                                'candidates'               => 0,
+                                'candidates_awaiting_emit' => 0,
+                                'by_classification'        => [],
+                            ];
+                        }
+
+                        $classification = (string) $row->classification;
+                        $denied         = (int) $row->denied === 1;
+
+                        $out[$chainId]['total']++;
+                        if ($row->classified_at !== null) {
+                            $out[$chainId]['inspected']++;
+                        }
+                        if ($denied) {
+                            $out[$chainId]['denied']++;
+                        }
+                        $out[$chainId]['by_classification'][$classification] =
+                            ($out[$chainId]['by_classification'][$classification] ?? 0) + 1;
+
+                        if (!$denied && \BCC\Trust\Onchain\Services\CosmwasmClassifier::isCw721($classification)) {
+                            $out[$chainId]['candidates']++;
+                            if ((int) $row->collection_row_written !== 1) {
+                                $out[$chainId]['candidates_awaiting_emit']++;
+                            }
+                        }
+                    }
+                }
+
+                return $out;
+            }
+
+            /**
+             * @param  list<int>    $chainIds
+             * @param  list<string> $addresses
+             * @return list<object>
+             */
+            public static function findManyForChains(array $chainIds, array $addresses): array
+            {
+                self::failIfArmed(__FUNCTION__);
+
+                $wanted = [];
+                foreach ($addresses as $address) {
+                    $wanted[strtolower(trim($address))] = true;
+                }
+
+                $out = [];
+                foreach ($chainIds as $chainId) {
+                    foreach (self::$contracts[$chainId] ?? [] as $address => $row) {
+                        if (isset($wanted[$address])) {
+                            $out[] = $row;
+                        }
+                    }
+                }
+
+                return $out;
+            }
         }
     }
 
@@ -622,6 +832,7 @@ namespace BCC\Trust\Onchain\Repositories {
             {
                 self::$knownByChain = [];
                 self::$upserted     = [];
+                self::$adminRows    = [];
             }
 
             /** @return array<int, object> */
@@ -651,6 +862,41 @@ namespace BCC\Trust\Onchain\Repositories {
                 }
 
                 return $map;
+            }
+
+            /**
+             * Admin rows keyed by collection id, for the Verify
+             * Collections handler path.
+             *
+             * @var array<int, object>
+             */
+            public static array $adminRows = [];
+
+            /** Test helper: one row as the admin page sees it. */
+            public static function seedAdminRow(int $id, int $chainId, string $contract, string $name): void
+            {
+                self::$adminRows[$id] = (object) [
+                    'id'               => (string) $id,
+                    'chain_id'         => (string) $chainId,
+                    'contract_address' => $contract,
+                    'collection_name'  => $name,
+                ];
+            }
+
+            /**
+             * @param  list<int> $ids
+             * @return list<object>
+             */
+            public static function findManyByIds(array $ids): array
+            {
+                $out = [];
+                foreach ($ids as $id) {
+                    if (isset(self::$adminRows[$id])) {
+                        $out[] = self::$adminRows[$id];
+                    }
+                }
+
+                return $out;
             }
 
             /** @param array<int, array<string, mixed>> $collections */
@@ -708,6 +954,7 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$metadataTouches   = [];
                 self::$watermarkAdvances = [];
                 self::$backfillRestarts  = [];
+                self::$failGetAll        = false;
             }
 
             /** @return list<string> */
@@ -751,6 +998,36 @@ namespace BCC\Trust\Onchain\Repositories {
             {
                 return self::$rows[$chainId] ?? null;
             }
+
+            /**
+             * Fail-safe listing (worker dashboards).
+             *
+             * @return list<object>
+             */
+            public static function getAll(): array
+            {
+                return array_values(self::$rows);
+            }
+
+            /**
+             * Fail-closed listing (the CosmWasm scanner panel).
+             *
+             * @return list<object>
+             */
+            public static function getAllOrFail(): array
+            {
+                if (self::$failGetAll) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                        self::class,
+                        'getAllOrFail',
+                        "Table 'bcc_test.wp_bcc_chain_checkpoints' doesn't exist"
+                    );
+                }
+
+                return array_values(self::$rows);
+            }
+
+            public static bool $failGetAll = false;
 
             public static function setCwDiscoveryState(int $chainId, string $state, ?string $error = null): bool
             {
@@ -871,9 +1148,18 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @var array<string, string> keyed "chainId|contract(lower)" */
             public static array $rules = [];
 
+            /**
+             * Make every rule write fail, the way the real repository does
+             * when its INSERT is rejected. Used to prove the hide path
+             * does NOT touch the scanner's cached flag on the strength of
+             * a rule that was never written.
+             */
+            public static bool $rejectWrites = false;
+
             public static function reset(): void
             {
-                self::$rules = [];
+                self::$rules        = [];
+                self::$rejectWrites = false;
             }
 
             public static function getRule(int $chainId, string $contract): ?string
@@ -883,6 +1169,10 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static function addRule(int $chainId, string $contract, string $rule, string $reason = ''): bool
             {
+                if (self::$rejectWrites) {
+                    return false;
+                }
+
                 self::$rules[$chainId . '|' . strtolower($contract)] = $rule;
 
                 return true;
@@ -1047,6 +1337,79 @@ namespace {
             \BccTestCronStore::$events[$hook] = ['interval' => $recurrence, 'timestamp' => $timestamp];
 
             return true;
+        }
+    }
+
+    // ── wp-admin surface shims ──────────────────────────────────────────
+    //
+    // Enough of wp-admin to RUN the scanner panel's render path and the
+    // Verify Collections POST handler in-process. Escaping is deliberately
+    // real-ish (htmlspecialchars) rather than pass-through, so a test that
+    // asserts on rendered output is looking at escaped markup the way the
+    // browser would.
+
+    if (!function_exists('esc_html')) {
+        function esc_html(string $text): string
+        {
+            return htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+        }
+        function esc_attr(string $text): string
+        {
+            return htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+        }
+        function esc_url(string $url): string
+        {
+            return htmlspecialchars($url, ENT_QUOTES, 'UTF-8');
+        }
+        /** @param mixed $number */
+        function number_format_i18n($number, int $decimals = 0): string
+        {
+            return number_format((float) $number, $decimals);
+        }
+        /**
+         * @param mixed $disabled
+         * @param mixed $current
+         */
+        function disabled($disabled, $current = true, bool $display = true): string
+        {
+            $out = (string) $disabled === (string) $current ? " disabled='disabled'" : '';
+            if ($display) {
+                echo $out;
+            }
+
+            return $out;
+        }
+        /** @return string */
+        function wp_nonce_field(string $action = '-1', string $name = '_wpnonce', bool $referer = true, bool $display = true)
+        {
+            $field = '<input type="hidden" name="' . $name . '" value="test-nonce">';
+            if ($display) {
+                echo $field;
+            }
+
+            return $field;
+        }
+    }
+
+    if (!function_exists('wp_verify_nonce')) {
+        /**
+         * Accepts the fixed token the stubbed nonce field emits, and
+         * NOTHING else — so a test can still exercise the "security check
+         * failed" branch by sending a different value.
+         *
+         * @return int|false
+         */
+        function wp_verify_nonce(string $nonce, string $action = '-1')
+        {
+            return $nonce === 'test-nonce' ? 1 : false;
+        }
+        function sanitize_text_field(string $value): string
+        {
+            return trim((string) preg_replace('/[\r\n\t]+/', ' ', $value));
+        }
+        function get_current_user_id(): int
+        {
+            return 1;
         }
     }
 

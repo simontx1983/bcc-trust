@@ -95,12 +95,19 @@ if (!function_exists('dbDelta')) {
         return [];
     }
 }
+// RECORDING stub, not a silent one. Several repository behaviours are only
+// observable through the log — a guarded read that failed returns the same
+// empty shape a successful empty read does, and the ERROR line is the whole
+// difference. A no-op Logger makes that untestable.
 if (!class_exists('BCC\\Core\\Log\\Logger')) {
     eval('namespace BCC\\Core\\Log; final class Logger {
-        public static function info(string $m, array $c = []): void {}
-        public static function warning(string $m, array $c = []): void {}
-        public static function error(string $m, array $c = []): void {}
-        public static function audit(string $m, array $c = []): void {}
+        /** @var list<array{level: string, message: string, context: array<string,mixed>}> */
+        public static array $lines = [];
+        public static function reset(): void { self::$lines = []; }
+        public static function info(string $m, array $c = []): void { self::$lines[] = ["level" => "info", "message" => $m, "context" => $c]; }
+        public static function warning(string $m, array $c = []): void { self::$lines[] = ["level" => "warning", "message" => $m, "context" => $c]; }
+        public static function error(string $m, array $c = []): void { self::$lines[] = ["level" => "error", "message" => $m, "context" => $c]; }
+        public static function audit(string $m, array $c = []): void { self::$lines[] = ["level" => "audit", "message" => $m, "context" => $c]; }
     }');
 }
 
@@ -148,6 +155,12 @@ if (!function_exists('get_option')) {
 require_once dirname(__DIR__, 2) . '/includes/config.php';
 
 // current_time('mysql') is used by some repositories (e.g. VoteRepository).
+//
+// The 'Y-m-d' arm is not decoration: ChainCheckpointRepository stamps
+// `cu_budget_reset_at` (a DATE column) with current_time('Y-m-d', true) and
+// then compares the stored value back against it to decide whether the daily
+// CU counter has rolled over. Returning a full datetime here made that
+// comparison NEVER match, so every increment looked like a new day.
 if (!function_exists('current_time')) {
     /** @return string|int */
     function current_time(string $type, int $gmt = 0)
@@ -155,7 +168,23 @@ if (!function_exists('current_time')) {
         if ($type === 'timestamp' || $type === 'U') {
             return time();
         }
+        if ($type === 'Y-m-d') {
+            return $gmt ? gmdate('Y-m-d') : date('Y-m-d');
+        }
         return $gmt ? gmdate('Y-m-d H:i:s') : date('Y-m-d H:i:s');
+    }
+}
+
+// Used by ChainCheckpointRepository when it re-encodes the bounded block
+// progression history.
+if (!function_exists('wp_json_encode')) {
+    /**
+     * @param  mixed $data
+     * @return string|false
+     */
+    function wp_json_encode($data, int $options = 0, int $depth = 512)
+    {
+        return json_encode($data, $options, $depth);
     }
 }
 

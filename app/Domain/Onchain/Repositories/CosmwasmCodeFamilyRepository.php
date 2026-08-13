@@ -740,7 +740,13 @@ final class CosmwasmCodeFamilyRepository
      * key, so the whole panel costs ONE read no matter how many chains
      * exist. Result cardinality is (#chains × #classifications) ≈ 45.
      *
+     * FAIL-CLOSED: this feeds the operator panel, where "0 code families"
+     * is an ANSWER. Returning it after the query failed would report a
+     * scanner that has found nothing, which is indistinguishable from a
+     * scanner nobody has run — so the failure is thrown, not absorbed.
+     *
      * @return array<int, array<string, int>> chainId => classification => count
+     * @throws RepositoryReadFailure when the read did not run
      */
     public static function countsByChainAndClassification(): array
     {
@@ -753,6 +759,7 @@ final class CosmwasmCodeFamilyRepository
                FROM {$table}
               GROUP BY chain_id, classification"
         );
+        self::guardReadOrThrow(__FUNCTION__);
 
         $out = [];
         foreach ($rows ?: [] as $row) {
@@ -778,7 +785,13 @@ final class CosmwasmCodeFamilyRepository
      * matches {@see countPendingClassification()} exactly, which is the
      * single-chain version of this query.
      *
+     * FAIL-CLOSED for the same reason as
+     * {@see countsByChainAndClassification()}: "0 remaining" is the panel's
+     * way of saying the queue is drained, and a failed read must never say
+     * that.
+     *
      * @return array<int, int> chainId => pending count
+     * @throws RepositoryReadFailure when the read did not run
      */
     public static function pendingCountsByChain(int $classifierVersion): array
     {
@@ -799,6 +812,7 @@ final class CosmwasmCodeFamilyRepository
             CosmwasmClassifier::MAX_RETRIES,
             $classifierVersion
         ));
+        self::guardReadOrThrow(__FUNCTION__);
 
         $out = [];
         foreach ($rows ?: [] as $row) {
@@ -818,9 +832,14 @@ final class CosmwasmCodeFamilyRepository
      * re-keys by (chain_id, code_id) in PHP, so the cross-product
      * over-fetch is discarded there rather than paid for per row.
      *
+     * FAIL-CLOSED: an empty result renders as "the scanner has no record
+     * of this contract's code family", which is a claim about the
+     * inventory. After a failed read we do not get to make that claim.
+     *
      * @param  list<int> $chainIds
      * @param  list<int> $codeIds
      * @return list<CodeFamilyRow>
+     * @throws RepositoryReadFailure when the read did not run
      */
     public static function findManyForChains(array $chainIds, array $codeIds): array
     {
@@ -847,6 +866,7 @@ final class CosmwasmCodeFamilyRepository
               LIMIT %d",
             self::MAX_LIMIT
         ));
+        self::guardReadOrThrow(__FUNCTION__);
 
         return $rows ?: [];
     }

@@ -393,6 +393,7 @@ return array(
     'BCC\\Trust\\Onchain\\Repositories\\NftSelectionRepository' => $baseDir . '/app/Domain/Onchain/Repositories/NftSelectionRepository.php',
     'BCC\\Trust\\Onchain\\Repositories\\NftSpamContractRepository' => $baseDir . '/app/Domain/Onchain/Repositories/NftSpamContractRepository.php',
     'BCC\\Trust\\Onchain\\Repositories\\OnchainCircuitBreakerRepository' => $baseDir . '/app/Domain/Onchain/Repositories/OnchainCircuitBreakerRepository.php',
+    'BCC\\Trust\\Onchain\\Repositories\\RepositoryReadFailure' => $baseDir . '/app/Domain/Onchain/Repositories/RepositoryReadFailure.php',
     'BCC\\Trust\\Onchain\\Repositories\\SignalRepository' => $baseDir . '/app/Domain/Onchain/Repositories/SignalRepository.php',
     'BCC\\Trust\\Onchain\\Repositories\\ValidatorGroupRepository' => $baseDir . '/app/Domain/Onchain/Repositories/ValidatorGroupRepository.php',
     'BCC\\Trust\\Onchain\\Repositories\\ValidatorMsgActivationRepository' => $baseDir . '/app/Domain/Onchain/Repositories/ValidatorMsgActivationRepository.php',

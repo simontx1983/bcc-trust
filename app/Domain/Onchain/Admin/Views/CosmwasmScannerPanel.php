@@ -48,14 +48,23 @@ final class CosmwasmScannerPanel
      * @var array<string, string>
      */
     private const STATUS_COLOR = [
-        CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN    => '#00a32a',
-        CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW   => '#dba617',
-        CosmwasmDiscoveryHealthSnapshot::STATUS_RED      => '#d63638',
-        CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED => '#646970',
+        CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN       => '#00a32a',
+        CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW      => '#dba617',
+        CosmwasmDiscoveryHealthSnapshot::STATUS_RED         => '#d63638',
+        CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED    => '#646970',
+        CosmwasmDiscoveryHealthSnapshot::STATUS_UNAVAILABLE => '#d63638',
     ];
 
     /**
      * Render the whole scanner panel.
+     *
+     * When the summary reports `data_unavailable`, EVERY DB-derived block
+     * is skipped rather than rendered from defaults. That is load-bearing:
+     * this file reads its numbers with `(int) ($t['families'] ?? 0)` and
+     * its chain list with `?: []`, so rendering an unavailable summary
+     * through the normal path would print a tidy wall of zeroes and "No
+     * active Cosmos chains are registered, so there is nothing to scan."
+     * — a confident answer to a question nobody managed to ask.
      *
      * @param array<string, mixed> $summary {@see CosmwasmDiscoveryHealthSnapshot::buildSummary()}
      */
@@ -65,12 +74,14 @@ final class CosmwasmScannerPanel
         $enabled = (bool) ($summary['discovery_enabled'] ?? false);
         $color   = self::STATUS_COLOR[$status] ?? '#646970';
 
+        $unavailable = (bool) ($summary['data_unavailable'] ?? false);
+
         /** @var list<array<string, mixed>> $chains */
         $chains = is_array($summary['chains'] ?? null) ? array_values($summary['chains']) : [];
         /** @var list<string> $issues */
         $issues = is_array($summary['issues'] ?? null) ? array_values($summary['issues']) : [];
         ?>
-        <details class="bcc-cw-scanner" style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;" <?php echo $status === CosmwasmDiscoveryHealthSnapshot::STATUS_RED ? 'open' : ''; ?>>
+        <details class="bcc-cw-scanner" style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;" <?php echo $status === CosmwasmDiscoveryHealthSnapshot::STATUS_RED || $unavailable ? 'open' : ''; ?>>
             <summary style="cursor:pointer;font-weight:600;">
                 CosmWasm collection scanner
                 <span style="display:inline-block;margin-left:6px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($color); ?>;">
@@ -89,7 +100,20 @@ final class CosmwasmScannerPanel
                 holder community.
             </p>
 
-            <?php if (!$enabled): ?>
+            <?php if ($unavailable): ?>
+                <div class="notice notice-error inline" style="margin:8px 0;">
+                    <p>
+                        <strong>Scanner figures are unavailable.</strong>
+                        <?php echo esc_html((string) ($summary['unavailable_reason'] ?? '')); ?>
+                    </p>
+                    <p>
+                        The counts, the per-chain rows and the controls are hidden rather than
+                        shown as zeroes — a scanner that has found nothing and a scanner nobody
+                        could read look identical once you print a 0, and only one of those is
+                        worth acting on. Reload once the database error clears.
+                    </p>
+                </div>
+            <?php elseif (!$enabled): ?>
                 <div class="notice notice-warning inline" style="margin:8px 0;">
                     <p>
                         <strong>Discovery is switched off.</strong>
@@ -113,7 +137,7 @@ final class CosmwasmScannerPanel
                 </div>
             <?php endif; ?>
 
-            <?php if ($issues !== []): ?>
+            <?php if ($issues !== [] && !$unavailable): ?>
                 <ul style="margin:8px 0 12px 18px;color:#3c434a;font-size:12px;list-style:disc;">
                     <?php foreach ($issues as $issue): ?>
                         <li><?php echo esc_html($issue); ?></li>
@@ -122,9 +146,16 @@ final class CosmwasmScannerPanel
             <?php endif; ?>
 
             <?php
-            self::renderTotals($summary);
+            // The cron table is NOT a database read (wp_next_scheduled), so
+            // it survives an unavailable summary and is worth keeping: a
+            // stalled cron and a broken DB otherwise look the same.
+            if (!$unavailable) {
+                self::renderTotals($summary);
+            }
             self::renderSchedule($summary);
-            self::renderChains($chains, $enabled, (bool) ($summary['backfill_enabled'] ?? false), $summary);
+            if (!$unavailable) {
+                self::renderChains($chains, $enabled, (bool) ($summary['backfill_enabled'] ?? false), $summary);
+            }
             ?>
         </details>
         <?php
@@ -133,12 +164,20 @@ final class CosmwasmScannerPanel
     /**
      * One-line count summary for the collapsed <summary> element.
      *
+     * Says so out loud when there are no numbers. `?? 0` on a missing
+     * total would read as "0 code families", which is a finding, not an
+     * absence.
+     *
      * @param array<string, mixed> $summary
      */
     private static function headlineCounts(array $summary): string
     {
+        if (!is_array($summary['totals'] ?? null)) {
+            return 'counts unavailable — a database read failed';
+        }
+
         /** @var array<string, int> $totals */
-        $totals = is_array($summary['totals'] ?? null) ? $summary['totals'] : [];
+        $totals = $summary['totals'];
 
         return sprintf(
             '%s code families · %s CW-721 · %s contracts inspected · %s candidates awaiting review',
@@ -158,8 +197,15 @@ final class CosmwasmScannerPanel
      */
     private static function renderTotals(array $summary): void
     {
+        // Belt and braces with the caller's guard: no totals, no tiles.
+        // Every tile below defaults to 0, so this must never be reached
+        // with an unavailable summary.
+        if (!is_array($summary['totals'] ?? null)) {
+            return;
+        }
+
         /** @var array<string, int> $t */
-        $t = is_array($summary['totals'] ?? null) ? $summary['totals'] : [];
+        $t = $summary['totals'];
 
         $tiles = [
             ['Code families known', (int) ($t['families'] ?? 0), 'Distinct wasm binaries inventoried across all Cosmos chains.'],
