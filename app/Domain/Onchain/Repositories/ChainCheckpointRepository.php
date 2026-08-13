@@ -109,6 +109,16 @@ final class ChainCheckpointRepository
     }
 
     /**
+     * One chain's checkpoint row.
+     *
+     * FAIL-SAFE on a read failure (logs, returns null). Every caller but
+     * one is a WORKER deciding whether it may do work this tick —
+     * {@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker},
+     * {@see \BCC\Trust\Onchain\Services\HoldingsService},
+     * {@see cuRemainingForToday()} — and "no checkpoint, so do nothing and
+     * come back next tick" is the safe reading there. Throwing would turn
+     * a logged degradation into a fatal inside cron.
+     *
      * @return CheckpointRow|null
      */
     public static function get(int $chainId): ?object
@@ -129,14 +139,51 @@ final class ChainCheckpointRepository
               LIMIT 1",
             $chainId
         ));
+        self::guardRead(__FUNCTION__);
 
         return $row;
     }
 
     /**
+     * Every chain's checkpoint row. FAIL-SAFE — see {@see getAllOrFail()}
+     * for the operator-facing half.
+     *
      * @return list<CheckpointRow>
      */
     public static function getAll(): array
+    {
+        return self::readAll(false);
+    }
+
+    /**
+     * Every chain's checkpoint row, FAIL-CLOSED.
+     *
+     * Same one query as {@see getAll()} — deliberately NOT a second query
+     * — under the opposite policy, because the two callers want opposite
+     * things from a failed read. The worker-side dashboards degrade to
+     * "no rows yet"; the CosmWasm scanner panel
+     * ({@see \BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot::buildSummary()})
+     * must not, because an empty checkpoint set there renders as every
+     * chain sitting `idle` and never scanned — a specific, wrong,
+     * reassuring claim.
+     *
+     * @return list<CheckpointRow>
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function getAllOrFail(): array
+    {
+        return self::readAll(true);
+    }
+
+    /**
+     * The single checkpoint-listing read behind {@see getAll()} and
+     * {@see getAllOrFail()}.
+     *
+     * @param  bool $failClosed throw instead of returning an empty list
+     * @return list<CheckpointRow>
+     * @throws RepositoryReadFailure when $failClosed and the read did not run
+     */
+    private static function readAll(bool $failClosed): array
     {
         global $wpdb;
         $table = self::table();
@@ -147,6 +194,12 @@ final class ChainCheckpointRepository
         // intentional unbounded read in the repo.
         /** @var list<CheckpointRow>|null $rows */
         $rows = $wpdb->get_results("SELECT {$cols} FROM {$table} ORDER BY chain_id ASC");
+        if ($failClosed) {
+            self::guardReadOrThrow('getAllOrFail');
+        } else {
+            self::guardRead('getAll');
+        }
+
         return $rows ?: [];
     }
 
@@ -188,6 +241,21 @@ final class ChainCheckpointRepository
      * Read-modify-write of the JSON column happens inside the same UPDATE
      * statement (one round trip). Bounded by MAX_PROGRESSION_ENTRIES = 5
      * → ~50-byte entry × 5 ≈ ~300 bytes max payload.
+     *
+     * ── WHEN THE HISTORY READ FAILS ─────────────────────────────────────
+     * This is a READ INSIDE A WRITE PATH, so a failed read is not just a
+     * missing answer — it would silently CORRUPT the write. `get_var()`
+     * answers a SQL error with null, `decodeProgressionHistory(null)`
+     * answers null with `[]`, and the UPDATE would then overwrite a real
+     * five-entry history with a fresh one-entry array that looks perfectly
+     * legitimate. The progression evidence the dashboard uses to spot
+     * stagnation, lag drift and checkpoint regression would be gone, with
+     * no error anywhere.
+     *
+     * So the tick's REAL progress (block, head, state, last_run_at) is
+     * still written — losing that would re-walk blocks for no reason —
+     * and the history column is left untouched instead of rewritten from
+     * a read we know did not run. The failure is logged by the guard.
      */
     public static function recordSuccess(int $chainId, int $lastProcessedBlock, int $headBlock): void
     {
@@ -200,26 +268,34 @@ final class ChainCheckpointRepository
         $now   = current_time('mysql', true);
 
         // Read current history (one tiny SELECT — bounded by primary key).
-        $currentJson = $wpdb->get_var($wpdb->prepare(
+        $currentJson    = $wpdb->get_var($wpdb->prepare(
             "SELECT block_progression_history FROM {$table} WHERE chain_id = %d LIMIT 1",
             $chainId
         ));
-        $history    = self::decodeProgressionHistory(is_string($currentJson) ? $currentJson : null);
-        $newHistory = self::appendProgressionEntry($history, $lastProcessedBlock, $headBlock);
-        $encoded    = (string) wp_json_encode($newHistory);
+        $historyUnknown = self::readFailed(__FUNCTION__);
+
+        $data = [
+            'last_processed_block' => $lastProcessedBlock,
+            'head_block'           => $headBlock,
+            'state'                => self::STATE_HEALTHY,
+            'last_run_at'          => $now,
+            'last_error'           => null,
+        ];
+        $formats = ['%d', '%d', '%s', '%s', '%s'];
+
+        if (!$historyUnknown) {
+            $history    = self::decodeProgressionHistory(is_string($currentJson) ? $currentJson : null);
+            $newHistory = self::appendProgressionEntry($history, $lastProcessedBlock, $headBlock);
+
+            $data['block_progression_history'] = (string) wp_json_encode($newHistory);
+            $formats[]                         = '%s';
+        }
 
         $wpdb->update(
             $table,
-            [
-                'last_processed_block'      => $lastProcessedBlock,
-                'head_block'                => $headBlock,
-                'state'                     => self::STATE_HEALTHY,
-                'last_run_at'               => $now,
-                'last_error'                => null,
-                'block_progression_history' => $encoded,
-            ],
+            $data,
             ['chain_id' => $chainId],
-            ['%d', '%d', '%s', '%s', '%s', '%s'],
+            $formats,
             ['%d']
         );
     }
@@ -347,6 +423,16 @@ final class ChainCheckpointRepository
      *
      * Returns the post-increment cu_used_today value (used by the
      * worker to decide whether to circuit-break before the next call).
+     *
+     * ── WHEN THE LOCKED READ FAILS ──────────────────────────────────────
+     * The other READ INSIDE A WRITE PATH. A failed `SELECT … FOR UPDATE`
+     * returns null, which the null branch below reads as "this chain has
+     * no checkpoint row" — and then returns 0 having written nothing and
+     * said nothing. So the guard THROWS here; the throw is caught by this
+     * method's own `catch`, which rolls the transaction back and logs the
+     * lost CU. The worker still gets its 0 and keeps running (an escaping
+     * exception inside cron would be worse than an under-count), but the
+     * two cases are no longer the same silence.
      */
     public static function addCuUsage(int $chainId, int $cu): int
     {
@@ -377,6 +463,9 @@ final class ChainCheckpointRepository
                     FOR UPDATE",
                 $chainId
             ));
+            // Caught below: rolls back and logs, so a failed read can never
+            // be mistaken for the "no such chain" case on the next line.
+            self::guardReadOrThrow(__FUNCTION__);
 
             if ($row === null) {
                 $wpdb->query('ROLLBACK');

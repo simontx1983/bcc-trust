@@ -8,6 +8,7 @@ use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 
@@ -23,7 +24,7 @@ if (!defined('ABSPATH')) {
  * fixed, tiny number of BOUNDED reads up front, then ALL derivation in
  * PHP over the already-loaded data. The reads are:
  *
- *   1. {@see ChainCheckpointRepository::getAll()}                 per-chain worker state
+ *   1. {@see ChainCheckpointRepository::getAllOrFail()}           per-chain worker state
  *   2. {@see CosmwasmCodeFamilyRepository::countsByChainAndClassification()}
  *   3. {@see CosmwasmCodeFamilyRepository::pendingCountsByChain()}
  *   4. {@see CosmwasmContractRepository::inventoryByChain()}
@@ -31,6 +32,13 @@ if (!defined('ABSPATH')) {
  * Reads 2–4 are GROUP BY aggregates keyed by `chain_id`, so the cost does
  * not grow with the number of chains. `ChainRepository::getActive()` is
  * served from the chains cache and adds no query on a warm request.
+ *
+ * All four are FAIL-CLOSED: they throw {@see RepositoryReadFailure}
+ * rather than answer a failed query with an empty set, and
+ * {@see buildSummary()} turns that into an explicit "unavailable" panel.
+ * The alternative is the failure mode this whole class would otherwise
+ * have: four empty results derive perfectly happily into a GREEN scanner
+ * with zero families, zero contracts and nothing pending.
  *
  * WHAT THIS DELIBERATELY IS NOT: a loop over chains calling
  * {@see CosmwasmDiscoveryService::chainSummary()}. That method is the
@@ -90,6 +98,15 @@ final class CosmwasmDiscoveryHealthSnapshot
     public const STATUS_RED      = 'red';
     /** The gate is off. Not a failure — a deliberate configuration. */
     public const STATUS_DISABLED = 'disabled';
+    /**
+     * A DB read failed, so there is no picture to paint.
+     *
+     * Distinct from every other value on purpose. `green`/`yellow`/`red`
+     * are verdicts ABOUT the scanner; this one says we could not look. It
+     * is not `red` because red is a real, derived answer an operator is
+     * meant to act on, and it is emphatically not `green` with zeroes.
+     */
+    public const STATUS_UNAVAILABLE = 'unavailable';
 
     /**
      * A chain that has not been touched in this long, while discovery is
@@ -107,11 +124,21 @@ final class CosmwasmDiscoveryHealthSnapshot
     /**
      * The whole operator view, derived in one pass.
      *
+     * ── IT CAN ALSO SAY "I DON'T KNOW" ──────────────────────────────────
+     * All four reads are FAIL-CLOSED. If any of them does not run, this
+     * returns `data_unavailable => true`, `status => unavailable`, no
+     * chain rows and `totals => null` — NOT a zeroed picture. `totals` is
+     * nullable precisely so a renderer cannot accidentally print an
+     * invented 0: there is no number to read, so the type says so and the
+     * panel has to handle it.
+     *
      * @return array{
      *     discovery_enabled: bool,
      *     backfill_enabled: bool,
      *     disabled_reason: string|null,
      *     status: string,
+     *     data_unavailable: bool,
+     *     unavailable_reason: string|null,
      *     schedule: list<ScheduleEntry>,
      *     chains: list<ChainPanelRow>,
      *     working_chain: array{chain_id: int, slug: string}|null,
@@ -127,7 +154,7 @@ final class CosmwasmDiscoveryHealthSnapshot
      *         candidates: int,
      *         candidates_awaiting_emit: int,
      *         denied: int
-     *     },
+     *     }|null,
      *     issues: list<string>
      * }
      */
@@ -135,6 +162,7 @@ final class CosmwasmDiscoveryHealthSnapshot
     {
         $discoveryEnabled = CosmwasmDiscoveryGate::discoveryEnabled();
         $backfillEnabled  = CosmwasmDiscoveryGate::backfillEnabled();
+        $now              = time();
 
         // READ 0 (cached): the chain registry, filtered to CosmWasm-capable
         // chains in PHP. Mirrors CosmwasmDiscoveryWorker::cosmosChainIds().
@@ -150,17 +178,23 @@ final class CosmwasmDiscoveryHealthSnapshot
         }
 
         // READS 1-4. Everything below this line is PHP over these arrays.
-        $checkpoints = ChainCheckpointRepository::getAll();
-        $familyCounts = CosmwasmCodeFamilyRepository::countsByChainAndClassification();
-        $familyPending = CosmwasmCodeFamilyRepository::pendingCountsByChain(CosmwasmClassifier::VERSION);
-        $contractStats = CosmwasmContractRepository::inventoryByChain();
+        // All four throw rather than answering a failed query with an
+        // empty set, because every one of them is a number this panel
+        // prints as fact.
+        try {
+            $checkpoints   = ChainCheckpointRepository::getAllOrFail();
+            $familyCounts  = CosmwasmCodeFamilyRepository::countsByChainAndClassification();
+            $familyPending = CosmwasmCodeFamilyRepository::pendingCountsByChain(CosmwasmClassifier::VERSION);
+            $contractStats = CosmwasmContractRepository::inventoryByChain();
+        } catch (RepositoryReadFailure $e) {
+            return self::unavailableSummary($discoveryEnabled, $backfillEnabled, $now, $e);
+        }
 
         $checkpointByChain = [];
         foreach ($checkpoints as $cp) {
             $checkpointByChain[(int) $cp->chain_id] = $cp;
         }
 
-        $now    = time();
         $chains = [];
         $totals = [
             'families'                 => 0,
@@ -206,16 +240,72 @@ final class CosmwasmDiscoveryHealthSnapshot
         $issues   = self::deriveIssues($discoveryEnabled, $backfillEnabled, $chains, $schedule);
 
         return [
-            'discovery_enabled' => $discoveryEnabled,
-            'backfill_enabled'  => $backfillEnabled,
-            'disabled_reason'   => self::disabledReason($discoveryEnabled, $backfillEnabled),
-            'status'            => self::deriveStatus($discoveryEnabled, $chains, $schedule),
-            'schedule'          => $schedule,
-            'chains'            => $chains,
-            'working_chain'     => self::deriveWorkingChain($chains),
-            'next_chain'        => self::deriveNextChain($chains),
-            'totals'            => $totals,
-            'issues'            => $issues,
+            'discovery_enabled'  => $discoveryEnabled,
+            'backfill_enabled'   => $backfillEnabled,
+            'disabled_reason'    => self::disabledReason($discoveryEnabled, $backfillEnabled),
+            'status'             => self::deriveStatus($discoveryEnabled, $chains, $schedule),
+            'data_unavailable'   => false,
+            'unavailable_reason' => null,
+            'schedule'           => $schedule,
+            'chains'             => $chains,
+            'working_chain'      => self::deriveWorkingChain($chains),
+            'next_chain'         => self::deriveNextChain($chains),
+            'totals'             => $totals,
+            'issues'             => $issues,
+        ];
+    }
+
+    /**
+     * The summary for "a read failed, so there is nothing to report".
+     *
+     * Everything derived from the DB is ABSENT rather than zero: no chain
+     * rows, no working/next chain, `totals => null`. The cron schedule
+     * survives because `wp_next_scheduled()` is not a database read and
+     * "is the pass even registered?" is still answerable — and still worth
+     * answering, since a stalled cron and a broken DB look identical from
+     * the outside otherwise.
+     *
+     * @return array{
+     *     discovery_enabled: bool,
+     *     backfill_enabled: bool,
+     *     disabled_reason: string|null,
+     *     status: string,
+     *     data_unavailable: bool,
+     *     unavailable_reason: string|null,
+     *     schedule: list<ScheduleEntry>,
+     *     chains: list<ChainPanelRow>,
+     *     working_chain: array{chain_id: int, slug: string}|null,
+     *     next_chain: array{chain_id: int, slug: string}|null,
+     *     totals: null,
+     *     issues: list<string>
+     * }
+     */
+    private static function unavailableSummary(
+        bool $discoveryEnabled,
+        bool $backfillEnabled,
+        int $now,
+        RepositoryReadFailure $failure
+    ): array {
+        $reason = sprintf(
+            'A scanner database read failed (%s), so none of these numbers could be loaded. '
+                . 'Nothing below is being reported as zero — it is simply not known right now. '
+                . 'The scanner itself is unaffected by this page; check the bcc-trust error log.',
+            $failure->repositoryMethod()
+        );
+
+        return [
+            'discovery_enabled'  => $discoveryEnabled,
+            'backfill_enabled'   => $backfillEnabled,
+            'disabled_reason'    => self::disabledReason($discoveryEnabled, $backfillEnabled),
+            'status'             => self::STATUS_UNAVAILABLE,
+            'data_unavailable'   => true,
+            'unavailable_reason' => $reason,
+            'schedule'           => self::deriveSchedule($now),
+            'chains'             => [],
+            'working_chain'      => null,
+            'next_chain'         => null,
+            'totals'             => null,
+            'issues'             => [$reason],
         ];
     }
 

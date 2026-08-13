@@ -543,6 +543,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Repositories\\NftSelectionRepository' => __DIR__ . '/../..' . '/app/Domain/Onchain/Repositories/NftSelectionRepository.php',
         'BCC\\Trust\\Onchain\\Repositories\\NftSpamContractRepository' => __DIR__ . '/../..' . '/app/Domain/Onchain/Repositories/NftSpamContractRepository.php',
         'BCC\\Trust\\Onchain\\Repositories\\OnchainCircuitBreakerRepository' => __DIR__ . '/../..' . '/app/Domain/Onchain/Repositories/OnchainCircuitBreakerRepository.php',
+        'BCC\\Trust\\Onchain\\Repositories\\RepositoryReadFailure' => __DIR__ . '/../..' . '/app/Domain/Onchain/Repositories/RepositoryReadFailure.php',
         'BCC\\Trust\\Onchain\\Repositories\\SignalRepository' => __DIR__ . '/../..' . '/app/Domain/Onchain/Repositories/SignalRepository.php',
         'BCC\\Trust\\Onchain\\Repositories\\ValidatorGroupRepository' => __DIR__ . '/../..' . '/app/Domain/Onchain/Repositories/ValidatorGroupRepository.php',
         'BCC\\Trust\\Onchain\\Repositories\\ValidatorMsgActivationRepository' => __DIR__ . '/../..' . '/app/Domain/Onchain/Repositories/ValidatorMsgActivationRepository.php',

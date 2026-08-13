@@ -419,6 +419,47 @@ final class CosmwasmContractRepository
         return is_int($updated) && $updated >= 0;
     }
 
+    /**
+     * The cached deny flag for ONE contract — `null` when the scanner has
+     * no row for it at all.
+     *
+     * FAIL-CLOSED, and that is the entire reason it exists next to
+     * {@see find()} rather than being expressed through it. `find()` is
+     * shared with the worker and must stay fail-safe, so it answers a
+     * failed read with `null` — indistinguishable from "the scanner has
+     * never seen this contract". The operator hide/unhide path needs
+     * those two apart: it uses this to CONFIRM that
+     * {@see \BCC\Trust\Onchain\Services\CosmwasmDiscoveryService::syncDenyFlags()}
+     * actually landed, and "I could not read it" must not be reported as
+     * "there was nothing to sync".
+     *
+     * One column, bounded by `uk_chain_contract` + LIMIT 1.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function deniedFlag(int $chainId, string $contract): ?bool
+    {
+        if ($chainId <= 0 || $contract === '') {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $flag = $wpdb->get_var($wpdb->prepare(
+            "SELECT denied
+               FROM {$table}
+              WHERE chain_id = %d
+                AND contract_address = %s
+              LIMIT 1",
+            $chainId,
+            strtolower($contract)
+        ));
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return $flag === null ? null : ((int) $flag === 1);
+    }
+
     /** Record a failed attempt without changing the verdict. */
     public static function recordAttemptFailure(
         int $chainId,
@@ -632,6 +673,14 @@ final class CosmwasmContractRepository
      * inspected, and conflating the two would let the panel claim work it
      * has not done.
      *
+     * FAIL-CLOSED. Every number the panel prints about contracts comes
+     * from this one aggregate, so absorbing a failed read here would paint
+     * a complete, zeroed, confident picture of an inventory nobody
+     * managed to read. Same reasoning as the `inspected` split above: the
+     * panel may not claim work it has not done.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     *
      * @return array<int, array{
      *     total: int,
      *     inspected: int,
@@ -657,6 +706,7 @@ final class CosmwasmContractRepository
                FROM {$table}
               GROUP BY chain_id, classification, denied, collection_row_written"
         );
+        self::guardReadOrThrow(__FUNCTION__);
 
         $out = [];
         foreach ($rows ?: [] as $row) {
@@ -711,9 +761,16 @@ final class CosmwasmContractRepository
      * re-keys by (chain_id, address) so the cross-product over-fetch is
      * discarded in PHP instead of being paid for as one query per row.
      *
+     * FAIL-CLOSED: the page renders NOTHING for a contract that has no
+     * row here, on the grounds that the collection came from another path
+     * and inventing a scanner story for it would be a lie. After a failed
+     * read, "no row" is not a fact we have — so it is thrown rather than
+     * silently rendered as absence.
+     *
      * @param  list<int>    $chainIds
      * @param  list<string> $addresses
      * @return list<CosmwasmContractRow>
+     * @throws RepositoryReadFailure when the read did not run
      */
     public static function findManyForChains(array $chainIds, array $addresses): array
     {
@@ -754,6 +811,7 @@ final class CosmwasmContractRepository
               LIMIT %d",
             ...$args
         ));
+        self::guardReadOrThrow(__FUNCTION__);
 
         return $rows ?: [];
     }
