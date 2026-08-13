@@ -8,6 +8,7 @@ use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
@@ -67,10 +68,19 @@ if (!defined('ABSPATH')) {
  *     others and never starves them;
  *   - manual pause/resume via `cw_discovery_state = paused`.
  *
- * Injective is INCLUDED. Its curated Talis-whitelist path stays as-is
- * for `fetch_top_collections`, but the whole point of this feature is
- * that discovery must not be bounded by what someone already curated —
- * a whitelist is a curation, so code-id discovery runs there too.
+ * Injective is INCLUDED, in the sense that nothing here excludes it by
+ * name. Its curated Talis-whitelist path stays as-is for
+ * `fetch_top_collections`, but the whole point of this feature is that
+ * discovery must not be bounded by what someone already curated — a
+ * whitelist is a curation, so code-id discovery runs there too, once an
+ * operator opts the chain in.
+ *
+ * ── WHICH CHAINS ────────────────────────────────────────────────────────
+ * Exactly one function decides: {@see eligibleChainIds()}. All four
+ * passes route through it, and it fails closed on every unsure branch.
+ * `wp_bcc_chains.cosmwasm_nft_discovery_enabled` ships DEFAULT 0, so a
+ * fresh install — and every install this migration lands on — scans
+ * nothing until someone says otherwise, per chain.
  *
  * @phpstan-import-type CheckpointRow from ChainCheckpointRepository
  */
@@ -96,6 +106,20 @@ final class CosmwasmDiscoveryWorker
     public const METADATA_INTERVAL = 'daily';
 
     private const ADVISORY_LOCK_PREFIX = 'bcc_cosmwasm_chain_';
+
+    /**
+     * The per-chain operator opt-in column, as it appears in the
+     * `ChainRepository::getActive()` projection.
+     *
+     * Named here rather than dereferenced inline so the one place that
+     * reads it is greppable from the column name. It must stay in
+     * {@see ChainRepository}'s COLUMNS list; the integration test
+     * `ChainCosmwasmDiscoveryFlagIntegrationTest` pins the two together
+     * against a real MySQL, because a column silently dropped from that
+     * projection would make every chain look ineligible — a change that
+     * fails SILENT and SAFE, and would therefore never be noticed.
+     */
+    private const DISCOVERY_FLAG_COLUMN = 'cosmwasm_nft_discovery_enabled';
 
     /** Families classified per chain per incremental pass. */
     private const FAMILIES_PER_PASS = 25;
@@ -165,7 +189,7 @@ final class CosmwasmDiscoveryWorker
             return;
         }
 
-        $chainIds = self::cosmosChainIds();
+        $chainIds = self::eligibleChainIds();
         if ($chainIds === []) {
             return;
         }
@@ -347,9 +371,10 @@ final class CosmwasmDiscoveryWorker
      * Daily: new code ids, new contracts under known CW-721 families,
      * classification of whatever is queued, and emit.
      *
-     * Loops every cosmos chain with per-chain isolation and the shared
-     * wall-clock deadline (the {@see NftEthIndexerWorker::runAllChains()}
-     * shape): a broken chain records its failure and the loop moves on.
+     * Loops every ELIGIBLE chain ({@see eligibleChainIds()}) with per-chain
+     * isolation and the shared wall-clock deadline (the
+     * {@see NftEthIndexerWorker::runAllChains()} shape): a broken chain
+     * records its failure and the loop moves on.
      */
     public static function runDailyDiscovery(): void
     {
@@ -614,7 +639,7 @@ final class CosmwasmDiscoveryWorker
      */
     private static function forEachChain(callable $step): void
     {
-        $chainIds = self::cosmosChainIds();
+        $chainIds = self::eligibleChainIds();
         if ($chainIds === []) {
             return;
         }
@@ -707,24 +732,152 @@ final class CosmwasmDiscoveryWorker
     }
 
     /**
-     * Active CosmWasm-capable chain ids.
+     * THE ELIGIBILITY CHOKEPOINT — every chain this worker may scan, and
+     * the only place that decision is made.
+     *
+     * All four passes reach it: {@see runBackfillTick()} calls it directly
+     * before handing the list to
+     * {@see ChainCheckpointRepository::nextCwDiscoveryChain()}, and
+     * {@see runDailyDiscovery()}, {@see runWeeklyRetry()} and
+     * {@see runMetadataRefresh()} all route through {@see forEachChain()},
+     * which calls it. Adding a fifth pass gets the policy by construction
+     * as long as it resolves its chains here. It is deliberately NOT named
+     * `cosmosChainIds()` any more: a reader who believed that name would
+     * conclude the returned list is "the cosmos chains", and would then
+     * quite reasonably filter it further somewhere else.
+     *
+     * ── THE FOUR PERMANENT CONDITIONS, PLUS ONE TEMPORARY ONE ───────────
+     *   is_active = 1                          (chain registry)
+     *   AND chain_type = 'cosmos'              (only cosmos speaks wasmd)
+     *   AND cosmwasm_nft_discovery_enabled = 1 (OPERATOR INTENT)
+     *   AND checkpoint.cw_discovery_state != 'unsupported'
+     *                                          (MEASURED CAPABILITY —
+     *                                           the chain answered the code
+     *                                           listing with 501)
+     *   AND (allowlist undefined OR id IN allowlist)
+     *                                          (temporary canary scope)
+     *
+     * Operator intent and measured capability are separate on purpose.
+     * Intent is a decision a human makes; capability is a fact the chain
+     * reported. Collapsing them into one hand-maintained
+     * "supports_cosmwasm" column would mean an operator could assert a
+     * capability the chain does not have, and the 501 the code already
+     * learns would have nowhere to be written.
+     *
+     * ── EVERY UNSURE BRANCH RETURNS FEWER CHAINS ────────────────────────
+     * The bug shape being avoided is the one this codebase has shipped
+     * twice: a guard whose "not configured" branch answers the permissive
+     * way. The retired `BCC_CW721_DISCOVERY_ENABLED` literally read
+     * `if (!defined(...)) return true;`. So:
+     *   - the column missing from the cached projection (migration has not
+     *     run yet, or a stale pre-migration transient) yields NO chains —
+     *     never "the field is absent, so skip that filter";
+     *   - a defined-but-unusable allowlist yields NO chains — never a
+     *     fall-through to "all";
+     *   - a checkpoint read that did not run yields NO chains.
+     * A tick that scans nothing costs one cron invocation and self-heals.
      *
      * @return list<int>
      */
-    private static function cosmosChainIds(): array
+    private static function eligibleChainIds(): array
     {
-        $ids = [];
-        foreach (ChainRepository::getActive() as $chain) {
-            if ((string) ($chain->chain_type ?? '') !== 'cosmos') {
-                continue;
-            }
-            $chainId = (int) ($chain->id ?? 0);
-            if ($chainId > 0) {
-                $ids[] = $chainId;
+        // null = undefined (no canary restriction); [] = defined but names
+        // no usable chain, which means scan nothing. See
+        // CosmwasmDiscoveryGate::chainAllowlist().
+        $allowlist = CosmwasmDiscoveryGate::chainAllowlist();
+        if ($allowlist === []) {
+            \BCC\Core\Log\Logger::warning(
+                '[CosmwasmDiscoveryWorker] BCC_COSMWASM_CHAIN_ALLOWLIST is defined but names no usable chain id — scanning nothing',
+                ['raw' => defined('BCC_COSMWASM_CHAIN_ALLOWLIST') ? gettype(constant('BCC_COSMWASM_CHAIN_ALLOWLIST')) : 'undefined']
+            );
+
+            return [];
+        }
+
+        // MEASURED CAPABILITY, in ONE bounded read rather than a checkpoint
+        // query per chain. Fail-CLOSED: getAllOrFail() throws when the read
+        // did not run, and "the read failed" is not evidence that a chain is
+        // supported.
+        try {
+            $checkpoints = ChainCheckpointRepository::getAllOrFail();
+        } catch (RepositoryReadFailure $e) {
+            \BCC\Core\Log\Logger::error('[CosmwasmDiscoveryWorker] checkpoint read failed — no chain is eligible this tick', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return [];
+        }
+
+        /** @var array<int, true> $unsupported */
+        $unsupported = [];
+        foreach ($checkpoints as $row) {
+            if ((string) $row->cw_discovery_state === ChainCheckpointRepository::CW_STATE_UNSUPPORTED) {
+                $unsupported[(int) $row->chain_id] = true;
             }
         }
 
+        $ids = [];
+        foreach (ChainRepository::getActive() as $chain) {
+            // getActive() is is_active = 1 by construction.
+            if ((string) ($chain->chain_type ?? '') !== 'cosmos') {
+                continue;
+            }
+
+            $chainId = (int) ($chain->id ?? 0);
+            if ($chainId <= 0) {
+                continue;
+            }
+
+            if (!self::discoveryOptedIn($chain)) {
+                continue;
+            }
+
+            if ($allowlist !== null && !in_array($chainId, $allowlist, true)) {
+                continue;
+            }
+
+            // A MISSING checkpoint row ALLOWS the chain. That is the one
+            // permissive-looking branch here and it is deliberate: the
+            // operator has already said yes on this specific chain, and
+            // "no checkpoint row" means nobody has measured it yet — the
+            // row is created by the first pass, which is also what records
+            // the 501 if there is one. Refusing here would mean an opted-in
+            // chain could never take its first measurement, so it would
+            // never become eligible: a permanent deadlock dressed up as
+            // caution. The set stays bounded either way (the operator flag
+            // is the gate, not the checkpoint table).
+            if (isset($unsupported[$chainId])) {
+                continue;
+            }
+
+            $ids[] = $chainId;
+        }
+
         return $ids;
+    }
+
+    /**
+     * Has an operator opted this chain in to CosmWasm NFT discovery?
+     *
+     * Typed `object`, not the ChainRow shape, because the honest answer
+     * depends on something the shape cannot express: whether the row was
+     * projected BEFORE or AFTER the `cosmwasm_nft_discovery_enabled`
+     * migration ran. A pre-migration row simply has no such property, and
+     * reading it would raise a PHP warning and evaluate to null — so the
+     * presence check comes first and answers FALSE.
+     *
+     * FALSE is the correct answer for "I cannot tell": on an install where
+     * the migration has not landed, nobody has been able to opt a chain in
+     * yet, so there is nothing to scan.
+     */
+    private static function discoveryOptedIn(object $chain): bool
+    {
+        $vars = get_object_vars($chain);
+        if (!array_key_exists(self::DISCOVERY_FLAG_COLUMN, $vars)) {
+            return false;
+        }
+
+        return (int) $vars[self::DISCOVERY_FLAG_COLUMN] === 1;
     }
 
     /** Chain slug, used only to resolve the operator priority hint. */

@@ -22,6 +22,15 @@ function bcc_onchain_chains_table(): string {
 
 /**
  * Create the chains table and seed default chains.
+ *
+ * `cosmwasm_nft_discovery_enabled` is DEFAULT 0 deliberately. It is the
+ * per-chain operator opt-in for the CosmWasm CW-721 scanner
+ * ({@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker}), and a
+ * default of 1 would mean "install the plugin, get every cosmos chain
+ * walked" — the opposite of the fail-closed rule the scanner's config
+ * gate exists to enforce. Nothing in this file, the seed loop, or the
+ * migration below ever sets it to 1; enabling a chain is an explicit
+ * operator act.
  */
 function bcc_onchain_create_chains_table(): void {
 
@@ -48,6 +57,7 @@ function bcc_onchain_create_chains_table(): void {
         description TEXT DEFAULT NULL,
         is_testnet TINYINT(1) NOT NULL DEFAULT 0,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
+        cosmwasm_nft_discovery_enabled TINYINT(1) NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         UNIQUE KEY slug (slug),
@@ -411,6 +421,62 @@ function bcc_onchain_add_chains_description_column(): void {
 
     // Clear the chains cache so the new column is visible to the Hall
     // chain_profile projection immediately.
+    if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')) {
+        \BCC\Trust\Onchain\Repositories\ChainRepository::clearCache();
+    }
+}
+
+/**
+ * Add the `cosmwasm_nft_discovery_enabled` column to bcc_onchain_chains
+ * (idempotent).
+ *
+ * PER-CHAIN OPERATOR INTENT for the CosmWasm CW-721 scanner. The two
+ * environment gates (`BCC_COSMWASM_DISCOVERY_ENABLED` /
+ * `BCC_COSMWASM_BACKFILL_ENABLED`) answer "may this environment scan at
+ * all"; this column answers "which chains, on the environment that may".
+ * It is one of the four permanent conditions in
+ * {@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::eligibleChainIds()}.
+ *
+ * THIS MIGRATION ENABLES NOTHING. `NOT NULL DEFAULT 0` means every
+ * pre-existing row lands at 0 without a backfill statement, so running it
+ * on a live install changes zero behaviour — deliberately, because the
+ * alternative (default 1, "keep doing what you were doing") would turn a
+ * plugin update into an unreviewed decision to walk every cosmos chain.
+ * There is no `UPDATE ... SET ... = 1` here and there must never be one:
+ * the seed-time `WHERE ... IS NULL` backfills above exist to author
+ * CONTENT, not to grant scanning permission.
+ *
+ * Same idempotent ALTER shape as
+ * {@see bcc_onchain_add_chains_description_column()}: an INFORMATION_SCHEMA
+ * existence probe gates the ADD because `ADD COLUMN IF NOT EXISTS` is
+ * unavailable on MariaDB < 10.0 / MySQL < 8.0.29. Fresh installs get the
+ * column from the CREATE TABLE above; existing DBs get it here.
+ */
+function bcc_onchain_add_chains_cosmwasm_discovery_column(): void {
+    global $wpdb;
+
+    $chains_table = \BCC\Core\DB\DB::table('chains');
+
+    $columnExists = (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME   = %s
+            AND COLUMN_NAME  = %s
+          LIMIT 1",
+        $chains_table,
+        'cosmwasm_nft_discovery_enabled'
+    ));
+
+    if ($columnExists === 0) {
+        $wpdb->query("ALTER TABLE {$chains_table} ADD COLUMN cosmwasm_nft_discovery_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER is_active");
+    }
+
+    // Clear the chains cache so the cached projection carries the new
+    // column. Without this the scanner's eligibility read would keep
+    // seeing pre-migration rows, and a row with the column ABSENT is
+    // (correctly) treated as ineligible — so a stale cache would look
+    // exactly like "the operator enabled nothing", for up to the cache
+    // TTL, with no way to tell the two apart.
     if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')) {
         \BCC\Trust\Onchain\Repositories\ChainRepository::clearCache();
     }

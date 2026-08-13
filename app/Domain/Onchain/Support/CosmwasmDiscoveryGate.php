@@ -33,6 +33,16 @@ if (!defined('ABSPATH')) {
  * The backfill gate is AND-ed with the discovery gate, not OR-ed: turning
  * discovery off stops everything, including a backfill in progress.
  *
+ * ── AND ONE NARROWING KNOB ──────────────────────────────────────────────
+ *   BCC_COSMWASM_CHAIN_ALLOWLIST
+ *       A temporary canary scope. It can only ever make the scanned set
+ *       SMALLER — see {@see chainAllowlist()}. It is not a gate: undefined
+ *       means "no extra restriction", not "enabled". Whether ANY work
+ *       happens is still decided by the two gates above, and WHICH chains
+ *       are scanned is still decided by
+ *       `wp_bcc_chains.cosmwasm_nft_discovery_enabled` plus the measured
+ *       per-chain capability.
+ *
  * ── WHAT THIS REPLACES ──────────────────────────────────────────────────
  * The retired `BCC_CW721_DISCOVERY_ENABLED` was fail-OPEN — its
  * implementation literally read `if (!defined(...)) return true;`, so
@@ -78,6 +88,74 @@ final class CosmwasmDiscoveryGate
         }
 
         return (bool) constant('BCC_COSMWASM_BACKFILL_ENABLED');
+    }
+
+    /**
+     * TEMPORARY CANARY SCOPE: `BCC_COSMWASM_CHAIN_ALLOWLIST`.
+     *
+     * A comma-separated list of chain IDs, e.g. `"8"` or `"8,12"`. Its one
+     * and only power is to NARROW the set of chains the scanner walks
+     * while a rollout is being watched. It can never widen it: a chain that
+     * is inactive, non-cosmos, not opted in via
+     * `cosmwasm_nft_discovery_enabled`, or measured `unsupported` stays
+     * excluded no matter what this names. See
+     * {@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::eligibleChainIds()},
+     * which applies it as a final AND after the four permanent conditions.
+     *
+     * ── THE RETURN CONTRACT (READ THIS BEFORE CHANGING IT) ──────────────
+     *   null → the constant is UNDEFINED. No canary restriction; the four
+     *          permanent conditions still decide everything.
+     *   []   → the constant IS defined but names no usable chain (empty
+     *          string, whitespace, `"abc"`, `"0"`, `"0,0"`, a non-scalar).
+     *          The caller MUST read that as "scan nothing".
+     *
+     * That two-value distinction is the whole point. The obvious
+     * implementation — return a plain list and let `[]` mean "no
+     * restriction" — is the fail-OPEN bug this codebase already shipped
+     * once as `if (!defined(...)) return true;`: a typo'd allowlist would
+     * silently widen to every chain, which is the exact moment an operator
+     * is least able to notice.
+     *
+     * Individual unparseable entries are DROPPED rather than promoted.
+     * `"8,abc"` narrows to chain 8 — dropping a token can only ever make
+     * the set smaller, so it cannot become a widening bug.
+     *
+     * @return list<int>|null null ONLY when the constant is undefined
+     */
+    public static function chainAllowlist(): ?array
+    {
+        if (!defined('BCC_COSMWASM_CHAIN_ALLOWLIST')) {
+            return null;
+        }
+
+        /** @var mixed $raw */
+        $raw = constant('BCC_COSMWASM_CHAIN_ALLOWLIST');
+        if (!is_string($raw) && !is_int($raw)) {
+            // Defined as an array, an object, null, false… — defined but
+            // unusable, which is the "scan nothing" case, NOT the "no
+            // restriction" case.
+            return [];
+        }
+
+        $ids = [];
+        foreach (explode(',', (string) $raw) as $token) {
+            $token = trim($token);
+            // ctype_digit() rather than is_numeric(): "8.5", "1e3", "-3"
+            // and " 8 " (already trimmed) are all operator typos, and a
+            // silent (int) cast would turn them into a confident wrong
+            // chain id. Dropping them only narrows.
+            if ($token === '' || !ctype_digit($token)) {
+                continue;
+            }
+            $id = (int) $token;
+            if ($id > 0) {
+                $ids[$id] = $id;
+            }
+        }
+        // sort() on an int-keyed map reindexes to a list.
+        sort($ids);
+
+        return $ids;
     }
 
     // ── Budgets ─────────────────────────────────────────────────────────

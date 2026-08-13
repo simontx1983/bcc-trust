@@ -398,6 +398,11 @@ function bcc_onchain_ensure_schema(): void {
     // Runs after the color ALTER above; column order is anchored to the base
     // marketplace_template column, so ordering here is not load-bearing.
     bcc_onchain_add_chains_description_column();
+    // Per-chain CosmWasm NFT-discovery opt-in. Same idempotent,
+    // INFORMATION_SCHEMA-gated shape as the description ALTER above.
+    // DEFAULT 0 with NO backfill: running this migration enables discovery
+    // on exactly zero chains.
+    bcc_onchain_add_chains_cosmwasm_discovery_column();
 
     // Signals table is owned by SignalRepository — included here so its
     // column-type migrations run on version bump, not just on fresh
