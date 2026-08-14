@@ -160,6 +160,13 @@ final class CosmwasmScannerFailClosedTest extends TestCase
      * `status` is checked against every "the scanner is fine" value, not
      * just green, because yellow/disabled would be equally misread as
      * "the system answered".
+     *
+     * IDLE IS ON THAT LIST AND IS THE MOST DANGEROUS ENTRY. It is the one
+     * status that a failed read could reach honestly-looking: the failure
+     * path carries an EMPTY chain list, and "no chain is opted in" is
+     * trivially true of no chains at all. A database outage reported as
+     * "Idle — nothing to do" is exactly the green-with-zeroes lie in a
+     * calmer voice, and it is worse, because idle invites no action at all.
      */
     #[DataProvider('failingRead')]
     public function test_a_failed_read_can_never_report_a_healthy_zero(string $read): void
@@ -172,7 +179,30 @@ final class CosmwasmScannerFailClosedTest extends TestCase
         self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW, $summary['status']);
         self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED, $summary['status']);
         self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_RED, $summary['status']);
+        self::assertNotSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE,
+            $summary['status'],
+            '"we could not look" must never be reported as "there is nothing to do"'
+        );
         self::assertNull($summary['totals']);
+    }
+
+    /**
+     * The same precedence at the RENDER layer: a failed read gets the
+     * unavailable treatment, never the idle one. The panel branches on
+     * `data_unavailable` first for this reason — an idle notice on a page
+     * whose numbers could not be read would tell an operator the calmest
+     * possible untruth.
+     */
+    public function test_the_panel_never_shows_the_idle_notice_for_a_failed_read(): void
+    {
+        $this->armFailure('checkpoints');
+
+        $html = $this->renderPanel(CosmwasmDiscoveryHealthSnapshot::buildSummary());
+
+        self::assertStringContainsString('Scanner figures are unavailable', $html);
+        self::assertStringNotContainsString('Idle — no chains enabled', $html);
+        self::assertStringNotContainsString('IDLE', $html);
     }
 
     /**

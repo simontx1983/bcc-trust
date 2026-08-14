@@ -102,6 +102,35 @@ final class CosmwasmDiscoveryHealthSnapshot
     /** The gate is off. Not a failure — a deliberate configuration. */
     public const STATUS_DISABLED = 'disabled';
     /**
+     * No chain is opted in, so there is nothing for the scanner to do.
+     *
+     * ── THE FOURTH KIND OF ANSWER ───────────────────────────────────────
+     * An operator who has opted no chain in is not looking at a healthy
+     * scanner, a degraded one, or a broken one. They are looking at one
+     * that has not been pointed at anything yet, which is a perfectly
+     * ordinary way to run this plugin and must not be dressed up as a
+     * finding.
+     *
+     * WHAT IT REPLACES: {@see deriveStatus()} counted every chain that was
+     * neither paused nor unsupported as "eligible", including chains the
+     * worker would never touch because nobody opted them in. With the gate
+     * on and zero opt-ins that arithmetic landed on YELLOW — a degraded
+     * verdict about a system that is not degraded, and the single fastest
+     * way to teach an operator that yellow means nothing.
+     *
+     * WHAT IT IS NOT: it is not {@see STATUS_DISABLED}, which is a
+     * statement about `BCC_COSMWASM_DISCOVERY_ENABLED` and nothing else;
+     * and it is emphatically not green, because "nothing is wrong" and
+     * "everything is working" are different sentences and only the first
+     * one is true here.
+     *
+     * The literal collides with {@see ChainCheckpointRepository::CW_STATE_IDLE}
+     * by coincidence of vocabulary, not by design. They are read off
+     * different keys — this one off `status`, that one off a chain row's
+     * `state` — and neither is ever compared against the other.
+     */
+    public const STATUS_IDLE = 'idle';
+    /**
      * A DB read failed, so there is no picture to paint.
      *
      * Distinct from every other value on purpose. `green`/`yellow`/`red`
@@ -344,6 +373,14 @@ final class CosmwasmDiscoveryHealthSnapshot
      * question nobody managed to ask — and it is the WORST invented answer
      * available, because 0 eligible chains is also a real and alarming
      * state an operator would act on.
+     *
+     * ── `unavailable` OUTRANKS `idle`, AND THIS IS WHERE THAT HAPPENS ───
+     * This method hard-codes {@see STATUS_UNAVAILABLE}; it does not ask
+     * {@see deriveStatus()} for a verdict. It must never start: the chain
+     * list here is EMPTY because nobody could read it, and "no chains" is
+     * one guard away from deriving into the calmest status this class can
+     * produce. A failed read reported as "Idle — nothing to do" is the
+     * same lie as GREEN with zeroes, in a quieter voice.
      *
      * @return array{
      *     discovery_enabled: bool,
@@ -737,15 +774,49 @@ final class CosmwasmDiscoveryHealthSnapshot
     /**
      * PURE. Overall RGB.
      *
-     * `disabled` is its own value rather than a colour: an operator who
-     * has not turned discovery on is not looking at a broken system, and
-     * painting it red would train them to ignore red.
+     * `disabled` and `idle` are their own values rather than colours: an
+     * operator who has not turned discovery on, or who has opted no chain
+     * in, is not looking at a broken system, and painting either red would
+     * train them to ignore red.
+     *
+     * ── THE PRECEDENCE, WHICH IS THE POINT OF THIS METHOD ───────────────
+     *   1. unavailable — NOT DECIDED HERE. {@see buildSummary()} returns
+     *      {@see unavailableSummary()} before this method is ever called,
+     *      so a failed read can never be reported as any verdict below.
+     *      That ordering is load-bearing: "a read failed" outranks every
+     *      tidy answer, and idle is the tidiest one there is.
+     *   2. idle    — nobody opted a chain in.
+     *   3. disabled — the constant is undefined.
+     *   4. red / yellow / green — the arithmetic, unchanged.
+     *
+     * ── WHY IDLE OUTRANKS DISABLED ──────────────────────────────────────
+     * Both are intentional configuration, so neither is a fault and the
+     * only question is which one an operator needs told first. With zero
+     * chains opted in, defining `BCC_COSMWASM_DISCOVERY_ENABLED` would
+     * change NOTHING — the scanner still has nowhere to go — so leading
+     * with the constant sends someone to edit wp-config.php for no effect.
+     * The nearer truth is "no chains are enabled", and it is the one with
+     * an action attached. The constant is not hidden by this: the panel
+     * still carries `disabled_reason`, and the idle notice names the
+     * constant when it is also undefined.
+     *
+     * ── AND WHY EMPTY CHAINS DO NOT COUNT AS IDLE ───────────────────────
+     * `$chains === []` means the registry lists no active Cosmos chain at
+     * all. That is not an operator declining to scan anything, it is a
+     * registry with nothing in it, and it keeps the RED it always had. The
+     * guard is also a second lock on precedence 1 above: the unavailable
+     * summary carries no chain rows, so an empty list must never be able
+     * to derive into a calm "idle".
      *
      * @param list<ChainPanelRow> $chains
      * @param list<ScheduleEntry> $schedule
      */
     public static function deriveStatus(bool $discoveryEnabled, array $chains, array $schedule): string
     {
+        if ($chains !== [] && self::optedInChainCount($chains) === 0) {
+            return self::STATUS_IDLE;
+        }
+
         if (!$discoveryEnabled) {
             return self::STATUS_DISABLED;
         }
@@ -785,6 +856,39 @@ final class CosmwasmDiscoveryHealthSnapshot
         }
 
         return self::STATUS_GREEN;
+    }
+
+    /**
+     * PURE. How many chains an operator has actually opted in.
+     *
+     * FAIL CLOSED, in the same direction as everything else here: only a
+     * literal `true` counts. A row assembled by older code with no
+     * `discovery_opted_in` key, or one carrying the raw `'1'` a database
+     * projection hands over, is NOT opted in as far as this is concerned.
+     * The decision was already made — and already fail-closed — in
+     * {@see deriveChainRow()}; this only reads it back, and a reader that
+     * accepted a truthy value would let an absent field switch the scanner
+     * on.
+     *
+     * It counts the OPT-IN, not eligibility, because those are different
+     * questions and only one of them is "did an operator ask for this?".
+     * A chain that is opted in but paused, unsupported or outside the
+     * canary allowlist still counts here: somebody asked for it, so the
+     * system is not idle — it has something to explain instead, and the
+     * red/yellow arithmetic below is what explains it.
+     *
+     * @param list<ChainPanelRow> $chains
+     */
+    public static function optedInChainCount(array $chains): int
+    {
+        $count = 0;
+        foreach ($chains as $chain) {
+            if (($chain['discovery_opted_in'] ?? null) === true) {
+                $count++;
+            }
+        }
+
+        return $count;
     }
 
     /**
