@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Services\CosmwasmEvidenceNarrator;
 use BCC\Trust\Onchain\Support\ExplorerLinkBuilder;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -63,6 +64,16 @@ final class CosmwasmScannerAdminTest extends TestCase
     }
 
     /**
+     * A chain-panel row shaped like the real one.
+     *
+     * THE DEFAULT IS AN OPTED-IN, ELIGIBLE CHAIN. That is not decoration:
+     * `deriveStatus()` reads `discovery_opted_in` to tell an idle scanner
+     * (nobody opted anything in) from a working one, so a fixture that
+     * omitted the key would make every status case in this file a
+     * zero-opt-in case and the red/yellow/green arithmetic would never be
+     * exercised at all. Tests that want the idle path say so by overriding
+     * it, exactly as they already do for `paused` and `unsupported`.
+     *
      * @param array<string, mixed> $overrides
      * @return array<string, mixed>
      */
@@ -76,6 +87,9 @@ final class CosmwasmScannerAdminTest extends TestCase
             'state_label'                 => 'Backfilled',
             'paused'                      => false,
             'unsupported'                 => false,
+            'discovery_opted_in'          => true,
+            'eligibility'                 => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE,
+            'eligibility_reason'          => '',
             'backfill_complete'           => true,
             'progress_label'              => '',
             'max_code_id'                 => 713,
@@ -488,6 +502,199 @@ final class CosmwasmScannerAdminTest extends TestCase
                 [$this->scheduleEntry()]
             )
         );
+    }
+
+    // ── status: the zero-opt-in case ────────────────────────────────────
+    //
+    // A scanner nobody has pointed at a chain is not healthy, not degraded
+    // and not broken. It used to read YELLOW, because deriveStatus()
+    // counted every chain that was neither paused nor unsupported as
+    // "eligible" — including the ones the worker skips for want of an
+    // opt-in — and then found them all stale. Yellow about a system that
+    // is doing exactly what it was configured to do is how an operator
+    // learns to stop reading yellow.
+
+    public function test_no_chain_opted_in_is_idle_and_nothing_else(): void
+    {
+        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+            true,
+            [
+                $this->chainRow(['discovery_opted_in' => false]),
+                $this->chainRow(['chain_id' => 2, 'slug' => 'juno', 'discovery_opted_in' => false]),
+            ],
+            [$this->scheduleEntry()]
+        );
+
+        $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE, $status);
+        // Named one at a time so the failure says WHICH verdict leaked.
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN, $status, 'idle is not healthy');
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW, $status, 'idle is not degraded');
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_RED, $status, 'idle is not failed');
+    }
+
+    /**
+     * The zero-opt-in state stays idle even when every OTHER signal the
+     * arithmetic keys on is screaming. None of them is about the operator's
+     * intent, and none of them can make a scanner with nowhere to go into a
+     * scanner that is behind: an unscheduled cron pass would do nothing if
+     * it fired, and a chain that is not opted in cannot be stale.
+     */
+    public function test_zero_opt_in_outranks_the_stale_and_unscheduled_signals(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [$this->chainRow([
+                    'discovery_opted_in'         => false,
+                    'last_discovery_age_seconds' => null,
+                    'last_error'                 => 'lcd 502',
+                ])],
+                [$this->scheduleEntry(['scheduled' => false, 'next_run_at' => null])]
+            )
+        );
+    }
+
+    /**
+     * IDLE OUTRANKS DISABLED. Both are intentional configuration, so the
+     * only question is which one to say first, and with no chain opted in
+     * the constant is the less useful of the two: defining it would change
+     * nothing at all. The panel still names the constant in the idle copy.
+     */
+    public function test_zero_opt_in_is_idle_even_with_the_gate_switched_off(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                false,
+                [$this->chainRow(['discovery_opted_in' => false])],
+                [$this->scheduleEntry()]
+            ),
+            'a gate-off site with nothing opted in is idle, not merely disabled'
+        );
+    }
+
+    /**
+     * The other side of that precedence, and the reason the gate check is
+     * still there: opt a chain in and the constant becomes the operative
+     * fact again.
+     */
+    public function test_one_opted_in_chain_brings_the_disabled_verdict_back(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                false,
+                [$this->chainRow(['discovery_opted_in' => true])],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * An EMPTY chain list is not idle. "No operator opted a chain in" and
+     * "the registry lists no Cosmos chain at all" are different facts, and
+     * only the first is a choice — the second keeps the red it always had.
+     *
+     * It is also the second lock on the unavailable/idle precedence: the
+     * unavailable summary carries no chain rows, so if an empty list could
+     * derive into idle, a failed read would be one refactor away from
+     * being reported as a calm, deliberate nothing.
+     */
+    public function test_an_empty_chain_list_is_not_idle(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_RED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(true, [], [$this->scheduleEntry()])
+        );
+    }
+
+    /**
+     * ONE opted-in chain is enough to hand the verdict back to the
+     * pre-existing arithmetic, and the not-opted-in chains beside it change
+     * nothing about the answer it gives. This is the regression fence
+     * around "presentation and classification only": red, yellow and green
+     * must still be reachable, and still on exactly the conditions they
+     * were reachable on before.
+     *
+     * @return list<array{0: string, 1: array<string, mixed>, 2: array<string, mixed>}>
+     */
+    public static function preExistingVerdict(): array
+    {
+        return [
+            'unscheduled hook is still red' => [
+                CosmwasmDiscoveryHealthSnapshot::STATUS_RED,
+                [],
+                ['scheduled' => false, 'next_run_at' => null],
+            ],
+            'recorded chain error is still yellow' => [
+                CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW,
+                ['last_error' => 'lcd 502'],
+                [],
+            ],
+            'overdue cron is still yellow' => [
+                CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW,
+                [],
+                ['overdue_seconds' => CosmwasmDiscoveryHealthSnapshot::CRON_OVERDUE_SECONDS + 1],
+            ],
+            'a healthy opted-in chain is still green' => [
+                CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+                [],
+                [],
+            ],
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $chainOverrides
+     * @param array<string, mixed> $scheduleOverrides
+     */
+    #[DataProvider('preExistingVerdict')]
+    public function test_one_opted_in_chain_keeps_the_pre_existing_arithmetic(
+        string $expected,
+        array $chainOverrides,
+        array $scheduleOverrides
+    ): void {
+        $this->assertSame(
+            $expected,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow($chainOverrides),
+                    // Not opted in, and deliberately noisy: it must not
+                    // drag the verdict either way.
+                    $this->chainRow([
+                        'chain_id'                   => 2,
+                        'slug'                       => 'juno',
+                        'discovery_opted_in'         => false,
+                        'last_discovery_age_seconds' => null,
+                    ]),
+                ],
+                [$this->scheduleEntry($scheduleOverrides)]
+            )
+        );
+    }
+
+    /**
+     * The count fails closed the same way the panel does: only a literal
+     * `true` is an opt-in. `'1'` is what a raw projection carries and a
+     * missing key is what older code produces, and neither may switch the
+     * scanner out of idle — the decision was already made, fail-closed, in
+     * deriveChainRow(), and this only reads it back.
+     */
+    public function test_only_a_literal_true_counts_as_an_opt_in(): void
+    {
+        $this->assertSame(1, CosmwasmDiscoveryHealthSnapshot::optedInChainCount([
+            $this->chainRow(['chain_id' => 1, 'discovery_opted_in' => true]),
+            $this->chainRow(['chain_id' => 2, 'discovery_opted_in' => '1']),
+            $this->chainRow(['chain_id' => 3, 'discovery_opted_in' => 1]),
+            $this->chainRow(['chain_id' => 4, 'discovery_opted_in' => 'yes']),
+        ]));
+
+        $rowWithoutTheKey = $this->chainRow();
+        unset($rowWithoutTheKey['discovery_opted_in']);
+        $this->assertSame(0, CosmwasmDiscoveryHealthSnapshot::optedInChainCount([$rowWithoutTheKey]));
+        $this->assertSame(0, CosmwasmDiscoveryHealthSnapshot::optedInChainCount([]));
     }
 
     // ── issues ──────────────────────────────────────────────────────────

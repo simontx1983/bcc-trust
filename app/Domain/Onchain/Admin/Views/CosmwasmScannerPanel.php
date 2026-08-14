@@ -45,6 +45,12 @@ final class CosmwasmScannerPanel
      * {@see NftIndexerStatusView} already uses so the two health panels
      * do not teach the operator two different colour languages.
      *
+     * `idle` takes the SAME neutral grey as `disabled` and deliberately
+     * not a colour of its own: both mean "on purpose, nothing running",
+     * and a fourth hue would imply a fourth severity. It must never take
+     * the green — that one says the scanner is working, which an idle
+     * scanner is not.
+     *
      * @var array<string, string>
      */
     private const STATUS_COLOR = [
@@ -52,6 +58,7 @@ final class CosmwasmScannerPanel
         CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW      => '#dba617',
         CosmwasmDiscoveryHealthSnapshot::STATUS_RED         => '#d63638',
         CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED    => '#646970',
+        CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE        => '#646970',
         CosmwasmDiscoveryHealthSnapshot::STATUS_UNAVAILABLE => '#d63638',
     ];
 
@@ -131,6 +138,41 @@ final class CosmwasmScannerPanel
                         could read look identical once you print a 0, and only one of those is
                         worth acting on. Reload once the database error clears.
                     </p>
+                </div>
+            <?php elseif ($status === CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE): ?>
+                <?php
+                // NEUTRAL BY CONSTRUCTION. notice-info, not notice-warning
+                // and not notice-error: nothing here is degraded and
+                // nothing here failed. An operator who has opted no chain
+                // in has configured the scanner, not broken it, and this
+                // block must never read as a fault — the panel loses the
+                // right to alarm anybody the day it alarms them about a
+                // choice they made.
+                //
+                // It sits AHEAD of the switched-off notice on purpose,
+                // matching CosmwasmDiscoveryHealthSnapshot::deriveStatus():
+                // with no chain opted in, defining the constant would
+                // change nothing, so leading with it would send someone to
+                // wp-config.php for no effect. The constant is still named
+                // below when it is also undefined, so no fact is hidden.
+                ?>
+                <div class="notice notice-info inline" style="margin:8px 0;">
+                    <p>
+                        <strong>Idle — no chains enabled for NFT discovery.</strong>
+                        No chain has been opted in, so there is nothing for the scanner to
+                        walk. This is a configuration state, not a fault: nothing has
+                        failed, nothing is behind, and no work is waiting. Use
+                        <em>Enable discovery</em> on a chain below to point it at one —
+                        everything it then finds still arrives here <strong>unverified</strong>.
+                    </p>
+                    <?php if (!$enabled): ?>
+                        <p>
+                            <?php echo esc_html((string) ($summary['disabled_reason'] ?? '')); ?>
+                            That gate would have to be opened as well before any scheduled
+                            pass ran, but on its own it changes nothing while no chain is
+                            opted in.
+                        </p>
+                    <?php endif; ?>
                 </div>
             <?php elseif (!$enabled): ?>
                 <div class="notice notice-warning inline" style="margin:8px 0;">

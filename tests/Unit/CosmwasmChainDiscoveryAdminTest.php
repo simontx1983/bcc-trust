@@ -593,6 +593,88 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertSame(0, CosmwasmDiscoveryHealthSnapshot::buildSummary()['eligible_chain_count']);
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    //  THE PANEL — nobody opted anything in
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * The setUp state IS the zero-opt-in state: both chains ship disabled,
+     * which is the production default the migration guarantees. Every
+     * install therefore starts here, and it used to read YELLOW — a
+     * degraded verdict handed to an operator on day one, about a system
+     * behaving exactly as configured.
+     */
+    public function test_no_chain_opted_in_reports_idle_and_no_other_verdict(): void
+    {
+        $status = CosmwasmDiscoveryHealthSnapshot::buildSummary()['status'];
+
+        self::assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE, $status);
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN, $status, 'idle is not healthy');
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW, $status, 'idle is not degraded');
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_RED, $status, 'idle is not failed');
+    }
+
+    /**
+     * The rendered half. The copy has to say the state out loud AND carry
+     * none of the treatments this panel reserves for trouble: no error
+     * notice, no warning notice, no alarm colour on the badge, and no
+     * forcing the whole disclosure open the way RED and UNAVAILABLE do.
+     *
+     * The constant is still named. Idle outranking `disabled` is about
+     * which fact leads, not about hiding the other one.
+     */
+    public function test_the_idle_panel_says_so_without_dressing_it_up_as_a_fault(): void
+    {
+        $html = $this->renderPanel();
+        $flat = self::flatten($html);
+
+        self::assertStringContainsString('Idle — no chains enabled for NFT discovery.', $html);
+        self::assertStringContainsString('This is a configuration state, not a fault', $flat);
+
+        // The badge is the NEUTRAL grey, and it says IDLE. Asserted as one
+        // string so it cannot be satisfied by a grey badge somewhere else
+        // on the page (every eligibility pill is grey here too).
+        self::assertStringContainsString('background:#646970;"> IDLE', $flat);
+
+        // None of the treatments that mean trouble.
+        self::assertStringNotContainsString('notice-error', $html);
+        self::assertStringNotContainsString('notice-warning', $html);
+        self::assertStringNotContainsString('Scanner figures are unavailable', $html);
+        self::assertStringNotContainsString('YELLOW', $html);
+        self::assertStringNotContainsString('RED', $html);
+
+        // And it does not force the disclosure open — that is reserved for
+        // states an operator has to deal with now.
+        self::assertSame(1, preg_match('/<details class="bcc-cw-scanner"[^>]*>/', $html, $tag));
+        self::assertStringNotContainsString('open', $tag[0], 'idle must not shove the panel open');
+
+        // Nothing is hidden: the undefined gate is still named, and the
+        // per-chain controls are still there to act on.
+        self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED', $html);
+        self::assertStringContainsString('Enable discovery', $html);
+        self::assertStringContainsString('Code families known', $html);
+    }
+
+    /**
+     * The exit from idle, through the real control. One opt-in is enough:
+     * the scanner now has somewhere to go, so the ordinary arithmetic —
+     * and, here, the still-undefined gate — takes the verdict back.
+     */
+    public function test_opting_one_chain_in_takes_the_panel_out_of_idle(): void
+    {
+        $this->post('cw_discovery_on_' . self::CHAIN_ID);
+
+        $status = CosmwasmDiscoveryHealthSnapshot::buildSummary()['status'];
+
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE, $status);
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED,
+            $status,
+            'with a chain opted in, the undefined gate is the operative fact again'
+        );
+        self::assertStringNotContainsString('Idle — no chains enabled', $this->renderPanel());
+    }
+
     /**
      * THE FAIL-CLOSED CASE, and the reason the panel reads its eligibility
      * the pedantic way.
