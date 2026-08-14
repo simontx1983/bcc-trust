@@ -51,6 +51,17 @@ final class CosmwasmScannerPanel
      * the green — that one says the scanner is working, which an idle
      * scanner is not.
      *
+     * `blocked` takes the amber, and NOT that grey. Nothing has failed, so
+     * it is not the red; nothing is running, so it is emphatically not the
+     * green; and unlike idle and disabled there is something an operator
+     * has to change before the selection they have already made can
+     * produce any work. Amber is this palette's "act on me, nothing is on
+     * fire", which is exactly the register. It borrows the existing hue
+     * rather than inventing a fifth: the badge prints the word BLOCKED
+     * beside it, so the colour carries severity and the word carries
+     * meaning — which is the division of labour the four hues already
+     * assume.
+     *
      * @var array<string, string>
      */
     private const STATUS_COLOR = [
@@ -59,6 +70,7 @@ final class CosmwasmScannerPanel
         CosmwasmDiscoveryHealthSnapshot::STATUS_RED         => '#d63638',
         CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED    => '#646970',
         CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE        => '#646970',
+        CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED     => '#dba617',
         CosmwasmDiscoveryHealthSnapshot::STATUS_UNAVAILABLE => '#d63638',
     ];
 
@@ -106,8 +118,18 @@ final class CosmwasmScannerPanel
         $chains = is_array($summary['chains'] ?? null) ? array_values($summary['chains']) : [];
         /** @var list<string> $issues */
         $issues = is_array($summary['issues'] ?? null) ? array_values($summary['issues']) : [];
+
+        // FORCED OPEN for the states an operator has to deal with now.
+        // `blocked` joins red and unavailable because it is the one calm
+        // status with an action attached: the selection cannot produce
+        // work, and the row naming the chain in the way is inside this
+        // disclosure. `idle` and `disabled` stay closed — nothing is
+        // waiting on anybody there.
+        $forceOpen = $unavailable
+            || $status === CosmwasmDiscoveryHealthSnapshot::STATUS_RED
+            || $status === CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED;
         ?>
-        <details class="bcc-cw-scanner" style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;" <?php echo $status === CosmwasmDiscoveryHealthSnapshot::STATUS_RED || $unavailable ? 'open' : ''; ?>>
+        <details class="bcc-cw-scanner" style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;" <?php echo $forceOpen ? 'open' : ''; ?>>
             <summary style="cursor:pointer;font-weight:600;">
                 CosmWasm collection scanner
                 <span style="display:inline-block;margin-left:6px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($color); ?>;">
@@ -171,6 +193,42 @@ final class CosmwasmScannerPanel
                             That gate would have to be opened as well before any scheduled
                             pass ran, but on its own it changes nothing while no chain is
                             opted in.
+                        </p>
+                    <?php endif; ?>
+                </div>
+            <?php elseif ($status === CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED): ?>
+                <?php
+                // notice-warning, NOT notice-error and NOT notice-info.
+                // Nothing failed, so it is not an error; but unlike the
+                // idle notice above there is something to change before
+                // the selection an operator has already made can produce
+                // any work, so it does not get the calm treatment either.
+                //
+                // It sits AHEAD of the switched-off notice for the same
+                // reason the idle block does, and
+                // CosmwasmDiscoveryHealthSnapshot::deriveStatus() ranks it
+                // the same way: with no scannable opted-in chain, defining
+                // the constant would change nothing. The constant is still
+                // named below when it is also undefined.
+                ?>
+                <div class="notice notice-warning inline" style="margin:8px 0;">
+                    <p>
+                        <strong>No opted-in chain can be scanned.</strong>
+                        Every chain enabled for NFT discovery is either paused or has no
+                        CosmWasm module — a chain that answered the code listing with a 501
+                        is permanently skipped, and opting it in changes nothing — so there
+                        is nothing for the scanner to walk. Nothing has failed and nothing
+                        is behind: the current selection simply cannot produce any work.
+                        Enable discovery on a chain that reports a wasm module, or resume a
+                        paused one. The Discovery and State columns below say which chain is
+                        which.
+                    </p>
+                    <?php if (!$enabled): ?>
+                        <p>
+                            <?php echo esc_html((string) ($summary['disabled_reason'] ?? '')); ?>
+                            That gate would have to be opened as well before any scheduled
+                            pass ran, but on its own it changes nothing while no opted-in
+                            chain can be scanned.
                         </p>
                     <?php endif; ?>
                 </div>

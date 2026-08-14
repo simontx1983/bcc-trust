@@ -468,10 +468,17 @@ final class CosmwasmScannerAdminTest extends TestCase
         );
     }
 
-    public function test_every_chain_paused_or_unsupported_is_red(): void
+    /**
+     * Both chains are opted IN here (the fixture default), so this is the
+     * blocked case rather than the red one: the operator's whole selection
+     * is unscannable, which has its own sentence now. `eligible === 0` is
+     * still what detects it — see
+     * test_an_empty_chain_list_is_not_idle() for the route that keeps RED.
+     */
+    public function test_every_opted_in_chain_paused_or_unsupported_is_blocked(): void
     {
         $this->assertSame(
-            CosmwasmDiscoveryHealthSnapshot::STATUS_RED,
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
             CosmwasmDiscoveryHealthSnapshot::deriveStatus(
                 true,
                 [$this->chainRow(['paused' => true]), $this->chainRow(['chain_id' => 2, 'unsupported' => true])],
@@ -695,6 +702,273 @@ final class CosmwasmScannerAdminTest extends TestCase
         unset($rowWithoutTheKey['discovery_opted_in']);
         $this->assertSame(0, CosmwasmDiscoveryHealthSnapshot::optedInChainCount([$rowWithoutTheKey]));
         $this->assertSame(0, CosmwasmDiscoveryHealthSnapshot::optedInChainCount([]));
+    }
+
+    // ── status: opted in, and none of it can be scanned ─────────────────
+    //
+    // The half of the zero-opt-in defect that survived #186. The counting
+    // loop still walked EVERY chain in the registry — it only skipped the
+    // paused and the unsupported ones — so a chain nobody had opted in
+    // counted as an eligible, healthy chain. A site whose one opt-in was
+    // an unsupported chain therefore read GREEN off a chain the operator
+    // had deliberately left switched off, which is the most expensive
+    // possible way to be told nothing is wrong.
+
+    /**
+     * THE LIVE REPRO, reproduced on staging against the deployed code:
+     * one opted-in chain with no wasm module, beside one supported chain
+     * nobody opted in. It derived `green`.
+     *
+     * The assertion is written both ways round on purpose. `assertSame`
+     * pins the new answer; the `assertNotSame` says out loud which answer
+     * must never come back, so a future refactor that reintroduces the
+     * whole-registry loop fails on the sentence that describes the bug.
+     */
+    public function test_an_unsupported_opt_in_beside_a_chain_nobody_opted_in_is_not_green(): void
+    {
+        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+            true,
+            [
+                $this->chainRow([
+                    'chain_id'           => 1,
+                    'slug'               => 'jackal',
+                    'discovery_opted_in' => true,
+                    'unsupported'        => true,
+                    'state'              => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ]),
+                $this->chainRow([
+                    'chain_id'           => 2,
+                    'slug'               => 'juno',
+                    'discovery_opted_in' => false,
+                ]),
+            ],
+            [$this->scheduleEntry()]
+        );
+
+        $this->assertNotSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+            $status,
+            'a chain nobody opted in must never make an unscannable selection look healthy'
+        );
+        $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+    }
+
+    /** The single-chain case: the only opt-in there is cannot be scanned. */
+    public function test_one_opted_in_unsupported_chain_is_blocked(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [$this->chainRow([
+                    'unsupported' => true,
+                    'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ])],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * EVERY opted-in chain unsupported, and no other verdict may leak.
+     * Named one at a time so a failure says WHICH one did.
+     */
+    public function test_every_opted_in_chain_unsupported_is_blocked_and_nothing_else(): void
+    {
+        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+            true,
+            [
+                $this->chainRow([
+                    'chain_id'    => 1,
+                    'slug'        => 'jackal',
+                    'unsupported' => true,
+                    'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ]),
+                $this->chainRow([
+                    'chain_id'    => 2,
+                    'slug'        => 'stargaze',
+                    'unsupported' => true,
+                    'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ]),
+            ],
+            [$this->scheduleEntry()]
+        );
+
+        $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN, $status, 'blocked is not healthy');
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW, $status, 'blocked is not merely degraded');
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE, $status, 'a selection was made — this is not idle');
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED, $status, 'blocked is not a statement about the constant');
+    }
+
+    /** The two unscannable reasons mixed: one paused, one unsupported. */
+    public function test_a_paused_opt_in_beside_an_unsupported_one_is_blocked(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow([
+                        'chain_id' => 1,
+                        'slug'     => 'juno',
+                        'paused'   => true,
+                        'state'    => ChainCheckpointRepository::CW_STATE_PAUSED,
+                    ]),
+                    $this->chainRow([
+                        'chain_id'    => 2,
+                        'slug'        => 'jackal',
+                        'unsupported' => true,
+                        'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * BLOCKED OUTRANKS DISABLED, for the reason idle already does: with no
+     * scannable opted-in chain, defining `BCC_COSMWASM_DISCOVERY_ENABLED`
+     * would change nothing, so sending an operator to wp-config.php would
+     * waste the trip. The panel still names the constant in the copy.
+     */
+    public function test_blocked_outranks_the_switched_off_gate(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                false,
+                [$this->chainRow([
+                    'unsupported' => true,
+                    'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ])],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * And it outranks the cron signals, again for the idle reason: an
+     * unscheduled pass would do nothing if it fired, because there is no
+     * chain for it to walk.
+     */
+    public function test_blocked_outranks_the_unscheduled_cron_signal(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [$this->chainRow([
+                    'unsupported'                => true,
+                    'state'                      => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                    'last_discovery_age_seconds' => null,
+                ])],
+                [$this->scheduleEntry(['scheduled' => false, 'next_run_at' => null])]
+            )
+        );
+    }
+
+    /**
+     * An EMPTY chain list is not blocked either. Same lock as
+     * test_an_empty_chain_list_is_not_idle(): the unavailable summary
+     * carries no chain rows, so no derived verdict may be reachable from
+     * an empty list except the RED it always had.
+     */
+    public function test_an_empty_chain_list_is_never_blocked(): void
+    {
+        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(true, [], [$this->scheduleEntry()]);
+
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+        $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_RED, $status);
+    }
+
+    // ── status: MIXED — some opted-in chains can be scanned ─────────────
+
+    /**
+     * ONE scannable opt-in is enough to hand the verdict back to the
+     * arithmetic, and the unscannable opt-in beside it changes nothing.
+     * That is the whole distinction the panel has to make: blocked is
+     * about the WHOLE selection, never about one row, and the per-chain
+     * "No wasm module" pill is what names the excluded chain.
+     */
+    public function test_a_scannable_opt_in_beside_an_unsupported_one_is_green(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow(['chain_id' => 1, 'slug' => 'juno']),
+                    $this->chainRow([
+                        'chain_id'                   => 2,
+                        'slug'                       => 'jackal',
+                        'unsupported'                => true,
+                        'state'                      => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                        'last_discovery_age_seconds' => null,
+                        'last_error'                 => 'lcd 501',
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            ),
+            'an unsupported chain is excluded from the arithmetic, not folded into it as a fault'
+        );
+    }
+
+    /**
+     * The other half of the mixed case: the chain that CAN be scanned is
+     * the one the verdict describes. Degrade it and the panel degrades,
+     * with the unsupported chain still sitting quietly beside it.
+     */
+    public function test_a_mixed_selection_reports_the_scannable_chain_degraded(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow(['chain_id' => 1, 'slug' => 'juno', 'last_error' => 'lcd 502']),
+                    $this->chainRow([
+                        'chain_id'    => 2,
+                        'slug'        => 'jackal',
+                        'unsupported' => true,
+                        'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * The counting loop is opted-in-only in BOTH directions. A chain
+     * nobody opted in cannot make the scanner look healthy — the bug this
+     * fixes — and it cannot make it look degraded either: the worker never
+     * touches it, so its recorded error and its missing last-run stamp are
+     * not facts about anything the scanner is doing.
+     *
+     * This is the crispest catch for "count the whole registry again": put
+     * the error back in scope and the answer turns yellow.
+     */
+    public function test_a_chain_nobody_opted_in_cannot_make_the_scanner_degraded(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow(['chain_id' => 1, 'slug' => 'juno']),
+                    $this->chainRow([
+                        'chain_id'                   => 2,
+                        'slug'                       => 'osmosis',
+                        'discovery_opted_in'         => false,
+                        'last_error'                 => 'lcd 502',
+                        'last_discovery_age_seconds' => null,
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            )
+        );
     }
 
     // ── issues ──────────────────────────────────────────────────────────

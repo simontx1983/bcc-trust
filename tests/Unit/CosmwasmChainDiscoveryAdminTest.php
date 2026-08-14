@@ -675,6 +675,116 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertStringNotContainsString('Idle — no chains enabled', $this->renderPanel());
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    //  THE PANEL — opted in, and none of it can be scanned
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * THE LIVE SHAPE, end to end through buildSummary(): one chain opted
+     * in and unsupported, one supported chain nobody opted in. Reproduced
+     * on staging, where it derived GREEN — the arithmetic counted the
+     * chain the operator had left switched off as an eligible, healthy
+     * chain, and reported the scanner fine while its entire selection was
+     * unscannable.
+     *
+     * It also pins the precedence: the gate constant is undefined in this
+     * process, and `blocked` still leads. Defining it would change nothing
+     * while no opted-in chain can be scanned, so the constant is the less
+     * useful of the two facts — the copy still names it.
+     */
+    public function test_an_opted_in_chain_with_no_wasm_module_reports_blocked(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainCheckpointRepository::setCwDiscoveryState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+
+        $status = CosmwasmDiscoveryHealthSnapshot::buildSummary()['status'];
+
+        self::assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN, $status, 'an unscannable selection is not healthy');
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE, $status, 'a selection was made — this is not idle');
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED, $status, 'the constant is not the operative fact here');
+    }
+
+    /**
+     * The rendered half. It has to say the state out loud, say what to do
+     * about it, and stop short of calling it a failure — nothing broke.
+     * It is not given the calm treatment idle gets either: there IS
+     * something to change, so it takes the amber and forces the
+     * disclosure open the way the other actionable states do.
+     */
+    public function test_the_blocked_panel_says_what_to_do_without_calling_it_a_failure(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainCheckpointRepository::setCwDiscoveryState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+
+        $html = $this->renderPanel();
+        $flat = self::flatten($html);
+
+        self::assertStringContainsString('No opted-in chain can be scanned.', $html);
+        self::assertStringContainsString('Nothing has failed and nothing is behind', $flat);
+        self::assertStringContainsString('resume a paused one', $flat);
+
+        // Amber, and it says BLOCKED. Asserted as one string so a stray
+        // amber pill elsewhere on the page cannot satisfy it.
+        self::assertStringContainsString('background:#dba617;"> BLOCKED', $flat);
+
+        // Actionable, not alarming: a warning notice, never an error one,
+        // and never the unavailable treatment.
+        self::assertStringContainsString('notice-warning', $html);
+        self::assertStringNotContainsString('notice-error', $html);
+        self::assertStringNotContainsString('Scanner figures are unavailable', $html);
+
+        // It DOES force the disclosure open — unlike idle, something is
+        // waiting on the operator here.
+        self::assertSame(1, preg_match('/<details class="bcc-cw-scanner"[^>]*>/', $html, $tag));
+        self::assertStringContainsString('open', $tag[0], 'blocked must not hide behind a closed disclosure');
+
+        // Nothing is hidden: the undefined gate is still named, the row
+        // says WHICH chain is in the way, and the controls are there.
+        self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED', $html);
+        self::assertStringContainsString('No wasm module', $html);
+        self::assertStringContainsString('Enable discovery', $html);
+    }
+
+    /**
+     * The exit from blocked, and the mixed case at panel level: opt a
+     * SCANNABLE chain in beside the unsupported one and the verdict goes
+     * back to the ordinary arithmetic — here, to the still-undefined gate.
+     * The unsupported chain does not disappear; it keeps its own row and
+     * its own reason, which is the distinction the panel exists to draw.
+     */
+    public function test_one_scannable_opt_in_takes_the_panel_out_of_blocked(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainCheckpointRepository::setCwDiscoveryState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+        ChainRepository::seed(self::OTHER_CHAIN_ID, self::OTHER_SLUG, 'https://b.example', 'cosmos', 1);
+
+        $status = CosmwasmDiscoveryHealthSnapshot::buildSummary()['status'];
+
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED,
+            $status,
+            'with a scannable chain opted in, the undefined gate is the operative fact again'
+        );
+
+        $html = $this->renderPanel();
+
+        self::assertStringNotContainsString('No opted-in chain can be scanned', $html);
+        // The unsupported chain is still named, one row at a time.
+        self::assertStringContainsString('No wasm module', $html);
+        self::assertStringContainsString('<strong>1 of 2</strong>', self::flatten($html));
+    }
+
     /**
      * THE FAIL-CLOSED CASE, and the reason the panel reads its eligibility
      * the pedantic way.

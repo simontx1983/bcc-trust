@@ -131,6 +131,41 @@ final class CosmwasmDiscoveryHealthSnapshot
      */
     public const STATUS_IDLE = 'idle';
     /**
+     * Chains ARE opted in, and not one of them can be scanned.
+     *
+     * ── THE HALF OF THE OPT-IN BUG THAT SURVIVED {@see STATUS_IDLE} ─────
+     * That constant fixed the case where nobody had opted anything in. The
+     * counting loop underneath it kept the rest of the defect: it walked
+     * EVERY chain in the registry, skipped the paused and the unsupported
+     * ones, and counted everything else as "eligible" — including chains
+     * the worker will never touch because no operator asked for them.
+     *
+     * Reproduced against the deployed code before this value existed:
+     * chains = [opted-in + unsupported, not-opted-in + supported] derived
+     * GREEN. An operator whose ENTIRE selection could not be scanned was
+     * told everything was fine, on the strength of a chain they had
+     * deliberately left switched off.
+     *
+     * WHAT IT MEANS, EXACTLY: at least one chain is opted in, and every
+     * opted-in chain is either unsupported (no wasm module) or paused.
+     * There is no work for the scanner to do even with the gate open and
+     * cron running perfectly.
+     *
+     * WHAT IT IS NOT:
+     *   - not GREEN. Nothing is running, so nothing is working.
+     *   - not IDLE. Somebody DID point the scanner at something. Idle is
+     *     "no selection"; this is "a selection that cannot produce work",
+     *     and only the first is answered by opting a chain in.
+     *   - not DISABLED. That is a statement about
+     *     `BCC_COSMWASM_DISCOVERY_ENABLED` alone, and it is still named in
+     *     the copy when it happens to be undefined as well.
+     *   - not merely RED, which is where this case landed before. Red was
+     *     not WRONG — `eligible === 0` caught it — it just explained
+     *     nothing, and it sent an operator looking for a fault when the
+     *     answer is a row in the table below saying "No wasm module".
+     */
+    public const STATUS_BLOCKED = 'blocked';
+    /**
      * A DB read failed, so there is no picture to paint.
      *
      * Distinct from every other value on purpose. `green`/`yellow`/`red`
@@ -786,45 +821,69 @@ final class CosmwasmDiscoveryHealthSnapshot
      *      That ordering is load-bearing: "a read failed" outranks every
      *      tidy answer, and idle is the tidiest one there is.
      *   2. idle    — nobody opted a chain in.
-     *   3. disabled — the constant is undefined.
-     *   4. red / yellow / green — the arithmetic, unchanged.
+     *   3. blocked — chains ARE opted in and not one of them is scannable.
+     *   4. disabled — the constant is undefined.
+     *   5. red / yellow / green — the arithmetic, over the OPTED-IN
+     *      scannable set only.
      *
-     * ── WHY IDLE OUTRANKS DISABLED ──────────────────────────────────────
-     * Both are intentional configuration, so neither is a fault and the
-     * only question is which one an operator needs told first. With zero
-     * chains opted in, defining `BCC_COSMWASM_DISCOVERY_ENABLED` would
-     * change NOTHING — the scanner still has nowhere to go — so leading
+     * ── THE ARITHMETIC ONLY EVER LOOKED AT THE WRONG SET ────────────────
+     * The loop below used to run over EVERY chain in the registry, skip
+     * the paused and unsupported ones, and count the rest as eligible. A
+     * chain nobody opted in — supported, unpaused, freshly stamped by
+     * nothing at all — therefore counted as a healthy eligible chain,
+     * which is the defect {@see STATUS_BLOCKED} documents: an operator
+     * whose only opt-in was an unsupported chain read GREEN off a chain
+     * they had switched off. It now skips anything not opted in BEFORE it
+     * counts anything, so every number here describes chains the worker
+     * would actually walk, and nothing else can move the verdict.
+     *
+     * ── WHY IDLE AND BLOCKED OUTRANK DISABLED ───────────────────────────
+     * Same reason, ruled once and applied twice. Both are intentional
+     * configuration, so neither is a fault and the only question is which
+     * fact an operator needs told first. With nothing opted in — or with
+     * nothing opted in that CAN be scanned — defining
+     * `BCC_COSMWASM_DISCOVERY_ENABLED` would change NOTHING, so leading
      * with the constant sends someone to edit wp-config.php for no effect.
-     * The nearer truth is "no chains are enabled", and it is the one with
-     * an action attached. The constant is not hidden by this: the panel
-     * still carries `disabled_reason`, and the idle notice names the
-     * constant when it is also undefined.
+     * The nearer truth is the selection, and it is the one with an action
+     * attached. Neither hides the constant: the panel still carries
+     * `disabled_reason`, and both notices name it when it is undefined.
      *
-     * ── AND WHY EMPTY CHAINS DO NOT COUNT AS IDLE ───────────────────────
+     * Blocked outranks the red/yellow/green arithmetic for the same
+     * reason: an unscheduled or overdue cron pass is real, but it changes
+     * nothing while there is no chain for that pass to walk.
+     *
+     * ── AND WHY EMPTY CHAINS ARE NEITHER IDLE NOR BLOCKED ───────────────
      * `$chains === []` means the registry lists no active Cosmos chain at
-     * all. That is not an operator declining to scan anything, it is a
-     * registry with nothing in it, and it keeps the RED it always had. The
-     * guard is also a second lock on precedence 1 above: the unavailable
+     * all. That is not an operator declining to scan anything, nor an
+     * operator selecting chains that cannot be scanned — it is a registry
+     * with nothing in it, and it keeps the RED it always had. Both guards
+     * are also a second lock on precedence 1 above: the unavailable
      * summary carries no chain rows, so an empty list must never be able
-     * to derive into a calm "idle".
+     * to derive into a calm "idle" or an explanatory "blocked".
      *
      * @param list<ChainPanelRow> $chains
      * @param list<ScheduleEntry> $schedule
      */
     public static function deriveStatus(bool $discoveryEnabled, array $chains, array $schedule): string
     {
-        if ($chains !== [] && self::optedInChainCount($chains) === 0) {
-            return self::STATUS_IDLE;
-        }
+        $optedIn = self::optedInChainCount($chains);
 
-        if (!$discoveryEnabled) {
-            return self::STATUS_DISABLED;
+        if ($chains !== [] && $optedIn === 0) {
+            return self::STATUS_IDLE;
         }
 
         $eligible = 0;
         $errored  = 0;
         $stale    = 0;
         foreach ($chains as $chain) {
+            // NOT OPTED IN, NOT COUNTED — in either direction. It cannot
+            // make the scanner look healthy (the bug this fixes) and it
+            // cannot make it look degraded either: a chain the worker
+            // never touches has no last run to be stale and no error of
+            // its own to answer for.
+            if (!self::optedIn($chain)) {
+                continue;
+            }
             if ($chain['paused'] || $chain['unsupported']) {
                 continue;
             }
@@ -838,6 +897,18 @@ final class CosmwasmDiscoveryHealthSnapshot
             }
         }
 
+        // Opt-ins exist, and not one of them survived the loop above.
+        // Stated as `$optedIn > 0` rather than leaning on the idle guard,
+        // because the two conditions are different sentences and a reader
+        // should not have to prove the first one from ten lines away.
+        if ($optedIn > 0 && $eligible === 0) {
+            return self::STATUS_BLOCKED;
+        }
+
+        if (!$discoveryEnabled) {
+            return self::STATUS_DISABLED;
+        }
+
         $unscheduled = 0;
         $overdue     = 0;
         foreach ($schedule as $entry) {
@@ -848,6 +919,13 @@ final class CosmwasmDiscoveryHealthSnapshot
             }
         }
 
+        // `$eligible === 0` survives as the BACKSTOP it always was, and it
+        // now only answers for the empty registry: every other route to
+        // zero eligible chains is an opt-in that cannot be scanned, which
+        // the blocked guard above has already claimed with a sentence an
+        // operator can act on. It is kept rather than tidied away because
+        // the fail-closed direction is the whole point — an unforeseen way
+        // to reach zero must land on RED, never on green with no chains.
         if ($eligible === 0 || $unscheduled > 0) {
             return self::STATUS_RED;
         }
@@ -874,8 +952,9 @@ final class CosmwasmDiscoveryHealthSnapshot
      * questions and only one of them is "did an operator ask for this?".
      * A chain that is opted in but paused, unsupported or outside the
      * canary allowlist still counts here: somebody asked for it, so the
-     * system is not idle — it has something to explain instead, and the
-     * red/yellow arithmetic below is what explains it.
+     * system is not idle — it has something to explain instead, and
+     * {@see STATUS_BLOCKED} or the red/yellow arithmetic is what explains
+     * it.
      *
      * @param list<ChainPanelRow> $chains
      */
@@ -883,12 +962,29 @@ final class CosmwasmDiscoveryHealthSnapshot
     {
         $count = 0;
         foreach ($chains as $chain) {
-            if (($chain['discovery_opted_in'] ?? null) === true) {
+            if (self::optedIn($chain)) {
                 $count++;
             }
         }
 
         return $count;
+    }
+
+    /**
+     * PURE. Did an operator ask for this chain? ONE reader, used by both
+     * the count above and the arithmetic in {@see deriveStatus()}.
+     *
+     * It is one function because the two callers must never drift: a
+     * status that counted opt-ins one way and eligible chains another
+     * could report "no chain is opted in" and "one chain is eligible" out
+     * of the same array. FAIL CLOSED — only a literal `true`; see
+     * {@see optedInChainCount()} for why a truthy value is not enough.
+     *
+     * @param ChainPanelRow $chain
+     */
+    private static function optedIn(array $chain): bool
+    {
+        return ($chain['discovery_opted_in'] ?? null) === true;
     }
 
     /**
