@@ -447,6 +447,7 @@ return array(
     'BCC\\Trust\\Onchain\\Support\\Bech32' => $baseDir . '/app/Domain/Onchain/Support/Bech32.php',
     'BCC\\Trust\\Onchain\\Support\\ChainSupport' => $baseDir . '/app/Domain/Onchain/Support/ChainSupport.php',
     'BCC\\Trust\\Onchain\\Support\\CosmwasmDiscoveryGate' => $baseDir . '/app/Domain/Onchain/Support/CosmwasmDiscoveryGate.php',
+    'BCC\\Trust\\Onchain\\Support\\CosmwasmScanEligibility' => $baseDir . '/app/Domain/Onchain/Support/CosmwasmScanEligibility.php',
     'BCC\\Trust\\Onchain\\Support\\CosmwasmTickBudget' => $baseDir . '/app/Domain/Onchain/Support/CosmwasmTickBudget.php',
     'BCC\\Trust\\Onchain\\Support\\ExplorerLinkBuilder' => $baseDir . '/app/Domain/Onchain/Support/ExplorerLinkBuilder.php',
     'BCC\\Trust\\Onchain\\Support\\MarketplaceLinkBuilder' => $baseDir . '/app/Domain/Onchain/Support/MarketplaceLinkBuilder.php',

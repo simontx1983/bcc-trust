@@ -8,6 +8,7 @@ use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Services\CosmwasmEvidenceNarrator;
+use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
 use BCC\Trust\Onchain\Support\ExplorerLinkBuilder;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -35,6 +36,7 @@ use PHPUnit\Framework\TestCase;
  *   - the narrator never echoes a raw evidence token as prose.
  */
 #[CoversClass(CosmwasmDiscoveryHealthSnapshot::class)]
+#[CoversClass(CosmwasmScanEligibility::class)]
 #[CoversClass(CosmwasmEvidenceNarrator::class)]
 #[CoversClass(ExplorerLinkBuilder::class)]
 final class CosmwasmScannerAdminTest extends TestCase
@@ -72,25 +74,55 @@ final class CosmwasmScannerAdminTest extends TestCase
      * omitted the key would make every status case in this file a
      * zero-opt-in case and the red/yellow/green arithmetic would never be
      * exercised at all. Tests that want the idle path say so by overriding
-     * it, exactly as they already do for `paused` and `unsupported`.
+     * it.
+     *
+     * ── `state` IS THE INPUT; `paused`, `unsupported` AND `eligibility`
+     *    ARE DERIVED FROM IT, EXACTLY AS deriveChainRow() DERIVES THEM ───
+     * A fixture that let a caller set `paused => true` while leaving
+     * `eligibility => 'eligible'` describes a row the production code
+     * cannot produce, and a status test written against it proves nothing
+     * about production. This has bitten twice — most recently when the
+     * arithmetic started reading the eligibility verdict and half this
+     * file's "paused" rows turned out to be claiming they were eligible.
+     * So the shape is built the way the real builder builds it, from ONE
+     * fact per question.
+     *
+     * An explicit override still wins, because two tests deliberately
+     * describe rows nothing could produce (a missing key, a truthy
+     * non-boolean) and that is exactly what they are for.
+     *
+     * The allowlist is not a parameter: it is not on the row in
+     * production either. A test that wants the allowlist-excluded verdict
+     * says `'eligibility' => ELIGIBILITY_ALLOWLIST_EXCLUDED`, which is
+     * what the real builder would have written there.
      *
      * @param array<string, mixed> $overrides
      * @return array<string, mixed>
      */
     private function chainRow(array $overrides = []): array
     {
+        $chainId = (int) ($overrides['chain_id'] ?? 8);
+        $state   = (string) ($overrides['state'] ?? ChainCheckpointRepository::CW_STATE_BACKFILLED);
+        /** @var mixed $optedIn */
+        $optedIn = array_key_exists('discovery_opted_in', $overrides)
+            ? $overrides['discovery_opted_in']
+            : true;
+
         return array_merge([
-            'chain_id'                    => 8,
+            'chain_id'                    => $chainId,
             'slug'                        => 'cosmos',
             'name'                        => 'Cosmos Hub',
-            'state'                       => ChainCheckpointRepository::CW_STATE_BACKFILLED,
-            'state_label'                 => 'Backfilled',
-            'paused'                      => false,
-            'unsupported'                 => false,
-            'discovery_opted_in'          => true,
-            'eligibility'                 => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE,
+            'state'                       => $state,
+            'state_label'                 => CosmwasmDiscoveryHealthSnapshot::stateLabel($state),
+            'paused'                      => $state === ChainCheckpointRepository::CW_STATE_PAUSED,
+            'unsupported'                 => $state === ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+            'discovery_opted_in'          => $optedIn,
+            // The SHARED verdict, from the same function production calls.
+            // `$optedIn === true` mirrors deriveChainRow()'s fail-closed
+            // read: only a literal true is an opt-in.
+            'eligibility'                 => CosmwasmScanEligibility::verdict($chainId, $state, $optedIn === true, null),
             'eligibility_reason'          => '',
-            'backfill_complete'           => true,
+            'backfill_complete'           => $state === ChainCheckpointRepository::CW_STATE_BACKFILLED,
             'progress_label'              => '',
             'max_code_id'                 => 713,
             'cursor_open'                 => false,
@@ -211,6 +243,15 @@ final class CosmwasmScannerAdminTest extends TestCase
     }
 
     // ── per-chain eligibility (PURE) ────────────────────────────────────
+    //
+    // The verdict is decided ONCE, in CosmwasmScanEligibility, and both
+    // the worker's selector and this panel read it from there. These cases
+    // are written against that class directly rather than through the
+    // snapshot, because the snapshot no longer has an opinion to test.
+
+    private const IDLE        = ChainCheckpointRepository::CW_STATE_IDLE;
+    private const PAUSED      = ChainCheckpointRepository::CW_STATE_PAUSED;
+    private const UNSUPPORTED = ChainCheckpointRepository::CW_STATE_UNSUPPORTED;
 
     /**
      * The control case. Every condition satisfied — and note that it takes
@@ -220,21 +261,26 @@ final class CosmwasmScannerAdminTest extends TestCase
     public function test_a_chain_is_eligible_only_when_every_condition_holds(): void
     {
         self::assertSame(
-            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE,
-            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, true, null)
+            CosmwasmScanEligibility::ELIGIBLE,
+            CosmwasmScanEligibility::verdict(8, self::IDLE, true, null)
         );
         self::assertSame(
-            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE,
-            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, true, [8, 12]),
+            CosmwasmScanEligibility::ELIGIBLE,
+            CosmwasmScanEligibility::verdict(8, self::IDLE, true, [8, 12]),
             'being named in the canary list is not an extra hurdle'
+        );
+        self::assertSame(
+            CosmwasmScanEligibility::ELIGIBLE,
+            CosmwasmScanEligibility::verdict(8, null, true, null),
+            'a chain nobody has measured yet is allowed through — the first pass IS the measurement'
         );
     }
 
     public function test_an_opt_in_of_false_is_reported_as_not_opted_in(): void
     {
         self::assertSame(
-            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_NOT_OPTED_IN,
-            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, false, null)
+            CosmwasmScanEligibility::NOT_OPTED_IN,
+            CosmwasmScanEligibility::verdict(8, self::IDLE, false, null)
         );
     }
 
@@ -247,8 +293,8 @@ final class CosmwasmScannerAdminTest extends TestCase
     {
         foreach ([null, [8], []] as $allowlist) {
             self::assertSame(
-                CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN,
-                CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, null, $allowlist)
+                CosmwasmScanEligibility::UNKNOWN,
+                CosmwasmScanEligibility::verdict(8, self::IDLE, null, $allowlist)
             );
         }
     }
@@ -258,20 +304,42 @@ final class CosmwasmScannerAdminTest extends TestCase
         // Opted in, in the allowlist, and it still cannot be scanned:
         // operator intent does not create a wasm module.
         self::assertSame(
-            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNSUPPORTED,
-            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, true, true, [8])
+            CosmwasmScanEligibility::UNSUPPORTED,
+            CosmwasmScanEligibility::verdict(8, self::UNSUPPORTED, true, [8])
         );
         self::assertSame(
-            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNSUPPORTED,
-            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, true, false, null)
+            CosmwasmScanEligibility::UNSUPPORTED,
+            CosmwasmScanEligibility::verdict(8, self::UNSUPPORTED, false, null)
+        );
+    }
+
+    /**
+     * THE VERDICT THIS AMENDMENT ADDED. Pause used to be invisible to the
+     * eligibility column — it was a separate `if` in the status
+     * arithmetic, and a separate `if` again in the worker, one layer below
+     * the selector. All three now read this.
+     */
+    public function test_an_operator_paused_chain_is_not_eligible(): void
+    {
+        self::assertSame(
+            CosmwasmScanEligibility::PAUSED,
+            CosmwasmScanEligibility::verdict(8, self::PAUSED, true, null)
+        );
+        self::assertSame(
+            CosmwasmScanEligibility::PAUSED,
+            CosmwasmScanEligibility::verdict(8, self::PAUSED, true, [8]),
+            'being inside the canary scope does not un-pause a chain'
+        );
+        self::assertFalse(
+            CosmwasmScanEligibility::isScannable(CosmwasmScanEligibility::PAUSED)
         );
     }
 
     public function test_a_chain_outside_the_canary_allowlist_is_not_eligible(): void
     {
         self::assertSame(
-            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
-            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, true, [12])
+            CosmwasmScanEligibility::ALLOWLIST_EXCLUDED,
+            CosmwasmScanEligibility::verdict(8, self::IDLE, true, [12])
         );
     }
 
@@ -284,8 +352,8 @@ final class CosmwasmScannerAdminTest extends TestCase
     public function test_a_defined_but_unusable_allowlist_excludes_every_chain(): void
     {
         self::assertSame(
-            CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
-            CosmwasmDiscoveryHealthSnapshot::deriveEligibility(8, false, true, [])
+            CosmwasmScanEligibility::ALLOWLIST_EXCLUDED,
+            CosmwasmScanEligibility::verdict(8, self::IDLE, true, [])
         );
         self::assertStringContainsString(
             'names no usable chain id',
@@ -294,6 +362,63 @@ final class CosmwasmScannerAdminTest extends TestCase
                 []
             )
         );
+    }
+
+    /**
+     * EXACTLY ONE VERDICT MEANS "WILL BE SCANNED". Asserted as a whole set
+     * rather than one value at a time, so a sixth verdict added later
+     * cannot quietly default to scannable.
+     */
+    public function test_only_the_eligible_verdict_is_scannable(): void
+    {
+        $verdicts = [
+            CosmwasmScanEligibility::ELIGIBLE           => true,
+            CosmwasmScanEligibility::NOT_OPTED_IN       => false,
+            CosmwasmScanEligibility::UNSUPPORTED        => false,
+            CosmwasmScanEligibility::PAUSED             => false,
+            CosmwasmScanEligibility::ALLOWLIST_EXCLUDED => false,
+            CosmwasmScanEligibility::UNKNOWN            => false,
+            ''                                          => false,
+            'some_future_verdict'                       => false,
+        ];
+
+        foreach ($verdicts as $verdict => $expected) {
+            self::assertSame(
+                $expected,
+                CosmwasmScanEligibility::isScannable((string) $verdict),
+                "verdict '{$verdict}'"
+            );
+        }
+    }
+
+    /**
+     * The panel's reader of that verdict, and the row shapes it must
+     * refuse. `scannable()` derives nothing — it reads the stored verdict
+     * — so anything that is not the eligible string is a NO.
+     */
+    public function test_the_panel_reads_scannability_from_the_stored_verdict_only(): void
+    {
+        self::assertTrue(CosmwasmDiscoveryHealthSnapshot::scannable($this->chainRow()));
+
+        self::assertFalse(
+            CosmwasmDiscoveryHealthSnapshot::scannable($this->chainRow(['state' => self::PAUSED]))
+        );
+        self::assertFalse(
+            CosmwasmDiscoveryHealthSnapshot::scannable(
+                $this->chainRow(['eligibility' => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED])
+            ),
+            'an allowlist-excluded chain is not scannable however healthy the rest of the row looks'
+        );
+
+        $noVerdict = $this->chainRow();
+        unset($noVerdict['eligibility']);
+        self::assertFalse(
+            CosmwasmDiscoveryHealthSnapshot::scannable($noVerdict),
+            'a row with no verdict at all must never read as scannable'
+        );
+
+        self::assertFalse(CosmwasmDiscoveryHealthSnapshot::scannable($this->chainRow(['eligibility' => null])));
+        self::assertFalse(CosmwasmDiscoveryHealthSnapshot::scannable($this->chainRow(['eligibility' => 1])));
     }
 
     /**
@@ -403,7 +528,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             $this->chainRow(['chain_id' => 1, 'slug' => 'juno',    'last_discovery_at' => '2026-08-06 10:00:00']),
             $this->chainRow(['chain_id' => 2, 'slug' => 'osmosis', 'last_discovery_at' => '2026-08-04 10:00:00']),
             $this->chainRow(['chain_id' => 3, 'slug' => 'jackal',  'last_discovery_at' => null]),
-            $this->chainRow(['chain_id' => 4, 'slug' => 'kujira',  'last_discovery_at' => '2026-01-01 00:00:00', 'paused' => true]),
+            $this->chainRow(['chain_id' => 4, 'slug' => 'kujira',  'last_discovery_at' => '2026-01-01 00:00:00', 'state' => self::PAUSED]),
         ];
 
         $next = CosmwasmDiscoveryHealthSnapshot::deriveNextChain($chains);
@@ -415,8 +540,8 @@ final class CosmwasmScannerAdminTest extends TestCase
     public function test_next_chain_skips_paused_and_unsupported_entirely(): void
     {
         $chains = [
-            $this->chainRow(['chain_id' => 4, 'slug' => 'kujira', 'last_discovery_at' => null, 'paused' => true]),
-            $this->chainRow(['chain_id' => 5, 'slug' => 'cryptoorgchain', 'last_discovery_at' => null, 'unsupported' => true]),
+            $this->chainRow(['chain_id' => 4, 'slug' => 'kujira', 'last_discovery_at' => null, 'state' => self::PAUSED]),
+            $this->chainRow(['chain_id' => 5, 'slug' => 'cryptoorgchain', 'last_discovery_at' => null, 'state' => self::UNSUPPORTED]),
         ];
 
         $this->assertNull(CosmwasmDiscoveryHealthSnapshot::deriveNextChain($chains));
@@ -468,13 +593,20 @@ final class CosmwasmScannerAdminTest extends TestCase
         );
     }
 
-    public function test_every_chain_paused_or_unsupported_is_red(): void
+    /**
+     * Both chains are opted IN here (the fixture default), so this is the
+     * blocked case rather than the red one: the operator's whole selection
+     * is unscannable, which has its own sentence now. `eligible === 0` is
+     * still what detects it — see
+     * test_an_empty_chain_list_is_not_idle() for the route that keeps RED.
+     */
+    public function test_every_opted_in_chain_paused_or_unsupported_is_blocked(): void
     {
         $this->assertSame(
-            CosmwasmDiscoveryHealthSnapshot::STATUS_RED,
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
             CosmwasmDiscoveryHealthSnapshot::deriveStatus(
                 true,
-                [$this->chainRow(['paused' => true]), $this->chainRow(['chain_id' => 2, 'unsupported' => true])],
+                [$this->chainRow(['state' => self::PAUSED]), $this->chainRow(['chain_id' => 2, 'state' => self::UNSUPPORTED])],
                 [$this->scheduleEntry()]
             )
         );
@@ -697,6 +829,373 @@ final class CosmwasmScannerAdminTest extends TestCase
         $this->assertSame(0, CosmwasmDiscoveryHealthSnapshot::optedInChainCount([]));
     }
 
+    // ── status: opted in, and none of it can be scanned ─────────────────
+    //
+    // The halves of the zero-opt-in defect that survived #186, in the
+    // order they were found.
+    //
+    // FIRST: the counting loop still walked EVERY chain in the registry —
+    // it only skipped the paused and the unsupported ones — so a chain
+    // nobody had opted in counted as an eligible, healthy chain. A site
+    // whose one opt-in was an unsupported chain therefore read GREEN off a
+    // chain the operator had deliberately left switched off, which is the
+    // most expensive possible way to be told nothing is wrong.
+    //
+    // SECOND: with the opt-in fixed, the loop still keyed on `paused ||
+    // unsupported` and never consulted BCC_COSMWASM_CHAIN_ALLOWLIST. An
+    // opted-in, supported, unpaused chain OUTSIDE the canary scope
+    // therefore counted as scannable and could read GREEN — while
+    // `eligible_chain_count` on the same summary reported 0 and the worker
+    // skipped it. There is now one verdict, shared with the worker, and
+    // the arithmetic reads it instead of re-deriving one.
+
+    /**
+     * THE LIVE REPRO, reproduced on staging against the deployed code:
+     * one opted-in chain with no wasm module, beside one supported chain
+     * nobody opted in. It derived `green`.
+     *
+     * The assertion is written both ways round on purpose. `assertSame`
+     * pins the new answer; the `assertNotSame` says out loud which answer
+     * must never come back, so a future refactor that reintroduces the
+     * whole-registry loop fails on the sentence that describes the bug.
+     */
+    public function test_an_unsupported_opt_in_beside_a_chain_nobody_opted_in_is_not_green(): void
+    {
+        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+            true,
+            [
+                $this->chainRow([
+                    'chain_id'           => 1,
+                    'slug'               => 'jackal',
+                    'discovery_opted_in' => true,
+                    'state'              => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ]),
+                $this->chainRow([
+                    'chain_id'           => 2,
+                    'slug'               => 'juno',
+                    'discovery_opted_in' => false,
+                ]),
+            ],
+            [$this->scheduleEntry()]
+        );
+
+        $this->assertNotSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+            $status,
+            'a chain nobody opted in must never make an unscannable selection look healthy'
+        );
+        $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+    }
+
+    /** The single-chain case: the only opt-in there is cannot be scanned. */
+    public function test_one_opted_in_unsupported_chain_is_blocked(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [$this->chainRow([
+                    'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ])],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * EVERY opted-in chain unsupported, and no other verdict may leak.
+     * Named one at a time so a failure says WHICH one did.
+     */
+    public function test_every_opted_in_chain_unsupported_is_blocked_and_nothing_else(): void
+    {
+        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+            true,
+            [
+                $this->chainRow([
+                    'chain_id'    => 1,
+                    'slug'        => 'jackal',
+                    'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ]),
+                $this->chainRow([
+                    'chain_id'    => 2,
+                    'slug'        => 'stargaze',
+                    'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ]),
+            ],
+            [$this->scheduleEntry()]
+        );
+
+        $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN, $status, 'blocked is not healthy');
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW, $status, 'blocked is not merely degraded');
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE, $status, 'a selection was made — this is not idle');
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED, $status, 'blocked is not a statement about the constant');
+    }
+
+    /** The two unscannable reasons mixed: one paused, one unsupported. */
+    public function test_a_paused_opt_in_beside_an_unsupported_one_is_blocked(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow([
+                        'chain_id' => 1,
+                        'slug'     => 'juno',
+                        'state'    => ChainCheckpointRepository::CW_STATE_PAUSED,
+                    ]),
+                    $this->chainRow([
+                        'chain_id'    => 2,
+                        'slug'        => 'jackal',
+                        'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * ONE opted-in chain, paused, and NOTHING else wrong with it. The
+     * arithmetic used to have its own `paused ||` test beside the
+     * eligibility column, which happened to catch this — and happened to
+     * catch nothing else. It now reads the shared verdict, which catches
+     * all four exclusions with one line.
+     */
+    public function test_one_opted_in_paused_chain_is_blocked(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [$this->chainRow(['state' => self::PAUSED])],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * THE CASE THIS AMENDMENT EXISTS FOR. The chain is opted in,
+     * supported, unpaused and freshly stamped — every signal the old
+     * arithmetic looked at says "fine" — and it is outside
+     * `BCC_COSMWASM_CHAIN_ALLOWLIST`, so the worker will never touch it.
+     * It read GREEN.
+     *
+     * Written both ways round: assertSame pins the answer, assertNotSame
+     * names the one that must never come back.
+     */
+    public function test_one_opted_in_chain_outside_the_allowlist_is_blocked_not_green(): void
+    {
+        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+            true,
+            [$this->chainRow([
+                'eligibility' => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
+            ])],
+            [$this->scheduleEntry()]
+        );
+
+        $this->assertNotSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+            $status,
+            'a chain the canary allowlist excludes must never make the scanner look healthy'
+        );
+        $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+    }
+
+    /** Every opt-in outside the canary scope, and none of it scannable. */
+    public function test_every_opted_in_chain_outside_the_allowlist_is_blocked(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow([
+                        'chain_id'    => 1,
+                        'slug'        => 'juno',
+                        'eligibility' => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
+                    ]),
+                    $this->chainRow([
+                        'chain_id'    => 2,
+                        'slug'        => 'jackal',
+                        'eligibility' => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * THE MIXED ALLOWLIST CASE: one chain inside the canary scope, one
+     * outside it. The arithmetic must describe only the chain that will
+     * actually be walked — so the excluded one is made as noisy as
+     * possible (never run, and carrying an error) and the answer must
+     * still be green.
+     */
+    public function test_an_allowlist_excluded_chain_cannot_degrade_the_scannable_one(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow(['chain_id' => 1, 'slug' => 'juno']),
+                    $this->chainRow([
+                        'chain_id'                   => 2,
+                        'slug'                       => 'jackal',
+                        'eligibility'                => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
+                        'last_error'                 => 'lcd 502',
+                        'last_discovery_age_seconds' => null,
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            ),
+            'a chain outside the canary scope is excluded from the arithmetic, not folded into it as a fault'
+        );
+    }
+
+    /**
+     * BLOCKED OUTRANKS DISABLED, for the reason idle already does: with no
+     * scannable opted-in chain, defining `BCC_COSMWASM_DISCOVERY_ENABLED`
+     * would change nothing, so sending an operator to wp-config.php would
+     * waste the trip. The panel still names the constant in the copy.
+     */
+    public function test_blocked_outranks_the_switched_off_gate(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                false,
+                [$this->chainRow([
+                    'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                ])],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * And it outranks the cron signals, again for the idle reason: an
+     * unscheduled pass would do nothing if it fired, because there is no
+     * chain for it to walk.
+     */
+    public function test_blocked_outranks_the_unscheduled_cron_signal(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [$this->chainRow([
+                    'state'                      => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                    'last_discovery_age_seconds' => null,
+                ])],
+                [$this->scheduleEntry(['scheduled' => false, 'next_run_at' => null])]
+            )
+        );
+    }
+
+    /**
+     * An EMPTY chain list is not blocked either. Same lock as
+     * test_an_empty_chain_list_is_not_idle(): the unavailable summary
+     * carries no chain rows, so no derived verdict may be reachable from
+     * an empty list except the RED it always had.
+     */
+    public function test_an_empty_chain_list_is_never_blocked(): void
+    {
+        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(true, [], [$this->scheduleEntry()]);
+
+        $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+        $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_RED, $status);
+    }
+
+    // ── status: MIXED — some opted-in chains can be scanned ─────────────
+
+    /**
+     * ONE scannable opt-in is enough to hand the verdict back to the
+     * arithmetic, and the unscannable opt-in beside it changes nothing.
+     * That is the whole distinction the panel has to make: blocked is
+     * about the WHOLE selection, never about one row, and the per-chain
+     * "No wasm module" pill is what names the excluded chain.
+     */
+    public function test_a_scannable_opt_in_beside_an_unsupported_one_is_green(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow(['chain_id' => 1, 'slug' => 'juno']),
+                    $this->chainRow([
+                        'chain_id'                   => 2,
+                        'slug'                       => 'jackal',
+                        'state'                      => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                        'last_discovery_age_seconds' => null,
+                        'last_error'                 => 'lcd 501',
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            ),
+            'an unsupported chain is excluded from the arithmetic, not folded into it as a fault'
+        );
+    }
+
+    /**
+     * The other half of the mixed case: the chain that CAN be scanned is
+     * the one the verdict describes. Degrade it and the panel degrades,
+     * with the unsupported chain still sitting quietly beside it.
+     */
+    public function test_a_mixed_selection_reports_the_scannable_chain_degraded(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow(['chain_id' => 1, 'slug' => 'juno', 'last_error' => 'lcd 502']),
+                    $this->chainRow([
+                        'chain_id'    => 2,
+                        'slug'        => 'jackal',
+                        'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
+    /**
+     * The counting loop is opted-in-only in BOTH directions. A chain
+     * nobody opted in cannot make the scanner look healthy — the bug this
+     * fixes — and it cannot make it look degraded either: the worker never
+     * touches it, so its recorded error and its missing last-run stamp are
+     * not facts about anything the scanner is doing.
+     *
+     * This is the crispest catch for "count the whole registry again": put
+     * the error back in scope and the answer turns yellow.
+     */
+    public function test_a_chain_nobody_opted_in_cannot_make_the_scanner_degraded(): void
+    {
+        $this->assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
+                true,
+                [
+                    $this->chainRow(['chain_id' => 1, 'slug' => 'juno']),
+                    $this->chainRow([
+                        'chain_id'                   => 2,
+                        'slug'                       => 'osmosis',
+                        'discovery_opted_in'         => false,
+                        'last_error'                 => 'lcd 502',
+                        'last_discovery_age_seconds' => null,
+                    ]),
+                ],
+                [$this->scheduleEntry()]
+            )
+        );
+    }
+
     // ── issues ──────────────────────────────────────────────────────────
 
     public function test_gate_off_produces_exactly_one_issue_naming_the_constant(): void
@@ -718,8 +1217,8 @@ final class CosmwasmScannerAdminTest extends TestCase
             true,
             true,
             [
-                $this->chainRow(['slug' => 'kujira', 'paused' => true]),
-                $this->chainRow(['chain_id' => 2, 'slug' => 'cryptoorgchain', 'unsupported' => true]),
+                $this->chainRow(['slug' => 'kujira', 'state' => self::PAUSED]),
+                $this->chainRow(['chain_id' => 2, 'slug' => 'cryptoorgchain', 'state' => self::UNSUPPORTED]),
             ],
             [$this->scheduleEntry()]
         );

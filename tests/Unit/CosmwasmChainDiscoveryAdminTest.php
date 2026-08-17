@@ -531,6 +531,25 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         return (string) preg_replace('/\s+/', ' ', $html);
     }
 
+    /**
+     * The PROSE the operator reads: tags stripped, entities decoded,
+     * whitespace collapsed.
+     *
+     * {@see flatten()} keeps the markup, which is what an assertion about a
+     * badge colour or a notice class needs. A sentence signed off word for
+     * word cannot be asserted that way — `<strong>` sits in the middle of
+     * the first one — and asserting the fragments either side of the tag
+     * instead is how the previous version of this copy passed its tests
+     * while naming only two of the three ways a selection can be
+     * unscannable.
+     */
+    private static function prose(string $html): string
+    {
+        $text = html_entity_decode(strip_tags($html), ENT_QUOTES, 'UTF-8');
+
+        return trim((string) preg_replace('/\s+/', ' ', $text));
+    }
+
     public function test_the_panel_reports_a_chain_nobody_opted_in(): void
     {
         ChainRepository::reset();
@@ -565,8 +584,21 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
 
         self::assertStringContainsString('No wasm module', $html);
         self::assertStringContainsString('opt-in <strong>ON</strong>', $html, 'the opt-in is still shown honestly');
-        self::assertStringContainsString('Opting it in would change nothing', $html);
         self::assertStringNotContainsString('Nothing is blocking this chain', $html);
+
+        // THE PERMANENCE CLAIM, AND ITS LIMITS. The code does prove this
+        // state is terminal to everything automated — prepareChain()
+        // refuses it, the shared eligibility verdict excludes it,
+        // pauseCwDiscovery() refuses when it is already set, and
+        // resumeCwDiscovery() only accepts `paused`, so no control on this
+        // page can clear it. The copy claims exactly that and no more: a
+        // direct database change is still possible, and a sentence that
+        // denied it would be wrong.
+        $flat = self::flatten($html);
+        self::assertStringContainsString('it answered the code listing with a 501', $flat);
+        self::assertStringContainsString('No scheduled pass retries that verdict', $flat);
+        self::assertStringContainsString('no control on this page clears it', $flat);
+        self::assertStringContainsString('only a direct database change would', $flat);
 
         // Still reversible: an opted-in unsupported chain must not be
         // stranded with no way to switch it back off.
@@ -673,6 +705,128 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
             'with a chain opted in, the undefined gate is the operative fact again'
         );
         self::assertStringNotContainsString('Idle — no chains enabled', $this->renderPanel());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  THE PANEL — opted in, and none of it can be scanned
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * THE LIVE SHAPE, end to end through buildSummary(): one chain opted
+     * in and unsupported, one supported chain nobody opted in. Reproduced
+     * on staging, where it derived GREEN — the arithmetic counted the
+     * chain the operator had left switched off as an eligible, healthy
+     * chain, and reported the scanner fine while its entire selection was
+     * unscannable.
+     *
+     * It also pins the precedence: the gate constant is undefined in this
+     * process, and `blocked` still leads. Defining it would change nothing
+     * while no opted-in chain can be scanned, so the constant is the less
+     * useful of the two facts — the copy still names it.
+     */
+    public function test_an_opted_in_chain_with_no_wasm_module_reports_blocked(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainCheckpointRepository::setCwDiscoveryState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+
+        $status = CosmwasmDiscoveryHealthSnapshot::buildSummary()['status'];
+
+        self::assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN, $status, 'an unscannable selection is not healthy');
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE, $status, 'a selection was made — this is not idle');
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED, $status, 'the constant is not the operative fact here');
+    }
+
+    /**
+     * The rendered half. It has to say the state out loud, say what to do
+     * about it, and stop short of calling it a failure — nothing broke.
+     * It is not given the calm treatment idle gets either: there IS
+     * something to change, so it takes the amber and forces the
+     * disclosure open the way the other actionable states do.
+     */
+    public function test_the_blocked_panel_says_what_to_do_without_calling_it_a_failure(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainCheckpointRepository::setCwDiscoveryState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+
+        $html = $this->renderPanel();
+        $flat = self::flatten($html);
+
+        // THE OPERATOR COPY, VERBATIM, as one flattened string. Asserted
+        // whole rather than in fragments because it is the sentence the
+        // owner signed off, and because the version it replaces was wrong
+        // in a way fragments would not have caught: it named two of the
+        // three ways a selection can be unscannable and omitted the
+        // allowlist — which was the one actually in play.
+        self::assertStringContainsString(
+            'No opted-in chain can currently be scanned. '
+                . 'Every chain enabled for NFT discovery is paused, marked as lacking CosmWasm support, '
+                . 'or outside the current canary allowlist. '
+                . 'Nothing has failed and nothing is behind—the current selection cannot produce any scanner work. '
+                . 'Enable an eligible chain, resume a paused chain, or update the canary allowlist. '
+                . 'The Discovery and State columns below show why each chain is excluded.',
+            self::prose($html)
+        );
+
+        // Amber, and it says BLOCKED. Asserted as one string so a stray
+        // amber pill elsewhere on the page cannot satisfy it.
+        self::assertStringContainsString('background:#dba617;"> BLOCKED', $flat);
+
+        // Actionable, not alarming: a warning notice, never an error one,
+        // and never the unavailable treatment.
+        self::assertStringContainsString('notice-warning', $html);
+        self::assertStringNotContainsString('notice-error', $html);
+        self::assertStringNotContainsString('Scanner figures are unavailable', $html);
+
+        // It DOES force the disclosure open — unlike idle, something is
+        // waiting on the operator here.
+        self::assertSame(1, preg_match('/<details class="bcc-cw-scanner"[^>]*>/', $html, $tag));
+        self::assertStringContainsString('open', $tag[0], 'blocked must not hide behind a closed disclosure');
+
+        // Nothing is hidden: the undefined gate is still named, the row
+        // says WHICH chain is in the way, and the controls are there.
+        self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED', $html);
+        self::assertStringContainsString('No wasm module', $html);
+        self::assertStringContainsString('Enable discovery', $html);
+    }
+
+    /**
+     * The exit from blocked, and the mixed case at panel level: opt a
+     * SCANNABLE chain in beside the unsupported one and the verdict goes
+     * back to the ordinary arithmetic — here, to the still-undefined gate.
+     * The unsupported chain does not disappear; it keeps its own row and
+     * its own reason, which is the distinction the panel exists to draw.
+     */
+    public function test_one_scannable_opt_in_takes_the_panel_out_of_blocked(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainCheckpointRepository::setCwDiscoveryState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+        ChainRepository::seed(self::OTHER_CHAIN_ID, self::OTHER_SLUG, 'https://b.example', 'cosmos', 1);
+
+        $status = CosmwasmDiscoveryHealthSnapshot::buildSummary()['status'];
+
+        self::assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
+        self::assertSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED,
+            $status,
+            'with a scannable chain opted in, the undefined gate is the operative fact again'
+        );
+
+        $html = $this->renderPanel();
+
+        self::assertStringNotContainsString('No opted-in chain can be scanned', $html);
+        // The unsupported chain is still named, one row at a time.
+        self::assertStringContainsString('No wasm module', $html);
+        self::assertStringContainsString('<strong>1 of 2</strong>', self::flatten($html));
     }
 
     /**

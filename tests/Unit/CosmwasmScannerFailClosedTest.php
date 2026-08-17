@@ -167,6 +167,14 @@ final class CosmwasmScannerFailClosedTest extends TestCase
      * trivially true of no chains at all. A database outage reported as
      * "Idle — nothing to do" is exactly the green-with-zeroes lie in a
      * calmer voice, and it is worse, because idle invites no action at all.
+     *
+     * BLOCKED IS THE SAME SHAPE OF DANGER and is asserted for the same
+     * reason: it is a confident, explanatory verdict about a SELECTION,
+     * and the failure path knows nothing about any selection because the
+     * read that carries the opt-ins is the one that did not run. Telling
+     * an operator to go fix their chain choices during a database outage
+     * is a wrong instruction delivered calmly. `unavailable` outranks it,
+     * exactly as it outranks idle.
      */
     #[DataProvider('failingRead')]
     public function test_a_failed_read_can_never_report_a_healthy_zero(string $read): void
@@ -183,6 +191,11 @@ final class CosmwasmScannerFailClosedTest extends TestCase
             CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE,
             $summary['status'],
             '"we could not look" must never be reported as "there is nothing to do"'
+        );
+        self::assertNotSame(
+            CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
+            $summary['status'],
+            '"we could not look" must never be reported as "your selection cannot be scanned"'
         );
         self::assertNull($summary['totals']);
     }
@@ -203,6 +216,23 @@ final class CosmwasmScannerFailClosedTest extends TestCase
         self::assertStringContainsString('Scanner figures are unavailable', $html);
         self::assertStringNotContainsString('Idle — no chains enabled', $html);
         self::assertStringNotContainsString('IDLE', $html);
+    }
+
+    /**
+     * The same precedence for the other calm verdict. A failed read must
+     * not produce the blocked notice either: that copy tells an operator
+     * to go and change which chains they have opted in, and it would be
+     * telling them so on the strength of a read that never ran.
+     */
+    public function test_the_panel_never_shows_the_blocked_notice_for_a_failed_read(): void
+    {
+        $this->armFailure('checkpoints');
+
+        $html = $this->renderPanel(CosmwasmDiscoveryHealthSnapshot::buildSummary());
+
+        self::assertStringContainsString('Scanner figures are unavailable', $html);
+        self::assertStringNotContainsString('No opted-in chain can be scanned', $html);
+        self::assertStringNotContainsString('BLOCKED', $html);
     }
 
     /**

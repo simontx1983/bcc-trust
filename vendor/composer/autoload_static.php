@@ -597,6 +597,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Support\\Bech32' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/Bech32.php',
         'BCC\\Trust\\Onchain\\Support\\ChainSupport' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ChainSupport.php',
         'BCC\\Trust\\Onchain\\Support\\CosmwasmDiscoveryGate' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/CosmwasmDiscoveryGate.php',
+        'BCC\\Trust\\Onchain\\Support\\CosmwasmScanEligibility' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/CosmwasmScanEligibility.php',
         'BCC\\Trust\\Onchain\\Support\\CosmwasmTickBudget' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/CosmwasmTickBudget.php',
         'BCC\\Trust\\Onchain\\Support\\ExplorerLinkBuilder' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ExplorerLinkBuilder.php',
         'BCC\\Trust\\Onchain\\Support\\MarketplaceLinkBuilder' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/MarketplaceLinkBuilder.php',

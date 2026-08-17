@@ -252,6 +252,61 @@ final class CosmwasmChainEligibilityTest extends TestCase
         self::assertNotContains(self::CHAIN_B, ChainCheckpointRepository::$discoveryTouches);
     }
 
+    /**
+     * OPERATOR PAUSE, AT THE SELECTOR.
+     *
+     * It used to be caught one layer down, in `prepareChain()`, so a
+     * paused chain was resolved as eligible, locked, `ensureExists()`-ed
+     * and STAMPED with a last-run time before anything noticed — and the
+     * admin panel, reading the same eligibility rule, called it eligible
+     * too. The selector now shares its verdict with the panel, and pause
+     * is part of that verdict, so neither of them considers the chain at
+     * all.
+     *
+     * The stamp is the observable half: `cw_last_discovery_at` moving on a
+     * chain nothing ran for is how "the scanner touched it" and "the
+     * scanner worked it" became indistinguishable.
+     */
+    public function testAPausedChainIsExcludedBeforeItIsEvenReached(): void
+    {
+        $this->enableEnvironment();
+        ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_B, 'osmosis', self::REST_B, 'cosmos', 1);
+
+        ChainCheckpointRepository::ensureExists(self::CHAIN_B);
+        ChainCheckpointRepository::$rows[self::CHAIN_B]->cw_discovery_state
+            = ChainCheckpointRepository::CW_STATE_PAUSED;
+
+        $this->runAllFourPasses();
+
+        self::assertSame(['a.example'], $this->contactedHosts(), 'b.example is paused and must not be contacted');
+        self::assertNotContains(
+            self::CHAIN_B,
+            ChainCheckpointRepository::$discoveryTouches,
+            'a paused chain must not even be stamped — it is not in the rotation'
+        );
+    }
+
+    /**
+     * And the manual path still refuses it, which is why `prepareChain()`
+     * keeps its own pause check: `runBackfillForChain()` is public, the
+     * "Run backfill slice" button calls it with one chain id, and that
+     * path never passes through the selector.
+     */
+    public function testThePauseIsStillEnforcedOnTheManualRunPath(): void
+    {
+        $this->enableEnvironment();
+        ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
+
+        ChainCheckpointRepository::ensureExists(self::CHAIN_A);
+        ChainCheckpointRepository::$rows[self::CHAIN_A]->cw_discovery_state
+            = ChainCheckpointRepository::CW_STATE_PAUSED;
+
+        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_A);
+
+        self::assertSame([], ApiRetry::$calls);
+    }
+
     public function testAChainWithNoCheckpointRowYetIsAllowedThrough(): void
     {
         $this->enableEnvironment();

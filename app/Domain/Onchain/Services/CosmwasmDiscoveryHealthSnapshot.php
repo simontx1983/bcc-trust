@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
+use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 
 if (!defined('ABSPATH')) {
@@ -131,6 +132,52 @@ final class CosmwasmDiscoveryHealthSnapshot
      */
     public const STATUS_IDLE = 'idle';
     /**
+     * Chains ARE opted in, and not one of them can be scanned.
+     *
+     * ── THE HALF OF THE OPT-IN BUG THAT SURVIVED {@see STATUS_IDLE} ─────
+     * That constant fixed the case where nobody had opted anything in. The
+     * counting loop underneath it kept the rest of the defect: it walked
+     * EVERY chain in the registry, skipped the paused and the unsupported
+     * ones, and counted everything else as "eligible" — including chains
+     * the worker will never touch because no operator asked for them.
+     *
+     * Reproduced against the deployed code before this value existed:
+     * chains = [opted-in + unsupported, not-opted-in + supported] derived
+     * GREEN. An operator whose ENTIRE selection could not be scanned was
+     * told everything was fine, on the strength of a chain they had
+     * deliberately left switched off.
+     *
+     * ── AND THE HALF THAT SURVIVED THE FIRST FIX OF THIS ────────────────
+     * The counting loop then kept its OWN `paused || unsupported` test
+     * beside the eligibility column and never consulted the canary
+     * allowlist at all. So an opted-in, supported, unpaused chain sitting
+     * outside `BCC_COSMWASM_CHAIN_ALLOWLIST` still counted as scannable
+     * and could read GREEN — while `eligible_chain_count` on the SAME
+     * summary reported 0 and the worker skipped the chain. There is now
+     * one verdict ({@see CosmwasmScanEligibility::verdict()}) and one
+     * reader of it ({@see scannable()}), shared with the worker.
+     *
+     * WHAT IT MEANS, EXACTLY: at least one chain is opted in, and not one
+     * opted-in chain is scannable — every one of them is unsupported (no
+     * wasm module), paused, outside the canary allowlist, or carrying an
+     * opt-in column nobody could read. There is no work for the scanner to
+     * do even with the gate open and cron running perfectly.
+     *
+     * WHAT IT IS NOT:
+     *   - not GREEN. Nothing is running, so nothing is working.
+     *   - not IDLE. Somebody DID point the scanner at something. Idle is
+     *     "no selection"; this is "a selection that cannot produce work",
+     *     and only the first is answered by opting a chain in.
+     *   - not DISABLED. That is a statement about
+     *     `BCC_COSMWASM_DISCOVERY_ENABLED` alone, and it is still named in
+     *     the copy when it happens to be undefined as well.
+     *   - not merely RED, which is where this case landed before. Red was
+     *     not WRONG — `eligible === 0` caught it — it just explained
+     *     nothing, and it sent an operator looking for a fault when the
+     *     answer is a row in the table below saying "No wasm module".
+     */
+    public const STATUS_BLOCKED = 'blocked';
+    /**
      * A DB read failed, so there is no picture to paint.
      *
      * Distinct from every other value on purpose. `green`/`yellow`/`red`
@@ -145,27 +192,49 @@ final class CosmwasmDiscoveryHealthSnapshot
     // The panel used to list every active Cosmos chain with no indication
     // of which ones the scanner will actually walk, so an operator read a
     // table of rows that were never going to move and had nothing to tell
-    // them why. These five values are the answer, and they are the ONLY
+    // them why. These six values are the answer, and they are the ONLY
     // values the panel may key on.
     //
+    // THEY ARE ALIASES, NOT A SECOND VOCABULARY. Every one of them IS the
+    // constant of the same meaning on {@see CosmwasmScanEligibility} —
+    // the class that decides the verdict for the worker AND for this
+    // panel. There is one literal per value in the codebase, and it lives
+    // there. The aliases exist so the display layer keeps naming its
+    // values in its own idiom (`ELIGIBILITY_*` beside `STATUS_*`) without
+    // that idiom becoming a place a value could drift.
+    //
     // EXACTLY ONE OF THEM MEANS "WILL BE SCANNED": ELIGIBLE. Every other
-    // value — including the one that means "we could not tell" — is a NO.
-    // That is deliberate: this is a display of a fail-closed rule, and a
-    // display that guesses in the permissive direction is worse than no
-    // display, because it invites an operator to conclude a chain is
-    // covered when it is not.
+    // value — including the one that means "we could not tell" — is a NO,
+    // and the test for it is {@see CosmwasmScanEligibility::isScannable()},
+    // never a hand-written list of exclusions.
 
     /** Nothing is blocking this chain; it is in the scanner's rotation. */
-    public const ELIGIBILITY_ELIGIBLE = 'eligible';
+    public const ELIGIBILITY_ELIGIBLE = CosmwasmScanEligibility::ELIGIBLE;
 
     /** OPERATOR INTENT: `wp_bcc_chains.cosmwasm_nft_discovery_enabled` = 0. */
-    public const ELIGIBILITY_NOT_OPTED_IN = 'not_opted_in';
+    public const ELIGIBILITY_NOT_OPTED_IN = CosmwasmScanEligibility::NOT_OPTED_IN;
 
     /** MEASURED CAPABILITY: the chain's wasm module answered with a 501. */
-    public const ELIGIBILITY_UNSUPPORTED = 'unsupported';
+    public const ELIGIBILITY_UNSUPPORTED = CosmwasmScanEligibility::UNSUPPORTED;
+
+    /**
+     * OPERATOR HOLD: `cw_discovery_state = paused`.
+     *
+     * ── THE SECOND HALF OF THE SAME DEFECT ──────────────────────────────
+     * Pause used to be invisible to this verdict. The panel's arithmetic
+     * had its own `if ($chain['paused'] || $chain['unsupported'])` line
+     * beside the eligibility column, so the two disagreed by construction:
+     * a paused chain read "Eligible" in the Discovery column while the
+     * same page's status counted it as unscannable. The worker disagreed
+     * with both — it resolved the chain as eligible and only dropped it
+     * one layer down, in `prepareChain()`.
+     *
+     * There is now one verdict and every reader takes it from here.
+     */
+    public const ELIGIBILITY_PAUSED = CosmwasmScanEligibility::PAUSED;
 
     /** Outside the temporary `BCC_COSMWASM_CHAIN_ALLOWLIST` canary scope. */
-    public const ELIGIBILITY_ALLOWLIST_EXCLUDED = 'allowlist_excluded';
+    public const ELIGIBILITY_ALLOWLIST_EXCLUDED = CosmwasmScanEligibility::ALLOWLIST_EXCLUDED;
 
     /**
      * The opt-in could not be read at all — the projection carries no
@@ -177,9 +246,10 @@ final class CosmwasmDiscoveryHealthSnapshot
      * different facts: one says an operator decided no, the other says
      * nobody has been able to decide anything yet. Both are treated as
      * NOT eligible, which is the same answer
-     * {@see CosmwasmDiscoveryWorker::eligibleChainIds()} gives.
+     * {@see CosmwasmDiscoveryWorker::eligibleChainIds()} gives — because
+     * it is literally the same function that decides it.
      */
-    public const ELIGIBILITY_UNKNOWN = 'unknown';
+    public const ELIGIBILITY_UNKNOWN = CosmwasmScanEligibility::UNKNOWN;
 
     /**
      * A chain that has not been touched in this long, while discovery is
@@ -209,6 +279,13 @@ final class CosmwasmDiscoveryHealthSnapshot
      * chain is eligible" and "nobody could work out which chains are
      * eligible" are different facts, and 0 is only allowed to mean the
      * first one.
+     *
+     * When it is NOT null it is required to equal
+     * `count(CosmwasmDiscoveryWorker::eligibleChainIds())` for the same
+     * site — same chains, same ids, not merely the same total. Both sides
+     * reach it through {@see CosmwasmScanEligibility::verdict()};
+     * CosmwasmScannerStatusParityTest asserts the two sets are identical
+     * for every fixture, including the ones where the answer is "none".
      *
      * @return array{
      *     discovery_enabled: bool,
@@ -319,7 +396,11 @@ final class CosmwasmDiscoveryHealthSnapshot
 
             $chains[] = $row;
 
-            if ($row['eligibility'] === self::ELIGIBILITY_ELIGIBLE) {
+            // THE SAME READER deriveStatus() counts with. Two ways of
+            // asking "is this one eligible?" in one method is how the
+            // summary line and the status badge came to contradict each
+            // other on the same screen.
+            if (self::scannable($row)) {
                 $eligibleCount++;
             }
 
@@ -499,8 +580,26 @@ final class CosmwasmDiscoveryHealthSnapshot
             'by_classification'        => [],
         ];
 
+        // THE SHARED VERDICT — the same function
+        // CosmwasmDiscoveryWorker::eligibleChainIds() filters on, given the
+        // same three facts. Not a mirror of it, not a display-side
+        // approximation of it: the same lines of code.
+        //
+        // A chain with NO checkpoint row is handed `null` rather than the
+        // `idle` stand-in used for display below, so the predicate sees
+        // exactly what the worker sees: "nobody has measured this yet".
+        $eligibility = CosmwasmScanEligibility::verdict(
+            $chainId,
+            $checkpoint !== null ? $state : null,
+            $discoveryOptedIn,
+            $allowlist
+        );
+
+        // Kept as their own row fields because they are FACTS the table
+        // prints (the State pill, the Controls cell), not policy. Nothing
+        // may derive "will this be scanned?" from them — that answer is
+        // `eligibility`, above, and there is only one of it.
         $unsupported = $state === ChainCheckpointRepository::CW_STATE_UNSUPPORTED;
-        $eligibility = self::deriveEligibility($chainId, $unsupported, $discoveryOptedIn, $allowlist);
 
         return [
             'chain_id'                    => $chainId,
@@ -538,62 +637,59 @@ final class CosmwasmDiscoveryHealthSnapshot
     }
 
     /**
-     * PURE. Will the scanner walk this chain, and if not, why not?
+     * PURE. Will the scanner walk this chain? THE ONE READER, used by
+     * every number on this panel that describes the scanner's workload.
      *
-     * ── IT MIRRORS THE CHOKEPOINT, IT IS NOT A SECOND COPY OF IT ────────
-     * The authority is {@see CosmwasmDiscoveryWorker::eligibleChainIds()};
-     * this answers the SAME question for display, over data the caller has
-     * already loaded. The two must never disagree on the BOOLEAN — a panel
-     * that says "eligible" about a chain the worker skips is worse than a
-     * panel with no eligibility column at all — so every condition here is
-     * one of the worker's, in the same direction:
+     * ── IT DERIVES NOTHING ──────────────────────────────────────────────
+     * The verdict was already decided, once, by
+     * {@see CosmwasmScanEligibility::verdict()} — the same function
+     * {@see CosmwasmDiscoveryWorker::eligibleChainIds()} filters on — and
+     * stored on the row in {@see deriveChainRow()}. This reads it back.
      *
-     *     unsupported            → checkpoint.cw_discovery_state
-     *     opted in               → chains.cosmwasm_nft_discovery_enabled
-     *     inside the canary list → BCC_COSMWASM_CHAIN_ALLOWLIST
+     * It deliberately does NOT re-examine `paused`, `unsupported` or
+     * anything else on the row. That is exactly what the old arithmetic
+     * did, with its own `if ($chain['paused'] || $chain['unsupported'])`
+     * beside the eligibility column, and it is how the panel came to
+     * report a healthy scanner twice in a fortnight: first counting chains
+     * nobody had opted in, then counting chains outside the canary
+     * allowlist. A second reading of the same facts is a second policy.
      *
-     * WHAT IT DOES NOT MIRROR is the ORDER, and only because the worker's
-     * order is a short-circuit and this one is an explanation. The worker
-     * drops a chain at the first failing condition and never looks at the
-     * rest; a reader wants the reason that is hardest to act on named
-     * FIRST, so `unsupported` — a measured fact about the chain that no
-     * operator action can change, and the one case where opting in would
-     * achieve nothing — is checked before the opt-in. The set of eligible
-     * chains is identical either way; only the sentence differs.
+     * FAIL CLOSED: a row with no `eligibility` key, a non-string one, or a
+     * value from a newer build is NOT scannable. See
+     * {@see CosmwasmScanEligibility::isScannable()}.
      *
-     * The `is_active`/`chain_type` conditions are not repeated because the
-     * caller's chain list is already filtered to active Cosmos chains.
-     *
-     * @param list<int>|null $allowlist null = the constant is undefined
+     * @param array<string, mixed> $chain
      */
-    public static function deriveEligibility(
-        int $chainId,
-        bool $unsupported,
-        ?bool $optedIn,
-        ?array $allowlist
-    ): string {
-        if ($unsupported) {
-            return self::ELIGIBILITY_UNSUPPORTED;
-        }
-        // ORDER MATTERS between these two: "nobody could read the column"
-        // is not the same statement as "an operator said no", and telling
-        // an operator they declined something they were never offered
-        // sends them looking for a switch that is not there.
-        if ($optedIn === null) {
-            return self::ELIGIBILITY_UNKNOWN;
-        }
-        if ($optedIn === false) {
-            return self::ELIGIBILITY_NOT_OPTED_IN;
-        }
-        // `$allowlist === []` lands here too — defined but naming no usable
-        // chain id, which the gate documents as "scan nothing". in_array on
-        // an empty list is false, so it needs no special case, but it does
-        // get its own sentence in eligibilityReason().
-        if ($allowlist !== null && !in_array($chainId, $allowlist, true)) {
-            return self::ELIGIBILITY_ALLOWLIST_EXCLUDED;
+    public static function scannable(array $chain): bool
+    {
+        $verdict = $chain['eligibility'] ?? null;
+
+        return is_string($verdict) && CosmwasmScanEligibility::isScannable($verdict);
+    }
+
+    /**
+     * PURE. How many of these chains the scanner will walk.
+     *
+     * This is the number `eligible_chain_count` reports, and it is
+     * REQUIRED to equal `count(CosmwasmDiscoveryWorker::eligibleChainIds())`
+     * for the same site. That equality is not a coincidence to be
+     * maintained by hand — both sides run
+     * {@see CosmwasmScanEligibility::verdict()} over the same three facts
+     * — and CosmwasmScannerStatusParityTest asserts it, per fixture, as
+     * matching SETS of chain ids rather than merely matching counts.
+     *
+     * @param list<ChainPanelRow> $chains
+     */
+    public static function scannableChainCount(array $chains): int
+    {
+        $count = 0;
+        foreach ($chains as $chain) {
+            if (self::scannable($chain)) {
+                $count++;
+            }
         }
 
-        return self::ELIGIBILITY_ELIGIBLE;
+        return $count;
     }
 
     /** PURE. Short operator label for an eligibility value. */
@@ -606,6 +702,8 @@ final class CosmwasmDiscoveryHealthSnapshot
                 return 'Not opted in';
             case self::ELIGIBILITY_UNSUPPORTED:
                 return 'No wasm module';
+            case self::ELIGIBILITY_PAUSED:
+                return 'Paused';
             case self::ELIGIBILITY_ALLOWLIST_EXCLUDED:
                 return 'Outside canary scope';
             default:
@@ -633,8 +731,33 @@ final class CosmwasmDiscoveryHealthSnapshot
             case self::ELIGIBILITY_UNSUPPORTED:
                 // Same register as the existing panel copy for this case:
                 // it is a fact about the chain, not a failure.
-                return 'This chain has no CosmWasm module — it answered the code listing with a 501, '
-                    . 'so it is permanently skipped. Opting it in would change nothing.';
+                //
+                // ── "PERMANENT" IS A CLAIM ABOUT THE CODE, NOT THE WORLD ─
+                // The code does prove it, and the sentence says exactly
+                // what it proves rather than more. CosmwasmDiscoveryWorker::
+                // prepareChain() returns null on this state ("durable,
+                // never retried"); the shared eligibility verdict excludes
+                // it, so no scheduled pass resolves the chain at all;
+                // ChainCheckpointRepository::pauseCwDiscovery() REFUSES
+                // when the state is already unsupported; and
+                // cwResumeState()/resumeCwDiscovery() require the state to
+                // be exactly `paused`, so Resume cannot clear it either.
+                // No other writer moves a chain out of `unsupported`.
+                //
+                // What that does NOT license is "it can never change".
+                // Somebody with database access can still edit the row,
+                // and a later build could add a re-measurement path. So
+                // the copy claims the guarantee — no scheduled pass, no
+                // control on this page — and names the one thing that
+                // would, instead of asserting a fact about the universe.
+                return 'This chain has no CosmWasm module — it answered the code listing with a 501. '
+                    . 'No scheduled pass retries that verdict and no control on this page clears it, '
+                    . 'so opting the chain in changes nothing; only a direct database change would.';
+
+            case self::ELIGIBILITY_PAUSED:
+                return 'An operator paused this chain, so no pass runs for it — no backfill, no daily '
+                    . 'pass, no retries. Its progress is kept exactly where it is; use Resume in the '
+                    . 'Controls column to put it back in the rotation.';
 
             case self::ELIGIBILITY_ALLOWLIST_EXCLUDED:
                 // null cannot reach here from deriveEligibility() — it only
@@ -748,7 +871,14 @@ final class CosmwasmDiscoveryHealthSnapshot
         $bestSeen = null;
 
         foreach ($chains as $chain) {
-            if ($chain['paused'] || $chain['unsupported']) {
+            // The SQL is only ever handed the ids
+            // CosmwasmDiscoveryWorker::eligibleChainIds() resolved, so the
+            // set this walks has to be the same one — which is what
+            // scannable() answers. It used to skip only paused and
+            // unsupported rows, so the panel could name a chain nobody had
+            // opted in (or one outside the canary allowlist) as the next
+            // one to be worked, which the worker would never take.
+            if (!self::scannable($chain)) {
                 continue;
             }
             $seen = $chain['last_discovery_at'];
@@ -786,46 +916,80 @@ final class CosmwasmDiscoveryHealthSnapshot
      *      That ordering is load-bearing: "a read failed" outranks every
      *      tidy answer, and idle is the tidiest one there is.
      *   2. idle    — nobody opted a chain in.
-     *   3. disabled — the constant is undefined.
-     *   4. red / yellow / green — the arithmetic, unchanged.
+     *   3. blocked — chains ARE opted in and not one of them is scannable:
+     *      every opt-in is paused, unsupported, outside the canary
+     *      allowlist, or its opt-in column could not be read.
+     *   4. disabled — the constant is undefined.
+     *   5. red / yellow / green — the arithmetic, over the SCANNABLE set
+     *      only ({@see scannable()}).
      *
-     * ── WHY IDLE OUTRANKS DISABLED ──────────────────────────────────────
-     * Both are intentional configuration, so neither is a fault and the
-     * only question is which one an operator needs told first. With zero
-     * chains opted in, defining `BCC_COSMWASM_DISCOVERY_ENABLED` would
-     * change NOTHING — the scanner still has nowhere to go — so leading
+     * ── THE ARITHMETIC ONLY EVER LOOKED AT THE WRONG SET ────────────────
+     * The loop below used to decide for itself which chains counted, and
+     * it got the answer wrong twice in a fortnight. First it ran over
+     * EVERY chain in the registry and skipped only the paused and
+     * unsupported ones, so a chain nobody had opted in counted as a
+     * healthy eligible chain — an operator whose only opt-in was an
+     * unsupported chain read GREEN off a chain they had switched off.
+     * Then, with the opt-in added, it still keyed on `paused ||
+     * unsupported` and never consulted the canary allowlist, so an
+     * opted-in chain OUTSIDE `BCC_COSMWASM_CHAIN_ALLOWLIST` counted as
+     * scannable — while `eligible_chain_count` on the same summary said 0
+     * and the worker skipped it.
+     *
+     * Both were the same bug: a second definition of "scannable", written
+     * here, maintained by hand beside the real one. There is now no
+     * definition here at all. {@see scannable()} reads the verdict
+     * {@see CosmwasmScanEligibility::verdict()} already reached — the same
+     * function {@see CosmwasmDiscoveryWorker::eligibleChainIds()} filters
+     * on — so every number below describes exactly the chains the worker
+     * would walk, and adding a sixth condition to the policy reaches this
+     * arithmetic without anybody editing this method.
+     *
+     * ── WHY IDLE AND BLOCKED OUTRANK DISABLED ───────────────────────────
+     * Same reason, ruled once and applied twice. Both are intentional
+     * configuration, so neither is a fault and the only question is which
+     * fact an operator needs told first. With nothing opted in — or with
+     * nothing opted in that CAN be scanned — defining
+     * `BCC_COSMWASM_DISCOVERY_ENABLED` would change NOTHING, so leading
      * with the constant sends someone to edit wp-config.php for no effect.
-     * The nearer truth is "no chains are enabled", and it is the one with
-     * an action attached. The constant is not hidden by this: the panel
-     * still carries `disabled_reason`, and the idle notice names the
-     * constant when it is also undefined.
+     * The nearer truth is the selection, and it is the one with an action
+     * attached. Neither hides the constant: the panel still carries
+     * `disabled_reason`, and both notices name it when it is undefined.
      *
-     * ── AND WHY EMPTY CHAINS DO NOT COUNT AS IDLE ───────────────────────
+     * Blocked outranks the red/yellow/green arithmetic for the same
+     * reason: an unscheduled or overdue cron pass is real, but it changes
+     * nothing while there is no chain for that pass to walk.
+     *
+     * ── AND WHY EMPTY CHAINS ARE NEITHER IDLE NOR BLOCKED ───────────────
      * `$chains === []` means the registry lists no active Cosmos chain at
-     * all. That is not an operator declining to scan anything, it is a
-     * registry with nothing in it, and it keeps the RED it always had. The
-     * guard is also a second lock on precedence 1 above: the unavailable
+     * all. That is not an operator declining to scan anything, nor an
+     * operator selecting chains that cannot be scanned — it is a registry
+     * with nothing in it, and it keeps the RED it always had. Both guards
+     * are also a second lock on precedence 1 above: the unavailable
      * summary carries no chain rows, so an empty list must never be able
-     * to derive into a calm "idle".
+     * to derive into a calm "idle" or an explanatory "blocked".
      *
      * @param list<ChainPanelRow> $chains
      * @param list<ScheduleEntry> $schedule
      */
     public static function deriveStatus(bool $discoveryEnabled, array $chains, array $schedule): string
     {
-        if ($chains !== [] && self::optedInChainCount($chains) === 0) {
-            return self::STATUS_IDLE;
-        }
+        $optedIn = self::optedInChainCount($chains);
 
-        if (!$discoveryEnabled) {
-            return self::STATUS_DISABLED;
+        if ($chains !== [] && $optedIn === 0) {
+            return self::STATUS_IDLE;
         }
 
         $eligible = 0;
         $errored  = 0;
         $stale    = 0;
         foreach ($chains as $chain) {
-            if ($chain['paused'] || $chain['unsupported']) {
+            // NOT SCANNABLE, NOT COUNTED — in either direction. A chain
+            // the worker will not walk cannot make the scanner look
+            // healthy (the bug this fixes, twice over) and it cannot make
+            // it look degraded either: it has no last run to be stale and
+            // no error of its own to answer for.
+            if (!self::scannable($chain)) {
                 continue;
             }
             $eligible++;
@@ -838,6 +1002,18 @@ final class CosmwasmDiscoveryHealthSnapshot
             }
         }
 
+        // Opt-ins exist, and not one of them survived the loop above.
+        // Stated as `$optedIn > 0` rather than leaning on the idle guard,
+        // because the two conditions are different sentences and a reader
+        // should not have to prove the first one from ten lines away.
+        if ($optedIn > 0 && $eligible === 0) {
+            return self::STATUS_BLOCKED;
+        }
+
+        if (!$discoveryEnabled) {
+            return self::STATUS_DISABLED;
+        }
+
         $unscheduled = 0;
         $overdue     = 0;
         foreach ($schedule as $entry) {
@@ -848,6 +1024,13 @@ final class CosmwasmDiscoveryHealthSnapshot
             }
         }
 
+        // `$eligible === 0` survives as the BACKSTOP it always was, and it
+        // now only answers for the empty registry: every other route to
+        // zero eligible chains is an opt-in that cannot be scanned, which
+        // the blocked guard above has already claimed with a sentence an
+        // operator can act on. It is kept rather than tidied away because
+        // the fail-closed direction is the whole point — an unforeseen way
+        // to reach zero must land on RED, never on green with no chains.
         if ($eligible === 0 || $unscheduled > 0) {
             return self::STATUS_RED;
         }
@@ -874,8 +1057,9 @@ final class CosmwasmDiscoveryHealthSnapshot
      * questions and only one of them is "did an operator ask for this?".
      * A chain that is opted in but paused, unsupported or outside the
      * canary allowlist still counts here: somebody asked for it, so the
-     * system is not idle — it has something to explain instead, and the
-     * red/yellow arithmetic below is what explains it.
+     * system is not idle — it has something to explain instead, and
+     * {@see STATUS_BLOCKED} or the red/yellow arithmetic is what explains
+     * it.
      *
      * @param list<ChainPanelRow> $chains
      */
@@ -883,12 +1067,29 @@ final class CosmwasmDiscoveryHealthSnapshot
     {
         $count = 0;
         foreach ($chains as $chain) {
-            if (($chain['discovery_opted_in'] ?? null) === true) {
+            if (self::optedIn($chain)) {
                 $count++;
             }
         }
 
         return $count;
+    }
+
+    /**
+     * PURE. Did an operator ask for this chain? ONE reader, used by both
+     * the count above and the arithmetic in {@see deriveStatus()}.
+     *
+     * It is one function because the two callers must never drift: a
+     * status that counted opt-ins one way and eligible chains another
+     * could report "no chain is opted in" and "one chain is eligible" out
+     * of the same array. FAIL CLOSED — only a literal `true`; see
+     * {@see optedInChainCount()} for why a truthy value is not enough.
+     *
+     * @param ChainPanelRow $chain
+     */
+    private static function optedIn(array $chain): bool
+    {
+        return ($chain['discovery_opted_in'] ?? null) === true;
     }
 
     /**
@@ -940,7 +1141,8 @@ final class CosmwasmDiscoveryHealthSnapshot
         foreach ($chains as $chain) {
             if ($chain['unsupported']) {
                 $issues[] = sprintf(
-                    '%s has no CosmWasm module, so it is permanently skipped. This is a fact about the chain, not a failure — the scanner stopped asking on purpose.',
+                    '%s has no CosmWasm module — it answered with a 501, so no scheduled pass asks it again and '
+                        . 'no control on this page clears that. This is a fact about the chain, not a failure.',
                     $chain['slug']
                 );
                 continue;

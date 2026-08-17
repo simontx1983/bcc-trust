@@ -51,6 +51,17 @@ final class CosmwasmScannerPanel
      * the green — that one says the scanner is working, which an idle
      * scanner is not.
      *
+     * `blocked` takes the amber, and NOT that grey. Nothing has failed, so
+     * it is not the red; nothing is running, so it is emphatically not the
+     * green; and unlike idle and disabled there is something an operator
+     * has to change before the selection they have already made can
+     * produce any work. Amber is this palette's "act on me, nothing is on
+     * fire", which is exactly the register. It borrows the existing hue
+     * rather than inventing a fifth: the badge prints the word BLOCKED
+     * beside it, so the colour carries severity and the word carries
+     * meaning — which is the division of labour the four hues already
+     * assume.
+     *
      * @var array<string, string>
      */
     private const STATUS_COLOR = [
@@ -59,6 +70,7 @@ final class CosmwasmScannerPanel
         CosmwasmDiscoveryHealthSnapshot::STATUS_RED         => '#d63638',
         CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED    => '#646970',
         CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE        => '#646970',
+        CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED     => '#dba617',
         CosmwasmDiscoveryHealthSnapshot::STATUS_UNAVAILABLE => '#d63638',
     ];
 
@@ -77,6 +89,10 @@ final class CosmwasmScannerPanel
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE           => '#00a32a',
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_NOT_OPTED_IN       => '#646970',
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNSUPPORTED        => '#646970',
+        // Amber, matching the State pill this chain already shows: a pause
+        // is a hold somebody put on, not a settled fact like "no wasm
+        // module" and not a mistake like an unreadable opt-in.
+        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_PAUSED             => '#dba617',
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED => '#dba617',
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN            => '#d63638',
     ];
@@ -106,8 +122,18 @@ final class CosmwasmScannerPanel
         $chains = is_array($summary['chains'] ?? null) ? array_values($summary['chains']) : [];
         /** @var list<string> $issues */
         $issues = is_array($summary['issues'] ?? null) ? array_values($summary['issues']) : [];
+
+        // FORCED OPEN for the states an operator has to deal with now.
+        // `blocked` joins red and unavailable because it is the one calm
+        // status with an action attached: the selection cannot produce
+        // work, and the row naming the chain in the way is inside this
+        // disclosure. `idle` and `disabled` stay closed — nothing is
+        // waiting on anybody there.
+        $forceOpen = $unavailable
+            || $status === CosmwasmDiscoveryHealthSnapshot::STATUS_RED
+            || $status === CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED;
         ?>
-        <details class="bcc-cw-scanner" style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;" <?php echo $status === CosmwasmDiscoveryHealthSnapshot::STATUS_RED || $unavailable ? 'open' : ''; ?>>
+        <details class="bcc-cw-scanner" style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;" <?php echo $forceOpen ? 'open' : ''; ?>>
             <summary style="cursor:pointer;font-weight:600;">
                 CosmWasm collection scanner
                 <span style="display:inline-block;margin-left:6px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($color); ?>;">
@@ -171,6 +197,51 @@ final class CosmwasmScannerPanel
                             That gate would have to be opened as well before any scheduled
                             pass ran, but on its own it changes nothing while no chain is
                             opted in.
+                        </p>
+                    <?php endif; ?>
+                </div>
+            <?php elseif ($status === CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED): ?>
+                <?php
+                // notice-warning, NOT notice-error and NOT notice-info.
+                // Nothing failed, so it is not an error; but unlike the
+                // idle notice above there is something to change before
+                // the selection an operator has already made can produce
+                // any work, so it does not get the calm treatment either.
+                //
+                // It sits AHEAD of the switched-off notice for the same
+                // reason the idle block does, and
+                // CosmwasmDiscoveryHealthSnapshot::deriveStatus() ranks it
+                // the same way: with no scannable opted-in chain, defining
+                // the constant would change nothing. The constant is still
+                // named below when it is also undefined.
+                //
+                // THE COPY NAMES ALL THREE EXCLUSIONS, not two. It used to
+                // say "either paused or has no CosmWasm module", written
+                // when the status arithmetic only knew about those two —
+                // so on the site that prompted this fix, where the whole
+                // selection sat outside BCC_COSMWASM_CHAIN_ALLOWLIST, the
+                // notice described a state the operator was not in. The
+                // per-chain reason in the Discovery column is still where
+                // the specifics live; this paragraph only has to send them
+                // to the right column.
+                ?>
+                <div class="notice notice-warning inline" style="margin:8px 0;">
+                    <p>
+                        <strong>No opted-in chain can currently be scanned.</strong>
+                        Every chain enabled for NFT discovery is paused, marked as lacking
+                        CosmWasm support, or outside the current canary allowlist.
+                        Nothing has failed and nothing is
+                        behind—the current selection cannot produce any scanner work.
+                        Enable an eligible chain, resume a paused chain, or update the
+                        canary allowlist. The Discovery and State columns below show why
+                        each chain is excluded.
+                    </p>
+                    <?php if (!$enabled): ?>
+                        <p>
+                            <?php echo esc_html((string) ($summary['disabled_reason'] ?? '')); ?>
+                            That gate would have to be opened as well before any scheduled
+                            pass ran, but on its own it changes nothing while no opted-in
+                            chain can be scanned.
                         </p>
                     <?php endif; ?>
                 </div>
@@ -380,8 +451,9 @@ final class CosmwasmScannerPanel
                 <strong><?php echo esc_html(number_format_i18n($eligibleCount)); ?>
                 of <?php echo esc_html(number_format_i18n(count($chains))); ?></strong>
                 listed chains are eligible for the scanner.
-                A chain is scanned only when an operator has opted it in <em>and</em> the chain has a
-                working wasm module — the Discovery column says which, per chain, and why not.
+                A chain is scanned only when an operator has opted it in, the chain reports a
+                working wasm module, nobody has paused it, <em>and</em> it is inside the canary
+                allowlist when one is set — the Discovery column says which, per chain, and why not.
             <?php else: ?>
                 How many of these chains are eligible could not be worked out.
             <?php endif; ?>
@@ -487,7 +559,8 @@ final class CosmwasmScannerPanel
             <td>
                 <?php if ($unsupported): ?>
                     <span style="color:#646970;font-size:11px;">
-                        Permanently skipped — this chain has no CosmWasm module.
+                        No CosmWasm module — no scheduled pass runs for this chain and
+                        nothing on this page can start one.
                     </span>
                 <?php else: ?>
                     <?php if ($paused): ?>
