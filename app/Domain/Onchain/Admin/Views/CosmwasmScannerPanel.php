@@ -89,6 +89,10 @@ final class CosmwasmScannerPanel
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE           => '#00a32a',
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_NOT_OPTED_IN       => '#646970',
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNSUPPORTED        => '#646970',
+        // Amber, matching the State pill this chain already shows: a pause
+        // is a hold somebody put on, not a settled fact like "no wasm
+        // module" and not a mistake like an unreadable opt-in.
+        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_PAUSED             => '#dba617',
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED => '#dba617',
         CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN            => '#d63638',
     ];
@@ -210,18 +214,27 @@ final class CosmwasmScannerPanel
                 // the same way: with no scannable opted-in chain, defining
                 // the constant would change nothing. The constant is still
                 // named below when it is also undefined.
+                //
+                // THE COPY NAMES ALL THREE EXCLUSIONS, not two. It used to
+                // say "either paused or has no CosmWasm module", written
+                // when the status arithmetic only knew about those two —
+                // so on the site that prompted this fix, where the whole
+                // selection sat outside BCC_COSMWASM_CHAIN_ALLOWLIST, the
+                // notice described a state the operator was not in. The
+                // per-chain reason in the Discovery column is still where
+                // the specifics live; this paragraph only has to send them
+                // to the right column.
                 ?>
                 <div class="notice notice-warning inline" style="margin:8px 0;">
                     <p>
-                        <strong>No opted-in chain can be scanned.</strong>
-                        Every chain enabled for NFT discovery is either paused or has no
-                        CosmWasm module — a chain that answered the code listing with a 501
-                        is permanently skipped, and opting it in changes nothing — so there
-                        is nothing for the scanner to walk. Nothing has failed and nothing
-                        is behind: the current selection simply cannot produce any work.
-                        Enable discovery on a chain that reports a wasm module, or resume a
-                        paused one. The Discovery and State columns below say which chain is
-                        which.
+                        <strong>No opted-in chain can currently be scanned.</strong>
+                        Every chain enabled for NFT discovery is paused, marked as lacking
+                        CosmWasm support, or outside the current canary allowlist.
+                        Nothing has failed and nothing is
+                        behind—the current selection cannot produce any scanner work.
+                        Enable an eligible chain, resume a paused chain, or update the
+                        canary allowlist. The Discovery and State columns below show why
+                        each chain is excluded.
                     </p>
                     <?php if (!$enabled): ?>
                         <p>
@@ -438,8 +451,9 @@ final class CosmwasmScannerPanel
                 <strong><?php echo esc_html(number_format_i18n($eligibleCount)); ?>
                 of <?php echo esc_html(number_format_i18n(count($chains))); ?></strong>
                 listed chains are eligible for the scanner.
-                A chain is scanned only when an operator has opted it in <em>and</em> the chain has a
-                working wasm module — the Discovery column says which, per chain, and why not.
+                A chain is scanned only when an operator has opted it in, the chain reports a
+                working wasm module, nobody has paused it, <em>and</em> it is inside the canary
+                allowlist when one is set — the Discovery column says which, per chain, and why not.
             <?php else: ?>
                 How many of these chains are eligible could not be worked out.
             <?php endif; ?>
@@ -545,7 +559,8 @@ final class CosmwasmScannerPanel
             <td>
                 <?php if ($unsupported): ?>
                     <span style="color:#646970;font-size:11px;">
-                        Permanently skipped — this chain has no CosmWasm module.
+                        No CosmWasm module — no scheduled pass runs for this chain and
+                        nothing on this page can start one.
                     </span>
                 <?php else: ?>
                     <?php if ($paused): ?>

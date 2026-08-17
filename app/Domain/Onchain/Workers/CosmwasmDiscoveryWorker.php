@@ -12,6 +12,7 @@ use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
+use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
 use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
@@ -76,8 +77,11 @@ if (!defined('ABSPATH')) {
  * operator opts the chain in.
  *
  * ── WHICH CHAINS ────────────────────────────────────────────────────────
- * Exactly one function decides: {@see eligibleChainIds()}. All four
- * passes route through it, and it fails closed on every unsure branch.
+ * Exactly one function RESOLVES them: {@see eligibleChainIds()}. All four
+ * passes route through it. Exactly one function DECIDES per chain:
+ * {@see CosmwasmScanEligibility::verdict()} — which the admin panel calls
+ * as well, so the dashboard and the worker cannot answer "will this chain
+ * be scanned?" differently. Both fail closed on every unsure branch.
  * `wp_bcc_chains.cosmwasm_nft_discovery_enabled` ships DEFAULT 0, so a
  * fresh install — and every install this migration lands on — scans
  * nothing until someone says otherwise, per chain.
@@ -693,6 +697,21 @@ final class CosmwasmDiscoveryWorker
      * pause, durable "no wasm module", circuit breaker, and a CosmWasm
      * fetcher.
      *
+     * ── THE PAUSE AND UNSUPPORTED CHECKS ARE NOT REDUNDANT ──────────────
+     * {@see eligibleChainIds()} already drops both, so the scheduled
+     * passes never reach here with a paused or unsupported chain. This
+     * method is also on the MANUAL path: {@see runBackfillForChain()} is
+     * public, an operator "Run backfill slice" click calls it with one
+     * chain id, and that path never touches the selector. Deleting these
+     * two lines would make the button ignore a pause.
+     *
+     * The circuit breaker and the fetcher checks live ONLY here on
+     * purpose. They are runtime conditions that can change between the
+     * moment a chain is selected and the moment it is worked, and they are
+     * deliberately NOT part of the shared eligibility verdict — a panel
+     * that reported "not eligible" for a chain whose breaker happens to be
+     * open right now would be describing a transient as a configuration.
+     *
      * @return array{fetcher: CosmosFetcher, checkpoint: CheckpointRow}|null
      */
     private static function prepareChain(int $chainId): ?array
@@ -746,16 +765,27 @@ final class CosmwasmDiscoveryWorker
      * conclude the returned list is "the cosmos chains", and would then
      * quite reasonably filter it further somewhere else.
      *
-     * ── THE FOUR PERMANENT CONDITIONS, PLUS ONE TEMPORARY ONE ───────────
+     * ── IT DOES NOT OWN THE RULE, IT RESOLVES THE DATA FOR IT ───────────
+     * The per-chain decision lives in
+     * {@see CosmwasmScanEligibility::verdict()}, which the ADMIN PANEL
+     * calls too. This method's job is the part that cannot be shared: two
+     * bounded reads (the chain registry and the checkpoint table) plus the
+     * allowlist constant, turned into the three facts the predicate wants.
+     * The panel resolves the same three facts from rows it has already
+     * fetched for other reasons.
+     *
+     * That split is the whole point. When the rule lived here AND in the
+     * panel they drifted twice inside a fortnight — first the panel
+     * counted chains nobody had opted in, then it counted chains outside
+     * the canary allowlist — and both times the panel reported a healthy
+     * scanner that was scanning nothing. Two definitions of "scannable" is
+     * how a dashboard starts lying.
+     *
+     * ── THE CONDITIONS THIS METHOD STILL OWNS ───────────────────────────
      *   is_active = 1                          (chain registry)
      *   AND chain_type = 'cosmos'              (only cosmos speaks wasmd)
-     *   AND cosmwasm_nft_discovery_enabled = 1 (OPERATOR INTENT)
-     *   AND checkpoint.cw_discovery_state != 'unsupported'
-     *                                          (MEASURED CAPABILITY —
-     *                                           the chain answered the code
-     *                                           listing with 501)
-     *   AND (allowlist undefined OR id IN allowlist)
-     *                                          (temporary canary scope)
+     * plus everything {@see CosmwasmScanEligibility::verdict()} decides:
+     * operator intent, measured capability, operator pause, canary scope.
      *
      * Operator intent and measured capability are separate on purpose.
      * Intent is a decision a human makes; capability is a fact the chain
@@ -763,6 +793,16 @@ final class CosmwasmDiscoveryWorker
      * "supports_cosmwasm" column would mean an operator could assert a
      * capability the chain does not have, and the 501 the code already
      * learns would have nowhere to be written.
+     *
+     * ── PAUSE IS FILTERED HERE NOW, AND STILL RE-CHECKED LATER ──────────
+     * `cw_discovery_state = paused` used to be caught only in
+     * {@see prepareChain()}, one layer down — so a paused chain was
+     * resolved as eligible, locked, `ensureExists()`-ed and stamped before
+     * anything noticed. Excluding it here means a paused chain is not
+     * considered at all, which is also what makes the panel's count able
+     * to mean something. {@see prepareChain()} KEEPS its own pause check:
+     * {@see runBackfillForChain()} is public and an operator "Run backfill
+     * slice" click reaches it WITHOUT passing through this method.
      *
      * ── EVERY UNSURE BRANCH RETURNS FEWER CHAINS ────────────────────────
      * The bug shape being avoided is the one this codebase has shipped
@@ -808,12 +848,16 @@ final class CosmwasmDiscoveryWorker
             return [];
         }
 
-        /** @var array<int, true> $unsupported */
-        $unsupported = [];
+        // The measured per-chain state, keyed for O(1) lookup. A chain with
+        // NO entry here has never been measured, and the predicate is told
+        // so as `null` rather than as some stand-in state — see
+        // CosmwasmScanEligibility::verdict(), which lets an unmeasured
+        // chain through on purpose (the first pass is what creates the
+        // measurement, so refusing one would deadlock it forever).
+        /** @var array<int, string> $stateByChain */
+        $stateByChain = [];
         foreach ($checkpoints as $row) {
-            if ((string) $row->cw_discovery_state === ChainCheckpointRepository::CW_STATE_UNSUPPORTED) {
-                $unsupported[(int) $row->chain_id] = true;
-            }
+            $stateByChain[(int) $row->chain_id] = (string) $row->cw_discovery_state;
         }
 
         $ids = [];
@@ -828,25 +872,16 @@ final class CosmwasmDiscoveryWorker
                 continue;
             }
 
-            if (!self::discoveryOptedIn($chain)) {
-                continue;
-            }
-
-            if ($allowlist !== null && !in_array($chainId, $allowlist, true)) {
-                continue;
-            }
-
-            // A MISSING checkpoint row ALLOWS the chain. That is the one
-            // permissive-looking branch here and it is deliberate: the
-            // operator has already said yes on this specific chain, and
-            // "no checkpoint row" means nobody has measured it yet — the
-            // row is created by the first pass, which is also what records
-            // the 501 if there is one. Refusing here would mean an opted-in
-            // chain could never take its first measurement, so it would
-            // never become eligible: a permanent deadlock dressed up as
-            // caution. The set stays bounded either way (the operator flag
-            // is the gate, not the checkpoint table).
-            if (isset($unsupported[$chainId])) {
+            // THE SHARED PREDICATE. Operator intent, measured capability,
+            // operator pause and canary scope are all decided in one place,
+            // by the same lines the admin panel reads its verdict from.
+            $verdict = CosmwasmScanEligibility::verdict(
+                $chainId,
+                $stateByChain[$chainId] ?? null,
+                self::discoveryOptInState($chain),
+                $allowlist
+            );
+            if (!CosmwasmScanEligibility::isScannable($verdict)) {
                 continue;
             }
 
@@ -857,39 +892,29 @@ final class CosmwasmDiscoveryWorker
     }
 
     /**
-     * Has an operator opted this chain in to CosmWasm NFT discovery?
+     * Has an operator opted this chain in to CosmWasm NFT discovery — yes,
+     * no, or "this install cannot say"?
      *
+     * ── ONE READER, THREE ANSWERS ───────────────────────────────────────
      * Typed `object`, not the ChainRow shape, because the honest answer
      * depends on something the shape cannot express: whether the row was
      * projected BEFORE or AFTER the `cosmwasm_nft_discovery_enabled`
      * migration ran. A pre-migration row simply has no such property, and
      * reading it would raise a PHP warning and evaluate to null — so the
-     * presence check comes first and answers FALSE.
+     * presence check comes first and answers `null`.
      *
-     * FALSE is the correct answer for "I cannot tell": on an install where
-     * the migration has not landed, nobody has been able to opt a chain in
-     * yet, so there is nothing to scan.
-     */
-    private static function discoveryOptedIn(object $chain): bool
-    {
-        return self::discoveryOptInState($chain) === true;
-    }
-
-    /**
-     * The same read, with the third answer kept.
+     * The third answer is KEPT rather than collapsed to false here, and
+     * collapsed by whoever needs a boolean:
+     * {@see CosmwasmScanEligibility::verdict()} turns it into
+     * {@see CosmwasmScanEligibility::UNKNOWN}, which is NOT scannable, and
+     * the admin panel turns the same value into a sentence explaining that
+     * the column is missing. "An operator switched this off" and "this
+     * install has no such column" are different things to tell somebody,
+     * and the second one sends them looking for a switch that is not there
+     * yet.
      *
-     * ── WHY TWO METHODS FOR ONE COLUMN ──────────────────────────────────
-     * The chokepoint above needs a yes/no, and "I cannot tell" has to
-     * collapse to NO there — that is the fail-closed rule and it does not
-     * change. The ADMIN PANEL needs the distinction back, because "an
-     * operator switched this off" and "this install has no such column"
-     * are different things to tell somebody, and the second one sends them
-     * looking for a switch that does not exist yet.
-     *
-     * Both callers read the column through THIS method so there is exactly
-     * one place that knows how the flag is stored. A panel with its own
-     * copy of the presence check could drift from the chokepoint, and the
-     * operator would believe the panel.
+     * Every caller reads the column through THIS method so there is
+     * exactly one place that knows how the flag is stored.
      *
      * @return bool|null null = the projection carries no such property,
      *                   i.e. the migration has not run on this install

@@ -531,6 +531,25 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         return (string) preg_replace('/\s+/', ' ', $html);
     }
 
+    /**
+     * The PROSE the operator reads: tags stripped, entities decoded,
+     * whitespace collapsed.
+     *
+     * {@see flatten()} keeps the markup, which is what an assertion about a
+     * badge colour or a notice class needs. A sentence signed off word for
+     * word cannot be asserted that way — `<strong>` sits in the middle of
+     * the first one — and asserting the fragments either side of the tag
+     * instead is how the previous version of this copy passed its tests
+     * while naming only two of the three ways a selection can be
+     * unscannable.
+     */
+    private static function prose(string $html): string
+    {
+        $text = html_entity_decode(strip_tags($html), ENT_QUOTES, 'UTF-8');
+
+        return trim((string) preg_replace('/\s+/', ' ', $text));
+    }
+
     public function test_the_panel_reports_a_chain_nobody_opted_in(): void
     {
         ChainRepository::reset();
@@ -565,8 +584,21 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
 
         self::assertStringContainsString('No wasm module', $html);
         self::assertStringContainsString('opt-in <strong>ON</strong>', $html, 'the opt-in is still shown honestly');
-        self::assertStringContainsString('Opting it in would change nothing', $html);
         self::assertStringNotContainsString('Nothing is blocking this chain', $html);
+
+        // THE PERMANENCE CLAIM, AND ITS LIMITS. The code does prove this
+        // state is terminal to everything automated — prepareChain()
+        // refuses it, the shared eligibility verdict excludes it,
+        // pauseCwDiscovery() refuses when it is already set, and
+        // resumeCwDiscovery() only accepts `paused`, so no control on this
+        // page can clear it. The copy claims exactly that and no more: a
+        // direct database change is still possible, and a sentence that
+        // denied it would be wrong.
+        $flat = self::flatten($html);
+        self::assertStringContainsString('it answered the code listing with a 501', $flat);
+        self::assertStringContainsString('No scheduled pass retries that verdict', $flat);
+        self::assertStringContainsString('no control on this page clears it', $flat);
+        self::assertStringContainsString('only a direct database change would', $flat);
 
         // Still reversible: an opted-in unsupported chain must not be
         // stranded with no way to switch it back off.
@@ -726,9 +758,21 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         $html = $this->renderPanel();
         $flat = self::flatten($html);
 
-        self::assertStringContainsString('No opted-in chain can be scanned.', $html);
-        self::assertStringContainsString('Nothing has failed and nothing is behind', $flat);
-        self::assertStringContainsString('resume a paused one', $flat);
+        // THE OPERATOR COPY, VERBATIM, as one flattened string. Asserted
+        // whole rather than in fragments because it is the sentence the
+        // owner signed off, and because the version it replaces was wrong
+        // in a way fragments would not have caught: it named two of the
+        // three ways a selection can be unscannable and omitted the
+        // allowlist — which was the one actually in play.
+        self::assertStringContainsString(
+            'No opted-in chain can currently be scanned. '
+                . 'Every chain enabled for NFT discovery is paused, marked as lacking CosmWasm support, '
+                . 'or outside the current canary allowlist. '
+                . 'Nothing has failed and nothing is behind—the current selection cannot produce any scanner work. '
+                . 'Enable an eligible chain, resume a paused chain, or update the canary allowlist. '
+                . 'The Discovery and State columns below show why each chain is excluded.',
+            self::prose($html)
+        );
 
         // Amber, and it says BLOCKED. Asserted as one string so a stray
         // amber pill elsewhere on the page cannot satisfy it.
