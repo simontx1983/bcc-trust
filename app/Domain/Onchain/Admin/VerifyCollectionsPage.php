@@ -54,6 +54,42 @@ final class VerifyCollectionsPage
     public const AJAX_ACTION_PROVISION = 'bcc_vc_provision_one';
 
     /**
+     * VC-A admin-post routes (batch: Verify Collections handler hardening).
+     *
+     * Each of these was previously an action BRANCH inside handlePost(),
+     * reached after ONE `bcc_verify_collections_nonce` check that covered
+     * fourteen different operations — so a nonce minted by the read-only
+     * "Test CW-721" button also authorised a hard delete. Each is now its
+     * own admin-post route with its own nonce action, and the per-row ones
+     * bind that nonce to the collection id as well.
+     *
+     * The nonce action string IS the route name (per-target routes append
+     * `_<collectionId>`), so a route can never verify a nonce minted for a
+     * different operation.
+     */
+    public const ACTION_SAVE       = 'bcc_vc_save';
+    public const ACTION_PROVISION  = 'bcc_vc_provision';
+    public const ACTION_ADD        = 'bcc_vc_add_collection';
+    public const ACTION_ADD_COSMOS = 'bcc_vc_add_cosmos';
+    public const ACTION_DELETE     = 'bcc_vc_delete';
+    public const ACTION_TESTQUERY  = 'bcc_vc_testquery';
+
+    /**
+     * Maximum collection ids accepted from one bulk-save submission.
+     *
+     * Not an arbitrary limit: listForAdminVerification() is called with a
+     * per-page of 50, so 50 is exactly how many `known[]` checkboxes one
+     * rendered page can legitimately submit. An oversized payload is
+     * REJECTED rather than truncated — silently dropping ids would leave
+     * the operator believing rows were saved that were not.
+     */
+    public const MAX_BULK_IDS = 50;
+
+    /** Operator-scoped, short-lived carrier for PRG result notices. */
+    private const NOTICE_TRANSIENT_PREFIX = 'bcc_vc_notices_';
+    private const NOTICE_TTL              = 60;
+
+    /**
      * Chain slugs surfaced as quick-filter pills above the dropdown.
      * Pills only render if the slug also appears in the active chains
      * registry — a missing/disabled chain silently drops its pill
@@ -125,6 +161,320 @@ final class VerifyCollectionsPage
     }
 
     /**
+     * Register the VC-A admin-post routes.
+     *
+     * These replace six action branches that previously posted back to the
+     * rendering page, where a browser refresh re-submitted them. Each now
+     * ends in a redirect (PRG), so a reload re-issues an inert GET.
+     */
+    public static function register_actions(): void
+    {
+        add_action('admin_post_' . self::ACTION_SAVE,       [__CLASS__, 'handleSavePost']);
+        add_action('admin_post_' . self::ACTION_PROVISION,  [__CLASS__, 'handleProvisionPost']);
+        add_action('admin_post_' . self::ACTION_ADD,        [__CLASS__, 'handleAddCollectionPost']);
+        add_action('admin_post_' . self::ACTION_ADD_COSMOS, [__CLASS__, 'handleAddCosmosPost']);
+        add_action('admin_post_' . self::ACTION_DELETE,     [__CLASS__, 'handleDeletePost']);
+        add_action('admin_post_' . self::ACTION_TESTQUERY,  [__CLASS__, 'handleTestQueryPost']);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // VC-A admin-post handlers
+    //
+    // Ordering in every one of them is: capability → input shape →
+    // scoped nonce → authoritative lookup → mutation. No repository,
+    // provider or PeepSo work happens before CSRF validation.
+    //
+    // Each delegates the actual domain work to the SAME private handler
+    // the page used before, so verification semantics, collection
+    // creation, delete protection and provisioning behaviour are
+    // unchanged — only the request boundary moved.
+    // ────────────────────────────────────────────────────────────────────
+
+    public static function handleSavePost(): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requireNonce(self::ACTION_SAVE, '_vc_save_nonce');
+
+        self::finish(self::handleSave(), 'save');
+    }
+
+    /**
+     * Create holder communities for collections that are ALREADY verified
+     * in the database.
+     *
+     * This deliberately no longer calls handleSave() first. The button
+     * used to persist every checkbox on the page as a hidden side effect,
+     * so "Create Communities" quietly did "Save Verification Changes"'s
+     * job — an operator who ticked a box to look at it, then clicked
+     * Create Communities, silently committed that tick. Provisioning now
+     * reads persisted state only; unsaved ticks are ignored and revert
+     * visibly on the redirect, and the button copy says so.
+     */
+    public static function handleProvisionPost(): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requireNonce(self::ACTION_PROVISION, '_vc_provision_nonce');
+
+        self::finish(self::handleProvision(), 'provision');
+    }
+
+    public static function handleAddCollectionPost(): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requireNonce(self::ACTION_ADD);
+
+        self::finish(self::handleAddCollection(), 'add');
+    }
+
+    public static function handleAddCosmosPost(): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requireNonce(self::ACTION_ADD_COSMOS);
+
+        self::finish(self::handleAddCosmosCollection(), 'add_cosmos');
+    }
+
+    public static function handleDeletePost(): void
+    {
+        AdminActionSupport::requireCapability();
+
+        // Shape first — the nonce action is derived from this id, so it has
+        // to be read before the nonce can be checked. Nothing touches the
+        // database until the nonce has proven the request authentic.
+        $collectionId = self::requireCollectionIdShape();
+        AdminActionSupport::requireNonce(self::ACTION_DELETE . '_' . $collectionId);
+
+        self::finish(self::handleDeleteCollection($collectionId), 'delete');
+    }
+
+    /**
+     * Read-only CW-721 probe.
+     *
+     * Kept as POST + PRG rather than converted to AJAX: it makes an
+     * outbound Cosmos LCD request, so replay resistance matters more than
+     * avoiding a page reload — under the old inline-POST shape a refresh
+     * re-issued the LCD call. The result is carried across the redirect in
+     * the same short-lived operator-scoped transient the other actions use,
+     * so the probe runs exactly once per click.
+     */
+    public static function handleTestQueryPost(): void
+    {
+        AdminActionSupport::requireCapability();
+
+        $collectionId = self::requireCollectionIdShape();
+        AdminActionSupport::requireNonce(self::ACTION_TESTQUERY . '_' . $collectionId);
+
+        // FAILURE POLICY (read-only probe), two cases, deliberately different:
+        //
+        //  1. An expected negative result — wrong chain type, contract is not
+        //     a CW-721, LCD returns an error shape. handleTestQuery() returns
+        //     a notice; technical detail goes to the provider path's own log.
+        //     NO durable audit row: nothing changed, and recording that an
+        //     operator looked at something is noise.
+        //
+        //  2. An UNEXPECTED exception escaping the probe. That is not a
+        //     verdict about the contract, it is a fault in our code or
+        //     transport, and it must be traceable. AdminActionSupport::
+        //     failure() is the one path that mints a correlation ID, and it
+        //     writes a durable row as part of that contract — so rather than
+        //     leave an unnamed event outside the vocabulary, the event is
+        //     named `admin_vc_testquery_failed` and declared with the rest.
+        //     Read-only or not, an authorized operation that crashed is worth
+        //     one row.
+        try {
+            $notices = self::handleTestQuery($collectionId);
+        } catch (\Throwable $e) {
+            $ref = AdminActionSupport::failure(
+                $e,
+                'admin_vc_testquery_failed',
+                'collection',
+                $collectionId
+            );
+            $notices = [[
+                'type'    => 'error',
+                'message' => AdminActionSupport::failureMessage($ref),
+            ]];
+        }
+
+        self::finish($notices, 'testquery');
+    }
+
+    /**
+     * The per-row VC-A forms (Remove, Test CW-721).
+     *
+     * Public so the wiring can be asserted structurally: the buttons that
+     * drive these live inside the big verification form and reach them via
+     * the HTML5 `form=` attribute, which only works if every id here is
+     * unique and matches exactly one button.
+     *
+     * @param list<int> $rowIds
+     */
+    public static function renderRowActionForms(
+        array $rowIds,
+        int $page,
+        string $chain,
+        string $tokenStandard,
+        bool $isVerified
+    ): void {
+        foreach ($rowIds as $rowId) {
+            $rowId = (int) $rowId;
+            if ($rowId <= 0) {
+                continue;
+            }
+            ?>
+            <form id="vc-a-del-<?php echo $rowId; ?>" method="post"
+                  action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:none;">
+                <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_DELETE); ?>">
+                <input type="hidden" name="collection_id" value="<?php echo $rowId; ?>">
+                <?php wp_nonce_field(self::ACTION_DELETE . '_' . $rowId); ?>
+                <?php self::renderReturnContext($page, $chain, $tokenStandard, $isVerified); ?>
+            </form>
+            <form id="vc-a-test-<?php echo $rowId; ?>" method="post"
+                  action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:none;">
+                <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_TESTQUERY); ?>">
+                <input type="hidden" name="collection_id" value="<?php echo $rowId; ?>">
+                <?php wp_nonce_field(self::ACTION_TESTQUERY . '_' . $rowId); ?>
+                <?php self::renderReturnContext($page, $chain, $tokenStandard, $isVerified); ?>
+            </form>
+            <?php
+        }
+    }
+
+    /**
+     * The two per-row VC-A buttons, as they appear inside the big form.
+     *
+     * Extracted alongside renderRowActionForms() so a test can compose the
+     * exact structure render_page() produces — buttons inside the big form,
+     * their forms after it closes — and assert the pairing with a real DOM
+     * parse rather than substring matching.
+     */
+    public static function renderRowActionButtons(int $rowId, bool $isCosmos): void
+    {
+        if ($isCosmos) {
+            ?>
+            <button type="submit" form="vc-a-test-<?php echo (int) $rowId; ?>" class="button button-small">
+                Test CW-721
+            </button>
+            <?php
+        }
+        ?>
+        <button type="submit" form="vc-a-del-<?php echo (int) $rowId; ?>" class="button button-small button-link-delete">
+            Remove
+        </button>
+        <?php
+    }
+
+    /**
+     * Hidden inputs carrying the operator's list context through an
+     * admin-post round trip, so the PRG redirect lands back on the same
+     * page/filter/sub-tab instead of page 1 unfiltered.
+     */
+    private static function renderReturnContext(
+        int $page,
+        string $chain,
+        string $tokenStandard,
+        bool $isVerified
+    ): void {
+        printf('<input type="hidden" name="paged" value="%d">', $page);
+        printf('<input type="hidden" name="chain" value="%s">', esc_attr($chain));
+        printf('<input type="hidden" name="token_standard" value="%s">', esc_attr($tokenStandard));
+        if ($isVerified) {
+            echo '<input type="hidden" name="vstate" value="verified">';
+        }
+    }
+
+    /**
+     * Shape-only validation of the per-row collection id.
+     *
+     * Deliberately does no repository work: the id feeds the nonce action,
+     * so it must be read pre-CSRF, and an unauthenticated request must not
+     * be able to probe which collection ids exist. Existence is checked by
+     * the domain handler, after the nonce.
+     */
+    private static function requireCollectionIdShape(): int
+    {
+        $collectionId = isset($_POST['collection_id']) ? (int) $_POST['collection_id'] : 0;
+
+        if ($collectionId <= 0) {
+            wp_die(
+                esc_html__('Invalid collection.', 'bcc-trust'),
+                esc_html__('Bad Request', 'bcc-trust'),
+                ['response' => 400]
+            );
+        }
+
+        return $collectionId;
+    }
+
+    /**
+     * Stash notices and PRG back to the page.
+     *
+     * The existing handlers return rich operator-facing notice arrays; the
+     * transient carries them across the redirect verbatim so no message
+     * regresses, while the redirect itself is what makes a refresh inert.
+     *
+     * @param list<array{type: string, message: string}> $notices
+     */
+    private static function finish(array $notices, string $op): never
+    {
+        if ($notices !== []) {
+            set_transient(
+                self::NOTICE_TRANSIENT_PREFIX . get_current_user_id(),
+                $notices,
+                self::NOTICE_TTL
+            );
+        }
+
+        AdminActionSupport::redirect(self::returnArgs(['bcc_vc_done' => $op]));
+    }
+
+    /**
+     * Preserve the operator's list context (page, filters, sub-tab) across
+     * the redirect so PRG doesn't dump them back on page 1 unfiltered.
+     *
+     * @param array<string, string|int> $extra
+     * @return array<string, string|int>
+     */
+    private static function returnArgs(array $extra = []): array
+    {
+        $args = ['page' => self::PAGE_SLUG];
+
+        foreach (['paged', 'chain', 'token_standard', 'vstate'] as $key) {
+            if (isset($_POST[$key]) && $_POST[$key] !== '') {
+                $args[$key] = sanitize_text_field((string) $_POST[$key]);
+            }
+        }
+
+        return array_merge($args, $extra);
+    }
+
+    /**
+     * Pull and clear the PRG notices for the current operator.
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function takeNotices(): array
+    {
+        $key    = self::NOTICE_TRANSIENT_PREFIX . get_current_user_id();
+        $stored = get_transient($key);
+
+        if (!is_array($stored)) {
+            return [];
+        }
+
+        delete_transient($key);
+
+        $out = [];
+        foreach ($stored as $n) {
+            if (is_array($n) && isset($n['type'], $n['message'])) {
+                $out[] = ['type' => (string) $n['type'], 'message' => (string) $n['message']];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * AJAX: flip a single collection's is_verified flag. Returns the new
      * state so the row UI can re-render without a page reload.
      */
@@ -133,8 +483,10 @@ final class VerifyCollectionsPage
         if (!current_user_can('manage_options')) {
             wp_send_json_error(['message' => 'Unauthorized.']);
         }
-        check_ajax_referer(self::AJAX_NONCE_KEY, 'nonce');
 
+        // Shape before nonce: both values feed the nonce action, which is
+        // bound to the collection AND the intended state, so a nonce minted
+        // to verify row 7 cannot unverify it — nor touch row 8.
         $collectionId = (int) ($_POST['collection_id'] ?? 0);
         // empty() already treats '0', '', and absent as false — the JS
         // sends '1' to verify and '0' to unverify.
@@ -144,11 +496,23 @@ final class VerifyCollectionsPage
             wp_send_json_error(['message' => 'Invalid collection id.']);
         }
 
+        check_ajax_referer(
+            self::AJAX_ACTION_TOGGLE . '_' . $collectionId . '_' . ($verify ? '1' : '0'),
+            'nonce'
+        );
+
         if ($verify) {
             $changed = CollectionRepository::setVerifiedBulk([$collectionId], []);
         } else {
             $changed = CollectionRepository::setVerifiedBulk([], [$collectionId]);
         }
+
+        AdminActionSupport::audit(
+            $verify ? 'admin_vc_collection_verified' : 'admin_vc_collection_unverified',
+            'collection',
+            $collectionId,
+            ['changed' => $changed]
+        );
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections toggle (ajax)', [
             'action'        => 'verify_collections_toggle_ajax',
@@ -172,18 +536,34 @@ final class VerifyCollectionsPage
         if (!current_user_can('manage_options')) {
             wp_send_json_error(['message' => 'Unauthorized.']);
         }
-        check_ajax_referer(self::AJAX_NONCE_KEY, 'nonce');
 
         $collectionId = (int) ($_POST['collection_id'] ?? 0);
         if ($collectionId <= 0) {
             wp_send_json_error(['message' => 'Invalid collection id.']);
         }
 
+        // Bound to this collection: a nonce for row 7 cannot create the
+        // community for row 8.
+        check_ajax_referer(self::AJAX_ACTION_PROVISION . '_' . $collectionId, 'nonce');
+
         $result = OnchainPlugin::instance()->gatedGroupProvisioningService()->provisionOne($collectionId);
 
         if ($result['status'] === 'error' || $result['status'] === 'skipped') {
+            AdminActionSupport::audit(
+                'admin_vc_community_provision_failed',
+                'collection',
+                $collectionId,
+                ['status' => (string) $result['status']]
+            );
             wp_send_json_error(['message' => $result['message']]);
         }
+
+        AdminActionSupport::audit(
+            'admin_vc_community_provisioned',
+            'collection',
+            $collectionId,
+            ['group_id' => (int) ($result['group_id'] ?? 0)]
+        );
 
         wp_send_json_success([
             'status'   => $result['status'],
@@ -198,7 +578,10 @@ final class VerifyCollectionsPage
             wp_die('Insufficient permissions.');
         }
 
-        $notices = self::handlePost();
+        // VC-B branches still post back to this page and return notices
+        // inline; VC-A actions redirect and leave theirs in a short-lived
+        // operator-scoped transient.
+        $notices = array_merge(self::takeNotices(), self::handlePost());
 
         $page                  = isset($_GET['paged']) ? max(1, (int) $_GET['paged']) : 1;
         $selectedChain         = isset($_GET['chain']) ? sanitize_text_field((string) $_GET['chain']) : '';
@@ -229,7 +612,9 @@ final class VerifyCollectionsPage
 
         $listing = CollectionRepository::listForAdminVerification(
             $page,
-            50,
+            // Same constant the bulk-save bound uses, so page size and the
+            // accepted id count cannot drift apart.
+            self::MAX_BULK_IDS,
             $chainArg,
             $standardArg,
             $isVerified
@@ -450,9 +835,10 @@ final class VerifyCollectionsPage
                     is added <strong>unverified</strong> — verify it below to give its
                     holders a community.
                 </p>
-                <form method="post" action="" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
-                    <?php wp_nonce_field(self::NONCE_KEY, self::NONCE_NAME); ?>
-                    <input type="hidden" name="bcc_vc_action" value="add_collection">
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
+                    <?php wp_nonce_field(self::ACTION_ADD, '_wpnonce'); ?>
+                    <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_ADD); ?>">
+                    <?php self::renderReturnContext($page, $selectedChain, $selectedTokenStandard, $isVerified); ?>
 
                     <label style="display:flex;flex-direction:column;font-size:12px;">
                         Chain <span style="color:#d63638;">*</span>
@@ -561,9 +947,10 @@ final class VerifyCollectionsPage
             ));
             if ($cosmosChains !== []):
             ?>
-                <form method="post" action="" style="margin:0 0 12px 0;padding:8px 12px;background:#f6f7f7;border:1px solid #c3c4c7;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                    <?php wp_nonce_field(self::NONCE_KEY, self::NONCE_NAME); ?>
-                    <input type="hidden" name="bcc_vc_action" value="add_cosmos_collection">
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0 0 12px 0;padding:8px 12px;background:#f6f7f7;border:1px solid #c3c4c7;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <?php wp_nonce_field(self::ACTION_ADD_COSMOS, '_wpnonce'); ?>
+                    <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_ADD_COSMOS); ?>">
+                    <?php self::renderReturnContext($page, $selectedChain, $selectedTokenStandard, $isVerified); ?>
                     <strong style="margin-right:4px;">Add Cosmos collection:</strong>
                     <label for="bcc-vc-add-chain" class="screen-reader-text">Chain</label>
                     <select name="bcc_vc_add_chain_id" id="bcc-vc-add-chain" required>
@@ -628,9 +1015,25 @@ final class VerifyCollectionsPage
                 </noscript>
             </form>
 
+            <?php
+            // This form still posts to the page itself, because the deferred
+            // VC-B row actions (hide / unhide) are submitted from inside it
+            // and still ride the broad `bcc_verify_collections_nonce`.
+            //
+            // The two VC-A buttons below override that with `formaction`, so
+            // Save and Create Communities go to admin-post.php, each with its
+            // OWN nonce field and action, and each redirects (PRG).
+            ?>
+            <?php
+            // Collection ids that rendered a VC-A per-row control. Their
+            // dedicated forms are emitted after this one closes, because a
+            // form cannot be nested inside another.
+            $vcRowForms = [];
+            ?>
             <form method="post" action="">
                 <?php wp_nonce_field(self::NONCE_KEY, self::NONCE_NAME); ?>
-                <input type="hidden" name="bcc_vc_action" value="save">
+                <?php wp_nonce_field(self::ACTION_SAVE, '_vc_save_nonce', false); ?>
+                <?php wp_nonce_field(self::ACTION_PROVISION, '_vc_provision_nonce', false); ?>
                 <input type="hidden" name="paged" value="<?php echo (int) $page; ?>">
                 <input type="hidden" name="chain" value="<?php echo esc_attr($selectedChain); ?>">
                 <input type="hidden" name="token_standard" value="<?php echo esc_attr($selectedTokenStandard); ?>">
@@ -639,12 +1042,24 @@ final class VerifyCollectionsPage
                 <?php endif; ?>
 
                 <p class="submit" style="margin:0 0 12px 0;">
-                    <button type="submit" class="button button-primary">Save Verification Changes</button>
                     <button type="submit"
-                            name="bcc_vc_action"
-                            value="provision"
+                            class="button button-primary"
+                            name="action"
+                            value="<?php echo esc_attr(self::ACTION_SAVE); ?>"
+                            formaction="<?php echo esc_url(admin_url('admin-post.php')); ?>">Save Verification Changes</button>
+                    <button type="submit"
+                            name="action"
+                            value="<?php echo esc_attr(self::ACTION_PROVISION); ?>"
+                            formaction="<?php echo esc_url(admin_url('admin-post.php')); ?>"
                             class="button"
-                            onclick="return confirm('Create communities for all verified collections that don\'t have one yet? This creates a closed holder community per collection. Existing communities are left untouched, and no members are added. Continue?');">Create Communities</button>
+                            onclick="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral(
+                                "Create communities for collections that are ALREADY SAVED as verified?\n\n"
+                                . 'This no longer saves your tick boxes first — any unsaved changes on this page are '
+                                . 'ignored and will revert. Save Verification Changes first if you want new ticks included.'
+                                . "\n\n"
+                                . 'It creates a closed holder community per verified collection that does not have one. '
+                                . 'Existing communities are left untouched and no members are added.'
+                            )); ?>);">Create Communities</button>
                 </p>
 
                 <table class="widefat striped">
@@ -749,9 +1164,9 @@ final class VerifyCollectionsPage
                                     if ($isCosmos):
                                     ?>
                                         <br>
+                                        <?php $vcRowForms[(int) $row->id] = true; ?>
                                         <button type="submit"
-                                                name="bcc_vc_action"
-                                                value="testquery_<?php echo (int) $row->id; ?>"
+                                                form="vc-a-test-<?php echo (int) $row->id; ?>"
                                                 class="button button-small"
                                                 style="margin-top:4px;font-size:11px;"
                                                 title="Run CW-721 contract_info — confirms the contract is a real CW-721 NFT before flipping is_verified.">
@@ -856,9 +1271,9 @@ final class VerifyCollectionsPage
                                             Hide
                                         </button>
                                     <?php endif; ?>
+                                    <?php $vcRowForms[$rowId] = true; ?>
                                     <button type="submit"
-                                            name="bcc_vc_action"
-                                            value="delete_<?php echo $rowId; ?>"
+                                            form="vc-a-del-<?php echo $rowId; ?>"
                                             class="button button-small button-link-delete"
                                             style="color:#b32d2e;"
                                             onclick="return confirm('Remove this collection from the list? This deletes the row only — rediscovery can bring it back. Use Hide to keep it away permanently. A collection with a live community can\'t be removed until its community is gone.');">
@@ -888,12 +1303,33 @@ final class VerifyCollectionsPage
                 </table>
 
                 <p class="submit">
-                    <button type="submit" class="button">Save Verification Changes</button>
+                    <button type="submit"
+                            class="button"
+                            name="action"
+                            value="<?php echo esc_attr(self::ACTION_SAVE); ?>"
+                            formaction="<?php echo esc_url(admin_url('admin-post.php')); ?>">Save Verification Changes</button>
                     <span style="color:#646970;font-size:12px;margin-left:8px;">
                         Verify toggles save instantly. This button is a fallback if JavaScript is off.
                     </span>
                 </p>
             </form>
+
+            <?php
+            // VC-A per-row forms.
+            //
+            // Emitted here rather than inside the table because HTML forbids
+            // nested forms; the buttons in the rows reach them through the
+            // HTML5 `form=` attribute. Each carries its OWN target-scoped
+            // nonce, so a Remove nonce for collection 7 cannot delete
+            // collection 8 and cannot run a CW-721 probe either.
+            self::renderRowActionForms(
+                array_map('intval', array_keys($vcRowForms)),
+                $page,
+                $selectedChain,
+                $selectedTokenStandard,
+                $isVerified
+            );
+            ?>
 
             <?php if ($listing['pages'] > 1): ?>
                 <div class="tablenav-pages">
@@ -908,17 +1344,40 @@ final class VerifyCollectionsPage
                 </div>
             <?php endif; ?>
         </div>
+        <?php
+        // Per-row, per-intent AJAX nonces.
+        //
+        // One page-wide nonce previously covered both AJAX actions and every
+        // row, so a nonce handed to the page could verify any collection,
+        // unverify any collection, or provision any community. Each intent
+        // now gets its own nonce bound to the collection id — and, for the
+        // toggle, to the direction as well.
+        $vcAjaxNonces = [];
+        foreach ($listing['items'] as $nonceRow) {
+            $nonceRowId = (int) $nonceRow->id;
+            $vcAjaxNonces[$nonceRowId] = [
+                'verify'    => wp_create_nonce(self::AJAX_ACTION_TOGGLE . '_' . $nonceRowId . '_1'),
+                'unverify'  => wp_create_nonce(self::AJAX_ACTION_TOGGLE . '_' . $nonceRowId . '_0'),
+                'provision' => wp_create_nonce(self::AJAX_ACTION_PROVISION . '_' . $nonceRowId),
+            ];
+        }
+        ?>
         <script>
         (function () {
             var ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
-            var nonce   = <?php echo wp_json_encode(wp_create_nonce(self::AJAX_NONCE_KEY)); ?>;
+            var NONCES  = <?php echo wp_json_encode($vcAjaxNonces); ?>;
             var ACTION_TOGGLE    = <?php echo wp_json_encode(self::AJAX_ACTION_TOGGLE); ?>;
             var ACTION_PROVISION = <?php echo wp_json_encode(self::AJAX_ACTION_PROVISION); ?>;
 
-            function post(action, collectionId, extra) {
+            function nonceFor(collectionId, intent) {
+                var row = NONCES[String(collectionId)];
+                return row ? row[intent] : '';
+            }
+
+            function post(action, collectionId, intent, extra) {
                 var body = new FormData();
                 body.append('action', action);
-                body.append('nonce', nonce);
+                body.append('nonce', nonceFor(collectionId, intent));
                 body.append('collection_id', collectionId);
                 if (extra) { Object.keys(extra).forEach(function (k) { body.append(k, extra[k]); }); }
                 return fetch(ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body })
@@ -934,7 +1393,7 @@ final class VerifyCollectionsPage
                     if (!id) { return; }
                     cb.disabled = true;
                     if (status) { status.textContent = 'saving…'; status.style.color = '#999'; }
-                    post(ACTION_TOGGLE, id, { verify: cb.checked ? '1' : '0' })
+                    post(ACTION_TOGGLE, id, cb.checked ? 'verify' : 'unverify', { verify: cb.checked ? '1' : '0' })
                         .then(function (resp) {
                             cb.disabled = false;
                             if (resp && resp.success) {
@@ -962,7 +1421,7 @@ final class VerifyCollectionsPage
                     if (!id) { return; }
                     btn.disabled = true;
                     btn.textContent = 'Creating…';
-                    post(ACTION_PROVISION, id)
+                    post(ACTION_PROVISION, id, 'provision')
                         .then(function (resp) {
                             if (resp && resp.success) {
                                 if (cell) { cell.innerHTML = '<span style="color:#00a32a;font-size:12px;">Community created</span>'; }
@@ -1001,36 +1460,21 @@ final class VerifyCollectionsPage
 
         $action = sanitize_text_field((string) $_POST['bcc_vc_action']);
 
-        if ($action === 'save') {
-            return self::handleSave();
-        }
-
-        if ($action === 'provision') {
-            return self::handleProvision();
-        }
-
-        if ($action === 'add_collection') {
-            return self::handleAddCollection();
-        }
-
-        // Per-row "Remove" button. Encodes the collection id in the
-        // action value (`delete_<id>`), same shape as testquery_<id>.
-        if (strpos($action, 'delete_') === 0) {
-            $collectionId = (int) substr($action, strlen('delete_'));
-            return self::handleDeleteCollection($collectionId);
-        }
-
-        // V2 Phase 2: per-row "Test CW-721 query" button. Encodes the
-        // collection id in the action value (`testquery_<id>`) so the
-        // existing single-form + single-nonce shape stays intact.
-        if (strpos($action, 'testquery_') === 0) {
-            $collectionId = (int) substr($action, strlen('testquery_'));
-            return self::handleTestQuery($collectionId);
-        }
-
-        if ($action === 'add_cosmos_collection') {
-            return self::handleAddCosmosCollection();
-        }
+        // NOTE — VC-A actions no longer arrive here.
+        //
+        // `save`, `provision`, `add_collection`, `add_cosmos_collection`,
+        // `delete_<id>` and `testquery_<id>` moved to dedicated
+        // admin_post_ routes with their own action- and target-scoped
+        // nonces (see register_actions()). They are deliberately NOT
+        // accepted here any more, so a `bcc_verify_collections_nonce`
+        // cannot reach them.
+        //
+        // ⚠️ The branches BELOW still share this one broad nonce. Any of
+        // them can authorise any other of them by changing bcc_vc_action:
+        // a hide nonce can drive a chain-discovery toggle or a scanner
+        // backfill. That is deferred VC-B scope, tracked separately —
+        // hide/unhide stay on this page, the cw_* controls are slated to
+        // move to Chains / scanner-operations surfaces.
 
         // Per-row Hide / Unhide. Writes an operator rule to the spam
         // table rather than touching the collection row — a DENY rule
@@ -1742,8 +2186,71 @@ final class VerifyCollectionsPage
         ]], 4 * HOUR_IN_SECONDS);
 
         if ($written === 0) {
+            // No collection row exists yet, so the only truthful target is
+            // the chain. A `collection` target holding a chain id would be
+            // indistinguishable from a real collection id later.
+            AdminActionSupport::audit(
+                'admin_vc_cosmos_collection_add_failed',
+                'chain',
+                $chainId,
+                ['contract' => $contract]
+            );
             return [['type' => 'error', 'message' => 'Add collection: upsert returned 0 rows. Check the bcc-trust error log.']];
         }
+
+        // This handler previously wrote NO record of any kind — not even a
+        // file-log line — despite writing a collection row.
+        //
+        // The row is resolved through the table's own uniqueness key
+        // (chain_id, contract_address) so target_id is the ACTUAL collection
+        // id. Storing the chain id in a `collection` target would be a lie
+        // that silently corrupts any later forensic query.
+        //
+        // "upserted", not "added": bulkUpsert() returns an affected-row count,
+        // which cannot distinguish an insert from an update without widening
+        // the repository contract — so the event name claims only what is true.
+        $upsertedRow = CollectionRepository::findByChainContract($chainId, $contract);
+
+        if ($upsertedRow === null) {
+            // The write reported rows but the row is not readable back. Do not
+            // fabricate a success record against a target we cannot name.
+            \BCC\Core\Log\Logger::error('[bcc-trust] Verify Collections cosmos upsert unresolved', [
+                'action'   => 'verify_collections_add_cosmos_unresolved',
+                'chain_id' => $chainId,
+                'contract' => $contract,
+                'written'  => $written,
+                'operator' => get_current_user_id(),
+            ]);
+            AdminActionSupport::audit(
+                'admin_vc_cosmos_upsert_unresolved',
+                'chain',
+                $chainId,
+                ['contract' => $contract, 'written' => $written]
+            );
+
+            return [[
+                'type'    => 'warning',
+                'message' => sprintf(
+                    'Add collection: %s was written but could not be read back, so it is not confirmed. Reload and check before verifying it.',
+                    $contract
+                ),
+            ]];
+        }
+
+        AdminActionSupport::audit(
+            'admin_vc_cosmos_collection_upserted',
+            'collection',
+            (int) $upsertedRow->id,
+            ['chain_id' => $chainId, 'contract' => $contract]
+        );
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections add (cosmos)', [
+            'action'   => 'verify_collections_add_cosmos',
+            'chain_id' => $chainId,
+            'contract' => $contract,
+            'written'  => $written,
+            'operator' => get_current_user_id(),
+        ]);
 
         return [[
             'type'    => 'success',
@@ -1867,8 +2374,23 @@ final class VerifyCollectionsPage
 
         $deleted = CollectionRepository::deleteById($collectionId);
         if ($deleted < 1) {
+            // Authorized destructive operation that began and did not
+            // complete — that gets a durable row, unlike an ordinary
+            // validation rejection.
+            AdminActionSupport::audit(
+                'admin_vc_collection_delete_failed',
+                'collection',
+                $collectionId
+            );
             return [['type' => 'error', 'message' => 'Remove: nothing was deleted.']];
         }
+
+        AdminActionSupport::audit(
+            'admin_vc_collection_deleted',
+            'collection',
+            $collectionId,
+            ['chain_id' => $chainId, 'contract' => $contract]
+        );
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections remove', [
             'action'        => 'verify_collections_remove',
@@ -1918,9 +2440,15 @@ final class VerifyCollectionsPage
         $standard = isset($_POST['add_token_standard'])
             ? sanitize_text_field((string) $_POST['add_token_standard'])
             : '';
-        $imageUrl = isset($_POST['add_image_url'])
-            ? trim((string) $_POST['add_image_url'])
+        // Authoritative WordPress sanitiser, not a bare trim(). This value
+        // is stored and later served through the public collection payload,
+        // so an unsafe scheme must never reach the database. esc_url_raw()
+        // returns '' for javascript:, data: and malformed input.
+        $imageUrlRaw = isset($_POST['add_image_url'])
+            ? trim((string) wp_unslash($_POST['add_image_url']))
             : '';
+        $imageUrl = $imageUrlRaw === '' ? '' : esc_url_raw($imageUrlRaw);
+        $imageUrlRejected = $imageUrlRaw !== '' && $imageUrl === '';
         $supplyRaw = isset($_POST['add_total_supply'])
             ? trim((string) $_POST['add_total_supply'])
             : '';
@@ -1931,6 +2459,17 @@ final class VerifyCollectionsPage
 
         if ($standard !== '' && !in_array($standard, self::ADD_TOKEN_STANDARDS, true)) {
             return [['type' => 'error', 'message' => 'Add Collection: unknown token standard.']];
+        }
+
+        // Reject rather than quietly drop. This is an INSERT, so there is no
+        // stored value to preserve — silently creating the row with a blank
+        // image would hide the operator's typo, and storing the raw string
+        // is what let an unsafe scheme reach the public payload before.
+        if ($imageUrlRejected) {
+            return [[
+                'type'    => 'error',
+                'message' => 'Add Collection: the image URL is not a valid http(s) URL, so nothing was added. Correct it or leave the field empty.',
+            ]];
         }
 
         $chain = ChainRepository::getById($chainId);
@@ -1994,9 +2533,27 @@ final class VerifyCollectionsPage
 
         $rowId = CollectionRepository::addManual($data);
         if ($rowId === false) {
+            // Same rule as the Cosmos path: the insert failed, so there is
+            // no collection to point at — target the chain.
+            AdminActionSupport::audit(
+                'admin_vc_manual_collection_add_failed',
+                'chain',
+                $chainId,
+                ['contract' => $contract]
+            );
             $notices[] = ['type' => 'error', 'message' => 'Add Collection: insert failed. See the bcc-trust error log.'];
             return $notices;
         }
+
+        // Distinct from the Cosmos insert: the durable table has no meta
+        // column, so "which flow created this row" has to live in the action
+        // name or it is not recoverable at all.
+        AdminActionSupport::audit(
+            'admin_vc_manual_collection_added',
+            'collection',
+            (int) $rowId,
+            ['chain_id' => $chainId, 'contract' => $contract, 'standard' => $standard]
+        );
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections add (manual)', [
             'action'         => 'verify_collections_add_manual',
@@ -2026,9 +2583,36 @@ final class VerifyCollectionsPage
      */
     private static function handleSave(): array
     {
-        $known = isset($_POST['known']) && is_array($_POST['known'])
-            ? array_map('intval', $_POST['known'])
+        $knownRaw = isset($_POST['known']) && is_array($_POST['known'])
+            ? $_POST['known']
             : [];
+
+        // Positive integers only, de-duplicated. `known[]` is entirely
+        // client-controlled and used to build an IN() list, so it is
+        // normalised before it can reach the repository.
+        $known = [];
+        foreach ($knownRaw as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $known[$id] = true;
+            }
+        }
+        $known = array_keys($known);
+
+        // REJECT rather than truncate. One rendered page can submit at
+        // most MAX_BULK_IDS checkboxes; more than that is not a bigger
+        // page, it is a crafted payload. Truncating would report success
+        // for rows that were never written.
+        if (count($known) > self::MAX_BULK_IDS) {
+            return [[
+                'type'    => 'error',
+                'message' => sprintf(
+                    'Save rejected: %d collections submitted but at most %d can be saved in one request. Nothing was changed.',
+                    count($known),
+                    self::MAX_BULK_IDS
+                ),
+            ]];
+        }
 
         $checkedRaw = isset($_POST['verified']) && is_array($_POST['verified'])
             ? $_POST['verified']
@@ -2041,9 +2625,6 @@ final class VerifyCollectionsPage
         $verify   = [];
         $unverify = [];
         foreach ($known as $collectionId) {
-            if ($collectionId <= 0) {
-                continue;
-            }
             if (isset($checked[$collectionId])) {
                 $verify[] = $collectionId;
             } else {
@@ -2052,6 +2633,13 @@ final class VerifyCollectionsPage
         }
 
         $changed = CollectionRepository::setVerifiedBulk($verify, $unverify);
+
+        AdminActionSupport::audit(
+            'admin_vc_verification_saved',
+            'collection',
+            null,
+            ['verified' => count($verify), 'unverified' => count($unverify), 'changed' => $changed]
+        );
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections save', [
             'action'    => 'verify_collections_save',
@@ -2076,10 +2664,22 @@ final class VerifyCollectionsPage
      */
     private static function handleProvision(): array
     {
-        // Persist any pending changes first so the operator sees consistent state.
-        $saveNotices = self::handleSave();
-
+        // Deliberately does NOT call handleSave() any more — see
+        // handleProvisionPost(). Provisioning operates on persisted
+        // verified state only; a button must not quietly perform another
+        // button's write.
         $result = OnchainPlugin::instance()->gatedGroupProvisioningService()->provisionAll();
+
+        AdminActionSupport::audit(
+            'admin_vc_communities_provisioned',
+            'collection',
+            null,
+            [
+                'created' => (int) ($result['created'] ?? 0),
+                'skipped' => (int) ($result['skipped'] ?? 0),
+                'errors'  => count($result['errors'] ?? []),
+            ]
+        );
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections provision (manual)', [
             'action'   => 'gated_group_provision_manual',
@@ -2096,7 +2696,7 @@ final class VerifyCollectionsPage
         );
         $errors = $result['errors'] ?? [];
 
-        $notices = $saveNotices;
+        $notices = [];
         $notices[] = [
             'type'    => empty($errors) ? 'success' : 'warning',
             'message' => $message,
