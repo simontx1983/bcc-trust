@@ -1702,52 +1702,14 @@ add_action('plugins_loaded', function (): void {
     add_action('rest_api_init', [\BCC\Trust\Onchain\REST\IndexerTickEndpoint::class, 'register']);
 
     // Manual cron triggers (admin only, CSRF-protected).
-    add_action('admin_init', function () {
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-
-        if (!empty($_GET['bcc_run_index_validators']) || !empty($_GET['bcc_run_index_collections'])
-            || !empty($_GET['bcc_run_enrich_validators']) || !empty($_GET['bcc_run_index_all'])) {
-            check_admin_referer('bcc_onchain_admin_trigger');
-        }
-
-        $ran = [];
-
-        if (!empty($_GET['bcc_run_index_validators']) || !empty($_GET['bcc_run_index_all'])) {
-            \BCC\Trust\Onchain\Services\ChainRefreshService::index_validators();
-            $ran[] = 'validators';
-        }
-
-        if (!empty($_GET['bcc_run_index_collections']) || !empty($_GET['bcc_run_index_all'])) {
-            \BCC\Trust\Onchain\Services\ChainRefreshService::index_collections();
-            $ran[] = 'collections';
-        }
-
-        if (!empty($_GET['bcc_run_enrich_validators']) || !empty($_GET['bcc_run_index_all'])) {
-            \BCC\Trust\Onchain\Services\ChainRefreshService::refresh_validators();
-            $ran[] = 'validator enrichment';
-        }
-
-        if (!empty($ran)) {
-            $label = implode(' + ', $ran);
-            $enrichStats = get_option('bcc_onchain_enrichment_stats', []);
-            add_action('admin_notices', function () use ($label, $enrichStats) {
-                echo '<div class="notice notice-success is-dismissible"><p><strong>BCC On-Chain:</strong> Indexing complete (' . esc_html($label) . ').</p>';
-                if (!empty($enrichStats)) {
-                    printf(
-                        '<p>Enrichment: %d processed, %d failed, %d skipped, %d API calls. Stop: %s</p>',
-                        (int) ($enrichStats['processed'] ?? 0),
-                        (int) ($enrichStats['failed'] ?? 0),
-                        (int) ($enrichStats['skipped'] ?? 0),
-                        (int) ($enrichStats['api_calls'] ?? 0),
-                        esc_html($enrichStats['stopped_reason'] ?? '—')
-                    );
-                }
-                echo '</div>';
-            });
-        }
-    });
+    //
+    // Batch 1 (safety hardening): these were four GET query-param triggers
+    // handled by an anonymous admin_init closure. A refresh, a link prefetch
+    // or a restored tab replayed a synchronous all-chains sweep, and three of
+    // the four had no confirmation. They are now POST-only, operation-scoped-
+    // nonce, audited, PRG handlers in a named, testable class. The result
+    // notice moved onto ChainsPage, which reads it from the redirect args.
+    \BCC\Trust\Onchain\Admin\ChainSweepActions::register();
 
     // Admin settings pages.
     add_action('admin_menu', function () {
@@ -1758,9 +1720,16 @@ add_action('plugins_loaded', function (): void {
         \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_page();
     }, 20);
     \BCC\Trust\Onchain\Admin\ChainsPage::register_ajax();
+    \BCC\Trust\Onchain\Admin\ChainsPage::register_actions();
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_ajax();
     \BCC\Trust\Onchain\Admin\WebhooksPage::register_actions();
     \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_actions();
+
+    // Batch 1: the NFT-indexer and spam-rule controls were handled inline
+    // during render (GET for the indexer, POST-to-self for spam rules). Both
+    // now dispatch through admin-post.php so a reload cannot replay them.
+    \BCC\Trust\Onchain\Admin\Views\NftIndexerStatusView::register_actions();
+    \BCC\Trust\Onchain\Admin\Views\NftSpamContractsView::register_actions();
 
     add_action('admin_enqueue_scripts', function ($hook) {
         if (strpos($hook, 'bcc-onchain') !== false) {

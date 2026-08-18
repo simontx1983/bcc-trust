@@ -2,6 +2,8 @@
 
 namespace BCC\Trust\Onchain\Admin\Views;
 
+use BCC\Trust\Onchain\Admin\AdminActionSupport;
+use BCC\Trust\Onchain\Admin\SettingsPage;
 use BCC\Trust\Onchain\REST\HeliusWebhookEndpoint;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -18,10 +20,19 @@ if (!defined('ABSPATH')) {
 /**
  * NFT Indexer admin sub-tab (V2 Phase 1a).
  *
- * Surfaces per-chain checkpoint, lag, CU budget, breaker state, last
- * error. Pure read view — operator controls (manual run, pause, reset
- * checkpoint) are GET-handled at the bottom and live here so the
- * SettingsPage dispatcher stays thin.
+ * Surfaces per-chain checkpoint, lag, CU budget, breaker state, last error.
+ *
+ * Batch 1 (safety hardening) changed how the operator controls dispatch —
+ * not what they do:
+ *   - "Run now", "Pause"/"Resume", "Provision shared webhook" and "Resync
+ *     addresses" were GET links handled during render. A refresh replayed
+ *     them, and two of them mutate EXTERNAL Helius state. All four are now
+ *     POST forms → admin-post.php → PRG.
+ *   - Nonce/capability failures used to `return` silently, rendering a normal
+ *     page while the operator believed the action ran. They now halt with 403.
+ *   - Every action writes a durable audit row; none did before.
+ *   - The indexer's per-chain advisory lock, BLOCKS_PER_TICK, daily CU budget
+ *     and checkpoint semantics are untouched — dispatch changed, work did not.
  *
  * @phpstan-import-type ChainRow from ChainRepository
  * @phpstan-import-type CheckpointRow from ChainCheckpointRepository
@@ -31,11 +42,9 @@ final class NftIndexerStatusView
 {
     public static function render(): void
     {
-        // Lightweight admin actions via GET + nonce. POST would be
-        // cleaner but the existing onchain admin surface uses GET +
-        // wp_verify_nonce for "run now" / "pause" controls, so this
-        // matches that convention.
-        self::handleActions();
+        // Actions dispatch through admin-post.php and redirect back here;
+        // this only replays the outcome from the redirect args.
+        self::renderResultNotice();
 
         $chains      = ChainRepository::getActive('evm');
         $checkpoints = ChainCheckpointRepository::getAll();
@@ -128,19 +137,6 @@ final class NftIndexerStatusView
                             if ($d < 0) { $progHasRegression = true; break; }
                         }
 
-                        $runNonce   = wp_create_nonce('bcc_nft_indexer_run_' . $cid);
-                        $pauseNonce = wp_create_nonce('bcc_nft_indexer_state_' . $cid);
-                        $runUrl     = self::actionUrl(['action' => 'run', 'chain_id' => $cid, '_wpnonce' => $runNonce]);
-                        $pauseTo    = $state === ChainCheckpointRepository::STATE_DISABLED
-                            ? ChainCheckpointRepository::STATE_HEALTHY
-                            : ChainCheckpointRepository::STATE_DISABLED;
-                        $pauseLabel = $state === ChainCheckpointRepository::STATE_DISABLED ? 'Resume' : 'Pause';
-                        $pauseUrl   = self::actionUrl([
-                            'action'   => 'set_state',
-                            'chain_id' => $cid,
-                            'state'    => $pauseTo,
-                            '_wpnonce' => $pauseNonce,
-                        ]);
                     ?>
                     <tr>
                         <td><strong><?php echo esc_html((string) $chain->slug); ?></strong></td>
@@ -177,10 +173,7 @@ final class NftIndexerStatusView
                         </td>
                         <td><?php echo esc_html($lastRun); ?></td>
                         <td><?php echo esc_html($lastErr); ?></td>
-                        <td>
-                            <a class="button button-secondary" href="<?php echo esc_url($runUrl); ?>">Run now</a>
-                            <a class="button" href="<?php echo esc_url($pauseUrl); ?>"><?php echo esc_html($pauseLabel); ?></a>
-                        </td>
+                        <td><?php self::renderChainActionForms($cid, $state, (string) $chain->slug); ?></td>
                     </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>
@@ -497,22 +490,7 @@ final class NftIndexerStatusView
         </table>
 
         <?php
-        $provNonce   = wp_create_nonce('bcc_helius_provision');
-        $resyncNonce = wp_create_nonce('bcc_helius_resync');
-        $provUrl     = self::actionUrl(['action' => 'helius_provision', '_wpnonce' => $provNonce]);
-        $resyncUrl   = self::actionUrl(['action' => 'helius_resync', '_wpnonce' => $resyncNonce]);
-        ?>
-
-        <p style="margin-top:16px">
-            <?php if ($status['webhook_id'] === ''): ?>
-                <a class="button button-primary" href="<?php echo esc_url($provUrl); ?>">Provision shared webhook</a>
-                <small style="margin-left:8px">Creates the Helius webhook with the callback URL above and stores its ID.</small>
-            <?php else: ?>
-                <a class="button" href="<?php echo esc_url($resyncUrl); ?>">Resync addresses from wallet_links</a>
-                <small style="margin-left:8px">Rebuilds the remote address list from the canonical local table. Use after <code>helius_managed</code> drift.</small>
-            <?php endif; ?>
-        </p>
-        <?php
+        self::renderHeliusActionForm((string) $status['webhook_id']);
     }
 
     /**
@@ -554,102 +532,389 @@ final class NftIndexerStatusView
         <?php
     }
 
+    // ────────────────────────────────────────────────────────────
+    // Action controls (extracted so the confirmation copy and the POST
+    // wiring are assertable without rendering the whole page)
+    // ────────────────────────────────────────────────────────────
+
     /**
-     * GET-driven actions. Each is nonce-verified per chain so a stale
-     * page can't trigger an action against a chain it didn't intend.
+     * Confirmation copy for the per-chain Run / Pause / Resume controls.
+     *
+     * Pure. Pause deliberately names the indefinite consequence — the state
+     * has no expiry and nothing resumes it automatically.
+     *
+     * @return array{run: string, state: string}
      */
-    private static function handleActions(): void
+    public static function chainActionConfirmations(string $slug, bool $isResume): array
     {
-        if (!isset($_GET['action'])) {
-            return;
-        }
-        if (!current_user_can('manage_options')) {
-            return;
+        return [
+            'run' => sprintf(
+                "Run an indexer tick for %s now?\n\n"
+                . 'Calls the Alchemy transfers API and consumes this chain\'s daily CU budget.',
+                $slug
+            ),
+            'state' => $isResume
+                ? sprintf('Resume indexing for %s?', $slug)
+                : sprintf(
+                    "Pause the indexer for %s?\n\n"
+                    . 'It will stop advancing indefinitely — there is no automatic resume — '
+                    . 'and NFT ownership for this chain will go stale until someone resumes it.',
+                    $slug
+                ),
+        ];
+    }
+
+    /**
+     * Per-chain Run now + Pause/Resume forms.
+     *
+     * Both POST to admin-post.php. The state form's nonce is bound to the
+     * chain AND the target state, so a Pause nonce cannot drive a Resume.
+     */
+    public static function renderChainActionForms(int $chainId, string $state, string $slug): void
+    {
+        $isResume  = $state === ChainCheckpointRepository::STATE_DISABLED;
+        $pauseTo   = $isResume
+            ? ChainCheckpointRepository::STATE_HEALTHY
+            : ChainCheckpointRepository::STATE_DISABLED;
+        $label     = $isResume ? 'Resume' : 'Pause';
+        $confirms  = self::chainActionConfirmations($slug, $isResume);
+        ?>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+              style="display:inline;margin:0;"
+              onsubmit="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral($confirms['run'])); ?>);">
+            <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_RUN); ?>">
+            <input type="hidden" name="chain_id" value="<?php echo (int) $chainId; ?>">
+            <?php wp_nonce_field(self::ACTION_RUN . '_' . $chainId); ?>
+            <button type="submit" class="button button-secondary">Run now</button>
+        </form>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+              style="display:inline;margin:0;"
+              onsubmit="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral($confirms['state'])); ?>);">
+            <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_SET_STATE); ?>">
+            <input type="hidden" name="chain_id" value="<?php echo (int) $chainId; ?>">
+            <input type="hidden" name="state" value="<?php echo esc_attr($pauseTo); ?>">
+            <?php wp_nonce_field(self::ACTION_SET_STATE . '_' . $chainId . '_' . $pauseTo); ?>
+            <button type="submit" class="button"><?php echo esc_html($label); ?></button>
+        </form>
+        <?php
+    }
+
+    /**
+     * Confirmation copy for the two Helius controls.
+     *
+     * Both mutate state on Helius, not just locally — the copy says so,
+     * because the labels alone read like local operations.
+     *
+     * @return array{provision: string, resync: string}
+     */
+    public static function heliusConfirmations(): array
+    {
+        return [
+            'provision' => "Create a new shared webhook on Helius?\n\n"
+                . 'This calls the Helius API and creates a billable external resource '
+                . 'pointing at the callback URL above.',
+            'resync' => "Repoint the remote Helius webhook's address list?\n\n"
+                . 'This PATCHes the live webhook on Helius so its address list matches this '
+                . 'site\'s wallet_links table. Solana ingestion follows the remote list.',
+        ];
+    }
+
+    /**
+     * Provision (when no webhook exists) or Resync (when one does).
+     */
+    public static function renderHeliusActionForm(string $webhookId): void
+    {
+        $confirms = self::heliusConfirmations();
+        ?>
+        <p style="margin-top:16px">
+            <?php if ($webhookId === ''): ?>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+                      style="display:inline;margin:0;"
+                      onsubmit="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral($confirms['provision'])); ?>);">
+                    <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_HELIUS_PROVISION); ?>">
+                    <?php wp_nonce_field(self::ACTION_HELIUS_PROVISION); ?>
+                    <button type="submit" class="button button-primary">Provision shared webhook</button>
+                </form>
+                <small style="margin-left:8px">Creates the Helius webhook with the callback URL above and stores its ID.</small>
+            <?php else: ?>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+                      style="display:inline;margin:0;"
+                      onsubmit="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral($confirms['resync'])); ?>);">
+                    <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_HELIUS_RESYNC); ?>">
+                    <?php wp_nonce_field(self::ACTION_HELIUS_RESYNC); ?>
+                    <button type="submit" class="button">Resync addresses from wallet_links</button>
+                </form>
+                <small style="margin-left:8px">Rebuilds the remote address list from the canonical local table. Use after <code>helius_managed</code> drift.</small>
+            <?php endif; ?>
+        </p>
+        <?php
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // admin-post handlers (Batch 1: were GET actions handled in render)
+    // ────────────────────────────────────────────────────────────
+
+    public const ACTION_RUN               = 'bcc_nft_indexer_run';
+    public const ACTION_SET_STATE         = 'bcc_nft_indexer_set_state';
+    public const ACTION_HELIUS_PROVISION  = 'bcc_helius_provision';
+    public const ACTION_HELIUS_RESYNC     = 'bcc_helius_resync';
+
+    public static function register_actions(): void
+    {
+        add_action('admin_post_' . self::ACTION_RUN,              [self::class, 'handleRun']);
+        add_action('admin_post_' . self::ACTION_SET_STATE,        [self::class, 'handleSetState']);
+        add_action('admin_post_' . self::ACTION_HELIUS_PROVISION, [self::class, 'handleHeliusProvision']);
+        add_action('admin_post_' . self::ACTION_HELIUS_RESYNC,    [self::class, 'handleHeliusResync']);
+    }
+
+    /**
+     * Manual indexer tick for one chain.
+     *
+     * Bounds are the worker's, unchanged: non-blocking per-chain
+     * AdvisoryLock, BLOCKS_PER_TICK, and the daily CU budget gate.
+     */
+    public static function handleRun(): void
+    {
+        AdminActionSupport::requireCapability();
+
+        // Shape check only. The nonce is derived from this id, so it must be
+        // read first — but NOTHING may touch the database until the request
+        // has proven itself authentic.
+        $chainId = self::requireChainIdShape();
+        AdminActionSupport::requireNonce(self::ACTION_RUN . '_' . $chainId);
+        self::requireResolvableChain($chainId);
+
+        try {
+            NftEthIndexerWorker::runForChain($chainId);
+        } catch (\Throwable $e) {
+            // Previously rendered `$e->getMessage()` verbatim — the strongest
+            // raw-exception-to-browser path in the on-chain admin.
+            $ref = AdminActionSupport::failure($e, 'admin_nft_indexer_run_failed', 'chain', $chainId);
+            self::redirect('run_failed', $chainId, $ref);
         }
 
-        $action  = sanitize_key((string) $_GET['action']);
-        $chainId = isset($_GET['chain_id']) ? (int) $_GET['chain_id'] : 0;
-        $nonce   = isset($_GET['_wpnonce']) ? (string) $_GET['_wpnonce'] : '';
+        AdminActionSupport::audit('admin_nft_indexer_run', 'chain', $chainId);
+        self::redirect('ran', $chainId);
+    }
 
-        // Per-chain actions require a valid chain_id. Each branch below
-        // also gates on $action so unknown values fall through harmlessly.
-        $chainScopedActions = ['run', 'set_state'];
-        if (in_array($action, $chainScopedActions, true) && $chainId <= 0) {
-            return;
+    /**
+     * Pause / Resume one chain's indexer.
+     *
+     * Pause and Resume deliberately share this route (they are one state
+     * transition with two targets), but the nonce is bound to BOTH the chain
+     * and the requested state, so a Pause nonce cannot drive a Resume.
+     */
+    public static function handleSetState(): void
+    {
+        AdminActionSupport::requireCapability();
+
+        // Shape + allowlist first: both the chain id and the target state feed
+        // the nonce action, so both must be read before it can be built — but
+        // neither may reach a repository until the nonce has been verified.
+        $chainId  = self::requireChainIdShape();
+        $newState = isset($_POST['state']) ? sanitize_key((string) $_POST['state']) : '';
+
+        $allowed = [ChainCheckpointRepository::STATE_HEALTHY, ChainCheckpointRepository::STATE_DISABLED];
+        if (!in_array($newState, $allowed, true)) {
+            // Reject before the nonce action can be built from an
+            // attacker-chosen state string.
+            self::redirect('state_invalid', $chainId);
         }
 
-        if ($action === 'run') {
-            if (!wp_verify_nonce($nonce, 'bcc_nft_indexer_run_' . $chainId)) {
-                return;
-            }
-            try {
-                NftEthIndexerWorker::runForChain($chainId);
-                add_settings_error('bcc_nft_indexer', 'ran', 'Indexer tick complete for chain ' . $chainId, 'updated');
-            } catch (\Throwable $e) {
-                add_settings_error('bcc_nft_indexer', 'failed', 'Indexer tick failed: ' . $e->getMessage(), 'error');
-            }
-            settings_errors('bcc_nft_indexer');
-            return;
+        AdminActionSupport::requireNonce(self::ACTION_SET_STATE . '_' . $chainId . '_' . $newState);
+        self::requireResolvableChain($chainId);
+
+        if (!ChainCheckpointRepository::setState($chainId, $newState)) {
+            AdminActionSupport::audit('admin_nft_indexer_state_failed', 'chain', $chainId, ['state' => $newState]);
+            self::redirect('state_invalid', $chainId);
         }
 
-        if ($action === 'set_state') {
-            if (!wp_verify_nonce($nonce, 'bcc_nft_indexer_state_' . $chainId)) {
-                return;
-            }
-            $newState = isset($_GET['state']) ? sanitize_key((string) $_GET['state']) : '';
-            if (ChainCheckpointRepository::setState($chainId, $newState)) {
-                add_settings_error('bcc_nft_indexer', 'state', 'Chain ' . $chainId . ' set to ' . $newState, 'updated');
-            } else {
-                add_settings_error('bcc_nft_indexer', 'state_failed', 'Invalid state.', 'error');
-            }
-            settings_errors('bcc_nft_indexer');
-            return;
+        AdminActionSupport::audit(
+            $newState === ChainCheckpointRepository::STATE_DISABLED
+                ? 'admin_nft_indexer_paused'
+                : 'admin_nft_indexer_resumed',
+            'chain',
+            $chainId,
+            ['state' => $newState]
+        );
+
+        self::redirect($newState === ChainCheckpointRepository::STATE_DISABLED ? 'paused' : 'resumed', $chainId);
+    }
+
+    /**
+     * Create the shared Helius webhook. Mutates EXTERNAL provider state.
+     */
+    public static function handleHeliusProvision(): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requireNonce(self::ACTION_HELIUS_PROVISION);
+
+        try {
+            $id = HeliusSubscriptionManager::provisionSharedWebhook(HeliusWebhookEndpoint::callbackUrl());
+        } catch (\Throwable $e) {
+            $ref = AdminActionSupport::failure($e, 'admin_helius_webhook_provision_failed', 'helius_webhook');
+            self::redirect('helius_provision_failed', 0, $ref);
         }
 
-        if ($action === 'helius_provision') {
-            if (!wp_verify_nonce($nonce, 'bcc_helius_provision')) {
-                return;
-            }
-            $callbackUrl = HeliusWebhookEndpoint::callbackUrl();
-            $id = HeliusSubscriptionManager::provisionSharedWebhook($callbackUrl);
-            if ($id !== null) {
-                add_settings_error('bcc_nft_indexer', 'helius_ok', 'Helius webhook provisioned: ' . $id, 'updated');
-            } else {
-                add_settings_error('bcc_nft_indexer', 'helius_failed', 'Provisioning failed. Check BCC_HELIUS_API_KEY + BCC_HELIUS_WEBHOOK_SECRET in wp-config.php and the error log.', 'error');
-            }
-            settings_errors('bcc_nft_indexer');
-            return;
+        if ($id === null) {
+            AdminActionSupport::audit('admin_helius_webhook_provision_failed', 'helius_webhook');
+            self::redirect('helius_provision_failed', 0);
         }
 
-        if ($action === 'helius_resync') {
-            if (!wp_verify_nonce($nonce, 'bcc_helius_resync')) {
-                return;
-            }
+        AdminActionSupport::audit('admin_helius_webhook_provisioned', 'helius_webhook');
+        self::redirect('helius_provisioned', 0);
+    }
+
+    /**
+     * Repoint the shared Helius webhook's address list. Mutates EXTERNAL
+     * provider state. Idempotent — reports a no-op when already in sync.
+     */
+    public static function handleHeliusResync(): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requireNonce(self::ACTION_HELIUS_RESYNC);
+
+        try {
             $stats = HeliusSubscriptionManager::resyncFromWalletLinks();
-            if ($stats === null) {
-                add_settings_error('bcc_nft_indexer', 'helius_resync_failed', 'Resync failed — check the error log.', 'error');
-            } else {
-                $msg = sprintf(
-                    'Resync %s. Remote: %d addresses · Local: %d addresses.',
-                    $stats['applied'] ? 'applied' : 'no-op (already in sync)',
-                    $stats['remote_count'],
-                    $stats['local_count']
-                );
-                add_settings_error('bcc_nft_indexer', 'helius_resync_ok', $msg, 'updated');
-            }
-            settings_errors('bcc_nft_indexer');
-            return;
+        } catch (\Throwable $e) {
+            $ref = AdminActionSupport::failure($e, 'admin_helius_resync_failed', 'helius_webhook');
+            self::redirect('helius_resync_failed', 0, $ref);
+        }
+
+        if ($stats === null) {
+            AdminActionSupport::audit('admin_helius_resync_failed', 'helius_webhook');
+            self::redirect('helius_resync_failed', 0);
+        }
+
+        $applied = (bool) $stats['applied'];
+        AdminActionSupport::audit(
+            $applied ? 'admin_helius_addresses_resynced' : 'admin_helius_resync_noop',
+            'helius_webhook',
+            null,
+            ['remote_count' => (int) $stats['remote_count'], 'local_count' => (int) $stats['local_count']]
+        );
+
+        AdminActionSupport::redirect([
+            'page'            => SettingsPage::PAGE_SLUG,
+            'tab'             => 'nft',
+            'bcc_nft_result'  => $applied ? 'helius_resynced' : 'helius_resync_noop',
+            'bcc_remote'      => (int) $stats['remote_count'],
+            'bcc_local'       => (int) $stats['local_count'],
+        ]);
+    }
+
+    /**
+     * Shape-only validation of chain_id — runs BEFORE the nonce check.
+     *
+     * The target-scoped nonce action is built from this id, so it has to be
+     * read first. Deliberately does no repository work: an unauthenticated
+     * request must not be able to probe which chain ids exist, and no domain
+     * code should run for a request that fails CSRF validation.
+     */
+    private static function requireChainIdShape(): int
+    {
+        $chainId = isset($_POST['chain_id']) ? (int) $_POST['chain_id'] : 0;
+
+        if ($chainId <= 0) {
+            wp_die(
+                esc_html__('Invalid chain.', 'bcc-trust'),
+                esc_html__('Bad Request', 'bcc-trust'),
+                ['response' => 400]
+            );
+        }
+
+        return $chainId;
+    }
+
+    /**
+     * Authoritative target resolution — runs AFTER the nonce check.
+     *
+     * A positive integer is not a target; the chain must exist. Separated
+     * from the shape check so this repository read happens only for a
+     * request already proven authentic.
+     */
+    private static function requireResolvableChain(int $chainId): void
+    {
+        if (ChainRepository::getById($chainId) === null) {
+            wp_die(
+                esc_html__('Unknown chain.', 'bcc-trust'),
+                esc_html__('Bad Request', 'bcc-trust'),
+                ['response' => 400]
+            );
         }
     }
 
     /**
-     * @param array<string, scalar> $args
+     * PRG terminator back to the NFT tab.
+     *
+     * `never` so a guard like `if ($stats === null) { self::redirect(...); }`
+     * narrows the value for the code that follows.
      */
-    private static function actionUrl(array $args): string
+    private static function redirect(string $result, int $chainId = 0, string $ref = ''): never
     {
-        return add_query_arg(
-            array_merge(['page' => 'bcc-onchain-signals', 'tab' => 'nft'], $args),
-            admin_url('admin.php')
-        );
+        $args = [
+            'page'           => SettingsPage::PAGE_SLUG,
+            'tab'            => 'nft',
+            'bcc_nft_result' => $result,
+        ];
+        if ($chainId > 0) {
+            $args['bcc_chain'] = $chainId;
+        }
+        if ($ref !== '') {
+            $args['bcc_ref'] = $ref;
+        }
+
+        AdminActionSupport::redirect($args);
+    }
+
+    /**
+     * Render the result notice from the PRG redirect args.
+     */
+    private static function renderResultNotice(): void
+    {
+        $result = isset($_GET['bcc_nft_result']) ? sanitize_key((string) $_GET['bcc_nft_result']) : '';
+        if ($result === '') {
+            return;
+        }
+
+        $chainId = isset($_GET['bcc_chain']) ? (int) $_GET['bcc_chain'] : 0;
+        $ref     = isset($_GET['bcc_ref']) ? sanitize_text_field((string) $_GET['bcc_ref']) : '';
+
+        $notices = [
+            'ran'                     => ['updated', sprintf('Indexer tick complete for chain %d.', $chainId)],
+            'paused'                  => ['updated', sprintf('Chain %d paused — its indexer will not advance until resumed.', $chainId)],
+            'resumed'                 => ['updated', sprintf('Chain %d resumed.', $chainId)],
+            'state_invalid'           => ['error',   'Invalid state — no change was made.'],
+            'helius_provisioned'      => ['updated', 'Helius shared webhook provisioned.'],
+            'helius_provision_failed' => ['error',   'Provisioning failed. Check BCC_HELIUS_API_KEY + BCC_HELIUS_WEBHOOK_SECRET in wp-config.php.'],
+            'helius_resync_failed'    => ['error',   'Resync failed.'],
+        ];
+
+        if ($result === 'helius_resynced' || $result === 'helius_resync_noop') {
+            $remote = isset($_GET['bcc_remote']) ? (int) $_GET['bcc_remote'] : 0;
+            $local  = isset($_GET['bcc_local']) ? (int) $_GET['bcc_local'] : 0;
+            $notices[$result] = ['updated', sprintf(
+                'Resync %s. Remote: %d addresses · Local: %d addresses.',
+                $result === 'helius_resynced' ? 'applied' : 'no-op (already in sync)',
+                $remote,
+                $local
+            )];
+        }
+
+        if ($result === 'run_failed') {
+            $notices['run_failed'] = ['error', AdminActionSupport::failureMessage($ref)];
+        }
+
+        if (!isset($notices[$result])) {
+            return;
+        }
+
+        [$type, $message] = $notices[$result];
+        if ($ref !== '' && $type === 'error' && $result !== 'run_failed') {
+            $message .= ' ' . AdminActionSupport::failureMessage($ref);
+        }
+
+        add_settings_error('bcc_nft_indexer', $result, $message, $type);
+        settings_errors('bcc_nft_indexer');
     }
 }
