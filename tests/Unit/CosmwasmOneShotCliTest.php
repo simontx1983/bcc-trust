@@ -943,7 +943,11 @@ final class CosmwasmOneShotCliTest extends TestCase
             'BCC_COSMWASM_DISCOVERY_ENABLED=undefined',
             'BCC_COSMWASM_BACKFILL_ENABLED=undefined',
             'checkpoint        : state=',
-            'budgets           : 50 requests, 20s wall clock',
+            // The budget wording is pinned in detail by
+            // CosmwasmCliPreflightAccuracyTest; these two are here so that
+            // "the preflight was printed at all" keeps covering them.
+            'request budget    : 50 LOGICAL requests',
+            'runtime deadline  : 20s — COOPERATIVE',
             'dailyChainStep',
             'emitCollections',
             'NOT invoked       : backfill, weekly retry, metadata refresh',
@@ -1249,8 +1253,14 @@ final class CosmwasmOneShotCliTest extends TestCase
         $doc  = (string) file_get_contents($file);
 
         self::assertStringContainsString('179 code families', $doc);
-        self::assertStringContainsString('25-request budget', $doc);
-        self::assertStringContainsString('ZERO DISCOVERED COLLECTIONS IS NOT A FAILURE', $doc);
-        self::assertStringContainsString('FIVE families', $doc);
+        self::assertStringContainsString('ZERO EMITTED COLLECTIONS IS EXPECTED', $doc);
+
+        // The two claims this test USED to pin were wrong and were
+        // corrected: the canary does not run under a 25-request budget
+        // (the canonical 50 was adopted) and it does not reach "about FIVE
+        // families" (5-25, depending on per-family cost). Pinning the
+        // retracted wording here is what would let it come back.
+        self::assertStringNotContainsString('25-request budget this canary is planned', $doc);
+        self::assertStringContainsString('~5-25 FAMILIES', $doc);
     }
 }
