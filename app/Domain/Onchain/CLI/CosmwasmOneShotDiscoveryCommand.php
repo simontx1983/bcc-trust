@@ -106,27 +106,115 @@ if (!defined('ABSPATH')) {
  * never relax one, because the moment it relaxes one it stops being a
  * safe way to observe what cron would do.
  *
+ * ── THE BUDGETS, AND WHAT THEY DO AND DO NOT BOUND ──────────────────────
+ * Both ceilings are read from {@see CosmwasmDiscoveryGate}. There is no
+ * CLI-specific budget and no second budget system: a supervised run is
+ * bounded exactly as a scheduled one is, which is the entire point of
+ * running it. An earlier draft of this file described a temporary
+ * 25-request canary limit (`BCC_COSMWASM_REQUEST_BUDGET=25`). That limit
+ * was NOT adopted — the canonical ceiling is what runs.
+ *
+ *   REQUESTS — {@see CosmwasmDiscoveryGate::DEFAULT_REQUEST_BUDGET}: 50
+ *   LOGICAL requests per invocation (`BCC_COSMWASM_REQUEST_BUDGET`
+ *   overrides it within 1..500). For this command per-invocation and
+ *   per-chain are the same number, because it builds one
+ *   {@see CosmwasmTickBudget} for exactly one chain. The scheduled loop
+ *   builds ONE budget and SHARES it across every eligible chain.
+ *
+ *   HTTP RETRIES ARE ATTEMPTS INSIDE A LOGICAL REQUEST AND ARE NOT
+ *   CHARGED SEPARATELY. One logical request is one `spend()`. Beneath it
+ *   {@see ApiRetry} may make up to 1 + `ApiRetry::DEFAULT_MAX_RETRIES`
+ *   = 4 HTTP attempts, but only on 5xx and network errors. A 429 returns
+ *   immediately without retrying or sleeping; a non-429 4xx is never
+ *   retried.
+ *
+ *   WALL CLOCK — {@see CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS}: 20
+ *   seconds, and IT IS COOPERATIVE, NOT A HARD PROCESS TIMEOUT. It is
+ *   tested before each spend and at the top of each loop; WORK ALREADY IN
+ *   FLIGHT IS ALLOWED TO FINISH and nothing interrupts it. Under WP-CLI
+ *   there is no `max_execution_time` backstop either — the CLI SAPI is
+ *   unlimited, and the 30s shared-host cap that motivated the 20s figure
+ *   applies to web and cron requests, not to this one.
+ *
+ *   SO THE RUNTIME BOUND IS ~88 SECONDS, NOT 20. One logical request that
+ *   times out on all four attempts costs 4 x 15s
+ *   (`CosmosFetcher::$timeout`) plus ApiRetry's capped backoff of
+ *   2s + 3s + 3s = 68s. If the deadline test passes an instant before 20s
+ *   and that is the request which runs, the pass ends at ~88s. That is
+ *   the bounded worst case, not the expectation.
+ *
+ * ── HOW MANY HTTP ATTEMPTS CAN ACTUALLY HAPPEN ──────────────────────────
+ * NOT 50 x 4 = 200. That product is arithmetic, not a reachable state,
+ * and quoting it overstates the load on the node by roughly 4x.
+ *
+ * Exhausting four attempts on all fifty logical requests would require
+ * 50 x 8s = 400 SECONDS of mandatory backoff sleep, while new spends stop
+ * at 20s. At most THREE fully-retried requests can even BEGIN, since each
+ * costs 8s in sleep alone (t=0, t=8, t=16).
+ *
+ * Attempts are maximised not by full retries but by SINGLE-retry
+ * requests: 2 attempts per 2s of sleep beats 3-per-5s and 4-per-8s. Ten
+ * of those start before the deadline (t=0,2,..,18), giving
+ * 10 x 2 + 40 x 1 = 60 ATTEMPTS. That is the ceiling, and it already
+ * assumes every HTTP attempt itself takes zero time — which is
+ * impossible.
+ *
+ * In practice a failing attempt consumes its 15s timeout, so a single
+ * retrying request ends the pass by itself. Expect ~50 attempts for 50
+ * logical requests, and ~50-55 in the worst realistic case.
+ *
  * ── WHAT A FIRST DUNGEON PASS IS EXPECTED TO DO ─────────────────────────
- * ZERO DISCOVERED COLLECTIONS IS NOT A FAILURE, and the operator should
- * expect it on the first run.
+ * ZERO EMITTED COLLECTIONS IS EXPECTED, and is a healthy first pass.
+ * ZERO CONTRACTS IS **NOT** the expected result — though it stays
+ * explainable by which families the pass actually reached.
  *
- * Dungeon Chain (id 17) has roughly **179 code families**. A first pass
- * on a fresh install is dominated by INVENTORY: the reverse code walk
- * ingests families into `wp_bcc_cosmwasm_code_families`, and only then
- * does classification start spending requests on them. With the
- * 25-request budget this canary is planned to run under
- * (`BCC_COSMWASM_REQUEST_BUDGET=25`), classification reaches only about
- * FIVE families — each one costs a metadata read plus up to
- * {@see CosmwasmDiscoveryGate::FAMILY_SAMPLE_SIZE} contract probes — out
- * of the ~179 inventoried. Measured across chains, roughly 50% of code
- * families have no contracts at all and only about 5% are CW-721.
+ * INVENTORY IS CAPPED AT ONE CODE PAGE ON A FRESH CHAIN. Dungeon Chain
+ * (id 17) has roughly 179 code families, and a first pass inventories AT
+ * MOST THE NEWEST {@see CosmwasmDiscoveryGate::CODE_PAGE_SIZE} = 100 of
+ * them — not all ~179. The reverse walk RETURNS AFTER ITS FIRST PAGE when
+ * the watermark is 0; see
+ * {@see CosmwasmDiscoveryService::ingestNewCodeFamilies()}, "Nothing
+ * inventoried yet: one page is enough ... The HISTORICAL BACKFILL owns
+ * the rest of the history". {@see CosmwasmDiscoveryGate::CODE_TAIL_MAX_PAGES}
+ * therefore never engages on the first pass.
  *
- * So the expected first-pass shape is: `code_families.inserted` in the
- * hundreds, `code_families.classified` around five, and
- * `collections_emitted: 0`. That is a healthy run. It means the inventory
- * landed and the queue is now primed. Judge the run by `errors`,
- * `stop_reason` and whether the watermark moved — not by the collection
- * count. Re-run to spend another budget on the queue.
+ * THE OLDER ~79 FAMILIES STAY UNTOUCHED, and stay untouched afterwards:
+ * the watermark advances to the newest id, so later incremental passes
+ * stop at their first page too. Only the historical backfill reaches
+ * them, and it is disabled — this command refuses to run while
+ * `BCC_COSMWASM_BACKFILL_ENABLED` is armed, and cannot invoke the
+ * backfill in any case. IF DUNGEON'S NFT FAMILIES ARE AMONG THE OLDER
+ * ONES, THIS CANARY FINDS NOTHING WHILE WORKING PERFECTLY.
+ *
+ * CLASSIFICATION REACHES ~5-25 FAMILIES under the canonical budget,
+ * depending on what each costs. A family costs 1 request for its
+ * contracts page plus up to
+ * {@see CosmwasmDiscoveryGate::FAMILY_SAMPLE_SIZE} = 3 sampled contracts,
+ * and EACH SAMPLE IS 2 OR 3 REQUESTS, not one:
+ * {@see \BCC\Trust\Onchain\Fetchers\CosmosFetcher::probeCw721()} issues
+ * `num_tokens`, then `contract_info`, then
+ * `get_collection_info_and_extension` ONLY if `contract_info` failed. So
+ * a family costs 1 request when its contract page is empty, 3 when the
+ * first sample confirms, and up to 10 in the worst case.
+ * {@see CosmwasmDiscoveryWorker::FAMILIES_PER_PASS} caps the count at 25
+ * regardless. Measured across chains, roughly 50% of code families have
+ * no contracts at all and only about 5% are CW-721.
+ *
+ * CONTRACT ROWS ARE BULK-INSERTED AND ARE NOT REQUEST-BOUNDED. One
+ * contracts page returns up to `CosmosFetcher::CW721_PAGE_SIZE` = 100
+ * addresses and ALL of them are inventoried for that single request.
+ * Conservative worst case for a 50-request pass: ~1,700 contract rows.
+ * That is expected; bulk inserts at that size are not a concern.
+ *
+ * So the expected first-pass shape is `code_families.inserted` up to 100,
+ * `code_families.classified` between 5 and 25, `contracts.inserted`
+ * plausibly in the hundreds, and `collections_emitted: 0`. Judge the run
+ * by `errors`, `stop_reason` and whether the watermark moved — not by the
+ * collection count. Re-run to spend another budget on the queue.
+ *
+ * AND JUDGE ITS SCOPE HONESTLY: this canary validates the NORMAL
+ * INCREMENTAL DISCOVERY PATH. It does not, and cannot, prove complete
+ * historical NFT coverage of the chain.
  *
  * ── DRY BY DEFAULT ──────────────────────────────────────────────────────
  * Without `--confirm=<slug>-<id>` the command validates everything,
@@ -195,6 +283,35 @@ final class CosmwasmOneShotDiscoveryCommand
 
     /** The pass threw, or the chain refused to prepare inside the lock. */
     public const EXIT_EXECUTION_FAILED = 6;
+
+    // ── Mirrors used ONLY to print honest runtime arithmetic ────────────
+    //
+    // NONE OF THESE BOUND ANYTHING. Every enforced budget is still read
+    // live from CosmwasmDiscoveryGate at the point of printing. These four
+    // exist because the preflight has to be able to say "20 seconds is
+    // cooperative and the real bound is ~88s", and their real sources are
+    // not reachable constants from here: `CosmosFetcher::$timeout` is a
+    // private instance property, ApiRetry's backoff is computed rather
+    // than declared, `ApiRetry::DEFAULT_MAX_RETRIES` is absent from the
+    // transport test double that stands in at ApiRetry's production FQN,
+    // and `CosmwasmDiscoveryWorker::FAMILIES_PER_PASS` is private.
+    //
+    // A MIRROR THAT DRIFTS IS WORSE THAN A LITERAL, so all four are pinned
+    // to their real sources by CosmwasmCliPreflightAccuracyTest — by
+    // reflection where the symbol is reachable and by reading the defining
+    // source where it is not. Change any source and that test fails.
+
+    /** Mirror of {@see \BCC\Trust\Onchain\Fetchers\CosmosFetcher::$timeout}. */
+    private const HTTP_ATTEMPT_TIMEOUT_SECONDS = 15;
+
+    /** Mirror of 1 + `ApiRetry::DEFAULT_MAX_RETRIES`. */
+    private const HTTP_ATTEMPTS_PER_LOGICAL_REQUEST = 4;
+
+    /** ApiRetry's capped backoff across a fully-retried call: 2s + 3s + 3s. */
+    private const RETRY_BACKOFF_SECONDS = 8;
+
+    /** Mirror of `CosmwasmDiscoveryWorker::FAMILIES_PER_PASS` (private there). */
+    private const FAMILIES_PER_PASS_MIRROR = 25;
 
     /**
      * The ONLY flags this command accepts.
@@ -665,19 +782,115 @@ final class CosmwasmOneShotDiscoveryCommand
         // Every number here is read from the production gate. Restating a
         // budget as a literal is how a printed preflight starts describing
         // a run that is not the run about to happen.
+        $attempts  = self::HTTP_ATTEMPTS_PER_LOGICAL_REQUEST;
+        $worstCall = ($attempts * self::HTTP_ATTEMPT_TIMEOUT_SECONDS) + self::RETRY_BACKOFF_SECONDS;
+
         \WP_CLI::log(sprintf(
-            '  budgets           : %d requests, %ds wall clock, %d code pages max, %d contract pages max, %d samples/family',
-            CosmwasmDiscoveryGate::requestBudget(),
-            CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS,
+            '  request budget    : %d LOGICAL requests — the canonical scanner ceiling, not a canary-only limit',
+            CosmwasmDiscoveryGate::requestBudget()
+        ));
+        \WP_CLI::log(sprintf(
+            '                      HTTP retries are attempts INSIDE a logical request (up to %d, on 5xx/network'
+            . ' only) and are NOT charged against that count',
+            $attempts
+        ));
+        \WP_CLI::log(sprintf(
+            '  runtime deadline  : %ds — COOPERATIVE, not a hard process timeout. Work already in flight is'
+            . ' allowed to finish.',
+            CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS
+        ));
+        \WP_CLI::log(sprintf(
+            '                      one retrying request can extend the run to ~%ds (%d x %ds timeout + %ds'
+            . ' backoff, begun just under the %ds mark)',
+            CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS + $worstCall,
+            $attempts,
+            self::HTTP_ATTEMPT_TIMEOUT_SECONDS,
+            self::RETRY_BACKOFF_SECONDS,
+            CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS
+        ));
+        \WP_CLI::log(sprintf(
+            '  page budgets      : %d code pages max, %d contract pages max, %d samples/family',
             CosmwasmDiscoveryGate::CODE_TAIL_MAX_PAGES,
             CosmwasmDiscoveryGate::CONTRACT_TAIL_MAX_PAGES,
             CosmwasmDiscoveryGate::FAMILY_SAMPLE_SIZE
         ));
+        self::printExpectations($summary);
         \WP_CLI::log('  pass              : CosmwasmDiscoveryWorker::dailyChainStep() — the DAILY incremental pass');
         \WP_CLI::log('                      (a) ingestNewCodeFamilies  (b) enumerateFamilyTail');
         \WP_CLI::log('                      (c) classifyFamily/classifyContract  (d) emitCollections');
         \WP_CLI::log('  NOT invoked       : backfill, weekly retry, metadata refresh');
         \WP_CLI::log('────────────────────────────────────────────────────────────');
+    }
+
+    /**
+     * What this pass will and will not achieve, in the operator's terms.
+     *
+     * ── WHY THIS IS PRINTED AT ALL ──────────────────────────────────────
+     * A safety command that leaves an operator with the wrong expectation
+     * is not safe, it is merely quiet. The specific wrong expectations
+     * this block exists to prevent: that a first pass inventories the
+     * WHOLE chain, that "0 collections" means the scanner is broken, that
+     * "0 contracts" is equally fine, and that finding nothing proves the
+     * chain has no NFTs.
+     *
+     * ── IT BRANCHES ON THE WATERMARK, AND MUST ──────────────────────────
+     * The one-page cap is a property of a FRESH chain, not of the walk. On
+     * `cw_max_code_id = 0` {@see CosmwasmDiscoveryService::ingestNewCodeFamilies()}
+     * returns after its first page and hands the rest of history to the
+     * backfill. On a resumed chain the walk is an ordinary reverse tail
+     * that may read up to {@see CosmwasmDiscoveryGate::CODE_TAIL_MAX_PAGES}
+     * pages. Printing the fresh-chain text on a resumed chain would be the
+     * same class of lie in the other direction.
+     *
+     * @phpstan-param PreflightSummary $summary
+     */
+    private static function printExpectations(array $summary): void
+    {
+        \WP_CLI::log('  expectations      :');
+
+        if ($summary['max_code_id'] === 0) {
+            \WP_CLI::log(sprintf(
+                '    inventory       : AT MOST the newest %d code families — NOT the whole chain. The reverse'
+                . ' walk returns after ONE page while the watermark is 0.',
+                CosmwasmDiscoveryGate::CODE_PAGE_SIZE
+            ));
+            \WP_CLI::log(
+                '    older families  : anything below that first page stays UNTOUCHED, now and on later'
+                . ' incremental passes. Only the historical backfill reaches them, and it is disabled.'
+            );
+        } else {
+            \WP_CLI::log(sprintf(
+                '    inventory       : an incremental reverse tail from watermark %d, up to %d pages of %d.',
+                $summary['max_code_id'],
+                CosmwasmDiscoveryGate::CODE_TAIL_MAX_PAGES,
+                CosmwasmDiscoveryGate::CODE_PAGE_SIZE
+            ));
+            \WP_CLI::log(
+                '    older families  : anything below the watermark is owned by the historical backfill,'
+                . ' which is disabled.'
+            );
+        }
+
+        \WP_CLI::log(sprintf(
+            '    classification  : roughly 5-25 families, capped at %d — 1 request per family page plus 2-3'
+            . ' per sampled contract, so a family costs 1 to 10.',
+            self::FAMILIES_PER_PASS_MIRROR
+        ));
+        \WP_CLI::log(
+            '    contract rows   : bulk-inserted and NOT request-bounded (one page carries up to 100'
+            . ' addresses). Conservative worst case ~1,700 rows.'
+        );
+        \WP_CLI::log(
+            '    collections     : 0 is EXPECTED and is a healthy first pass.'
+        );
+        \WP_CLI::log(
+            '    contracts       : 0 is NOT the expected result, though it stays explainable by which'
+            . ' families the pass reached.'
+        );
+        \WP_CLI::log(
+            '    scope           : this validates the NORMAL INCREMENTAL DISCOVERY PATH. It does not prove'
+            . ' complete historical NFT coverage of the chain.'
+        );
     }
 
     // ── Summary ─────────────────────────────────────────────────────────
