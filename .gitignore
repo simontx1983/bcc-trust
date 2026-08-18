@@ -19,5 +19,19 @@ composer.lock
 /vendor/staabm/
 /vendor/theseer/
 
+# Dev-only WP-CLI tree — pulled by the `wp-cli/wp-cli` require-dev that lets
+# CosmwasmCliSynopsisTest run the REAL synopsis parser instead of a replica.
+# `/vendor/wp-cli/` covers all four packages composer installs under it:
+# wp-cli/wp-cli, wp-cli/php-cli-tools, wp-cli/mustache and
+# wp-cli/mustangostang-spyc — there is no top-level /vendor/mustache/ or
+# /vendor/mustangostang/ to ignore.
+#
+# symfony/finder is listed individually and NOT as /vendor/symfony/, because
+# three symfony packages (deprecation-contracts, polyfill-mbstring,
+# polyfill-php82) are COMMITTED production dependencies; a blanket rule would
+# hide them from git and they would stop shipping.
+/vendor/wp-cli/
+/vendor/symfony/finder/
+
 # Local-only agent instructions (not shared via git — see Tia/Phillip agreement 2026-07-08)
 CLAUDE.md
