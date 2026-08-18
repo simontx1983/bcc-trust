@@ -831,6 +831,13 @@ final class CosmwasmDiscoveryWorker
      * the very set the scheduled passes walk, so this path can never be
      * more permissive than cron.
      *
+     * And the bypass is ONE-DIRECTIONAL: the caller runs this while the
+     * constant is OFF and REFUSES while it is ON, because an armed
+     * constant means the hooks above are live and a scheduled pass can
+     * fire immediately before or after this one. The per-chain lock in
+     * {@see runChainPass()} excludes SIMULTANEOUS execution and nothing
+     * else, so it is not a substitute for that refusal.
+     *
      * @param CosmwasmPassReport $report write-only telemetry for the summary
      * @return string one of the PASS_* constants
      */

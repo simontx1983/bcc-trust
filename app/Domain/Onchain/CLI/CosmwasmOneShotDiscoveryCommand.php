@@ -65,9 +65,18 @@ if (!defined('ABSPATH')) {
  * `runMetadataRefresh()` are NOT on that path and are not named anywhere
  * in this file. A backfill cannot be reached from here.
  *
- * ── WHAT IT BYPASSES: EXACTLY ONE THING ─────────────────────────────────
- * `BCC_COSMWASM_DISCOVERY_ENABLED`, and nothing else. Still enforced,
- * unchanged, by the same production code the scheduled passes use:
+ * ── WHAT IT BYPASSES: EXACTLY ONE THING, AND ONLY WHILE IT IS OFF ───────
+ * `BCC_COSMWASM_DISCOVERY_ENABLED`, and nothing else — and the bypass is
+ * one-directional. The command runs the pass while that constant is OFF
+ * (which is the whole point) and REFUSES while it is ON, because an armed
+ * constant means the three scheduled hooks are live and a pass can fire
+ * either side of this one. The advisory lock only rules out SIMULTANEOUS
+ * execution; it cannot rule out a tick a second before or a second after,
+ * so the "one supervised pass" guarantee is void. See the comment at the
+ * check itself.
+ *
+ * Still enforced, unchanged, by the same production code the scheduled
+ * passes use:
  *   - the per-chain operator opt-in (`cosmwasm_nft_discovery_enabled`);
  *   - `is_active = 1` and `chain_type = 'cosmos'`;
  *   - the measured `unsupported` state and the operator `paused` state;
@@ -131,8 +140,9 @@ if (!defined('ABSPATH')) {
  *      chain's, or an attempt to run outside WP-CLI.
  *   3  ELIGIBILITY REFUSED — unknown chain, not opted in, not active,
  *      not cosmos, paused, measured unsupported, absent or non-matching
- *      allowlist, a fail-closed repository read, or the historical
- *      backfill being armed on this environment.
+ *      allowlist, a fail-closed repository read, the historical backfill
+ *      being armed, or the scheduled discovery gate being armed on this
+ *      environment.
  *   4  LOCK CONTENDED — a cron tick or another operator holds
  *      `bcc_cosmwasm_chain_<id>`. Nothing was run and nothing was written.
  *   5  BUDGET EXHAUSTED — the pass ran and was CUT SHORT by its request
@@ -297,6 +307,21 @@ final class CosmwasmOneShotDiscoveryCommand
             );
         }
 
+        // ── THE TWO SCHEDULING GATES: ARMED MEANS REFUSE ────────────────
+        //
+        // Both of the next two checks run BEFORE the first network request
+        // and before the first write, and both refuse with
+        // EXIT_NOT_ELIGIBLE.
+        //
+        // BACKFILL IS CHECKED FIRST, AND THE ORDER IS LOAD-BEARING.
+        // `backfillEnabled()` is AND-ed with `discoveryEnabled()` — see
+        // {@see CosmwasmDiscoveryGate::backfillEnabled()}, which returns
+        // false whenever discovery as a whole is off — so an armed backfill
+        // ALWAYS implies an armed discovery gate. Checking discovery first
+        // would therefore make this branch unreachable and take its
+        // message with it. The backfill is the more specific and more
+        // expensive condition, so it gets to name itself.
+        //
         // The historical backfill is the expensive, long-running pass. A
         // supervised one-shot exists to watch ONE bounded incremental pass,
         // so it refuses to run on an environment where the backfill is
@@ -307,6 +332,50 @@ final class CosmwasmOneShotDiscoveryCommand
             self::fail(
                 'BCC_COSMWASM_BACKFILL_ENABLED is on. A supervised one-shot refuses to run alongside '
                 . 'the historical backfill — turn the backfill off before observing a single pass.',
+                self::EXIT_NOT_ELIGIBLE
+            );
+        }
+
+        // AND NOW THE INVERSION. READ IT TWICE; IT IS BACKWARDS FROM WHAT
+        // THE REST OF THIS FILE PRIMES YOU TO EXPECT.
+        //
+        // BCC_COSMWASM_DISCOVERY_ENABLED is the one constant this command
+        // BYPASSES. It bypasses it while it is OFF — that is the entire
+        // point of the command — and it REFUSES while it is ON. Those are
+        // not in tension; they are the same rule stated at both ends:
+        //
+        //   OFF → the three scheduled hooks are inert. Nothing else can be
+        //         running this pass, so the pass this operator is watching
+        //         is the ONLY pass, and "one supervised pass" is literally
+        //         true. Run it.
+        //   ON  → the scheduled hooks are LIVE and fire on their own
+        //         cadence. There is then nothing for a supervised run to
+        //         add, and something for it to destroy: the one-shot
+        //         guarantee.
+        //
+        // AND THE LOCK IS NOT A SUBSTITUTE FOR THIS CHECK. The per-chain
+        // `bcc_cosmwasm_chain_<id>` advisory lock is honest about exactly
+        // one thing — SIMULTANEOUS execution. It says nothing whatsoever
+        // about a scheduled tick that fires a second BEFORE this process
+        // acquires the lock, or a second AFTER it releases. Both of those
+        // are ordinary cron behaviour when the gate is armed, and both are
+        // invisible in this command's output. The operator would then read
+        // one summary and attribute to it the writes, the request spend,
+        // the watermark movement and the state transitions of an
+        // unwatched pass that ran either side of it. That is a worse
+        // failure than a crash, because it is a wrong conclusion that
+        // looks like a measurement.
+        //
+        // So: to observe one pass, turn the gate off. If the gate is on,
+        // the scheduled pass is already running — read its telemetry.
+        if (CosmwasmDiscoveryGate::discoveryEnabled()) {
+            self::fail(
+                'BCC_COSMWASM_DISCOVERY_ENABLED is on, so the scheduled discovery hooks are LIVE on this '
+                . 'environment. A supervised one-shot refuses: the per-chain advisory lock prevents a cron '
+                . 'tick and this process running SIMULTANEOUSLY, but not a scheduled pass immediately before '
+                . 'or after this one — so the summary you are about to read would silently include work this '
+                . 'command did not do. Turn the gate off to observe a single pass; leave it on and read the '
+                . 'scheduled run\'s telemetry instead.',
                 self::EXIT_NOT_ELIGIBLE
             );
         }
@@ -558,7 +627,8 @@ final class CosmwasmOneShotDiscoveryCommand
                     : implode(',', $allowlist) . (in_array($chainId, $allowlist, true) ? ' (chain present)' : ' (CHAIN ABSENT)'))
         ));
         \WP_CLI::log(sprintf(
-            '  discovery gate    : BCC_COSMWASM_DISCOVERY_ENABLED=%s  ← BYPASSED by this command, and only this',
+            '  discovery gate    : BCC_COSMWASM_DISCOVERY_ENABLED=%s  ← the ONE gate this command bypasses, '
+            . 'and only while it is off; ON means cron is live and this command REFUSES',
             self::constantState('BCC_COSMWASM_DISCOVERY_ENABLED')
         ));
         \WP_CLI::log(sprintf(

@@ -567,7 +567,7 @@ final class CosmwasmOneShotCliTest extends TestCase
         self::assertSame([], \BCC\Core\DB\AdvisoryLock::$acquired);
     }
 
-    // ── (e) backfill is impossible ──────────────────────────────────────
+    // ── (e) the two scheduling gates: ARMED means refuse ────────────────
 
     public function testItRefusesWhileTheHistoricalBackfillIsArmed(): void
     {
@@ -580,6 +580,81 @@ final class CosmwasmOneShotCliTest extends TestCase
         self::assertSame(CosmwasmOneShotDiscoveryCommand::EXIT_NOT_ELIGIBLE, $code);
         self::assertStringContainsString('BCC_COSMWASM_BACKFILL_ENABLED is on', \WP_CLI::output());
         $this->assertInertRun('the backfill is armed');
+    }
+
+    /**
+     * THE INVERSION, AND THE REASON THE LOCK IS NOT ENOUGH.
+     *
+     * `BCC_COSMWASM_DISCOVERY_ENABLED` is the ONE constant this command
+     * bypasses — while it is OFF. Armed, it means the three scheduled
+     * hooks are LIVE, and then a supervised run is no longer supervising
+     * anything it can attribute.
+     *
+     * The per-chain advisory lock does NOT close this. It excludes
+     * SIMULTANEOUS execution and only that; a cron tick that fires a
+     * second before this process acquires the lock, or a second after it
+     * releases, is ordinary armed-cron behaviour and is invisible in this
+     * command's summary. The operator would read one JSON object and
+     * attribute to it the writes, the request spend and the watermark
+     * movement of a pass they never saw. So the command refuses BEFORE
+     * the first request and BEFORE the first write.
+     *
+     * Note the constants: the backfill constant is NOT defined here, so
+     * this refusal cannot be the backfill one wearing a different hat.
+     */
+    public function testItRefusesWhileTheScheduledDiscoveryGateIsArmed(): void
+    {
+        $this->arrange();
+        $this->queueOneCleanCodePage();
+        define('BCC_COSMWASM_DISCOVERY_ENABLED', true);
+        self::assertFalse(defined('BCC_COSMWASM_BACKFILL_ENABLED'), 'precondition: only the discovery gate is armed');
+
+        // Proof this is NOT an eligibility problem in disguise: with the
+        // gate armed the scheduled passes would happily walk this chain.
+        self::assertTrue(CosmwasmDiscoveryWorker::isChainScannable(self::CHAIN));
+
+        $code = $this->invoke($this->executeArgs());
+
+        self::assertSame(CosmwasmOneShotDiscoveryCommand::EXIT_NOT_ELIGIBLE, $code);
+
+        $output = \WP_CLI::output();
+        self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED is on', $output);
+        // And it says WHY the lock does not make this safe, because the
+        // next operator to hit it will reach for exactly that argument.
+        self::assertStringContainsString('immediately before', $output);
+        self::assertStringNotContainsString('BCC_COSMWASM_BACKFILL_ENABLED is on', $output);
+
+        $this->assertInertRun('the scheduled discovery gate is armed');
+        // The queued page is still unread: the refusal beat the network.
+        self::assertCount(1, ApiRetry::$queue);
+    }
+
+    /**
+     * Both gates refuse, and each names ITSELF.
+     *
+     * `backfillEnabled()` is AND-ed with `discoveryEnabled()`, so an armed
+     * backfill always implies an armed discovery gate. Checking discovery
+     * first would make the backfill branch unreachable — the message an
+     * operator needs ("turn the backfill off") would never print. This
+     * pins the order.
+     */
+    public function testTheBackfillRefusalIsNotShadowedByTheDiscoveryRefusal(): void
+    {
+        $this->arrange();
+        define('BCC_COSMWASM_DISCOVERY_ENABLED', true);
+        define('BCC_COSMWASM_BACKFILL_ENABLED', true);
+
+        $code = $this->invoke($this->executeArgs());
+
+        self::assertSame(CosmwasmOneShotDiscoveryCommand::EXIT_NOT_ELIGIBLE, $code);
+        $output = \WP_CLI::output();
+        self::assertStringContainsString('BCC_COSMWASM_BACKFILL_ENABLED is on', $output);
+        self::assertStringNotContainsString(
+            'BCC_COSMWASM_DISCOVERY_ENABLED is on',
+            $output,
+            'the more specific refusal wins, so the operator is told about the expensive pass'
+        );
+        $this->assertInertRun('both gates are armed');
     }
 
     /**
@@ -630,6 +705,86 @@ final class CosmwasmOneShotCliTest extends TestCase
         self::assertSame([], ChainCheckpointRepository::$rows, 'and writes nothing, not even a checkpoint row');
         self::assertSame([], ChainCheckpointRepository::$discoveryTouches);
         self::assertStringContainsString('"stop_reason": "lock_contended"', \WP_CLI::output());
+    }
+
+    /**
+     * THE LOCK IS RELEASED ON EVERY OUTCOME THAT TOOK IT.
+     *
+     * A `bcc_cosmwasm_chain_<id>` that is still held after the process
+     * exits is a chain that cron cannot scan again until the MySQL session
+     * dies — so "the unhappy paths release it too" is the assertion that
+     * matters, not the happy one. The release and the
+     * `cw_last_discovery_at` stamp both live in the `finally` of
+     * {@see CosmwasmDiscoveryWorker::runChainPass()}, and this drives two
+     * different unhappy outcomes through it in one process:
+     *
+     *   1. THE CHAIN REFUSED TO PREPARE (breaker open) — an early
+     *      `return` from INSIDE the try, which is the shape a `finally`
+     *      exists to catch and the shape a plain trailing release would
+     *      miss.
+     *   2. THE PASS THREW — a repository read fails after the lock is
+     *      held.
+     *
+     * Success is covered by {@see testItRunsExactlyOnePassPerInvocation()},
+     * budget exhaustion by
+     * {@see testABudgetExhaustedPassExitsWithItsOwnCode()}, and the
+     * never-acquired case by
+     * {@see testItRefusesWhileAPeerHoldsTheChainLock()}.
+     */
+    public function testTheChainLockIsReleasedWhenTheChainRefusesToPrepareAndWhenThePassThrows(): void
+    {
+        $this->arrange();
+
+        // ── 1. prepareChain() refuses: an early return inside the try ───
+        \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::$open = true;
+
+        $code = $this->invoke($this->executeArgs());
+
+        self::assertSame(CosmwasmOneShotDiscoveryCommand::EXIT_EXECUTION_FAILED, $code);
+        self::assertSame(['bcc_cosmwasm_chain_17'], \BCC\Core\DB\AdvisoryLock::$acquired);
+        self::assertSame(
+            ['bcc_cosmwasm_chain_17'],
+            \BCC\Core\DB\AdvisoryLock::$released,
+            'an early return from inside the try must still release the lock'
+        );
+        self::assertSame([self::CHAIN], ChainCheckpointRepository::$discoveryTouches);
+        self::assertSame([], ApiRetry::$calls, 'a chain that refused to prepare made no request');
+        self::assertStringContainsString('"stop_reason": "chain_refused_to_prepare"', \WP_CLI::output());
+
+        // ── 2. the pass THROWS, with the lock held ──────────────────────
+        \WP_CLI::reset();
+        ApiRetry::reset();
+        ChainCheckpointRepository::reset();
+        CosmwasmCodeFamilyRepository::reset();
+        \BCC\Core\DB\AdvisoryLock::reset();
+        \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::reset();
+        AuditLogger::reset();
+
+        // The first statement of the pass body fails its read. That is
+        // AFTER acquire() and INSIDE the try.
+        CosmwasmCodeFamilyRepository::$failReads = ['requeueForClassifierVersion'];
+        $this->queueOneCleanCodePage();
+
+        $code = $this->invoke($this->executeArgs());
+
+        self::assertSame(CosmwasmOneShotDiscoveryCommand::EXIT_EXECUTION_FAILED, $code);
+        self::assertSame(['bcc_cosmwasm_chain_17'], \BCC\Core\DB\AdvisoryLock::$acquired);
+        self::assertSame(
+            ['bcc_cosmwasm_chain_17'],
+            \BCC\Core\DB\AdvisoryLock::$released,
+            'a throw must not strand the chain lock'
+        );
+        self::assertSame([self::CHAIN], ChainCheckpointRepository::$discoveryTouches);
+        self::assertSame([], ApiRetry::$calls, 'it threw before the first request');
+
+        $output = \WP_CLI::output();
+        self::assertStringContainsString('"stop_reason": "execution_failed"', $output);
+        self::assertStringContainsString('"exit_code": 6', $output);
+        // The throw is durable too: the outcome is in the audit action.
+        self::assertSame(
+            ['cosmwasm_cli_pass_started', 'cosmwasm_cli_pass_failed'],
+            AuditLogger::actions()
+        );
     }
 
     // ── (g) exactly one pass ────────────────────────────────────────────
@@ -813,12 +968,27 @@ final class CosmwasmOneShotCliTest extends TestCase
      *
      * The comparison is a SEQUENCE, not a count: two paths that make the
      * same NUMBER of requests in a different ORDER are not the same pass.
+     *
+     * ── WHY THE GATE IS DEFINED HALFWAY THROUGH ─────────────────────────
+     * Each half runs under the gate setting its own caller REQUIRES, and
+     * they are opposites:
+     *
+     *   supervised → `BCC_COSMWASM_DISCOVERY_ENABLED` must be OFF (with it
+     *                on, cron is live and the command refuses — see
+     *                {@see testItRefusesWhileTheScheduledDiscoveryGateIsArmed()});
+     *   scheduled  → it must be ON, or `runDailyDiscovery()` returns
+     *                immediately and compares nothing.
+     *
+     * A constant cannot be undefined, so the supervised half runs FIRST
+     * and the constant is defined between the two. That is not a
+     * workaround — it is the real-world comparison: this is exactly the
+     * pair of environments the two callers run in, and the pass still has
+     * to be identical across them.
      */
     public function testTheSupervisedPassAndTheScheduledPassBehaveIdentically(): void
     {
         define('WP_CLI', true);
         define('BCC_COSMWASM_CHAIN_ALLOWLIST', (string) self::CHAIN);
-        define('BCC_COSMWASM_DISCOVERY_ENABLED', true);
 
         $fixtures = function (): void {
             $this->queueJson([
@@ -834,7 +1004,8 @@ final class CosmwasmOneShotCliTest extends TestCase
             $this->queueJson(['data' => ['name' => 'AshFall', 'symbol' => 'ASH']]);
         };
 
-        // ── the supervised path ─────────────────────────────────────────
+        // ── the supervised path, with the scheduled gate OFF ────────────
+        self::assertFalse(defined('BCC_COSMWASM_DISCOVERY_ENABLED'), 'the supervised half runs with cron inert');
         ChainRepository::seed(self::CHAIN, self::SLUG, self::REST, 'cosmos', 1);
         $fixtures();
         self::assertSame(
@@ -857,6 +1028,10 @@ final class CosmwasmOneShotCliTest extends TestCase
         ChainRepository::reset();
         \BCC\Core\DB\AdvisoryLock::reset();
         \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::reset();
+
+        // NOW arm the gate — the scheduled pass needs it, and the
+        // supervised half above has already run without it.
+        define('BCC_COSMWASM_DISCOVERY_ENABLED', true);
 
         ChainRepository::seed(self::CHAIN, self::SLUG, self::REST, 'cosmos', 1);
         $fixtures();
@@ -981,6 +1156,90 @@ final class CosmwasmOneShotCliTest extends TestCase
         self::assertStringContainsString('"stop_reason": "request_budget_exhausted"', \WP_CLI::output());
         // Progress is still durable — a cut-short pass resumes, it does not restart.
         self::assertSame([self::CHAIN], ChainCheckpointRepository::$discoveryTouches);
+        // And a pass that ran out of budget still gives the lock back —
+        // otherwise the next cron tick finds the chain held.
+        self::assertSame(['bcc_cosmwasm_chain_17'], \BCC\Core\DB\AdvisoryLock::$acquired);
+        self::assertSame(['bcc_cosmwasm_chain_17'], \BCC\Core\DB\AdvisoryLock::$released);
+    }
+
+    /**
+     * A CUT-SHORT PASS REPORTS WHAT IT ACTUALLY WROTE.
+     *
+     * Exit 5 is "there is more to do", not "nothing happened" — rows DID
+     * land before the budget ran out, and they are durable. The failure
+     * mode being guarded against is a summary that rounds an interrupted
+     * pass down to zero, or (worse) advances the watermark as though the
+     * walk had been authoritative: an operator who believes either one
+     * re-runs against a chain whose state is not what they were told.
+     *
+     * So the summary must say, on the same run: these families were
+     * inserted, the watermark did NOT move, and here is the reason the
+     * pass could not settle. Each number is checked against the
+     * repository state rather than against itself.
+     */
+    public function testPartialWritesBeforeBudgetExhaustionAreReportedHonestly(): void
+    {
+        $this->arrange();
+        define('BCC_COSMWASM_REQUEST_BUDGET', 1);
+
+        // One page of three NEW code ids, and more behind it — so the
+        // single request inserts three rows and still cannot reach the
+        // watermark at 100.
+        $this->queueJson([
+            'code_infos' => [
+                ['code_id' => '900', 'data_hash' => 'AA'],
+                ['code_id' => '899', 'data_hash' => 'BB'],
+                ['code_id' => '898', 'data_hash' => 'CC'],
+            ],
+            'pagination' => ['next_key' => 'MORE=='],
+        ]);
+        ChainCheckpointRepository::ensureExists(self::CHAIN);
+        ChainCheckpointRepository::$rows[self::CHAIN]->cw_max_code_id = '100';
+
+        $code = $this->invoke($this->executeArgs());
+
+        self::assertSame(CosmwasmOneShotDiscoveryCommand::EXIT_BUDGET_EXHAUSTED, $code);
+
+        // The writes are REAL: three families are in the inventory.
+        foreach ([900, 899, 898] as $codeId) {
+            self::assertNotNull(
+                CosmwasmCodeFamilyRepository::find(self::CHAIN, $codeId),
+                sprintf('code family %d was written before the budget ran out', $codeId)
+            );
+        }
+
+        $output = \WP_CLI::output();
+        $start  = strpos($output, '{');
+        self::assertIsInt($start);
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode(substr($output, $start, (int) strrpos($output, '}') - $start + 1), true);
+        self::assertIsArray($decoded);
+
+        // …and the summary says so, in the same numbers.
+        self::assertSame('request_budget_exhausted', $decoded['stop_reason']);
+        self::assertSame(5, $decoded['exit_code']);
+        self::assertSame('ran', $decoded['outcome'], 'the pass RAN — it was cut short, it did not fail');
+        self::assertIsArray($decoded['code_families']);
+        self::assertSame(3, $decoded['code_families']['inserted'], 'the partial write is reported, not rounded to zero');
+        self::assertSame(3, $decoded['code_families']['after']);
+
+        // The watermark did NOT move, because the walk never reached it —
+        // and the summary must not claim otherwise.
+        self::assertIsArray($decoded['watermark']);
+        self::assertSame(100, $decoded['watermark']['before']);
+        self::assertSame(100, $decoded['watermark']['after']);
+        self::assertSame(0, $decoded['watermark']['moved']);
+        self::assertSame([], ChainCheckpointRepository::$watermarkAdvances);
+
+        // And the reason is stated rather than left to be inferred.
+        self::assertIsArray($decoded['errors']);
+        self::assertNotSame([], $decoded['errors'], 'an interrupted walk must say why it could not settle');
+        self::assertStringContainsString('watermark', strtolower((string) $decoded['errors'][0]));
+        self::assertIsArray($decoded['requests']);
+        self::assertSame(1, $decoded['requests']['used']);
+        self::assertSame(0, $decoded['requests']['remaining']);
+        self::assertIsArray($decoded['collections']);
+        self::assertSame(0, $decoded['collections']['emitted']);
     }
 
     /** The docblock has to carry the expectation an operator will misread. */
