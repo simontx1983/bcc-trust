@@ -2028,6 +2028,18 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust vmq',
         \BCC\Trust\Onchain\CLI\ValidatorMsgQueueCommand::class
     );
+    // ONE supervised CosmWasm discovery pass, for ONE chain, watched by a
+    // human. THIS IS THE ONLY ENTRY POINT IT HAS: there is deliberately no
+    // REST route, no admin-post handler, no AJAX action and no cron hook
+    // that reaches CosmwasmOneShotDiscoveryCommand. The reason it exists
+    // is that arming BCC_COSMWASM_DISCOVERY_ENABLED also arms three
+    // scheduled hooks that then fire unsupervised, and unscheduling them
+    // does not hold — CosmwasmDiscoveryWorker::register() runs on
+    // plugins_loaded and reschedules anything missing.
+    \WP_CLI::add_command(
+        'bcc-trust cosmwasm',
+        \BCC\Trust\Onchain\CLI\CosmwasmOneShotDiscoveryCommand::class
+    );
 }
 
 /*

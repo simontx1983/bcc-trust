@@ -287,9 +287,24 @@ namespace BCC\Trust\Onchain\Repositories {
                 return true;
             }
 
-            /** @param list<string>|null $affected */
+            /**
+             * Armable, like the aggregate reads above.
+             *
+             * This one is the FIRST statement of the daily pass body, so
+             * arming it is how a test reproduces "the pass threw AFTER the
+             * advisory lock was taken" — the case that proves the `finally`
+             * in CosmwasmDiscoveryWorker::runChainPass() really does
+             * release the lock and stamp the chain on the throwing path.
+             * No production behaviour changes: it only throws when a test
+             * puts this method name in $failReads, and nothing does by
+             * default.
+             *
+             * @param list<string>|null $affected
+             */
             public static function requeueForClassifierVersion(int $chainId, int $classifierVersion, int $limit, ?array $affected = null): int
             {
+                self::failIfArmed(__FUNCTION__);
+
                 $affected = $affected ?? \BCC\Trust\Onchain\Services\CosmwasmClassifier::requeueableClassifications();
                 self::$requeues[] = ['chain_id' => $chainId, 'version' => $classifierVersion, 'affected' => $affected];
 

@@ -12,6 +12,7 @@ use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
+use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
 use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
@@ -51,6 +52,18 @@ if (!defined('ABSPATH')) {
  * durable inventory row IS the memory, and every work query filters on
  * it. A classifier-version bump requeues ONLY the explicitly-affected
  * classifications (never settled negatives).
+ *
+ * ── AND ONE NON-PASS: THE SUPERVISED ONE-SHOT ───────────────────────────
+ * {@see runSupervisedSingleChainPass()} is NOT a fifth pass. It is the
+ * DAILY pass ({@see dailyChainStep()}) inside the SAME per-chain envelope
+ * ({@see runChainPass()}), for one chain, once, driven from WP-CLI by a
+ * human who is watching. It exists because there was otherwise no way to
+ * run exactly one supervised pass: defining
+ * `BCC_COSMWASM_DISCOVERY_ENABLED` arms three scheduled hooks, and
+ * unscheduling them does not hold — {@see register()} runs on
+ * `plugins_loaded`, i.e. on every request, and re-adds anything missing.
+ * It reaches NO other pass: not the backfill, not the weekly retry, not
+ * the monthly metadata refresh.
  *
  * ── OPERATIONAL SHAPE (copied from {@see NftEthIndexerWorker}) ──────────
  *   - {@see CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS} wall-clock
@@ -387,114 +400,150 @@ final class CosmwasmDiscoveryWorker
         }
 
         self::forEachChain(static function (int $chainId, CosmosFetcher $fetcher, CosmwasmTickBudget $budget): void {
-            // A classifier-version bump requeues ONLY the affected
-            // classifications. Settled `not_cw721` is excluded by the
-            // default affected set, so a version bump never resurrects a
-            // family we already ruled out.
-            CosmwasmCodeFamilyRepository::requeueForClassifierVersion(
-                $chainId,
-                CosmwasmClassifier::VERSION,
-                self::REQUEUE_PER_PASS
-            );
-            CosmwasmContractRepository::requeueForClassifierVersion(
-                $chainId,
-                CosmwasmClassifier::VERSION,
-                self::REQUEUE_PER_PASS
-            );
+            self::dailyChainStep($chainId, $fetcher, $budget);
+        });
+    }
 
-            // (a) newly-uploaded code ids — a REVERSE walk against the
-            //     numeric watermark. Newest-first, stop at the first
-            //     `code_id <= cw_max_code_id`. Typical daily cost: ONE
-            //     request per chain.
-            //
-            //     This replaced an offset tail read that was MEASURED
-            //     broken on cosmoshub, juno, osmosis and injective (a
-            //     non-zero offset returns an empty 200 — see
-            //     CosmosFetcher::listCodeFamilies). Do not reintroduce it.
-            $checkpoint = ChainCheckpointRepository::get($chainId);
-            $watermark  = $checkpoint !== null ? (int) $checkpoint->cw_max_code_id : 0;
+    /**
+     * THE CANONICAL INCREMENTAL PASS, for ONE chain.
+     *
+     * Extracted from {@see runDailyDiscovery()}'s closure so that exactly
+     * one body of code defines what "a discovery pass" means, and both
+     * callers reach it:
+     *
+     *   - the SCHEDULED daily hook, via {@see forEachChain()};
+     *   - the SUPERVISED operator one-shot, via
+     *     {@see runSupervisedSingleChainPass()}.
+     *
+     * There is deliberately NO second implementation for the supervised
+     * path. A hand-written "just run the important bits" variant is how
+     * an operator ends up watching something that is not the thing cron
+     * runs, and concluding from it.
+     *
+     * ── EMISSION IS PART OF THIS PASS ───────────────────────────────────
+     * Step (c)+(d) is {@see classifyAndEnumerate()}, which ENDS with
+     * {@see CosmwasmDiscoveryService::emitCollections()}. Emission is not
+     * separable from the canonical pass and no caller may ask for the
+     * pass without it.
+     *
+     * @param ?CosmwasmPassReport $report OPTIONAL write-only telemetry.
+     *                                    Null on every scheduled path.
+     */
+    private static function dailyChainStep(
+        int $chainId,
+        CosmosFetcher $fetcher,
+        CosmwasmTickBudget $budget,
+        ?CosmwasmPassReport $report = null
+    ): void {
+        // A classifier-version bump requeues ONLY the affected
+        // classifications. Settled `not_cw721` is excluded by the
+        // default affected set, so a version bump never resurrects a
+        // family we already ruled out.
+        CosmwasmCodeFamilyRepository::requeueForClassifierVersion(
+            $chainId,
+            CosmwasmClassifier::VERSION,
+            self::REQUEUE_PER_PASS
+        );
+        CosmwasmContractRepository::requeueForClassifierVersion(
+            $chainId,
+            CosmwasmClassifier::VERSION,
+            self::REQUEUE_PER_PASS
+        );
 
-            $tail = CosmwasmDiscoveryService::ingestNewCodeFamilies(
+        // (a) newly-uploaded code ids — a REVERSE walk against the
+        //     numeric watermark. Newest-first, stop at the first
+        //     `code_id <= cw_max_code_id`. Typical daily cost: ONE
+        //     request per chain.
+        //
+        //     This replaced an offset tail read that was MEASURED
+        //     broken on cosmoshub, juno, osmosis and injective (a
+        //     non-zero offset returns an empty 200 — see
+        //     CosmosFetcher::listCodeFamilies). Do not reintroduce it.
+        $checkpoint = ChainCheckpointRepository::get($chainId);
+        $watermark  = $checkpoint !== null ? (int) $checkpoint->cw_max_code_id : 0;
+
+        $tail = CosmwasmDiscoveryService::ingestNewCodeFamilies(
+            $chainId,
+            $fetcher,
+            $watermark,
+            $budget,
+            CosmwasmDiscoveryGate::CODE_TAIL_MAX_PAGES
+        );
+        $report?->addCodePages($tail['pages']);
+
+        if (!$tail['ok']) {
+            $report?->addError('code tail read failed: ' . $tail['message']);
+            if (CosmwasmDiscoveryService::isUnsupportedChainError($tail['error_kind'], $tail['http_code'])) {
+                ChainCheckpointRepository::setCwDiscoveryState(
+                    $chainId,
+                    ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                    'wasm module not available (HTTP ' . $tail['http_code'] . ')'
+                );
+
+                return;
+            }
+            // Transport/node failure — retried next pass, nothing settled.
+            OnchainCircuitBreaker::recordFailure($chainId);
+        } elseif ($tail['reached_watermark']) {
+            // AUTHORITATIVE: the walk actually met the watermark (or the
+            // chain has nothing more), so the contiguous high-water mark
+            // may move.
+            if ($tail['newest_code_id'] > 0) {
+                ChainCheckpointRepository::advanceCwCodeWatermark($chainId, $tail['newest_code_id']);
+            }
+        } else {
+            // NOT AUTHORITATIVE. Either the page budget ran out before
+            // the watermark, or the read came back empty while we KNOW
+            // code ids exist. Advancing the watermark here would strand
+            // every id between it and this walk's lowest page, and
+            // calling it "nothing new" would be exactly the fake-healthy
+            // failure the offset bug had. Hand the catch-up to the
+            // historical backfill and leave the chain visibly degraded.
+            $anomaly = $tail['anomaly']
+                ? 'incremental reverse read returned an empty page despite a non-zero watermark'
+                : 'incremental reverse read did not reach the watermark within its page budget';
+            ChainCheckpointRepository::requestCwBackfillRestart($chainId, $anomaly);
+            $report?->addError($anomaly);
+            \BCC\Core\Log\Logger::warning('[CosmwasmDiscoveryWorker] incremental code tail did not reach the watermark', [
+                'chain_id'  => $chainId,
+                'watermark' => $watermark,
+                'pages'     => $tail['pages'],
+                'ingested'  => $tail['ingested'],
+                'lowest'    => $tail['lowest_code_id'],
+                'anomaly'   => $tail['anomaly'],
+            ]);
+        }
+
+        // (b) new contracts under CONFIRMED/PROBABLE families whose
+        //     forward walk already DRAINED — a reverse tail stopping at
+        //     the first already-inventoried address. Families still
+        //     mid-walk are left to the forward cursor in (c). Settled
+        //     `not_cw721` families are excluded by the query, so they
+        //     are never re-walked.
+        $families = CosmwasmCodeFamilyRepository::findEnumerable(
+            $chainId,
+            self::FAMILIES_ENUMERATED_PER_PASS,
+            false
+        );
+        foreach ($families as $family) {
+            if ($budget->exhausted()) {
+                break;
+            }
+            if ((int) $family->enumeration_complete !== 1) {
+                continue; // Still draining — (c) continues its cursor.
+            }
+            $enumerated = CosmwasmDiscoveryService::enumerateFamilyTail(
                 $chainId,
                 $fetcher,
-                $watermark,
+                $family,
                 $budget,
-                CosmwasmDiscoveryGate::CODE_TAIL_MAX_PAGES
+                CosmwasmDiscoveryGate::CONTRACT_TAIL_MAX_PAGES
             );
+            $report?->addContractPages($enumerated['pages']);
+        }
 
-            if (!$tail['ok']) {
-                if (CosmwasmDiscoveryService::isUnsupportedChainError($tail['error_kind'], $tail['http_code'])) {
-                    ChainCheckpointRepository::setCwDiscoveryState(
-                        $chainId,
-                        ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
-                        'wasm module not available (HTTP ' . $tail['http_code'] . ')'
-                    );
-
-                    return;
-                }
-                // Transport/node failure — retried next pass, nothing settled.
-                OnchainCircuitBreaker::recordFailure($chainId);
-            } elseif ($tail['reached_watermark']) {
-                // AUTHORITATIVE: the walk actually met the watermark (or the
-                // chain has nothing more), so the contiguous high-water mark
-                // may move.
-                if ($tail['newest_code_id'] > 0) {
-                    ChainCheckpointRepository::advanceCwCodeWatermark($chainId, $tail['newest_code_id']);
-                }
-            } else {
-                // NOT AUTHORITATIVE. Either the page budget ran out before
-                // the watermark, or the read came back empty while we KNOW
-                // code ids exist. Advancing the watermark here would strand
-                // every id between it and this walk's lowest page, and
-                // calling it "nothing new" would be exactly the fake-healthy
-                // failure the offset bug had. Hand the catch-up to the
-                // historical backfill and leave the chain visibly degraded.
-                ChainCheckpointRepository::requestCwBackfillRestart(
-                    $chainId,
-                    $tail['anomaly']
-                        ? 'incremental reverse read returned an empty page despite a non-zero watermark'
-                        : 'incremental reverse read did not reach the watermark within its page budget'
-                );
-                \BCC\Core\Log\Logger::warning('[CosmwasmDiscoveryWorker] incremental code tail did not reach the watermark', [
-                    'chain_id'  => $chainId,
-                    'watermark' => $watermark,
-                    'pages'     => $tail['pages'],
-                    'ingested'  => $tail['ingested'],
-                    'lowest'    => $tail['lowest_code_id'],
-                    'anomaly'   => $tail['anomaly'],
-                ]);
-            }
-
-            // (b) new contracts under CONFIRMED/PROBABLE families whose
-            //     forward walk already DRAINED — a reverse tail stopping at
-            //     the first already-inventoried address. Families still
-            //     mid-walk are left to the forward cursor in (c). Settled
-            //     `not_cw721` families are excluded by the query, so they
-            //     are never re-walked.
-            $families = CosmwasmCodeFamilyRepository::findEnumerable(
-                $chainId,
-                self::FAMILIES_ENUMERATED_PER_PASS,
-                false
-            );
-            foreach ($families as $family) {
-                if ($budget->exhausted()) {
-                    break;
-                }
-                if ((int) $family->enumeration_complete !== 1) {
-                    continue; // Still draining — (c) continues its cursor.
-                }
-                CosmwasmDiscoveryService::enumerateFamilyTail(
-                    $chainId,
-                    $fetcher,
-                    $family,
-                    $budget,
-                    CosmwasmDiscoveryGate::CONTRACT_TAIL_MAX_PAGES
-                );
-            }
-
-            // (c) + (d)
-            self::classifyAndEnumerate($chainId, $fetcher, $budget);
-        });
+        // (c) + (d)
+        self::classifyAndEnumerate($chainId, $fetcher, $budget, $report);
     }
 
     // ── Pass 3: weekly retry ────────────────────────────────────────────
@@ -583,7 +632,8 @@ final class CosmwasmDiscoveryWorker
     private static function classifyAndEnumerate(
         int $chainId,
         CosmosFetcher $fetcher,
-        CosmwasmTickBudget $budget
+        CosmwasmTickBudget $budget,
+        ?CosmwasmPassReport $report = null
     ): void {
         $priority = CosmwasmDiscoveryGate::priorityCodeIds(self::chainSlug($chainId));
 
@@ -598,6 +648,7 @@ final class CosmwasmDiscoveryWorker
                 break;
             }
             CosmwasmDiscoveryService::classifyFamily($chainId, $fetcher, $family, $budget);
+            $report?->countFamilyClassified();
         }
 
         // Drain contract listings for families that ARE CW-721.
@@ -611,6 +662,7 @@ final class CosmwasmDiscoveryWorker
                 break;
             }
             CosmwasmDiscoveryService::enumerateFamilyPage($chainId, $fetcher, $family, $budget);
+            $report?->addContractPages(1);
         }
 
         $contracts = CosmwasmContractRepository::findPendingClassification(
@@ -623,10 +675,12 @@ final class CosmwasmDiscoveryWorker
                 break;
             }
             CosmwasmDiscoveryService::classifyContract($chainId, $fetcher, $row, $budget);
+            $report?->countContractClassified();
         }
 
         if (!$budget->exhausted()) {
-            CosmwasmDiscoveryService::emitCollections($chainId, $fetcher, $budget, self::EMIT_PER_PASS);
+            $emitted = CosmwasmDiscoveryService::emitCollections($chainId, $fetcher, $budget, self::EMIT_PER_PASS);
+            $report?->addEmitted($emitted['emitted'], $emitted['denied']);
         }
     }
 
@@ -637,7 +691,9 @@ final class CosmwasmDiscoveryWorker
      * Every chain gets its own advisory lock, its own try/catch, and its
      * own `cw_last_discovery_at` stamp — that stamp is what stops a
      * broken chain from being re-picked first forever and starving the
-     * rest.
+     * rest. All three live in {@see runChainPass()}, which is also what
+     * the supervised one-shot calls, so the loop and the operator run
+     * cannot diverge on any of them.
      *
      * @param callable(int, CosmosFetcher, CosmwasmTickBudget): void $step
      */
@@ -658,38 +714,173 @@ final class CosmwasmDiscoveryWorker
                 break;
             }
 
+            self::runChainPass($chainId, $step, $budget);
+        }
+    }
+
+    // ── The outcome of ONE chain's pass ─────────────────────────────────
+    //
+    // The scheduled loop ignores these — it isolates failures and moves
+    // on. The SUPERVISED one-shot maps them onto process exit codes, so
+    // an operator (or a script) can tell "another worker holds the lock"
+    // apart from "the chain refused to prepare" apart from "the pass
+    // threw". They are constants on the worker rather than on the CLI
+    // command because the worker is what produces them.
+
+    /** The step ran. It may still have been cut short by its budget. */
+    public const PASS_RAN = 'ran';
+
+    /** A concurrent holder has the per-chain advisory lock. Nothing ran. */
+    public const PASS_LOCKED = 'locked';
+
+    /** {@see prepareChain()} refused: paused, unsupported, breaker open, no driver. */
+    public const PASS_SKIPPED = 'skipped';
+
+    /** The step threw. Recorded on the row; the throw does not escape. */
+    public const PASS_FAILED = 'failed';
+
+    /**
+     * ONE chain's pass — THE single implementation of the per-chain
+     * envelope, and the reason there is no second one.
+     *
+     * Lock, prepare, run, circuit breaker, and the `finally` that stamps
+     * `cw_last_discovery_at` and releases the lock: every caller gets all
+     * of it or none of it. {@see forEachChain()} calls this in a loop;
+     * {@see runSupervisedSingleChainPass()} calls it exactly once. Neither
+     * of them owns a copy.
+     *
+     * ── ORDERING: NOTHING IS WRITTEN BEFORE THE LOCK ────────────────────
+     * `ensureExists()` used to run BEFORE `acquire()`, which meant a chain
+     * whose lock was held by a peer still had a checkpoint row upserted by
+     * the loser. It is now inside the lock. Behaviour on the ACQUIRED path
+     * is unchanged, because {@see prepareChain()} calls `ensureExists()` as
+     * its own first statement — the pre-lock call was always redundant
+     * there, and only ever observable on the path that does no work.
+     *
+     * @param callable(int, CosmosFetcher, CosmwasmTickBudget): void $step
+     * @return string one of the PASS_* constants
+     */
+    private static function runChainPass(int $chainId, callable $step, CosmwasmTickBudget $budget): string
+    {
+        $lockKey = self::ADVISORY_LOCK_PREFIX . $chainId;
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
+            return self::PASS_LOCKED;
+        }
+
+        $outcome = self::PASS_RAN;
+
+        try {
             ChainCheckpointRepository::ensureExists($chainId);
 
-            $lockKey = self::ADVISORY_LOCK_PREFIX . $chainId;
-            if (!\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
-                continue;
+            $context = self::prepareChain($chainId);
+            if ($context === null) {
+                return self::PASS_SKIPPED;
             }
-
-            try {
-                $context = self::prepareChain($chainId);
-                if ($context === null) {
-                    continue;
-                }
-                $step($chainId, $context['fetcher'], $budget);
-                OnchainCircuitBreaker::recordSuccess($chainId);
-            } catch (\Throwable $e) {
-                // FAILURE ISOLATION: one broken chain must not stop the
-                // others, so the throw dies here and the loop continues.
-                \BCC\Core\Log\Logger::error('[CosmwasmDiscoveryWorker] chain pass failed', [
-                    'chain_id' => $chainId,
-                    'error'    => $e->getMessage(),
-                ]);
-                OnchainCircuitBreaker::recordFailure($chainId);
-                ChainCheckpointRepository::setCwDiscoveryState(
-                    $chainId,
-                    ChainCheckpointRepository::CW_STATE_BACKFILLING,
-                    CosmwasmClassifier::sanitizeExcerpt($e->getMessage())
-                );
-            } finally {
-                ChainCheckpointRepository::touchCwDiscovery($chainId);
-                \BCC\Core\DB\AdvisoryLock::release($lockKey);
-            }
+            $step($chainId, $context['fetcher'], $budget);
+            OnchainCircuitBreaker::recordSuccess($chainId);
+        } catch (\Throwable $e) {
+            // FAILURE ISOLATION: one broken chain must not stop the
+            // others, so the throw dies here and the loop continues.
+            $outcome = self::PASS_FAILED;
+            \BCC\Core\Log\Logger::error('[CosmwasmDiscoveryWorker] chain pass failed', [
+                'chain_id' => $chainId,
+                'error'    => $e->getMessage(),
+            ]);
+            OnchainCircuitBreaker::recordFailure($chainId);
+            ChainCheckpointRepository::setCwDiscoveryState(
+                $chainId,
+                ChainCheckpointRepository::CW_STATE_BACKFILLING,
+                CosmwasmClassifier::sanitizeExcerpt($e->getMessage())
+            );
+        } finally {
+            ChainCheckpointRepository::touchCwDiscovery($chainId);
+            \BCC\Core\DB\AdvisoryLock::release($lockKey);
         }
+
+        return $outcome;
+    }
+
+    // ── The supervised operator one-shot ────────────────────────────────
+
+    /**
+     * EXACTLY ONE incremental discovery pass, for EXACTLY ONE chain,
+     * driven by a human at a terminal.
+     *
+     * ── WHY THIS EXISTS ─────────────────────────────────────────────────
+     * There was no way to run one supervised pass. Defining
+     * `BCC_COSMWASM_DISCOVERY_ENABLED` arms three scheduled hooks, and
+     * unscheduling them does not hold: {@see register()} runs on
+     * `plugins_loaded` — every request — and re-adds anything missing. So
+     * the only ways to see a pass were "arm cron and hope" or "write a
+     * second implementation", and the second one is how an operator ends
+     * up watching something that is not what cron runs.
+     *
+     * ── WHAT IT IS NOT ──────────────────────────────────────────────────
+     * It is NOT a fifth pass. It runs {@see dailyChainStep()} — the same
+     * body {@see runDailyDiscovery()} runs — inside {@see runChainPass()}
+     * — the same envelope {@see forEachChain()} uses. It cannot reach the
+     * backfill, the weekly retry or the monthly metadata pass: those are
+     * other methods and this one does not name them.
+     *
+     * ── AUTHORIZATION IS THE CALLER'S JOB, AND IT IS STRICTER ───────────
+     * This method deliberately does NOT check
+     * {@see CosmwasmDiscoveryGate::discoveryEnabled()} — bypassing that
+     * one constant is the entire point of a supervised run. EVERY other
+     * condition still applies and is enforced by the CLI command before it
+     * gets here, via {@see isChainScannable()} — which is membership in
+     * the very set the scheduled passes walk, so this path can never be
+     * more permissive than cron.
+     *
+     * And the bypass is ONE-DIRECTIONAL: the caller runs this while the
+     * constant is OFF and REFUSES while it is ON, because an armed
+     * constant means the hooks above are live and a scheduled pass can
+     * fire immediately before or after this one. The per-chain lock in
+     * {@see runChainPass()} excludes SIMULTANEOUS execution and nothing
+     * else, so it is not a substitute for that refusal.
+     *
+     * @param CosmwasmPassReport $report write-only telemetry for the summary
+     * @return string one of the PASS_* constants
+     */
+    public static function runSupervisedSingleChainPass(
+        int $chainId,
+        CosmwasmTickBudget $budget,
+        CosmwasmPassReport $report
+    ): string {
+        if ($chainId <= 0) {
+            return self::PASS_SKIPPED;
+        }
+
+        return self::runChainPass(
+            $chainId,
+            static function (int $id, CosmosFetcher $fetcher, CosmwasmTickBudget $tickBudget) use ($report): void {
+                self::dailyChainStep($id, $fetcher, $tickBudget, $report);
+            },
+            $budget
+        );
+    }
+
+    /**
+     * Is this ONE chain in the set the scheduled passes would walk?
+     *
+     * ── MEMBERSHIP, NOT A RE-DERIVATION ─────────────────────────────────
+     * Implemented as `in_array($chainId, eligibleChainIds())` on purpose.
+     * The obvious alternative — ask
+     * {@see CosmwasmScanEligibility::verdict()} directly with facts
+     * gathered here — would be a THIRD place that knows how to resolve
+     * those facts, and the two prior times this rule was maintained in two
+     * places they drifted inside a fortnight. Asking the production
+     * selector for the production set and testing membership cannot drift,
+     * and cannot be more permissive than cron by construction.
+     *
+     * Public only so the supervised CLI command can gate on it.
+     */
+    public static function isChainScannable(int $chainId): bool
+    {
+        if ($chainId <= 0) {
+            return false;
+        }
+
+        return in_array($chainId, self::eligibleChainIds(), true);
     }
 
     /**
