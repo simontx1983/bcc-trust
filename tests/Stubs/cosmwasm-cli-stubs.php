@@ -42,6 +42,37 @@ namespace {
         }
     }
 
+    if (!class_exists('BccTestCliRunner', false)) {
+        /**
+         * The sliver of `WP_CLI::get_runner()` the REAL dispatcher touches.
+         *
+         * {@see \WP_CLI\Dispatcher\CompositeCommand::__construct()} calls
+         * `WP_CLI::get_runner()->register_early_invoke()` whenever the
+         * docblock it is handed carries a `@when` tag — and the CosmWasm
+         * command's `run()` carries `@when after_wp_load`. So a test that
+         * builds the command through WP-CLI's own
+         * {@see \WP_CLI\Dispatcher\CommandFactory} (rather than
+         * re-implementing what WP-CLI would have done) needs this to exist.
+         * It records rather than ignores, so the hook is assertable.
+         */
+        final class BccTestCliRunner
+        {
+            /** @var list<string> every `@when` tag the dispatcher registered. */
+            public static array $earlyInvokes = [];
+
+            public static function reset(): void
+            {
+                self::$earlyInvokes = [];
+            }
+
+            /** @param mixed $command */
+            public function register_early_invoke(string $when, $command): void
+            {
+                self::$earlyInvokes[] = $when;
+            }
+        }
+    }
+
     if (!class_exists('WP_CLI', false)) {
         /** Recording WP-CLI double. */
         final class WP_CLI
@@ -68,6 +99,16 @@ namespace {
                 self::$errors    = [];
                 self::$successes = [];
                 self::$commands  = [];
+                \BccTestCliRunner::reset();
+            }
+
+            /**
+             * Only ever called by WP-CLI's own dispatcher, for `@when`.
+             * See {@see \BccTestCliRunner}.
+             */
+            public static function get_runner(): \BccTestCliRunner
+            {
+                return new \BccTestCliRunner();
             }
 
             public static function log(string $message): void

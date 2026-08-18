@@ -217,9 +217,23 @@ final class CosmwasmOneShotDiscoveryCommand
      * : REQUIRED. The numeric `wp_bcc_chains.id` to scan. Exactly one.
      *   There is no "all chains", no list, no wildcard and no default.
      *
-     * --once
+     * [--once]
      * : REQUIRED. An explicit acknowledgement that this runs the pass
      *   exactly once and then stops. Must be the bare flag.
+     *
+     *   THE BRACKETS ARE WP-CLI GRAMMAR, NOT POLICY — DO NOT "TIDY" THE
+     *   REQUIREMENT AWAY BECAUSE OF THEM. WP-CLI's synopsis grammar has no
+     *   form for a MANDATORY bare flag: {@see \WP_CLI\SynopsisParser::parse()}
+     *   retypes any non-optional `flag` token to `unknown`, the declaration
+     *   is then discarded, and `--once` comes back out of
+     *   {@see \WP_CLI\SynopsisValidator::unknown_assoc()} as an unrecognised
+     *   parameter. Declaring it `--once` therefore made EVERY invocation die
+     *   at WP-CLI's argument layer ("unknown --once parameter") before this
+     *   method was ever entered. `[--once]` only tells the PARSER the flag
+     *   may be absent; it is this command that decides absence is an error,
+     *   and it still refuses with EXIT_INVALID_ARGS (2) — see
+     *   {@see self::parseInvocation()}. Pinned by
+     *   CosmwasmCliSynopsisTest, which fails if the brackets come off.
      *
      * [--confirm=<token>]
      * : The chain-specific execution token, `<slug>-<id>` (Dungeon Chain
