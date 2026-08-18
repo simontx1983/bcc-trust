@@ -40,10 +40,24 @@ class ChainsPage
         );
     }
 
+    /** admin-post action for the Identity editor (Batch 1: PRG). */
+    public const ACTION_IDENTITY_SAVE = 'bcc_chain_identity_save';
+
     public static function register_ajax(): void
     {
         add_action('wp_ajax_bcc_chain_refresh', [self::class, 'ajax_refresh']);
         add_action('wp_ajax_bcc_collection_refresh', [self::class, 'ajax_collection_refresh']);
+    }
+
+    /**
+     * Batch 1: the Identity editor posted back to the page and rendered its
+     * notice inline, so a refresh re-triggered the browser's resubmit dialog
+     * and could re-run the write. It now goes through admin-post.php and
+     * redirects, and the notice is rebuilt from the redirect args.
+     */
+    public static function register_actions(): void
+    {
+        add_action('admin_post_' . self::ACTION_IDENTITY_SAVE, [self::class, 'handle_identity_save']);
     }
 
     // ── AJAX: Validator Refresh ─────────────────────────────────────────────
@@ -124,6 +138,17 @@ class ChainsPage
 
             $stats['enriched'] = 0;
 
+            AdminActionSupport::audit(
+                'admin_chain_validators_refreshed',
+                'chain',
+                $chainId,
+                [
+                    'total'   => (int) $stats['total'],
+                    'new'     => (int) $stats['new'],
+                    'updated' => (int) $stats['updated'],
+                ]
+            );
+
             wp_send_json_success([
                 'message' => sprintf(
                     '%s: %d indexed (%d new, %d updated). %s',
@@ -137,7 +162,18 @@ class ChainsPage
                 'scheduled' => (bool) $scheduled,
             ]);
         } catch (\Throwable $e) {
-            wp_send_json_error(['message' => $chain->name . ': ' . $e->getMessage()]);
+            // Raw Throwable text used to be painted straight into the page —
+            // it can carry SQL fragments and absolute paths.
+            $correlationId = AdminActionSupport::failure(
+                $e,
+                'admin_chain_validators_refresh_failed',
+                'chain',
+                $chainId,
+                ['chain' => (string) $chain->name]
+            );
+            wp_send_json_error([
+                'message' => $chain->name . ': ' . AdminActionSupport::failureMessage($correlationId),
+            ]);
         }
     }
 
@@ -186,12 +222,28 @@ class ChainsPage
 
             $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
 
+            AdminActionSupport::audit(
+                'admin_chain_collections_refreshed',
+                'chain',
+                $chainId,
+                ['total' => (int) $count]
+            );
+
             wp_send_json_success([
                 'message' => sprintf('%s: %d collections indexed.', $chain->name, $count),
                 'stats'   => ['total' => $count],
             ]);
         } catch (\Throwable $e) {
-            wp_send_json_error(['message' => $chain->name . ': ' . $e->getMessage()]);
+            $correlationId = AdminActionSupport::failure(
+                $e,
+                'admin_chain_collections_refresh_failed',
+                'chain',
+                $chainId,
+                ['chain' => (string) $chain->name]
+            );
+            wp_send_json_error([
+                'message' => $chain->name . ': ' . AdminActionSupport::failureMessage($correlationId),
+            ]);
         }
     }
 
@@ -199,9 +251,20 @@ class ChainsPage
 
     public static function render_page(): void
     {
-        // Handle an Identity-editor POST BEFORE reading chains, so the table
-        // re-renders with the saved values (updateIdentity busts the cache).
-        $notice = self::handle_identity_save();
+        // Defense in depth: add_submenu_page() already gates on this
+        // capability, but relying on menu registration alone was the gap
+        // every sibling page had already closed.
+        if (!current_user_can('manage_options')) {
+            wp_die(
+                esc_html__('Sorry, you are not allowed to access this page.', 'bcc-trust'),
+                esc_html__('Forbidden', 'bcc-trust'),
+                ['response' => 403]
+            );
+        }
+
+        // Identity saves now redirect here after writing (PRG), so the notice
+        // is rebuilt from the redirect args rather than from a live POST.
+        $notice = self::identity_notice_from_query();
 
         $chains         = ChainRepository::getAll();
         $valCountMap    = ValidatorRepository::getCountsByChain();
@@ -221,50 +284,9 @@ class ChainsPage
                 </div>
             <?php endif; ?>
 
-            <?php
-            // "Run cron now" — manual trigger for the all-chains indexers. Reuses
-            // the existing admin_init handler at bcc-trust.php:878-905 which routes
-            // through ChainRefreshService::index_validators / index_collections /
-            // refresh_validators. Those paths call OnchainCircuitBreaker::recordSuccess()
-            // on success, which clears the "Chain data is stale" admin notice that
-            // fires from bcc-trust.php:1505. Synchronous run; first invocation can
-            // be slow while every active chain's fetcher is exercised.
-            //
-            // Note: the per-chain AJAX "Refresh" buttons further down call the
-            // fetchers directly without going through ChainRefreshService, so they
-            // do NOT clear the staleness notice. Use these top-of-page buttons for
-            // that.
-            $runAllUrl    = wp_nonce_url(
-                admin_url('admin.php?page=' . self::PAGE_SLUG . '&bcc_run_index_all=1'),
-                'bcc_onchain_admin_trigger'
-            );
-            $runValUrl    = wp_nonce_url(
-                admin_url('admin.php?page=' . self::PAGE_SLUG . '&bcc_run_index_validators=1'),
-                'bcc_onchain_admin_trigger'
-            );
-            $runCollUrl   = wp_nonce_url(
-                admin_url('admin.php?page=' . self::PAGE_SLUG . '&bcc_run_index_collections=1'),
-                'bcc_onchain_admin_trigger'
-            );
-            $runEnrichUrl = wp_nonce_url(
-                admin_url('admin.php?page=' . self::PAGE_SLUG . '&bcc_run_enrich_validators=1'),
-                'bcc_onchain_admin_trigger'
-            );
-            ?>
-            <div style="margin:8px 0 16px 0;padding:10px 12px;background:#f6f7f7;border:1px solid #c3c4c7;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <strong style="margin-right:4px;">Run cron now:</strong>
-                <a href="<?php echo esc_url($runAllUrl); ?>"
-                   class="button button-primary"
-                   onclick="return confirm('Run validator index + collection index + enrichment for every active chain? This is synchronous — first click may take 30+ seconds.');">
-                    All (validators + collections + enrichment)
-                </a>
-                <a href="<?php echo esc_url($runValUrl); ?>" class="button">Validators only</a>
-                <a href="<?php echo esc_url($runCollUrl); ?>" class="button">Collections only</a>
-                <a href="<?php echo esc_url($runEnrichUrl); ?>" class="button">Enrichment only</a>
-                <span style="color:#646970;font-size:11px;margin-left:auto;">
-                    Clears the &ldquo;Chain data is stale&rdquo; notice via <code>OnchainCircuitBreaker::recordSuccess</code> on the chains that respond.
-                </span>
-            </div>
+            <?php self::render_sweep_notice(); ?>
+
+            <?php self::render_sweep_bar(); ?>
 
             <nav class="nav-tab-wrapper" style="margin-bottom:16px">
                 <a href="<?php echo esc_url(add_query_arg('subtab', 'validators')); ?>"
@@ -464,32 +486,26 @@ class ChainsPage
      * clear → NULL path. All the actual DB work + cache-bust lives in
      * ChainRepository::updateIdentity (§1 — no $wpdb in an Admin page).
      *
-     * @return array{type: string, message: string}|null notice to render,
-     *         or null when this request is not an identity save.
+     * Batch 1: this was a render-path POST handler returning a notice array.
+     * It is now an admin-post handler that redirects (PRG), writes a durable
+     * audit row, and never renders a raw exception. The validation semantics
+     * below — including the "reject the field, keep the stored value" rule —
+     * are unchanged.
      */
-    private static function handle_identity_save(): ?array
+    public static function handle_identity_save(): void
     {
-        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
-            return null;
-        }
-        if (($_POST['bcc_chain_identity_action'] ?? '') !== 'save') {
-            return null;
-        }
-
-        if (!current_user_can('manage_options')) {
-            return ['type' => 'error', 'message' => 'You do not have permission to edit chains.'];
-        }
-
-        $nonce = isset($_POST['bcc_chain_identity_nonce'])
-            ? sanitize_text_field((string) wp_unslash($_POST['bcc_chain_identity_nonce']))
-            : '';
-        if (!wp_verify_nonce($nonce, 'bcc_chain_identity_save')) {
-            return ['type' => 'error', 'message' => 'Security check failed. Please reload and try again.'];
-        }
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requireNonce(self::ACTION_IDENTITY_SAVE, 'bcc_chain_identity_nonce');
 
         $chainId = (int) ($_POST['chain_id'] ?? 0);
         if ($chainId <= 0) {
-            return ['type' => 'error', 'message' => 'Invalid chain.'];
+            self::redirect_identity('invalid_chain');
+        }
+
+        // The chain id must resolve through the authoritative repository —
+        // a positive integer is not by itself a valid target.
+        if (ChainRepository::getById($chainId) === null) {
+            self::redirect_identity('invalid_chain');
         }
 
         $descriptionRaw = isset($_POST['description']) ? wp_unslash($_POST['description']) : '';
@@ -527,25 +543,245 @@ class ChainsPage
                 : null;
         }
 
-        $ok = ChainRepository::updateIdentity(
-            $chainId,
-            $description !== '' ? $description : null,
-            $iconUrlValue,
-            $colorValue
-        );
+        try {
+            $ok = ChainRepository::updateIdentity(
+                $chainId,
+                $description !== '' ? $description : null,
+                $iconUrlValue,
+                $colorValue
+            );
+        } catch (\Throwable $e) {
+            $correlationId = AdminActionSupport::failure(
+                $e,
+                'admin_chain_identity_failed',
+                'chain',
+                $chainId
+            );
+            self::redirect_identity('exception', $chainId, $correlationId);
+        }
 
         if (!$ok) {
-            return ['type' => 'error', 'message' => 'Chain not found — nothing was saved.'];
+            self::redirect_identity('not_found', $chainId);
         }
 
-        if ($fieldErrors !== []) {
-            return [
-                'type'    => 'error',
-                'message' => implode(' ', $fieldErrors) . ' Every other field was saved.',
-            ];
+        // Public-facing chain profile changed (chain_profile on /halls/:slug).
+        // This was the only mutation on the page with no record of any kind.
+        AdminActionSupport::audit(
+            'admin_chain_identity_saved',
+            'chain',
+            $chainId,
+            [
+                'fields_rejected' => count($fieldErrors),
+                'cleared'         => $description === '' ? 'description' : '',
+            ]
+        );
+
+        self::redirect_identity($fieldErrors !== [] ? 'partial' : 'ok', $chainId);
+    }
+
+    /**
+     * Descriptors for the four "Run cron now" sweeps.
+     *
+     * Pure and public so the confirmation copy is assertable without
+     * rendering the whole page. Each `confirm` must truthfully state the
+     * scope — every active chain, synchronous, live provider APIs, quota —
+     * because three of these four controls previously had no confirmation
+     * at all.
+     *
+     * @return list<array{action: string, label: string, primary: bool, confirm: string}>
+     */
+    public static function sweepControls(): array
+    {
+        return [
+            [
+                'action'  => ChainSweepActions::ACTION_ALL,
+                'label'   => 'All (validators + collections + enrichment)',
+                'primary' => true,
+                'confirm' => 'Run validator index + collection index + enrichment for EVERY active chain, right now?'
+                    . "\n\n"
+                    . 'This runs synchronously against live provider APIs (Alchemy / Helius / Subscan / Cosmos LCD) '
+                    . 'and consumes provider quota. It cannot be cancelled once started and may take 30+ seconds.',
+            ],
+            [
+                'action'  => ChainSweepActions::ACTION_VALIDATORS,
+                'label'   => 'Validators only',
+                'primary' => false,
+                'confirm' => 'Re-index validators for EVERY active chain now?'
+                    . "\n\n"
+                    . 'Synchronous, runs against live provider APIs, and consumes provider quota.',
+            ],
+            [
+                'action'  => ChainSweepActions::ACTION_COLLECTIONS,
+                'label'   => 'Collections only',
+                'primary' => false,
+                'confirm' => 'Re-index NFT collections for EVERY active chain now?'
+                    . "\n\n"
+                    . 'Synchronous, runs against live provider APIs, and consumes provider quota.',
+            ],
+            [
+                'action'  => ChainSweepActions::ACTION_ENRICHMENT,
+                'label'   => 'Enrichment only',
+                'primary' => false,
+                'confirm' => 'Run validator enrichment for EVERY active chain now?'
+                    . "\n\n"
+                    . 'Synchronous and bounded by the EnrichmentScheduler API-call cap, but still consumes provider quota.',
+            ],
+        ];
+    }
+
+    /**
+     * "Run cron now" bar — manual trigger for the all-chains indexers.
+     *
+     * Routes through ChainRefreshService, which calls
+     * OnchainCircuitBreaker::recordSuccess() on success and so clears the
+     * "Chain data is stale" notice. The per-chain AJAX "Refresh" buttons
+     * further down call the fetchers directly and do NOT clear it.
+     *
+     * Batch 1: these were four GET links sharing one nonce, only one of which
+     * had a confirmation. Each is now a POST form to admin-post.php with its
+     * own operation-scoped nonce.
+     */
+    public static function render_sweep_bar(): void
+    {
+        ?>
+        <div style="margin:8px 0 16px 0;padding:10px 12px;background:#f6f7f7;border:1px solid #c3c4c7;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <strong style="margin-right:4px;">Run cron now:</strong>
+            <?php foreach (self::sweepControls() as $sweep): ?>
+                <form method="post"
+                      action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+                      style="display:inline;margin:0;"
+                      onsubmit="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral($sweep['confirm'])); ?>);">
+                    <input type="hidden" name="action" value="<?php echo esc_attr($sweep['action']); ?>">
+                    <?php wp_nonce_field($sweep['action']); ?>
+                    <button type="submit"
+                            class="button<?php echo $sweep['primary'] ? ' button-primary' : ''; ?>">
+                        <?php echo esc_html($sweep['label']); ?>
+                    </button>
+                </form>
+            <?php endforeach; ?>
+            <span style="color:#646970;font-size:11px;margin-left:auto;">
+                Clears the &ldquo;Chain data is stale&rdquo; notice via <code>OnchainCircuitBreaker::recordSuccess</code> on the chains that respond.
+            </span>
+        </div>
+        <?php
+    }
+
+    /**
+     * PRG terminator for the Identity editor.
+     */
+    private static function redirect_identity(string $result, int $chainId = 0, string $ref = ''): never
+    {
+        $args = [
+            'page'         => self::PAGE_SLUG,
+            'subtab'       => 'identity',
+            'bcc_identity' => $result,
+        ];
+        if ($chainId > 0) {
+            $args['bcc_chain'] = $chainId;
+        }
+        if ($ref !== '') {
+            $args['bcc_ref'] = $ref;
         }
 
-        return ['type' => 'success', 'message' => 'Chain identity saved.'];
+        AdminActionSupport::redirect($args);
+    }
+
+    /**
+     * Rebuild the Identity-editor notice from the PRG redirect args.
+     *
+     * @return array{type: string, message: string}|null
+     */
+    private static function identity_notice_from_query(): ?array
+    {
+        $result = isset($_GET['bcc_identity']) ? sanitize_key((string) $_GET['bcc_identity']) : '';
+        if ($result === '') {
+            return null;
+        }
+
+        switch ($result) {
+            case 'ok':
+                return ['type' => 'success', 'message' => __('Chain identity saved.', 'bcc-trust')];
+            case 'partial':
+                return [
+                    'type'    => 'error',
+                    'message' => __(
+                        'Some fields were rejected and kept their stored values — check the Icon URL (https://…) and Color (#RRGGBB) formats. Every other field was saved.',
+                        'bcc-trust'
+                    ),
+                ];
+            case 'invalid_chain':
+                return ['type' => 'error', 'message' => __('Invalid chain.', 'bcc-trust')];
+            case 'not_found':
+                return ['type' => 'error', 'message' => __('Chain not found — nothing was saved.', 'bcc-trust')];
+            case 'exception':
+                $ref = isset($_GET['bcc_ref']) ? sanitize_text_field((string) $_GET['bcc_ref']) : '';
+                return [
+                    'type'    => 'error',
+                    'message' => AdminActionSupport::failureMessage($ref),
+                ];
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * Result notice for a completed "Run cron now" sweep, rebuilt from the
+     * PRG redirect args written by ChainSweepActions.
+     */
+    private static function render_sweep_notice(): void
+    {
+        $slug = isset($_GET['bcc_sweep']) ? sanitize_key((string) $_GET['bcc_sweep']) : '';
+        if ($slug === '') {
+            return;
+        }
+
+        $steps = ChainSweepActions::stepsForSlug($slug);
+        if ($steps === []) {
+            return;
+        }
+
+        $result = isset($_GET['bcc_result']) ? sanitize_key((string) $_GET['bcc_result']) : '';
+
+        if ($result === 'failed') {
+            $failedAt = isset($_GET['bcc_failed_at']) ? sanitize_key((string) $_GET['bcc_failed_at']) : '';
+            $ref      = isset($_GET['bcc_ref']) ? sanitize_text_field((string) $_GET['bcc_ref']) : '';
+
+            echo '<div class="notice notice-error is-dismissible"><p><strong>BCC On-Chain:</strong> ';
+            printf(
+                /* translators: %s: the sweep step that failed, e.g. "collections". */
+                esc_html__('Indexing stopped during the %s step.', 'bcc-trust'),
+                esc_html($failedAt !== '' ? $failedAt : 'unknown')
+            );
+            echo ' ' . esc_html(AdminActionSupport::failureMessage($ref)) . '</p></div>';
+            return;
+        }
+
+        if ($result !== 'ok') {
+            return;
+        }
+
+        $enrichStats = get_option('bcc_onchain_enrichment_stats', []);
+
+        echo '<div class="notice notice-success is-dismissible"><p><strong>BCC On-Chain:</strong> ';
+        printf(
+            /* translators: %s: completed step list, e.g. "validators + collections". */
+            esc_html__('Indexing complete (%s).', 'bcc-trust'),
+            esc_html(ChainSweepActions::stepLabels($steps))
+        );
+        echo '</p>';
+
+        if (is_array($enrichStats) && $enrichStats !== [] && in_array('enrichment', $steps, true)) {
+            printf(
+                '<p>Enrichment: %d processed, %d failed, %d skipped, %d API calls. Stop: %s</p>',
+                (int) ($enrichStats['processed'] ?? 0),
+                (int) ($enrichStats['failed'] ?? 0),
+                (int) ($enrichStats['skipped'] ?? 0),
+                (int) ($enrichStats['api_calls'] ?? 0),
+                esc_html((string) ($enrichStats['stopped_reason'] ?? '—'))
+            );
+        }
+
+        echo '</div>';
     }
 
     /**
@@ -566,10 +802,10 @@ class ChainsPage
         <?php foreach ($chains as $chain):
             $cid = (int) $chain->id;
         ?>
-        <form method="post" action=""
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
               style="margin:0 0 12px 0;padding:12px;background:#fff;border:1px solid #c3c4c7;max-width:1100px;">
-            <?php wp_nonce_field('bcc_chain_identity_save', 'bcc_chain_identity_nonce'); ?>
-            <input type="hidden" name="bcc_chain_identity_action" value="save">
+            <?php wp_nonce_field(self::ACTION_IDENTITY_SAVE, 'bcc_chain_identity_nonce'); ?>
+            <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_IDENTITY_SAVE); ?>">
             <input type="hidden" name="chain_id" value="<?php echo esc_attr((string) $cid); ?>">
             <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
                 <div style="min-width:150px;">

@@ -52,6 +52,17 @@ class SettingsPage
 
     public static function render_page(): void
     {
+        // Defense in depth: add_submenu_page() already gates this page on
+        // manage_options, but relying on menu registration alone was the gap
+        // every sibling page had already closed.
+        if (!current_user_can('manage_options')) {
+            wp_die(
+                esc_html__('Sorry, you are not allowed to access this page.', 'bcc-trust'),
+                esc_html__('Forbidden', 'bcc-trust'),
+                ['response' => 403]
+            );
+        }
+
         // GET-driven sub-tab; default to validator for backwards-compat
         // with bookmarks/links that don't carry the tab parameter.
         $tab = isset($_GET['tab']) && is_string($_GET['tab']) ? sanitize_key($_GET['tab']) : 'validator';
