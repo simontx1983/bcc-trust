@@ -259,12 +259,31 @@ final class CosmwasmClassifierVersionRequeueIntegrationTest extends TestCase
 
     // ── scoping and idempotence ─────────────────────────────────────────
 
-    /** A chain-17 requeue must not touch chain 8. */
+    /**
+     * A chain-17 requeue must not touch chain 8.
+     *
+     * DELIBERATELY SEEDED SMALL. An earlier version of this test used the
+     * full 100-family Dungeon fixture and passed even with `WHERE chain_id`
+     * removed — MySQL's `UPDATE … LIMIT 100` was exhausted by chain 17's
+     * own rows before it ever reached chain 8, so the LIMIT was doing the
+     * protecting and the scoping was untested. Two chain-17 rows leave the
+     * limit nowhere near spent, so only the WHERE can keep chain 8 intact.
+     */
     public function testTheRequeueIsChainScoped(): void
     {
-        $this->seedPreservedDungeonState();
-
         $table = CosmwasmCodeFamilyRepository::table();
+
+        CosmwasmCodeFamilyRepository::recordDiscovered(self::CHAIN, [
+            ['code_id' => 89, 'checksum' => str_repeat('d', 64)],
+            ['code_id' => 90, 'checksum' => str_repeat('e', 64)],
+        ]);
+        $GLOBALS['wpdb']->query(
+            "UPDATE `{$table}`
+                SET classification = 'temporarily_unreachable', classifier_version = 1,
+                    classified_at = '2026-08-19 00:24:46',
+                    next_attempt_at = '2026-08-19 12:24:46', retry_count = 1
+              WHERE chain_id = " . self::CHAIN
+        );
         CosmwasmCodeFamilyRepository::recordDiscovered(self::OTHER, [['code_id' => 434, 'checksum' => str_repeat('c', 64)]]);
         $GLOBALS['wpdb']->query(
             "UPDATE `{$table}`
