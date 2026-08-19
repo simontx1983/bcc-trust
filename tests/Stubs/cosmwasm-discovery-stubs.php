@@ -1665,6 +1665,27 @@ namespace {
         }
     }
 
+    // VC-B2: BOTH of these are genuinely needed by this shared family,
+    // not only by the new route test — the scanner-panel tests render the
+    // canonical Chains link (admin_url), and the discovery-domain test
+    // rebuilds its operator notice through the production notice builder
+    // rather than a test-local copy (sanitize_key). Guarded, so the
+    // dedicated route stub can define its own without conflict.
+    if (!function_exists('sanitize_key')) {
+        function sanitize_key(string $key): string
+        {
+            return preg_replace('/[^a-z0-9_\-]/', '', strtolower($key)) ?? '';
+        }
+    }
+
+    if (!function_exists('admin_url')) {
+        // VC-B2: the scanner panel now links to Chains ▸ NFT Discovery.
+        function admin_url(string $path = ''): string
+        {
+            return 'https://example.test/wp-admin/' . ltrim($path, '/');
+        }
+    }
+
     // Shared WP shims, Logger, the ApiRetry transport fake, AdvisoryLock,
     // DegradationMetrics and OnchainCircuitBreaker. Loaded LAST so its
     // class_exists() guards skip everything defined above.

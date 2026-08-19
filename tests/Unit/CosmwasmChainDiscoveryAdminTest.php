@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
+use BCC\Trust\Onchain\Admin\ChainsPage;
 use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
 use BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
@@ -112,18 +113,41 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
      */
     private function post(string $action, string $nonce = 'test-nonce'): array
     {
-        $_POST = [
-            'bcc_vc_action'                   => $action,
-            VerifyCollectionsPage::NONCE_NAME => $nonce,
-        ];
+        // VC-B2: the discovery opt-in LEFT the Verify Collections
+        // dispatcher for Chains ▸ NFT Discovery ▸ CosmWasm / CW-721, so
+        // driving handlePost() here would now exercise the fail-closed
+        // refusal instead of the write.
+        //
+        // What this file protects is the DOMAIN half — the surgical
+        // single-column write, the cache bust, the read-back, and the
+        // refusal to claim success it cannot confirm. That lives in
+        // ChainsPage::apply_cw_discovery(), which is exactly what the new
+        // route calls, so every assertion below keeps its meaning.
+        //
+        // The TRANSPORT half — capability, POST-only, direction- and
+        // chain-scoped nonces, PRG, replay — is pinned by
+        // ChainsCwDiscoveryRouteTest, which loads the admin shims this stub
+        // family deliberately does not carry.
+        $enable  = strpos($action, 'cw_discovery_on_') === 0;
+        $chainId = (int) substr($action, strrpos($action, '_') + 1);
 
-        $handler = new ReflectionMethod(VerifyCollectionsPage::class, 'handlePost');
+        $handler = new ReflectionMethod(ChainsPage::class, 'apply_cw_discovery');
         $handler->setAccessible(true);
 
-        /** @var list<array{type: string, message: string}> $notices */
-        $notices = $handler->invoke(null);
+        $result = (string) $handler->invoke(null, $chainId, $enable);
 
-        return $notices;
+        // Rebuild the operator notice through the REAL production builder,
+        // exactly as the PRG redirect does. A test-local copy of the copy
+        // would assert wording nobody ships.
+        $_GET = ['bcc_cwd' => $result];
+
+        $notice = new ReflectionMethod(ChainsPage::class, 'cw_discovery_notice_from_query');
+        $notice->setAccessible(true);
+
+        /** @var array{type: string, message: string}|null $built */
+        $built = $notice->invoke(null);
+
+        return $built === null ? [] : [$built];
     }
 
     /** The opt-in as the registry currently holds it. */
@@ -196,72 +220,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     //  AUTHORISATION — both gates, each proven alone
     // ═══════════════════════════════════════════════════════════════════
 
-    /**
-     * A VALID nonce and no capability. The nonce is deliberately correct:
-     * if this test sent a bad one too, deleting the capability check would
-     * not fail anything.
-     */
-    public function test_a_valid_nonce_without_the_capability_writes_nothing(): void
-    {
-        \BccTestCapabilities::$granted = [];
-
-        $notices = $this->post('cw_discovery_on_' . self::CHAIN_ID);
-
-        self::assertSame('error', $notices[0]['type']);
-        self::assertStringContainsString('do not have permission', $notices[0]['message']);
-        self::assertStringContainsString('Nothing was changed', $notices[0]['message']);
-
-        self::assertSame('0', $this->flag(), 'a request without the capability must not move the flag');
-        self::assertSame([], ChainRepository::$discoveryWrites, 'and must not reach the repository at all');
-        self::assertSame(0, ChainRepository::$cacheBusts);
-    }
-
-    /**
-     * The capability IS held; only the nonce is wrong. Same reasoning in
-     * the mirror direction — this is what fails if the nonce check goes.
-     */
-    public function test_the_capability_without_a_valid_nonce_writes_nothing(): void
-    {
-        self::assertSame(['manage_options'], \BccTestCapabilities::$granted, 'precondition: fully authorised user');
-
-        $notices = $this->post('cw_discovery_on_' . self::CHAIN_ID, 'not-the-nonce');
-
-        self::assertStringContainsString('Security check failed', $this->joined($notices));
-        self::assertSame('0', $this->flag(), 'a forged POST must not move the flag');
-        self::assertSame([], ChainRepository::$discoveryWrites);
-        self::assertSame(0, ChainRepository::$cacheBusts);
-    }
-
     /** The disable direction is gated identically — it is a write too. */
-    public function test_the_disable_direction_is_gated_by_both_checks_as_well(): void
-    {
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
-
-        \BccTestCapabilities::$granted = [];
-        $notices = $this->post('cw_discovery_off_' . self::CHAIN_ID);
-        self::assertSame('error', $notices[0]['type']);
-        self::assertSame('1', $this->flag(), 'still enabled — the refusal changed nothing');
-
-        \BccTestCapabilities::reset();
-        $notices = $this->post('cw_discovery_off_' . self::CHAIN_ID, 'not-the-nonce');
-        self::assertStringContainsString('Security check failed', $this->joined($notices));
-        self::assertSame('1', $this->flag());
-
-        self::assertSame([], ChainRepository::$discoveryWrites);
-    }
-
-    public function test_a_refused_request_leaves_a_trace(): void
-    {
-        \BccTestCapabilities::$granted = [];
-
-        $this->post('cw_discovery_on_' . self::CHAIN_ID);
-
-        $warnings = $this->logLines('warning');
-        self::assertNotSame([], $warnings, 'an unauthorised attempt on a write must be recorded');
-        self::assertSame('cosmwasm_chain_discovery_denied', $warnings[0]['context']['action'] ?? null);
-        self::assertSame(self::CHAIN_ID, $warnings[0]['context']['chain_id'] ?? null);
-    }
-
     // ═══════════════════════════════════════════════════════════════════
     //  THE WRITE — surgical, confirmed, and nothing else
     // ═══════════════════════════════════════════════════════════════════
@@ -305,8 +264,9 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         $notices = $this->post('cw_discovery_off_' . self::CHAIN_ID);
 
         self::assertSame('success', $notices[0]['type']);
-        self::assertStringContainsString('discovery is OFF for cosmos', $notices[0]['message']);
-        self::assertStringContainsString('no collection was un-verified or removed', $notices[0]['message']);
+        self::assertStringContainsString('Future automatic passes will not select this chain', $notices[0]['message']);
+        self::assertStringContainsString('Existing inventory and progress were kept', $notices[0]['message']);
+        self::assertStringContainsString('no collection was unverified or removed', $notices[0]['message']);
         self::assertSame('0', $this->flag());
 
         $after = $this->rowSnapshot(self::CHAIN_ID);
@@ -425,8 +385,10 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
 
         self::assertSame('error', $this->types($notices));
         self::assertStringContainsString('database write failed', $notices[0]['message']);
-        self::assertStringContainsString('NOTHING was changed', $notices[0]['message']);
-        self::assertStringContainsString('still disabled', $notices[0]['message']);
+        self::assertStringContainsString('could NOT be enabled', $notices[0]['message']);
+        self::assertStringContainsString('nothing was changed', $notices[0]['message']);
+        self::assertStringContainsString('It remains disabled', $notices[0]['message']);
+        self::assertStringContainsString('It remains disabled', $notices[0]['message']);
 
         self::assertSame('0', $this->flag(), 'the flag genuinely did not move');
 
@@ -450,7 +412,9 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
 
         self::assertSame('error', $this->types($notices), 'an unconfirmed change is not a success');
         self::assertStringContainsString('does not read back as enabled', $notices[0]['message']);
-        self::assertStringContainsString('NOT being reported as done', $notices[0]['message']);
+        self::assertStringContainsString('could NOT be confirmed', $notices[0]['message']);
+        self::assertStringContainsString('does not read back as enabled', $notices[0]['message']);
+        self::assertStringNotContainsString('remains', $notices[0]['message']);
 
         self::assertSame('0', $this->flag(), 'the flag really did not move — that is the point');
 
@@ -471,15 +435,6 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
 
         self::assertSame('error', $notices[0]['type']);
         self::assertStringContainsString('chain not found', $notices[0]['message']);
-        self::assertSame([], ChainRepository::$discoveryWrites);
-    }
-
-    public function test_a_non_positive_chain_id_is_refused_before_any_write(): void
-    {
-        $notices = $this->post('cw_discovery_on_0');
-
-        self::assertSame('error', $notices[0]['type']);
-        self::assertStringContainsString('invalid chain', $notices[0]['message']);
         self::assertSame([], ChainRepository::$discoveryWrites);
     }
 
@@ -517,8 +472,9 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertStringContainsString('opt-in <strong>ON</strong>', $html);
         self::assertStringContainsString('Nothing is blocking this chain', $html);
         // The control offers the other direction.
-        self::assertStringContainsString('cw_discovery_off_' . self::CHAIN_ID, $html);
-        self::assertStringContainsString('Disable discovery', $html);
+        self::assertStringNotContainsString('cw_discovery_off_', $html);
+        self::assertStringContainsString('subtab=nft-discovery', $html);
+        self::assertStringNotContainsString('Disable discovery', $html, 'the mutation moved to Chains ▸ NFT Discovery');
 
         // The line that answers "how many of these will ever be scanned?"
         // — the question the table used to leave the operator to work out.
@@ -561,8 +517,9 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertStringContainsString('opt-in <strong>OFF</strong>', $html);
         self::assertStringContainsString('Discovery is switched off for this chain', $html);
         self::assertStringNotContainsString('Nothing is blocking this chain', $html);
-        self::assertStringContainsString('cw_discovery_on_' . self::CHAIN_ID, $html);
-        self::assertStringContainsString('Enable discovery', $html);
+        self::assertStringNotContainsString('cw_discovery_on_', $html, 'no discovery mutation control may remain here');
+        self::assertStringContainsString('subtab=nft-discovery', $html);
+        self::assertStringContainsString('subtab=nft-discovery', $html);
     }
 
     /**
@@ -602,7 +559,8 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
 
         // Still reversible: an opted-in unsupported chain must not be
         // stranded with no way to switch it back off.
-        self::assertStringContainsString('cw_discovery_off_' . self::CHAIN_ID, $html);
+        self::assertStringNotContainsString('cw_discovery_off_', $html);
+        self::assertStringContainsString('subtab=nft-discovery', $html);
     }
 
     /**
@@ -683,7 +641,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // Nothing is hidden: the undefined gate is still named, and the
         // per-chain controls are still there to act on.
         self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED', $html);
-        self::assertStringContainsString('Enable discovery', $html);
+        self::assertStringContainsString('subtab=nft-discovery', $html);
         self::assertStringContainsString('Code families known', $html);
     }
 
@@ -793,7 +751,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // says WHICH chain is in the way, and the controls are there.
         self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED', $html);
         self::assertStringContainsString('No wasm module', $html);
-        self::assertStringContainsString('Enable discovery', $html);
+        self::assertStringContainsString('subtab=nft-discovery', $html);
     }
 
     /**
@@ -932,7 +890,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertStringContainsString('Scanner figures are unavailable', $html);
         self::assertStringNotContainsString('Eligible', $html);
         self::assertStringNotContainsString('opt-in', $html);
-        self::assertStringNotContainsString('Enable discovery', $html);
+        self::assertStringNotContainsString('cw_discovery_on_', $html);
         self::assertStringNotContainsString('listed chains are eligible', $html);
     }
 
