@@ -40,13 +40,18 @@
  *
  * ## Route scoping
  *
- * The BCC-namespace predicate is {@see EdgeCache::appliesTo()} — the
- * single implementation in this plugin, already unit-pinned by
- * tests/Unit/EdgeCacheRoutePredicateTest.php. It matches a namespace
- * root (`/bcc/v1`) as well as any route beneath it; the old
- * `str_contains($route, '/bcc/v1/')` test in this class missed the root
- * (WP reports the namespace index as `/bcc/v1`, no trailing slash) and
- * so left it on core's reflected headers.
+ * This handler owns EVERY WordPress REST route — see {@see ownsRoute()}.
+ * Not just the BCC namespaces: core's `rest_send_cors_headers` reflected
+ * any Origin with credentials on every route, so scoping to `/bcc/v1` and
+ * `/bcc-trust/v1` left the hole open precisely where no BCC code guarded.
+ *
+ * `ownsRoute()` is deliberately INDEPENDENT of
+ * {@see EdgeCache::appliesTo()}. Both currently answer "yes" for every
+ * REST route, but they answer different questions — one is a security
+ * boundary, the other a caching policy. An earlier revision had the CORS
+ * gate delegate to the cache predicate; that coupling meant any future
+ * narrowing of the cache exclusion would have silently re-opened CORS.
+ * Keep them separate.
  *
  * ## Allowlist
  *
