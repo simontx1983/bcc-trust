@@ -670,40 +670,38 @@ final class CosmwasmScannerPanel
             <div style="margin-top:4px;color:#646970;"><?php echo esc_html($reason); ?></div>
 
             <?php
-            // The control is offered in EVERY state, including `unsupported`
-            // and `unknown`. It writes operator intent, which is meaningful
-            // (and reversible) whatever the chain itself is doing — hiding it
-            // on an unsupported chain would strand an already-opted-in chain
-            // with no way to switch it back off.
+            // ── VC-B2 TRANSITIONAL DUPLICATION — READ BEFORE "TIDYING" ──
+            //
+            // The control that CHANGES the discovery opt-in moved to
+            // Chains ▸ NFT Discovery ▸ CosmWasm / CW-721, where it has its
+            // own direction- and chain-scoped nonce instead of sharing one
+            // page-wide nonce with a provider-consuming backfill.
+            //
+            // The opt-in STATE is still shown here, and also on the new tab.
+            // That duplication is deliberate and bounded:
+            //
+            //   • ONE authoritative source. Both surfaces render from
+            //     CosmwasmDiscoveryHealthSnapshot::buildSummary(). Neither
+            //     computes eligibility itself, so they cannot disagree.
+            //     ChainsNftDiscoveryTabTest pins this.
+            //   • ZERO duplicate mutation controls. Exactly one Enable and
+            //     one Disable exist in production, both on the new tab.
+            //   • It is here only because Pause / Resume / Backfill / Retry
+            //     still live on this page. An operator deciding whether to
+            //     pause a chain needs to know whether it is even opted in.
+            //
+            // VC-B3 moves those four worker controls to the same tab and
+            // deletes this panel's per-chain display with them. Until then,
+            // removing the read-only state here would leave the remaining
+            // controls without the context needed to use them safely.
             ?>
-            <button type="submit"
-                    name="bcc_vc_action"
-                    value="<?php echo esc_attr(($optedIn ? 'cw_discovery_off_' : 'cw_discovery_on_') . $chainId); ?>"
-                    class="button button-small"
-                    style="margin-top:4px;"
-                    title="<?php echo esc_attr(self::discoveryToggleTitle($optedIn, $slug)); ?>">
-                <?php echo esc_html($optedIn ? 'Disable discovery' : 'Enable discovery'); ?>
-            </button>
+            <div style="margin-top:4px;font-size:11px;">
+                <a href="<?php echo esc_url(
+                    admin_url('admin.php?page=bcc-onchain-chains&subtab=nft-discovery')
+                ); ?>">Change in Chains ▸ NFT Discovery</a>
+            </div>
         </td>
         <?php
-    }
-
-    /** What the discovery toggle will and will not do, in one sentence. */
-    private static function discoveryToggleTitle(bool $optedIn, string $slug): string
-    {
-        if ($optedIn) {
-            return sprintf(
-                'Stop the scanner considering %s at all. Everything it has already found is kept, '
-                    . 'and no collection is un-verified or removed.',
-                $slug
-            );
-        }
-
-        return sprintf(
-            'Let the scanner consider %s. It still has to be scheduled, gated on and supported by the chain '
-                . 'before anything is scanned, and everything it finds arrives unverified.',
-            $slug
-        );
     }
 
     /** Why the start control is or is not usable, in one sentence. */
