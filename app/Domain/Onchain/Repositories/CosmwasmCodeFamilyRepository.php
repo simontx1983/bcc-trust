@@ -823,6 +823,71 @@ final class CosmwasmCodeFamilyRepository
     }
 
     /**
+     * ALL-CHAIN "families carrying an unresolved error" counts. ONE
+     * bounded aggregate.
+     *
+     * ── WHY THIS EXISTS ─────────────────────────────────────────────────
+     * The panel's only error input used to be
+     * `wp_bcc_chain_checkpoints.cw_last_error`, and that field is cleared
+     * by {@see ChainCheckpointRepository::advanceCwCodeWatermark()} — with
+     * good reason, since the code read really did succeed. The result,
+     * measured on Dungeon 2026-08-19: 15 families held
+     * `Circuit breaker open for chain 17` and one contract was
+     * unreachable, while the chain rendered GREEN with the label "Nothing
+     * is blocking this chain". Family-level failures reached no status.
+     *
+     * ── WHAT COUNTS, AND WHAT DELIBERATELY DOES NOT ─────────────────────
+     * ONLY a non-null, non-empty `last_error`. That predicate is doing
+     * exactly one job — separating "this endpoint is unhealthy" from
+     * "this contract is not an NFT":
+     *
+     *   COUNTS: breaker-open skips, transport failures, node faults —
+     *   anything that left an unresolved reason on the row.
+     *
+     *   DOES NOT COUNT: a family settled `not_cw721`, or any family whose
+     *   attempt simply concluded. An ordinary DeFi contract answering "I
+     *   do not implement num_tokens" is a SUCCESSFUL classification and
+     *   records no error, so a chain full of them stays green. Making
+     *   those yellow would train an operator to ignore the colour, which
+     *   is the same failure as never showing it.
+     *
+     * Classification is deliberately NOT in the predicate. `last_error`
+     * is the field that means "unresolved", and keying off a
+     * classification list would need updating every time the vocabulary
+     * moves.
+     *
+     * FAIL-CLOSED, and this one matters more than its siblings: "0
+     * families have errors" is the sentence that turns the panel GREEN.
+     * A failed read answering it would be the exact bug this method was
+     * written to remove, one layer down.
+     *
+     * @return array<int, int> chainId => unresolved-error count
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function erroredCountsByChain(): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        /** @var list<object{chain_id: string, total: string}>|null $rows */
+        $rows = $wpdb->get_results(
+            "SELECT chain_id, COUNT(*) AS total
+               FROM {$table}
+              WHERE last_error IS NOT NULL
+                AND last_error <> ''
+              GROUP BY chain_id"
+        );
+        self::guardReadOrThrow(__FUNCTION__);
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $out[(int) $row->chain_id] = (int) $row->total;
+        }
+
+        return $out;
+    }
+
+    /**
      * Family rows for a bounded set of (chain, code id) pairs.
      *
      * The admin candidate table renders ≤ 50 collection rows spanning a

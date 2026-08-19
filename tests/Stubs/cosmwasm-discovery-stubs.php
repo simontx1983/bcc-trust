@@ -233,7 +233,13 @@ namespace BCC\Trust\Onchain\Repositories {
                     $row                     = self::$families[$chainId][$codeId];
                     $row->classification     = (string) $verdict['classification'];
                     $row->classification_reason = (string) $verdict['reason'];
-                    $row->classifier_version = (string) $verdict['classifier_version'];
+                    $row->classifier_version = (string) ($verdict['classifier_version'] ?? 0);
+                    // Mirrors production: a verdict carrying no error text
+                    // CLEARS the row's error, which is what makes a settled
+                    // `not_cw721` stop counting as unresolved.
+                    $row->last_error = ($verdict['last_error'] ?? '') !== ''
+                        ? (string) $verdict['last_error']
+                        : null;
                     $row->classified_at      = '2026-08-06 00:00:00';
                     $row->sample_contract    = $sampleContract;
                     $row->retry_count        = (string) $retryCount;
@@ -282,6 +288,11 @@ namespace BCC\Trust\Onchain\Repositories {
                 ];
                 if (isset(self::$families[$chainId][$codeId])) {
                     self::$families[$chainId][$codeId]->retry_count = (string) $retryCount;
+                    // Production writes `last_error` here. The fake did not,
+                    // which made it invisible to any test asking "which
+                    // families hold an unresolved reason?" — exactly the
+                    // question the panel now needs answered.
+                    self::$families[$chainId][$codeId]->last_error = $error;
                 }
 
                 return true;
@@ -411,6 +422,37 @@ namespace BCC\Trust\Onchain\Repositories {
                 $out = [];
                 foreach (self::$families as $chainId => $_rows) {
                     $out[$chainId] = count(self::findPendingClassification($chainId, 1000, $classifierVersion));
+                }
+
+                return $out;
+            }
+
+            /**
+             * Mirrors the production aggregate: count families whose
+             * `last_error` is present and non-empty, grouped by chain.
+             *
+             * Deliberately keyed on the SAME field as production and NOT
+             * on classification — a `not_cw721` family with no error must
+             * not appear here, and that is a property the tests assert.
+             *
+             * @return array<int, int>
+             */
+            public static function erroredCountsByChain(): array
+            {
+                self::failIfArmed(__FUNCTION__);
+
+                $out = [];
+                foreach (self::$families as $chainId => $rows) {
+                    $n = 0;
+                    foreach ($rows as $row) {
+                        $err = $row->last_error ?? null;
+                        if (is_string($err) && $err !== '') {
+                            $n++;
+                        }
+                    }
+                    if ($n > 0) {
+                        $out[(int) $chainId] = $n;
+                    }
                 }
 
                 return $out;
