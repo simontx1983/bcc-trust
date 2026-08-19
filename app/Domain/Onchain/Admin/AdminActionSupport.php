@@ -71,6 +71,29 @@ final class AdminActionSupport
     }
 
     /**
+     * Method gate for a state-changing admin handler.
+     *
+     * `admin-post.php` dispatches `admin_post_{action}` for GET as well as
+     * POST — it reads the action out of `$_REQUEST`. So a handler that only
+     * reads `$_POST` is not thereby POST-only: a crafted GET reaches it,
+     * finds an empty `$_POST`, and runs whatever the empty-input path does.
+     * Refusing the method outright is the gate; it also keeps a mutation out
+     * of anything that pre-fetches links.
+     */
+    public static function requirePost(): void
+    {
+        $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : '';
+
+        if ($method !== 'POST') {
+            wp_die(
+                esc_html__('This action must be submitted as a form.', 'bcc-trust'),
+                esc_html__('Method Not Allowed', 'bcc-trust'),
+                ['response' => 405]
+            );
+        }
+    }
+
+    /**
      * Action-scoped CSRF gate.
      *
      * check_admin_referer() wp_die()s with a 403 on failure, so an expired or

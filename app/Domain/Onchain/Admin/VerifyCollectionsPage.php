@@ -75,6 +75,23 @@ final class VerifyCollectionsPage
     public const ACTION_TESTQUERY  = 'bcc_vc_testquery';
 
     /**
+     * VC-B1 admin-post routes: per-row Hide / Unhide.
+     *
+     * Hide and Unhide are DELIBERATELY two routes rather than one "toggle",
+     * for the same reason the CosmWasm discovery control is two actions: a
+     * toggle decides its direction from the state the page had at RENDER
+     * time, so a stale tab or a double-submit silently applies the opposite
+     * of what the operator is looking at. Here that would mean un-hiding a
+     * scam contract by clicking a button labelled "Hide".
+     *
+     * Two routes also make the nonce meaningful. Because the nonce action is
+     * `<route>_<collectionId>`, a Hide nonce for collection 7 cannot drive
+     * Unhide on 7, Hide on 8, any VC-A route, or any remaining `cw_*` branch.
+     */
+    public const ACTION_HIDE   = 'bcc_vc_hide';
+    public const ACTION_UNHIDE = 'bcc_vc_unhide';
+
+    /**
      * Maximum collection ids accepted from one bulk-save submission.
      *
      * Not an arbitrary limit: listForAdminVerification() is called with a
@@ -175,6 +192,10 @@ final class VerifyCollectionsPage
         add_action('admin_post_' . self::ACTION_ADD_COSMOS, [__CLASS__, 'handleAddCosmosPost']);
         add_action('admin_post_' . self::ACTION_DELETE,     [__CLASS__, 'handleDeletePost']);
         add_action('admin_post_' . self::ACTION_TESTQUERY,  [__CLASS__, 'handleTestQueryPost']);
+
+        // VC-B1.
+        add_action('admin_post_' . self::ACTION_HIDE,       [__CLASS__, 'handleHidePost']);
+        add_action('admin_post_' . self::ACTION_UNHIDE,     [__CLASS__, 'handleUnhidePost']);
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -299,6 +320,75 @@ final class VerifyCollectionsPage
         self::finish($notices, 'testquery');
     }
 
+    // ────────────────────────────────────────────────────────────────────
+    // VC-B1 admin-post handlers: Hide / Unhide
+    // ────────────────────────────────────────────────────────────────────
+
+    public static function handleHidePost(): void
+    {
+        self::handleHideRequest(true);
+    }
+
+    public static function handleUnhidePost(): void
+    {
+        self::handleHideRequest(false);
+    }
+
+    /**
+     * Shared request boundary for both directions.
+     *
+     * One method, not two copies: the ONLY thing that differs between Hide
+     * and Unhide at the boundary is which route name the nonce is bound to,
+     * and duplicating the gate order is how one copy later drifts out of
+     * step with the other.
+     *
+     * Order is capability → method → id shape → scoped nonce → domain work.
+     * The id is read before the nonce because the nonce action is derived
+     * from it, but nothing touches a repository until the nonce has proven
+     * the request authentic, and the shape check deliberately does no
+     * lookup — an unauthenticated request must not be able to probe which
+     * collection ids exist.
+     */
+    private static function handleHideRequest(bool $hide): never
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
+
+        $collectionId = self::requireCollectionIdShape();
+        $route        = $hide ? self::ACTION_HIDE : self::ACTION_UNHIDE;
+
+        AdminActionSupport::requireNonce($route . '_' . $collectionId);
+
+        // FAILURE POLICY, matching the VC-A Test CW-721 rule:
+        //
+        //  - an EXPECTED negative (unknown collection, id mismatch, the rule
+        //    write reporting failure) returns an operator notice and writes
+        //    NO durable row. Nothing changed, and a row saying so would be
+        //    indistinguishable later from a change that did happen.
+        //
+        //  - an UNEXPECTED exception is a fault in our code or transport,
+        //    not a verdict about the collection. It routes through
+        //    AdminActionSupport::failure(), which is the one path that mints
+        //    a correlation ID and writes a durable row as part of that
+        //    contract — so the event is named rather than left anonymous.
+        try {
+            $notices = self::handleHideToggle($collectionId, $hide);
+        } catch (\Throwable $e) {
+            $ref = AdminActionSupport::failure(
+                $e,
+                self::hideFailedAction($hide),
+                'collection',
+                $collectionId
+            );
+            $notices = [[
+                'type'    => 'error',
+                'message' => AdminActionSupport::failureMessage($ref),
+            ]];
+        }
+
+        self::finish($notices, $hide ? 'hide' : 'unhide');
+    }
+
     /**
      * The per-row VC-A forms (Remove, Test CW-721).
      *
@@ -307,21 +397,38 @@ final class VerifyCollectionsPage
      * the HTML5 `form=` attribute, which only works if every id here is
      * unique and matches exactly one button.
      *
-     * @param list<int> $rowIds
+     * @param list<int>          $rowIds
+     * @param array<int, bool>   $hiddenById  row id => is currently hidden
      */
     public static function renderRowActionForms(
         array $rowIds,
         int $page,
         string $chain,
         string $tokenStandard,
-        bool $isVerified
+        bool $isVerified,
+        array $hiddenById = []
     ): void {
         foreach ($rowIds as $rowId) {
             $rowId = (int) $rowId;
             if ($rowId <= 0) {
                 continue;
             }
+
+            // VC-B1: exactly ONE of the two directions is emitted per row —
+            // the one the row is not already in. Rendering both would put a
+            // live Unhide form on a visible collection, and the whole point
+            // of splitting the routes is that a direction is never implied.
+            $isHidden   = (bool) ($hiddenById[$rowId] ?? false);
+            $hideRoute  = $isHidden ? self::ACTION_UNHIDE : self::ACTION_HIDE;
+            $hideFormId = self::hideFormId($rowId, $isHidden);
             ?>
+            <form id="<?php echo esc_attr($hideFormId); ?>" method="post"
+                  action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:none;">
+                <input type="hidden" name="action" value="<?php echo esc_attr($hideRoute); ?>">
+                <input type="hidden" name="collection_id" value="<?php echo $rowId; ?>">
+                <?php wp_nonce_field($hideRoute . '_' . $rowId); ?>
+                <?php self::renderReturnContext($page, $chain, $tokenStandard, $isVerified); ?>
+            </form><?php ?>
             <form id="vc-a-del-<?php echo $rowId; ?>" method="post"
                   action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:none;">
                 <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_DELETE); ?>">
@@ -360,6 +467,64 @@ final class VerifyCollectionsPage
         ?>
         <button type="submit" form="vc-a-del-<?php echo (int) $rowId; ?>" class="button button-small button-link-delete">
             Remove
+        </button>
+        <?php
+    }
+
+    /**
+     * The id of a row's Hide-or-Unhide form.
+     *
+     * Direction is part of the id, so the two can never collide and a DOM
+     * assertion can tell from the id alone which direction a row offers.
+     */
+    public static function hideFormId(int $rowId, bool $isHidden): string
+    {
+        return ($isHidden ? 'vc-b-unhide-' : 'vc-b-hide-') . (int) $rowId;
+    }
+
+    /**
+     * The per-row Hide / Unhide button.
+     *
+     * Called by render_page() AND by the DOM wiring test, so the assertion
+     * is made against the markup production actually emits rather than
+     * against a copy of it that can drift.
+     *
+     * The confirmation text states what the control really does: it applies
+     * (or lifts) a platform-wide DENY rule on the CONTRACT, which is what
+     * governs visibility and rediscovery. It deliberately does NOT describe
+     * the scanner-cache sync — that is downstream bookkeeping, and calling
+     * it the security control would be untrue.
+     */
+    public static function renderHideButton(int $rowId, bool $isHidden): void
+    {
+        $rowId  = (int) $rowId;
+        $formId = self::hideFormId($rowId, $isHidden);
+
+        $confirm = $isHidden
+            ? 'Lift the platform-wide hide rule?' . "\n\n"
+                . 'This applies a platform-wide ALLOW rule to the contract, lifting the deny decision. '
+                . 'The collection may become visible again on user-facing surfaces where it otherwise '
+                . 'qualifies, and discovery may consider it eligible from now on.' . "\n\n"
+                . 'It does NOT verify the collection, and it does NOT create or provision its community. '
+                . 'You still do that yourself.'
+            : 'Hide this collection from users?' . "\n\n"
+                . 'This applies a platform-wide DENY rule to the contract. The collection is removed from every '
+                . 'user-facing surface, and discovery will no longer treat it as eligible or visible — so it stays '
+                . 'hidden even if wallets holding it link later.' . "\n\n"
+                . 'Reversible with Unhide. This is not the same as Remove, which only deletes the row.';
+
+        $title = $isHidden
+            ? 'Apply a platform-wide ALLOW rule to this contract and lift the deny decision. The collection may '
+                . 'become visible again where it otherwise qualifies. This does not verify it or create its community.'
+            : 'Apply a platform-wide DENY rule to this contract: hidden from users everywhere and never treated '
+                . 'as eligible by discovery. Reversible, unlike Remove.';
+        ?>
+        <button type="submit"
+                form="<?php echo esc_attr($formId); ?>"
+                class="button button-small"
+                title="<?php echo esc_attr($title); ?>"
+                onclick="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral($confirm)); ?>);">
+            <?php echo $isHidden ? 'Unhide' : 'Hide'; ?>
         </button>
         <?php
     }
@@ -1028,7 +1193,8 @@ final class VerifyCollectionsPage
             // Collection ids that rendered a VC-A per-row control. Their
             // dedicated forms are emitted after this one closes, because a
             // form cannot be nested inside another.
-            $vcRowForms = [];
+            $vcRowForms   = [];
+            $vcHiddenById = [];
             ?>
             <form method="post" action="">
                 <?php wp_nonce_field(self::NONCE_KEY, self::NONCE_NAME); ?>
@@ -1254,24 +1420,16 @@ final class VerifyCollectionsPage
                                     ?>
                                     <?php if ($isHidden): ?>
                                         <span style="display:inline-block;margin-bottom:4px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:#d63638;">HIDDEN</span>
-                                        <button type="submit"
-                                                name="bcc_vc_action"
-                                                value="unhide_<?php echo $rowId; ?>"
-                                                class="button button-small"
-                                                title="Restore this collection for users (writes an explicit ALLOW rule on the contract).">
-                                            Unhide
-                                        </button>
-                                    <?php else: ?>
-                                        <button type="submit"
-                                                name="bcc_vc_action"
-                                                value="hide_<?php echo $rowId; ?>"
-                                                class="button button-small"
-                                                title="Hide this collection from all user-facing surfaces and block rediscovery (writes a DENY rule on the contract — reversible, unlike delete)."
-                                                onclick="return confirm('Hide this collection from users? The contract gets a DENY rule, so it stays hidden even if wallets holding it link later. Reversible via Unhide.');">
-                                            Hide
-                                        </button>
                                     <?php endif; ?>
-                                    <?php $vcRowForms[$rowId] = true; ?>
+                                    <?php
+                                    // VC-B1: the button reaches its own form
+                                    // via form=, because HTML forbids nesting
+                                    // one form inside another and this row
+                                    // sits inside the big verification form.
+                                    self::renderHideButton($rowId, $isHidden);
+                                    $vcRowForms[$rowId]  = true;
+                                    $vcHiddenById[$rowId] = $isHidden;
+                                    ?>
                                     <button type="submit"
                                             form="vc-a-del-<?php echo $rowId; ?>"
                                             class="button button-small button-link-delete"
@@ -1327,7 +1485,8 @@ final class VerifyCollectionsPage
                 $page,
                 $selectedChain,
                 $selectedTokenStandard,
-                $isVerified
+                $isVerified,
+                $vcHiddenById
             );
             ?>
 
@@ -1469,23 +1628,42 @@ final class VerifyCollectionsPage
         // accepted here any more, so a `bcc_verify_collections_nonce`
         // cannot reach them.
         //
-        // ⚠️ The branches BELOW still share this one broad nonce. Any of
-        // them can authorise any other of them by changing bcc_vc_action:
-        // a hide nonce can drive a chain-discovery toggle or a scanner
-        // backfill. That is deferred VC-B scope, tracked separately —
-        // hide/unhide stay on this page, the cw_* controls are slated to
-        // move to Chains / scanner-operations surfaces.
+        // NOTE — VC-B1 actions no longer arrive here either. `hide_<id>` and
+        // `unhide_<id>` moved to their own admin_post routes; what remains
+        // below is the fail-closed refusal for stale tabs.
+        //
+        // ⚠️ The six `cw_*` branches BELOW still share this one broad nonce.
+        // Any of them can authorise any other of them by changing
+        // bcc_vc_action: a pause nonce can drive a scanner backfill on a
+        // different chain. That is deferred VC-B2/VC-B3 scope, tracked
+        // separately — those controls are slated to move to a Chains ▸
+        // CosmWasm subtab and are deliberately untouched by this batch.
 
-        // Per-row Hide / Unhide. Writes an operator rule to the spam
-        // table rather than touching the collection row — a DENY rule
-        // is what survives rediscovery (wallet-link discovery consults
-        // it before landing rows), so a hidden scam can't resurrect
-        // itself the way a deleted row would.
-        if (strpos($action, 'hide_') === 0) {
-            return self::handleHideToggle((int) substr($action, strlen('hide_')), true);
-        }
-        if (strpos($action, 'unhide_') === 0) {
-            return self::handleHideToggle((int) substr($action, strlen('unhide_')), false);
+        // VC-B1: Hide and Unhide LEFT this dispatcher. They are now
+        // admin_post routes with their own direction- and target-scoped
+        // nonces (see ACTION_HIDE / ACTION_UNHIDE).
+        //
+        // A page loaded before that change still carries the old markup, so
+        // a stale tab can still post `hide_<id>` here with a valid page
+        // nonce. That must FAIL CLOSED. Silently falling through to the
+        // `return []` at the bottom would render a perfectly normal page
+        // and let the operator believe a scam contract had been hidden when
+        // no rule was written at all — the worst outcome available.
+        //
+        // No durable row is written: nothing changed, and a stale form is
+        // an operator-side accident, not a state transition.
+        if (strpos($action, 'hide_') === 0 || strpos($action, 'unhide_') === 0) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] Verify Collections: stale hide/unhide submission refused', [
+                'action'   => 'verify_collections_stale_hide_post',
+                'posted'   => $action,
+                'operator' => get_current_user_id(),
+            ]);
+
+            return [[
+                'type'    => 'error',
+                'message' => 'Hide/Unhide was submitted from a page that is out of date, so NOTHING was changed — '
+                    . 'no rule was written and the scanner was not touched. Reload this page and try again.',
+            ]];
         }
 
         // Per-chain discovery opt-in. Checked BEFORE the shorter `cw_`
@@ -2013,10 +2191,57 @@ final class VerifyCollectionsPage
             // The rule did not land, so the cached flag is deliberately NOT
             // touched: syncing it here would suppress (or un-suppress) a
             // contract on the strength of a rule that does not exist.
+            //
+            // THIS IS A DURABLE FAILURE, not a validation mistake. Capability,
+            // method, target and nonce all passed — an authorised operator
+            // asked for a state change and the authoritative write refused
+            // it. "Nothing changed" is exactly the fact worth being able to
+            // reconstruct later, so it gets a row.
+            //
+            // Same action name as an unexpected exception, deliberately:
+            // both mean "the authoritative rule was NOT applied", which is
+            // the only thing the durable row can carry. The cause lives in
+            // the technical log. No correlation ID is minted — that contract
+            // belongs to AdminActionSupport::failure() and is reserved for
+            // exceptions; inventing one here would promise an engineer a
+            // stack trace that was never captured.
+            \BCC\Core\Log\Logger::error('[bcc-trust] Verify Collections hide toggle: rule write refused', [
+                'action'        => 'verify_collections_hide_rule_write_failed',
+                'collection_id' => $collectionId,
+                'chain_id'      => $chainId,
+                'contract'      => $contract,
+                'rule'          => $rule,
+                'operator'      => get_current_user_id(),
+            ]);
+
+            AdminActionSupport::audit(
+                self::hideFailedAction($hide),
+                'collection',
+                $collectionId,
+                ['chain_id' => $chainId, 'contract' => $contract, 'rule' => $rule]
+            );
+
             return [['type' => 'error', 'message' => 'Hide: rule write failed. Check the bcc-trust error log.']];
         }
 
         $scannerSynced = self::syncScannerDenyFlag($chainId, $contract, $hide);
+
+        // THE DURABLE RECORD (VC-B1).
+        //
+        // The outcome is in the ACTION NAME, not in $meta: AuditLogger::log()
+        // accepts $meta and the insert array drops it, so anything encoded
+        // there is not durable. "applied" and "sync_unconfirmed" are
+        // therefore separate events rather than one event with a flag.
+        //
+        // The target is the COLLECTION row — never the chain. A chain id
+        // stored under target_type 'collection' would be indistinguishable
+        // from a real collection id in any later forensic query.
+        AdminActionSupport::audit(
+            self::hideAuditAction($hide, $scannerSynced),
+            'collection',
+            $collectionId,
+            ['chain_id' => $chainId, 'contract' => $contract, 'rule' => $rule]
+        );
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections hide toggle', [
             'action'         => 'verify_collections_hide',
@@ -2084,6 +2309,50 @@ final class VerifyCollectionsPage
      *   ===   → the cache agrees with the rule;
      *   !==   → the write silently did not land — report partial.
      */
+    /**
+     * The VC-B1 audit vocabulary, in one place.
+     *
+     * Four names, all inside the 50-character `action` column:
+     *
+     *   admin_vc_hide_applied              (21) rule written, cache agrees
+     *   admin_vc_unhide_applied            (23) rule written, cache agrees
+     *   admin_vc_hide_sync_unconfirmed     (30) rule written, cache stale
+     *   admin_vc_unhide_sync_unconfirmed   (32) rule written, cache stale
+     *
+     * "applied" covers BOTH "the scanner's flag now agrees" and "the scanner
+     * has no record of this contract, so there was nothing to sync" — the
+     * two are the same fact from the operator's side: nothing is left stale.
+     * `syncScannerDenyFlag()` already collapses them, and splitting them
+     * here would be a distinction the durable row cannot act on.
+     */
+    private static function hideAuditAction(bool $hide, bool $synced): string
+    {
+        if ($synced) {
+            return $hide ? 'admin_vc_hide_applied' : 'admin_vc_unhide_applied';
+        }
+
+        return $hide ? 'admin_vc_hide_sync_unconfirmed' : 'admin_vc_unhide_sync_unconfirmed';
+    }
+
+    /**
+     * The "the authoritative rule was NOT applied" event.
+     *
+     *   admin_vc_hide_failed    (20)
+     *   admin_vc_unhide_failed  (22)
+     *
+     * Shared by BOTH failure shapes on purpose: a repository write that
+     * returned false, and an unexpected exception escaping the handler.
+     * The durable row can only carry one fact, and for both shapes that
+     * fact is identical — the operator asked, the rule did not land, and
+     * nothing downstream was touched. Splitting them would invent a
+     * distinction the row cannot act on; the CAUSE lives in the technical
+     * log, which is where an engineer looks anyway.
+     */
+    private static function hideFailedAction(bool $hide): string
+    {
+        return $hide ? 'admin_vc_hide_failed' : 'admin_vc_unhide_failed';
+    }
+
     private static function syncScannerDenyFlag(int $chainId, string $contract, bool $hide): bool
     {
         try {

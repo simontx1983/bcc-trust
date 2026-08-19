@@ -499,6 +499,11 @@ namespace BCC\Trust\Onchain\Repositories {
     if (!class_exists(NftSpamContractRepository::class, false)) {
         final class NftSpamContractRepository
         {
+            // VC-B1: Hide/Unhide names these directly. Added here rather
+            // than in a second fake so one production class keeps one fake.
+            public const RULE_DENY  = 'deny';
+            public const RULE_ALLOW = 'allow';
+
             /** @var list<array<string, mixed>> */
             public static array $added = [];
             /** @var list<array<string, mixed>> */

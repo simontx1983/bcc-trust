@@ -103,8 +103,44 @@ final class VerifyCollectionsHideToggleTest extends TestCase
      */
     private function post(string $action, string $nonce = 'test-nonce'): array
     {
+        // VC-B1: Hide and Unhide LEFT handlePost() for their own admin_post
+        // routes, so driving the old dispatcher would now exercise the
+        // fail-closed refusal instead of the domain logic.
+        //
+        // What this file protects is the DOMAIN half — authoritative rule
+        // first, scanner cache second, read-back, partial completion, and
+        // above all that the production call to syncDenyFlags() EXISTS. That
+        // lives in handleHideToggle(), which is exactly what the new route
+        // calls, so every assertion below keeps its meaning.
+        //
+        // The TRANSPORT half — capability, direction- and target-scoped
+        // nonce, POST-only, PRG, replay, durable audit — is pinned by
+        // VerifyCollectionsHideRouteTest, which loads the admin shims this
+        // stub family deliberately does not carry.
+        $hide = strncmp($action, 'unhide_', 7) !== 0;
+        $id   = (int) substr($action, (int) strpos($action, '_') + 1);
+
+        $handler = new ReflectionMethod(VerifyCollectionsPage::class, 'handleHideToggle');
+        $handler->setAccessible(true);
+
+        /** @var list<array{type: string, message: string}> $notices */
+        $notices = $handler->invoke(null, $id, $hide);
+
+        return $notices;
+    }
+
+    /**
+     * The legacy transport is refused, and refused LOUDLY.
+     *
+     * A tab opened before VC-B1 still holds the old markup and a valid page
+     * nonce. Falling through to the dispatcher's `return []` would render a
+     * normal-looking page and let an operator believe a scam contract had
+     * been hidden when no rule was written at all.
+     */
+    private function postLegacy(string $action, string $nonce = 'test-nonce'): array
+    {
         $_POST = [
-            'bcc_vc_action'             => $action,
+            'bcc_vc_action'                   => $action,
             VerifyCollectionsPage::NONCE_NAME => $nonce,
         ];
 
@@ -412,11 +448,74 @@ final class VerifyCollectionsHideToggleTest extends TestCase
 
     public function test_a_bad_nonce_never_reaches_the_rule_or_the_scanner(): void
     {
-        $notices = $this->post('hide_' . self::COLLECTION_ID, 'not-the-nonce');
+        $notices = $this->postLegacy('hide_' . self::COLLECTION_ID, 'not-the-nonce');
 
         self::assertStringContainsString('Security check failed', $this->joined($notices));
         self::assertNull(NftSpamContractRepository::getRule(self::CHAIN_ID, self::CONTRACT));
         self::assertSame('0', $this->deniedFlag());
+    }
+
+    /**
+     * VC-B1 fail-closed: the legacy transport, with a PERFECTLY VALID page
+     * nonce, writes nothing and says so.
+     */
+    public function test_a_stale_legacy_hide_post_writes_nothing_and_says_so(): void
+    {
+        $notices = $this->postLegacy('hide_' . self::COLLECTION_ID);
+
+        self::assertSame('error', $notices[0]['type']);
+        self::assertStringContainsString('out of date', $this->joined($notices));
+        self::assertStringContainsString('NOTHING was changed', $this->joined($notices));
+
+        self::assertNull(
+            NftSpamContractRepository::getRule(self::CHAIN_ID, self::CONTRACT),
+            'a stale legacy hide must not write the authoritative rule'
+        );
+        self::assertSame('0', $this->deniedFlag(), 'nor touch the scanner cache');
+        self::assertSame(
+            [],
+            \BCC\Trust\Core\Security\AuditLogger::actions(),
+            'a stale form is an operator accident, not a state transition — no durable row'
+        );
+    }
+
+    public function test_a_stale_legacy_unhide_post_writes_nothing_and_says_so(): void
+    {
+        $notices = $this->postLegacy('unhide_' . self::COLLECTION_ID);
+
+        self::assertSame('error', $notices[0]['type']);
+        self::assertStringContainsString('out of date', $this->joined($notices));
+        self::assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions());
+    }
+
+    /**
+     * The six deferred `cw_*` branches are structurally untouched by VC-B1:
+     * they still reach their handlers through this dispatcher and the shared
+     * page nonce. Removing Hide/Unhide must not have disturbed them.
+     */
+    public function test_the_remaining_cw_legacy_dispatch_is_structurally_intact(): void
+    {
+        $source = (string) file_get_contents(
+            __DIR__ . '/../../app/Domain/Onchain/Admin/VerifyCollectionsPage.php'
+        );
+
+        foreach ([
+            'cw_discovery_on_',
+            'cw_discovery_off_',
+            'cw_pause_',
+            'cw_resume_',
+            'cw_backfill_',
+            'cw_retry_',
+        ] as $prefix) {
+            self::assertStringContainsString(
+                "strpos(\$action, '{$prefix}') === 0",
+                $source,
+                "{$prefix} must still dispatch from handlePost() until VC-B2/VC-B3"
+            );
+        }
+
+        // And the shared nonce they depend on is still verified there.
+        self::assertStringContainsString('wp_verify_nonce', $source);
     }
 
     public function test_an_unknown_collection_id_is_refused_before_any_write(): void

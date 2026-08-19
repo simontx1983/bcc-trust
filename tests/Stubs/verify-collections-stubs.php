@@ -49,6 +49,21 @@ namespace {
         }
     }
 
+    if (!function_exists('wp_json_encode')) {
+        /**
+         * VC-B1: the Hide/Unhide confirmation goes through
+         * AdminActionSupport::confirmLiteral(), which JSON-encodes the text
+         * so a quote or newline in it cannot break out of the onclick.
+         *
+         * @param mixed $data
+         * @return string|false
+         */
+        function wp_json_encode($data, int $options = 0, int $depth = 512)
+        {
+            return json_encode($data, $options, $depth);
+        }
+    }
+
     if (!function_exists('esc_url_raw')) {
         function esc_url_raw(string $url): string
         {
@@ -192,6 +207,9 @@ namespace BCC\Trust\Onchain\Repositories {
                     'chain_id'         => $chainId,
                     'contract_address' => $contract,
                     'name'             => 'Seeded',
+                    // VC-B1: the hide handler names the collection back to
+                    // the operator, falling back to the contract.
+                    'collection_name'  => 'Seeded Collection',
                     'chain_type'       => 'cosmos',
                     'slug'             => 'cosmos',
                     // getByIdWithChain() joins the chain, so the probe path
@@ -230,6 +248,91 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function reset(): void
             {
                 self::$groups = [];
+            }
+        }
+    }
+}
+
+namespace BCC\Trust\Onchain\Repositories {
+
+    // ── VC-B1 Hide/Unhide collaborators ────────────────────────────────
+
+    if (!class_exists(RepositoryReadFailure::class, false)) {
+        /** Thrown when a read could not be completed — never "no row". */
+        final class RepositoryReadFailure extends \RuntimeException
+        {
+            public function __construct(private string $method = 'deniedFlag', private string $db = 'db gone')
+            {
+                parent::__construct('repository read failed: ' . $method);
+            }
+
+            public function repositoryMethod(): string
+            {
+                return $this->method;
+            }
+
+            public function dbError(): string
+            {
+                return $this->db;
+            }
+        }
+    }
+
+    if (!class_exists(CosmwasmContractRepository::class, false)) {
+        /** The scanner's CACHED deny flag — downstream of the rule. */
+        final class CosmwasmContractRepository
+        {
+            /** null = the scanner never inventoried this contract. */
+            public static ?bool $flag = null;
+            public static bool $throwOnRead = false;
+            public static int $reads = 0;
+
+            public static function deniedFlag(int $chainId, string $contract): ?bool
+            {
+                self::$reads++;
+
+                if (self::$throwOnRead) {
+                    throw new RepositoryReadFailure('deniedFlag', 'SQLSTATE[HY000] stub');
+                }
+
+                return self::$flag;
+            }
+
+            public static function reset(): void
+            {
+                self::$flag        = null;
+                self::$throwOnRead = false;
+                self::$reads       = 0;
+            }
+        }
+    }
+}
+
+namespace BCC\Trust\Onchain\Services {
+
+    if (!class_exists(CosmwasmDiscoveryService::class, false)) {
+        final class CosmwasmDiscoveryService
+        {
+            /** @var list<array{chain: int, contracts: list<string>}> */
+            public static array $syncCalls = [];
+            public static ?\Throwable $syncThrows = null;
+
+            /** @param list<string> $contracts */
+            public static function syncDenyFlags(int $chainId, array $contracts): int
+            {
+                self::$syncCalls[] = ['chain' => $chainId, 'contracts' => $contracts];
+
+                if (self::$syncThrows !== null) {
+                    throw self::$syncThrows;
+                }
+
+                return count($contracts);
+            }
+
+            public static function reset(): void
+            {
+                self::$syncCalls  = [];
+                self::$syncThrows = null;
             }
         }
     }
