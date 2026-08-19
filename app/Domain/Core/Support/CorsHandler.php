@@ -52,7 +52,7 @@
  *
  * Sourced from the `BCC_FRONTEND_ORIGIN` constant, comma-separated. When
  * undefined or empty NO CORS headers are emitted — same-origin only.
- * Two entry forms are recognised:
+ * Three entry forms are recognised:
  *
  *   1. An exact origin, e.g. `https://bluecollarcrypto.io`. Compared
  *      against the request Origin AFTER both sides are canonicalised
@@ -68,21 +68,89 @@
  *      `<project>-…-<team>.vercel.app.evil.com`, a different team slug)
  *      cannot match.
  *
- * RETIRED: the `regex:` entry form. It matched case-insensitively
- * against the RAW Origin string and echoed that raw string back, so
- * `HTTPS://BCC-FRONTEND-…` was accepted and reflected verbatim; and its
- * `[a-z0-9]+` body could not span a hyphen, so no `git-*` branch preview
- * ever matched. `regex:` entries are now ignored (fail closed).
- * DEPLOYMENT NOTE: any environment whose `BCC_FRONTEND_ORIGIN` still
- * carries a `regex:` entry must migrate it to the `vercel:` form or its
- * preview deployments lose CORS.
+ *   3. A regular-expression rule, `regex:<pattern>`. The escape hatch for
+ *      an origin shape the two structural forms cannot express. Prefer
+ *      form 2 for Vercel — it needs no pattern review. See
+ *      {@see self::compileRegexRule()} for the full rule set; the short
+ *      version is that the pattern is ALWAYS wrapped in `^(?:…)$`, always
+ *      matched case-SENSITIVELY, and always matched against the
+ *      canonical origin rather than the raw header.
+ *
+ * ## The `regex:` form, and the two defects it used to have
+ *
+ * This form was withdrawn in the 2026-08 hardening pass and reinstated
+ * immediately afterwards (owner ruling: keep it, a rule may be needed
+ * later). Reinstated does NOT mean restored — the original had two live
+ * defects, and the current implementation exists to make both
+ * unrepresentable:
+ *
+ *   1. It matched with `/i` against the RAW `Origin` bytes and then echoed
+ *      those raw bytes back, so `HTTPS://BCC-FRONTEND-…VERCEL.APP` was
+ *      allowed and reflected verbatim. Now the origin must first survive
+ *      {@see self::canonicalizeOrigin()} — the same structural gate every
+ *      other entry form goes through, which is the only thing standing
+ *      between the allowlist and a path, query, fragment, userinfo, port,
+ *      control character or percent-escape. The pattern then matches the
+ *      CANONICAL, lowercased origin, and the canonical form is what is
+ *      echoed. A `regex:` entry is therefore not a way around any reject
+ *      rule; it can only ever select from among origins that already
+ *      passed. `/i` is gone: the subject is lowercase by construction, so
+ *      the flag could only ever widen the surface.
+ *
+ *   2. Its `[a-z0-9]+` body could not span a hyphen, so no `git-*` branch
+ *      preview ever matched. That is a config-authoring problem rather
+ *      than a code one; form 2 now covers previews structurally, which is
+ *      why it is the recommended answer.
+ *
+ * ⚠ A `regex:` pattern MAY NOT CONTAIN A COMMA. The allowlist splits on
+ * commas before anything else looks at an entry, so a counted quantifier
+ * like `[a-z0-9]{6,32}` is torn into `regex:…[a-z0-9]{6` and `32}…`. Both
+ * halves then fail closed — the first will not compile, the second is not
+ * a valid origin — so the symptom is a rule that silently never matches,
+ * not a security hole. Use `[a-z0-9][a-z0-9]*` or form 2 instead.
+ *
+ * ⚠ A `regex:` entry MUST NOT BE FIRST. Three other consumers of
+ * `BCC_FRONTEND_ORIGIN` read the first entry as the canonical frontend
+ * origin and would build links out of the rule string. Append, never
+ * prepend. Same constraint as the `vercel:` form; see
+ * docs/domain-cutover-runbook.md.
+ *
+ * ⚠⚠ AND "not first" IS NOT SUFFICIENT. A pattern that BEGINS with `//`
+ * is refused outright ({@see self::compileRegexRule()}), because of a
+ * neighbouring consumer rather than anything CORS does:
+ *
+ *   - {@see FrontendRedirect::allowedHosts()} runs `wp_parse_url()` over
+ *     EVERY entry and keeps whatever `host` falls out. `regex:` parses as
+ *     a URL scheme, so in `regex://evil.com` the `//` reads as the start
+ *     of an authority and yields the host `evil.com` — which lands on the
+ *     allowlist {@see FrontendRedirect::validateReturnTo()} uses to
+ *     approve OAuth `return_to` targets (GitHubController, XController).
+ *     That is an open redirect and a token-leak path. The pattern itself
+ *     is inert for CORS (no canonical origin starts with `//`), so the
+ *     damage would be entirely in the other consumer and no CORS test
+ *     would ever see it. Refusing the shape here is the cheap half of the
+ *     fix; it costs nothing, since such a pattern can never match.
+ *   - Only a LEADING `//` does this. `regex:^https://…` and
+ *     `regex:https://…` both parse to no host at all, because
+ *     `wp_parse_url` only reads an authority when `//` directly follows
+ *     the scheme colon. The ordinary anchored pattern is therefore safe.
+ *   - {@see JwtToken::audienceAllowlist()} adds every entry verbatim to
+ *     the acceptable `aud` set. Inert — an attacker cannot sign a token —
+ *     but it means a rule string is a valid audience, which is noise in
+ *     any audit of that list.
+ *
+ * Both of those parsers predate the prefixed entry forms and neither
+ * strips a prefix. Unifying all four readers behind one parser is the
+ * real fix; it is tracked in docs/domain-cutover-runbook.md and is NOT
+ * done here.
  *
  * Configuration example (wp-config.php):
  *
  *   define('BCC_FRONTEND_ORIGIN',
  *       'https://bluecollarcrypto.io' .
  *       ',https://staging.bluecollarcrypto.io' .
- *       ',vercel:bcc-frontend:phillip-simon-s-projects'
+ *       ',vercel:bcc-frontend:phillip-simon-s-projects' .
+ *       ',regex:https://bcc-frontend-[a-z0-9-]+\.internal\.example\.net'
  *   );
  *
  * ## Two entry points, one policy
@@ -207,22 +275,148 @@ final class CorsHandler
     /** Allowlist entry prefix for a structural Vercel preview rule. */
     private const PREVIEW_ENTRY_PREFIX = 'vercel:';
 
-    /** Allowlist entry prefix that is recognised only so it can be ignored. */
-    private const RETIRED_REGEX_ENTRY_PREFIX = 'regex:';
+    /**
+     * Allowlist entry prefix for a hardened regular-expression rule.
+     *
+     * Supported again as of 2026-08 (owner ruling), on the terms set out in
+     * {@see self::compileRegexRule()}. It is the LAST resort — the exact and
+     * `vercel:` forms need no pattern review, so reach for those first.
+     */
+    private const REGEX_ENTRY_PREFIX = 'regex:';
+
+    /**
+     * PCRE delimiter for `regex:` rules, and therefore a byte a pattern may
+     * not contain.
+     *
+     * `/` is unusable — every origin pattern contains `https://`, and forcing
+     * operators to write `https:\/\/` is exactly the kind of papercut that
+     * produces a pattern nobody re-reads. `#` cannot appear in a canonical
+     * origin either (a fragment is a reject rule in
+     * {@see self::canonicalizeOrigin()}), so nothing legitimate needs it and
+     * refusing it outright is free.
+     */
+    private const REGEX_DELIMITER = '#';
+
+    /**
+     * Hard cap on a `regex:` pattern, in bytes.
+     *
+     * Half of the backtracking bound. The other half is the 255-byte cap
+     * `canonicalizeOrigin()` already puts on the SUBJECT. Measured at both
+     * caps, the nastiest classic ReDoS shapes (`(a|a)+$`, `(\w|\w\w)+$`)
+     * exhaust `pcre.backtrack_limit` in ~3.5 ms and return `false`, which
+     * {@see self::tryMatch()} turns into a denial — so the worst case is a
+     * few wasted milliseconds and a closed door, not a hung worker.
+     *
+     * 200 is ~3× the longest realistic rule (the documented Vercel-shaped
+     * pattern is 70 bytes).
+     */
+    private const MAX_REGEX_PATTERN_LENGTH = 200;
+
+    /**
+     * Negative canary. Every configured pattern is probed against it, and any
+     * pattern that MATCHES it is discarded.
+     *
+     * This rejects total catch-alls — `regex:.*`, `regex:.+`, `regex:[\s\S]*`
+     * — which are never a deliberate allowlist and are the single most likely
+     * way this entry form gets misused (someone pastes `.*` while debugging
+     * CORS and it ships). `.invalid` is reserved by RFC 2606 and can never be
+     * registered, so no honest rule has any reason to match it.
+     *
+     * ⚠ Be precise about what this does NOT do. It catches TOTALITY, not
+     * BREADTH. `regex:^https://.*\.vercel\.app$` does not match the canary
+     * and is accepted, even though it hands CORS to every Vercel deployment
+     * on the internet. That remains operator rope, deliberately: a pattern
+     * broad enough to be dangerous but narrow enough to look intentional
+     * cannot be told apart from a legitimate one by any local check. Pattern
+     * review at config time is the control for breadth; this is only a
+     * backstop for the degenerate case.
+     */
+    private const REGEX_TOTALITY_CANARY = 'https://cors-totality-canary.invalid';
+
+    /**
+     * Priority at which the core-CORS removal runs on `rest_api_init`.
+     *
+     * WordPress registers `rest_send_cors_headers` from inside
+     * `rest_api_default_filters()`, which is hooked to `rest_api_init` at
+     * priority 10 (wp-includes/default-filters.php:532). The removal must
+     * therefore run AFTER that — 11 is the first priority that qualifies.
+     * Removing earlier is a silent no-op: the filter does not exist yet,
+     * `remove_filter()` returns false, and core re-adds it moments later.
+     */
+    public const CORE_CORS_REMOVAL_PRIORITY = 11;
+
+    /**
+     * Priority at which WordPress core registers `rest_send_cors_headers`
+     * on `rest_pre_serve_request` — `add_filter()`'s default, i.e. 10
+     * (wp-includes/rest-api.php:252). `remove_filter()` matches on
+     * (hook, callback, priority), so this value must be exact: passing
+     * any other priority removes nothing and returns false.
+     */
+    public const CORE_CORS_PRIORITY = 10;
+
+    /** Guards against double registration if register() is called twice. */
+    private static bool $registered = false;
 
     public static function register(): void
     {
-        // Preflight OPTIONS for BCC routes — short-circuit before WP routing.
+        // Idempotent: two registrations would emit duplicate CORS headers,
+        // which is itself a spec violation.
+        if (self::$registered) {
+            return;
+        }
+        self::$registered = true;
+
+        // Preflight OPTIONS — short-circuit before WP routing.
         add_action('init', [self::class, 'handlePreflight'], 1);
 
-        // Actual REST response. LAST on the hook so core's unconditional
-        // reflected headers are already emitted and can be stripped.
+        // Take core OUT of the CORS business entirely, rather than racing
+        // it and cleaning up afterwards. Core's version reflects ANY
+        // Origin with `Access-Control-Allow-Credentials: true` on EVERY
+        // REST route — including `/wp-json/` and `/wp/v2/*`, which no BCC
+        // handler used to touch. Verified on production 2026-08-19:
+        // `evil.example.com` was echoed back with credentials.
+        add_action(
+            'rest_api_init',
+            [self::class, 'removeCoreCorsHeaders'],
+            self::CORE_CORS_REMOVAL_PRIORITY
+        );
+
+        // Actual REST response. LAST on the hook, so anything another
+        // plugin emits is still stripped even though core no longer does.
         add_filter(
             'rest_pre_serve_request',
             [self::class, 'sendCorsHeaders'],
             self::FINAL_AUTHORITY_PRIORITY,
             3
         );
+    }
+
+    /**
+     * Detach WordPress core's REST CORS emitter.
+     *
+     * Deliberately narrow: this removes exactly one callback from exactly
+     * one hook at exactly one priority. `rest_handle_options_request` and
+     * every other core REST filter are left alone — only the header
+     * emitter goes.
+     *
+     * @return bool True when the callback was present and removed. False
+     *              means core's filter was not registered at the expected
+     *              priority, which is a contract change worth failing a
+     *              test over.
+     */
+    public static function removeCoreCorsHeaders(): bool
+    {
+        return remove_filter(
+            'rest_pre_serve_request',
+            'rest_send_cors_headers',
+            self::CORE_CORS_PRIORITY
+        );
+    }
+
+    /** Test seam: forget that register() ran. */
+    public static function resetRegistrationForTests(): void
+    {
+        self::$registered = false;
     }
 
     public static function handlePreflight(): void
@@ -593,6 +787,17 @@ final class CorsHandler
     }
 
     /**
+     * Test the CANONICAL candidate against every configured entry.
+     *
+     * ⚠ Structural invariant, load-bearing for the `regex:` form: the only
+     * caller is {@see self::resolveAllowedOrigin()}, which has already run
+     * {@see self::canonicalizeOrigin()} and bailed on null. Every `$candidate`
+     * reaching here has therefore survived the full reject list, and
+     * `$candidate['canonical']` is lowercased and normalised. No entry form —
+     * least of all a pattern out of configuration — may be given the raw
+     * header instead. Route a new entry form through `$candidate`, never
+     * through `self::requestOrigin()`.
+     *
      * @param array{scheme: string, host: string, port: int|null, canonical: string} $candidate
      */
     private static function isAllowlisted(array $candidate): bool
@@ -619,9 +824,11 @@ final class CorsHandler
                 continue;
             }
 
-            // RETIRED entry form — recognised only so it is skipped rather
-            // than mis-parsed as an exact origin. See the class docblock.
-            if (str_starts_with($entry, self::RETIRED_REGEX_ENTRY_PREFIX)) {
+            if (str_starts_with($entry, self::REGEX_ENTRY_PREFIX)) {
+                $pattern = substr($entry, strlen(self::REGEX_ENTRY_PREFIX));
+                if (self::matchesRegexRule($candidate, $pattern)) {
+                    return true;
+                }
                 continue;
             }
 
@@ -686,5 +893,159 @@ final class CorsHandler
 
         // Branch alias: `git-` followed by a hyphen-separated slug.
         return preg_match('/^git-[a-z0-9]+(?:-[a-z0-9]+)*$/', $middle) === 1;
+    }
+
+    /**
+     * Match a `regex:<pattern>` rule.
+     *
+     * The subject is `$candidate['canonical']` and nothing else. That string
+     * is lowercase, has no path/query/fragment/userinfo, has a validated LDH
+     * host and a validated port, and is byte-identical to what
+     * {@see self::applyPolicy()} will echo in `Access-Control-Allow-Origin`
+     * if this returns true. Matching what we echo, rather than what the
+     * caller sent, is the property that makes reflecting attacker-chosen
+     * bytes structurally impossible — it was the original defect in this
+     * entry form and must not be reintroduced.
+     *
+     * @param array{scheme: string, host: string, port: int|null, canonical: string} $candidate
+     */
+    private static function matchesRegexRule(array $candidate, string $pattern): bool
+    {
+        $regex = self::compileRegexRule($pattern);
+        if ($regex === null) {
+            return false;
+        }
+
+        return self::tryMatch($regex, $candidate['canonical']) === true;
+    }
+
+    /**
+     * Validate a configured pattern and wrap it into the PCRE we will
+     * actually run, or return null to discard the entry.
+     *
+     * Everything here fails CLOSED: a rejected entry is simply skipped, so a
+     * bad pattern costs its own rule and cannot widen any other. In
+     * particular a non-compiling pattern never makes the allowlist
+     * permissive — the remaining entries are evaluated exactly as before.
+     *
+     * ## Always anchored, never anchor-CHECKED
+     *
+     * The pattern is unconditionally wrapped in `^(?:…)$` (plus the `D`
+     * modifier, so `$` cannot match before a trailing newline). It is NOT
+     * inspected for `^` and `$` and rejected when they are missing.
+     *
+     * That is a deliberate choice between the two options, and the reason is
+     * that an anchor-PRESENCE test is not an anchor GUARANTEE. Consider:
+     *
+     *     regex:^https://bluecollarcrypto\.io|evil
+     *
+     * It contains a `^`, so a presence check waves it through — and then it
+     * matches `https://evil.com`, because alternation binds looser than the
+     * anchor and the second branch is a bare substring. That is a live
+     * false-allow produced by a rule that LOOKS anchored. Wrapping instead of
+     * checking makes the whole class unrepresentable: whatever the operator
+     * wrote becomes one alternation group that must consume the entire
+     * subject. The non-capturing group is what makes it safe for alternation
+     * — `^https://a|https://b$` without the group is not anchored on either
+     * branch.
+     *
+     * Wrapping is also idempotent for the patterns people actually write: the
+     * documented, already-anchored Vercel-shaped rule matches identically
+     * before and after, because `^` and `$` are zero-width assertions that
+     * re-assert harmlessly at the positions the wrapper pins them to.
+     *
+     * The cost of wrapping over rejecting is that an operator who writes an
+     * unanchored substring rule gets a rule that matches nothing rather than
+     * a rule that is refused. Both are fail-closed; wrapping additionally
+     * does the right thing for the operator who wrote a bare alternation, and
+     * never has to explain a rejection whose cause is a regex subtlety.
+     *
+     * ## Case-sensitive
+     *
+     * No `/i`. The subject is lowercased by `canonicalizeOrigin()`, so `i`
+     * cannot make a legitimate rule match anything extra — it can only widen
+     * the rule to accept uppercase forms of hosts the operator did not think
+     * about. The original implementation used `/i` against the raw header and
+     * that is precisely how `HTTPS://BCC-FRONTEND-…` got allowed.
+     *
+     * @return string|null the delimited PCRE, or null when the entry is unusable
+     */
+    private static function compileRegexRule(string $pattern): ?string
+    {
+        if ($pattern === '' || strlen($pattern) > self::MAX_REGEX_PATTERN_LENGTH) {
+            return null;
+        }
+
+        // Printable ASCII only — the same charset canonicalizeOrigin() demands
+        // of the subject. A pattern carrying a control character, a NUL or a
+        // non-ASCII byte cannot match a canonical origin anyway, so refusing
+        // it loses nothing and keeps the two charsets in step.
+        if (preg_match('/[^\x21-\x7e]/', $pattern) === 1) {
+            return null;
+        }
+
+        if (str_contains($pattern, self::REGEX_DELIMITER)) {
+            return null;
+        }
+
+        // A pattern starting with `//` makes `regex://evil.com` parse as a
+        // URL with the authority `evil.com`, which FrontendRedirect then
+        // trusts as an OAuth return-URL host. Inert here — no canonical
+        // origin begins with `//`, so the rule could never match anyway —
+        // which is exactly why refusing it is free. See the class docblock.
+        if (str_starts_with($pattern, '//')) {
+            return null;
+        }
+
+        $regex = self::REGEX_DELIMITER . '^(?:' . $pattern . ')$' . self::REGEX_DELIMITER . 'D';
+
+        // One probe, two guarantees. `null` means PCRE refused the pattern
+        // outright (a compile error, e.g. an unbalanced bracket) — discard it.
+        // `true` means the pattern matches a host that must never be allowed,
+        // i.e. it is a total catch-all — discard that too. Only a pattern that
+        // compiles AND correctly declines the canary is handed back.
+        return self::tryMatch($regex, self::REGEX_TOTALITY_CANARY) === false ? $regex : null;
+    }
+
+    /**
+     * `preg_match` with every failure mode collapsed into a single null.
+     *
+     * A `regex:` pattern is configuration, so it can be malformed, and its
+     * subject is attacker-influenced, so matching can blow the backtrack
+     * limit. PHP reports the first as an `E_WARNING` plus a `false` return
+     * and the second as a `false` return with `preg_last_error()` set; both
+     * must fail closed.
+     *
+     * The local error handler is not decoration. Without it a single
+     * mistyped entry emits a warning into the site's error log on EVERY
+     * request that carries an `Origin` — a log flood that is far more likely
+     * to take a site down than the misconfiguration itself. `@` is not
+     * sufficient: a custom handler installed by a debug plugin (or by
+     * PHPUnit) is invoked regardless of the suppression operator.
+     *
+     * @return bool|null true = matched, false = did not match, null = PCRE refused
+     */
+    private static function tryMatch(string $regex, string $subject): ?bool
+    {
+        $refused = false;
+
+        set_error_handler(static function (int $errno, string $errstr) use (&$refused): bool {
+            unset($errno, $errstr);
+            $refused = true;
+
+            return true;
+        });
+
+        try {
+            $result = preg_match($regex, $subject);
+        } finally {
+            restore_error_handler();
+        }
+
+        if ($refused || $result === false || preg_last_error() !== PREG_NO_ERROR) {
+            return null;
+        }
+
+        return $result === 1;
     }
 }

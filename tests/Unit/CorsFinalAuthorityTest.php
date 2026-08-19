@@ -69,6 +69,118 @@ final class CorsFinalAuthorityTest extends TestCase
     private const STAGING = 'https://staging.bluecollarcrypto.io';
     private const TEAM    = 'phillip-simon-s-projects';
 
+    /**
+     * The anchored `regex:` pattern used by most of the regex fixtures.
+     * Deliberately the SHAPE the retired implementation shipped, so the
+     * uppercase and structural fixtures below are testing the exact
+     * configuration that used to be exploitable.
+     *
+     * Note `[a-z0-9-]+` rather than the original `[a-z0-9]+`: the original
+     * could not span a hyphen, which is why no `git-*` branch preview ever
+     * matched it (defect 2).
+     */
+    private const REGEX_PREVIEW = 'regex:^https://bcc-frontend-[a-z0-9-]+-'
+        . self::TEAM . '\\.vercel\\.app$';
+
+    /** The allowlist every pre-existing test in this file was written against. */
+    private const BASE_CONFIG = self::PROD
+        . ',' . self::STAGING
+        . ',vercel:bcc-frontend:' . self::TEAM
+        . ',http://localhost:3000';
+
+    /**
+     * Per-test `BCC_FRONTEND_ORIGIN`.
+     *
+     * `#[RunTestsInSeparateProcesses]` gives every test its own process, but
+     * `setUp()` still runs before the test body, and a constant can only be
+     * defined once — so a test cannot choose its own allowlist from inside
+     * itself. Keying off the test name in setUp() is the seam. The
+     * alternative, adding a settable override to CorsHandler, would put a
+     * test-only mutation hook on the class whose entire job is to be the
+     * final authority; that is a worse trade.
+     *
+     * Anything not listed here gets BASE_CONFIG, which is byte-identical to
+     * what this file used before the `regex:` form was reinstated. That is
+     * what keeps the pre-existing tests honest rather than merely green.
+     *
+     * @return array<string, string>
+     */
+    private static function configs(): array
+    {
+        return [
+            // A catch-all, to pin what the totality canary does with it.
+            'testRegexCatchAllIsRefusedAsAConfigurationError'
+                => self::PROD . ',regex:.*',
+            'testRegexCatchAllVariantsAreAllRefused'
+                => self::PROD . ',regex:.+,regex:[\s\S]*,regex:(.*)',
+
+            // Unanchored / partially anchored patterns.
+            'testUnanchoredRegexMatchesNothingBecauseEveryPatternIsWrapped'
+                => self::PROD . ',regex:bcc-frontend',
+            'testAnchorPresenceIsNotAnchorGuarantee'
+                => self::PROD . ',regex:^https://bluecollarcrypto\\.io|evil',
+            'testAlternationIsGroupedSoEveryBranchIsAnchored'
+                => 'regex:https://a\\.example|https://b\\.example',
+
+            // Malformed / hostile patterns.
+            'testNonCompilingPatternIsDeniedAndTheRestOfTheAllowlistStillWorks'
+                => self::PROD . ',regex:^https://[a-z,' . self::STAGING,
+            'testOverlongPatternIsRefused'
+                => self::PROD . ',regex:^https://' . str_repeat('a', 200) . '$',
+            'testPatternContainingTheDelimiterIsRefused'
+                => self::PROD . ',regex:^https://bcc#frontend\\.example$',
+            'testLeadingDoubleSlashPatternIsRefused'
+                => self::PROD . ',regex://evil.com',
+            // A genuinely catastrophic rule, paired below with a subject that
+            // is a STRUCTURALLY VALID origin — see the test for why that
+            // pairing is the whole point.
+            'testCatastrophicPatternFailsClosedWithoutHanging'
+                => self::PROD . ',regex:https://(a|a)+\\.io',
+
+            // The comma trap.
+            'testCountedQuantifierIsTornApartByTheAllowlistSplitterAndFailsClosed'
+                => self::PROD . ',regex:^https://bcc-frontend-[a-z0-9]{6,32}-'
+                    . self::TEAM . '\\.vercel\\.app$',
+
+            // Coexistence of all three entry forms.
+            'testAllThreeEntryFormsCoexist'
+                => self::PROD
+                    . ',vercel:bcc-frontend:' . self::TEAM
+                    . ',' . self::REGEX_PREVIEW,
+        ];
+    }
+
+    /** The allowlist a `regex:`-form test runs against, for its own assertions. */
+    private static function configForCurrent(string $test): string
+    {
+        return self::configs()[$test] ?? self::REGEX_ONLY_CONFIG;
+    }
+
+    /**
+     * Default for the regex fixtures that share one allowlist: the anchored
+     * preview pattern, plus an exact origin so "the rest of the allowlist
+     * still works" is always assertable.
+     */
+    private const REGEX_ONLY_CONFIG = self::PROD . ',' . self::REGEX_PREVIEW;
+
+    /**
+     * Tests that opt in to REGEX_ONLY_CONFIG rather than BASE_CONFIG.
+     * Listed explicitly so a new test cannot silently inherit a regex
+     * allowlist it did not ask for.
+     *
+     * @return list<string>
+     */
+    private static function regexFixtureTests(): array
+    {
+        return [
+            'testAnchoredRegexAllowsThePreviewHostAndEchoesTheCanonicalOrigin',
+            'testUppercaseOriginUnderARegexRuleIsEchoedLowercasedNeverRaw',
+            'testRegexRuleCannotBypassStructuralOriginValidation',
+            'testRegexRuleIsMatchedCaseSensitively',
+            'testTrailingWhitespaceBytesAreTrimmedAndNeverReflected',
+        ];
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -76,13 +188,15 @@ final class CorsFinalAuthorityTest extends TestCase
         require_once __DIR__ . '/../Stubs/cors-stubs.php';
 
         if (!defined('BCC_FRONTEND_ORIGIN')) {
-            define(
-                'BCC_FRONTEND_ORIGIN',
-                self::PROD
-                . ',' . self::STAGING
-                . ',vercel:bcc-frontend:' . self::TEAM
-                . ',http://localhost:3000'
-            );
+            $test = $this->name();
+            if (isset(self::configs()[$test])) {
+                $config = self::configs()[$test];
+            } elseif (in_array($test, self::regexFixtureTests(), true)) {
+                $config = self::REGEX_ONLY_CONFIG;
+            } else {
+                $config = self::BASE_CONFIG;
+            }
+            define('BCC_FRONTEND_ORIGIN', $config);
         }
 
         HeaderRecorder::reset();
@@ -91,6 +205,23 @@ final class CorsFinalAuthorityTest extends TestCase
         unset($_SERVER['HTTP_ORIGIN']);
         $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI']    = '/wp-json/bcc/v1/users';
+    }
+
+    /** The single ACAO on the response, or null when the origin was denied. */
+    private function acao(string $origin, string $route = '/bcc/v1/users'): ?string
+    {
+        if ($origin === '') {
+            unset($_SERVER['HTTP_ORIGIN']);
+        } else {
+            $_SERVER['HTTP_ORIGIN'] = $origin;
+        }
+
+        $this->serveRest($route);
+
+        $values = HeaderRecorder::values('Access-Control-Allow-Origin');
+        self::assertLessThanOrEqual(1, count($values), 'more than one ACAO was emitted');
+
+        return $values === [] ? null : $values[0];
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -837,17 +968,26 @@ final class CorsFinalAuthorityTest extends TestCase
     // Allowlist configuration
     // ─────────────────────────────────────────────────────────────────
 
-    public function testRetiredRegexEntryIsNeverHonoured(): void
+    /**
+     * A `regex:`-prefixed string is a CONFIG entry, never a legal `Origin`
+     * header. Sending one as an Origin must be refused like any other
+     * malformed value — the prefix must not be stripped, and the remainder
+     * must not be re-read as an exact origin.
+     *
+     * (Previously `testRetiredRegexEntryIsNeverHonoured`. The entry FORM is
+     * supported again; this property is unchanged and still worth pinning,
+     * so the assertions are kept verbatim and only the name and commentary
+     * were corrected.)
+     */
+    public function testRegexPrefixedStringIsNotItselfAValidOrigin(): void
     {
-        // The retired form, verbatim from the shipped wp-config example.
-        // It must neither match nor be mis-read as an exact origin.
         $entry = 'regex:^https://bcc-frontend-[a-z0-9]+-' . self::TEAM . '\\.vercel\\.app$';
 
         foreach ([$entry, 'https://bcc-frontend-abc123def-' . self::TEAM . '.vercel.app'] as $origin) {
             $_SERVER['HTTP_ORIGIN'] = $origin;
             $this->serveRest('/bcc/v1/users');
             // The preview origin is still allowed — by the `vercel:` rule
-            // that setUp() configures, not by the regex entry.
+            // that setUp() configures for this test, not by any regex entry.
             if (str_starts_with($origin, 'regex:')) {
                 self::assertSame([], HeaderRecorder::values('Access-Control-Allow-Origin'));
             }
@@ -856,7 +996,528 @@ final class CorsFinalAuthorityTest extends TestCase
         self::assertStringContainsString(
             'vercel:bcc-frontend:' . self::TEAM,
             (string) BCC_FRONTEND_ORIGIN,
-            'preview coverage must come from the structural rule, not a regex'
+            'preview coverage here must come from the structural rule, not a regex'
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // The `regex:` entry form
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // Reinstated 2026-08 by owner ruling after the hardening pass withdrew
+    // it. Reinstated is not restored: the original had two live defects and
+    // the tests below exist to keep both dead.
+    //
+    //   Defect 1 (FALSE-ALLOW). It matched `/i` against the RAW Origin bytes
+    //   and echoed those bytes back, so `HTTPS://BCC-FRONTEND-….VERCEL.APP`
+    //   was allowed and reflected verbatim. Pinned by
+    //   testUppercaseOriginUnderARegexRuleIsEchoedLowercasedNeverRaw and
+    //   testRegexRuleCannotBypassStructuralOriginValidation.
+    //
+    //   Defect 2 (FALSE-DENY). Its `[a-z0-9]+` body could not span a hyphen,
+    //   so no `git-*` branch preview matched. A config-authoring problem, not
+    //   a code one; the `vercel:` form now covers previews structurally and
+    //   is the recommended answer. testAllThreeEntryFormsCoexist shows the
+    //   two side by side.
+    //
+    // The pattern is ALWAYS wrapped in `^(?:…)$` rather than checked for
+    // anchors — see testAnchorPresenceIsNotAnchorGuarantee for the concrete
+    // false-allow that the check-instead-of-wrap design would have let
+    // through.
+
+    /** Call the private pattern validator directly. Null = entry discarded. */
+    private static function compileRule(string $pattern): ?string
+    {
+        $method = new \ReflectionMethod(CorsHandler::class, 'compileRegexRule');
+
+        /** @var string|null $compiled */
+        $compiled = $method->invoke(null, $pattern);
+
+        return $compiled;
+    }
+
+    /**
+     * Call the private structural validator directly. Null = the origin never
+     * reaches the allowlist at all. Used to prove a denial came from the
+     * matcher rather than from canonicalisation, which is the difference
+     * between a real assertion and a vacuous one.
+     *
+     * @return array{scheme: string, host: string, port: int|null, canonical: string}|null
+     */
+    private static function canonicalize(string $origin): ?array
+    {
+        $method = new \ReflectionMethod(CorsHandler::class, 'canonicalizeOrigin');
+
+        /** @var array{scheme: string, host: string, port: int|null, canonical: string}|null $parts */
+        $parts = $method->invoke(null, $origin);
+
+        return $parts;
+    }
+
+    public function testAnchoredRegexAllowsThePreviewHostAndEchoesTheCanonicalOrigin(): void
+    {
+        $host = 'https://bcc-frontend-abc123def-' . self::TEAM . '.vercel.app';
+
+        self::assertSame($host, $this->acao($host), 'the anchored regex rule must allow the preview host');
+
+        // Defect 2 stays dead: the hyphen-spanning body matches branch aliases.
+        $branch = 'https://bcc-frontend-git-fix-cors-repair-' . self::TEAM . '.vercel.app';
+        self::assertSame($branch, $this->acao($branch));
+
+        // …and the exact entry in the same config is unaffected.
+        self::assertSame(self::PROD, $this->acao(self::PROD));
+    }
+
+    /**
+     * DEFECT 1, pinned. The old implementation matched `/i` against the raw
+     * header and echoed the raw header; this asserts the origin is allowed
+     * but that what comes back is the LOWERCASED canonical form and is not
+     * byte-equal to what the caller sent.
+     */
+    public function testUppercaseOriginUnderARegexRuleIsEchoedLowercasedNeverRaw(): void
+    {
+        $raw       = 'HTTPS://BCC-FRONTEND-ABC123DEF-PHILLIP-SIMON-S-PROJECTS.VERCEL.APP';
+        $canonical = 'https://bcc-frontend-abc123def-' . self::TEAM . '.vercel.app';
+
+        $acao = $this->acao($raw);
+
+        self::assertSame($canonical, $acao, 'the canonical, lowercased origin must be echoed');
+        self::assertNotSame($raw, $acao, 'the raw request bytes must never be reflected');
+        self::assertSame(
+            strtolower($raw),
+            $acao,
+            'canonicalisation is a pure lowercase here — if these diverge the fixture is wrong'
+        );
+    }
+
+    /**
+     * The pattern is matched case-SENSITIVELY. An uppercase origin is allowed
+     * only because canonicalizeOrigin() lowercased it first, not because the
+     * matcher is tolerant. Proven by a rule containing an uppercase literal,
+     * which can therefore never match anything.
+     */
+    public function testRegexRuleIsMatchedCaseSensitively(): void
+    {
+        self::assertNotNull(
+            self::compileRule('^https://bcc-frontend-[a-z0-9-]+-' . self::TEAM . '\\.vercel\\.app$'),
+            'control: the lowercase rule compiles'
+        );
+
+        // An uppercase rule compiles fine but matches no canonical origin,
+        // because every canonical origin is lowercase and there is no /i.
+        $upper = self::compileRule('^HTTPS://BCC-FRONTEND-ABC\\.VERCEL\\.APP$');
+        self::assertNotNull($upper);
+        self::assertStringNotContainsString(
+            'i',
+            (string) substr((string) $upper, (int) strrpos((string) $upper, '#') + 1),
+            'the trailing modifier list must not contain `i`'
+        );
+        self::assertSame(
+            0,
+            preg_match((string) $upper, 'https://bcc-frontend-abc.vercel.app'),
+            'a case-sensitive rule must not match the lowercased canonical origin'
+        );
+    }
+
+    /**
+     * A `regex:` entry is a filter applied AFTER canonicalizeOrigin(), never
+     * a way around it. Every origin below would satisfy the configured
+     * pattern's visible intent, and every one must still be refused.
+     *
+     * The two mechanisms are called out per row because they are different:
+     * most rows never reach the matcher at all (canonicalizeOrigin returns
+     * null), while `port` reaches it and is refused by the anchoring, since
+     * the canonical form carries `:8443` and the pattern ends at `.app$`.
+     */
+    public function testRegexRuleCannotBypassStructuralOriginValidation(): void
+    {
+        $host = 'bcc-frontend-abc123def-' . self::TEAM . '.vercel.app';
+
+        $fixtures = [
+            'unexpected port'          => 'https://' . $host . ':8443',
+            'path beyond root'         => 'https://' . $host . '/admin',
+            'query string'             => 'https://' . $host . '?x=1',
+            'fragment'                 => 'https://' . $host . '#f',
+            'embedded credentials'     => 'https://user:pass@' . $host,
+            'userinfo confusion'       => 'https://' . $host . '@evil.com',
+            'plain http'               => 'http://' . $host,
+            'trailing dot'             => 'https://' . $host . '.',
+            'literal null'             => 'null',
+            'crlf injection'           => "https://{$host}\r\nX-Injected: 1",
+            'embedded space'           => 'https://bcc-frontend abc-' . self::TEAM . '.vercel.app',
+            'percent-encoded dot'      => 'https://bcc-frontend-abc123def-' . self::TEAM . '%2evercel.app',
+            'embedded nul byte'        => 'https://bcc-frontend-abc' . "\0" . '-' . self::TEAM . '.vercel.app',
+            'suffix attack'            => 'https://' . $host . '.evil.com',
+            'subdomain attack'         => 'https://evil.' . $host,
+        ];
+
+        foreach ($fixtures as $label => $origin) {
+            self::assertNull(
+                $this->acao($origin),
+                "{$label}: a regex rule must not smuggle an origin past canonicalizeOrigin()"
+            );
+        }
+
+        // Control — without this the loop could pass because the rule matches
+        // nothing at all, which would make every row above vacuous.
+        self::assertSame(
+            'https://' . $host,
+            $this->acao('https://' . $host),
+            'the same rule must still allow the well-formed origin'
+        );
+    }
+
+    /**
+     * A TRAILING nul (or space, tab, CR, LF, vertical tab) is stripped by the
+     * `trim()` in requestOrigin() before validation, so such an origin is
+     * ALLOWED — but what gets echoed is the trimmed canonical form, with the
+     * junk byte gone. That is the property that matters: no caller-supplied
+     * byte is reflected.
+     *
+     * Documented rather than "fixed" because it is uniform across all three
+     * entry forms and is a normalisation, not a bypass. An EMBEDDED nul
+     * survives trim() and is refused by the charset check — see the fixture
+     * table above. Pinned both ways so neither half drifts.
+     */
+    public function testTrailingWhitespaceBytesAreTrimmedAndNeverReflected(): void
+    {
+        $host = 'https://bcc-frontend-abc123def-' . self::TEAM . '.vercel.app';
+
+        foreach (["\0", ' ', "\t", "\r\n", "\x0b"] as $suffix) {
+            $acao = $this->acao($host . $suffix);
+
+            self::assertSame($host, $acao, 'the trimmed canonical origin is what comes back');
+            self::assertNotSame($host . $suffix, $acao, 'the raw bytes must never be reflected');
+            self::assertSame(
+                1,
+                preg_match('/^[\x21-\x7e]+$/', (string) $acao),
+                'the echoed header must be printable ASCII only — no header smuggling'
+            );
+        }
+    }
+
+    /**
+     * ANCHORING DECISION: every pattern is wrapped in `^(?:…)$`, always. A
+     * substring rule therefore matches nothing rather than matching
+     * everything containing it.
+     */
+    public function testUnanchoredRegexMatchesNothingBecauseEveryPatternIsWrapped(): void
+    {
+        // Config: `regex:bcc-frontend` — a bare substring.
+        foreach ([
+            'https://bcc-frontend-abc123def-' . self::TEAM . '.vercel.app',
+            'https://bcc-frontend.evil.com',
+            'https://evil.com/bcc-frontend',
+            'https://bcc-frontend.io',
+        ] as $origin) {
+            self::assertNull($this->acao($origin), "unanchored rule must not match {$origin}");
+        }
+
+        // The rule is not rejected outright — it compiles, it simply cannot
+        // match a whole origin. Distinguishing these two is the point.
+        self::assertNotNull(self::compileRule('bcc-frontend'), 'the entry is wrapped, not refused');
+        self::assertSame(self::PROD, $this->acao(self::PROD), 'the rest of the allowlist is unaffected');
+    }
+
+    /**
+     * WHY WRAPPING BEATS ANCHOR-CHECKING, concretely.
+     *
+     * Config here is `regex:^https://bluecollarcrypto\.io|evil`. It CONTAINS
+     * a `^`, so an implementation that merely verified the presence of
+     * anchors would accept it — and then `https://evil.com` matches, because
+     * alternation binds looser than the anchor and the second branch is a
+     * bare substring. That is a live false-allow produced by a rule that
+     * looks anchored.
+     *
+     * Wrapping makes the branch `^(?:…|evil)$`, which only matches the
+     * literal string `evil` — not an origin, so nothing.
+     */
+    public function testAnchorPresenceIsNotAnchorGuarantee(): void
+    {
+        $sneaky = '^https://bluecollarcrypto\\.io|evil';
+
+        // 1. The premise: an anchor-presence check WOULD have accepted this.
+        self::assertStringContainsString('^', $sneaky);
+
+        // 2. And it really is exploitable when used unwrapped. If this ever
+        //    stops being true the test below proves nothing.
+        self::assertSame(
+            1,
+            preg_match('#' . $sneaky . '#', 'https://evil.com'),
+            'premise failed: the unwrapped pattern no longer false-allows'
+        );
+
+        // 3. As configured, it does not.
+        self::assertNull($this->acao('https://evil.com'), 'the substring branch must not match');
+        self::assertNull($this->acao('https://evil.example'));
+
+        // 4. The legitimate branch still works.
+        self::assertSame(self::PROD, $this->acao(self::PROD));
+    }
+
+    /**
+     * The wrapper is `^(?:…)$`, not `^…$`. Without the non-capturing group an
+     * alternation would anchor only its first and last branch.
+     */
+    public function testAlternationIsGroupedSoEveryBranchIsAnchored(): void
+    {
+        // Config: `regex:https://a\.example|https://b\.example` (no anchors).
+        self::assertSame('https://a.example', $this->acao('https://a.example'));
+        self::assertSame('https://b.example', $this->acao('https://b.example'));
+
+        // Neither branch leaks as a substring.
+        self::assertNull($this->acao('https://zzzb.example'));
+        self::assertNull($this->acao('https://a.example.evil.com'));
+    }
+
+    /**
+     * A pattern PCRE cannot compile is discarded, and — the load-bearing half
+     * — discarding it does not disturb any other entry.
+     *
+     * Config: `https://…io , regex:^https://[a-z , https://staging…io`. The
+     * middle entry has an unterminated character class. Note it got that way
+     * by the comma splitter, which is the same trap the counted-quantifier
+     * test covers.
+     */
+    public function testNonCompilingPatternIsDeniedAndTheRestOfTheAllowlistStillWorks(): void
+    {
+        self::assertNull(self::compileRule('^https://[a-z'), 'an uncompilable pattern must be discarded');
+
+        // It must not somehow become permissive.
+        foreach (['https://evil.com', 'https://a.example', 'https://bcc-frontend.io'] as $origin) {
+            self::assertNull($this->acao($origin), "{$origin}: a broken rule must never widen the allowlist");
+        }
+
+        // Entries on BOTH sides of the broken one still resolve.
+        self::assertSame(self::PROD, $this->acao(self::PROD), 'the entry before the broken rule still works');
+        self::assertSame(self::STAGING, $this->acao(self::STAGING), 'the entry after it still works');
+    }
+
+    /**
+     * `regex:.*` — the degenerate catch-all. DECISION: REJECTED, not treated
+     * as acceptable operator rope.
+     *
+     * A total catch-all in a CORS allowlist is never a deliberate policy; it
+     * is what gets pasted in while debugging and then shipped. The negative
+     * canary (an RFC 2606 `.invalid` host no honest rule can want) catches
+     * exactly that shape.
+     *
+     * ⚠ What is still rope, deliberately: BREADTH short of totality.
+     * `^https://.*\.vercel\.app$` does not match the canary, is accepted, and
+     * hands CORS to every Vercel deployment on the internet. No local check
+     * can separate a broad-but-intentional rule from a broad-but-careless
+     * one, so that remains a config-review responsibility. This test asserts
+     * both halves so the boundary is explicit rather than implied.
+     */
+    public function testRegexCatchAllIsRefusedAsAConfigurationError(): void
+    {
+        self::assertNull(self::compileRule('.*'), 'a total catch-all must be refused');
+
+        foreach (['https://evil.com', 'https://anything.example', 'https://bcc-frontend.io'] as $origin) {
+            self::assertNull($this->acao($origin), "{$origin}: `regex:.*` must not allow it");
+        }
+
+        // The rest of the allowlist is untouched by the refusal.
+        self::assertSame(self::PROD, $this->acao(self::PROD));
+
+        // The documented limit of the guard: broad-but-not-total is ACCEPTED.
+        self::assertNotNull(
+            self::compileRule('^https://.*\\.vercel\\.app$'),
+            'breadth short of totality is deliberately still permitted — see the docblock'
+        );
+    }
+
+    /** The other spellings of "everything" are caught too. */
+    public function testRegexCatchAllVariantsAreAllRefused(): void
+    {
+        foreach (['.*', '.+', '[\\s\\S]*', '(.*)', '.{0,}', '[^#]*'] as $pattern) {
+            self::assertNull(self::compileRule($pattern), "`{$pattern}` must be refused as a catch-all");
+        }
+
+        foreach (['https://evil.com', 'https://anything.example'] as $origin) {
+            self::assertNull($this->acao($origin), "{$origin}: no catch-all variant may allow it");
+        }
+
+        self::assertSame(self::PROD, $this->acao(self::PROD));
+    }
+
+    /**
+     * ⚠ THE COMMA TRAP. The allowlist splits on `,` before any entry is
+     * parsed, so a counted quantifier is torn in half. This is a real
+     * operator footgun, and the point of the test is that it fails CLOSED:
+     * the front half will not compile, the back half is not an origin, and
+     * neither becomes permissive.
+     */
+    public function testCountedQuantifierIsTornApartByTheAllowlistSplitterAndFailsClosed(): void
+    {
+        // Prove the premise — the configured value really did get split.
+        $entries = explode(',', (string) BCC_FRONTEND_ORIGIN);
+        self::assertCount(3, $entries, 'premise: `{6,32}` splits the entry in two');
+        self::assertStringEndsWith('[a-z0-9]{6', $entries[1]);
+        self::assertSame('32}-' . self::TEAM . '\\.vercel\\.app$', $entries[2]);
+
+        // The preview host the operator was trying to allow is NOT allowed…
+        self::assertNull(
+            $this->acao('https://bcc-frontend-abc123def-' . self::TEAM . '.vercel.app'),
+            'the torn rule must not match — this is a silent config failure, by design fail-closed'
+        );
+
+        // …and nothing else became allowed either.
+        foreach (['https://evil.com', 'https://32.vercel.app'] as $origin) {
+            self::assertNull($this->acao($origin), "{$origin}: neither half may widen the allowlist");
+        }
+
+        self::assertSame(self::PROD, $this->acao(self::PROD), 'the exact entry is unaffected');
+    }
+
+    /** Over the length cap → refused, before PCRE ever sees it. */
+    public function testOverlongPatternIsRefused(): void
+    {
+        $atCap   = '^https://' . str_repeat('a', 190) . '$';
+        $overCap = '^https://' . str_repeat('a', 200) . '$';
+
+        self::assertLessThanOrEqual(200, strlen($atCap));
+        self::assertGreaterThan(200, strlen($overCap));
+
+        self::assertNotNull(self::compileRule($atCap), 'a pattern within the cap compiles');
+        self::assertNull(self::compileRule($overCap), 'a pattern over the cap is refused');
+        self::assertNull(self::compileRule(''), 'an empty pattern is refused');
+
+        self::assertSame(self::PROD, $this->acao(self::PROD), 'the rest of the allowlist still works');
+    }
+
+    /** The delimiter cannot appear in the body, so `#` is refused. */
+    public function testPatternContainingTheDelimiterIsRefused(): void
+    {
+        self::assertNull(self::compileRule('^https://bcc#frontend\\.example$'));
+        self::assertNull(self::compileRule('#'));
+        self::assertNull(
+            self::compileRule("^https://a\x01b\\.example$"),
+            'a control character in the pattern is refused too'
+        );
+
+        self::assertSame(self::PROD, $this->acao(self::PROD));
+    }
+
+    /**
+     * A pattern beginning with `//` is refused — not because CORS needs it
+     * (no canonical origin starts with `//`, so it could never match) but
+     * because `regex://evil.com` parses as a URL whose host is `evil.com`,
+     * and FrontendRedirect::allowedHosts() would then trust that host as an
+     * OAuth `return_to` target. Refusing the shape here is free.
+     */
+    public function testLeadingDoubleSlashPatternIsRefused(): void
+    {
+        self::assertNull(self::compileRule('//evil.com'));
+        self::assertNull(self::compileRule('//evil.com$'));
+
+        // Prove WHY: this is what the neighbouring parser would have seen.
+        $parsed = parse_url('regex://evil.com');
+        self::assertIsArray($parsed);
+        self::assertSame(
+            'evil.com',
+            $parsed['host'] ?? null,
+            'premise: a leading // makes the entry parse as a URL with a host'
+        );
+
+        // …and that only a LEADING // does it, so ordinary rules are safe.
+        self::assertArrayNotHasKey('host', (array) parse_url('regex:^https://x\\.example$'));
+        self::assertNotNull(self::compileRule('^https://x\\.example$'));
+
+        self::assertSame(self::PROD, $this->acao(self::PROD));
+    }
+
+    /**
+     * A catastrophic-backtracking rule must fail CLOSED rather than hang or,
+     * worse, be read as a match.
+     *
+     * ⚠ Getting this test to test anything is fiddly, and the first version
+     * of it was vacuous — worth knowing about before editing it. The obvious
+     * subject, `https://<200 a's>.io`, never reaches the matcher at all:
+     * `isValidHostname()` rejects a DNS label longer than 63 bytes, so
+     * `canonicalizeOrigin()` returns null and the rule is never consulted.
+     * The test passed, caught nothing, and a mutation that made PCRE errors
+     * fail OPEN survived it.
+     *
+     * So the subject below is built from three 63-byte labels: long enough to
+     * make `(a|a)+` explode, short enough to be a legal hostname. Step 1
+     * asserts that structural validity directly, because that is the
+     * assumption the whole test rests on.
+     */
+    public function testCatastrophicPatternFailsClosedWithoutHanging(): void
+    {
+        $label   = str_repeat('a', 63);
+        $host    = "{$label}.{$label}.{$label}.io";
+        $subject = 'https://' . $host;
+
+        // 1. The subject really is a well-formed origin, so a denial below can
+        //    only come from the matcher — not from canonicalizeOrigin().
+        self::assertLessThanOrEqual(253, strlen($host));
+        self::assertLessThanOrEqual(255, strlen($subject));
+        self::assertNotNull(
+            self::canonicalize($subject),
+            'premise: the subject must survive structural validation, or this test is vacuous'
+        );
+
+        // 2. The configured rule really is catastrophic against it — PCRE
+        //    gives up rather than answering.
+        self::assertFalse(
+            @preg_match('#^(?:https://(a|a)+\\.io)$#D', $subject),
+            'premise: the rule must actually blow the backtrack limit'
+        );
+        self::assertSame(PREG_BACKTRACK_LIMIT_ERROR, preg_last_error());
+
+        // 3. And that is read as a denial, quickly.
+        $started = microtime(true);
+        self::assertNull($this->acao($subject), 'a blown backtrack limit must deny, never allow');
+        $elapsedMs = (microtime(true) - $started) * 1000;
+
+        self::assertLessThan(
+            2000.0,
+            $elapsedMs,
+            'the match must be bounded by pcre.backtrack_limit, not run to completion'
+        );
+
+        self::assertSame(self::PROD, $this->acao(self::PROD), 'the rest of the allowlist still works');
+    }
+
+    /**
+     * All three entry forms in one config, each doing its own job and none
+     * interfering with the others.
+     */
+    public function testAllThreeEntryFormsCoexist(): void
+    {
+        $config = (string) BCC_FRONTEND_ORIGIN;
+        self::assertStringContainsString(self::PROD, $config);
+        self::assertStringContainsString('vercel:bcc-frontend:' . self::TEAM, $config);
+        self::assertStringContainsString('regex:', $config);
+
+        // 1. exact
+        self::assertSame(self::PROD, $this->acao(self::PROD));
+
+        // 2. vercel: — the hash form, matched structurally.
+        $hash = 'https://bcc-frontend-abc123def-' . self::TEAM . '.vercel.app';
+        self::assertSame($hash, $this->acao($hash));
+
+        // 3. vercel: — the git-* branch form the retired regex could never
+        //    reach (defect 2). This is why the structural form is preferred.
+        $branch = 'https://bcc-frontend-git-main-' . self::TEAM . '.vercel.app';
+        self::assertSame($branch, $this->acao($branch));
+
+        // 4. regex: — same team, but a host shape the vercel: rule rejects,
+        //    proving the regex entry is actually load-bearing here and the
+        //    assertion is not being satisfied by the vercel: rule.
+        $viaRegex = 'https://bcc-frontend-a-b-c-' . self::TEAM . '.vercel.app';
+        self::assertSame($viaRegex, $this->acao($viaRegex));
+
+        // Everything else is still denied.
+        foreach ([
+            'https://evil.com',
+            'https://bcc-frontend-abc123def-other-team.vercel.app',
+            'https://bcc-frontend-abc123def-' . self::TEAM . '.vercel.app.evil.com',
+            'https://evil.bcc-frontend-abc123def-' . self::TEAM . '.vercel.app',
+        ] as $origin) {
+            self::assertNull($this->acao($origin), "{$origin}: must stay denied");
+        }
     }
 }
