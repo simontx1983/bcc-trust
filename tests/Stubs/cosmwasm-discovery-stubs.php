@@ -1628,3 +1628,43 @@ namespace {
     // class_exists() guards skip everything defined above.
     require_once __DIR__ . '/nft-indexer-stubs.php';
 }
+
+namespace BCC\Trust\Core\Security {
+
+    // VC-B1: the Hide/Unhide handler now writes a durable audit row via
+    // AdminActionSupport::audit(). Recording-only fake so the domain tests
+    // in this stub family can run the real handler without a database.
+    if (!class_exists(AuditLogger::class, false)) {
+        final class AuditLogger
+        {
+            /** @var list<array{action: string, targetId: int|null, targetType: string|null}> */
+            public static array $rows = [];
+
+            /** @param array<string, mixed> $meta */
+            public static function log(
+                string $action,
+                ?int $targetId = null,
+                array $meta = [],
+                ?string $targetType = null,
+                ?int $userId = null
+            ): void {
+                self::$rows[] = [
+                    'action'     => $action,
+                    'targetId'   => $targetId,
+                    'targetType' => $targetType,
+                ];
+            }
+
+            public static function reset(): void
+            {
+                self::$rows = [];
+            }
+
+            /** @return list<string> */
+            public static function actions(): array
+            {
+                return array_map(static fn(array $r): string => $r['action'], self::$rows);
+            }
+        }
+    }
+}
