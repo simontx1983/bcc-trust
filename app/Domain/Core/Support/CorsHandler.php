@@ -1,6 +1,6 @@
 <?php
 /**
- * CorsHandler — the FINAL CORS authority for /bcc/v1/* and /bcc-trust/v1/*.
+ * CorsHandler — the FINAL CORS authority for EVERY WordPress REST route.
  *
  * ## Why "final"
  *
@@ -434,7 +434,7 @@ final class CorsHandler
         $uri = isset($_SERVER['REQUEST_URI']) && is_string($_SERVER['REQUEST_URI'])
             ? $_SERVER['REQUEST_URI']
             : '';
-        if (!EdgeCache::appliesTo(self::routeFromRequestUri($uri))) {
+        if (!self::ownsRoute(self::routeFromRequestUri($uri))) {
             return;
         }
 
@@ -479,14 +479,46 @@ final class CorsHandler
      */
     public static function sendCorsHeaders(bool $served, $result = null, $request = null): bool
     {
-        if (!EdgeCache::appliesTo(self::routeFor($result, $request))) {
-            // Not a BCC namespace: core's behaviour stands, untouched.
+        if (!self::ownsRoute(self::routeFor($result, $request))) {
             return $served;
         }
 
         self::applyPolicy();
 
         return $served;
+    }
+
+    /**
+     * Which REST routes this handler is the CORS authority for: ALL of them.
+     *
+     * This used to delegate to `EdgeCache::appliesTo()`, which at the time
+     * meant "the two BCC namespaces". That was wrong twice over:
+     *
+     *   1. Scope. Core's `rest_send_cors_headers` reflected ANY Origin with
+     *      credentials on EVERY REST route, so leaving `/wp-json/` and
+     *      `/wp/v2/*` to "core's behaviour" left the hole open on exactly
+     *      the routes no BCC code guarded. Verified on production
+     *      2026-08-19: `evil.example.com` was echoed back from
+     *      `/wp-json/wp/v2/types`.
+     *   2. Coupling. Borrowing a CACHE predicate to decide a SECURITY
+     *      boundary means a future narrowing of the cache exclusion would
+     *      silently re-open CORS. The two answers coincide today; they are
+     *      not the same question, so they no longer share a predicate.
+     *
+     * No non-REST guard is needed: this is only ever reached from
+     * `rest_pre_serve_request`, which WordPress fires solely while serving
+     * a REST request. Ordinary page requests never enter here — including
+     * the `?rest_route=` form, which IS a REST request and is normalised
+     * upstream by `routeFromRequestUri()`.
+     *
+     * Kept as a named predicate rather than deleting the branch so the
+     * ownership claim stays greppable and testable.
+     */
+    private static function ownsRoute(string $route): bool
+    {
+        unset($route);
+
+        return true;
     }
 
     /**
