@@ -25,6 +25,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Mail\BccMailer;
+use BCC\Trust\Core\Support\FrontendRedirect;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -37,8 +38,50 @@ final class AuthMailer
     private const PASSWORD_RESET_FAILURE_EVENT     = 'password_reset_email_send_failed';
     private const TWO_FA_FAILURE_EVENT             = '2fa_email_send_failed';
 
-    private const LOGO_URL = 'https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png';
-    private const SITE_URL = 'https://bluecollarcrypto.io';
+    /**
+     * Path of the masthead logo within the WordPress uploads tree.
+     *
+     * Kept as a path, not a URL: the logo is a /wp-content asset and must
+     * follow the WordPress host. It was previously pinned to the bare apex,
+     * which breaks the moment WP moves off it (the apex becomes the Next.js
+     * app) — a 404 logo in every verification, welcome, reset and 2FA email.
+     */
+    private const LOGO_PATH = '/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png';
+
+    /** Fallback link text when no frontend origin is configured. */
+    private const SITE_LABEL_FALLBACK = 'bluecollarcrypto.io';
+
+    /**
+     * Masthead logo URL — always on the WordPress origin, since that is
+     * where /wp-content is served from.
+     *
+     * `site_url()` (WP_SITEURL), NOT `home_url()`. This install runs the
+     * headless split: WP_SITEURL is the WordPress origin (cms.*) while
+     * WP_HOME stays the public front door (the apex, served by Next.js).
+     * home_url() here would point /wp-content at the Next.js app and 404.
+     */
+    private static function logoUrl(): string
+    {
+        return site_url(self::LOGO_PATH);
+    }
+
+    /**
+     * Human-facing site URL for the email footer — the Next.js app, not
+     * WordPress. Falls back to the WP host when BCC_FRONTEND_ORIGIN is
+     * unset, matching FrontendRedirect::defaultReturn().
+     */
+    private static function siteUrl(): string
+    {
+        return FrontendRedirect::firstOrigin() ?? home_url('/');
+    }
+
+    /** Bare host of siteUrl(), used as the visible footer link text. */
+    private static function siteLabel(): string
+    {
+        $host = wp_parse_url(self::siteUrl(), PHP_URL_HOST);
+
+        return is_string($host) && $host !== '' ? $host : self::SITE_LABEL_FALLBACK;
+    }
 
     /**
      * Send the email-address verification email.
@@ -188,6 +231,9 @@ final class AuthMailer
         $safeDisplayName = htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8');
         $safeOtp         = htmlspecialchars($otpCode,     ENT_QUOTES, 'UTF-8');
         $safeVerifyUrl   = htmlspecialchars($verifyUrl,   ENT_QUOTES, 'UTF-8');
+        $logoUrl         = htmlspecialchars(self::logoUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteUrl         = htmlspecialchars(self::siteUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteLabel       = htmlspecialchars(self::siteLabel(), ENT_QUOTES, 'UTF-8');
 
         return <<<HTML
 <!DOCTYPE html>
@@ -207,7 +253,7 @@ final class AuthMailer
 
         <tr>
           <td align="center" style="padding:0 0 24px;">
-            <img src="https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png"
+            <img src="{$logoUrl}"
                  alt="{$safeSiteName}" width="130" height="auto"
                  style="display:block;max-width:130px;height:auto;border:0;outline:none;text-decoration:none;">
           </td>
@@ -278,7 +324,7 @@ final class AuthMailer
                 <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
                   <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
                     &copy; {$safeSiteName} &bull;
-                    <a href="https://bluecollarcrypto.io" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
+                    <a href="{$siteUrl}" style="color:#484f58;text-decoration:none;">{$siteLabel}</a>
                   </p>
                 </td>
               </tr>
@@ -324,6 +370,9 @@ HTML;
         $safeHandle   = htmlspecialchars($handle,    ENT_QUOTES, 'UTF-8');
         $safeEmail    = htmlspecialchars($email,     ENT_QUOTES, 'UTF-8');
         $safeLoginUrl = htmlspecialchars($loginUrl,  ENT_QUOTES, 'UTF-8');
+        $logoUrl      = htmlspecialchars(self::logoUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteUrl      = htmlspecialchars(self::siteUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteLabel    = htmlspecialchars(self::siteLabel(), ENT_QUOTES, 'UTF-8');
 
         return <<<HTML
 <!DOCTYPE html>
@@ -343,7 +392,7 @@ HTML;
 
         <tr>
           <td align="center" style="padding:0 0 24px;">
-            <img src="https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png"
+            <img src="{$logoUrl}"
                  alt="{$safeSiteName}" width="130" height="auto"
                  style="display:block;max-width:130px;height:auto;border:0;outline:none;text-decoration:none;">
           </td>
@@ -404,7 +453,7 @@ HTML;
                 <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
                   <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
                     &copy; {$safeSiteName} &bull;
-                    <a href="https://bluecollarcrypto.io" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
+                    <a href="{$siteUrl}" style="color:#484f58;text-decoration:none;">{$siteLabel}</a>
                   </p>
                 </td>
               </tr>
@@ -450,6 +499,9 @@ HTML;
         $safeDisplayName = htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8');
         $safeResetUrl    = htmlspecialchars($resetUrl,    ENT_QUOTES, 'UTF-8');
         $safeRequestedAt = htmlspecialchars($requestedAt, ENT_QUOTES, 'UTF-8');
+        $logoUrl         = htmlspecialchars(self::logoUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteUrl         = htmlspecialchars(self::siteUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteLabel       = htmlspecialchars(self::siteLabel(), ENT_QUOTES, 'UTF-8');
         $ipLine = $requestIp !== ''
             ? '<p style="margin:0;font-size:14px;color:#8b949e;"><span style="color:#6e7681;">IP:&nbsp;&nbsp;&nbsp;</span>'
               . htmlspecialchars($requestIp, ENT_QUOTES, 'UTF-8') . '</p>'
@@ -473,7 +525,7 @@ HTML;
 
         <tr>
           <td align="center" style="padding:0 0 24px;">
-            <img src="https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png"
+            <img src="{$logoUrl}"
                  alt="{$safeSiteName}" width="130" height="auto"
                  style="display:block;max-width:130px;height:auto;border:0;outline:none;text-decoration:none;">
           </td>
@@ -544,7 +596,7 @@ HTML;
                 <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
                   <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
                     &copy; {$safeSiteName} &bull;
-                    <a href="https://bluecollarcrypto.io" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
+                    <a href="{$siteUrl}" style="color:#484f58;text-decoration:none;">{$siteLabel}</a>
                   </p>
                 </td>
               </tr>
@@ -606,6 +658,9 @@ HTML;
         $safeSiteName    = htmlspecialchars($siteName,    ENT_QUOTES, 'UTF-8');
         $safeDisplayName = htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8');
         $safeOtp         = htmlspecialchars($otpCode,     ENT_QUOTES, 'UTF-8');
+        $logoUrl         = htmlspecialchars(self::logoUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteUrl         = htmlspecialchars(self::siteUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteLabel       = htmlspecialchars(self::siteLabel(), ENT_QUOTES, 'UTF-8');
 
         return <<<HTML
 <!DOCTYPE html>
@@ -625,7 +680,7 @@ HTML;
 
         <tr>
           <td align="center" style="padding:0 0 24px;">
-            <img src="https://bluecollarcrypto.io/wp-content/uploads/2026/05/Blue-Collar-Crypto-Logo.png"
+            <img src="{$logoUrl}"
                  alt="{$safeSiteName}" width="130" height="auto"
                  style="display:block;max-width:130px;height:auto;border:0;outline:none;text-decoration:none;">
           </td>
@@ -676,7 +731,7 @@ HTML;
                 <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
                   <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
                     &copy; {$safeSiteName} &bull;
-                    <a href="https://bluecollarcrypto.io" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
+                    <a href="{$siteUrl}" style="color:#484f58;text-decoration:none;">{$siteLabel}</a>
                   </p>
                 </td>
               </tr>
@@ -741,14 +796,15 @@ HTML;
      *
      * Same dark shell as the verify email, blue accent, single code box —
      * no auto-verify link (the user is already signed in and types the code
-     * in-app). Uses the shared LOGO_URL / SITE_URL constants.
+     * in-app). Uses the shared logoUrl() / siteUrl() helpers.
      */
     private static function buildRecoveryOtpHtml(string $siteName, string $otpCode): string
     {
         $safeSiteName = htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8');
         $safeOtp      = htmlspecialchars($otpCode,  ENT_QUOTES, 'UTF-8');
-        $logoUrl      = htmlspecialchars(self::LOGO_URL, ENT_QUOTES, 'UTF-8');
-        $siteUrl      = htmlspecialchars(self::SITE_URL, ENT_QUOTES, 'UTF-8');
+        $logoUrl      = htmlspecialchars(self::logoUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteUrl      = htmlspecialchars(self::siteUrl(),   ENT_QUOTES, 'UTF-8');
+        $siteLabel    = htmlspecialchars(self::siteLabel(), ENT_QUOTES, 'UTF-8');
 
         return <<<HTML
 <!DOCTYPE html>
@@ -815,7 +871,7 @@ HTML;
                 <td style="padding:16px 36px;border-top:1px solid #21262d;text-align:center;">
                   <p style="margin:0;font-size:12px;color:#484f58;line-height:1.5;">
                     &copy; {$safeSiteName} &bull;
-                    <a href="{$siteUrl}" style="color:#484f58;text-decoration:none;">bluecollarcrypto.io</a>
+                    <a href="{$siteUrl}" style="color:#484f58;text-decoration:none;">{$siteLabel}</a>
                   </p>
                 </td>
               </tr>

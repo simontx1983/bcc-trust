@@ -311,7 +311,7 @@ final class JwtToken
      * - undefined / empty → returns []; aud is omitted from minted
      *   tokens and not checked on decode.
      * - single origin     → returns [origin].
-     * - comma-separated   → returns the full list, in order.
+     * - comma-separated   → returns every EXACT origin, in order.
      *
      * Encode uses the FIRST entry as the canonical mint value.
      * Decode accepts any entry via in_array (exact-string match — no
@@ -319,15 +319,17 @@ final class JwtToken
      * case (one backend serves both prod-frontend AND staging) without
      * weakening the equality check.
      *
+     * `regex:` preview patterns are excluded by FrontendOrigin: an
+     * audience must be a concrete origin, and a raw pattern minted into
+     * `aud` would validate only until the pattern is removed from the
+     * allowlist — then every outstanding token fails at once, long after
+     * the change that caused it.
+     *
      * @return list<string>
      */
     private static function audienceAllowlist(): array
     {
-        if (!defined('BCC_FRONTEND_ORIGIN') || BCC_FRONTEND_ORIGIN === '') {
-            return [];
-        }
-        $entries = array_map('trim', explode(',', (string) BCC_FRONTEND_ORIGIN));
-        return array_values(array_filter($entries, static fn(string $e): bool => $e !== ''));
+        return FrontendOrigin::exactOrigins();
     }
 
     /** RFC 7515 §2 base64url (no padding). */

@@ -160,21 +160,17 @@ final class CorsHandler
      * allowlist. Returns the matched origin to echo back, or null
      * when no match (or no allowlist configured).
      *
-     * Each comma-separated entry is treated as either:
-     *   - An exact origin string (scheme + host + optional port).
-     *   - A regex pattern prefixed with "regex:" — the rest of the
-     *     entry is matched case-insensitively against the request
-     *     Origin. Use this for Vercel preview URLs:
-     *
-     *     regex:^https://bcc-frontend-[a-z0-9]+-phillip-simon-s-projects\.vercel\.app$
-     *
-     * Regex entries are evaluated after exact matches so the fast
-     * path is always tried first. A malformed regex is silently
-     * skipped (no match) so a typo can't break the allowlist.
+     * The allowlist grammar (exact origins vs `regex:` patterns) and
+     * the exact-then-regex resolution order are owned by
+     * {@see FrontendOrigin} — the single parser of the constant. Do not
+     * re-implement the split here: CORS is the one consumer that may
+     * consider regex entries at all, and keeping the rules in one place
+     * is what stops it drifting from the JWT-audience and redirect
+     * consumers, which must only ever see concrete origins.
      */
     private static function resolveAllowedOrigin(): ?string
     {
-        if (!defined('BCC_FRONTEND_ORIGIN') || BCC_FRONTEND_ORIGIN === '') {
+        if (!FrontendOrigin::isConfigured()) {
             return null;
         }
 
@@ -185,30 +181,10 @@ final class CorsHandler
             return null;
         }
 
-        $exact   = [];
-        $regexes = [];
-        foreach (array_map('trim', explode(',', (string) BCC_FRONTEND_ORIGIN)) as $entry) {
-            if ($entry === '') {
-                continue;
-            }
-            if (str_starts_with($entry, 'regex:')) {
-                $regexes[] = substr($entry, 6);
-            } else {
-                $exact[] = $entry;
-            }
-        }
-
-        if (in_array($requestOrigin, $exact, true)) {
-            return $requestOrigin;
-        }
-
-        foreach ($regexes as $pattern) {
-            if (@preg_match('#' . $pattern . '#i', $requestOrigin) === 1) {
-                return $requestOrigin;
-            }
-        }
-
-        return null;
+        // Exact-then-regex resolution lives in FrontendOrigin so CORS and
+        // the JWT/redirect consumers can never disagree about what the
+        // allowlist means — the divergence this class alone got right.
+        return FrontendOrigin::match($requestOrigin);
     }
 
     private static function emitHeaders(string $origin): void
