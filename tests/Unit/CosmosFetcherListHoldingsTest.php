@@ -21,7 +21,7 @@ use PHPUnit\Framework\TestCase;
  *   - list_holdings assembles the SAME §H1 item shape it always did,
  *     given stubbed batch first-page + per-token metadata results;
  *   - a first page under the page size is treated as the complete set
- *     (no wasteful walk); the item order matches listKnownByChain order;
+ *     (no wasteful walk); the item order matches listVerifiedByChain order;
  *   - Phase A writes each first page back to the shared cw721_tokens
  *     cache so the single-path count_holdings reads the SAME rows
  *     (no second network call, and no divergence between gallery + gate);

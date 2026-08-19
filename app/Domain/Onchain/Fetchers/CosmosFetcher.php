@@ -400,16 +400,22 @@ class CosmosFetcher implements FetcherInterface
 
         $chainId = (int) $this->chain->id;
         $cap     = self::contractCap();
-        // Gallery iterates every KNOWN collection — verified first, then
-        // unverified discovery rows (verified ones win the cap when a
-        // wallet's chain has more known contracts than the cap allows).
-        // A user's own assets should never silently vanish just because
-        // the operator hasn't verified the collection yet; the caller
-        // annotates each item with `collection_verified` so the UI can
-        // dim rather than hide. GATING is unaffected: ownsAny/
-        // count_holdings resolve per gate contract and gates only exist
-        // on verified collections.
-        $known = \BCC\Trust\Onchain\Repositories\CollectionRepository::listKnownByChain($chainId, $cap);
+        // VERIFIED-ONLY, and the filter belongs HERE — before the walk, not
+        // after it. Discovery writes unverified rows into
+        // `bcc_onchain_collections` as an OPERATOR INTAKE QUEUE; a row
+        // landing there is not permission to expose the collection to users
+        // or to spend outbound LCD requests querying it on their behalf.
+        // Selecting unverified rows would do both: every candidate becomes a
+        // `tokens{owner}` target in the batch below, so an automated scanner
+        // could grow this wallet's per-load request fan-out without any
+        // operator decision.
+        //
+        // A future opt-in "show unverified assets" surface is a SEPARATE
+        // design; it must not arrive by leaving the default query wide.
+        //
+        // GATING is unaffected either way: ownsAny/count_holdings resolve per
+        // gate contract, and gates only exist on verified collections.
+        $known = \BCC\Trust\Onchain\Repositories\CollectionRepository::listVerifiedByChain($chainId, $cap);
         if ($known === []) {
             return $empty;
         }

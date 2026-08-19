@@ -893,10 +893,24 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$findManyByIdsOverride = null;
             }
 
-            /** @return array<int, object> */
-            public static function listKnownByChain(int $chainId, int $limit): array
+            /**
+             * Mirrors production: VERIFIED rows only. The seed array holds
+             * every row that exists on the chain, verified or not, so a test
+             * can prove an unverified row is filtered out HERE rather than
+             * relying on the seed to omit it.
+             *
+             * @return array<int, object>
+             */
+            public static function listVerifiedByChain(int $chainId, int $limit): array
             {
-                return array_slice(self::$knownByChain[$chainId] ?? [], 0, $limit);
+                $verified = [];
+                foreach (self::$knownByChain[$chainId] ?? [] as $row) {
+                    if ((int) ($row->is_verified ?? 0) === 1) {
+                        $verified[] = $row;
+                    }
+                }
+
+                return array_slice($verified, 0, $limit);
             }
 
             /**

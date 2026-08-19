@@ -1257,67 +1257,6 @@ final class CollectionRepository
         return $rows ?: [];
     }
 
-    /**
-     * Every known collection on a chain — verified AND unverified —
-     * verified first, then by holder count.
-     *
-     * Sibling of {@see listVerifiedByChain} for the user's OWN gallery
-     * (CosmosFetcher::list_holdings): a linked wallet's assets render
-     * even when the operator hasn't verified the collection yet (the UI
-     * dims them via the `collection_verified` annotation). Verified
-     * rows win the cap so widening the iteration can never evict a
-     * verified collection from the gallery. NOT for gating — gate
-     * reads stay on the verified-only queries.
-     *
-     * @return list<object{
-     *     id: string,
-     *     chain_id: string,
-     *     contract_address: string,
-     *     collection_name: string|null,
-     *     image_url: string|null,
-     *     is_verified: string,
-     *     chain_slug: string,
-     *     chain_type: string
-     * }>
-     */
-    public static function listKnownByChain(int $chainId, int $limit = 30): array
-    {
-        if ($chainId <= 0) {
-            return [];
-        }
-        $limit = max(1, min(200, $limit));
-
-        global $wpdb;
-        $table  = self::table();
-        $chains = ChainRepository::table();
-
-        /** @var list<object{
-         *     id: string,
-         *     chain_id: string,
-         *     contract_address: string,
-         *     collection_name: string|null,
-         *     image_url: string|null,
-         *     is_verified: string,
-         *     chain_slug: string,
-         *     chain_type: string
-         * }>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT c.id, c.chain_id, c.contract_address, c.collection_name, c.image_url,
-                    c.is_verified, ch.slug AS chain_slug, ch.chain_type
-             FROM {$table} c
-             JOIN {$chains} ch ON ch.id = c.chain_id
-             WHERE c.chain_id = %d
-             ORDER BY c.is_verified DESC,
-                      c.unique_holders IS NULL ASC,
-                      c.unique_holders DESC,
-                      c.id ASC
-             LIMIT %d",
-            $chainId,
-            $limit
-        ));
-
-        return $rows ?: [];
-    }
 
     /**
      * Verification map for a bounded set of contracts on one chain:
