@@ -112,6 +112,87 @@ final class CosmwasmReadFailureIntegrationTest extends TestCase
         CosmwasmCodeFamilyRepository::pendingCountsByChain(CosmwasmClassifier::VERSION);
     }
 
+    /**
+     * The grouped unresolved-error aggregate, against real MySQL.
+     *
+     * Four states, and the middle two carry the whole argument: an EMPTY
+     * result is the panel saying "nothing is wrong", a FAILED read is the
+     * panel unable to say anything. Collapsing them is how a broken
+     * database renders green.
+     *
+     * The `<> ''` half of the predicate is exercised deliberately, because
+     * MySQL treats '' and NULL differently and only one of them is
+     * excluded by `IS NOT NULL`.
+     */
+    public function testErroredCountsByChainPopulatedEmptyAndFailed(): void
+    {
+        $table = CosmwasmCodeFamilyRepository::table();
+
+        CosmwasmCodeFamilyRepository::recordDiscovered(self::CHAIN_ID, [
+            ['code_id' => 80, 'checksum' => 'aa'],
+            ['code_id' => 81, 'checksum' => 'bb'],
+            ['code_id' => 82, 'checksum' => 'cc'],
+        ]);
+        CosmwasmCodeFamilyRepository::recordDiscovered(self::CHAIN_B, [['code_id' => 5, 'checksum' => 'dd']]);
+
+        // Two errored on chain A, one on chain B.
+        CosmwasmCodeFamilyRepository::recordAttemptFailure(self::CHAIN_ID, 80, 'Circuit breaker open for chain 8', 1);
+        CosmwasmCodeFamilyRepository::recordAttemptFailure(self::CHAIN_ID, 81, 'rpc error: code = Unavailable', 1);
+        CosmwasmCodeFamilyRepository::recordAttemptFailure(self::CHAIN_B, 5, 'node unreachable', 1);
+
+        // …and one row whose error is the EMPTY STRING, not NULL. It must
+        // not count: `IS NOT NULL` alone would let it through.
+        $GLOBALS['wpdb']->query(
+            "UPDATE `{$table}` SET last_error = '' WHERE chain_id = " . self::CHAIN_ID . " AND code_id = 82"
+        );
+
+        self::assertSame(
+            [self::CHAIN_ID => 2, self::CHAIN_B => 1],
+            CosmwasmCodeFamilyRepository::erroredCountsByChain(),
+            'grouped per chain; the empty-string row is not an error'
+        );
+
+        // empty — a legitimate answer, not a failure
+        $GLOBALS['wpdb']->query("TRUNCATE TABLE `{$table}`");
+        self::assertSame([], CosmwasmCodeFamilyRepository::erroredCountsByChain());
+        self::assertSame('', (string) $GLOBALS['wpdb']->last_error, 'an empty table is not an error');
+
+        // failed — NOT an answer. This must never become "zero errors".
+        $this->hideTable($table);
+        $this->expectException(RepositoryReadFailure::class);
+        CosmwasmCodeFamilyRepository::erroredCountsByChain();
+    }
+
+    /** A settled `not_cw721` with no error text is NOT an unresolved error. */
+    public function testASettledNegativeIsNotCountedAsAnError(): void
+    {
+        CosmwasmCodeFamilyRepository::recordDiscovered(self::CHAIN_ID, [['code_id' => 90, 'checksum' => 'ee']]);
+        CosmwasmCodeFamilyRepository::recordAttemptFailure(self::CHAIN_ID, 90, 'transient node blip', 1);
+        self::assertSame([self::CHAIN_ID => 1], CosmwasmCodeFamilyRepository::erroredCountsByChain());
+
+        // The retry succeeds and settles the family as a genuine non-NFT.
+        CosmwasmCodeFamilyRepository::recordClassification(
+            self::CHAIN_ID,
+            90,
+            [
+                'classification'     => CosmwasmClassifier::NOT_CW721,
+                'reason'             => 'no_cw721_queries',
+                'probes_ok'          => '',
+                'probes_failed'      => 'num_tokens,contract_info',
+                'last_error'         => '',
+                'classifier_version' => CosmwasmClassifier::VERSION,
+            ],
+            null,
+            1
+        );
+
+        self::assertSame(
+            [],
+            CosmwasmCodeFamilyRepository::erroredCountsByChain(),
+            'an ordinary DeFi contract must not keep the panel yellow forever'
+        );
+    }
+
     public function testFamilyBatchLookupFailsClosed(): void
     {
         CosmwasmCodeFamilyRepository::recordDiscovered(self::CHAIN_ID, [['code_id' => 434, 'checksum' => 'cc']]);

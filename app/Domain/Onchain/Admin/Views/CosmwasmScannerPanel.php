@@ -505,6 +505,7 @@ final class CosmwasmScannerPanel
         $paused      = (bool) ($chain['paused'] ?? false);
         $unsupported = (bool) ($chain['unsupported'] ?? false);
         $lastError   = is_string($chain['last_error'] ?? null) ? (string) $chain['last_error'] : null;
+        $familiesErrored = (int) ($chain['families_errored'] ?? 0);
         $age         = is_int($chain['last_discovery_age_seconds'] ?? null)
             ? (int) $chain['last_discovery_age_seconds']
             : null;
@@ -524,6 +525,20 @@ final class CosmwasmScannerPanel
             </td>
             <td style="font-size:12px;">
                 <?php echo esc_html((string) ($chain['progress_label'] ?? '')); ?>
+                <?php if ($familiesErrored > 0): ?>
+                    <?php // THE SENTENCE THAT WAS MISSING. Plain, countable,
+                          // and it says the work is not lost — an operator
+                          // who reads "errors" without "retryable" reaches
+                          // for a rebuild they do not need. ?>
+                    <br><span style="color:#d63638;font-size:11px;">
+                        <?php echo esc_html(sprintf(
+                            $familiesErrored === 1
+                                ? '%s code family has unresolved discovery errors and remains eligible for retry.'
+                                : '%s code families have unresolved discovery errors and remain eligible for retry.',
+                            number_format_i18n($familiesErrored)
+                        )); ?>
+                    </span>
+                <?php endif; ?>
                 <?php if ($lastError !== null): ?>
                     <details style="margin-top:4px;">
                         <summary style="cursor:pointer;color:#d63638;font-size:11px;">Last recorded reason</summary>

@@ -86,6 +86,7 @@ if (!defined('ABSPATH')) {
  *     last_error: string|null,
  *     families_total: int,
  *     families_pending: int,
+ *     families_errored: int,
  *     families_by_classification: array<string, int>,
  *     contracts_total: int,
  *     contracts_inspected: int,
@@ -342,14 +343,20 @@ final class CosmwasmDiscoveryHealthSnapshot
             }
         }
 
-        // READS 1-4. Everything below this line is PHP over these arrays.
-        // All four throw rather than answering a failed query with an
+        // READS 1-5. Everything below this line is PHP over these arrays.
+        // All five throw rather than answering a failed query with an
         // empty set, because every one of them is a number this panel
         // prints as fact.
+        //
+        // `erroredCountsByChain()` joins this block rather than being
+        // read defensively somewhere calmer FOR THE REASON THE BLOCK
+        // EXISTS: its zero is the sentence that turns the panel green, so
+        // a failed read must reach STATUS_UNAVAILABLE and not "no errors".
         try {
             $checkpoints   = ChainCheckpointRepository::getAllOrFail();
             $familyCounts  = CosmwasmCodeFamilyRepository::countsByChainAndClassification();
             $familyPending = CosmwasmCodeFamilyRepository::pendingCountsByChain(CosmwasmClassifier::VERSION);
+            $familyErrored = CosmwasmCodeFamilyRepository::erroredCountsByChain();
             $contractStats = CosmwasmContractRepository::inventoryByChain();
         } catch (RepositoryReadFailure $e) {
             return self::unavailableSummary($discoveryEnabled, $backfillEnabled, $now, $e);
@@ -384,6 +391,7 @@ final class CosmwasmDiscoveryHealthSnapshot
                 $checkpointByChain[$chainId] ?? null,
                 $familyCounts[$chainId] ?? [],
                 $familyPending[$chainId] ?? 0,
+                $familyErrored[$chainId] ?? 0,
                 $contractStats[$chainId] ?? null,
                 $now,
                 // THE SAME READER THE WORKER USES, not a second copy of the
@@ -540,6 +548,7 @@ final class CosmwasmDiscoveryHealthSnapshot
         ?object $checkpoint,
         array $familyCounts,
         int $familyPending,
+        int $familiesErrored,
         ?array $contractStats,
         int $now,
         ?bool $discoveryOptedIn = null,
@@ -626,6 +635,7 @@ final class CosmwasmDiscoveryHealthSnapshot
             'last_error'                  => $lastError,
             'families_total'              => $familyTotal,
             'families_pending'            => $familyPending,
+            'families_errored'            => $familiesErrored,
             'families_by_classification'  => $familyCounts,
             'contracts_total'             => $stats['total'],
             'contracts_inspected'         => $stats['inspected'],
@@ -993,7 +1003,25 @@ final class CosmwasmDiscoveryHealthSnapshot
                 continue;
             }
             $eligible++;
-            if ($chain['last_error'] !== null) {
+            // TWO INDEPENDENT WAYS A SCANNED CHAIN IS DEGRADED, and the
+            // second one is why this chain rendered green while it was
+            // broken.
+            //
+            //   `last_error`      — the CHAIN's own last pass failed.
+            //   `families_errored` — the pass finished, but families
+            //                        inside it hold unresolved reasons.
+            //
+            // They are OR-ed because either alone is a true statement
+            // about a degraded chain. Relying on the first only is the
+            // measured Dungeon bug: `advanceCwCodeWatermark()` clears
+            // `cw_last_error` when the code read succeeds, so a chain with
+            // 15 breaker-blocked families reported no error at all.
+            //
+            // A count, not a proportion: `pagination.count_total` is
+            // honoured by one of nine cosmos chains, so there is no
+            // trustworthy denominator — and "12% of families failed" is a
+            // worse operator sentence than "12 families failed" anyway.
+            if ($chain['last_error'] !== null || $chain['families_errored'] > 0) {
                 $errored++;
             }
             $age = $chain['last_discovery_age_seconds'];

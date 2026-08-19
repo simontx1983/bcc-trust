@@ -133,6 +133,10 @@ final class CosmwasmScannerAdminTest extends TestCase
             'last_error'                  => null,
             'families_total'              => 713,
             'families_pending'            => 0,
+            // Default 0 = "no unresolved family errors", so every
+            // pre-existing case keeps the verdict it had. Cases that mean
+            // to exercise the new signal override it explicitly.
+            'families_errored'            => 0,
             'families_by_classification'  => [],
             'contracts_total'             => 0,
             'contracts_inspected'         => 0,
@@ -181,6 +185,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                 CosmwasmClassifier::UNREACHABLE  => 0,
             ],
             3,
+            0,
             [
                 'total'                    => 2400,
                 'inspected'                => 1800,
@@ -213,6 +218,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             null,
             [],
             0,
+            0,
             null,
             self::NOW
         );
@@ -233,6 +239,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             'Crypto.org',
             $this->checkpoint(['cw_discovery_state' => ChainCheckpointRepository::CW_STATE_UNSUPPORTED]),
             [],
+            0,
             0,
             null,
             self::NOW
@@ -449,6 +456,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             $this->checkpoint(),
             [],
             0,
+            0,
             null,
             self::NOW
         );
@@ -466,6 +474,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             'Cosmos Hub',
             $this->checkpoint(),
             [],
+            0,
             0,
             null,
             self::NOW,
