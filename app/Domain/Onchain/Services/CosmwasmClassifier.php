@@ -133,8 +133,33 @@ final class CosmwasmClassifier
      *
      * A bump does NOT sweep the whole inventory: only the classifications
      * named by {@see requeueableClassifications()} are requeued.
+     *
+     * ── 1 → 2 (2026-08-19): THE DECISION RULES DID CHANGE ───────────────
+     * PR #195 stopped a cosmos LCD's HTTP 500 "unknown variant" answer
+     * from being read as a node fault. Before it, probing a non-CW-721
+     * contract retried four times, charged the CHAIN-WIDE circuit breaker,
+     * and — once the breaker opened mid-probe — turned the remaining
+     * probes into transport errors, so the family settled
+     * `temporarily_unreachable` instead of the terminal, correct
+     * `not_cw721`. Measured on Dungeon: one White Whale incentive factory
+     * did exactly that, and took 15 unrelated families down with it.
+     *
+     * #195 fixed the code but could not fix the ROWS. Every non-terminal
+     * classification written under the old behaviour is a verdict this
+     * classifier would no longer reach, and `classifier_version` is the
+     * mechanism that says so — {@see \BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository::requeueForClassifierVersion()}
+     * clears `classified_at`, `next_attempt_at` and `retry_count` for
+     * them, chain by chain, on the chain's next pass.
+     *
+     * That bump belonged in #195 and was missed there. It is here instead,
+     * on its own, so the requeue is reviewable as the data change it is.
+     *
+     * NOTHING HAPPENS AT DEPLOY TIME. This constant is only read; rows
+     * move when an ELIGIBLE chain runs a pass, and only that chain's rows.
+     * Terminal `not_cw721` and settled `confirmed_cw721` are excluded by
+     * {@see requeueableClassifications()} and stay excluded.
      */
-    public const VERSION = 1;
+    public const VERSION = 2;
 
     // ── Probe identifiers (stored in probes_ok / probes_failed) ──────────
 
