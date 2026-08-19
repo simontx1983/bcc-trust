@@ -110,11 +110,10 @@ final class FrontendRedirect
      */
     public static function firstOrigin(): ?string
     {
-        if (!defined('BCC_FRONTEND_ORIGIN') || BCC_FRONTEND_ORIGIN === '') {
-            return null;
-        }
-        $entries = array_filter(array_map('trim', explode(',', (string) BCC_FRONTEND_ORIGIN)));
-        return $entries === [] ? null : (string) array_values($entries)[0];
+        // First EXACT entry — never a `regex:` preview pattern, which is
+        // not a usable URL base. Callers build redirect targets and email
+        // links from this.
+        return FrontendOrigin::canonical();
     }
 
     /**
@@ -124,15 +123,11 @@ final class FrontendRedirect
      */
     private static function allowedHosts(): array
     {
-        if (!defined('BCC_FRONTEND_ORIGIN') || BCC_FRONTEND_ORIGIN === '') {
-            return [];
-        }
         $hosts = [];
-        foreach (explode(',', (string) BCC_FRONTEND_ORIGIN) as $entry) {
-            $entry = trim($entry);
-            if ($entry === '') {
-                continue;
-            }
+        // Exact origins only: wp_parse_url() on a `regex:^https://…`
+        // entry yields a nonsense host that could never match a real
+        // redirect target anyway.
+        foreach (FrontendOrigin::exactOrigins() as $entry) {
             $parts = wp_parse_url($entry);
             if (!is_array($parts) || empty($parts['host'])) {
                 continue;
