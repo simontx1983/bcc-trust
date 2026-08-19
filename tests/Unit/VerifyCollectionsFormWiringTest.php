@@ -52,8 +52,18 @@ final class VerifyCollectionsFormWiringTest extends TestCase
         ob_start();
         echo '<div class="wrap">';
         echo '<form method="post" action="">';
-        // VC-B still rides the broad page nonce — unchanged by this batch.
-        wp_nonce_field(VerifyCollectionsPage::NONCE_KEY, VerifyCollectionsPage::NONCE_NAME);
+        // NO SHARED NONCE, AND NO HAND-WRITTEN LEGACY CONTROL.
+        //
+        // Both used to be scaffolded here, and both had to go in VC-B3b —
+        // for the same reason, which is worth stating plainly because it
+        // is a trap this file walked into once. A composite that fakes
+        // markup production no longer emits does not fail when the
+        // production markup changes; it passes, asserting properties of
+        // the test's own scaffolding. Two tests below were green against a
+        // `cw_pause_` button that this method wrote itself.
+        //
+        // Everything in the composite is now emitted by a real renderer,
+        // so "the legacy transport is gone" is a fact about production.
         echo '<table><tbody>';
         foreach (self::ROWS as $i => $id) {
             echo '<tr><td>';
@@ -61,9 +71,6 @@ final class VerifyCollectionsFormWiringTest extends TestCase
             // VC-B1: the real renderer, so this asserts the markup
             // production emits rather than a copy of it.
             VerifyCollectionsPage::renderHideButton($id, self::HIDDEN[$id]);
-            // Representative REMAINING VC-B control (deferred to VC-B3),
-            // still on the shared page nonce and still inside this form.
-            echo '<button type="submit" name="bcc_vc_action" value="cw_pause_' . $id . '">Pause</button>';
             echo '</td></tr>';
         }
         echo '</tbody></table>';
@@ -206,11 +213,11 @@ final class VerifyCollectionsFormWiringTest extends TestCase
             $this->assertNotNull($form);
 
             $this->assertNull(
-                $this->hiddenValue($form, VerifyCollectionsPage::NONCE_NAME),
+                $this->hiddenValue($form, '_bcc_vc_nonce'),
                 'a VC-B1 form must not carry the broad page nonce field'
             );
             $this->assertNotSame(
-                VerifyCollectionsPage::NONCE_KEY,
+                'bcc_verify_collections_nonce',
                 $this->nonceAction($form),
                 'a VC-B1 form must not use the broad page nonce action'
             );
@@ -295,20 +302,34 @@ final class VerifyCollectionsFormWiringTest extends TestCase
         }
     }
 
-    public function testTheDeferredCosmwasmControlsKeepTheSharedNonce(): void
+    /**
+     * NO CONTROL ON THIS PAGE SUBMITS THE LEGACY TRANSPORT.
+     *
+     * This case used to assert the opposite — that the four CosmWasm
+     * controls still rode `bcc_vc_action` inside the big form, which
+     * was true and deliberate while they were deferred. VC-B3b moved
+     * them, so the assertion is inverted rather than deleted.
+     *
+     * It is also worth more than it was: the button it counted was
+     * written by the composite helper itself, so it passed whatever
+     * production did. Everything the composite renders now comes from
+     * a real renderer.
+     */
+    public function testNoControlSubmitsTheLegacyBccVcAction(): void
     {
         $doc = $this->renderComposite();
 
-        $pauses = 0;
         foreach ($this->elements($doc, 'button') as $button) {
-            if ($button->getAttribute('name') === 'bcc_vc_action') {
-                $pauses++;
-                $this->assertSame('', $button->getAttribute('form'), 'VC-B3 controls stay inside the big form');
-                $this->assertStringStartsWith('cw_', $button->getAttribute('value'));
-            }
+            $this->assertNotSame(
+                'bcc_vc_action',
+                $button->getAttribute('name'),
+                'every remaining control has its own admin-post route'
+            );
         }
 
-        $this->assertSame(count(self::ROWS), $pauses);
+        foreach ($this->elements($doc, 'input') as $input) {
+            $this->assertNotSame('bcc_vc_action', $input->getAttribute('name'));
+        }
     }
 
     public function testEveryButtonFormAttributeResolvesToExactlyOneForm(): void
@@ -413,11 +434,11 @@ final class VerifyCollectionsFormWiringTest extends TestCase
                 $this->assertNotNull($form);
 
                 $this->assertNull(
-                    $this->hiddenValue($form, VerifyCollectionsPage::NONCE_NAME),
+                    $this->hiddenValue($form, '_bcc_vc_nonce'),
                     'VC-A forms must not carry the broad page nonce field.'
                 );
                 $this->assertNotSame(
-                    VerifyCollectionsPage::NONCE_KEY,
+                    'bcc_verify_collections_nonce',
                     $this->nonceAction($form),
                     'VC-A forms must not use the broad page nonce action.'
                 );
@@ -425,11 +446,21 @@ final class VerifyCollectionsFormWiringTest extends TestCase
         }
     }
 
-    public function testVcbControlsRetainTheSharedNonceAndAreUntouched(): void
+    /**
+     * THE BIG FORM SURVIVES; ITS SHARED NONCE DOES NOT.
+     *
+     * The form still exists because it carries the VC-A
+     * verification checkboxes, and Save and Create Communities
+     * still override its destination with `formaction`. What it no
+     * longer carries is `bcc_verify_collections_nonce`: VC-B3b
+     * moved the last thing that verified it, and a nonce nobody
+     * checks is not defence, it is a token minted on every page
+     * load that teaches the next reader the form is protected.
+     */
+    public function testTheBigFormNoLongerCarriesTheSharedNonce(): void
     {
         $doc = $this->renderComposite();
 
-        // The big form still carries the broad VC-B nonce.
         $big = null;
         foreach ($this->elements($doc, 'form') as $form) {
             if ($form->getAttribute('id') === '') {
@@ -437,26 +468,17 @@ final class VerifyCollectionsFormWiringTest extends TestCase
                 break;
             }
         }
-        $this->assertNotNull($big, 'The big verification form should still exist.');
-        $this->assertSame(
-            VerifyCollectionsPage::NONCE_KEY,
+
+        $this->assertNotNull($big, 'the verification form still exists');
+        $this->assertNull(
             $this->nonceAction($big),
-            'VC-B still rides the shared nonce — deferred, deliberately unchanged.'
+            'the shared page nonce is gone with the last thing that verified it'
         );
 
-        // The DEFERRED CosmWasm controls still submit the legacy
-        // bcc_vc_action with no form attr. Hide/Unhide no longer do —
-        // VC-B1 moved them to their own admin-post routes.
-        $legacy = 0;
-        foreach ($this->elements($doc, 'button') as $button) {
-            if ($button->getAttribute('name') === 'bcc_vc_action') {
-                $legacy++;
-                $this->assertSame('', $button->getAttribute('form'));
-                $this->assertStringStartsWith('cw_', $button->getAttribute('value'));
-                $this->assertStringNotContainsString('hide_', $button->getAttribute('value'));
-            }
-        }
-        $this->assertSame(count(self::ROWS), $legacy);
+        $this->assertStringNotContainsString(
+            'bcc_verify_collections_nonce',
+            (string) $doc->saveHTML()
+        );
     }
 
     public function testNonCosmosRowsGetNoTestButton(): void

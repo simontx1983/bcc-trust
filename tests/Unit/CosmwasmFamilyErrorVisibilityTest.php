@@ -343,37 +343,91 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
         self::assertNull($summary['eligible_chain_count']);
     }
 
-    // ── (5) the panel says it in words ──────────────────────────────────
+    // ── (5) the operator surface says it in words ───────────────────────
+    //
+    // RELOCATED IN VC-B3b, NOT WEAKENED.
+    //
+    // These two assertions were written against
+    // CosmwasmScannerPanel::renderChainRow(). That method is gone: the
+    // per-chain table moved to Chains ▸ NFT Discovery ▸ CosmWasm / CW-721
+    // Discovery, which is now its single owner. The assertions follow the
+    // surface — same strings, same singular/plural sentence, checked
+    // against ChainsPage::render_cw_status_row().
+    //
+    // The sentence itself moved with them. The new status row already
+    // showed "N errored"; the count alone is the half that sends an
+    // operator looking for a rebuild, so the "eligible for retry" wording
+    // was carried across verbatim rather than dropped as redundant. It now
+    // sits on the same page as the Retry control that acts on it.
 
     /** The operator sees the count, and is told the work is retryable. */
-    public function testThePanelReportsTheUnresolvedCount(): void
+    public function testTheStatusRowReportsTheUnresolvedCount(): void
     {
-        $row  = $this->row(familiesErrored: 15);
-        $html = self::renderPanelRow($row);
+        $html = self::renderStatusRow($this->row(familiesErrored: 15));
 
         self::assertStringContainsString('15 code families have unresolved discovery errors', $html);
         self::assertStringContainsString('remain eligible for retry', $html);
     }
 
-    /** A clean chain says nothing about errors. */
-    public function testThePanelIsSilentWhenThereAreNoFamilyErrors(): void
+    /** One error is one sentence, not "1 code families". */
+    public function testTheSingularSentenceSurvivedTheMove(): void
     {
-        $html = self::renderPanelRow($this->row(familiesErrored: 0));
+        $html = self::renderStatusRow($this->row(familiesErrored: 1));
+
+        self::assertStringContainsString('1 code family has unresolved discovery errors', $html);
+        self::assertStringContainsString('remains eligible for retry', $html);
+    }
+
+    /** A clean chain says nothing about errors. */
+    public function testTheStatusRowIsSilentWhenThereAreNoFamilyErrors(): void
+    {
+        $html = self::renderStatusRow($this->row(familiesErrored: 0));
 
         self::assertStringNotContainsString('unresolved discovery errors', $html);
     }
 
+    /**
+     * THE GUARANTEE, STATED AS A GUARANTEE.
+     *
+     * PR #196's real claim is not "some string appears" — it is that a
+     * chain holding family errors is never presented as a clean one. So
+     * this renders both and asserts they differ, which no amount of copy
+     * editing on either surface can accidentally satisfy.
+     */
+    public function testAChainWithFamilyErrorsIsNotRenderedLikeACleanOne(): void
+    {
+        $errored = self::renderStatusRow($this->row(familiesErrored: 15));
+        $clean   = self::renderStatusRow($this->row(familiesErrored: 0));
+
+        self::assertNotSame($clean, $errored, 'errored and clean must not render identically');
+        self::assertStringContainsString('15 errored', $errored);
+        self::assertStringNotContainsString('errored', $clean);
+    }
+
+    /**
+     * The panel that used to carry this no longer offers the method, so a
+     * future edit cannot quietly restore a second, divergent copy of the
+     * per-chain error display.
+     */
+    public function testTheOldPanelRowRendererIsGone(): void
+    {
+        self::assertFalse(
+            method_exists(\BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel::class, 'renderChainRow'),
+            'the per-chain renderer moved to ChainsPage; two copies is what VC-B3b removed'
+        );
+    }
+
     /** @param array<string, mixed> $row */
-    private static function renderPanelRow(array $row): string
+    private static function renderStatusRow(array $row): string
     {
         $m = new \ReflectionMethod(
-            \BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel::class,
-            'renderChainRow'
+            \BCC\Trust\Onchain\Admin\ChainsPage::class,
+            'render_cw_status_row'
         );
         $m->setAccessible(true);
 
         ob_start();
-        $m->invoke(null, $row, true, false);
+        $m->invoke(null, $row);
 
         return (string) ob_get_clean();
     }

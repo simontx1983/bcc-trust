@@ -355,7 +355,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
     public function testTheLegacyVerifyCollectionsNonceIsRejected(bool $enable): void
     {
         $_POST['chain_id'] = self::CHAIN_ID;
-        \BccAdminTestState::$validNonceAction = VerifyCollectionsPage::NONCE_KEY;
+        \BccAdminTestState::$validNonceAction = 'bcc_verify_collections_nonce';
 
         try {
             $enable ? ChainsPage::handle_cw_discovery_enable() : ChainsPage::handle_cw_discovery_disable();

@@ -204,6 +204,37 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         return $html;
     }
 
+    /**
+     * The CANONICAL per-chain surface, rendered from the same live summary.
+     *
+     * ── WHY THIS HELPER EXISTS ──────────────────────────────────────────
+     * VC-B3b moved the per-chain table out of the scanner panel and into
+     * Chains ▸ NFT Discovery ▸ CosmWasm / CW-721 Discovery. The eligibility
+     * assertions below were written against the panel and are NOT deleted:
+     * they follow the surface, with their scenarios intact.
+     *
+     * Keeping them here rather than folding them into
+     * ChainsNftDiscoveryTabTest is deliberate. That file renders from a
+     * FAKE snapshot, which is right for its own job — proving the renderer
+     * prints what it is handed. These go the whole way: seeded chain rows
+     * and checkpoints through the real buildSummary() and out to the
+     * markup, which is the only way an eligibility verdict that is correct
+     * in isolation but wrong end to end gets caught.
+     */
+    private function renderDiscovery(): string
+    {
+        $chains = CosmwasmDiscoveryHealthSnapshot::buildSummary()['chains'];
+        self::assertIsArray($chains);
+
+        ob_start();
+        ChainsPage::render_cw_discovery_section(array_values($chains));
+        $html = ob_get_clean();
+
+        self::assertIsString($html);
+
+        return $html;
+    }
+
     /** The panel row for one chain, as the summary describes it. */
     private function summaryRow(int $chainId): array
     {
@@ -461,24 +492,38 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     //  THE PANEL — four status cases, each named
     // ═══════════════════════════════════════════════════════════════════
 
-    public function test_the_panel_reports_an_eligible_chain(): void
+    public function test_the_discovery_row_reports_an_eligible_chain(): void
+    {
+        ChainRepository::reset();
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+
+        $html = $this->renderDiscovery();
+
+        self::assertStringContainsString('Eligible', $html);
+        self::assertStringContainsString('Enabled', $html, 'the operator setting is shown');
+        self::assertStringContainsString('Nothing is blocking this chain', $html);
+    }
+
+    /**
+     * The panel keeps the AGGREGATE half of the same fact.
+     *
+     * "1 of 1 listed chains are eligible" is a scanner-wide number that
+     * NFT Discovery, being one row per chain, never states. It lived
+     * inside the deleted table's renderer and was restored into the
+     * retained aggregates rather than lost with it — which is what this
+     * asserts, alongside the panel no longer offering the mutation.
+     */
+    public function test_the_panel_keeps_the_scanner_wide_eligible_count(): void
     {
         ChainRepository::reset();
         ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
 
         $html = $this->renderPanel();
 
-        self::assertStringContainsString('Eligible', $html);
-        self::assertStringContainsString('opt-in <strong>ON</strong>', $html);
-        self::assertStringContainsString('Nothing is blocking this chain', $html);
-        // The control offers the other direction.
-        self::assertStringNotContainsString('cw_discovery_off_', $html);
-        self::assertStringContainsString('subtab=nft-discovery', $html);
-        self::assertStringNotContainsString('Disable discovery', $html, 'the mutation moved to Chains ▸ NFT Discovery');
-
-        // The line that answers "how many of these will ever be scanned?"
-        // — the question the table used to leave the operator to work out.
         self::assertStringContainsString('<strong>1 of 1</strong>', self::flatten($html));
+        self::assertStringContainsString('subtab=nft-discovery', $html);
+        self::assertStringNotContainsString('cw_discovery_off_', $html);
+        self::assertStringNotContainsString('Disable discovery', $html, 'the mutation moved to Chains ▸ NFT Discovery');
     }
 
     /** Collapse HTML whitespace so an assertion can span line breaks. */
@@ -506,20 +551,23 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         return trim((string) preg_replace('/\s+/', ' ', $text));
     }
 
-    public function test_the_panel_reports_a_chain_nobody_opted_in(): void
+    public function test_the_discovery_row_reports_a_chain_nobody_opted_in(): void
     {
         ChainRepository::reset();
         ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 0);
 
-        $html = $this->renderPanel();
+        $html = $this->renderDiscovery();
 
         self::assertStringContainsString('Not opted in', $html);
-        self::assertStringContainsString('opt-in <strong>OFF</strong>', $html);
+        self::assertStringContainsString('Disabled', $html, 'the operator setting is shown');
         self::assertStringContainsString('Discovery is switched off for this chain', $html);
         self::assertStringNotContainsString('Nothing is blocking this chain', $html);
-        self::assertStringNotContainsString('cw_discovery_on_', $html, 'no discovery mutation control may remain here');
-        self::assertStringContainsString('subtab=nft-discovery', $html);
-        self::assertStringContainsString('subtab=nft-discovery', $html);
+
+        // The panel no longer carries the legacy transport for either
+        // direction, and points at the canonical page instead.
+        $panel = $this->renderPanel();
+        self::assertStringNotContainsString('cw_discovery_on_', $panel);
+        self::assertStringContainsString('subtab=nft-discovery', $panel);
     }
 
     /**
@@ -528,7 +576,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
      * is that opting in cannot override a fact about the chain, and the
      * panel must say so rather than showing a green row that never moves.
      */
-    public function test_the_panel_reports_a_chain_with_no_wasm_module(): void
+    public function test_the_discovery_row_reports_a_chain_with_no_wasm_module(): void
     {
         ChainRepository::reset();
         ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
@@ -537,11 +585,23 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
             ChainCheckpointRepository::CW_STATE_UNSUPPORTED
         );
 
-        $html = $this->renderPanel();
+        $html = $this->renderDiscovery();
 
-        self::assertStringContainsString('No wasm module', $html);
-        self::assertStringContainsString('opt-in <strong>ON</strong>', $html, 'the opt-in is still shown honestly');
+        self::assertStringContainsString('No CosmWasm module', $html);
+        self::assertStringContainsString('Enabled', $html, 'the opt-in is still shown honestly');
         self::assertStringNotContainsString('Nothing is blocking this chain', $html);
+
+        // VC-B3b: an unsupported chain is offered NO scanner operation —
+        // there is no pass to pause, resume, backfill or retry.
+        foreach ([
+            ChainsPage::ACTION_CW_PAUSE,
+            ChainsPage::ACTION_CW_RESUME,
+            ChainsPage::ACTION_CW_BACKFILL,
+            ChainsPage::ACTION_CW_RETRY,
+        ] as $route) {
+            self::assertStringNotContainsString($route, $html);
+        }
+        self::assertStringContainsString('nothing to pause, resume, backfill or retry', $html);
 
         // THE PERMANENCE CLAIM, AND ITS LIMITS. The code does prove this
         // state is terminal to everything automated — prepareChain()
@@ -558,9 +618,13 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertStringContainsString('only a direct database change would', $flat);
 
         // Still reversible: an opted-in unsupported chain must not be
-        // stranded with no way to switch it back off.
-        self::assertStringNotContainsString('cw_discovery_off_', $html);
-        self::assertStringContainsString('subtab=nft-discovery', $html);
+        // stranded with no way to switch it back off. The opt-out control
+        // is present — on the canonical surface, and only there.
+        self::assertStringContainsString(ChainsPage::ACTION_CW_DISCOVERY_DISABLE, $html);
+
+        $panel = $this->renderPanel();
+        self::assertStringNotContainsString('cw_discovery_off_', $panel);
+        self::assertStringContainsString('subtab=nft-discovery', $panel);
     }
 
     /**
@@ -568,14 +632,14 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
      * not scanned — the case with no other visible symptom whatsoever,
      * which is exactly why it needs saying out loud.
      */
-    public function test_the_panel_reports_a_chain_outside_the_canary_allowlist(): void
+    public function test_the_discovery_row_reports_a_chain_outside_the_canary_allowlist(): void
     {
         define('BCC_COSMWASM_CHAIN_ALLOWLIST', '4321');
 
         ChainRepository::reset();
         ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
 
-        $html = $this->renderPanel();
+        $html = $this->renderDiscovery();
 
         self::assertStringContainsString('Outside canary scope', $html);
         self::assertStringContainsString('BCC_COSMWASM_CHAIN_ALLOWLIST names only chain 4321', $html);
@@ -728,7 +792,11 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
                 . 'or outside the current canary allowlist. '
                 . 'Nothing has failed and nothing is behind—the current selection cannot produce any scanner work. '
                 . 'Enable an eligible chain, resume a paused chain, or update the canary allowlist. '
-                . 'The Discovery and State columns below show why each chain is excluded.',
+                // VC-B3b: the columns this sentence sends the operator to
+                // moved to Chains ▸ NFT Discovery, so the sentence had to
+                // move with them. Directions to a table that is no longer
+                // there are worse than no directions.
+                . 'The Discovery and State columns in Chains ▸ NFT Discovery show why each chain is excluded.',
             self::prose($html)
         );
 
@@ -750,8 +818,10 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // Nothing is hidden: the undefined gate is still named, the row
         // says WHICH chain is in the way, and the controls are there.
         self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED', $html);
-        self::assertStringContainsString('No wasm module', $html);
         self::assertStringContainsString('subtab=nft-discovery', $html);
+        // WHICH chain is in the way is a per-chain fact, and lives with
+        // the per-chain row on the canonical surface.
+        self::assertStringContainsString('No CosmWasm module', $this->renderDiscovery());
     }
 
     /**
@@ -782,9 +852,11 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         $html = $this->renderPanel();
 
         self::assertStringNotContainsString('No opted-in chain can be scanned', $html);
-        // The unsupported chain is still named, one row at a time.
-        self::assertStringContainsString('No wasm module', $html);
+        // The scanner-wide arithmetic stays on the panel…
         self::assertStringContainsString('<strong>1 of 2</strong>', self::flatten($html));
+        // …and the unsupported chain is still named, one row at a time, on
+        // the canonical per-chain surface.
+        self::assertStringContainsString('No CosmWasm module', $this->renderDiscovery());
     }
 
     /**
@@ -824,7 +896,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertStringContainsString('Unknown', $html);
         self::assertStringNotContainsString('Eligible', $html);
         self::assertStringNotContainsString('Nothing is blocking this chain', $html);
-        self::assertStringContainsString('opt-in <strong>OFF</strong>', $html);
+        self::assertStringContainsString('Disabled', $html);
         self::assertStringContainsString('could not be read', $html);
     }
 
@@ -852,7 +924,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
             'eligibility'                => '',
         ]);
 
-        self::assertStringContainsString('opt-in <strong>OFF</strong>', $html);
+        self::assertStringContainsString('Disabled', $html);
         self::assertStringContainsString('Unknown', $html);
         self::assertStringNotContainsString('Eligible', $html);
     }
@@ -905,6 +977,21 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
      * @param  array<string, mixed> $chain
      */
     private function renderPanelFor(array $chain): string
+    {
+        // VC-B3b: the per-chain row moved to Chains ▸ NFT Discovery, so the
+        // fail-closed assertions below follow it. The row shape and the
+        // property under test are unchanged: an absent or merely-truthy
+        // opt-in must never render as opted in.
+        ob_start();
+        ChainsPage::render_cw_discovery_section([$chain]);
+        $html = ob_get_clean();
+        self::assertIsString($html);
+
+        return $html;
+    }
+
+    /** @param array<string, mixed> $chain */
+    private function renderPanelWithChain(array $chain): string
     {
         ob_start();
         CosmwasmScannerPanel::render([

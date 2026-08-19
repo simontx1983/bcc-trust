@@ -419,28 +419,86 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
 
     // ── VC-B3a adds NO controls ─────────────────────────────────────────
 
-    public function testNoScannerMutationControlWasAdded(): void
+    /**
+     * THE STATUS ROW IS STILL READ-ONLY. The scope moved; the rule did not.
+     *
+     * These two assertions were written in VC-B3a, when the section held
+     * nothing but the discovery opt-in, and they said "no scanner control
+     * exists anywhere in this section". VC-B3b deliberately adds four —
+     * that is the batch. Deleting the guard would have been a real loss of
+     * coverage, and raising its counts would have made it assert nothing.
+     *
+     * So it now targets the STATUS ROW itself, which is where the original
+     * concern actually lives: status is a read-only presentation of the
+     * snapshot, and a control mixed into it would be a mutation offered
+     * inside a display an operator reads as a report. Controls belong in
+     * the separate operations row, asserted below and owned in full by
+     * ChainsCwScannerOperationsDomTest.
+     */
+    public function testTheStatusRowCarriesNoMutationControl(): void
+    {
+        $html = $this->renderStatusRow($this->sentinelRow(['last_error' => 'x']));
+
+        foreach ([
+            ChainsPage::ACTION_CW_PAUSE,
+            ChainsPage::ACTION_CW_RESUME,
+            ChainsPage::ACTION_CW_BACKFILL,
+            ChainsPage::ACTION_CW_RETRY,
+            ChainsPage::ACTION_CW_DISCOVERY_ENABLE,
+            ChainsPage::ACTION_CW_DISCOVERY_DISABLE,
+        ] as $route) {
+            $this->assertStringNotContainsString($route, $html, 'status display must offer no route');
+        }
+
+        $this->assertSame(0, substr_count($html, '<form'), 'no form inside the status display');
+        $this->assertSame(0, substr_count($html, '<button'), 'no button inside the status display');
+        $this->assertSame(0, substr_count($html, '<input'), 'no input inside the status display');
+        $this->assertSame(0, substr_count($html, 'data-nonce-action'), 'no nonce inside the status display');
+    }
+
+    /**
+     * And the controls really are in their own row — so the separation
+     * above is a structural fact, not an accident of where the sentinel
+     * happened to put them.
+     */
+    public function testTheControlsLiveInASeparateRowFromTheStatus(): void
     {
         $html = $this->render([$this->sentinelRow()]);
 
-        foreach (['cw_pause_', 'cw_resume_', 'cw_backfill_', 'cw_retry_'] as $action) {
-            $this->assertStringNotContainsString(
-                $action,
-                $html,
-                'VC-B3a is read-only — Pause/Resume/Backfill/Retry move in VC-B3b'
-            );
+        $doc = new \DOMDocument();
+        libxml_use_internal_errors(true);
+        $doc->loadHTML('<!DOCTYPE html><html><body>' . $html . '</body></html>');
+        libxml_clear_errors();
+
+        $statusRows = 0;
+        $opsRows    = 0;
+        foreach ($doc->getElementsByTagName('tr') as $tr) {
+            if (!$tr instanceof \DOMElement) {
+                continue;
+            }
+            $class = $tr->getAttribute('class');
+            if (str_contains($class, 'bcc-cw-status-row')) {
+                $statusRows++;
+                $this->assertSame(0, $tr->getElementsByTagName('form')->length);
+            }
+            if (str_contains($class, 'bcc-cw-operations-row')) {
+                $opsRows++;
+            }
         }
 
-        // Exactly one form per chain: the VC-B2 discovery opt-in, unchanged.
-        $this->assertSame(1, substr_count($html, '<form '));
+        $this->assertSame(1, $statusRows, 'one status row per chain');
+        $this->assertSame(1, $opsRows, 'one operations row per chain');
     }
 
-    public function testTheStatusRowIsReadOnlyMarkup(): void
+    /** @param array<string, mixed> $row */
+    private function renderStatusRow(array $row): string
     {
-        $html = $this->render([$this->sentinelRow(['last_error' => 'x'])]);
+        $m = new \ReflectionMethod(ChainsPage::class, 'render_cw_status_row');
+        $m->setAccessible(true);
 
-        // The status row itself carries no inputs, buttons or nonce.
-        $this->assertSame(1, substr_count($html, 'wp_nonce') + substr_count($html, 'data-nonce-action'));
-        $this->assertSame(1, substr_count($html, '<button'));
+        ob_start();
+        $m->invoke(null, $row);
+
+        return (string) ob_get_clean();
     }
 }

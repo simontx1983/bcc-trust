@@ -141,7 +141,10 @@ final class VerifyCollectionsHideToggleTest extends TestCase
     {
         $_POST = [
             'bcc_vc_action'                   => $action,
-            VerifyCollectionsPage::NONCE_NAME => $nonce,
+            // The literal, not a constant: VC-B3b deleted NONCE_NAME
+            // with the last thing that verified it. A stale browser tab
+            // still posts this field, which is exactly what is simulated.
+            '_bcc_vc_nonce'                   => $nonce,
         ];
 
         $handler = new ReflectionMethod(VerifyCollectionsPage::class, 'handlePost');
@@ -446,13 +449,49 @@ final class VerifyCollectionsHideToggleTest extends TestCase
 
     // ── the dispatcher itself ───────────────────────────────────────────
 
+    /**
+     * THE GUARANTEE SURVIVED THE NONCE'S REMOVAL — and got stronger.
+     *
+     * This used to assert "Security check failed", because the legacy
+     * dispatcher verified `bcc_verify_collections_nonce` before refusing.
+     * VC-B3b removed that nonce: the dispatcher performs no lookup, no
+     * write, no provider call and no audit, so there was nothing left for
+     * a nonce to protect, and keeping one alive purely to decorate a
+     * warning would have preserved the exact excessive-authority token
+     * this programme spent four batches removing.
+     *
+     * What the test is actually for is unchanged and asserted below: a
+     * submission carrying a bad nonce reaches NEITHER the rule NOR the
+     * scanner flag. It is now refused for a stronger reason — the code
+     * path no longer touches either, whatever it is carrying.
+     */
     public function test_a_bad_nonce_never_reaches_the_rule_or_the_scanner(): void
     {
         $notices = $this->postLegacy('hide_' . self::COLLECTION_ID, 'not-the-nonce');
 
-        self::assertStringContainsString('Security check failed', $this->joined($notices));
+        self::assertSame('error', $notices[0]['type']);
+        self::assertStringContainsString('NOTHING was changed', $this->joined($notices));
+
         self::assertNull(NftSpamContractRepository::getRule(self::CHAIN_ID, self::CONTRACT));
         self::assertSame('0', $this->deniedFlag());
+    }
+
+    /**
+     * The refused submission must not become a reflection or log-injection
+     * surface on the way out: the attacker-controlled `bcc_vc_action` is
+     * never echoed back.
+     */
+    public function test_the_refusal_never_echoes_the_submitted_action(): void
+    {
+        $notices = $this->postLegacy('hide_' . self::COLLECTION_ID . '<script>alert(1)</script>', 'not-the-nonce');
+
+        $message = $this->joined($notices);
+        self::assertStringNotContainsString('<script>', $message);
+        self::assertStringNotContainsString('hide_' . self::COLLECTION_ID, $message);
+
+        foreach (\BCC\Core\Log\Logger::$lines as $line) {
+            self::assertStringNotContainsString('<script>', json_encode($line) ?: '');
+        }
     }
 
     /**
@@ -493,11 +532,35 @@ final class VerifyCollectionsHideToggleTest extends TestCase
      * they still reach their handlers through this dispatcher and the shared
      * page nonce. Removing Hide/Unhide must not have disturbed them.
      */
-    public function test_the_remaining_cw_legacy_dispatch_is_structurally_intact(): void
+    /**
+     * THE SAME GUARD, INVERTED — because the migration finished.
+     *
+     * While the moves were in flight this asserted that each `cw_*` branch
+     * was still dispatched from handlePost(), so a half-finished batch
+     * could not leave a control reachable from neither page. VC-B2 moved
+     * the two discovery branches and VC-B3b the four scanner ones, so the
+     * useful assertion is now the opposite one: none of them may come
+     * back, and the dispatcher they lived in must stay inert.
+     *
+     * Keeping it pointed the old way would have meant either deleting the
+     * file's only structural check or asserting that finished work was
+     * unfinished.
+     */
+    public function test_no_cw_legacy_dispatch_branch_survives(): void
     {
         $source = (string) file_get_contents(
             __DIR__ . '/../../app/Domain/Onchain/Admin/VerifyCollectionsPage.php'
         );
+
+        // Comments legitimately NAME these prefixes to explain where they
+        // went, so the check runs against code only.
+        $code = '';
+        foreach (token_get_all($source) as $token) {
+            if (is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                continue;
+            }
+            $code .= is_array($token) ? $token[1] : $token;
+        }
 
         foreach ([
             'cw_discovery_on_',
@@ -507,15 +570,63 @@ final class VerifyCollectionsHideToggleTest extends TestCase
             'cw_backfill_',
             'cw_retry_',
         ] as $prefix) {
-            self::assertStringContainsString(
-                "strpos(\$action, '{$prefix}') === 0",
-                $source,
-                "{$prefix} must still dispatch from handlePost() until VC-B2/VC-B3"
+            self::assertStringNotContainsString(
+                $prefix,
+                $code,
+                "{$prefix} moved to Chains ▸ NFT Discovery; a second dispatcher is what VC-B3b removed"
             );
         }
 
-        // And the shared nonce they depend on is still verified there.
-        self::assertStringContainsString('wp_verify_nonce', $source);
+        // The handlers that served them are gone with them.
+        foreach ([
+            'handleScannerPause',
+            'handleScannerBackfill',
+            'handleScannerForceRetry',
+            'handleCwDiscoveryToggle',
+        ] as $method) {
+            self::assertStringNotContainsString($method, $code, "{$method} must not survive the move");
+        }
+
+        // And the broad nonce is neither minted nor verified here any more.
+        self::assertStringNotContainsString('bcc_verify_collections_nonce', $code);
+        // Word-boundary matched: AJAX_NONCE_KEY is a DIFFERENT, still-live
+        // constant for the inline AJAX handlers, and a plain substring
+        // check would hit it and fail for the wrong reason.
+        self::assertSame(0, preg_match('/(?<![A-Z_])NONCE_KEY\b/', $code), 'NONCE_KEY must be gone');
+        self::assertSame(0, preg_match('/(?<![A-Z_])NONCE_NAME\b/', $code), 'NONCE_NAME must be gone');
+        self::assertStringContainsString('AJAX_NONCE_KEY', $code, 'the AJAX nonce is untouched');
+    }
+
+    /**
+     * The VC-A controls that legitimately REMAIN on this page still have
+     * their own routes and their own action-scoped nonces — so "the shared
+     * nonce is gone" cannot be satisfied by a page that lost its
+     * protection rather than replaced it.
+     */
+    public function test_the_surviving_controls_keep_their_own_scoped_nonces(): void
+    {
+        $source = (string) file_get_contents(
+            __DIR__ . '/../../app/Domain/Onchain/Admin/VerifyCollectionsPage.php'
+        );
+
+        // Bulk save and provision: own action, own named nonce field.
+        self::assertStringContainsString(
+            "wp_nonce_field(self::ACTION_SAVE, '_vc_save_nonce', false)",
+            $source
+        );
+        self::assertStringContainsString(
+            "wp_nonce_field(self::ACTION_PROVISION, '_vc_provision_nonce', false)",
+            $source
+        );
+
+        // Per-row controls: nonce action bound to the collection id.
+        self::assertStringContainsString("wp_nonce_field(\$hideRoute . '_' . \$rowId)", $source);
+        self::assertStringContainsString("wp_nonce_field(self::ACTION_DELETE . '_' . \$rowId)", $source);
+        self::assertStringContainsString("wp_nonce_field(self::ACTION_TESTQUERY . '_' . \$rowId)", $source);
+
+        // Add-collection forms: own action nonces.
+        self::assertStringContainsString("wp_nonce_field(self::ACTION_ADD, '_wpnonce')", $source);
+        self::assertStringContainsString("wp_nonce_field(self::ACTION_ADD_COSMOS, '_wpnonce')", $source);
     }
 
     public function test_an_unknown_collection_id_is_refused_before_any_write(): void
