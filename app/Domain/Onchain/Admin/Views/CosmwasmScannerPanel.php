@@ -2,8 +2,7 @@
 
 namespace BCC\Trust\Onchain\Admin\Views;
 
-use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
-use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
+use BCC\Trust\Onchain\Admin\ChainsPage;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Services\CosmwasmEvidenceNarrator;
@@ -72,29 +71,6 @@ final class CosmwasmScannerPanel
         CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE        => '#646970',
         CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED     => '#dba617',
         CosmwasmDiscoveryHealthSnapshot::STATUS_UNAVAILABLE => '#d63638',
-    ];
-
-    /**
-     * Colour per eligibility value.
-     *
-     * GREEN IS RESERVED FOR `eligible`, and the lookup below defaults to
-     * the UNKNOWN colour rather than to grey — an eligibility value this
-     * build has never heard of is not a quiet "no", it is a "something is
-     * wrong with this panel", and it must not be able to borrow the calm
-     * colour of a deliberately-disabled chain.
-     *
-     * @var array<string, string>
-     */
-    private const ELIGIBILITY_COLOR = [
-        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE           => '#00a32a',
-        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_NOT_OPTED_IN       => '#646970',
-        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNSUPPORTED        => '#646970',
-        // Amber, matching the State pill this chain already shows: a pause
-        // is a hold somebody put on, not a settled fact like "no wasm
-        // module" and not a mistake like an unreadable opt-in.
-        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_PAUSED             => '#dba617',
-        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED => '#dba617',
-        CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN            => '#d63638',
     ];
 
     /**
@@ -188,7 +164,8 @@ final class CosmwasmScannerPanel
                         No chain has been opted in, so there is nothing for the scanner to
                         walk. This is a configuration state, not a fault: nothing has
                         failed, nothing is behind, and no work is waiting. Use
-                        <em>Enable discovery</em> on a chain below to point it at one —
+                        <em>Enable discovery</em> on a chain in Chains ▸ NFT Discovery to point it at
+                        one —
                         everything it then finds still arrives here <strong>unverified</strong>.
                     </p>
                     <?php if (!$enabled): ?>
@@ -221,7 +198,7 @@ final class CosmwasmScannerPanel
                 // so on the site that prompted this fix, where the whole
                 // selection sat outside BCC_COSMWASM_CHAIN_ALLOWLIST, the
                 // notice described a state the operator was not in. The
-                // per-chain reason in the Discovery column is still where
+                // per-chain reason in NFT Discovery is still where
                 // the specifics live; this paragraph only has to send them
                 // to the right column.
                 ?>
@@ -233,8 +210,8 @@ final class CosmwasmScannerPanel
                         Nothing has failed and nothing is
                         behind—the current selection cannot produce any scanner work.
                         Enable an eligible chain, resume a paused chain, or update the
-                        canary allowlist. The Discovery and State columns below show why
-                        each chain is excluded.
+                        canary allowlist. The Discovery and State columns in Chains ▸ NFT
+                        Discovery show why each chain is excluded.
                     </p>
                     <?php if (!$enabled): ?>
                         <p>
@@ -250,7 +227,8 @@ final class CosmwasmScannerPanel
                     <p>
                         <strong>Discovery is switched off.</strong>
                         <?php echo esc_html((string) ($summary['disabled_reason'] ?? '')); ?>
-                        Nothing is scanned and the controls below are inert — the gate fails
+                        Nothing is scanned and the scanner controls in Chains ▸ NFT Discovery are
+                        inert — the gate fails
                         closed on purpose, so a missing constant never silently means
                         "enabled". Add
                         <code>define('BCC_COSMWASM_DISCOVERY_ENABLED', true);</code>
@@ -264,7 +242,7 @@ final class CosmwasmScannerPanel
                     <p>
                         Incremental discovery is running, but the <strong>historical backfill is
                         off</strong> — <code>BCC_COSMWASM_BACKFILL_ENABLED</code> is not defined.
-                        Start controls below will not do anything until it is.
+                        The Backfill control in Chains ▸ NFT Discovery is not offered until it is.
                     </p>
                 </div>
             <?php endif; ?>
@@ -283,13 +261,143 @@ final class CosmwasmScannerPanel
             // stalled cron and a broken DB otherwise look the same.
             if (!$unavailable) {
                 self::renderTotals($summary);
+                self::renderCoverage($summary, $chains);
             }
             self::renderSchedule($summary);
-            if (!$unavailable) {
-                self::renderChains($chains, $enabled, (bool) ($summary['backfill_enabled'] ?? false), $summary);
-            }
+            // VC-B3b: the per-chain table — the status columns AND the four
+            // scanner controls — moved to Chains ▸ NFT Discovery ▸ CosmWasm /
+            // CW-721 Discovery, which is now their single owner. Keeping a
+            // second copy here is what the transitional duplication existed
+            // to avoid becoming permanent.
+            //
+            // What stays: the chain-wide aggregate and schedule, which the
+            // NFT Discovery section does not show, and the per-collection
+            // candidate detail rendered from the verification table below.
+            //
+            // Rendered UNCONDITIONALLY, outside the `$unavailable` guard that
+            // hides every DB-derived block. It derives nothing from the
+            // summary, so there are no zeroes for it to invent — and a failed
+            // database read is exactly the moment an operator goes looking
+            // for the controls this panel used to carry.
+            self::renderMovedNotice();
             ?>
         </details>
+        <?php
+    }
+
+    /**
+     * Chain-wide coverage and rotation — the two AGGREGATE paragraphs.
+     *
+     * ── WHY THESE STAYED WHEN THE TABLE WENT ────────────────────────────
+     * They lived inside the per-chain table's renderer, but they were never
+     * per-chain: "how many of the listed chains will ever be scanned" and
+     * "which chain the rotation is on" are single facts about the whole
+     * scanner, and NFT Discovery — which is organised one row per chain —
+     * shows neither. Removing them with the table would have deleted
+     * aggregate information nothing else reports, which is exactly the kind
+     * of quiet loss the move was supposed to avoid.
+     *
+     * `eligible_chain_count` is int|null on purpose. Null means the summary
+     * could not work it out, and printing "0 of 21" for that would be an
+     * invented finding — the same fail-closed rule the rest of this file
+     * follows.
+     *
+     * @param array<string, mixed>       $summary
+     * @param list<array<string, mixed>> $chains
+     */
+    private static function renderCoverage(array $summary, array $chains): void
+    {
+        if ($chains === []) {
+            echo '<p><em>No active Cosmos chains are registered, so there is nothing to scan.</em></p>';
+
+            return;
+        }
+
+        $working = is_array($summary['working_chain'] ?? null) ? $summary['working_chain'] : null;
+        $next    = is_array($summary['next_chain'] ?? null) ? $summary['next_chain'] : null;
+
+        $eligibleCount = is_int($summary['eligible_chain_count'] ?? null)
+            ? (int) $summary['eligible_chain_count']
+            : null;
+        ?>
+        <p style="font-size:12px;color:#646970;margin:0 0 6px 0;">
+            <?php if ($eligibleCount !== null): ?>
+                <strong><?php echo esc_html(number_format_i18n($eligibleCount)); ?>
+                of <?php echo esc_html(number_format_i18n(count($chains))); ?></strong>
+                listed chains are eligible for the scanner.
+                A chain is scanned only when an operator has opted it in, the chain reports a
+                working wasm module, nobody has paused it, <em>and</em> it is inside the canary
+                allowlist when one is set. Chains ▸ NFT Discovery says which, per chain, and why not.
+            <?php else: ?>
+                How many of these chains are eligible could not be worked out.
+            <?php endif; ?>
+        </p>
+
+        <p style="font-size:12px;color:#646970;margin:0 0 6px 0;">
+            <?php if ($working !== null): ?>
+                Currently working through <strong><?php echo esc_html((string) ($working['slug'] ?? '')); ?></strong>.
+            <?php else: ?>
+                No chain is mid-backfill.
+            <?php endif; ?>
+            <?php if ($next !== null): ?>
+                Next backfill slice goes to <strong><?php echo esc_html((string) ($next['slug'] ?? '')); ?></strong>
+                (least recently worked first, so one broken chain cannot starve the rest).
+            <?php endif; ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * The forwarding notice left where the per-chain table used to be.
+     *
+     * ── WHY A NOTICE AND NOT SILENCE ────────────────────────────────────
+     * The table that stood here carried both the per-chain status columns
+     * and the four scanner controls. Deleting it without a marker would
+     * leave an operator who knows this panel with no way to find out where
+     * Pause, Resume, Backfill and Retry went — the controls would look
+     * withdrawn rather than moved.
+     *
+     * ── WHAT THIS MUST NOT DO ───────────────────────────────────────────
+     * It renders a link and nothing else. No form, no nonce, no button:
+     * this file is no longer a mutation surface for the scanner, and the
+     * whole point of VC-B3b is that exactly one page owns those controls.
+     * It also reads nothing — no snapshot, no repository, no worker, no
+     * provider — so it costs nothing and cannot fail.
+     *
+     * ── TWO CLAIMS IT DELIBERATELY DOES NOT MAKE ────────────────────────
+     * That NFT Discovery is a CosmWasm-only page: it is not. The section
+     * named here is one engine's section on it, and chains served by the
+     * EVM and Solana NFT paths are neither described nor implied to be
+     * ineligible for NFT discovery — they are simply not scanned by THIS
+     * engine.
+     *
+     * And that opening the page does anything. Following this link
+     * navigates; it starts no pass, no backfill and no provider call.
+     */
+    private static function renderMovedNotice(): void
+    {
+        $url = admin_url(
+            'admin.php?page=' . ChainsPage::PAGE_SLUG
+            . '&subtab=' . ChainsPage::SUBTAB_NFT_DISCOVERY
+        );
+        ?>
+        <div class="notice notice-info inline bcc-cw-scanner-moved" style="margin:12px 0 4px 0;">
+            <p style="margin:8px 0;">
+                <strong>Per-chain scanner status and controls have moved.</strong>
+                Per-chain CosmWasm/CW-721 scanner status and controls now live under
+                <strong>Chains ▸ NFT Discovery</strong>. Overall scanner schedule and
+                aggregate discovery totals remain here.
+            </p>
+            <p style="margin:8px 0;color:#646970;font-size:12px;">
+                That section covers the CosmWasm/CW-721 engine specifically. Chains
+                indexed by the other NFT engines are handled by their own surfaces —
+                nothing there marks them as ineligible for NFT discovery. Opening the
+                page starts no scan.
+            </p>
+            <p style="margin:8px 0;">
+                <a href="<?php echo esc_url($url); ?>">Open NFT Discovery</a>
+            </p>
+        </div>
         <?php
     }
 
@@ -416,340 +524,8 @@ final class CosmwasmScannerPanel
         <?php
     }
 
-    /**
-     * Per-chain state + the operator controls.
-     *
-     * The controls post back into the SAME `handlePost()` dispatcher and
-     * the SAME nonce the rest of the page uses. A separate form element is
-     * required only because HTML forbids nesting one form inside another,
-     * and the verification table is already a form.
-     *
-     * @param list<array<string, mixed>> $chains
-     * @param array<string, mixed>       $summary
-     */
-    private static function renderChains(array $chains, bool $discoveryEnabled, bool $backfillEnabled, array $summary): void
-    {
-        if ($chains === []) {
-            echo '<p><em>No active Cosmos chains are registered, so there is nothing to scan.</em></p>';
-
-            return;
-        }
-
-        $working = is_array($summary['working_chain'] ?? null) ? $summary['working_chain'] : null;
-        $next    = is_array($summary['next_chain'] ?? null) ? $summary['next_chain'] : null;
-
-        // "How many of these will actually be scanned?" — the question the
-        // table used to leave an operator to work out for themselves.
-        // int|null on purpose: null means the summary could not work it out,
-        // and printing "0 of 21" for that would be an invented finding.
-        $eligibleCount = is_int($summary['eligible_chain_count'] ?? null)
-            ? (int) $summary['eligible_chain_count']
-            : null;
-        ?>
-        <p style="font-size:12px;color:#646970;margin:0 0 6px 0;">
-            <?php if ($eligibleCount !== null): ?>
-                <strong><?php echo esc_html(number_format_i18n($eligibleCount)); ?>
-                of <?php echo esc_html(number_format_i18n(count($chains))); ?></strong>
-                listed chains are eligible for the scanner.
-                A chain is scanned only when an operator has opted it in, the chain reports a
-                working wasm module, nobody has paused it, <em>and</em> it is inside the canary
-                allowlist when one is set — the Discovery column says which, per chain, and why not.
-            <?php else: ?>
-                How many of these chains are eligible could not be worked out.
-            <?php endif; ?>
-        </p>
-
-        <p style="font-size:12px;color:#646970;margin:0 0 6px 0;">
-            <?php if ($working !== null): ?>
-                Currently working through <strong><?php echo esc_html((string) ($working['slug'] ?? '')); ?></strong>.
-            <?php else: ?>
-                No chain is mid-backfill.
-            <?php endif; ?>
-            <?php if ($next !== null): ?>
-                Next backfill slice goes to <strong><?php echo esc_html((string) ($next['slug'] ?? '')); ?></strong>
-                (least recently worked first, so one broken chain cannot starve the rest).
-            <?php endif; ?>
-        </p>
-
-        <form method="post" action="" style="margin:0 0 8px 0;">
-            <?php wp_nonce_field(VerifyCollectionsPage::NONCE_KEY, VerifyCollectionsPage::NONCE_NAME); ?>
-            <table class="widefat striped">
-                <thead>
-                    <tr>
-                        <th style="width:110px;">Chain</th>
-                        <th style="width:250px;">Discovery</th>
-                        <th style="width:100px;">State</th>
-                        <th>Progress</th>
-                        <th style="width:210px;">Inventory</th>
-                        <th style="width:150px;">Last run</th>
-                        <th style="width:230px;">Controls</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($chains as $chain): ?>
-                        <?php self::renderChainRow($chain, $discoveryEnabled, $backfillEnabled); ?>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-        </form>
-        <?php
-    }
-
-    /**
-     * @param array<string, mixed> $chain
-     */
-    private static function renderChainRow(array $chain, bool $discoveryEnabled, bool $backfillEnabled): void
-    {
-        $chainId     = (int) ($chain['chain_id'] ?? 0);
-        $slug        = (string) ($chain['slug'] ?? '');
-        $paused      = (bool) ($chain['paused'] ?? false);
-        $unsupported = (bool) ($chain['unsupported'] ?? false);
-        $lastError   = is_string($chain['last_error'] ?? null) ? (string) $chain['last_error'] : null;
-        $familiesErrored = (int) ($chain['families_errored'] ?? 0);
-        $age         = is_int($chain['last_discovery_age_seconds'] ?? null)
-            ? (int) $chain['last_discovery_age_seconds']
-            : null;
-
-        /** @var array<string, int> $familyCounts */
-        $familyCounts = is_array($chain['families_by_classification'] ?? null) ? $chain['families_by_classification'] : [];
-        ?>
-        <tr>
-            <td>
-                <code><?php echo esc_html($slug); ?></code>
-            </td>
-            <?php self::renderDiscoveryCell($chain, $chainId, $slug); ?>
-            <td>
-                <span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr(self::stateColor($chain)); ?>;">
-                    <?php echo esc_html((string) ($chain['state_label'] ?? '')); ?>
-                </span>
-            </td>
-            <td style="font-size:12px;">
-                <?php echo esc_html((string) ($chain['progress_label'] ?? '')); ?>
-                <?php if ($familiesErrored > 0): ?>
-                    <?php // THE SENTENCE THAT WAS MISSING. Plain, countable,
-                          // and it says the work is not lost — an operator
-                          // who reads "errors" without "retryable" reaches
-                          // for a rebuild they do not need. ?>
-                    <br><span style="color:#d63638;font-size:11px;">
-                        <?php echo esc_html(sprintf(
-                            $familiesErrored === 1
-                                ? '%s code family has unresolved discovery errors and remains eligible for retry.'
-                                : '%s code families have unresolved discovery errors and remain eligible for retry.',
-                            number_format_i18n($familiesErrored)
-                        )); ?>
-                    </span>
-                <?php endif; ?>
-                <?php if ($lastError !== null): ?>
-                    <details style="margin-top:4px;">
-                        <summary style="cursor:pointer;color:#d63638;font-size:11px;">Last recorded reason</summary>
-                        <?php
-                        // VC-B3a display-safety correction. Same redactor the
-                        // NFT Discovery status row uses, so the two surfaces
-                        // cannot diverge on what an operator may see. The
-                        // stored column and the technical log keep the raw
-                        // text — this is display only.
-                        ?>
-                        <code style="display:block;margin-top:4px;font-size:11px;white-space:pre-wrap;word-break:break-word;"><?php
-                            echo esc_html(\BCC\Trust\Onchain\Admin\AdminActionSupport::operatorSafeExcerpt($lastError));
-                        ?></code>
-                    </details>
-                <?php endif; ?>
-            </td>
-            <td style="font-size:12px;">
-                <?php echo esc_html(number_format_i18n(CosmwasmDiscoveryHealthSnapshot::cw721Total($familyCounts))); ?> CW-721
-                · <?php echo esc_html(number_format_i18n((int) ($familyCounts[CosmwasmClassifier::NOT_CW721] ?? 0))); ?> non-NFT
-                · <?php echo esc_html(number_format_i18n((int) ($chain['families_pending'] ?? 0))); ?> pending
-                <br>
-                <span style="color:#646970;">
-                    <?php echo esc_html(number_format_i18n((int) ($chain['contracts_inspected'] ?? 0))); ?> contracts inspected,
-                    <?php echo esc_html(number_format_i18n((int) ($chain['candidates'] ?? 0))); ?> candidates
-                    <?php if ((int) ($chain['contracts_denied'] ?? 0) > 0): ?>
-                        , <?php echo esc_html(number_format_i18n((int) $chain['contracts_denied'])); ?> hidden
-                    <?php endif; ?>
-                </span>
-            </td>
-            <td style="font-size:12px;">
-                <?php if ($age === null): ?>
-                    <span style="color:#646970;">never</span>
-                <?php else: ?>
-                    <?php echo esc_html(CosmwasmDiscoveryHealthSnapshot::formatDuration($age)); ?> ago
-                <?php endif; ?>
-                <?php if (is_string($chain['metadata_refreshed_at'] ?? null)): ?>
-                    <br><span style="color:#646970;font-size:11px;">
-                        migration check <?php echo esc_html((string) $chain['metadata_refreshed_at']); ?> UTC
-                    </span>
-                <?php endif; ?>
-            </td>
-            <td>
-                <?php if ($unsupported): ?>
-                    <span style="color:#646970;font-size:11px;">
-                        No CosmWasm module — no scheduled pass runs for this chain and
-                        nothing on this page can start one.
-                    </span>
-                <?php else: ?>
-                    <?php if ($paused): ?>
-                        <button type="submit"
-                                name="bcc_vc_action"
-                                value="cw_resume_<?php echo $chainId; ?>"
-                                class="button button-small"
-                                title="Put this chain back in the rotation. It returns to the state its own progress says it is in, so a completed backfill is not re-walked.">
-                            Resume
-                        </button>
-                    <?php else: ?>
-                        <button type="submit"
-                                name="bcc_vc_action"
-                                value="cw_pause_<?php echo $chainId; ?>"
-                                class="button button-small"
-                                title="Stop every scanner pass for this chain — backfill, daily, retries. Progress is kept and nothing is lost.">
-                            Pause
-                        </button>
-                    <?php endif; ?>
-
-                    <button type="submit"
-                            name="bcc_vc_action"
-                            value="cw_backfill_<?php echo $chainId; ?>"
-                            class="button button-small"
-                            <?php disabled(!$discoveryEnabled || !$backfillEnabled || $paused); ?>
-                            title="<?php echo esc_attr(self::startTitle($discoveryEnabled, $backfillEnabled, $paused)); ?>">
-                        Run backfill slice
-                    </button>
-
-                    <button type="submit"
-                            name="bcc_vc_action"
-                            value="cw_retry_<?php echo $chainId; ?>"
-                            class="button button-small"
-                            <?php disabled(!$discoveryEnabled); ?>
-                            title="Clear the wait on unresolved code families and contracts for this chain so the next pass looks at them again. Settled non-NFT results and hidden contracts are not touched.">
-                        Force retry
-                    </button>
-                <?php endif; ?>
-            </td>
-        </tr>
-        <?php
-    }
-
-    /**
-     * The Discovery cell: opt-in state, eligibility verdict, the reason,
-     * and the control that changes it.
-     *
-     * ── EVERY READ HERE FAILS CLOSED ────────────────────────────────────
-     * `eligibility` is taken from the row only when it is a NON-EMPTY
-     * STRING, and anything else — a missing key, a null, an int, an empty
-     * string — becomes `unknown`. `discovery_opted_in` is compared with
-     * `=== true`, so `'1'`, `1` and a missing key all read as NOT opted in.
-     *
-     * That is not defensive noise. The panel is a display of a fail-closed
-     * rule, and the one thing it must never do is let an ABSENT field read
-     * as a permission: "this key is missing" and "an operator switched
-     * this on" have to be different answers, or a summary built by older
-     * code would quietly show every chain as opted in and eligible.
-     *
-     * `eligibility_reason` is a plain sentence produced by the snapshot and
-     * escaped here — the view derives no policy of its own, it only prints
-     * what it was handed.
-     *
-     * @param array<string, mixed> $chain
-     */
-    private static function renderDiscoveryCell(array $chain, int $chainId, string $slug): void
-    {
-        $eligibility = is_string($chain['eligibility'] ?? null) && $chain['eligibility'] !== ''
-            ? (string) $chain['eligibility']
-            : CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN;
-
-        $optedIn = ($chain['discovery_opted_in'] ?? null) === true;
-
-        $reason = is_string($chain['eligibility_reason'] ?? null) && $chain['eligibility_reason'] !== ''
-            ? (string) $chain['eligibility_reason']
-            : CosmwasmDiscoveryHealthSnapshot::eligibilityReason(
-                CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN,
-                null
-            );
-
-        $color = self::ELIGIBILITY_COLOR[$eligibility]
-            ?? self::ELIGIBILITY_COLOR[CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_UNKNOWN];
-        ?>
-        <td style="font-size:12px;">
-            <span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($color); ?>;">
-                <?php echo esc_html(CosmwasmDiscoveryHealthSnapshot::eligibilityLabel($eligibility)); ?>
-            </span>
-            <span style="margin-left:6px;color:#646970;">
-                opt-in <strong><?php echo esc_html($optedIn ? 'ON' : 'OFF'); ?></strong>
-            </span>
-
-            <div style="margin-top:4px;color:#646970;"><?php echo esc_html($reason); ?></div>
-
-            <?php
-            // ── VC-B2 TRANSITIONAL DUPLICATION — READ BEFORE "TIDYING" ──
-            //
-            // The control that CHANGES the discovery opt-in moved to
-            // Chains ▸ NFT Discovery ▸ CosmWasm / CW-721, where it has its
-            // own direction- and chain-scoped nonce instead of sharing one
-            // page-wide nonce with a provider-consuming backfill.
-            //
-            // The opt-in STATE is still shown here, and also on the new tab.
-            // That duplication is deliberate and bounded:
-            //
-            //   • ONE authoritative source. Both surfaces render from
-            //     CosmwasmDiscoveryHealthSnapshot::buildSummary(). Neither
-            //     computes eligibility itself, so they cannot disagree.
-            //     ChainsNftDiscoveryTabTest pins this.
-            //   • ZERO duplicate mutation controls. Exactly one Enable and
-            //     one Disable exist in production, both on the new tab.
-            //   • It is here only because Pause / Resume / Backfill / Retry
-            //     still live on this page. An operator deciding whether to
-            //     pause a chain needs to know whether it is even opted in.
-            //
-            // VC-B3 moves those four worker controls to the same tab and
-            // deletes this panel's per-chain display with them. Until then,
-            // removing the read-only state here would leave the remaining
-            // controls without the context needed to use them safely.
-            ?>
-            <div style="margin-top:4px;font-size:11px;">
-                <a href="<?php echo esc_url(
-                    admin_url('admin.php?page=bcc-onchain-chains&subtab=nft-discovery')
-                ); ?>">Change in Chains ▸ NFT Discovery</a>
-            </div>
-        </td>
-        <?php
-    }
-
     /** Why the start control is or is not usable, in one sentence. */
-    private static function startTitle(bool $discoveryEnabled, bool $backfillEnabled, bool $paused): string
-    {
-        if (!$discoveryEnabled) {
-            return 'Unavailable: BCC_COSMWASM_DISCOVERY_ENABLED is not defined, so no scanner work can run.';
-        }
-        if (!$backfillEnabled) {
-            return 'Unavailable: BCC_COSMWASM_BACKFILL_ENABLED is not defined, so the historical walk cannot run.';
-        }
-        if ($paused) {
-            return 'Unavailable: this chain is paused. Resume it first.';
-        }
-
-        return 'Run one bounded slice of the historical walk now instead of waiting for the next scheduled tick.';
-    }
-
     /** @param array<string, mixed> $chain */
-    private static function stateColor(array $chain): string
-    {
-        if ((bool) ($chain['unsupported'] ?? false)) {
-            return '#646970';
-        }
-        if ((bool) ($chain['paused'] ?? false)) {
-            return '#dba617';
-        }
-
-        $state = (string) ($chain['state'] ?? '');
-        if ($state === ChainCheckpointRepository::CW_STATE_BACKFILLED) {
-            return '#00a32a';
-        }
-        if ($state === ChainCheckpointRepository::CW_STATE_BACKFILLING) {
-            return '#2271b1';
-        }
-
-        return '#646970';
-    }
-
     /**
      * Per-candidate scanner detail, rendered as a sub-row underneath a
      * collection row in the verification table.

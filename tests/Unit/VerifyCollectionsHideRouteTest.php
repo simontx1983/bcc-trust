@@ -186,7 +186,7 @@ final class VerifyCollectionsHideRouteTest extends TestCase
     public function testTheLegacySharedPageNonceIsRejected(bool $hide): void
     {
         $_POST['collection_id'] = self::CID;
-        \BccAdminTestState::$validNonceAction = VerifyCollectionsPage::NONCE_KEY;
+        \BccAdminTestState::$validNonceAction = 'bcc_verify_collections_nonce';
 
         try {
             $hide ? VerifyCollectionsPage::handleHidePost() : VerifyCollectionsPage::handleUnhidePost();

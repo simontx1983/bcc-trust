@@ -21,7 +21,6 @@ use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
-use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
@@ -30,9 +29,6 @@ use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CollectionDemandService;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
-use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
-use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -41,8 +37,21 @@ if (!defined('ABSPATH')) {
 final class VerifyCollectionsPage
 {
     public const PAGE_SLUG  = 'bcc-verify-collections';
-    public const NONCE_KEY  = 'bcc_verify_collections_nonce';
-    public const NONCE_NAME = '_bcc_vc_nonce';
+
+    /*
+     * `bcc_verify_collections_nonce` / `_bcc_vc_nonce` USED TO LIVE HERE.
+     *
+     * One nonce action authorised fourteen different operations, from a
+     * read-only CW-721 probe to a hard delete to a chain-wide backfill.
+     * VC-A, VC-B1, VC-B2 and VC-B3b moved every one of those onto its own
+     * admin-post route with its own action-scoped nonce, and VC-B3b removed
+     * the last thing that verified the shared token. The constants are gone
+     * with it — leaving them would let a future control reach for a
+     * ready-made nonce whose whole history is excessive authority.
+     *
+     * The string is still named in the test suite, only ever as the token a
+     * route must REFUSE.
+     */
 
     /**
      * Separate nonce for the inline AJAX actions (instant verify toggle,
@@ -129,29 +138,13 @@ final class VerifyCollectionsPage
      */
     private const TABLE_COLSPAN = 12;
 
-    /**
-     * Rows a single operator "Force retry" click may clear the backoff on,
-     * per table, per chain.
-     *
-     * Bounded on purpose: the button is a nudge, not a reset. 100 families
-     * plus 100 contracts is comfortably more than one scheduled pass can
-     * chew through (25 + 25), so the queue is refilled without letting one
-     * click queue an unbounded amount of LCD traffic.
+    /*
+     * FORCE_RETRY_LIMIT, ADMIN_BACKFILL_REQUESTS and ADMIN_BACKFILL_SECONDS
+     * moved to ChainsPage in VC-B3b, together with the four scanner controls
+     * that were the only things reading them. Their reasoning moved with
+     * them — a bound documented next to a page that can no longer apply it
+     * is worse than no comment at all.
      */
-    private const FORCE_RETRY_LIMIT = 100;
-
-    /**
-     * Request budget for an operator-triggered backfill slice.
-     *
-     * Deliberately smaller than the cron budget
-     * ({@see CosmwasmDiscoveryGate::DEFAULT_REQUEST_BUDGET}, 50) and on a
-     * shorter clock: a cron tick may spend its full 20 seconds because
-     * nobody is waiting on it, whereas this one runs INSIDE an admin page
-     * load. A slice that ties up the browser for 20 seconds gets clicked
-     * twice, and the second click is a wasted advisory-lock miss.
-     */
-    private const ADMIN_BACKFILL_REQUESTS = 20;
-    private const ADMIN_BACKFILL_SECONDS  = 8;
 
     public static function register_page(): void
     {
@@ -1181,13 +1174,22 @@ final class VerifyCollectionsPage
             </form>
 
             <?php
-            // This form still posts to the page itself, because the deferred
-            // VC-B row actions (hide / unhide) are submitted from inside it
-            // and still ride the broad `bcc_verify_collections_nonce`.
+            // NO SHARED NONCE ON THIS FORM ANY MORE.
             //
-            // The two VC-A buttons below override that with `formaction`, so
-            // Save and Create Communities go to admin-post.php, each with its
-            // OWN nonce field and action, and each redirects (PRG).
+            // It carried `bcc_verify_collections_nonce` for as long as
+            // handlePost() still dispatched real actions from it. VC-B3b
+            // moved the last of those (pause / resume / backfill / retry) to
+            // Chains ▸ NFT Discovery, so nothing verifies that token now —
+            // and a nonce nobody checks is not defence, it is a token minted
+            // on every page load that only teaches the next reader the form
+            // is protected.
+            //
+            // The form still exists and still posts to the page, because it
+            // carries the VC-A verification checkboxes. Every control that
+            // acts overrides the destination with `formaction` and brings its
+            // OWN action-scoped nonce: Save and Create Communities below,
+            // and the per-row Hide/Unhide, Remove and Test CW-721 forms that
+            // are emitted after this one closes.
             ?>
             <?php
             // Collection ids that rendered a VC-A per-row control. Their
@@ -1197,7 +1199,6 @@ final class VerifyCollectionsPage
             $vcHiddenById = [];
             ?>
             <form method="post" action="">
-                <?php wp_nonce_field(self::NONCE_KEY, self::NONCE_NAME); ?>
                 <?php wp_nonce_field(self::ACTION_SAVE, '_vc_save_nonce', false); ?>
                 <?php wp_nonce_field(self::ACTION_PROVISION, '_vc_provision_nonce', false); ?>
                 <input type="hidden" name="paged" value="<?php echo (int) $page; ?>">
@@ -1603,6 +1604,30 @@ final class VerifyCollectionsPage
     }
 
     /**
+     * INERT. Every action this dispatcher once owned has moved.
+     *
+     * ── WHY IT STILL EXISTS ─────────────────────────────────────────────
+     * A browser tab opened before the moves still carries the old markup
+     * and will POST `bcc_vc_action` here. Falling through silently would
+     * render a perfectly normal page and let an operator believe a scam
+     * contract had been hidden, a chain opted out, or a backfill started,
+     * when nothing whatsoever happened. So a stale submission is answered
+     * explicitly.
+     *
+     * ── WHY IT NO LONGER CHECKS A NONCE ─────────────────────────────────
+     * It performs no lookup, no write, no provider call and no audit, so
+     * there is nothing here for a nonce to protect. Keeping the broad
+     * `bcc_verify_collections_nonce` alive purely to decorate a warning
+     * would preserve the exact excessive-authority token this programme
+     * spent three batches removing. The nonce is gone with the last
+     * action that needed it.
+     *
+     * ── WHAT IT MUST NOT DO ─────────────────────────────────────────────
+     * The submitted value is attacker-controlled. It is never echoed, never
+     * logged, and never used to decide anything beyond "something stale
+     * arrived" — so this cannot become a log-injection or reflection
+     * surface on the way out.
+     *
      * @return list<array{type: string, message: string}>
      */
     private static function handlePost(): array
@@ -1611,315 +1636,17 @@ final class VerifyCollectionsPage
             return [];
         }
 
-        if (!isset($_POST[self::NONCE_NAME]) ||
-            !wp_verify_nonce(sanitize_text_field((string) $_POST[self::NONCE_NAME]), self::NONCE_KEY)
-        ) {
-            return [['type' => 'error', 'message' => 'Security check failed. Please try again.']];
-        }
-
-        $action = sanitize_text_field((string) $_POST['bcc_vc_action']);
-
-        // NOTE — VC-A actions no longer arrive here.
-        //
-        // `save`, `provision`, `add_collection`, `add_cosmos_collection`,
-        // `delete_<id>` and `testquery_<id>` moved to dedicated
-        // admin_post_ routes with their own action- and target-scoped
-        // nonces (see register_actions()). They are deliberately NOT
-        // accepted here any more, so a `bcc_verify_collections_nonce`
-        // cannot reach them.
-        //
-        // NOTE — VC-B1 actions no longer arrive here either. `hide_<id>` and
-        // `unhide_<id>` moved to their own admin_post routes; what remains
-        // below is the fail-closed refusal for stale tabs.
-        //
-        // ⚠️ The six `cw_*` branches BELOW still share this one broad nonce.
-        // Any of them can authorise any other of them by changing
-        // bcc_vc_action: a pause nonce can drive a scanner backfill on a
-        // different chain. That is deferred VC-B2/VC-B3 scope, tracked
-        // separately — those controls are slated to move to a Chains ▸
-        // CosmWasm subtab and are deliberately untouched by this batch.
-
-        // VC-B1: Hide and Unhide LEFT this dispatcher. They are now
-        // admin_post routes with their own direction- and target-scoped
-        // nonces (see ACTION_HIDE / ACTION_UNHIDE).
-        //
-        // A page loaded before that change still carries the old markup, so
-        // a stale tab can still post `hide_<id>` here with a valid page
-        // nonce. That must FAIL CLOSED. Silently falling through to the
-        // `return []` at the bottom would render a perfectly normal page
-        // and let the operator believe a scam contract had been hidden when
-        // no rule was written at all — the worst outcome available.
-        //
-        // No durable row is written: nothing changed, and a stale form is
-        // an operator-side accident, not a state transition.
-        if (strpos($action, 'hide_') === 0 || strpos($action, 'unhide_') === 0) {
-            \BCC\Core\Log\Logger::warning('[bcc-trust] Verify Collections: stale hide/unhide submission refused', [
-                'action'   => 'verify_collections_stale_hide_post',
-                'posted'   => $action,
-                'operator' => get_current_user_id(),
-            ]);
-
-            return [[
-                'type'    => 'error',
-                'message' => 'Hide/Unhide was submitted from a page that is out of date, so NOTHING was changed — '
-                    . 'no rule was written and the scanner was not touched. Reload this page and try again.',
-            ]];
-        }
-
-        // VC-B2: per-chain discovery opt-in LEFT this dispatcher. It now
-        // lives at Chains ▸ NFT Discovery ▸ CosmWasm / CW-721, with its own
-        // direction- and chain-scoped nonces.
-        //
-        // A page loaded before that change still carries the old markup, so
-        // a stale tab can still post `cw_discovery_on_<id>` here with a
-        // valid page nonce. That must FAIL CLOSED: falling through to the
-        // `return []` at the bottom would render a normal page and let the
-        // operator believe a chain had been opted in when nothing was
-        // written. No durable row — a stale form is an operator-side
-        // accident, not a state transition.
-        if (strpos($action, 'cw_discovery_on_') === 0 || strpos($action, 'cw_discovery_off_') === 0) {
-            \BCC\Core\Log\Logger::warning('[bcc-trust] Verify Collections: stale discovery-toggle submission refused', [
-                'action'   => 'verify_collections_stale_discovery_post',
-                'posted'   => $action,
-                'operator' => get_current_user_id(),
-            ]);
-
-            return [[
-                'type'    => 'error',
-                'message' => 'Discovery on/off has moved to Chains ▸ NFT Discovery, and this page is out of '
-                    . 'date, so NOTHING was changed — no chain setting was written and no scan was started. '
-                    . 'Open Chains ▸ NFT Discovery to change it.',
-            ]];
-        }
-
-        // CosmWasm scanner controls. Same `<verb>_<id>` encoding as the
-        // per-row buttons above, prefixed `cw_` so the scanner's chain ids
-        // can never be mistaken for a collection id.
-        if (strpos($action, 'cw_pause_') === 0) {
-            return self::handleScannerPause((int) substr($action, strlen('cw_pause_')), true);
-        }
-        if (strpos($action, 'cw_resume_') === 0) {
-            return self::handleScannerPause((int) substr($action, strlen('cw_resume_')), false);
-        }
-        if (strpos($action, 'cw_backfill_') === 0) {
-            return self::handleScannerBackfill((int) substr($action, strlen('cw_backfill_')));
-        }
-        if (strpos($action, 'cw_retry_') === 0) {
-            return self::handleScannerForceRetry((int) substr($action, strlen('cw_retry_')));
-        }
-
-        return [];
-    }
-
-    /**
-     * Pause / resume the CosmWasm scanner for ONE chain.
-     *
-     * The switch is `wp_bcc_chain_checkpoints.cw_discovery_state`, which
-     * the worker already honours in two places — it refuses to prepare a
-     * paused chain, and the backfill rotation query excludes one. There is
-     * deliberately no separate "paused" option: a second flag is how
-     * "paused in the UI, still hammering the LCD" happens.
-     *
-     * Resume does NOT restore a remembered previous value (there is
-     * nowhere it was kept). It re-derives the state from the chain's own
-     * durable progress, so a chain whose backfill had completed comes back
-     * as `backfilled` and is not re-walked.
-     *
-     * @return list<array{type: string, message: string}>
-     */
-    private static function handleScannerPause(int $chainId, bool $pause): array
-    {
-        if ($chainId <= 0) {
-            return [['type' => 'error', 'message' => 'Scanner: invalid chain.']];
-        }
-
-        $chain = ChainRepository::getById($chainId);
-        $slug  = $chain !== null ? (string) $chain->slug : (string) $chainId;
-
-        $ok = $pause
-            ? ChainCheckpointRepository::pauseCwDiscovery($chainId)
-            : ChainCheckpointRepository::resumeCwDiscovery($chainId);
-
-        if (!$ok) {
-            return [[
-                'type'    => 'warning',
-                'message' => $pause
-                    ? sprintf('Scanner: %s could not be paused — it is already paused, or it has no CosmWasm module.', $slug)
-                    : sprintf('Scanner: %s is not paused, so there was nothing to resume.', $slug),
-            ]];
-        }
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner pause toggle', [
-            'action'   => 'cosmwasm_scanner_pause',
-            'chain_id' => $chainId,
-            'paused'   => $pause,
+        \BCC\Core\Log\Logger::warning('[bcc-trust] Verify Collections: stale legacy submission refused', [
+            'action'   => 'verify_collections_stale_post',
             'operator' => get_current_user_id(),
         ]);
 
-        if ($pause) {
-            return [[
-                'type'    => 'success',
-                'message' => sprintf(
-                    'Scanner paused for %s. Nothing runs for it — no backfill, no daily pass, no retries — and its progress is kept.',
-                    $slug
-                ),
-            ]];
-        }
-
-        $row   = ChainCheckpointRepository::get($chainId);
-        $state = $row !== null ? (string) $row->cw_discovery_state : '';
-
         return [[
-            'type'    => 'success',
-            'message' => sprintf(
-                'Scanner resumed for %s (state: %s).',
-                $slug,
-                $state !== '' ? $state : 'unknown'
-            ),
-        ]];
-    }
-
-    /**
-     * Run ONE bounded slice of the historical backfill for a chain, now.
-     *
-     * The gates are re-checked here even though the button renders
-     * disabled without them: a disabled attribute is a UI hint, not
-     * authorization, and a crafted POST must hit the same fail-closed
-     * answer the cron path does.
-     *
-     * The slice runs with a SMALLER budget than a cron tick — see
-     * {@see ADMIN_BACKFILL_REQUESTS} — because this one executes inside an
-     * admin page load. It is genuinely one slice: the worker's advisory
-     * lock, wall clock and request budget all still apply, and progress is
-     * written durably as it goes, so clicking it is equivalent to the next
-     * scheduled tick arriving early.
-     *
-     * @return list<array{type: string, message: string}>
-     */
-    private static function handleScannerBackfill(int $chainId): array
-    {
-        if ($chainId <= 0) {
-            return [['type' => 'error', 'message' => 'Scanner: invalid chain.']];
-        }
-
-        if (!CosmwasmDiscoveryGate::discoveryEnabled()) {
-            return [[
-                'type'    => 'error',
-                'message' => 'Scanner: discovery is switched off (BCC_COSMWASM_DISCOVERY_ENABLED is not defined in wp-config.php). Nothing was run.',
-            ]];
-        }
-        if (!CosmwasmDiscoveryGate::backfillEnabled()) {
-            return [[
-                'type'    => 'error',
-                'message' => 'Scanner: the historical backfill is switched off (BCC_COSMWASM_BACKFILL_ENABLED is not defined in wp-config.php). Nothing was run.',
-            ]];
-        }
-
-        $chain = ChainRepository::getById($chainId);
-        if ($chain === null) {
-            return [['type' => 'error', 'message' => 'Scanner: chain not found.']];
-        }
-        $slug = (string) $chain->slug;
-
-        $checkpoint = ChainCheckpointRepository::get($chainId);
-        if ($checkpoint !== null
-            && (string) $checkpoint->cw_discovery_state === ChainCheckpointRepository::CW_STATE_PAUSED
-        ) {
-            return [[
-                'type'    => 'warning',
-                'message' => sprintf('Scanner: %s is paused. Resume it before running a slice.', $slug),
-            ]];
-        }
-
-        CosmwasmDiscoveryWorker::runBackfillForChain(
-            $chainId,
-            new CosmwasmTickBudget(self::ADMIN_BACKFILL_REQUESTS, self::ADMIN_BACKFILL_SECONDS)
-        );
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner manual backfill slice', [
-            'action'   => 'cosmwasm_scanner_backfill_slice',
-            'chain_id' => $chainId,
-            'operator' => get_current_user_id(),
-        ]);
-
-        $after = ChainCheckpointRepository::get($chainId);
-        $state = $after !== null ? (string) $after->cw_discovery_state : 'unknown';
-        $error = $after !== null && is_string($after->cw_last_error) && $after->cw_last_error !== ''
-            ? (string) $after->cw_last_error
-            : null;
-
-        if ($error !== null) {
-            return [[
-                'type'    => 'warning',
-                'message' => sprintf(
-                    'Scanner: ran a slice for %s and it recorded a problem (state: %s). Progress was kept and it will be retried. Reason: %s',
-                    $slug,
-                    $state,
-                    $error
-                ),
-            ]];
-        }
-
-        return [[
-            'type'    => 'success',
-            'message' => sprintf(
-                'Scanner: ran one backfill slice for %s (state: %s). Run it again to continue, or leave it to the scheduled ticks.',
-                $slug,
-                $state
-            ),
-        ]];
-    }
-
-    /**
-     * Clear the wait on unresolved scanner rows for one chain.
-     *
-     * "Unresolved" means `inconclusive` or `temporarily_unreachable` only.
-     * A settled `not_cw721` is never re-checked (that exclusion lives in
-     * the repository, not here), a decided CW-721 has nothing to redecide,
-     * and a DENY-ruled contract stays suppressed — a force-retry button
-     * must not become a back door around the operator's own hide.
-     *
-     * @return list<array{type: string, message: string}>
-     */
-    private static function handleScannerForceRetry(int $chainId): array
-    {
-        if ($chainId <= 0) {
-            return [['type' => 'error', 'message' => 'Scanner: invalid chain.']];
-        }
-
-        if (!CosmwasmDiscoveryGate::discoveryEnabled()) {
-            return [[
-                'type'    => 'error',
-                'message' => 'Scanner: discovery is switched off, so a retry would never run. Nothing was changed.',
-            ]];
-        }
-
-        $chain = ChainRepository::getById($chainId);
-        if ($chain === null) {
-            return [['type' => 'error', 'message' => 'Scanner: chain not found.']];
-        }
-
-        $families  = CosmwasmCodeFamilyRepository::forceRetryUnresolved($chainId, self::FORCE_RETRY_LIMIT);
-        $contracts = CosmwasmContractRepository::forceRetryUnresolved($chainId, self::FORCE_RETRY_LIMIT);
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner force retry', [
-            'action'    => 'cosmwasm_scanner_force_retry',
-            'chain_id'  => $chainId,
-            'families'  => $families,
-            'contracts' => $contracts,
-            'operator'  => get_current_user_id(),
-        ]);
-
-        return [[
-            'type'    => 'success',
-            'message' => sprintf(
-                'Scanner: queued %d code famil%s and %d contract%s on %s for another look. Settled non-NFT results and hidden contracts were left alone.',
-                $families,
-                $families === 1 ? 'y' : 'ies',
-                $contracts,
-                $contracts === 1 ? '' : 's',
-                (string) $chain->slug
-            ),
+            'type'    => 'error',
+            'message' => 'That control has moved and this page is out of date, so NOTHING was changed — '
+                . 'no rule was written, no chain setting was touched, and no scanner work was started. '
+                . 'Reload this page. Hide and Unhide are here; discovery, pause, resume, backfill and '
+                . 'retry are in Chains ▸ NFT Discovery.',
         ]];
     }
 

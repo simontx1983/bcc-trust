@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Admin\ChainsPage;
-use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -123,6 +122,49 @@ final class ChainsNftDiscoveryTabTest extends TestCase
         return null;
     }
 
+    /**
+     * The two DISCOVERY opt-in forms, separated from the VC-B3b scanner
+     * operations that now share the section.
+     *
+     * This file owns the opt-in control. Selecting by route rather than
+     * counting every form on the page is what keeps its assertions honest
+     * after the move: a bare `assertCount(3, $forms)` would have started
+     * failing for a correct page, and "fixing" it by raising the number to
+     * 5 would have quietly stopped checking that each chain offers exactly
+     * one direction. Pause, Resume, Backfill and Retry are asserted in
+     * ChainsCwScannerOperationsDomTest, which owns them.
+     *
+     * @return list<\DOMElement>
+     */
+    private function discoveryForms(\DOMDocument $doc): array
+    {
+        $routes = [ChainsPage::ACTION_CW_DISCOVERY_ENABLE, ChainsPage::ACTION_CW_DISCOVERY_DISABLE];
+
+        $out = [];
+        foreach ($this->elements($doc, 'form') as $form) {
+            if (in_array((string) $this->hiddenValue($form, 'action'), $routes, true)) {
+                $out[] = $form;
+            }
+        }
+
+        return $out;
+    }
+
+    /** @return list<\DOMElement> */
+    private function discoveryButtons(\DOMDocument $doc): array
+    {
+        $out = [];
+        foreach ($this->discoveryForms($doc) as $form) {
+            foreach ($form->getElementsByTagName('button') as $b) {
+                if ($b instanceof \DOMElement) {
+                    $out[] = $b;
+                }
+            }
+        }
+
+        return $out;
+    }
+
     // ── Registration and identity ───────────────────────────────────────
 
     public function testTheCanonicalSlugIsNftDiscovery(): void
@@ -227,7 +269,14 @@ final class ChainsNftDiscoveryTabTest extends TestCase
             if ($tr->getElementsByTagName('td')->length === 0) {
                 continue;
             }
-            if (str_contains($tr->getAttribute('class'), 'bcc-cw-status-row')) {
+            // VC-B3a added a status detail row and VC-B3b an operations
+            // row. Both are continuations of the identity row above them
+            // and carry no chain identity of their own, so they are marked
+            // and skipped rather than counted as chains.
+            $class = $tr->getAttribute('class');
+            if (str_contains($class, 'bcc-cw-status-row')
+                || str_contains($class, 'bcc-cw-operations-row')
+            ) {
                 continue;
             }
             $chainRows++;
@@ -308,8 +357,73 @@ final class ChainsNftDiscoveryTabTest extends TestCase
     /**
      * A source guard for the same property, catching what a render test
      * cannot: a dependency added later that only fires on some other path.
+     *
+     * ── NARROWED IN VC-B3b, AND WHY THAT IS NOT A WEAKENING ─────────────
+     * This used to forbid the gate symbols across the WHOLE file. VC-B3b
+     * gave this page four mutating routes, and Backfill and Retry MUST
+     * re-check `discoveryEnabled()` / `backfillEnabled()` server-side —
+     * a disabled button is a UI hint, not authorization, and a crafted
+     * POST has to reach the same fail-closed answer cron does. Keeping the
+     * file-wide ban would have meant either an unguarded route or deleting
+     * the guard, and both are worse than saying precisely where the rule
+     * applies.
+     *
+     * The rule it actually encodes is about PRESENTATION: the renderers
+     * must print the snapshot's verdict rather than compute a second one.
+     * So the ban now applies to exactly the render methods, where a gate
+     * call really would be a competing authority — and one authority-only
+     * symbol stays banned file-wide, because no handler needs it either.
      */
-    public function testTheTabHasNoIndependentEligibilityDependency(): void
+    public function testTheRenderersHaveNoIndependentEligibilityDependency(): void
+    {
+        $code = $this->strippedSource();
+
+        // Nothing anywhere on this page may derive its own eligibility.
+        foreach (['CosmwasmScanEligibility', 'eligibleChainIds'] as $forbidden) {
+            $this->assertStringNotContainsString(
+                $forbidden,
+                $code,
+                "ChainsPage must not derive eligibility itself; `{$forbidden}` would be a second authority."
+            );
+        }
+
+        // And no RENDER method may consult the environment gates.
+        foreach ([
+            'render_nft_discovery_tab',
+            'render_cw_discovery_section',
+            'render_cw_discovery_row',
+            'render_cw_status_row',
+            'render_cw_operation_control',
+        ] as $method) {
+            $body = $this->methodBody($code, $method);
+            $this->assertNotSame('', $body, "method {$method} not found — update this guard");
+
+            foreach (['CosmwasmDiscoveryGate', 'discoveryEnabled(', 'backfillEnabled('] as $forbidden) {
+                $this->assertStringNotContainsString(
+                    $forbidden,
+                    $body,
+                    "{$method}() must print supplied status, not recompute it; `{$forbidden}` is a second authority."
+                );
+            }
+        }
+    }
+
+    /**
+     * The one renderer that IS allowed a gate call, stated positively so
+     * the exception is deliberate rather than an omission from the list
+     * above: it decides which controls to OFFER, and offering Backfill
+     * where the constant is undefined would be a button that cannot work.
+     */
+    public function testOnlyTheOperationsRowConsultsTheEnvironmentGates(): void
+    {
+        $body = $this->methodBody($this->strippedSource(), 'render_cw_operations_row');
+
+        $this->assertStringContainsString('discoveryEnabled(', $body);
+        $this->assertStringContainsString('backfillEnabled(', $body);
+    }
+
+    /** ChainsPage source with all comments removed. */
+    private function strippedSource(): string
     {
         $source = (string) file_get_contents(
             __DIR__ . '/../../app/Domain/Onchain/Admin/ChainsPage.php'
@@ -326,19 +440,36 @@ final class ChainsNftDiscoveryTabTest extends TestCase
             $code .= is_array($token) ? $token[1] : $token;
         }
 
-        foreach ([
-            'CosmwasmScanEligibility',
-            'CosmwasmDiscoveryGate',
-            'eligibleChainIds',
-            'discoveryEnabled(',
-            'backfillEnabled(',
-        ] as $forbidden) {
-            $this->assertStringNotContainsString(
-                $forbidden,
-                $code,
-                "ChainsPage must not derive discovery status itself; `{$forbidden}` would be a second authority."
-            );
+        return $code;
+    }
+
+    /** Brace-balanced body of one method, or '' if absent. */
+    private function methodBody(string $code, string $method): string
+    {
+        $at = strpos($code, 'function ' . $method . '(');
+        if ($at === false) {
+            return '';
         }
+
+        $open = strpos($code, '{', $at);
+        if ($open === false) {
+            return '';
+        }
+
+        $depth = 0;
+        $len   = strlen($code);
+        for ($i = $open; $i < $len; $i++) {
+            if ($code[$i] === '{') {
+                $depth++;
+            } elseif ($code[$i] === '}') {
+                $depth--;
+                if ($depth === 0) {
+                    return substr($code, $open, $i - $open + 1);
+                }
+            }
+        }
+
+        return '';
     }
 
     // ── Form structure ──────────────────────────────────────────────────
@@ -346,9 +477,9 @@ final class ChainsNftDiscoveryTabTest extends TestCase
     public function testEveryChainRendersExactlyOneCorrectlyScopedForm(): void
     {
         $doc   = $this->dom();
-        $forms = $this->elements($doc, 'form');
+        $forms = $this->discoveryForms($doc);
 
-        $this->assertCount(3, $forms, 'one control per CosmWasm candidate, no more');
+        $this->assertCount(3, $forms, 'one discovery control per CosmWasm candidate, no more');
 
         $ids      = [];
         $expected = [
@@ -417,21 +548,28 @@ final class ChainsNftDiscoveryTabTest extends TestCase
         return null;
     }
 
+    /**
+     * The literal is spelled out rather than referenced through
+     * VerifyCollectionsPage: VC-B3b deleted those constants, because the
+     * last thing that verified that token is gone. The string survives
+     * here — and only here, in tests — as the token this page must never
+     * mint.
+     */
     public function testTheSharedVerifyCollectionsNonceIsAbsent(): void
     {
         $html = $this->render();
 
-        $this->assertStringNotContainsString(VerifyCollectionsPage::NONCE_KEY, $html);
-        $this->assertStringNotContainsString(VerifyCollectionsPage::NONCE_NAME, $html);
+        $this->assertStringNotContainsString('bcc_verify_collections_nonce', $html);
+        $this->assertStringNotContainsString('_bcc_vc_nonce', $html);
         $this->assertStringNotContainsString('bcc_vc_action', $html);
     }
 
-    public function testThereIsExactlyOneProductionControlPerChain(): void
+    public function testThereIsExactlyOneDiscoveryControlPerChain(): void
     {
         $doc = $this->dom();
 
         $buttons = 0;
-        foreach ($this->elements($doc, 'button') as $b) {
+        foreach ($this->discoveryButtons($doc) as $b) {
             if ($b->getAttribute('type') === 'submit') {
                 $buttons++;
             }
@@ -447,7 +585,7 @@ final class ChainsNftDiscoveryTabTest extends TestCase
         $doc = $this->dom();
 
         $labels = [];
-        foreach ($this->elements($doc, 'button') as $b) {
+        foreach ($this->discoveryButtons($doc) as $b) {
             $labels[] = trim($b->textContent);
         }
 
@@ -471,7 +609,7 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
         $seen = ['enable' => false, 'disable' => false];
 
-        foreach ($this->elements($doc, 'button') as $button) {
+        foreach ($this->discoveryButtons($doc) as $button) {
             $onclick = $button->getAttribute('onclick');
             $this->assertStringContainsString('confirm(', $onclick);
 

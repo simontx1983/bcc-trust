@@ -10,6 +10,11 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
+use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
+use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
+use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
+use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
+use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
@@ -79,6 +84,45 @@ class ChainsPage
     public const ACTION_CW_DISCOVERY_ENABLE  = 'bcc_chain_cw_discovery_enable';
     public const ACTION_CW_DISCOVERY_DISABLE = 'bcc_chain_cw_discovery_disable';
 
+    /**
+     * VC-B3b: the four CosmWasm scanner OPERATIONS.
+     *
+     * These are four different things, not four spellings of one button:
+     *
+     *   Pause    operational hold      writes checkpoint state
+     *   Resume   clears the hold       derives state from durable progress
+     *   Backfill immediate bounded work THE ONLY provider-consuming control
+     *   Retry    requeues failed work   clears a wait, contacts nothing
+     *
+     * Each gets its own route and its own direction-and-chain-scoped nonce,
+     * so a Pause nonce can no longer authorise a provider-consuming
+     * Backfill on a different chain — which is exactly what the single
+     * shared page nonce allowed.
+     */
+    public const ACTION_CW_PAUSE    = 'bcc_chain_cw_pause';
+    public const ACTION_CW_RESUME   = 'bcc_chain_cw_resume';
+    public const ACTION_CW_BACKFILL = 'bcc_chain_cw_backfill';
+    public const ACTION_CW_RETRY    = 'bcc_chain_cw_retry';
+
+    /**
+     * Retry bound, relocated from VerifyCollectionsPage unchanged.
+     *
+     * Up to 100 unresolved code families AND up to 100 unresolved
+     * contracts — two separate limits, not a shared budget.
+     */
+    private const FORCE_RETRY_LIMIT = 100;
+
+    /**
+     * The admin backfill slice budget, relocated unchanged.
+     *
+     * Deliberately SMALLER than a cron tick because this one executes
+     * inside an admin page load. PR #200 added downstream reserve floors
+     * INSIDE the worker; this handler supplies the budget object and does
+     * not reserve against it — the worker owns that sequence.
+     */
+    private const ADMIN_BACKFILL_REQUESTS = 20;
+    private const ADMIN_BACKFILL_SECONDS  = 8;
+
     public static function register_ajax(): void
     {
         add_action('wp_ajax_bcc_chain_refresh', [self::class, 'ajax_refresh']);
@@ -106,6 +150,384 @@ class ChainsPage
             'admin_post_' . self::ACTION_CW_DISCOVERY_DISABLE,
             [self::class, 'handle_cw_discovery_disable']
         );
+
+        // VC-B3b: the four scanner operations, moved off the Verify
+        // Collections shared-nonce dispatcher.
+        add_action('admin_post_' . self::ACTION_CW_PAUSE,    [self::class, 'handle_cw_pause']);
+        add_action('admin_post_' . self::ACTION_CW_RESUME,   [self::class, 'handle_cw_resume']);
+        add_action('admin_post_' . self::ACTION_CW_BACKFILL, [self::class, 'handle_cw_backfill']);
+        add_action('admin_post_' . self::ACTION_CW_RETRY,    [self::class, 'handle_cw_retry']);
+    }
+
+    // ── VC-B3b: CosmWasm scanner operations ─────────────────────────────
+
+    public static function handle_cw_pause(): void
+    {
+        self::handle_cw_operation(self::ACTION_CW_PAUSE);
+    }
+
+    public static function handle_cw_resume(): void
+    {
+        self::handle_cw_operation(self::ACTION_CW_RESUME);
+    }
+
+    public static function handle_cw_backfill(): void
+    {
+        self::handle_cw_operation(self::ACTION_CW_BACKFILL);
+    }
+
+    public static function handle_cw_retry(): void
+    {
+        self::handle_cw_operation(self::ACTION_CW_RETRY);
+    }
+
+    /**
+     * Shared request boundary for all four operations.
+     *
+     * One method, not four copies: the ONLY thing that differs at the
+     * boundary is which route the nonce is bound to and which domain call
+     * runs. Duplicating the gate order four times is how one copy later
+     * drifts out of step with the others — and the copy that drifts would
+     * most likely be Backfill, the one that spends provider budget.
+     *
+     * Order: refusal trace (server-known only) → capability → POST-only →
+     * chain-id shape → direction-and-chain nonce → authoritative lookup →
+     * operation-specific gates → the operation, at most once → verify where
+     * the contract allows → at most one durable row → PRG.
+     */
+    private static function handle_cw_operation(string $route): never
+    {
+        // The trace carries NO request input. `chain_id` is
+        // attacker-controlled and unvalidated here; echoing it would let an
+        // unauthenticated caller write our log and probe which chains exist.
+        if (!current_user_can('manage_options')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] CosmWasm scanner operation refused', [
+                'action'    => 'cosmwasm_scanner_operation_denied',
+                'operation' => self::cw_operation_slug($route),
+                'operator'  => get_current_user_id(),
+            ]);
+        }
+
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
+
+        $chainId = self::require_chain_id_shape();
+
+        AdminActionSupport::requireNonce($route . '_' . $chainId);
+
+        try {
+            $result = self::apply_cw_operation($route, $chainId);
+        } catch (\Throwable $e) {
+            $ref = AdminActionSupport::failure(
+                $e,
+                'admin_chain_cw_' . self::cw_operation_slug($route) . '_error',
+                'chain',
+                $chainId
+            );
+
+            self::redirect_cw_operation('error', $ref);
+        }
+
+        self::redirect_cw_operation($result);
+    }
+
+    /** Short, fixed operation name — derived from the ROUTE, never the request. */
+    private static function cw_operation_slug(string $route): string
+    {
+        switch ($route) {
+            case self::ACTION_CW_PAUSE:
+                return 'pause';
+            case self::ACTION_CW_RESUME:
+                return 'resume';
+            case self::ACTION_CW_BACKFILL:
+                return 'backfill';
+            case self::ACTION_CW_RETRY:
+                return 'retry';
+        }
+
+        return 'unknown';
+    }
+
+    /**
+     * Dispatch to the domain call and report what actually happened.
+     *
+     * @return string result code for the PRG notice
+     */
+    private static function apply_cw_operation(string $route, int $chainId): string
+    {
+        $chain = ChainRepository::getById($chainId);
+        if ($chain === null) {
+            return 'unknown_chain';
+        }
+
+        switch ($route) {
+            case self::ACTION_CW_PAUSE:
+                return self::apply_cw_pause($chainId);
+            case self::ACTION_CW_RESUME:
+                return self::apply_cw_resume($chainId);
+            case self::ACTION_CW_BACKFILL:
+                return self::apply_cw_backfill($chainId);
+            case self::ACTION_CW_RETRY:
+                return self::apply_cw_retry($chainId);
+        }
+
+        // Unreachable: handle_cw_operation() is only ever called with the
+        // four route constants. It throws rather than falling through to
+        // `unknown_chain`, because that code says "the chain id you sent
+        // does not exist" — a confident, wrong explanation for what is
+        // actually a wiring bug here. The caller turns this into the
+        // generic error notice plus a correlation id.
+        throw new \LogicException('Unroutable CosmWasm scanner operation.');
+    }
+
+    /**
+     * PAUSE — an operational hold on a chain the scanner still owns.
+     *
+     * `pauseCwDiscovery()` returns false for TWO different reasons —
+     * already paused, and `unsupported` (which is terminal and must not be
+     * overwritten, or the durable "no wasm module" fact is lost and the
+     * chain re-enters the rotation on resume). The state is read first so
+     * those are reported apart instead of as one vague failure.
+     *
+     * It cannot cancel a pass already inside the worker's advisory lock.
+     * Nothing here signals a running pass, and the copy does not pretend
+     * otherwise.
+     */
+    private static function apply_cw_pause(int $chainId): string
+    {
+        $before = ChainCheckpointRepository::get($chainId);
+        $state  = $before !== null ? (string) $before->cw_discovery_state : '';
+
+        if ($state === ChainCheckpointRepository::CW_STATE_UNSUPPORTED) {
+            return 'pause_unsupported';
+        }
+        if ($state === ChainCheckpointRepository::CW_STATE_PAUSED) {
+            return 'pause_noop';
+        }
+
+        if (!ChainCheckpointRepository::pauseCwDiscovery($chainId)) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] CosmWasm scanner pause write failed', [
+                'action'   => 'cosmwasm_scanner_pause_write_failed',
+                'chain_id' => $chainId,
+                'operator' => get_current_user_id(),
+            ]);
+
+            AdminActionSupport::audit('admin_chain_cw_pause_failed', 'chain', $chainId);
+
+            return 'pause_failed';
+        }
+
+        $after = ChainCheckpointRepository::get($chainId);
+        if ($after === null
+            || (string) $after->cw_discovery_state !== ChainCheckpointRepository::CW_STATE_PAUSED
+        ) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] CosmWasm scanner pause could not be confirmed', [
+                'action'   => 'cosmwasm_scanner_pause_unconfirmed',
+                'chain_id' => $chainId,
+                'observed' => $after !== null ? (string) $after->cw_discovery_state : null,
+                'operator' => get_current_user_id(),
+            ]);
+
+            AdminActionSupport::audit('admin_chain_cw_pause_unconfirmed', 'chain', $chainId);
+
+            return 'pause_unconfirmed';
+        }
+
+        AdminActionSupport::audit('admin_chain_cw_paused', 'chain', $chainId);
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner paused', [
+            'action'   => 'cosmwasm_scanner_pause',
+            'chain_id' => $chainId,
+            'operator' => get_current_user_id(),
+        ]);
+
+        return 'paused';
+    }
+
+    /**
+     * RESUME — clears the hold and returns the chain to the state its own
+     * durable progress says it is in.
+     *
+     * `cwResumeState()` is preserved exactly and NOT reimplemented here:
+     * completed → `backfilled`, cursor-or-watermark → `backfilling`,
+     * nothing → `idle`. Resuming a drained chain to `idle` would make the
+     * worker re-walk its entire code listing.
+     *
+     * Resume starts nothing and contacts nothing.
+     */
+    private static function apply_cw_resume(int $chainId): string
+    {
+        $before = ChainCheckpointRepository::get($chainId);
+        $state  = $before !== null ? (string) $before->cw_discovery_state : '';
+
+        if ($state !== ChainCheckpointRepository::CW_STATE_PAUSED) {
+            return 'resume_noop';
+        }
+
+        // The state the repository will derive — read BEFORE the write so
+        // the read-back can be compared against an expectation rather than
+        // against whatever it happens to find.
+        $expected = ChainCheckpointRepository::cwResumeState($before);
+
+        if (!ChainCheckpointRepository::resumeCwDiscovery($chainId)) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] CosmWasm scanner resume write failed', [
+                'action'   => 'cosmwasm_scanner_resume_write_failed',
+                'chain_id' => $chainId,
+                'operator' => get_current_user_id(),
+            ]);
+
+            AdminActionSupport::audit('admin_chain_cw_resume_failed', 'chain', $chainId);
+
+            return 'resume_failed';
+        }
+
+        $after = ChainCheckpointRepository::get($chainId);
+        if ($after === null || (string) $after->cw_discovery_state !== $expected) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] CosmWasm scanner resume could not be confirmed', [
+                'action'   => 'cosmwasm_scanner_resume_unconfirmed',
+                'chain_id' => $chainId,
+                'expected' => $expected,
+                'observed' => $after !== null ? (string) $after->cw_discovery_state : null,
+                'operator' => get_current_user_id(),
+            ]);
+
+            AdminActionSupport::audit('admin_chain_cw_resume_unconfirmed', 'chain', $chainId);
+
+            return 'resume_unconfirmed';
+        }
+
+        AdminActionSupport::audit('admin_chain_cw_resumed', 'chain', $chainId);
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner resumed', [
+            'action'   => 'cosmwasm_scanner_resume',
+            'chain_id' => $chainId,
+            'state'    => $expected,
+            'operator' => get_current_user_id(),
+        ]);
+
+        return 'resumed';
+    }
+
+    /**
+     * BACKFILL — the only provider-consuming control on this page.
+     *
+     * ── THE GATES ARE RE-CHECKED HERE ───────────────────────────────────
+     * The button renders disabled without them, but a `disabled` attribute
+     * is a UI hint, not authorization: a crafted POST must reach the same
+     * fail-closed answer the cron path does.
+     *
+     * ── WHAT THE AUDIT CAN HONESTLY CLAIM ───────────────────────────────
+     * `runBackfillForChain()` returns VOID. On a normal return this handler
+     * cannot prove that the advisory lock was acquired, that any provider
+     * request was made, or that progress advanced — a concurrent run may
+     * hold the lock and the worker simply logs and returns. So the durable
+     * event is `admin_chain_cw_backfill_requested`, which is what we can
+     * actually observe. Calling it `_ran` or `_completed` would be a claim
+     * the contract does not support.
+     *
+     * ── PR #200 OWNS THE RESERVE SEQUENCE ───────────────────────────────
+     * This handler constructs the budget ONCE and hands it over. It does
+     * not call reserve() or available(), and it does not reproduce the
+     * worker's downstream floors. Second-guessing them here is how the two
+     * copies drift apart.
+     */
+    private static function apply_cw_backfill(int $chainId): string
+    {
+        if (!CosmwasmDiscoveryGate::discoveryEnabled()) {
+            return 'backfill_discovery_off';
+        }
+        if (!CosmwasmDiscoveryGate::backfillEnabled()) {
+            return 'backfill_gate_off';
+        }
+
+        $checkpoint = ChainCheckpointRepository::get($chainId);
+        if ($checkpoint !== null
+            && (string) $checkpoint->cw_discovery_state === ChainCheckpointRepository::CW_STATE_PAUSED
+        ) {
+            return 'backfill_paused';
+        }
+
+        CosmwasmDiscoveryWorker::runBackfillForChain(
+            $chainId,
+            new CosmwasmTickBudget(self::ADMIN_BACKFILL_REQUESTS, self::ADMIN_BACKFILL_SECONDS)
+        );
+
+        AdminActionSupport::audit('admin_chain_cw_backfill_requested', 'chain', $chainId);
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner backfill slice requested', [
+            'action'   => 'cosmwasm_scanner_backfill_slice',
+            'chain_id' => $chainId,
+            'operator' => get_current_user_id(),
+        ]);
+
+        return 'backfill_requested';
+    }
+
+    /**
+     * RETRY — clears the WAIT on unresolved work. It contacts nothing.
+     *
+     * Scope is preserved exactly: `inconclusive` and
+     * `temporarily_unreachable` only, up to 100 code families AND up to 100
+     * contracts (two separate limits). Settled `not_cw721`, decided CW-721
+     * families, DENY-ruled contracts, the checkpoint, the cursor and the
+     * breaker are all untouched. The work happens on a FUTURE pass.
+     *
+     * Deliberately does NOT touch `classifier_version`: PR #198's version
+     * bump is the one and only staleness-requeue mechanism, and a second
+     * one here would make "why did this requeue?" unanswerable.
+     */
+    private static function apply_cw_retry(int $chainId): string
+    {
+        if (!CosmwasmDiscoveryGate::discoveryEnabled()) {
+            return 'retry_discovery_off';
+        }
+
+        $families  = CosmwasmCodeFamilyRepository::forceRetryUnresolved($chainId, self::FORCE_RETRY_LIMIT);
+        $contracts = CosmwasmContractRepository::forceRetryUnresolved($chainId, self::FORCE_RETRY_LIMIT);
+
+        if ($families === 0 && $contracts === 0) {
+            // Nothing was waiting. Truthful, and not a state change, so it
+            // writes no durable row.
+            return 'retry_none_pending';
+        }
+
+        AdminActionSupport::audit('admin_chain_cw_retry_requeued', 'chain', $chainId);
+
+        \BCC\Core\Log\Logger::info('[bcc-trust] CosmWasm scanner force retry', [
+            'action'    => 'cosmwasm_scanner_force_retry',
+            'chain_id'  => $chainId,
+            'families'  => $families,
+            'contracts' => $contracts,
+            'operator'  => get_current_user_id(),
+        ]);
+
+        return 'retry_requeued';
+    }
+
+    /**
+     * PRG terminator for the scanner operations.
+     *
+     * Same allowlist discipline as the discovery toggle: page, subtab, a
+     * bounded result code, and an optional correlation id. No chain id
+     * under any name, no action, no nonce, no direction, no submitted
+     * value, no provider response, no scanner error text.
+     *
+     * @var list<string> OPERATION_REDIRECT_KEYS
+     */
+    public const OPERATION_REDIRECT_KEYS = ['page', 'subtab', 'bcc_cwo', 'bcc_ref'];
+
+    private static function redirect_cw_operation(string $result, string $ref = ''): never
+    {
+        $args = [
+            'page'    => self::PAGE_SLUG,
+            'subtab'  => self::SUBTAB_NFT_DISCOVERY,
+            'bcc_cwo' => $result,
+        ];
+        if ($ref !== '') {
+            $args['bcc_ref'] = $ref;
+        }
+
+        AdminActionSupport::redirect($args);
     }
 
     // ── VC-B2: CosmWasm / CW-721 discovery opt-in ───────────────────────────
@@ -1047,7 +1469,12 @@ class ChainsPage
         /** @var list<array<string, mixed>> $chains */
         $chains = is_array($summary['chains'] ?? null) ? $summary['chains'] : [];
 
-        self::render_cw_discovery_section($chains, self::cw_discovery_notice_from_query());
+        // Two independent notice sources: the discovery opt-in (VC-B2) and
+        // the scanner operations (VC-B3b). Only one can be present on any
+        // given PRG landing, since each redirect carries its own key.
+        $notice = self::cw_discovery_notice_from_query() ?? self::cw_operation_notice_from_query();
+
+        self::render_cw_discovery_section($chains, $notice);
     }
 
     /**
@@ -1214,6 +1641,186 @@ class ChainsPage
         </tr>
         <?php
         self::render_cw_status_row($chain);
+        self::render_cw_operations_row($chain);
+    }
+
+    /**
+     * The four scanner operations for one chain (VC-B3b).
+     *
+     * Each is its own POST form to admin-post.php with its own
+     * direction-and-chain-scoped nonce. They are rendered in their own row
+     * rather than inside the status row so no form is ever nested, and so
+     * a DOM test can pair each button with exactly one form.
+     *
+     * Visibility is driven by the SAME snapshot row the status uses:
+     *
+     *   unsupported chain  no operations at all — nothing runs for it
+     *   paused             Resume only; Backfill is refused while paused
+     *   not paused         Pause, plus Backfill when both gates allow
+     *   Retry              whenever discovery is on
+     *
+     * @param array<string, mixed> $chain a completed snapshot row
+     */
+    private static function render_cw_operations_row(array $chain): void
+    {
+        $chainId = (int) ($chain['chain_id'] ?? 0);
+        if ($chainId <= 0) {
+            return;
+        }
+
+        $slug        = (string) ($chain['slug'] ?? '');
+        $unsupported = (bool) ($chain['unsupported'] ?? false);
+        $paused      = (bool) ($chain['paused'] ?? false);
+
+        // Environment gates, read from the same authority the worker uses.
+        $discoveryOn = CosmwasmDiscoveryGate::discoveryEnabled();
+        $backfillOn  = CosmwasmDiscoveryGate::backfillEnabled();
+        ?>
+        <tr class="bcc-cw-operations-row">
+            <td colspan="6" style="padding:6px 12px;">
+                <?php if ($unsupported): ?>
+                    <span style="color:#646970;font-size:12px;">
+                        No CosmWasm module on this chain — no scanner pass runs for it, so there is
+                        nothing to pause, resume, backfill or retry.
+                    </span>
+                <?php else: ?>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+                        <?php
+                        if ($paused) {
+                            self::render_cw_operation_control(self::ACTION_CW_RESUME, $chainId, $slug);
+                        } else {
+                            self::render_cw_operation_control(self::ACTION_CW_PAUSE, $chainId, $slug);
+                        }
+
+                        // Backfill is the only provider-consuming control.
+                        // Offered only when both gates allow it AND the
+                        // chain is not paused — the same conditions the
+                        // handler re-checks server-side.
+                        if ($discoveryOn && $backfillOn && !$paused) {
+                            self::render_cw_operation_control(self::ACTION_CW_BACKFILL, $chainId, $slug);
+                        }
+
+                        if ($discoveryOn) {
+                            self::render_cw_operation_control(self::ACTION_CW_RETRY, $chainId, $slug);
+                        }
+                        ?>
+                    </div>
+                <?php endif; ?>
+            </td>
+        </tr>
+        <?php
+    }
+
+    /** The id of one operation form. Operation and chain are both in it. */
+    public static function cw_operation_form_id(string $route, int $chainId): string
+    {
+        return 'cwo-' . self::cw_operation_slug($route) . '-' . (int) $chainId;
+    }
+
+    /**
+     * One operation as a self-contained POST form.
+     *
+     * Public so the DOM wiring test asserts the markup production emits
+     * rather than a copy of it.
+     */
+    public static function render_cw_operation_control(string $route, int $chainId, string $slug = ''): void
+    {
+        $chainId = (int) $chainId;
+        $name    = $slug !== '' ? $slug : ('chain ' . $chainId);
+        $formId  = self::cw_operation_form_id($route, $chainId);
+
+        [$label, $title, $confirm] = self::cw_operation_copy($route, $name);
+        ?>
+        <form id="<?php echo esc_attr($formId); ?>" method="post"
+              action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0;">
+            <input type="hidden" name="action" value="<?php echo esc_attr($route); ?>">
+            <input type="hidden" name="chain_id" value="<?php echo $chainId; ?>">
+            <?php wp_nonce_field($route . '_' . $chainId); ?>
+            <button type="submit"
+                    class="button button-small"
+                    title="<?php echo esc_attr($title); ?>"
+                    onclick="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral($confirm)); ?>);">
+                <?php echo esc_html($label); ?>
+            </button>
+        </form>
+        <?php
+    }
+
+    /**
+     * Label, hover title and confirmation for one operation.
+     *
+     * The copy states what each control DOES and, just as importantly,
+     * what it does not: Pause cannot cancel a pass already running,
+     * Resume starts nothing, Backfill is one bounded slice and not a full
+     * scan, and Retry contacts nothing now. None of them verifies a
+     * collection or creates a community.
+     *
+     * @return array{0: string, 1: string, 2: string}
+     */
+    private static function cw_operation_copy(string $route, string $name): array
+    {
+        switch ($route) {
+            case self::ACTION_CW_PAUSE:
+                return [
+                    'Pause scanning',
+                    'Stop selecting this chain for future automatic passes. Keeps all progress.',
+                    sprintf(
+                        'Pause CW-721 scanning for %s?' . "\n\n"
+                            . 'Future automatic passes will not select this chain. A pass that is already '
+                            . 'running is NOT cancelled — this cannot stop work already in flight.' . "\n\n"
+                            . 'All scan progress and inventory are kept. This is different from disabling '
+                            . 'discovery: pausing is a temporary hold on a chain the scanner still owns.',
+                        $name
+                    ),
+                ];
+
+            case self::ACTION_CW_RESUME:
+                return [
+                    'Resume scanning',
+                    'Return this chain to the rotation at the state its own progress says it is in. Starts nothing now.',
+                    sprintf(
+                        'Resume CW-721 scanning for %s?' . "\n\n"
+                            . 'The chain returns to the rotation at the state its own durable progress says it '
+                            . 'is in, so a completed backfill is not re-walked.' . "\n\n"
+                            . 'This does NOT start a scan now and contacts nothing. It also does not change '
+                            . 'whether discovery is enabled for the chain.',
+                        $name
+                    ),
+                ];
+
+            case self::ACTION_CW_BACKFILL:
+                return [
+                    'Run one backfill slice',
+                    'Contacts the chain now. One bounded slice: at most 20 requests or 8 seconds. Not a full scan.',
+                    sprintf(
+                        'Run one backfill slice for %s now?' . "\n\n"
+                            . 'This CONTACTS THE CHAIN IMMEDIATELY. It runs one bounded slice — at most 20 '
+                            . 'requests or 8 seconds — and then stops.' . "\n\n"
+                            . 'It is not a full scan. Progress is written durably as it goes, so running it '
+                            . 'again continues from where it stopped. If another pass already holds the lock, '
+                            . 'this does nothing.' . "\n\n"
+                            . 'Anything discovered arrives unverified. Nothing is verified and no community '
+                            . 'is created.',
+                        $name
+                    ),
+                ];
+
+            case self::ACTION_CW_RETRY:
+                return [
+                    'Retry unresolved',
+                    'Clear the wait on unresolved code families and contracts. Contacts nothing now.',
+                    sprintf(
+                        'Retry unresolved scanner work for %s?' . "\n\n"
+                            . 'This clears the wait on up to 100 unresolved code families and up to 100 '
+                            . 'unresolved contracts, so the next scheduled pass looks at them again.' . "\n\n"
+                            . 'Nothing is contacted now. Settled non-NFT results, decided CW-721 families and '
+                            . 'hidden contracts are left alone, and no collection is verified.',
+                        $name
+                    ),
+                ];
+        }
+
+        return ['', '', ''];
     }
 
     /**
@@ -1312,6 +1919,26 @@ class ChainsPage
                             · <span style="color:#d63638;font-weight:600;"><?php
                                 echo esc_html(number_format_i18n($familiesErrored));
                             ?> errored</span>
+                            <?php
+                            // PR #196's SENTENCE, moved here verbatim rather
+                            // than reduced to the count beside it.
+                            //
+                            // "N errored" alone is the half that makes an
+                            // operator reach for a rebuild they do not need.
+                            // The word that stops them is "retry", and now
+                            // that Retry is a control on THIS page, the
+                            // sentence and the button that acts on it finally
+                            // sit together. The scanner panel that used to
+                            // carry this no longer renders per-chain rows.
+                            ?>
+                            <div style="color:#d63638;font-size:11px;margin-top:2px;">
+                                <?php echo esc_html(sprintf(
+                                    $familiesErrored === 1
+                                        ? '%s code family has unresolved discovery errors and remains eligible for retry.'
+                                        : '%s code families have unresolved discovery errors and remain eligible for retry.',
+                                    number_format_i18n($familiesErrored)
+                                )); ?>
+                            </div>
                         <?php endif; ?>
                     </div>
 
@@ -1427,6 +2054,127 @@ class ChainsPage
             <?php echo esc_html($label); ?>
         </button>
         <?php
+    }
+
+    /**
+     * Rebuild the scanner-operation notice from the PRG redirect args.
+     *
+     * Generic by necessity: the destination carries no chain id (see
+     * OPERATION_REDIRECT_KEYS), so this cannot name the chain and does not
+     * pretend to. The durable audit row holds the real target.
+     *
+     * @return array{type: string, message: string}|null
+     */
+    private static function cw_operation_notice_from_query(): ?array
+    {
+        $result = isset($_GET['bcc_cwo']) ? sanitize_key((string) $_GET['bcc_cwo']) : '';
+        if ($result === '') {
+            return null;
+        }
+
+        switch ($result) {
+            // ── Pause ───────────────────────────────────────────────────
+            case 'paused':
+                return ['type' => 'success', 'message' =>
+                    'Scanner paused. Future automatic passes will not select this chain. '
+                    . 'A pass already running is not cancelled, and all progress is kept. '
+                    . 'This is not the same as disabling discovery.'];
+
+            case 'pause_noop':
+                return ['type' => 'info', 'message' =>
+                    'That chain was already paused. Nothing was changed.'];
+
+            case 'pause_unsupported':
+                return ['type' => 'info', 'message' =>
+                    'That chain reports no CosmWasm module, so no scanner pass runs for it and there is '
+                    . 'nothing to pause. Nothing was changed.'];
+
+            case 'pause_failed':
+                return ['type' => 'error', 'message' =>
+                    'The chain could NOT be paused — the database write failed and nothing was changed. '
+                    . 'It is still in the rotation. Check the bcc-trust error log.'];
+
+            case 'pause_unconfirmed':
+                return ['type' => 'error', 'message' =>
+                    'The pause was attempted but could NOT be confirmed: the stored scanner state does not '
+                    . 'read back as paused, so this is not being reported as done. Reload to see the current '
+                    . 'state and check the bcc-trust error log.'];
+
+            // ── Resume ──────────────────────────────────────────────────
+            case 'resumed':
+                return ['type' => 'success', 'message' =>
+                    'Scanner resumed. The chain returns to the rotation at the state its own progress says '
+                    . 'it is in — a completed backfill is not re-walked. No scan was started by this action, '
+                    . 'and nothing was contacted.'];
+
+            case 'resume_noop':
+                return ['type' => 'info', 'message' =>
+                    'That chain was not paused, so there was nothing to resume. Nothing was changed.'];
+
+            case 'resume_failed':
+                return ['type' => 'error', 'message' =>
+                    'The chain could NOT be resumed — the database write failed and nothing was changed. '
+                    . 'It is still paused. Check the bcc-trust error log.'];
+
+            case 'resume_unconfirmed':
+                return ['type' => 'error', 'message' =>
+                    'The resume was attempted but could NOT be confirmed: the stored scanner state does not '
+                    . 'read back as expected, so this is not being reported as done. Reload to see the current '
+                    . 'state and check the bcc-trust error log.'];
+
+            // ── Backfill ────────────────────────────────────────────────
+            case 'backfill_requested':
+                return ['type' => 'success', 'message' =>
+                    'One bounded backfill slice was requested for this chain — at most 20 requests or 8 '
+                    . 'seconds. Whether it did any work depends on the scanner: another pass may already hold '
+                    . 'the lock, in which case it does nothing. Run it again to continue, and check the '
+                    . 'scanner state below to see where it got to. Anything discovered arrives unverified.'];
+
+            case 'backfill_discovery_off':
+                return ['type' => 'error', 'message' =>
+                    'Discovery is switched off for this installation, so no scanner work can run. '
+                    . 'Nothing was started.'];
+
+            case 'backfill_gate_off':
+                return ['type' => 'error', 'message' =>
+                    'The historical backfill is switched off for this installation, so the walk cannot run. '
+                    . 'Nothing was started.'];
+
+            case 'backfill_paused':
+                return ['type' => 'warning', 'message' =>
+                    'That chain is paused, so no slice was run. Resume it first. Nothing was started.'];
+
+            // ── Retry ───────────────────────────────────────────────────
+            case 'retry_requeued':
+                return ['type' => 'success', 'message' =>
+                    'Unresolved code families and contracts were queued for another look — up to 100 of each. '
+                    . 'Nothing was contacted now: the next scheduled pass does the work. Settled non-NFT '
+                    . 'results, decided CW-721 families and hidden contracts were left alone.'];
+
+            case 'retry_none_pending':
+                return ['type' => 'info', 'message' =>
+                    'Nothing was waiting to be retried on that chain — no unresolved code families and no '
+                    . 'unresolved contracts. Nothing was changed.'];
+
+            case 'retry_discovery_off':
+                return ['type' => 'error', 'message' =>
+                    'Discovery is switched off for this installation, so a retry would never run. '
+                    . 'Nothing was changed.'];
+
+            // ── Shared ──────────────────────────────────────────────────
+            case 'unknown_chain':
+                return ['type' => 'error', 'message' =>
+                    'Scanner: chain not found. Nothing was changed.'];
+
+            case 'error':
+                $ref = isset($_GET['bcc_ref']) ? sanitize_text_field((string) $_GET['bcc_ref']) : '';
+
+                return ['type' => 'error', 'message' => $ref !== ''
+                    ? AdminActionSupport::failureMessage($ref)
+                    : 'Scanner: the operation could not be completed. Check the bcc-trust error log.'];
+        }
+
+        return null;
     }
 
     /**

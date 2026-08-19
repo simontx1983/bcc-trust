@@ -66,7 +66,7 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
     public function testEachRouteRejectsTheOldSharedPageNonce(string $action, string $method): void
     {
         // The pre-batch nonce. It used to open all fourteen branches.
-        \BccAdminTestState::$validNonceAction = VerifyCollectionsPage::NONCE_KEY;
+        \BccAdminTestState::$validNonceAction = 'bcc_verify_collections_nonce';
         $_POST['collection_id'] = self::CID;
 
         $this->expectException(\BccAdminDie::class);
@@ -122,7 +122,7 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
             VerifyCollectionsPage::ACTION_TESTQUERY . '_' . self::CID,
         ] as $vcaNonce) {
             $this->assertNotSame(
-                VerifyCollectionsPage::NONCE_KEY,
+                'bcc_verify_collections_nonce',
                 $vcaNonce,
                 "VC-A nonce {$vcaNonce} must not equal the VC-B dispatcher key, which is what {$vcbAction} verifies."
             );
