@@ -1,0 +1,194 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Tests\Integration;
+
+use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
+use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
+use BCC\Trust\Onchain\Services\CosmwasmClassifier;
+use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
+use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Group;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * The downstream candidate survives an upstream backlog, against real SQL.
+ *
+ * ── WHY THIS CANNOT BE A UNIT TEST ──────────────────────────────────────
+ * The unit suite fakes the repositories, so "is the candidate still
+ * SELECTABLE while 25 families queue in front of it" is answered by the
+ * fake rather than by MySQL. The selectors here are the real ones, running
+ * the real `findPendingClassification` / `findEnumerable` / `findEmittable`
+ * SQL against the real schema, so the backlog and the candidate coexist
+ * exactly as they do on staging.
+ *
+ * The pass itself is not run here — that needs a transport, which is the
+ * unit suite's job. What is proved is the DATA half: the backlog is real,
+ * the downstream rows are real, the emittable candidate is genuinely
+ * returned by production SQL despite the backlog, `bulkUpsert()` inserts
+ * it unverified, and a second emission is refused.
+ */
+#[Group('integration')]
+#[CoversClass(CosmwasmCodeFamilyRepository::class)]
+#[CoversClass(CosmwasmContractRepository::class)]
+#[CoversClass(CosmwasmTickBudget::class)]
+final class CosmwasmEmissionUnderBacklogIntegrationTest extends TestCase
+{
+    private const CHAIN          = 4242;
+    private const CONFIRMED_CODE = 105;
+
+    private function sample(): string
+    {
+        return 'cosmos1' . str_repeat('e', 59);
+    }
+
+    protected function setUp(): void
+    {
+        $this->purge();
+    }
+
+    protected function tearDown(): void
+    {
+        $this->purge();
+    }
+
+    /** Remove every fixture row this test owns. Nothing else is touched. */
+    private function purge(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        $wpdb->query('DELETE FROM `' . CosmwasmCodeFamilyRepository::table() . '` WHERE chain_id = ' . self::CHAIN);
+        $wpdb->query('DELETE FROM `' . CosmwasmContractRepository::table() . '` WHERE chain_id = ' . self::CHAIN);
+        $wpdb->query('DELETE FROM `' . $wpdb->prefix . 'bcc_onchain_collections` WHERE chain_id = ' . self::CHAIN);
+    }
+
+    private function seed(): void
+    {
+        // 25 pending families — the saturated upstream backlog.
+        $families = [];
+        for ($i = 0; $i < 25; $i++) {
+            $families[] = ['code_id' => 200 + $i, 'checksum' => sprintf('%064x', 200 + $i)];
+        }
+        $families[] = ['code_id' => self::CONFIRMED_CODE, 'checksum' => sprintf('%064x', self::CONFIRMED_CODE)];
+        CosmwasmCodeFamilyRepository::recordDiscovered(self::CHAIN, $families);
+
+        // The confirmed family, still awaiting enumeration.
+        CosmwasmCodeFamilyRepository::recordClassification(
+            self::CHAIN,
+            self::CONFIRMED_CODE,
+            [
+                'classification'     => CosmwasmClassifier::CONFIRMED,
+                'reason'             => 'num_tokens_and_info',
+                'probes_ok'          => 'num_tokens,contract_info',
+                'probes_failed'      => '',
+                'last_error'         => '',
+                'classifier_version' => CosmwasmClassifier::VERSION,
+            ],
+            $this->sample(),
+            0
+        );
+
+        // Its confirmed sample contract — already emittable.
+        // The repository takes rows, not bare addresses.
+        CosmwasmContractRepository::recordDiscovered(
+            self::CHAIN,
+            self::CONFIRMED_CODE,
+            [['contract_address' => $this->sample(), 'denied' => 0]]
+        );
+        CosmwasmContractRepository::recordClassification(
+            self::CHAIN,
+            $this->sample(),
+            [
+                'classification'     => CosmwasmClassifier::CONFIRMED,
+                'reason'             => 'num_tokens_and_info',
+                'probes_ok'          => 'num_tokens,contract_info',
+                'probes_failed'      => '',
+                'last_error'         => '',
+                'classifier_version' => CosmwasmClassifier::VERSION,
+            ],
+            0
+        );
+    }
+
+    /** The backlog and the candidate coexist in real SQL. */
+    public function testTheEmittableCandidateSurvivesTheUpstreamBacklog(): void
+    {
+        $this->seed();
+
+        $pending = CosmwasmCodeFamilyRepository::findPendingClassification(self::CHAIN, 25, CosmwasmClassifier::VERSION);
+        self::assertCount(25, $pending, 'a saturated upstream backlog genuinely exists');
+
+        $enumerable = CosmwasmCodeFamilyRepository::findEnumerable(self::CHAIN, 10, true);
+        self::assertCount(1, $enumerable, 'the confirmed family is genuinely awaiting enumeration');
+        self::assertSame(self::CONFIRMED_CODE, (int) $enumerable[0]->code_id);
+
+        $emittable = CosmwasmContractRepository::findEmittable(self::CHAIN, 25);
+        self::assertCount(1, $emittable, 'the candidate is returned DESPITE the backlog');
+        self::assertSame($this->sample(), (string) $emittable[0]->contract_address);
+    }
+
+    /** One shared budget, and the reserve holds a real request back. */
+    public function testOneSharedBudgetEnforcesTheDownstreamFloor(): void
+    {
+        $b = new CosmwasmTickBudget(50, 120);
+        $b->reserve(5);
+        $b->spend(45);
+
+        self::assertSame(0, $b->available(), 'the upstream stage is finished');
+        self::assertTrue($b->exhausted());
+        $b->reserve(0);
+        self::assertSame(5, $b->available(), 'five real requests were held for downstream');
+        self::assertSame(45, $b->spent());
+        self::assertSame(50, $b->spent() + $b->remaining(), 'the ceiling is intact');
+    }
+
+    /** The row is inserted through bulkUpsert(), unverified, and once only. */
+    public function testTheCandidateIsInsertedUnverifiedAndIsIdempotent(): void
+    {
+        $this->seed();
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = $wpdb->prefix . 'bcc_onchain_collections';
+
+        $budget = new CosmwasmTickBudget(50, 120);
+        $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
+
+        self::assertSame(1, $result['emitted']);
+
+        $row = $wpdb->get_row(
+            'SELECT * FROM `' . $table . '` WHERE chain_id = ' . self::CHAIN . " AND contract_address = '" . $this->sample() . "'"
+        );
+        self::assertNotNull($row, 'the candidate really is in the table');
+        self::assertSame('CW-721', (string) $row->token_standard);
+        self::assertSame('0', (string) $row->is_verified, 'UNVERIFIED — the schema default stands');
+        // bulkUpsert() passes null; the columns are NOT NULL, so MySQL
+        // stores the empty/zero default. Either way there is no artwork and
+        // no supply, which is what keeps the row unpublishable — asserted
+        // against what the database ACTUALLY holds, not what was passed in.
+        self::assertSame('', (string) $row->image_url, 'no artwork, so nothing is publishable');
+        self::assertContains((string) $row->total_supply, ['', '0'], 'no supply figure was invented');
+
+        // Second invocation: collection_row_written now blocks it.
+        self::assertSame([], CosmwasmContractRepository::findEmittable(self::CHAIN, 25), 'no longer emittable');
+        $again = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new CosmwasmTickBudget(50, 120), 25);
+        self::assertSame(0, $again['emitted'], 'idempotent — no duplicate');
+        self::assertSame('1', (string) $wpdb->get_var(
+            'SELECT COUNT(*) FROM `' . $table . '` WHERE chain_id = ' . self::CHAIN
+        ), 'exactly one row, still');
+    }
+
+    /** A fetcher whose metadata read answers, so emission can name the row. */
+    private function fetcher(): \BCC\Trust\Onchain\Fetchers\CosmosFetcher
+    {
+        return new class ((object) [
+            'id' => self::CHAIN, 'slug' => 'testchain', 'chain_type' => 'cosmos',
+            'rest_url' => 'https://lcd.example', 'rpc_url' => '', 'is_active' => 1, 'decimals' => 6,
+        ]) extends \BCC\Trust\Onchain\Fetchers\CosmosFetcher {
+            /** @return array<string, mixed>|null */
+            public function fetchContractInfo(string $contract): ?array
+            {
+                return ['name' => 'Fixture Collection', 'symbol' => 'FIX'];
+            }
+        };
+    }
+}
