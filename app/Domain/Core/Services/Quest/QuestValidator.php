@@ -263,8 +263,14 @@ class QuestValidator {
                 return false;
             }
 
-            $siteHost = parse_url(home_url(), PHP_URL_HOST) ?: home_url();
-            $api      = new \BCC\Trust\Core\Services\x\XApiService();
+            // Match on the FRONTEND host: users share links to the Next.js
+            // app, never to the WordPress origin, so keying this off
+            // home_url() silently never matched once the two hosts diverged.
+            // Falls back to the WP host when BCC_FRONTEND_ORIGIN is unset,
+            // matching FrontendRedirect::defaultReturn().
+            $shareOrigin = \BCC\Trust\Core\Support\FrontendRedirect::firstOrigin() ?? home_url();
+            $siteHost    = parse_url($shareOrigin, PHP_URL_HOST) ?: $shareOrigin;
+            $api         = new \BCC\Trust\Core\Services\x\XApiService();
 
             $found = $api->hasRecentTweetContaining(
                 $accessToken,
