@@ -39,7 +39,34 @@ final class ApiRetry
      *     @type int    $max_retries   Max retry attempts (default 3).
      *     @type string $label         Human-readable label for logging (e.g. "Cosmos LCD /validators").
      *     @type int    $chain_id      Chain ID for circuit breaker integration.
+     *     @type callable $application_error  OPTIONAL. See below. Absent =
+     *                                 today's behaviour, exactly.
      * }
+     *
+     * ── `application_error`: WHEN A 5xx IS NOT A SERVER PROBLEM ─────────
+     * A cosmos LCD reports CONTRACT-level errors as HTTP 500. Asking a
+     * DeFi contract a CW-721 question returns 500 with
+     * `unknown variant \`num_tokens\`, expected one of \`config\`, …` —
+     * the node is healthy, the query reached the contract, and the
+     * contract answered. Measured on Dungeon 2026-08-19: that single
+     * non-CW-721 contract cost 8 HTTP attempts and 16s of backoff, and
+     * tripped the CHAIN-WIDE breaker, which then blocked 15 unrelated
+     * code families.
+     *
+     * This layer cannot tell the difference — the distinction lives in a
+     * response body it must not learn to parse. So the CALLER may supply
+     * a predicate `fn(string $body, int $code): bool`. When it returns
+     * TRUE for a 5xx, this method treats the response as the ANSWER it
+     * is: return it immediately, DO NOT retry, and DO NOT touch the
+     * circuit breaker. Domain classification then happens where it
+     * belongs, on the returned body.
+     *
+     * IT IS OPT-IN AND NARROW. Absent (the default, and every caller
+     * other than the CosmWasm smart-query path) nothing changes: 5xx
+     * still retries and still counts against the breaker. It is not
+     * consulted for WP_Error, timeouts, 429 or 4xx, so no transport
+     * failure can be reclassified as an application answer.
+     *
      * @return array<string, mixed>|\WP_Error  The final HTTP response or WP_Error after all retries exhausted.
      */
     public static function request(callable $fn, array $options = [])
@@ -47,6 +74,10 @@ final class ApiRetry
         $maxRetries = (int) ($options['max_retries'] ?? self::DEFAULT_MAX_RETRIES);
         $label      = $options['label'] ?? 'API call';
         $chainId    = (int) ($options['chain_id'] ?? 0);
+
+        $isApplicationError = isset($options['application_error']) && is_callable($options['application_error'])
+            ? $options['application_error']
+            : null;
 
         // Circuit breaker: check before attempting
         if ($chainId > 0 && OnchainCircuitBreaker::isOpen($chainId)) {
@@ -167,6 +198,20 @@ final class ApiRetry
 
                 // ── 5xx Server Error — retryable with short delay ───────
                 if ($code >= 500) {
+                    // …UNLESS the caller can tell us this 5xx is the
+                    // CONTRACT's answer rather than the node's failure.
+                    // Checked BEFORE the log, the breaker and the retry,
+                    // because all three are wrong for an answer.
+                    if ($isApplicationError !== null
+                        && $isApplicationError((string) wp_remote_retrieve_body($lastResponse), $code)) {
+                        self::log(sprintf(
+                            'APPLICATION ERROR (%d) %s — the contract answered; not retried, breaker untouched',
+                            $code, $label
+                        ));
+
+                        return $lastResponse;
+                    }
+
                     self::log(sprintf(
                         'SERVER ERROR (%d) %s — attempt %d/%d',
                         $code, $label, $attempt + 1, $maxRetries + 1

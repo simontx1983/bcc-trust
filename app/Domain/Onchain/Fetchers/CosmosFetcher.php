@@ -1980,7 +1980,7 @@ class CosmosFetcher implements FetcherInterface
      * @param array<string, string|int> $params
      * @return array{ok: bool, data: array<string, mixed>|null, http_code: int, error_kind: string, message_excerpt: string}
      */
-    private function lcdGetResult(string $path, array $params = []): array
+    private function lcdGetResult(string $path, array $params = [], bool $smartQuery = false): array
     {
         $classifier = \BCC\Trust\Onchain\Services\CosmwasmClassifier::class;
         $chainId    = (int) ($this->chain->id ?? 0);
@@ -1990,13 +1990,24 @@ class CosmosFetcher implements FetcherInterface
             $url .= '?' . http_build_query($params);
         }
 
+        $retryOptions = [
+            'label'    => 'Cosmos LCD ' . $path,
+            'chain_id' => $chainId,
+        ];
+
+        // ONLY smart queries may reinterpret a 5xx. A code listing or a
+        // contract listing that 500s really is a node problem, and must
+        // keep its retries and its breaker protection — see the parameter
+        // docs on {@see ApiRetry::request()}.
+        if ($smartQuery) {
+            $retryOptions['application_error'] = static fn(string $body, int $code): bool
+                => self::isSmartQueryApplicationError($body, $code);
+        }
+
         $response = ApiRetry::get($url, [
             'timeout' => $this->timeout,
             'headers' => ['Accept' => 'application/json'],
-        ], [
-            'label'    => 'Cosmos LCD ' . $path,
-            'chain_id' => $chainId,
-        ]);
+        ], $retryOptions);
 
         if (is_wp_error($response)) {
             $message = $response->get_error_message();
@@ -2061,6 +2072,40 @@ class CosmosFetcher implements FetcherInterface
      * something, and {@see \BCC\Trust\Onchain\Services\CosmwasmClassifier}
      * will simply not match any token on it.
      */
+    /**
+     * PURE. Is this 5xx the CONTRACT's answer rather than the node's failure?
+     *
+     * Supplied to {@see ApiRetry::request()} by the smart-query path ONLY.
+     * Returning TRUE means "do not retry, do not blame the chain" — so this
+     * must say TRUE **only** on evidence that the query reached a working
+     * contract which then refused the variant.
+     *
+     * ── IT DELEGATES; IT DOES NOT DECIDE ────────────────────────────────
+     * The decision is {@see CosmwasmClassifier::errorKindFromMessage()},
+     * which already owns this vocabulary and already checks its
+     * NODE_ERROR_TOKENS list FIRST. That ordering is what makes this safe:
+     *   - `rpc error`, `Querier system error`, `panicked`, `out of gas`,
+     *     `Error calling the VM`, `connection refused` → KIND_NODE_ERROR
+     *     → FALSE → full retry + breaker, unchanged.
+     *   - `Error parsing into type` / `unknown variant` / `expected one of`
+     *     → KIND_QUERY_UNSUPPORTED → TRUE.
+     *   - an empty or unrecognised body falls through to the `>= 500`
+     *     branch → KIND_NODE_ERROR → FALSE.
+     *
+     * FAILING CLOSED IS THE DEFAULT DIRECTION: anything this cannot
+     * positively recognise as a contract answer keeps today's protection.
+     */
+    private static function isSmartQueryApplicationError(string $body, int $code): bool
+    {
+        $message = self::extractLcdErrorMessage($body);
+        if (trim($message) === '') {
+            return false;
+        }
+
+        return \BCC\Trust\Onchain\Services\CosmwasmClassifier::errorKindFromMessage($message, $code)
+            === \BCC\Trust\Onchain\Services\CosmwasmClassifier::KIND_QUERY_UNSUPPORTED;
+    }
+
     private static function extractLcdErrorMessage(string $body): string
     {
         $decoded = json_decode($body, true);
@@ -2102,7 +2147,11 @@ class CosmosFetcher implements FetcherInterface
             ];
         }
 
-        $result = $this->lcdGetResult($path, []);
+        // THE ONLY CALL SITE THAT OPTS IN. A 5xx here may be the contract
+        // refusing the query variant, which is decisive evidence rather
+        // than a node fault; every other LCD path keeps the strict
+        // treatment. See {@see isSmartQueryApplicationError()}.
+        $result = $this->lcdGetResult($path, [], true);
         if (!$result['ok']) {
             return $result;
         }

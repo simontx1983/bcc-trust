@@ -57,9 +57,14 @@ if (!defined('ABSPATH')) {
  *             │          ├─ CosmwasmDiscoveryService::enumerateFamilyPage() ×N
  *             │          ├─ CosmwasmDiscoveryService::classifyContract() ×N
  *             │          └─ CosmwasmDiscoveryService::emitCollections()  ← EMIT
- *             ├─ OnchainCircuitBreaker::recordSuccess()
  *             └─ finally: ChainCheckpointRepository::touchCwDiscovery()
  *                         + AdvisoryLock::release()
+ *
+ * The circuit breaker is NOT touched at the end of the pass. It is driven
+ * per response inside {@see \BCC\Trust\Onchain\Support\ApiRetry::request()}
+ * from real transport evidence, because "the pass returned" and "the chain
+ * is reachable" are different claims — see the comment in
+ * {@see CosmwasmDiscoveryWorker::runChainPass()}.
  *
  * `runBackfillTick()`, `runBackfillForChain()`, `runWeeklyRetry()` and
  * `runMetadataRefresh()` are NOT on that path and are not named anywhere

@@ -777,7 +777,32 @@ final class CosmwasmDiscoveryWorker
                 return self::PASS_SKIPPED;
             }
             $step($chainId, $context['fetcher'], $budget);
-            OnchainCircuitBreaker::recordSuccess($chainId);
+
+            // ── NO recordSuccess() HERE. READ THIS BEFORE ADDING ONE ────
+            //
+            // There used to be an unconditional
+            // `OnchainCircuitBreaker::recordSuccess($chainId)` on this
+            // line, and it was WRONG in the one case that matters.
+            //
+            // "The step returned" is not "the chain is healthy".
+            // {@see dailyChainStep()} deliberately swallows per-family
+            // failures — an unreachable node is recorded on the FAMILY
+            // ROW and the loop moves on, so the step returns normally
+            // whether every probe succeeded or every probe failed. The
+            // call therefore RESET A BREAKER THAT REAL FAILURES HAD JUST
+            // OPENED, erasing the protection at the exact moment it was
+            // earned. Measured on Dungeon 2026-08-19: 15 families were
+            // blocked by an open breaker and the pass closed it again on
+            // the way out.
+            //
+            // The breaker does not need this call. It is already driven
+            // by ACTUAL TRANSPORT EVIDENCE, per response, inside
+            // {@see ApiRetry::request()}: recordSuccess on every 2xx,
+            // recordFailure on every 429/5xx/WP_Error. That is a real
+            // observation of the chain; this was an assumption about it.
+            // Removing it means a genuinely open breaker stays open, and
+            // recovery happens the way the breaker itself defines it —
+            // the cooldown plus a half-open probe.
         } catch (\Throwable $e) {
             // FAILURE ISOLATION: one broken chain must not stop the
             // others, so the throw dies here and the loop continues.
