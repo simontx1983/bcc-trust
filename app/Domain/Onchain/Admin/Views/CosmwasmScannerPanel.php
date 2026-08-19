@@ -542,7 +542,16 @@ final class CosmwasmScannerPanel
                 <?php if ($lastError !== null): ?>
                     <details style="margin-top:4px;">
                         <summary style="cursor:pointer;color:#d63638;font-size:11px;">Last recorded reason</summary>
-                        <code style="display:block;margin-top:4px;font-size:11px;white-space:pre-wrap;word-break:break-word;"><?php echo esc_html($lastError); ?></code>
+                        <?php
+                        // VC-B3a display-safety correction. Same redactor the
+                        // NFT Discovery status row uses, so the two surfaces
+                        // cannot diverge on what an operator may see. The
+                        // stored column and the technical log keep the raw
+                        // text — this is display only.
+                        ?>
+                        <code style="display:block;margin-top:4px;font-size:11px;white-space:pre-wrap;word-break:break-word;"><?php
+                            echo esc_html(\BCC\Trust\Onchain\Admin\AdminActionSupport::operatorSafeExcerpt($lastError));
+                        ?></code>
                     </details>
                 <?php endif; ?>
             </td>

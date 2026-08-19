@@ -227,6 +227,18 @@ namespace BCC\Trust\Onchain\Workers {
 
 namespace BCC\Trust\Onchain\Services {
 
+    if (!class_exists(CosmwasmClassifier::class, false)) {
+        /** Only the classification vocabulary the status row reads. */
+        final class CosmwasmClassifier
+        {
+            public const CONFIRMED    = 'confirmed_cw721';
+            public const PROBABLE     = 'probable_cw721';
+            public const NOT_CW721    = 'not_cw721';
+            public const INCONCLUSIVE = 'inconclusive';
+            public const UNREACHABLE  = 'temporarily_unreachable';
+        }
+    }
+
     if (!class_exists(CosmwasmDiscoveryHealthSnapshot::class, false)) {
         /**
          * The single authoritative status source both surfaces read.
@@ -274,6 +286,46 @@ namespace BCC\Trust\Onchain\Services {
             public static function eligibilityReason(string $eligibility, ?array $allowlist): string
             {
                 return 'reason: ' . $eligibility;
+            }
+
+            // ── VC-B3a: presentation helpers the status row reuses ───────
+            //
+            // Deliberately faked as PASS-THROUGH/IDENTITY shapes. The point
+            // of the parity tests is that the renderer prints what the
+            // snapshot supplies; if these fakes invented formatting, a
+            // renderer that recomputed a label could still look correct.
+
+            public static function stateLabel(string $state): string
+            {
+                return 'state:' . $state;
+            }
+
+            public static function progressLabel(
+                string $state,
+                int $maxCodeId,
+                bool $cursorOpen,
+                int $familiesKnown
+            ): string {
+                return 'progress:' . $state;
+            }
+
+            public static function formatDuration(int $seconds): string
+            {
+                return $seconds . 's';
+            }
+
+            /**
+             * Faithful to the real contract: "CW-721" is CONFIRMED plus
+             * PROBABLE only. Summing every bucket would fold the settled
+             * non-NFT count into the NFT total, and a test built on that
+             * would assert the wrong number.
+             *
+             * @param array<string, int> $byClassification
+             */
+            public static function cw721Total(array $byClassification): int
+            {
+                return (int) ($byClassification[CosmwasmClassifier::CONFIRMED] ?? 0)
+                    + (int) ($byClassification[CosmwasmClassifier::PROBABLE] ?? 0);
             }
 
             /**

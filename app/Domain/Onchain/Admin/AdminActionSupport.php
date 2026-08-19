@@ -106,6 +106,75 @@ final class AdminActionSupport
     }
 
     /**
+     * Operator-safe rendering of an UPSTREAM error excerpt.
+     *
+     * ── WHY THIS IS NOT esc_html() ──────────────────────────────────────
+     * `esc_html()` stops markup executing. It does nothing about a message
+     * that legitimately contains a credentialed URL, an absolute server
+     * path or an SQL fragment — those render perfectly safely and are still
+     * a disclosure.
+     *
+     * ── AND WHY IT IS NOT sanitizeExcerpt() EITHER ──────────────────────
+     * {@see \BCC\Trust\Onchain\Services\CosmwasmClassifier::sanitizeExcerpt()}
+     * is a FORMATTER, despite the name: it strips control characters,
+     * collapses whitespace and truncates. Its own docblock calls the result
+     * an "excerpt". Content survives verbatim. That is correct for the
+     * stored column and the technical log — an engineer needs the real
+     * text — but it is not a redactor, and `cw_last_error` demonstrably
+     * carries `$e->getMessage()` and raw LCD response bodies
+     * ({@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker}).
+     *
+     * ── SO THIS IS A DISPLAY FILTER, AND ONLY THAT ──────────────────────
+     * The stored value and the logs are untouched; this is what an admin
+     * PAGE is allowed to show. It redacts rather than allowlists, because
+     * an allowlist would throw away the useful half — "wasm module not
+     * available (HTTP 501)" is exactly what an operator needs to read.
+     */
+    public static function operatorSafeExcerpt(string $raw): string
+    {
+        $s = trim(preg_replace('/\s+/', ' ', $raw) ?? $raw);
+        if ($s === '') {
+            return '';
+        }
+
+        // An SQL statement is never operator-facing detail. Replace the
+        // whole thing rather than trying to scrub it clause by clause.
+        if (preg_match('/\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER)\b.{0,80}\b(FROM|INTO|TABLE|SET|WHERE)\b/i', $s) === 1) {
+            return '[database error — details in the bcc-trust error log]';
+        }
+
+        $patterns = [
+            // Credentialed parameters, before the URL rule can keep them.
+            '/\b(api[_-]?key|apikey|token|secret|password|passwd|authorization|auth)\b\s*[=:]\s*\S+/i'
+                => '$1=[redacted]',
+            // Any URL — covers chain endpoints and anything carrying a key.
+            '~\b[a-z][a-z0-9+.\-]*://\S+~i' => '[redacted-url]',
+            // Absolute paths, Windows and POSIX.
+            '~\b[A-Za-z]:\\\\[^\s,;]+~'     => '[redacted-path]',
+            '~(?<![\w.])/(?:home|var|srv|usr|etc|root|tmp|opt)/[^\s,;]*~i' => '[redacted-path]',
+            // Stack-trace frames and "in /file.php:12" tails.
+            '/#\d+\s+\S+/'                  => '[redacted-trace]',
+            '/\bin\s+\S+\.php(?::\d+)?/i'   => 'in [redacted-path]',
+            // Exception / error class names, namespaced or not.
+            '/\b[A-Za-z_][\w\\\\]*(?:Exception|Error)\b/' => '[redacted-type]',
+            // Long opaque blobs: keys, tokens, signatures.
+            '/\b[A-Fa-f0-9]{32,}\b/'        => '[redacted]',
+            '/\b[A-Za-z0-9_\-]{40,}\b/'     => '[redacted]',
+        ];
+
+        foreach ($patterns as $re => $with) {
+            $next = preg_replace($re, $with, $s);
+            if (is_string($next)) {
+                $s = $next;
+            }
+        }
+
+        $s = trim(preg_replace('/\s+/', ' ', $s) ?? $s);
+
+        return function_exists('mb_substr') ? mb_substr($s, 0, 200) : substr($s, 0, 200);
+    }
+
+    /**
      * Short, non-secret correlation ID used to join an operator-facing error
      * message to the full exception in the file log.
      */
