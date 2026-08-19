@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
+use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 
@@ -1209,6 +1210,160 @@ class ChainsPage
                     <?php wp_nonce_field($route . '_' . $chainId); ?>
                     <?php self::render_cw_discovery_button($chainId, $optedIn, $slug); ?>
                 </form>
+            </td>
+        </tr>
+        <?php
+        self::render_cw_status_row($chain);
+    }
+
+    /**
+     * The scanner-status detail row (VC-B3a).
+     *
+     * ── WHY THIS EXISTS BEFORE THE CONTROLS MOVE ────────────────────────
+     * VC-B3b will move Pause / Resume / Backfill / Retry here from the
+     * Verify Collections scanner panel. Those controls are unusable without
+     * the state they act on — "should I resume this chain?" is unanswerable
+     * from an eligibility verdict alone — so the READOUT lands first, is
+     * proven, and only then does the switch follow. Until VC-B3b the four
+     * controls stay exactly where they are and behave exactly as before.
+     *
+     * ── TRANSITIONAL DUPLICATION, DELIBERATE AND BOUNDED ────────────────
+     * These same values are also rendered by CosmwasmScannerPanel during
+     * the transition. That is approved and temporary:
+     *
+     *   • ONE authority. Both surfaces print fields from the SAME
+     *     CosmwasmDiscoveryHealthSnapshot::buildSummary() row. Nothing here
+     *     recalculates eligibility, health, progress or a gate, and nothing
+     *     here touches a repository — so the two cannot disagree.
+     *   • READ-ONLY. No mutation control is added by this batch.
+     *   • The panel copy is deleted in VC-B3b, once parity is proven.
+     *
+     * Every value below arrives in $chain already computed — including the
+     * derived labels `state_label`, `progress_label` and
+     * `last_discovery_age_seconds`. This renderer only formats and escapes.
+     *
+     * @param array<string, mixed> $chain a completed snapshot row
+     */
+    private static function render_cw_status_row(array $chain): void
+    {
+        $stateLabel = is_string($chain['state_label'] ?? null) && $chain['state_label'] !== ''
+            ? (string) $chain['state_label']
+            : CosmwasmDiscoveryHealthSnapshot::stateLabel((string) ($chain['state'] ?? ''));
+
+        $progress = is_string($chain['progress_label'] ?? null) ? (string) $chain['progress_label'] : '';
+
+        $familyCounts   = is_array($chain['families_by_classification'] ?? null)
+            ? $chain['families_by_classification']
+            : [];
+        $familiesPending = (int) ($chain['families_pending'] ?? 0);
+
+        // PR #196. Fail closed: anything non-numeric reads as 0 errored, and
+        // a positive count is stated plainly rather than buried in a total.
+        $familiesErrored = (int) ($chain['families_errored'] ?? 0);
+
+        $inspected = (int) ($chain['contracts_inspected'] ?? 0);
+        $denied    = (int) ($chain['contracts_denied'] ?? 0);
+        $candidates = (int) ($chain['candidates'] ?? 0);
+
+        $lastError = is_string($chain['last_error'] ?? null) && $chain['last_error'] !== ''
+            ? (string) $chain['last_error']
+            : null;
+
+        $age = is_int($chain['last_discovery_age_seconds'] ?? null)
+            ? (int) $chain['last_discovery_age_seconds']
+            : null;
+
+        $metadataAt = is_string($chain['metadata_refreshed_at'] ?? null) && $chain['metadata_refreshed_at'] !== ''
+            ? (string) $chain['metadata_refreshed_at']
+            : null;
+        ?>
+        <tr class="bcc-cw-status-row">
+            <td colspan="6" style="background:#f6f7f7;padding:8px 12px;">
+                <div style="display:flex;flex-wrap:wrap;gap:24px;font-size:12px;">
+
+                    <div>
+                        <strong>Scanner state</strong><br>
+                        <span><?php echo esc_html($stateLabel); ?></span>
+                        <?php if ($progress !== ''): ?>
+                            <div style="color:#646970;"><?php echo esc_html($progress); ?></div>
+                        <?php endif; ?>
+                    </div>
+
+                    <div>
+                        <strong>Classification queue</strong><br>
+                        <?php
+                        // The SAME three values the scanner panel shows, in the
+                        // same order and from the same row: the CW-721 total
+                        // (confirmed + probable, via the snapshot's own
+                        // cw721Total), the settled non-NFT count read by its
+                        // classifier constant, and the pending count. Dropping
+                        // "non-NFT" would leave an operator unable to tell a
+                        // chain nobody has classified from one where almost
+                        // everything turned out not to be an NFT.
+                        ?>
+                        <span><?php echo esc_html(number_format_i18n(
+                            CosmwasmDiscoveryHealthSnapshot::cw721Total($familyCounts)
+                        )); ?> CW-721</span>
+                        · <span><?php echo esc_html(number_format_i18n(
+                            (int) ($familyCounts[CosmwasmClassifier::NOT_CW721] ?? 0)
+                        )); ?> non-NFT</span>
+                        · <span><?php echo esc_html(number_format_i18n($familiesPending)); ?> pending</span>
+                        <?php if ($familiesErrored > 0): ?>
+                            · <span style="color:#d63638;font-weight:600;"><?php
+                                echo esc_html(number_format_i18n($familiesErrored));
+                            ?> errored</span>
+                        <?php endif; ?>
+                    </div>
+
+                    <div>
+                        <strong>Inventory</strong><br>
+                        <span><?php echo esc_html(number_format_i18n($inspected)); ?> contracts inspected</span>
+                        · <span><?php echo esc_html(number_format_i18n($candidates)); ?> candidates</span>
+                        <?php if ($denied > 0): ?>
+                            · <span><?php echo esc_html(number_format_i18n($denied)); ?> hidden</span>
+                        <?php endif; ?>
+                    </div>
+
+                    <div>
+                        <strong>Freshness</strong><br>
+                        <?php if ($age !== null): ?>
+                            <span><?php echo esc_html(
+                                CosmwasmDiscoveryHealthSnapshot::formatDuration($age)
+                            ); ?> ago</span>
+                        <?php else: ?>
+                            <span style="color:#646970;">never</span>
+                        <?php endif; ?>
+                        <?php if ($metadataAt !== null): ?>
+                            <div style="color:#646970;">
+                                capability check <?php echo esc_html($metadataAt); ?> UTC
+                            </div>
+                        <?php endif; ?>
+                    </div>
+
+                    <?php if ($lastError !== null): ?>
+                        <div style="flex-basis:100%;">
+                            <?php
+                            // UPSTREAM TEXT. Same treatment the panel gives it:
+                            // behind a disclosure and labelled as not ours,
+                            // because it is the one field whose content we do
+                            // not control. esc_html() on the way out.
+                            ?>
+                            <details>
+                                <summary style="cursor:pointer;color:#d63638;">Last recorded reason</summary>
+                                <code style="display:block;margin-top:4px;white-space:pre-wrap;word-break:break-word;"><?php
+                                    // REDACTED BEFORE ESCAPING. esc_html()
+                                    // stops markup executing; it does nothing
+                                    // about a credentialed URL, an absolute
+                                    // server path or an SQL fragment, and
+                                    // `cw_last_error` demonstrably carries
+                                    // raw $e->getMessage() and LCD bodies.
+                                    echo esc_html(AdminActionSupport::operatorSafeExcerpt($lastError));
+                                ?></code>
+                            </details>
+                        </div>
+                    <?php endif; ?>
+
+                </div>
             </td>
         </tr>
         <?php

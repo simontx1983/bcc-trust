@@ -215,14 +215,26 @@ final class ChainsNftDiscoveryTabTest extends TestCase
         $this->assertStringNotContainsString('ethereum', $text);
         $this->assertStringNotContainsString('77', $this->render());
 
-        // Every rendered row IS a CosmWasm candidate.
+        // Every rendered CHAIN row is a CosmWasm candidate.
+        //
+        // VC-B3a added a per-chain status detail row, which carries scanner
+        // state rather than the chain identity — it is a continuation of the
+        // row above, not a new chain. It is marked and skipped here rather
+        // than weakening the check into something that would pass for a
+        // genuinely mislabelled chain.
+        $chainRows = 0;
         foreach ($this->elements($this->dom(), 'tr') as $tr) {
-            $cells = $tr->getElementsByTagName('td');
-            if ($cells->length === 0) {
+            if ($tr->getElementsByTagName('td')->length === 0) {
                 continue;
             }
+            if (str_contains($tr->getAttribute('class'), 'bcc-cw-status-row')) {
+                continue;
+            }
+            $chainRows++;
             $this->assertStringContainsString('cosmos', $tr->textContent);
         }
+
+        $this->assertSame(3, $chainRows, 'one identity row per CosmWasm candidate');
     }
 
     public function testTheTabUsesTheSharedHealthSnapshotOnce(): void
