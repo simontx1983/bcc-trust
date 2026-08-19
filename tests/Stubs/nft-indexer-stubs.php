@@ -301,6 +301,7 @@ namespace BCC\Trust\Onchain\Support {
             {
                 self::$queue          = [];
                 self::$calls          = [];
+                self::$responder      = null;
                 self::$batchResponses = [];
                 self::$batchCalls     = [];
             }
@@ -344,9 +345,27 @@ namespace BCC\Trust\Onchain\Support {
              * @param array<string,mixed> $options
              * @return mixed
              */
+            /**
+             * OPTIONAL url-routed responder, consulted before the FIFO.
+             *
+             * The queue alone cannot express a MULTI-STAGE pass. When an
+             * early stage stops on a budget floor it leaves the rest of the
+             * queue misaligned with what the later stages ask for, and the
+             * test then measures the fixture rather than the code. A
+             * responder answers by URL, so each stage gets a well-formed
+             * reply no matter how many requests the stage before it used.
+             *
+             * @var null|callable(string): (array{code: int, body: string}|\WP_Error)
+             */
+            public static $responder = null;
+
             public static function get(string $url, array $args = [], array $options = [])
             {
                 self::$calls[] = ['url' => $url, 'body' => ''];
+
+                if (self::$responder !== null) {
+                    return (self::$responder)($url);
+                }
                 if (self::$queue === []) {
                     return new \WP_Error('queue exhausted');
                 }

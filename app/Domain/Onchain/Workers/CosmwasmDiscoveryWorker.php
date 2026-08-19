@@ -156,6 +156,57 @@ final class CosmwasmDiscoveryWorker
     /** Rows requeued per chain when the classifier version moves. */
     private const REQUEUE_PER_PASS = 100;
 
+    // ── DOWNSTREAM BUDGET RESERVES ──────────────────────────────────────
+    //
+    // The pass runs four stages in a fixed order against ONE shared
+    // CosmwasmTickBudget. Nothing stopped the first stage spending all 50
+    // requests, and on a chain with a classification backlog it reliably
+    // did. Measured on Dungeon: a confirmed CW-721 family and an
+    // already-emittable contract sat untouched while the queue ahead of
+    // them was worked through, pass after pass. Every stage was correct;
+    // the pipeline still produced nothing.
+    //
+    // ── THE MAXIMA, READ OFF THE CONTROL FLOW ───────────────────────────
+    // These are the total cost of ONE unit of work in each stage, counted
+    // from the `spend()` calls themselves — not estimated from row counts:
+    //
+    //   classifyFamily()        1 contracts page
+    //                         + up to FAMILY_SAMPLE_SIZE (3) samples
+    //                         x up to 3 probes each          = 10
+    //   enumerateFamilyTail()   up to CONTRACT_TAIL_MAX_PAGES = 3
+    //   enumerateFamilyPage()   exactly one spend, no loop    = 1
+    //   classifyContract()      one spend of count(outcomes)  = 3
+    //   emitCollections()       one spend per candidate       = 1
+    //
+    // NOTE the asymmetry: the TAIL walks up to 3 pages, the PAGE walks
+    // exactly one. They are different stages and cost different amounts.
+    //
+    // ── THE FLOORS, WORKED BACKWARDS FROM EMISSION ──────────────────────
+    // Each stage holds back the cost of one unit of every stage still to
+    // come, so the last stage can always afford at least one candidate:
+    //
+    //   during contract classification  reserve emit(1)            =  1
+    //   during enumeration              reserve contract(3)+emit(1)=  4
+    //   during family classification    reserve enum(1)+4          =  5
+    //   during the drained-family tail  reserve family(10)+5       = 15
+    //
+    // Stage (a), the code-id walk, is deliberately unreserved: it is
+    // bounded at CODE_TAIL_MAX_PAGES (5) of a 50-request budget and it is
+    // the source of every downstream row. Starving it would starve
+    // everything.
+
+    /** Emission: one candidate. */
+    private const RESERVE_EMIT = 1;
+
+    /** After enumeration: one contract classification + one emission. */
+    private const RESERVE_AFTER_ENUMERATION = 3 + self::RESERVE_EMIT;
+
+    /** After family classification: one enumeration page + the above. */
+    private const RESERVE_AFTER_FAMILIES = 1 + self::RESERVE_AFTER_ENUMERATION;
+
+    /** After the drained-family tail: one whole family + the above. */
+    private const RESERVE_AFTER_TAIL = 10 + self::RESERVE_AFTER_FAMILIES;
+
     /**
      * Self-heal the cron registrations.
      *
@@ -435,6 +486,13 @@ final class CosmwasmDiscoveryWorker
         CosmwasmTickBudget $budget,
         ?CosmwasmPassReport $report = null
     ): void {
+        // The budget is SHARED ACROSS CHAINS by forEachChain(), and a
+        // chain whose step threw leaves whatever reserve it had set. Start
+        // every chain from zero so one chain's failure cannot hold requests
+        // hostage from the next. Stage (a) below is deliberately
+        // unreserved — see the RESERVE_* constants.
+        $budget->reserve(0);
+
         // A classifier-version bump requeues ONLY the affected
         // classifications. Settled `not_cw721` is excluded by the
         // default affected set, so a version bump never resurrects a
@@ -525,6 +583,10 @@ final class CosmwasmDiscoveryWorker
             self::FAMILIES_ENUMERATED_PER_PASS,
             false
         );
+        // Hold back one whole family classification plus everything after
+        // it, so a long tail walk cannot consume the pass. Lowered again
+        // by classifyAndEnumerate() for each stage in turn.
+        $budget->reserve(self::RESERVE_AFTER_TAIL);
         foreach ($families as $family) {
             if ($budget->exhausted()) {
                 break;
@@ -637,12 +699,20 @@ final class CosmwasmDiscoveryWorker
     ): void {
         $priority = CosmwasmDiscoveryGate::priorityCodeIds(self::chainSlug($chainId));
 
+        // ── STAGE ORDER IS UNCHANGED; ONLY THE CEILING PER STAGE MOVES ──
+        // Each `reserve()` below holds back one unit of work for every
+        // stage still to come. It is read by canSpend()/exhausted() on
+        // EVERY spend, so a family that has already bought its contracts
+        // page stops before a sample that would breach the floor — the
+        // partial work is durable and the family stays pending, which is
+        // the same resumption path an exhausted budget always used.
         $families = CosmwasmCodeFamilyRepository::findPendingClassification(
             $chainId,
             self::FAMILIES_PER_PASS,
             CosmwasmClassifier::VERSION,
             $priority
         );
+        $budget->reserve(self::RESERVE_AFTER_FAMILIES);
         foreach ($families as $family) {
             if ($budget->exhausted()) {
                 break;
@@ -652,11 +722,15 @@ final class CosmwasmDiscoveryWorker
         }
 
         // Drain contract listings for families that ARE CW-721.
+        // Re-read AFTER classification: a family confirmed moments ago in
+        // this same pass is enumerable now, which is what lets work created
+        // upstream flow downstream within one invocation.
         $enumerable = CosmwasmCodeFamilyRepository::findEnumerable(
             $chainId,
             self::FAMILIES_ENUMERATED_PER_PASS,
             true
         );
+        $budget->reserve(self::RESERVE_AFTER_ENUMERATION);
         foreach ($enumerable as $family) {
             if ($budget->exhausted()) {
                 break;
@@ -670,6 +744,7 @@ final class CosmwasmDiscoveryWorker
             self::CONTRACTS_PER_PASS,
             CosmwasmClassifier::VERSION
         );
+        $budget->reserve(self::RESERVE_EMIT);
         foreach ($contracts as $row) {
             if ($budget->exhausted()) {
                 break;
@@ -678,6 +753,8 @@ final class CosmwasmDiscoveryWorker
             $report?->countContractClassified();
         }
 
+        // Last stage: nothing follows it, so it may use what is left.
+        $budget->reserve(0);
         if (!$budget->exhausted()) {
             $emitted = CosmwasmDiscoveryService::emitCollections($chainId, $fetcher, $budget, self::EMIT_PER_PASS);
             $report?->addEmitted($emitted['emitted'], $emitted['denied']);
