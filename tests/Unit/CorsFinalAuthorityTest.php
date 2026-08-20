@@ -223,11 +223,11 @@ final class CorsFinalAuthorityTest extends TestCase
         WpCore::registerCorsFilter();
 
         self::assertTrue(
-            CorsHandler::removeCoreCorsHeaders(),
+            CorsHandler::detachCoreCorsEmitter(),
             'removal must report success when the callback was present'
         );
         self::assertFalse(
-            CorsHandler::removeCoreCorsHeaders(),
+            CorsHandler::detachCoreCorsEmitter(),
             'a second removal has nothing to remove and must say so'
         );
     }

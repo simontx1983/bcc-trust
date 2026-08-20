@@ -185,6 +185,16 @@ final class CorsHandler
     }
 
     /**
+     * `rest_api_init` callback. An action callback must return nothing, so
+     * the removal's result — which is worth asserting on — lives on
+     * {@see self::detachCoreCorsEmitter()} instead of being swallowed here.
+     */
+    public static function removeCoreCorsHeaders(): void
+    {
+        self::detachCoreCorsEmitter();
+    }
+
+    /**
      * Detach WordPress core's REST CORS emitter.
      *
      * Deliberately narrow: this removes exactly one callback from exactly
@@ -197,7 +207,7 @@ final class CorsHandler
      *              priority, which is a contract change worth failing a
      *              test over.
      */
-    public static function removeCoreCorsHeaders(): bool
+    public static function detachCoreCorsEmitter(): bool
     {
         return remove_filter(
             'rest_pre_serve_request',
