@@ -139,6 +139,32 @@ final class BearerAuth
     }
 
     /**
+     * Does this request carry an authentication credential at all?
+     *
+     * Exposed for the edge-cache exclusion
+     * ({@see \BCC\Trust\Infrastructure\EdgeCache::isCredentialed}), which
+     * must never let a credentialed response be stored by a cache that
+     * does not key on the credential.
+     *
+     * Deliberately answered by the SAME header reader that decides
+     * authentication rather than by a second, independent check. If the
+     * cache's notion of "credentialed" could disagree with the auth
+     * layer's, the gap between them is precisely a personalized response
+     * cached as anonymous. Tying both to one reader makes that class of
+     * drift impossible — if this returns false, BearerAuth cannot have
+     * authenticated anyone either.
+     *
+     * Intentionally does NOT validate the token: a rejected or expired
+     * credential still produces a user-specific response (a 401 is not a
+     * cacheable public answer), and validating here would duplicate
+     * decode work on every request.
+     */
+    public static function hasCredential(): bool
+    {
+        return self::readAuthorizationHeader() !== '';
+    }
+
+    /**
      * Read the Authorization header from whichever source the current
      * server config populates. See the file-level docblock for the
      * forwarding requirement.

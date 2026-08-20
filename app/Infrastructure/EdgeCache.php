@@ -28,12 +28,20 @@
  * exclusion is active; revisit if a per-Origin cache-vary lands at the
  * server layer.
  *
+ * POLICY 2 (2026-08-20): a CREDENTIALED request is excluded on every
+ * route, not just the BCC namespaces — see
+ * {@see EdgeCache::isCredentialed()}. Route scoping alone left a gap,
+ * because BearerAuth authenticates globally while LSCWP decides
+ * "logged in" from cookies, and this frontend carries JWTs instead.
+ *
  * @package BCC\Trust\Infrastructure
  */
 
 declare(strict_types=1);
 
 namespace BCC\Trust\Infrastructure;
+
+use BCC\Trust\Core\Support\BearerAuth;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -60,11 +68,59 @@ final class EdgeCache
     public static function init(): void
     {
         add_filter('rest_pre_dispatch', static function ($result, $server, $request) {
-            if ($request instanceof \WP_REST_Request && self::appliesTo($request->get_route())) {
+            if ($request instanceof \WP_REST_Request && self::shouldExclude($request->get_route())) {
                 self::noCache();
             }
             return $result;
         }, 10, 3);
+    }
+
+    /**
+     * Whether the in-flight REST response must be kept out of the edge
+     * cache — either because of WHERE it is (a BCC route) or because of
+     * WHO it is for (a credentialed request).
+     */
+    public static function shouldExclude(string $route): bool
+    {
+        return self::appliesTo($route) || self::isCredentialed();
+    }
+
+    /**
+     * Whether this request carries credentials, and so must never be
+     * stored by a cache that does not key on them.
+     *
+     * ## Why route-scoping alone was not enough
+     *
+     * `appliesTo()` covers the two BCC namespaces, but
+     * {@see BearerAuth} hooks `determine_current_user` GLOBALLY (priority
+     * 30) — so a JWT authenticates on *any* route, including PeepSo's.
+     * Verified on production: `/wp-json/peepso/v1/post` returns 200 and
+     * LiteSpeed marks it `public,max-age=...`, while `/wp/v2/*` is
+     * `no-cache` because WP core sends its own nocache headers.
+     *
+     * The trap is that LSCWP decides "is this visitor logged in?" from
+     * COOKIES. This frontend authenticates with `Authorization: Bearer`
+     * and sets no cookie, so a fully authenticated request looks
+     * anonymous to the cache: its personalized response gets stored and
+     * replayed to whoever asks next. Cookie sessions were never exposed
+     * — LSCWP already excludes those — which is exactly why the gap was
+     * invisible.
+     *
+     * `is_user_logged_in()` is checked too, as belt-and-braces for any
+     * auth path that resolves a user without an Authorization header.
+     * It is guarded by `function_exists` so the predicate stays callable
+     * outside WordPress (unit tests, CLI).
+     *
+     * Anonymous traffic is untouched: both checks are false, so the
+     * anonymous edge tier keeps caching exactly as before.
+     */
+    public static function isCredentialed(): bool
+    {
+        if (BearerAuth::hasCredential()) {
+            return true;
+        }
+
+        return function_exists('is_user_logged_in') && is_user_logged_in();
     }
 
     /**
