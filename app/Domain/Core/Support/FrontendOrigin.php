@@ -4,9 +4,13 @@
  *
  * The constant is a comma-separated allowlist whose entries are either:
  *   - an exact origin string (scheme + host + optional port), or
- *   - a regex pattern prefixed with "regex:", matched case-insensitively
- *     against a request Origin. Used for Vercel preview URLs, e.g.
- *     regex:^https://bcc-frontend-[a-z0-9]+-team\.vercel\.app$
+ *   - a regex pattern prefixed with "regex:", matched case-SENSITIVELY and
+ *     force-anchored against a whole request Origin. Used for Vercel preview
+ *     URLs, e.g. regex:^https://bcc-frontend-[a-z0-9]+-team\.vercel\.app$
+ *
+ *     The pattern is wrapped as `^(?:…)$` at match time, so an entry written
+ *     without anchors still cannot match a substring. See match() for why
+ *     requiring operators to supply their own anchors is not sufficient.
  *
  * Before this class the constant was parsed in four places, and only one
  * of them understood the "regex:" prefix:
@@ -121,6 +125,36 @@ final class FrontendOrigin
      * entries are evaluated only on miss. A malformed pattern is silently
      * skipped (never matches) so a typo cannot break the whole allowlist.
      *
+     * ## Why the pattern is force-anchored and matched case-sensitively
+     *
+     * A pattern is interpolated into a delimiter pair, so an entry written
+     * without `^`/`$` matches a SUBSTRING. `regex:bcc-frontend-[a-z0-9]+-team
+     * \.vercel\.app` would then accept
+     * `https://bcc-frontend-abc-team.vercel.app.evil.test` — an
+     * attacker-controlled lookalike host. Anchoring is not something an
+     * operator should have to remember, so it is applied here.
+     *
+     * Requiring the operator to supply anchors would not be sufficient
+     * either: `^https://a\.test|https://b\.test$` carries both anchors yet
+     * still matches `https://a.test.evil.io`, because top-level alternation
+     * binds looser than either anchor. Hence the non-capturing group — it is
+     * load-bearing. Without it, `^…$` anchors only the first branch.
+     * Wrapping an already-anchored pattern is harmless: anchors are
+     * zero-width, so `^(?:^…$)$` matches exactly what `^…$` did.
+     *
+     * A consequence worth knowing: an unanchored entry now matches NOTHING
+     * rather than matching too much. Both outcomes fail closed, and a
+     * preview that stops working is a visible, safe failure.
+     *
+     * The `i` flag is deliberately absent. The exact path above is strict
+     * (`in_array(…, true)`) and therefore case-sensitive; a case-insensitive
+     * regex path would accept host spellings the exact path rejects and echo
+     * the caller's raw bytes back in Access-Control-Allow-Origin.
+     *
+     * Same defect class as the `expanded_url` substring match in X share
+     * verification, and the unbounded prefix match in the `rest_url` origin
+     * filter (now BCC\Core\Support\HeadlessOrigin, which boundary-checks).
+     *
      * @return string|null The matched origin to echo back, or null.
      */
     public static function match(string $requestOrigin): ?string
@@ -135,7 +169,7 @@ final class FrontendOrigin
         }
 
         foreach (self::patterns() as $pattern) {
-            if (@preg_match('#' . $pattern . '#i', $requestOrigin) === 1) {
+            if (@preg_match('#^(?:' . $pattern . ')$#', $requestOrigin) === 1) {
                 return $requestOrigin;
             }
         }
