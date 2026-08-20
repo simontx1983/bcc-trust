@@ -1520,4 +1520,129 @@ final class CorsFinalAuthorityTest extends TestCase
             self::assertNull($this->acao($origin), "{$origin}: must stay denied");
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Global REST ownership
+    //
+    // The gate used to delegate to EdgeCache::appliesTo(), i.e. a CACHE
+    // policy decided a SECURITY boundary. It answered "BCC namespaces
+    // only", so /wp-json/ and /wp/v2/* were left on core's reflected
+    // headers — reproduced on production 2026-08-19, where
+    // evil.example.com was echoed back from /wp-json/wp/v2/types.
+    //
+    // These are the regression guards for that: if ownsRoute() is ever
+    // re-narrowed, or re-coupled to the cache predicate, the core-route
+    // rows fail.
+    // ─────────────────────────────────────────────────────────────────
+
+    /** @return iterable<string, array{string}> */
+    public static function ownedRoutes(): iterable
+    {
+        yield 'REST index'   => ['/'];
+        yield 'core wp/v2'   => ['/wp/v2/types'];
+        yield 'bcc/v1'       => ['/bcc/v1/example'];
+        yield 'bcc-trust/v1' => ['/bcc-trust/v1/example'];
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function ownedUris(): iterable
+    {
+        yield 'REST index'    => ['/wp-json/'];
+        yield 'core wp/v2'    => ['/wp-json/wp/v2/types'];
+        yield 'bcc/v1'        => ['/wp-json/bcc/v1/example'];
+        yield 'bcc-trust/v1'  => ['/wp-json/bcc-trust/v1/example'];
+        yield 'rest_route'    => ['/?rest_route=/wp/v2/types'];
+    }
+
+    #[DataProvider('ownedRoutes')]
+    public function testCorsIsOwnedOnEveryRestRouteViaTheResponsePath(string $route): void
+    {
+        self::assertSame(
+            self::PROD,
+            $this->acao(self::PROD, $route),
+            "the handler must own {$route}, not defer to core"
+        );
+        self::assertSame(
+            [],
+            HeaderRecorder::values('Access-Control-Allow-Credentials'),
+            'credentials must never be emitted'
+        );
+    }
+
+    #[DataProvider('ownedUris')]
+    public function testCorsIsOwnedOnEveryRestRouteViaThePreflightPath(string $uri): void
+    {
+        $_SERVER['HTTP_ORIGIN'] = self::PROD;
+
+        $status = $this->servePreflight($uri);
+
+        self::assertSame(204, $status, "preflight must terminate for {$uri}");
+
+        $values = HeaderRecorder::values('Access-Control-Allow-Origin');
+        self::assertCount(1, $values, 'exactly one ACAO expected');
+        self::assertSame(self::PROD, $values[0]);
+        self::assertSame([], HeaderRecorder::values('Access-Control-Allow-Credentials'));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Origin policy, on a CORE route
+    //
+    // /wp/v2/types is the representative route precisely because it is
+    // the one no BCC code used to guard.
+    // ─────────────────────────────────────────────────────────────────
+
+    /** @return iterable<string, array{string, ?string}> */
+    public static function originPolicy(): iterable
+    {
+        yield 'configured origin allowed' => [self::PROD, self::PROD];
+        yield 'hostile origin denied'     => ['https://evil.example.com', null];
+        yield 'wrong environment denied'  => [self::STAGING, null];
+        yield 'literal null denied'       => ['null', null];
+        yield 'malformed denied'          => ['https://bluecollarcrypto.io/path?q=1#f', null];
+        yield 'absent origin gets none'   => ['', null];
+    }
+
+    #[DataProvider('originPolicy')]
+    public function testOriginPolicyOnACoreRouteResponsePath(string $origin, ?string $expected): void
+    {
+        self::assertSame($expected, $this->acao($origin, '/wp/v2/types'));
+        self::assertSame([], HeaderRecorder::values('Access-Control-Allow-Credentials'));
+    }
+
+    #[DataProvider('originPolicy')]
+    public function testOriginPolicyOnACoreRoutePreflightPath(string $origin, ?string $expected): void
+    {
+        if ($origin === '') {
+            unset($_SERVER['HTTP_ORIGIN']);
+        } else {
+            $_SERVER['HTTP_ORIGIN'] = $origin;
+        }
+
+        $this->servePreflight('/wp-json/wp/v2/types');
+
+        $values = HeaderRecorder::values('Access-Control-Allow-Origin');
+        self::assertLessThanOrEqual(1, count($values), 'more than one ACAO was emitted');
+        self::assertSame($expected, $values === [] ? null : $values[0]);
+        self::assertSame([], HeaderRecorder::values('Access-Control-Allow-Credentials'));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Ordered sequences — no header state may survive between requests.
+    // ─────────────────────────────────────────────────────────────────
+
+    public function testAllowedThenEvilThenAllowedLeaksNothing(): void
+    {
+        self::assertSame(self::PROD, $this->acao(self::PROD, '/wp/v2/types'), 'call 1');
+        self::assertNull($this->acao('https://evil.example.com', '/wp/v2/types'), 'call 2 must not inherit call 1');
+        self::assertSame(self::PROD, $this->acao(self::PROD, '/wp/v2/types'), 'call 3');
+        self::assertSame([], HeaderRecorder::values('Access-Control-Allow-Credentials'));
+    }
+
+    public function testEvilThenAllowedThenEvilLeaksNothing(): void
+    {
+        self::assertNull($this->acao('https://evil.example.com', '/wp/v2/types'), 'call 1');
+        self::assertSame(self::PROD, $this->acao(self::PROD, '/wp/v2/types'), 'call 2');
+        self::assertNull($this->acao('https://evil.example.com', '/wp/v2/types'), 'call 3 must not inherit call 2');
+        self::assertSame([], HeaderRecorder::values('Access-Control-Allow-Credentials'));
+    }
 }
