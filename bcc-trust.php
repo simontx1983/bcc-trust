@@ -1466,8 +1466,12 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 |              the request as the JWT's user_id claim. WP cookie auth
 |              wins when both are present (same-origin admin tooling).
 |
-| CorsHandler → CORS for /bcc/v1/* gated by BCC_FRONTEND_ORIGIN.
-|               Same-origin only when the constant is undefined.
+| CorsHandler → the SINGLE CORS authority for every WordPress REST
+|               route, gated by BCC_FRONTEND_ORIGIN (parsed by
+|               FrontendOrigin). It removes core's `rest_send_cors_headers`
+|               — which reflected any Origin with credentials on every
+|               route — and never emits Allow-Credentials itself. Same-origin
+|               only when the constant is undefined.
 |
 | EdgeCache   → excludes every BCC REST response from the LiteSpeed
 |               edge cache (Origin-variant CORS hazard — see the class
