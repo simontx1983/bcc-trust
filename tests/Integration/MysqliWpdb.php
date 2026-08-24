@@ -68,8 +68,48 @@ final class MysqliWpdb
     }
 
     /**
-     * WP-style prepare: %d → int, %f → float, %s → 'escaped'. Accepts either
-     * variadic args or a single array (both forms the repos use).
+     * Placeholder/argument mismatches seen by prepare(), newest last.
+     *
+     * WordPress reports these via _doing_it_wrong(); there is no WP here, so the
+     * shim records them instead and tests assert the list is empty.
+     *
+     * @var list<string>
+     */
+    public array $doingItWrong = [];
+
+    /** Forget any recorded prepare() mismatches. */
+    public function resetDoingItWrong(): void
+    {
+        $this->doingItWrong = [];
+    }
+
+    /**
+     * Count the placeholders `wpdb::prepare()` would count in $query.
+     *
+     * Deliberately textual, exactly like WordPress: `prepare()` does not parse
+     * SQL, so a `%f` sitting inside an embedded SQL comment counts just the
+     * same as one in a value position. Reproducing that is the whole point —
+     * the shim used to substitute positionally and silently pad missing args
+     * with '', which is why a real 14-placeholders/13-arguments defect in
+     * VoteRepository::getVoteAggregatesForPage() passed the integration suite
+     * while failing in production.
+     *
+     * `%%` is an escaped literal percent and is not a placeholder.
+     */
+    private static function countPlaceholders(string $query): int
+    {
+        $stripped = str_replace('%%', '', $query);
+        return preg_match_all('/%(?:\d+\$)?[dsfFi]/', $stripped);
+    }
+
+    /**
+     * WP-style prepare: %d → int, %f → float, %s → 'escaped', %i → identifier.
+     * Accepts either variadic args or a single array (both forms the repos use).
+     *
+     * Mirrors WordPress's contract on a count mismatch: record the fault and
+     * return an empty string, so the caller's query does not run. That empty
+     * return is what turns this class of bug into silently-zeroed results
+     * rather than a loud failure, so the shim has to reproduce it.
      *
      * @param mixed ...$args
      */
@@ -78,8 +118,27 @@ final class MysqliWpdb
         if (count($args) === 1 && is_array($args[0])) {
             $args = array_values($args[0]);
         }
+
+        $placeholders = self::countPlaceholders($query);
+        $argCount     = count($args);
+
+        if ($placeholders !== $argCount) {
+            $this->doingItWrong[] = sprintf(
+                'The query does not contain the correct number of placeholders (%d) for the number of arguments passed (%d).',
+                $placeholders,
+                $argCount
+            );
+
+            // WP returns '' when it has fewer arguments than placeholders and
+            // no numbered placeholders are in play. Anything else is left to
+            // substitute so over-supplied args stay as visible as they are in WP.
+            if ($argCount < $placeholders && !preg_match('/%\d+\$/', $query)) {
+                return '';
+            }
+        }
+
         $i = 0;
-        $out = preg_replace_callback('/%[dsfF]/', function (array $m) use (&$i, $args): string {
+        $out = preg_replace_callback('/%[dsfFi]/', function (array $m) use (&$i, $args): string {
             $v = $args[$i] ?? '';
             $i++;
             switch ($m[0]) {
@@ -88,6 +147,8 @@ final class MysqliWpdb
                 case '%f':
                 case '%F':
                     return (string) (float) $v;
+                case '%i':
+                    return '`' . str_replace('`', '``', (string) $v) . '`';
                 case '%s':
                 default:
                     return "'" . $this->db->real_escape_string((string) $v) . "'";
@@ -105,6 +166,11 @@ final class MysqliWpdb
     public function query(string $sql)
     {
         $this->last_error = '';
+        if (trim($sql) === '') {
+            // See get_results(): an empty query is a refused prepare(), not a crash.
+            $this->last_error = 'Empty query (prepare() returned an empty string).';
+            return false;
+        }
         $result = @$this->db->query($sql);
         if ($result === false) {
             $this->last_error = $this->db->error;
@@ -122,10 +188,21 @@ final class MysqliWpdb
         return true;
     }
 
-    /** @return list<object> */
+    /**
+     * @return list<object>
+     *
+     * An empty $sql means an upstream prepare() refused to build the query.
+     * WordPress does not execute it and the caller sees "no rows"; mysqli would
+     * instead throw a ValueError, which would misreport the failure as a crash
+     * in the test rather than the silent empty result production actually gets.
+     */
     public function get_results(string $sql): array
     {
         $this->last_error = '';
+        if (trim($sql) === '') {
+            $this->last_error = 'Empty query (prepare() returned an empty string).';
+            return [];
+        }
         $res = @$this->db->query($sql);
         if ($res === false || $res === true) {
             if ($res === false) {

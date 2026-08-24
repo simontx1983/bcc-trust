@@ -283,10 +283,38 @@ $GLOBALS['wpdb']->query(
     ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
 );
 
+// WordPress core wp_users. Only the columns the BCC read paths join against:
+// VoteRepository::getVoteAggregatesForPage() LEFT JOINs it for user_registered
+// to compute the confidence-diversity "mature voter" term.
+//
+// user_registered is NULLable here where WP core declares
+// `NOT NULL DEFAULT '0000-00-00 00:00:00'`: MySQL 8 runs with NO_ZERO_DATE, so
+// the core default is rejected and the CREATE fails. The aggregate already
+// treats a NULL registration as "not mature", so the semantics match.
+$created = $GLOBALS['wpdb']->query(
+    "CREATE TABLE `wp_users` (
+        ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_login VARCHAR(60) NOT NULL DEFAULT '',
+        user_email VARCHAR(100) NOT NULL DEFAULT '',
+        user_registered DATETIME NULL DEFAULT NULL,
+        display_name VARCHAR(250) NOT NULL DEFAULT '',
+        PRIMARY KEY (ID)
+    ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+);
+if ($created === false) {
+    fwrite(STDERR, "FATAL: could not create wp_users: " . $GLOBALS['wpdb']->last_error . "\n");
+    exit(1);
+}
+
 // Core tables (votes, scores, endorsements, …) via the real installer; its
 // endorsement migration uses get_option/update_option (stubbed above).
 require_once dirname(__DIR__, 2) . '/includes/database/schema-core.php';
 bcc_trust_create_core_tables();
+
+// user_info via its real installer — the aggregate query LEFT JOINs it for
+// fraud_score (the retroactive fraud discount).
+require_once dirname(__DIR__, 2) . '/includes/database/schema-user-info.php';
+bcc_trust_create_user_info_table();
 
 // On-chain claim-resolution tables (claims / validators / collections /
 // wallet_links) — exercised by UserVerifiedClaimOnPageIntegrationTest.
