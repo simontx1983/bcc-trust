@@ -840,6 +840,56 @@ class VoteRepository {
      *
      * @phpstan-return VoteAggregateRow
      */
+    /*
+     * ── Why this query carries no embedded SQL comments ──
+     *
+     * Everything below used to be documented INSIDE the string handed to
+     * $wpdb->prepare(). Two independent WordPress behaviours turned that prose
+     * into a silent outage, and both are invisible in code review:
+     *
+     *  1. prepare() counts placeholders TEXTUALLY. A documented constant
+     *     written as "Floor (%f) = …" counted as a 14th placeholder against 13
+     *     arguments, so prepare() reported _doing_it_wrong and returned an
+     *     empty string.
+     *
+     *  2. wpdb::query() calls get_table_from_query(), which regex-matches the
+     *     first "FROM <word>". A comment reading "…are excluded from the
+     *     mature_unique_voters count…" made it resolve the table name as
+     *     "the". check_safe_collation() then failed and the query was rejected
+     *     with "Could not perform query because it contains invalid data".
+     *
+     * Either one alone yields an empty result, which the `if (!$result)` guard
+     * below converts into a zero row — indistinguishable from "this page has no
+     * votes". Keep the SQL prose-free; document it here instead.
+     *
+     * ── voter maturity (confidence-diversity term) ──
+     * Fresh accounts (age < N days) are left out of the mature_unique_voters
+     * distinct count. user_registered is in site-local time, same frame as
+     * NOW(), so the comparison carries no timezone drift.
+     *
+     * ── vesting-aware weight ──
+     * Uses vested_weight when populated (the graduation cron keeps it current
+     * with the voter's vesting stage) and falls back to weight on legacy rows
+     * where vested_weight was never written. Without the fallback, a stage-0
+     * voter's 10-percent vote was summed at full effective weight, nullifying
+     * the documented Sybil-mitigation vesting.
+     *
+     * ── retroactive fraud discount ──
+     * SAFETY CONTRACT: the SQL implements a simplified fraud_score-only model.
+     * The full multi-signal logic (automation, device, behaviour,
+     * multi-account) lives only in PHP — see FraudDiscountCalculator::compute().
+     * To keep both paths aligned, ALL fraud signals MUST ultimately update
+     * user_info.fraud_score. A signal that penalises in PHP without flowing
+     * into fraud_score leaves historical votes under-discounted on recalc.
+     * The GREATEST() floor is BCC_TRUST_RETROACTIVE_FRAUD_FLOOR and must match
+     * the PHP constant.
+     * @see FraudDiscountCalculator::retroactiveFactor() — PHP equivalent
+     *
+     * ── time decay ──
+     * The final CASE applies the linear decay described in the docblock above.
+     *
+     * Guarded by tests/Unit/PreparedSqlCommentPlaceholderTest.php.
+     */
     public function getVoteAggregatesForPage( int $pageId ): object {
         global $wpdb;
 
@@ -869,42 +919,13 @@ class VoteRepository {
                     v.vote_type,
                     v.voter_user_id AS voter_id,
                     v.created_at,
-                    /* ── voter maturity for confidence-diversity term ──
-                     * Fresh accounts (age < N days) are excluded from the
-                     * mature_unique_voters distinct count. user_registered is
-                     * in site-local time (same as NOW()); matching frames
-                     * avoids timezone drift in the comparison.
-                     */
                     CASE
                         WHEN u.user_registered IS NOT NULL
                          AND u.user_registered <= DATE_SUB(NOW(), INTERVAL %d DAY)
                           THEN 1
                         ELSE 0
                     END AS is_mature,
-                    /* ── vesting-aware weight ──
-                     * Use vested_weight when populated (graduation cron
-                     * keeps it current with the voter's vesting stage).
-                     * Fall back to weight on legacy rows where vested_weight
-                     * was never written. Without this, fresh voters' stage-0
-                     * 10% votes were summed at full effective weight,
-                     * nullifying the documented Sybil-mitigation vesting.
-                     */
                     COALESCE(NULLIF(v.vested_weight, 0), v.weight)
-                    /* ── retroactive fraud discount ──
-                     *
-                     * SAFETY CONTRACT: This SQL uses a simplified fraud_score-only
-                     * model. The full multi-signal fraud logic (automation, device,
-                     * behavior, multi-account) exists only in PHP — see
-                     * FraudDiscountCalculator::compute().
-                     *
-                     * To keep both paths aligned, ALL fraud signals MUST ultimately
-                     * update the user_info.fraud_score column. If a signal penalizes
-                     * in PHP but doesn't flow into fraud_score, historical votes will
-                     * be under-discounted during recalculation.
-                     *
-                     * Floor (%f) = BCC_TRUST_RETROACTIVE_FRAUD_FLOOR — must match PHP.
-                     * @see FraudDiscountCalculator::retroactiveFactor() — PHP equivalent
-                     */
                     * CASE
                         WHEN COALESCE(ui.fraud_score, 0) <= %d
                           THEN 1.0
@@ -918,7 +939,6 @@ class VoteRepository {
                                   GREATEST(%f, 1.0 - COALESCE(v.fraud_score_at_vote, 0) / 100.0),
                                   1.0)
                       END
-                    /* ── time decay ── */
                     * CASE
                         WHEN TIMESTAMPDIFF(SECOND, v.created_at, UTC_TIMESTAMP()) / 86400.0 > %d
                           THEN %f
