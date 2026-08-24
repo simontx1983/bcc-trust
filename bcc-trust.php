@@ -1242,6 +1242,23 @@ function bcc_trust_schedule_cron_jobs() {
     \BCC\Trust\Core\Services\CronService::scheduleAll();
 }
 
+// Schedule health, on ordinary requests rather than on cron.
+//
+// This used to be admin_init only, which meant the schedule was only ever
+// repaired if a human opened wp-admin. On a headless install that can be days.
+// It must not hang off WP-Cron either — missing cron state is precisely what
+// it repairs, so a cron-driven healer cannot fix the case that matters.
+//
+// `init` fires for front-end, REST and admin requests alike. The work behind
+// it is a single autoloaded option read unless the version changed or the
+// hourly drift check is due, so the added cost on a normal request is
+// negligible. admin_init stays as well: it runs after init, and keeping it
+// means an operator loading wp-admin still gets the immediate version-change
+// path even if something short-circuits init.
+add_action('init', function () {
+    \BCC\Trust\Core\Services\CronService::maybeReschedule();
+}, 99);
+
 add_action('admin_init', function () {
     \BCC\Trust\Core\Services\CronService::maybeReschedule();
 });
