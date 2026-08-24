@@ -885,7 +885,30 @@ class CronService
         return $schedules;
     }
 
-    public static function scheduleAll(): void
+    /**
+     * How often the state-aware health check may run when the version is
+     * unchanged. Filterable so a site recovering from an incident can tighten
+     * it without a deploy.
+     */
+    private const HEALTH_CHECK_INTERVAL = 3600; // one hour; literal, not
+    // HOUR_IN_SECONDS, because a class constant referencing a WordPress
+    // constant only fails at first use — and unit tests run without WP.
+
+    /** Timestamp option for the health-check throttle. */
+    private const HEALTH_CHECK_OPTION = 'bcc_trust_cron_health_checked_at';
+
+    /**
+     * The recurring hooks this service owns and will restore.
+     *
+     * Kept in step with `includes/cron-hooks.php` by
+     * CronScheduleSelfHealTest::testEveryOwnedJobIsInTheCanonicalInventory —
+     * the two drifted apart once already, which is how
+     * `bcc_trust_weekly_slow_ring_scan` ended up scheduled here but filed
+     * under `cleanup_only` there, invisible to the drift detector.
+     *
+     * @return array<string, string> hook => cron schedule slug
+     */
+    public static function ownedJobs(): array
     {
         $jobs = [
             'bcc_trust_daily_cleanup'          => 'daily',    // cleanup + archive + fraud decay
@@ -901,6 +924,44 @@ class CronService
             'bcc_trust_elite_eligibility_sweep' => 'daily',          // §J.12: nightly elite-gate recompute
             'bcc_trust_feed_hot_warm'          => 'bcc_one_minute',  // anon /feed/hot first-page payload warm
         ];
+
+        /**
+         * Filter the recurring hooks this service owns.
+         *
+         * Removing an entry opts a site out entirely: the hook is neither
+         * scheduled by scheduleAll() nor treated as missing by the self-heal
+         * check, so an intentionally disabled job is never resurrected.
+         *
+         * @param array<string, string> $jobs hook => cron schedule slug
+         */
+        $filtered = apply_filters('bcc_trust_owned_cron_jobs', $jobs);
+
+        return is_array($filtered) ? $filtered : $jobs;
+    }
+
+    /**
+     * Owned recurring hooks that are not currently scheduled.
+     *
+     * A hook that a site has deliberately disabled through the
+     * `bcc_trust_owned_cron_jobs` filter is not "missing" — it is not owned,
+     * so it never appears here and self-healing will not resurrect it.
+     *
+     * @return array<string, string> hook => schedule slug
+     */
+    public static function missingJobs(): array
+    {
+        $missing = [];
+        foreach (self::ownedJobs() as $hook => $interval) {
+            if (!wp_next_scheduled($hook)) {
+                $missing[$hook] = $interval;
+            }
+        }
+        return $missing;
+    }
+
+    public static function scheduleAll(): void
+    {
+        $jobs = self::ownedJobs();
 
         // Clear retired hooks so they don't fire orphaned actions.
         $retired = [
@@ -921,11 +982,101 @@ class CronService
         }
     }
 
+    /**
+     * Keep the schedule correct — on version change AND on drift.
+     *
+     * The version gate alone was not enough. When bcc-core fails to load (a
+     * missing GMP extension is the observed cause) this plugin never boots,
+     * its `cron_schedules` filter never registers, and WP-Cron cannot
+     * reschedule events whose interval slug it no longer recognises. Fifteen
+     * recurring events dropped out within fifteen seconds of one such boot.
+     * Once the extension was restored the version had NOT changed, so
+     * scheduleAll() was skipped and the events stayed gone — permanently,
+     * because nothing else re-registers them.
+     *
+     * So: a version change still schedules immediately, and otherwise a
+     * throttled health check restores anything owned that has gone missing.
+     *
+     * Three properties this has to hold:
+     *
+     *  - **Cheap.** This runs on ordinary requests, not just cron. The
+     *    version comparison is one autoloaded option read; the drift scan is
+     *    behind a timestamp throttle so it runs at most hourly.
+     *  - **Concurrency-safe.** Two simultaneous requests could both pass the
+     *    throttle. The repair itself is taken under the same advisory lock
+     *    the other cron paths use, and re-checks under that lock, so a loser
+     *    finds nothing to do. wp_schedule_event() is also guarded by
+     *    wp_next_scheduled() inside scheduleAll(), making a duplicate
+     *    impossible even if both somehow proceeded.
+     *  - **Not cron-dependent.** Missing cron state is exactly what this
+     *    repairs, so it cannot be driven by WP-Cron. It is wired to `init`
+     *    and `admin_init` in bcc-trust.php — any request will do.
+     */
     public static function maybeReschedule(): void
     {
         if (get_option('bcc_trust_cron_version') !== BCC_TRUST_VERSION) {
-            self::scheduleAll();
+            self::healSchedule();
             update_option('bcc_trust_cron_version', BCC_TRUST_VERSION, false);
+            return;
+        }
+
+        /**
+         * Filter the minimum gap between drift checks.
+         *
+         * @param int $seconds Default one hour.
+         */
+        $interval = (int) apply_filters('bcc_trust_cron_health_interval', self::HEALTH_CHECK_INTERVAL);
+        $last     = (int) get_option(self::HEALTH_CHECK_OPTION, 0);
+        $now      = time();
+
+        // A clock that moved backwards must not park the check forever.
+        if ($last > $now) {
+            $last = 0;
+        }
+        if ($last > 0 && ($now - $last) < $interval) {
+            return;
+        }
+
+        // Stamp BEFORE scanning so a burst of concurrent requests collapses to
+        // one scan even before the advisory lock is reached.
+        update_option(self::HEALTH_CHECK_OPTION, $now, false);
+
+        if (self::missingJobs() === []) {
+            return;
+        }
+
+        self::healSchedule();
+    }
+
+    /**
+     * Restore the owned schedule under the shared cron advisory lock.
+     *
+     * Re-reads the missing set inside the lock: by the time a second request
+     * gets here the winner has usually already repaired everything, and this
+     * turns the loser into a no-op instead of a redundant scheduleAll().
+     */
+    private static function healSchedule(): void
+    {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire('bcc_cron_schedule_lock', 0)) {
+            return; // another request is repairing; nothing to do
+        }
+
+        try {
+            $missing = self::missingJobs();
+
+            self::scheduleAll();
+
+            if ($missing !== []) {
+                \BCC\Core\Log\Logger::warning('[CronService] restored missing recurring events', [
+                    'hooks' => array_keys($missing),
+                    'count' => count($missing),
+                ]);
+                AuditLogger::log('cron_schedule_self_healed', 0, [
+                    'hooks' => array_keys($missing),
+                ], 'system');
+            }
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release('bcc_cron_schedule_lock');
         }
     }
 

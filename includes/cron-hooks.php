@@ -34,6 +34,12 @@ return [
         'bcc_trust_daily_maintenance'           => ['interval' => 'daily',                        'description' => 'read-model sync safety net'],
         'bcc_trust_daily_contribution_recovery' => ['interval' => 'daily',                        'description' => 'trust recovery through contribution (caution/risky cohort)'],
         'bcc_trust_weekly_digest'               => ['interval' => 'bcc_weekly',                   'description' => 'weekly digest mailer'],
+        // Recurring, not a legacy drain: CronService::scheduleAll() has always
+        // scheduled this weekly. It was filed under cleanup_only, so the
+        // drift detector never expected it — and when it silently went
+        // missing, nothing noticed. Kept in step with CronService::ownedJobs()
+        // by CronScheduleSelfHealTest.
+        'bcc_trust_weekly_slow_ring_scan'       => ['interval' => 'bcc_weekly',                   'description' => 'slow endorsement-ring detection (scale hardening)'],
         'bcc_trust_deferred_rm_sync'            => ['interval' => 'bcc_thirty_seconds',           'description' => 'read-model deferred-rebuild for staleness recovery'],
         'bcc_trust_divergence_state_sweep'      => ['interval' => 'daily',                        'description' => 'divergence-state classification + §J.7 notifications'],
         'bcc_trust_daily_attestation_decay'     => ['interval' => 'daily',                        'description' => 'attestation_bonus decay recompute sweep (Slice E)'],
@@ -83,7 +89,6 @@ return [
         'bcc_trust_initial_user_sync',
         'bcc_trust_initial_read_model_sync',
         // Scale-hardening / legacy drains still worth clearing on long-lived installs.
-        'bcc_trust_weekly_slow_ring_scan',
         'bcc_pull_batch_sweep',
         // Retired hooks (kept for uninstall hygiene on installs that scheduled them pre-retirement).
         // bcc_trust_daily_vesting retired 2026-07-31 (Rank Phase 2, audit #10):

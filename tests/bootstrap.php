@@ -28,3 +28,14 @@ if (!defined('ABSPATH')) {
 require_once dirname(__DIR__) . '/includes/config.php';
 
 require_once __DIR__ . '/../vendor/autoload.php';
+
+// Namespace-scoped WP shims for CronService's schedule self-healing, plus the
+// bcc-core collaborators it calls by fully-qualified name.
+//
+// Loaded here rather than from the test file on purpose: PHPUnit loads every
+// test into one process, so a shim declared in a test file only wins if that
+// file loads first. `apply_filters` in BCC\Trust\Core\Services and
+// `AdvisoryLock` are each already declared by several suites, and alphabetical
+// load order is not a contract. The defaults match what those suites already
+// assume, so this makes the harness deterministic without changing behaviour.
+require_once __DIR__ . '/Stubs/cron-schedule-stubs.php';
