@@ -2894,13 +2894,27 @@ final class Plugin
                         }
 
                         $collections = $fetcher->fetch_collections($address, $chainId);
-                        foreach ($collections as $row) {
-                            \BCC\Trust\Onchain\Repositories\CollectionRepository::upsert(
-                                $row,
-                                $walletId
-                            );
+                        // #212: the result is load-bearing — a discarded
+                        // false is exactly how the dropped writes hid.
+                        $persisted = \BCC\Trust\Onchain\Services\CollectionPersistBatch::persist(
+                            $collections,
+                            $walletId,
+                            4 * HOUR_IN_SECONDS
+                        );
+
+                        if (\BCC\Trust\Onchain\Services\CollectionPersistBatch::allPersisted($persisted)) {
+                            \BCC\Trust\Onchain\Repositories\WalletRepository::markHoldingsRefreshed($walletId);
+                        } else {
+                            // Do NOT advance the watermark. Marking a wallet
+                            // refreshed after losing writes suppresses the next
+                            // attempt and makes the loss permanent — the same
+                            // "failure leaves no trace" shape as #212 itself.
+                            \BCC\Core\Log\Logger::warning('[bcc-trust] gallery_refresh could not persist every collection; leaving the wallet eligible for retry', [
+                                'post_id'        => $postId,
+                                'wallet_link_id' => $walletId,
+                                'chain_id'       => $chainId,
+                            ] + $persisted);
                         }
-                        \BCC\Trust\Onchain\Repositories\WalletRepository::markHoldingsRefreshed($walletId);
                     }
                 } catch (\Throwable $e) {
                     \BCC\Core\Log\Logger::error('[bcc-trust] gallery_refresh failed', [
