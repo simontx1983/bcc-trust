@@ -34,7 +34,7 @@ if (!defined('ABSPATH')) {
  */
 class WatchMetaRepository
 {
-    /** Explicit column list — must match schema-watch-meta.php. */
+    /** Explicit projection of the columns consumed by this repository. */
     private const COLUMNS = 'follow_id, tier_at_watch, batch_id, watched_at';
 
     private string $table;
