@@ -130,26 +130,4 @@ final class WatchBatchRepository
         }
         return $map;
     }
-
-    /**
-     * Read-side: get the snapshot for a given internal id (the
-     * peepso_activities.act_external_id pointer). Used by future
-     * feed-renderer hydration paths.
-     *
-     * @phpstan-return WatchBatchRow|null
-     */
-    public function findById(int $id): ?object
-    {
-        if ($id <= 0) {
-            return null;
-        }
-
-        global $wpdb;
-        /** @var WatchBatchRow|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
-            'SELECT ' . self::COLUMNS . " FROM {$this->table} WHERE id = %d LIMIT 1",
-            $id
-        ));
-        return $row ?: null;
-    }
 }

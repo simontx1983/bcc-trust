@@ -29,14 +29,13 @@ if (!defined('ABSPATH')) {
  *     follow_id: numeric-string,
  *     tier_at_watch: string|null,
  *     batch_id: string|null,
- *     visibility: string,
  *     watched_at: string
  * }
  */
 class WatchMetaRepository
 {
     /** Explicit column list — must match schema-watch-meta.php. */
-    private const COLUMNS = 'follow_id, tier_at_watch, batch_id, visibility, watched_at';
+    private const COLUMNS = 'follow_id, tier_at_watch, batch_id, watched_at';
 
     private string $table;
 
@@ -73,7 +72,7 @@ class WatchMetaRepository
      * batch_id is null on first insert and assigned later by the
      * BatchAggregatorService when the batch closes (per §C3).
      */
-    public function insert(int $followId, ?string $tierAtWatch, ?string $batchId, string $visibility = 'public'): bool
+    public function insert(int $followId, ?string $tierAtWatch, ?string $batchId): bool
     {
         global $wpdb;
 
@@ -81,9 +80,8 @@ class WatchMetaRepository
             'follow_id'     => $followId,
             'tier_at_watch' => $tierAtWatch,
             'batch_id'      => $batchId,
-            'visibility'    => $visibility,
             'watched_at'    => current_time('mysql', true),
-        ], ['%d', '%s', '%s', '%s', '%s']);
+        ], ['%d', '%s', '%s', '%s']);
 
         return $result !== false;
     }
@@ -107,41 +105,9 @@ class WatchMetaRepository
     }
 
     /**
-     * Bulk-fetch watch-meta for a set of follow_ids. Used by the watchlist
-     * list endpoint after PeepSo returns the user's follows — we then
-     * enrich with our metadata in a single query (no N+1).
-     *
-     * @param int[] $followIds
-     * @phpstan-return array<int, WatchMetaRow> follow_id => row
-     */
-    public function findManyByFollowIds(array $followIds): array
-    {
-        if (empty($followIds)) {
-            return [];
-        }
-
-        global $wpdb;
-        $placeholders = implode(',', array_fill(0, count($followIds), '%d'));
-
-        /** @var list<WatchMetaRow>|null */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            'SELECT ' . self::COLUMNS . " FROM {$this->table}
-             WHERE follow_id IN ({$placeholders})
-             LIMIT 500",
-            ...$followIds
-        ));
-
-        $map = [];
-        foreach ($rows ?: [] as $row) {
-            $map[(int) $row->follow_id] = $row;
-        }
-        return $map;
-    }
-
-    /**
-     * Bulk variant of findByBatchId — fetch members for many batches
-     * in one round-trip. Used by the §A3 feed-body hydrator to
-     * compose watch_batch top_cards across a feed page.
+     * Fetch members for many batches in one round-trip. Used by the §A3
+     * feed-body hydrator to compose watch_batch top_cards across a feed
+     * page.
      *
      * Rows are returned grouped by batch_id, ordered within each
      * group by (watched_at ASC, follow_id ASC) — the same order the
@@ -181,49 +147,6 @@ class WatchMetaRepository
             $map[$bid][] = $row;
         }
         return $map;
-    }
-
-    /**
-     * Find all watch-meta rows belonging to a single batch. Used by the
-     * BatchAggregatorService when emitting the §C3 watch_batch feed item
-     * to compose card_count + top_cards + more_count from the actual
-     * watches in the batch.
-     *
-     * @phpstan-return list<WatchMetaRow>
-     */
-    public function findByBatchId(string $batchId): array
-    {
-        global $wpdb;
-
-        /** @var list<WatchMetaRow>|null */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            'SELECT ' . self::COLUMNS . " FROM {$this->table}
-             WHERE batch_id = %s
-             ORDER BY watched_at ASC
-             LIMIT 500",
-            $batchId
-        ));
-
-        return $rows ?: [];
-    }
-
-    /**
-     * Assign a follow_id to a batch_id. Called as the
-     * BatchAggregatorService closes a batch and stamps every member.
-     */
-    public function assignToBatch(int $followId, string $batchId): bool
-    {
-        global $wpdb;
-
-        $result = $wpdb->update(
-            $this->table,
-            ['batch_id' => $batchId],
-            ['follow_id' => $followId],
-            ['%s'],
-            ['%d']
-        );
-
-        return $result !== false;
     }
 
     /**
