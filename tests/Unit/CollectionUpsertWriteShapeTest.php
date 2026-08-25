@@ -228,26 +228,59 @@ final class CollectionUpsertWriteShapeTest extends TestCase
      * Blank string metadata is treated as "not reported". Numeric columns keep
      * their own helpers so a genuine zero is still written — a broad empty()
      * rule would discard both.
+     *
+     * The rule moved out of upsert()'s body into the shared private helpers in
+     * #220, so all three writers obey one implementation. Asserted against the
+     * whole class for that reason.
      */
     public function testBlankStringsAreTreatedAsAbsentButZeroIsNot(): void
     {
-        $body = $this->upsertBody();
+        $src = $this->repoSource();
 
         self::assertMatchesRegularExpression(
             '/trim\(\$string\) === \x27\x27 \? \x27NULL\x27/',
-            $body,
+            $src,
             "'' and whitespace-only must resolve to SQL NULL so COALESCE preserves the existing value"
         );
         self::assertStringNotContainsString(
             'empty($value)',
-            $body,
+            $src,
             'empty() would discard a legitimate numeric zero and the string "0"'
         );
         // The numeric helpers must remain null-only, never blank-sensitive.
         self::assertStringContainsString(
-            "return \$value === null ? 'NULL' : \$wpdb->prepare('%d', (int) \$value);",
-            $body,
+            "return \$wpdb->prepare('%d', (int) \$value);",
+            $src,
             'integer columns must still write a genuine 0'
+        );
+    }
+
+    /**
+     * ONE implementation of the blank rule, not three. Before #220 the same
+     * decision was made independently in upsert(), bulkUpsert() and
+     * addManual() — two of them wrongly. Duplicating it again is how the
+     * defect would come back.
+     */
+    public function testTheBlankRuleHasExactlyOneImplementation(): void
+    {
+        $src = $this->repoSource();
+
+        self::assertSame(
+            1,
+            preg_match_all('/trim\(\$string\) === \x27\x27 \? \x27NULL\x27/', $src),
+            'the blank-to-NULL rule must exist in exactly one shared helper'
+        );
+        self::assertSame(
+            1,
+            preg_match_all('/private static function sqlStringOrNull/', $src),
+            'exactly one sqlStringOrNull helper'
+        );
+        // And every writer must actually route through the helpers rather than
+        // rebuilding a fragment inline.
+        self::assertSame(
+            0,
+            preg_match_all('/!== null \? \$wpdb->prepare/', $src),
+            'no writer may hand-roll its own NULL fragment any more'
         );
     }
 
