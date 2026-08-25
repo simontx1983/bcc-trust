@@ -16,7 +16,7 @@
  * materializes a real PeepSo follow (user→user, viewer→operator),
  * and deletes the row here. So `bcc_page_follows` is the pre-claim
  * holding pen; the canonical post-claim store is still
- * `peepso_user_friendships` + `bcc_watch_meta`.
+ * `peepso_user_followers` + `bcc_watch_meta`.
  *
  * Why a separate table rather than a `placeholder_post_author=1`
  * trick on `wp_posts`: a shared system user as followee would mean

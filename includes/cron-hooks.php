@@ -67,7 +67,7 @@ return [
         'bcc_cosmwasm_daily_discovery'          => ['interval' => 'daily',                        'description' => 'CosmWasm CW-721 incremental discovery — new code ids + new contracts under known families'],
         'bcc_cosmwasm_weekly_retry'             => ['interval' => 'bcc_weekly',                   'description' => 'CosmWasm CW-721 retry sweep — temporarily_unreachable + inconclusive, capped and backed off'],
         'bcc_cosmwasm_metadata_refresh'         => ['interval' => 'daily',                        'description' => 'CosmWasm CW-721 migration check + mutable metadata refresh (monthly via a durable elapsed guard)'],
-        'bcc_watch_batch_sweep'                 => ['interval' => 'bcc_pull_batch_sweep_minute',  'description' => 'WatchBatchAggregator sweep'],
+        'bcc_watch_batch_sweep'                 => ['interval' => 'bcc_minute',                   'description' => 'WatchBatchAggregator sweep (WatchBatchAggregator::SWEEP_HOOK / ::SWEEP_INTERVAL)'],
         // Disputes domain
         'bcc_disputes_auto_resolve'             => ['interval' => 'daily',                        'description' => 'dispute auto-resolve sweep'],
         'bcc_disputes_reconcile_orphans'        => ['interval' => 'bcc_five_minutes',             'description' => 'dispute reconcile (covers cron + AS enqueue failures)'],

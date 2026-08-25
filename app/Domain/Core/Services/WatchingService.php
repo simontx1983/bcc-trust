@@ -16,7 +16,6 @@
  *
  * Stubs still in place:
  *   - reputation_tier_at_watch → null when no bcc_watch_meta row exists yet
- *   - batch_id           → always null in V1.0 (Phase 3 batching is V2)
  *   - watched_at         → null when no bcc_watch_meta row exists yet
  *
  * Previously stubbed, now wired (kept for changelog clarity):
@@ -871,7 +870,7 @@ final class WatchingService
      * Per §C2: watching = creating a peepso_user_followers row +
      * writing a bcc_watch_meta sidecar. The follow itself is the
      * source of truth; bcc_watch_meta carries the BCC-specific extras
-     * (tier_at_watch, batch_id, visibility).
+     * (tier_at_watch, batch_id, watched_at).
      *
      * Idempotent: if the viewer is already following the resolved
      * target, returns the existing item with status='already_watching'

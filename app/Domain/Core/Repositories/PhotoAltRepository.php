@@ -70,8 +70,7 @@ final class PhotoAltRepository
      * null). Used by FeedRankingService::loadPhotoBodies to attach
      * alts to a feed page in a single round-trip.
      *
-     * The IN clause is hard-bounded at 500 placeholders to match the
-     * canonical WatchMetaRepository::findManyByFollowIds shape — feed
+     * The IN clause is hard-bounded at 500 placeholders per §4 — feed
      * pages cap at 20–50 items in practice, so 500 leaves abundant
      * headroom while keeping the query plan stable.
      *

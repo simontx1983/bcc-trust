@@ -10,7 +10,7 @@
  * `PeepSoIntegration::onPageClaimed` migrates each row here into a
  * real PeepSo follow via `PeepSoFollowWriter::follow`, then deletes
  * the row from this table. So the canonical post-claim store stays
- * `peepso_user_friendships` + `bcc_pull_meta` — this table is the
+ * `peepso_user_followers` + `bcc_watch_meta` — this table is the
  * pre-claim holding pen only.
  *
  * Architecture per §1: this repository owns the `bcc_page_follows`

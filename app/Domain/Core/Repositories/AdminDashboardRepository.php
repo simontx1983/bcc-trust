@@ -1822,7 +1822,7 @@ class AdminDashboardRepository
     // engagement metrics, no DAU. Operator-only stewardship surface.
     //
     // Composes on existing producers (PatternRepository, DisputeRepository,
-    // bcc_pull_meta + peepso_user_followers, wp_posts) — no parallel
+    // bcc_watch_meta + peepso_user_followers, wp_posts) — no parallel
     // observability store. Per §11 EXTEND-only doctrine.
     // ────────────────────────────────────────────────────────────────────
 
