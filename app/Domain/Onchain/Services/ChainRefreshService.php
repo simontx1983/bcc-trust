@@ -401,8 +401,23 @@ class ChainRefreshService
                     $collections = $fetcher->fetch_collections($wallet->wallet_address, (int) $row->chain_id);
 
                     if (!empty($collections)) {
+                        $failed = 0;
                         foreach ($collections as $collection) {
-                            CollectionRepository::upsert($collection, (int) $row->wallet_link_id, 4 * HOUR_IN_SECONDS);
+                            // #212: never discard the result. A failure here is
+                            // a genuine write loss, not a transient — it must
+                            // not stay invisible the way the old bare INSERT did.
+                            if (CollectionRepository::upsert($collection, (int) $row->wallet_link_id, 4 * HOUR_IN_SECONDS)['status'] === 'failed') {
+                                $failed++;
+                            }
+                        }
+                        if ($failed > 0) {
+                            \BCC\Core\Log\Logger::warning(sprintf(
+                                '[Onchain] %d of %d collections failed to persist for wallet_link_id %d on chain %d',
+                                $failed,
+                                count($collections),
+                                (int) $row->wallet_link_id,
+                                (int) $row->chain_id
+                            ));
                         }
 
                         if ((int) $wallet->post_id > 0) {

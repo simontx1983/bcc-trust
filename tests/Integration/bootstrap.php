@@ -142,6 +142,15 @@ if (!function_exists('get_option')) {
     {
         return trim($s);
     }
+    /**
+     * Enough of WP's URL sanitiser for repository writes to run: strip
+     * control characters and pass the rest through. CollectionRepository
+     * runs image_url through this before persisting.
+     */
+    function esc_url_raw(string $url): string
+    {
+        return trim((string) preg_replace('/[\x00-\x1F\x7F]/', '', $url));
+    }
     /** @param mixed $v */
     function absint($v): int
     {

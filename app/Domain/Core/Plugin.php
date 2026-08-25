@@ -2894,11 +2894,26 @@ final class Plugin
                         }
 
                         $collections = $fetcher->fetch_collections($address, $chainId);
+                        $failed = 0;
                         foreach ($collections as $row) {
-                            \BCC\Trust\Onchain\Repositories\CollectionRepository::upsert(
+                            // #212: the result is load-bearing — a discarded
+                            // false is exactly how the dropped writes hid.
+                            $outcome = \BCC\Trust\Onchain\Repositories\CollectionRepository::upsert(
                                 $row,
                                 $walletId
                             );
+                            if ($outcome['status'] === 'failed') {
+                                $failed++;
+                            }
+                        }
+                        if ($failed > 0) {
+                            \BCC\Core\Log\Logger::warning('[bcc-trust] gallery_refresh could not persist every collection', [
+                                'post_id'        => $postId,
+                                'wallet_link_id' => $walletId,
+                                'chain_id'       => $chainId,
+                                'failed'         => $failed,
+                                'total'          => count($collections),
+                            ]);
                         }
                         \BCC\Trust\Onchain\Repositories\WalletRepository::markHoldingsRefreshed($walletId);
                     }
