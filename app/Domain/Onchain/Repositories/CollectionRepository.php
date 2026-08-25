@@ -125,63 +125,180 @@ final class CollectionRepository
     }
 
     /**
-     * Insert or update a collection row by wallet_link_id + chain_id + contract_address.
+     * Insert or refresh the canonical collection row for
+     * (chain_id, contract_address) — the key this table actually enforces.
+     *
+     * ── WHAT WAS WRONG (#212) ───────────────────────────────────────────
+     * This method used to LOOK UP on three columns (wallet_link_id,
+     * chain_id, contract_address) and then run a bare INSERT when the
+     * lookup missed. The table's only unique key is
+     * `uq_chain_contract (chain_id, contract_address)` — no wallet. So for
+     * a collection already recorded against a DIFFERENT wallet the lookup
+     * always missed, MySQL rejected the INSERT, `insert_id` was 0, and the
+     * write was discarded. Silently: all three callers ignored the return
+     * value, `$wpdb->insert()` does not throw, and no backoff or breaker
+     * saw it, so the same rejection repeated every refresh cycle.
+     *
+     * The rejected INSERT never deleted or overwrote the existing row —
+     * that collection was left untouched. What was lost is the metadata
+     * refresh and the second wallet's association.
+     *
+     * ── WHAT THIS CHANGES ───────────────────────────────────────────────
+     * One atomic INSERT … ON DUPLICATE KEY UPDATE against the real key,
+     * matching the three sibling writers ({@see bulkUpsert},
+     * {@see addManual}, {@see ensureExistsBatch}). The metadata refresh now
+     * always lands, and the check-then-insert race — which existed even
+     * when the keys DID agree — is gone along with the read.
+     *
+     * ── WHAT THIS DELIBERATELY DOES NOT DO ──────────────────────────────
+     * It does NOT record the second wallet's ownership. One row cannot
+     * carry two owners, so `wallet_link_id` stays first-writer-wins and is
+     * never rewritten on the update path. Many-to-many ownership needs a
+     * relationship table and is tracked separately — this method is
+     * containment, not the ownership model.
+     *
+     * Also protected on the update path: `is_verified` and
+     * `show_on_profile` (operator decisions) and `source` (so a curated
+     * 'manual' row is never demoted by an automated wallet refresh).
+     *
+     * Metadata is COALESCE'd, and for the nullable string columns NULL,
+     * '' and whitespace-only all count as "not reported" — an automated
+     * refresh saying nothing about a field must not be read as an
+     * instruction to clear it. So a sparse fetch may FILL a blank column
+     * but may never BLANK a populated one, and one wallet's thin response
+     * cannot erase another wallet's richer data. Numeric columns keep
+     * their own NULL-safe helpers, so a genuine zero supply, floor or
+     * holder count still writes 0.
      *
      * @param array<string, mixed> $data  Normalized collection data from a fetcher.
-     * @param int   $walletLinkId  The wallet link this collection belongs to.
+     * @param int   $walletLinkId  Wallet link that observed it. Recorded only on INSERT.
      * @param int   $ttlSeconds    Cache TTL before the row is considered expired.
-     * @return int|false  Row ID on success, false on failure.
+     * @return array{status: 'created'|'updated'|'failed', id: int}
      */
-    public static function upsert(array $data, int $walletLinkId, int $ttlSeconds = 4 * HOUR_IN_SECONDS)
+    public static function upsert(array $data, int $walletLinkId, int $ttlSeconds = 4 * HOUR_IN_SECONDS): array
     {
-        global $wpdb;
-        $table = self::table();
+        $chainId  = (int) ($data['chain_id'] ?? 0);
+        $contract = isset($data['contract_address']) ? (string) $data['contract_address'] : '';
 
-        $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
-
-        $existing = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$table}
-             WHERE wallet_link_id = %d AND chain_id = %d AND contract_address = %s
-             LIMIT 1",
-            $walletLinkId,
-            (int) $data['chain_id'],
-            $data['contract_address']
-        ));
-
-        $row = [
-            'wallet_link_id'    => $walletLinkId,
-            'contract_address'  => $data['contract_address'],
-            'chain_id'          => (int) $data['chain_id'],
-            'collection_name'   => isset($data['collection_name']) ? sanitize_text_field($data['collection_name']) : null,
-            'token_standard'    => isset($data['token_standard']) ? sanitize_text_field($data['token_standard']) : null,
-            'total_supply'      => $data['total_supply'] ?? null,
-            'floor_price'       => $data['floor_price'] ?? null,
-            'floor_currency'    => isset($data['floor_currency']) ? sanitize_text_field($data['floor_currency']) : null,
-            'unique_holders'    => $data['unique_holders'] ?? null,
-            'total_volume'      => $data['total_volume'] ?? null,
-            'listed_percentage' => $data['listed_percentage'] ?? null,
-            'royalty_percentage' => $data['royalty_percentage'] ?? null,
-            'metadata_storage'  => isset($data['metadata_storage']) ? sanitize_text_field($data['metadata_storage']) : null,
-            // Persisted from V1 NFT discovery (Alchemy `openSeaMetadata.imageUrl`)
-            // — schema column existed since Phase 1c but the V1 path dropped it
-            // on the floor pre-migration. `esc_url_raw` because the value is
-            // ultimately rendered as `<img src>` on the Verify Collections page.
-            'image_url'         => isset($data['image_url']) && is_string($data['image_url'])
-                ? esc_url_raw($data['image_url'])
-                : null,
-            'fetched_at'        => current_time('mysql', true),
-            'expires_at'        => $expiresAt,
-        ];
-
-        $format = ['%d', '%s', '%d', '%s', '%s', '%d', '%f', '%s', '%d', '%f', '%f', '%f', '%s', '%s', '%s', '%s'];
-
-        if ($existing) {
-            $wpdb->update($table, $row, ['id' => (int) $existing], $format, ['%d']);
-            return (int) $existing;
+        if ($chainId <= 0 || $contract === '') {
+            return ['status' => 'failed', 'id' => 0];
         }
 
-        $wpdb->insert($table, $row, $format);
-        return $wpdb->insert_id ?: false;
+        global $wpdb;
+        $table     = self::table();
+        $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
+        $now       = current_time('mysql', true);
+
+        // NULL-safe fragments. wpdb::prepare('%d'|'%f', null) yields 0 and
+        // '%s' yields '' — both write a fake value over an unknown one. That
+        // matters doubly here: the COALESCE below preserves an existing value
+        // only when the incoming one is a real SQL NULL, so anything that
+        // reaches MySQL as '' would overwrite rather than preserve.
+        $intOrNull = static function ($value) use ($wpdb) {
+            return $value === null ? 'NULL' : $wpdb->prepare('%d', (int) $value);
+        };
+        $floatOrNull = static function ($value) use ($wpdb) {
+            return $value === null ? 'NULL' : $wpdb->prepare('%f', (float) $value);
+        };
+
+        /**
+         * String metadata only: an automated refresh that carries '' — or a
+         * whitespace-only value — is reporting "I don't know", not "clear it".
+         * Treating those as absent is what stops one wallet's thin response
+         * blanking another's populated name or artwork.
+         *
+         * Deliberately NOT empty(): that would also discard the string "0",
+         * and the numeric columns keep their own helpers above so a genuine
+         * zero supply, floor or holder count still writes 0 rather than NULL.
+         * Only these five nullable VARCHAR columns route through here.
+         */
+        $strOrNull = static function ($value) use ($wpdb) {
+            if ($value === null) {
+                return 'NULL';
+            }
+            $string = (string) $value;
+
+            return trim($string) === '' ? 'NULL' : $wpdb->prepare('%s', $string);
+        };
+
+        $sqlWallet  = $walletLinkId > 0 ? $wpdb->prepare('%d', $walletLinkId) : 'NULL';
+        $sqlSupply  = $intOrNull($data['total_supply'] ?? null);
+        $sqlHolders = $intOrNull($data['unique_holders'] ?? null);
+        $sqlFloor   = $floatOrNull($data['floor_price'] ?? null);
+        $sqlVolume  = $floatOrNull($data['total_volume'] ?? null);
+        $sqlListed  = $floatOrNull($data['listed_percentage'] ?? null);
+        $sqlRoyalty = $floatOrNull($data['royalty_percentage'] ?? null);
+
+        // `esc_url_raw` because the value is ultimately rendered as an
+        // `<img src>` on the Verify Collections page.
+        $sqlImage = $strOrNull(
+            isset($data['image_url']) && is_string($data['image_url'])
+                ? esc_url_raw($data['image_url'])
+                : null
+        );
+        $sqlName     = $strOrNull(isset($data['collection_name']) ? sanitize_text_field((string) $data['collection_name']) : null);
+        $sqlStandard = $strOrNull(isset($data['token_standard']) ? sanitize_text_field((string) $data['token_standard']) : null);
+        $sqlCurrency = $strOrNull(isset($data['floor_currency']) ? sanitize_text_field((string) $data['floor_currency']) : null);
+        $sqlMetaStor = $strOrNull(isset($data['metadata_storage']) ? sanitize_text_field((string) $data['metadata_storage']) : null);
+
+        $result = $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$table}
+                (wallet_link_id, contract_address, chain_id, collection_name, token_standard,
+                 total_supply, floor_price, floor_currency, unique_holders, total_volume,
+                 listed_percentage, royalty_percentage, metadata_storage, image_url,
+                 source, fetched_at, expires_at)
+             VALUES ({$sqlWallet}, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSupply}, {$sqlFloor},
+                     {$sqlCurrency}, {$sqlHolders}, {$sqlVolume}, {$sqlListed}, {$sqlRoyalty},
+                     {$sqlMetaStor}, {$sqlImage}, 'discovery', %s, %s)
+             ON DUPLICATE KEY UPDATE
+                collection_name    = COALESCE(VALUES(collection_name), collection_name),
+                token_standard     = COALESCE(VALUES(token_standard), token_standard),
+                total_supply       = COALESCE(VALUES(total_supply), total_supply),
+                floor_price        = COALESCE(VALUES(floor_price), floor_price),
+                floor_currency     = COALESCE(VALUES(floor_currency), floor_currency),
+                unique_holders     = COALESCE(VALUES(unique_holders), unique_holders),
+                total_volume       = COALESCE(VALUES(total_volume), total_volume),
+                listed_percentage  = COALESCE(VALUES(listed_percentage), listed_percentage),
+                royalty_percentage = COALESCE(VALUES(royalty_percentage), royalty_percentage),
+                metadata_storage   = COALESCE(VALUES(metadata_storage), metadata_storage),
+                image_url          = COALESCE(VALUES(image_url), image_url),
+                fetched_at         = VALUES(fetched_at),
+                expires_at         = VALUES(expires_at)",
+            $contract,
+            $chainId,
+            $now,
+            $expiresAt
+        ));
+
+        if ($result === false) {
+            return ['status' => 'failed', 'id' => 0];
+        }
+
+        // MySQL's ON DUPLICATE KEY UPDATE affected-rows contract: 1 = a row was
+        // inserted, 2 = an existing row was updated, 0 = it matched but nothing
+        // changed. Used for the LABEL ONLY. A zero here is a SUCCESSFUL no-op
+        // replay, not a failure — wpdb::query() returns int 0, and the guard
+        // above is a strict `=== false`, so it cannot be confused for one.
+        $affected = (int) $result;
+
+        // The id is ALWAYS resolved from the canonical key, never from
+        // insert_id. insert_id is connection-sticky, and under a client
+        // configured with CLIENT_FOUND_ROWS an unchanged update also reports
+        // affected=1 — so trusting it there could hand back a different row
+        // entirely. One extra lookup on a unique index is the cheaper bargain.
+        $id = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$table}
+             WHERE chain_id = %d AND contract_address = %s
+             LIMIT 1",
+            $chainId,
+            $contract
+        ));
+
+        if ($id <= 0) {
+            return ['status' => 'failed', 'id' => 0];
+        }
+
+        return ['status' => $affected === 1 ? 'created' : 'updated', 'id' => $id];
     }
 
     /**
