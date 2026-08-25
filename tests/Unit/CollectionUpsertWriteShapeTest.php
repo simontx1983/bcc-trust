@@ -28,12 +28,15 @@ final class CollectionUpsertWriteShapeTest extends TestCase
 {
     private const REPO = __DIR__ . '/../../app/Domain/Onchain/Repositories/CollectionRepository.php';
 
-    /** Call sites that must consume the discriminated result. */
+    /** Every production file that may call upsert() directly. */
     private const CALL_SITES = [
+        __DIR__ . '/../../app/Domain/Onchain/Services/CollectionPersistBatch.php',
         __DIR__ . '/../../app/Domain/Onchain/Services/WalletSeedService.php',
         __DIR__ . '/../../app/Domain/Onchain/Services/ChainRefreshService.php',
         __DIR__ . '/../../app/Domain/Core/Plugin.php',
     ];
+
+    private const PLUGIN = __DIR__ . '/../../app/Domain/Core/Plugin.php';
 
     private function repoSource(): string
     {
@@ -181,11 +184,11 @@ final class CollectionUpsertWriteShapeTest extends TestCase
                 }
                 $found++;
 
-                // A consumed result is either assigned or branched on in the
-                // same statement. A discarded one starts the statement with
-                // the call itself.
+                // A consumed result is assigned, branched on, returned, or
+                // subscripted in the same statement. A discarded one starts
+                // the statement with the call itself.
                 self::assertMatchesRegularExpression(
-                    '/(\$\w+\s*=\s*|if\s*\(|return\s+)/',
+                    '/(\$\w+\s*=\s*|if\s*\(|return\s+|\)\[)/',
                     $line,
                     sprintf(
                         "%s:%d discards upsert()'s result — that is exactly how #212 hid",
@@ -196,6 +199,72 @@ final class CollectionUpsertWriteShapeTest extends TestCase
             }
         }
 
-        self::assertSame(3, $found, 'all three known call sites must be present and checked');
+        self::assertGreaterThan(0, $found, 'the guard must actually have inspected a call site');
+    }
+
+    /**
+     * THE WATERMARK GATE. Advancing "holdings refreshed" after losing writes
+     * suppresses the next attempt and makes the loss permanent — the same
+     * "failure leaves no trace" shape as #212 itself.
+     */
+    public function testGalleryRefreshMarksHoldingsOnlyWhenFullyPersisted(): void
+    {
+        $src = file_get_contents(self::PLUGIN);
+        self::assertIsString($src);
+
+        $at = strpos($src, 'markHoldingsRefreshed($walletId)');
+        self::assertIsInt($at, 'the gallery-refresh task must still mark the wallet on success');
+
+        // The 400 characters before the call must contain the success gate.
+        $preceding = substr($src, max(0, $at - 400), min($at, 400));
+        self::assertStringContainsString(
+            'CollectionPersistBatch::allPersisted($persisted)',
+            $preceding,
+            'markHoldingsRefreshed() must be gated on a fully-persisted batch, not called unconditionally'
+        );
+    }
+
+    /**
+     * Blank string metadata is treated as "not reported". Numeric columns keep
+     * their own helpers so a genuine zero is still written — a broad empty()
+     * rule would discard both.
+     */
+    public function testBlankStringsAreTreatedAsAbsentButZeroIsNot(): void
+    {
+        $body = $this->upsertBody();
+
+        self::assertMatchesRegularExpression(
+            '/trim\(\$string\) === \x27\x27 \? \x27NULL\x27/',
+            $body,
+            "'' and whitespace-only must resolve to SQL NULL so COALESCE preserves the existing value"
+        );
+        self::assertStringNotContainsString(
+            'empty($value)',
+            $body,
+            'empty() would discard a legitimate numeric zero and the string "0"'
+        );
+        // The numeric helpers must remain null-only, never blank-sensitive.
+        self::assertStringContainsString(
+            "return \$value === null ? 'NULL' : \$wpdb->prepare('%d', (int) \$value);",
+            $body,
+            'integer columns must still write a genuine 0'
+        );
+    }
+
+    /** The id must never be taken from the connection-sticky insert_id. */
+    public function testRowIdIsAlwaysResolvedFromTheCanonicalKey(): void
+    {
+        $body = $this->upsertBody();
+
+        self::assertStringNotContainsString(
+            '$wpdb->insert_id',
+            $body,
+            'insert_id is connection-sticky and, under CLIENT_FOUND_ROWS, an unchanged update also reports affected=1 — it can name the wrong row'
+        );
+        self::assertMatchesRegularExpression(
+            '/SELECT id FROM \{\$table\}\s+WHERE chain_id = %d AND contract_address = %s/',
+            $body,
+            'the id must come from the canonical key'
+        );
     }
 }

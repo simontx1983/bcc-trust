@@ -142,6 +142,12 @@ if (!function_exists('get_option')) {
     {
         return trim($s);
     }
+}
+
+// Guarded on its OWN name rather than riding the get_option() block above:
+// that block is skipped wholesale once get_option exists, which would leave
+// this undefined, and it would redeclare this one if the reverse happened.
+if (!function_exists('esc_url_raw')) {
     /**
      * Enough of WP's URL sanitiser for repository writes to run: strip
      * control characters and pass the rest through. CollectionRepository
@@ -151,6 +157,9 @@ if (!function_exists('get_option')) {
     {
         return trim((string) preg_replace('/[\x00-\x1F\x7F]/', '', $url));
     }
+}
+
+if (!function_exists('absint')) {
     /** @param mixed $v */
     function absint($v): int
     {

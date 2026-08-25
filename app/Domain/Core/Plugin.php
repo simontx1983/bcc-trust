@@ -2894,28 +2894,27 @@ final class Plugin
                         }
 
                         $collections = $fetcher->fetch_collections($address, $chainId);
-                        $failed = 0;
-                        foreach ($collections as $row) {
-                            // #212: the result is load-bearing — a discarded
-                            // false is exactly how the dropped writes hid.
-                            $outcome = \BCC\Trust\Onchain\Repositories\CollectionRepository::upsert(
-                                $row,
-                                $walletId
-                            );
-                            if ($outcome['status'] === 'failed') {
-                                $failed++;
-                            }
-                        }
-                        if ($failed > 0) {
-                            \BCC\Core\Log\Logger::warning('[bcc-trust] gallery_refresh could not persist every collection', [
+                        // #212: the result is load-bearing — a discarded
+                        // false is exactly how the dropped writes hid.
+                        $persisted = \BCC\Trust\Onchain\Services\CollectionPersistBatch::persist(
+                            $collections,
+                            $walletId,
+                            4 * HOUR_IN_SECONDS
+                        );
+
+                        if (\BCC\Trust\Onchain\Services\CollectionPersistBatch::allPersisted($persisted)) {
+                            \BCC\Trust\Onchain\Repositories\WalletRepository::markHoldingsRefreshed($walletId);
+                        } else {
+                            // Do NOT advance the watermark. Marking a wallet
+                            // refreshed after losing writes suppresses the next
+                            // attempt and makes the loss permanent — the same
+                            // "failure leaves no trace" shape as #212 itself.
+                            \BCC\Core\Log\Logger::warning('[bcc-trust] gallery_refresh could not persist every collection; leaving the wallet eligible for retry', [
                                 'post_id'        => $postId,
                                 'wallet_link_id' => $walletId,
                                 'chain_id'       => $chainId,
-                                'failed'         => $failed,
-                                'total'          => count($collections),
-                            ]);
+                            ] + $persisted);
                         }
-                        \BCC\Trust\Onchain\Repositories\WalletRepository::markHoldingsRefreshed($walletId);
                     }
                 } catch (\Throwable $e) {
                     \BCC\Core\Log\Logger::error('[bcc-trust] gallery_refresh failed', [

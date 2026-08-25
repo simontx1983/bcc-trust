@@ -135,21 +135,14 @@ final class WalletSeedService
             if ($fetcher->supports_feature('collection')) {
                 if (!CollectionRepository::existsForWalletLink($walletLinkId)) {
                     $collections = $fetcher->fetch_collections($address, (int) $chainObj->id);
-                    $failed = 0;
-                    foreach ($collections as $c) {
-                        // #212: a discarded result is how the previous defect
-                        // stayed invisible for months. Count and report.
-                        if (CollectionRepository::upsert($c, $walletLinkId, 4 * HOUR_IN_SECONDS)['status'] === 'failed') {
-                            $failed++;
-                        }
-                    }
-                    if ($failed > 0) {
+                    // #212: never discard the result — a lost write must be
+                    // countable, not invisible.
+                    $persisted = CollectionPersistBatch::persist($collections, $walletLinkId, 4 * HOUR_IN_SECONDS);
+                    if (!CollectionPersistBatch::allPersisted($persisted)) {
                         \BCC\Core\Log\Logger::warning('[Onchain] Wallet seed could not persist every collection', [
                             'wallet_link_id' => $walletLinkId,
                             'chain_id'       => (int) $chainObj->id,
-                            'failed'         => $failed,
-                            'total'          => count($collections),
-                        ]);
+                        ] + $persisted);
                     }
                     if (!empty($collections) && (int) $walletLink->post_id > 0) {
                         CollectionService::invalidate((int) $walletLink->post_id);

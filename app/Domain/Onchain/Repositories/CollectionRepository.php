@@ -160,9 +160,15 @@ final class CollectionRepository
      * Also protected on the update path: `is_verified` and
      * `show_on_profile` (operator decisions) and `source` (so a curated
      * 'manual' row is never demoted by an automated wallet refresh).
-     * Metadata is COALESCE'd — a sparse fetch may fill a blank column but
-     * may never blank a populated one, so one wallet's thin response
-     * cannot erase another wallet's richer data.
+     *
+     * Metadata is COALESCE'd, and for the nullable string columns NULL,
+     * '' and whitespace-only all count as "not reported" — an automated
+     * refresh saying nothing about a field must not be read as an
+     * instruction to clear it. So a sparse fetch may FILL a blank column
+     * but may never BLANK a populated one, and one wallet's thin response
+     * cannot erase another wallet's richer data. Numeric columns keep
+     * their own NULL-safe helpers, so a genuine zero supply, floor or
+     * holder count still writes 0.
      *
      * @param array<string, mixed> $data  Normalized collection data from a fetcher.
      * @param int   $walletLinkId  Wallet link that observed it. Recorded only on INSERT.
@@ -186,16 +192,33 @@ final class CollectionRepository
         // NULL-safe fragments. wpdb::prepare('%d'|'%f', null) yields 0 and
         // '%s' yields '' — both write a fake value over an unknown one. That
         // matters doubly here: the COALESCE below preserves an existing value
-        // only when the incoming one is a real SQL NULL, so an empty string
-        // would silently "preserve" the blank instead.
+        // only when the incoming one is a real SQL NULL, so anything that
+        // reaches MySQL as '' would overwrite rather than preserve.
         $intOrNull = static function ($value) use ($wpdb) {
             return $value === null ? 'NULL' : $wpdb->prepare('%d', (int) $value);
         };
         $floatOrNull = static function ($value) use ($wpdb) {
             return $value === null ? 'NULL' : $wpdb->prepare('%f', (float) $value);
         };
+
+        /**
+         * String metadata only: an automated refresh that carries '' — or a
+         * whitespace-only value — is reporting "I don't know", not "clear it".
+         * Treating those as absent is what stops one wallet's thin response
+         * blanking another's populated name or artwork.
+         *
+         * Deliberately NOT empty(): that would also discard the string "0",
+         * and the numeric columns keep their own helpers above so a genuine
+         * zero supply, floor or holder count still writes 0 rather than NULL.
+         * Only these five nullable VARCHAR columns route through here.
+         */
         $strOrNull = static function ($value) use ($wpdb) {
-            return $value === null ? 'NULL' : $wpdb->prepare('%s', (string) $value);
+            if ($value === null) {
+                return 'NULL';
+            }
+            $string = (string) $value;
+
+            return trim($string) === '' ? 'NULL' : $wpdb->prepare('%s', $string);
         };
 
         $sqlWallet  = $walletLinkId > 0 ? $wpdb->prepare('%d', $walletLinkId) : 'NULL';
@@ -251,24 +274,25 @@ final class CollectionRepository
             return ['status' => 'failed', 'id' => 0];
         }
 
-        // MySQL's ON DUPLICATE KEY UPDATE affected-rows contract: 1 = a row
-        // was inserted, 2 = an existing row was updated, 0 = it matched but
-        // nothing changed. Used for the LABEL only — the id below is always
-        // resolved from the canonical key, so a client configured with
-        // CLIENT_FOUND_ROWS (which would flatten 2 to 1) can at worst
-        // mislabel, never hand back the wrong row.
+        // MySQL's ON DUPLICATE KEY UPDATE affected-rows contract: 1 = a row was
+        // inserted, 2 = an existing row was updated, 0 = it matched but nothing
+        // changed. Used for the LABEL ONLY. A zero here is a SUCCESSFUL no-op
+        // replay, not a failure — wpdb::query() returns int 0, and the guard
+        // above is a strict `=== false`, so it cannot be confused for one.
         $affected = (int) $result;
 
-        $id = $affected === 1 ? (int) $wpdb->insert_id : 0;
-        if ($id <= 0) {
-            $id = (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT id FROM {$table}
-                 WHERE chain_id = %d AND contract_address = %s
-                 LIMIT 1",
-                $chainId,
-                $contract
-            ));
-        }
+        // The id is ALWAYS resolved from the canonical key, never from
+        // insert_id. insert_id is connection-sticky, and under a client
+        // configured with CLIENT_FOUND_ROWS an unchanged update also reports
+        // affected=1 — so trusting it there could hand back a different row
+        // entirely. One extra lookup on a unique index is the cheaper bargain.
+        $id = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$table}
+             WHERE chain_id = %d AND contract_address = %s
+             LIMIT 1",
+            $chainId,
+            $contract
+        ));
 
         if ($id <= 0) {
             return ['status' => 'failed', 'id' => 0];

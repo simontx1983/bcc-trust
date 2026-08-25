@@ -7,6 +7,7 @@ namespace BCC\Trust\Tests\Integration;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
@@ -189,6 +190,110 @@ final class CollectionUpsertCanonicalKeyIntegrationTest extends TestCase
         self::assertSame(1, $this->rowCount(), 'four writes, one row');
         self::assertCount(1, array_unique($ids), 'every write resolved to the same row id');
         self::assertSame('Iteration 3', (string) $this->row()->collection_name, 'the last write wins on metadata');
+    }
+
+    /**
+     * "Not reported" comes in four shapes and NONE of them may clear a field.
+     *
+     * `''` and whitespace-only are the dangerous pair: they survive `isset()`,
+     * and `wpdb::prepare('%s', …)` hands them to MySQL as a real string, so a
+     * plain `COALESCE(VALUES(col), col)` treats them as a value and overwrites.
+     * An automated refresh that says nothing about a field is reporting "I
+     * don't know", never "clear it".
+     *
+     * @param string|null $blank
+     */
+    #[DataProvider('blankMetadataProvider')]
+    public function testNoFormOfBlankMetadataCanEraseAPopulatedValue(string $label, $blank, bool $omitKeys): void
+    {
+        CollectionRepository::upsert(
+            $this->payload('Established Name', 'https://cdn.example/established.png', 4200),
+            self::WALLET_A
+        );
+
+        $sparse = $omitKeys
+            ? ['chain_id' => $this->chainId, 'contract_address' => self::CONTRACT]
+            : [
+                'chain_id'         => $this->chainId,
+                'contract_address' => self::CONTRACT,
+                'collection_name'  => $blank,
+                'image_url'        => $blank,
+                'token_standard'   => $blank,
+            ];
+
+        $result = CollectionRepository::upsert($sparse, self::WALLET_B);
+        self::assertSame('updated', $result['status'], "{$label}: the write itself must still succeed");
+        self::assertSame('', (string) $GLOBALS['wpdb']->last_error, "{$label}: left a SQL error behind");
+
+        $row = $this->row();
+        self::assertSame('Established Name', (string) $row->collection_name, "{$label}: name was erased");
+        self::assertSame('https://cdn.example/established.png', (string) $row->image_url, "{$label}: image_url was erased");
+        self::assertSame('CW-721', (string) $row->token_standard, "{$label}: token_standard was erased");
+        self::assertSame(1, $this->rowCount(), "{$label}: still one canonical row");
+    }
+
+    /** @return array<string, array{0: string, 1: string|null, 2: bool}> */
+    public static function blankMetadataProvider(): array
+    {
+        return [
+            'empty string'     => ['empty string', '', false],
+            'single space'     => ['single space', ' ', false],
+            'whitespace run'   => ['whitespace run', "  \t \n ", false],
+            'explicit null'    => ['explicit null', null, false],
+            'keys omitted'     => ['keys omitted', null, true],
+        ];
+    }
+
+    /**
+     * A genuine zero is NOT blank. The blank-to-null rule is scoped to string
+     * columns precisely so a real "0 supply / 0 holders" still records as 0
+     * rather than being discarded as "unknown".
+     */
+    public function testGenuineNumericZeroIsStillWritten(): void
+    {
+        CollectionRepository::upsert($this->payload('Zeroed', null, 4200), self::WALLET_A);
+
+        $zeroed = [
+            'chain_id'         => $this->chainId,
+            'contract_address' => self::CONTRACT,
+            'total_supply'     => 0,
+            'unique_holders'   => 0,
+            'floor_price'      => 0,
+        ];
+        self::assertSame('updated', CollectionRepository::upsert($zeroed, self::WALLET_B)['status']);
+
+        $row = $this->row();
+        self::assertSame('0', (string) $row->total_supply, 'a real zero supply must persist, not be discarded');
+        self::assertSame('0', (string) $row->unique_holders, 'a real zero holder count must persist');
+        self::assertSame(0.0, (float) $row->floor_price, 'a real zero floor must persist');
+    }
+
+    /**
+     * EXACT replay: same wallet, same contract, byte-identical metadata. MySQL
+     * reports ZERO affected rows because nothing changed — that is a success,
+     * not a failure, and `wpdb::query()` returns int 0 which a loose check
+     * would misread as false.
+     */
+    public function testIdenticalReplayWithZeroAffectedRowsStillSucceeds(): void
+    {
+        $wpdb    = $GLOBALS['wpdb'];
+        $payload = $this->payload('Replay Fixture', 'https://cdn.example/replay.png', 7);
+
+        $first = CollectionRepository::upsert($payload, self::WALLET_A);
+        self::assertSame('created', $first['status']);
+
+        $replay = CollectionRepository::upsert($payload, self::WALLET_A);
+
+        self::assertSame(
+            0,
+            (int) $wpdb->rows_affected,
+            'the fixture must actually produce a zero-affected replay, or this test proves nothing'
+        );
+        self::assertSame('updated', $replay['status'], 'a no-op replay is a success, not a failure');
+        self::assertSame($first['id'], $replay['id'], 'the canonical id must survive a zero-affected write');
+        self::assertGreaterThan(0, $replay['id']);
+        self::assertSame('', (string) $wpdb->last_error, 'a no-op replay must leave no SQL error');
+        self::assertSame(1, $this->rowCount());
     }
 
     /** Malformed input is rejected as `failed` rather than silently ignored. */
