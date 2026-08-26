@@ -306,7 +306,7 @@ class ChainRefreshService
      * This is wallet-driven, not chain-wide: every row it touches is
      * anchored to a `wallet_link_id`, so the work is bounded by how many
      * wallets members have linked rather than by how large a chain is.
-     * {@see CollectionRepository::getExpired()} enforces that at the query,
+     * {@see CollectionRepository::getExpiredWalletLinked()} enforces that at the query,
      * so a chain-level row cannot reach this loop at all.
      *
      * The chain-level branch that used to live here called
