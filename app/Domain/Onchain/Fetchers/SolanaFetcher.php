@@ -939,10 +939,10 @@ class SolanaFetcher implements FetcherInterface
      */
     private static function redactRpcUrl(string $url): string
     {
-        $queryPos = strpos($url, '?');
-        if ($queryPos === false) {
-            return $url;
-        }
-        return substr($url, 0, $queryPos) . '?***REDACTED***';
+        // Shared with NftProviderReadiness, which must put the CURRENT
+        // endpoint through the identical transformation to decide whether a
+        // stored mark still describes it. Two copies would drift, and the
+        // drift would silently make every stored mark un-matchable.
+        return HeliusEndpoint::redactEndpoint($url);
     }
 }

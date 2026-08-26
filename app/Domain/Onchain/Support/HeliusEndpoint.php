@@ -48,14 +48,21 @@ final class HeliusEndpoint
      */
     public static function resolveRpcUrl(): ?string
     {
+        // Values are TRIMMED before they are judged usable. A constant
+        // holding "  " or "\n" is the same class of half-finished
+        // configuration as an empty one — a templated wp-config, a secret
+        // injected with a stray newline, a copy-paste with trailing
+        // whitespace. Untrimmed it is non-empty, reads as configured, and
+        // produces a URL that cannot resolve. Trimming here also means the
+        // key never carries whitespace into the outbound URL.
         if (defined('BCC_HELIUS_RPC_URL')) {
-            $url = (string) constant('BCC_HELIUS_RPC_URL');
+            $url = trim((string) constant('BCC_HELIUS_RPC_URL'));
             if ($url !== '') {
                 return $url;
             }
         }
         if (defined('BCC_HELIUS_API_KEY')) {
-            $key = (string) constant('BCC_HELIUS_API_KEY');
+            $key = trim((string) constant('BCC_HELIUS_API_KEY'));
             if ($key !== '') {
                 return 'https://mainnet.helius-rpc.com/?api-key=' . rawurlencode($key);
             }
@@ -84,5 +91,38 @@ final class HeliusEndpoint
     public static function dasUnsupportedOptionKey(int $chainId): string
     {
         return 'bcc_onchain_das_unsupported_' . $chainId;
+    }
+
+    /**
+     * Strip query-string secrets from an RPC URL before it reaches a log or
+     * a persisted option.
+     *
+     * Helius's canonical DAS URL embeds the API key as `?api-key=…`, so the
+     * whole query string is masked — host + path are what an operator needs
+     * in order to recognise the endpoint.
+     *
+     * ── WHY THIS LIVES HERE NOW ─────────────────────────────────────────
+     * It was private to `SolanaFetcher`, which WRITES the DAS-unsupported
+     * mark. {@see NftProviderReadiness} has to decide whether a stored mark
+     * describes the endpoint currently in use, and it can only do that by
+     * putting the current endpoint through the SAME transformation the
+     * writer used. Two copies of a redaction rule would drift, and the drift
+     * would silently make every stored mark un-matchable — permanently
+     * disabling a driver, or permanently ignoring a real negative signal,
+     * with no way to tell which.
+     *
+     * ⚠️ This masks the QUERY STRING only. A credential embedded in the URL
+     * PATH (`https://host/v1/<KEY>`) is NOT redacted — see the note on
+     * {@see NftProviderReadiness::dasMarkApplies()}. That is pre-existing
+     * behaviour, preserved here byte-for-byte rather than quietly changed.
+     */
+    public static function redactEndpoint(string $url): string
+    {
+        $queryPos = strpos($url, '?');
+        if ($queryPos === false) {
+            return $url;
+        }
+
+        return substr($url, 0, $queryPos) . '?***REDACTED***';
     }
 }

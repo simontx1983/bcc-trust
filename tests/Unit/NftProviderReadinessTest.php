@@ -116,6 +116,65 @@ final class NftProviderReadinessTest extends TestCase
         self::assertFalse(HeliusEndpoint::isConfigured());
     }
 
+    // ── Whitespace-only configuration is not configuration ──────────────
+
+    /**
+     * A constant holding only whitespace is the same class of half-finished
+     * setup as an empty one — a templated wp-config, a secret injected with
+     * a stray newline, a copy-paste with trailing spaces. Untrimmed it is
+     * non-empty, reads as configured, and yields a URL that cannot resolve.
+     */
+    public function testWhitespaceOnlyHeliusApiKeyIsNotConfigured(): void
+    {
+        define('BCC_HELIUS_API_KEY', "  \t\n ");
+
+        self::assertFalse(HeliusEndpoint::isConfigured());
+        self::assertNull(HeliusEndpoint::resolveRpcUrl());
+        self::assertFalse(
+            NftProviderReadiness::isReady(self::chain('solana', 'solana'), NftDriverRegistry::DRIVER_DAS)
+        );
+    }
+
+    public function testWhitespaceOnlyHeliusRpcUrlIsNotConfigured(): void
+    {
+        define('BCC_HELIUS_RPC_URL', "   ");
+
+        self::assertFalse(HeliusEndpoint::isConfigured());
+        self::assertNull(HeliusEndpoint::resolveRpcUrl());
+    }
+
+    /** A whitespace-only URL falls THROUGH to a usable key. */
+    public function testWhitespaceUrlFallsThroughToAValidKey(): void
+    {
+        define('BCC_HELIUS_RPC_URL', "  \n");
+        define('BCC_HELIUS_API_KEY', 'real-key');
+
+        self::assertSame(
+            'https://mainnet.helius-rpc.com/?api-key=real-key',
+            HeliusEndpoint::resolveRpcUrl()
+        );
+    }
+
+    /** A padded key is usable, and its padding never reaches the URL. */
+    public function testPaddedKeyIsTrimmedRatherThanRejected(): void
+    {
+        define('BCC_HELIUS_API_KEY', "  real-key\n");
+
+        self::assertSame(
+            'https://mainnet.helius-rpc.com/?api-key=real-key',
+            HeliusEndpoint::resolveRpcUrl()
+        );
+    }
+
+    /** A valid explicit URL still wins over a valid key, trimmed. */
+    public function testPaddedExplicitUrlStillWins(): void
+    {
+        define('BCC_HELIUS_RPC_URL', "  https://custom.example/rpc  ");
+        define('BCC_HELIUS_API_KEY', 'ignored');
+
+        self::assertSame('https://custom.example/rpc', HeliusEndpoint::resolveRpcUrl());
+    }
+
     /** An empty URL falls THROUGH to the key rather than short-circuiting. */
     public function testEmptyUrlFallsThroughToANonEmptyKey(): void
     {
@@ -140,40 +199,141 @@ final class NftProviderReadinessTest extends TestCase
     }
 
     /**
-     * A configured key is still not ready when the endpoint has ALREADY told
-     * us it cannot serve `getAssets*`. The mark is written only on an
-     * observed -32601/-32603, so it is evidence rather than a guess.
+     * A configured key is still not ready when THE ENDPOINT IN USE has
+     * already told us it cannot serve `getAssets*`. The mark is written only
+     * on an observed -32601/-32603, so it is evidence rather than a guess.
+     *
+     * The mark records the redacted endpoint, so the current one is put
+     * through the same redaction to compare.
      */
     public function testObservedDasUnsupportedOverridesAConfiguredKey(): void
     {
         define('BCC_HELIUS_API_KEY', 'real-key');
 
-        $solana = self::chain('solana', 'solana', '', '', 42);
+        $publicRpc = 'https://api.mainnet-beta.solana.com';
+        $solana    = self::chain('solana', 'solana', $publicRpc, '', 42);
         self::assertTrue(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS));
 
         NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
-            'rpc_url' => 'https://redacted', 'code' => -32601, 'message' => 'Method not found',
+            'rpc_url'     => HeliusEndpoint::redactEndpoint($publicRpc),
+            'code'        => -32601,
+            'message'     => 'Method not found',
+            'detected_at' => 1,
         ];
 
         self::assertFalse(
             NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS),
-            'an endpoint that answered "method not found" is not ready, key or no key'
+            'the endpoint that answered "method not found" is not ready, key or no key'
         );
     }
 
     /**
-     * A malformed mark is NOT treated as a mark. The option is a negative
-     * signal; an unreadable one must not silently disable a driver an
-     * operator has correctly configured.
+     * THE STALE-MARK DEAD END, closed.
+     *
+     * A negative observation belongs to the endpoint that produced it.
+     * Before this, any stored mark was permanent: the seeded public RPC
+     * answered "method not found", the mark was stored, the operator
+     * repointed `chains.rpc_url` at a DAS-capable endpoint — and readiness
+     * stayed false forever, with no way to clear it short of deleting the
+     * option by hand.
      */
-    public function testMalformedDasMarkIsIgnored(): void
+    public function testRepointingToADifferentEndpointClearsAStaleMark(): void
     {
         define('BCC_HELIUS_API_KEY', 'real-key');
 
-        $solana = self::chain('solana', 'solana', '', '', 42);
-        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = 'garbage';
+        $oldRpc = 'https://api.mainnet-beta.solana.com';
+        $newRpc = 'https://mainnet.helius-rpc.com/?api-key=real-key';
+
+        // The old endpoint was observed to lack DAS.
+        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
+            'rpc_url'     => HeliusEndpoint::redactEndpoint($oldRpc),
+            'code'        => -32601,
+            'message'     => 'Method not found',
+            'detected_at' => 1,
+        ];
+
+        self::assertFalse(
+            NftProviderReadiness::isReady(self::chain('solana', 'solana', $oldRpc, '', 42), NftDriverRegistry::DRIVER_DAS),
+            'the same endpoint keeps its refusal'
+        );
+
+        self::assertTrue(
+            NftProviderReadiness::isReady(self::chain('solana', 'solana', $newRpc, '', 42), NftDriverRegistry::DRIVER_DAS),
+            'a DIFFERENT endpoint must not inherit the previous one\'s verdict'
+        );
+    }
+
+    /**
+     * A mark that cannot be attributed to an endpoint does not apply.
+     *
+     * This is a NEGATIVE signal, and an unattributable one must not
+     * permanently disable a driver an operator has correctly configured. The
+     * choice is self-correcting: if the endpoint really is DAS-incapable,
+     * the next call re-writes the mark WITH an endpoint attached.
+     */
+    #[DataProvider('unattributableMarks')]
+    public function testUnattributableDasMarkIsIgnored(mixed $stored): void
+    {
+        define('BCC_HELIUS_API_KEY', 'real-key');
+
+        $solana = self::chain('solana', 'solana', 'https://api.mainnet-beta.solana.com', '', 42);
+        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = $stored;
 
         self::assertTrue(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS));
+    }
+
+    /** @return array<string, array{0: mixed}> */
+    public static function unattributableMarks(): array
+    {
+        return [
+            'not an array'      => ['garbage'],
+            'empty array'       => [[]],
+            'no rpc_url key'    => [['code' => -32601, 'message' => 'Method not found']],
+            'empty rpc_url'     => [['rpc_url' => '', 'code' => -32601]],
+            'whitespace rpc_url'=> [['rpc_url' => '   ', 'code' => -32601]],
+        ];
+    }
+
+    /**
+     * The redaction masks the whole query string, so the same host with a
+     * ROTATED key compares equal and keeps its refusal.
+     *
+     * Deliberate and conservative: a host that has already proven it cannot
+     * serve DAS will not start serving it because the key changed, and the
+     * redaction is what keeps the secret out of the stored option.
+     */
+    public function testRotatingAKeyOnTheSameHostKeepsTheRefusal(): void
+    {
+        define('BCC_HELIUS_API_KEY', 'real-key');
+
+        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
+            'rpc_url' => HeliusEndpoint::redactEndpoint('https://dead.example/?api-key=OLD'),
+            'code'    => -32601,
+        ];
+
+        self::assertFalse(
+            NftProviderReadiness::isReady(
+                self::chain('solana', 'solana', 'https://dead.example/?api-key=NEW', '', 42),
+                NftDriverRegistry::DRIVER_DAS
+            )
+        );
+    }
+
+    /** The mark is per chain — it must not leak onto another chain's row. */
+    public function testDasMarkIsScopedToItsOwnChain(): void
+    {
+        define('BCC_HELIUS_API_KEY', 'real-key');
+
+        $rpc = 'https://api.mainnet-beta.solana.com';
+        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
+            'rpc_url' => HeliusEndpoint::redactEndpoint($rpc),
+            'code'    => -32601,
+        ];
+
+        self::assertTrue(
+            NftProviderReadiness::isReady(self::chain('solana', 'solana', $rpc, '', 99), NftDriverRegistry::DRIVER_DAS),
+            'chain 99 must not inherit chain 42\'s mark'
+        );
     }
 
     // ── EVM: the seeded URLs are templates, not endpoints ───────────────

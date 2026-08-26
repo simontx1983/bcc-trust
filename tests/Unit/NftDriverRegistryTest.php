@@ -58,7 +58,7 @@ final class NftDriverRegistryTest extends TestCase
         foreach (['ethereum', 'base', 'polygon', 'arbitrum', 'optimism', 'avalanche', 'bsc'] as $slug) {
             self::assertSame(
                 [],
-                NftDriverRegistry::driversFor(self::chain('evm', $slug), NftDriverRegistry::OP_ENUMERATION),
+                NftDriverRegistry::driversFor(self::chain('evm', $slug), NftDriverRegistry::OP_ENUMERATION, []),
                 "EVM chain {$slug} must have no enumeration driver"
             );
         }
@@ -68,7 +68,7 @@ final class NftDriverRegistryTest extends TestCase
     {
         self::assertSame(
             [],
-            NftDriverRegistry::driversFor(self::chain('solana', 'solana'), NftDriverRegistry::OP_ENUMERATION)
+            NftDriverRegistry::driversFor(self::chain('solana', 'solana'), NftDriverRegistry::OP_ENUMERATION, [])
         );
     }
 
@@ -76,7 +76,7 @@ final class NftDriverRegistryTest extends TestCase
     {
         self::assertSame(
             [NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION],
-            NftDriverRegistry::driversFor(self::chain('cosmos', 'cosmos'), NftDriverRegistry::OP_ENUMERATION)
+            NftDriverRegistry::driversFor(self::chain('cosmos', 'cosmos'), NftDriverRegistry::OP_ENUMERATION, [])
         );
     }
 
@@ -89,21 +89,21 @@ final class NftDriverRegistryTest extends TestCase
 
         self::assertSame(
             [NftDriverRegistry::DRIVER_TALIS_WHITELIST],
-            NftDriverRegistry::driversFor($injective, NftDriverRegistry::OP_CURATED_FEED)
+            NftDriverRegistry::driversFor($injective, NftDriverRegistry::OP_CURATED_FEED, [])
         );
         self::assertSame(
             [],
-            NftDriverRegistry::driversFor($hub, NftDriverRegistry::OP_CURATED_FEED),
+            NftDriverRegistry::driversFor($hub, NftDriverRegistry::OP_CURATED_FEED, []),
             'the Cosmos Hub has no curated feed'
         );
 
         self::assertSame(
             [NftDriverRegistry::DRIVER_STARGAZE_MARKETPLACE],
-            NftDriverRegistry::driversFor($hub, NftDriverRegistry::OP_WALLET_DISCOVERY)
+            NftDriverRegistry::driversFor($hub, NftDriverRegistry::OP_WALLET_DISCOVERY, [])
         );
         self::assertSame(
             [],
-            NftDriverRegistry::driversFor($injective, NftDriverRegistry::OP_WALLET_DISCOVERY),
+            NftDriverRegistry::driversFor($injective, NftDriverRegistry::OP_WALLET_DISCOVERY, []),
             'Injective has no per-wallet owner index'
         );
     }
@@ -123,11 +123,11 @@ final class NftDriverRegistryTest extends TestCase
 
         self::assertContains(
             NftDriverRegistry::DRIVER_EVM_RPC,
-            NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_OWNERSHIP)
+            NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_OWNERSHIP, [])
         );
         self::assertSame(
             [],
-            NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_VALIDATION),
+            NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_VALIDATION, []),
             'EVM validation is not implemented on this branch and must not be claimed'
         );
     }
@@ -136,7 +136,7 @@ final class NftDriverRegistryTest extends TestCase
     {
         self::assertSame(
             [NftDriverRegistry::DRIVER_ALCHEMY_TRANSFERS, NftDriverRegistry::DRIVER_EVM_RPC],
-            NftDriverRegistry::driversFor(self::chain('evm', 'ethereum'), NftDriverRegistry::OP_OWNERSHIP)
+            NftDriverRegistry::driversFor(self::chain('evm', 'ethereum'), NftDriverRegistry::OP_OWNERSHIP, [])
         );
     }
 
@@ -190,7 +190,7 @@ final class NftDriverRegistryTest extends TestCase
     ): void {
         $chain = self::chain($chainType, $chainSlug);
 
-        $withoutOverride = NftDriverRegistry::driversFor($chain, $operation);
+        $withoutOverride = NftDriverRegistry::driversFor($chain, $operation, []);
         $withOverride    = NftDriverRegistry::driversFor($chain, $operation, [$row]);
 
         self::assertSame(
@@ -244,7 +244,7 @@ final class NftDriverRegistryTest extends TestCase
         foreach (['', 'ENUMERATION', 'enumerate', 'intake', 'primary'] as $bogus) {
             self::assertSame(
                 [],
-                NftDriverRegistry::driversFor($chain, $bogus),
+                NftDriverRegistry::driversFor($chain, $bogus, []),
                 "operation '{$bogus}' must not resolve"
             );
         }
@@ -255,7 +255,7 @@ final class NftDriverRegistryTest extends TestCase
         $chain = self::chain('polkadot', 'polkadot');
 
         foreach (NftDriverRegistry::operations() as $operation) {
-            self::assertSame([], NftDriverRegistry::driversFor($chain, $operation));
+            self::assertSame([], NftDriverRegistry::driversFor($chain, $operation, []));
         }
     }
 
@@ -269,7 +269,7 @@ final class NftDriverRegistryTest extends TestCase
         $chain = (object) ['id' => '1', 'slug' => 'mystery'];
 
         foreach (NftDriverRegistry::operations() as $operation) {
-            self::assertSame([], NftDriverRegistry::driversFor($chain, $operation));
+            self::assertSame([], NftDriverRegistry::driversFor($chain, $operation, []));
         }
     }
 

@@ -282,9 +282,74 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
             'app/Domain/Onchain/Support/NftProviderReadiness.php',
             'app/Domain/Onchain/Support/NftChainCapability.php',
             'app/Domain/Onchain/Repositories/ChainNftCapabilityRepository.php',
+            'app/Domain/Onchain/ValueObjects/ChainNftCapabilityOverrides.php',
             'includes/database/schema-chain-nft-capabilities.php',
             'includes/database/schema-probe.php',
         ];
+    }
+
+    // ── No convenience method may bypass operator overrides ─────────────
+
+    /**
+     * `NftDriverRegistry::enumerationDriversForChainId()` was removed.
+     *
+     * It took `array $overrides = []`, so every call that omitted the
+     * argument silently meant "this chain has no overrides" — bypassing
+     * every operator disable in the database and returning full registry
+     * defaults, behind a name that promised a complete persisted answer.
+     *
+     * The rule generalises: no method on the registry may DEFAULT its
+     * overrides. A caller either supplies them or does not use the registry.
+     */
+    public function testRegistryExposesNoOverrideDefaultingHelper(): void
+    {
+        $src = self::codeWithoutComments(
+            self::root() . '/app/Domain/Onchain/Support/NftDriverRegistry.php'
+        );
+
+        self::assertStringNotContainsString('enumerationDriversForChainId', $src);
+
+        // And the rule generalises: `driversFor()` takes its overrides as a
+        // REQUIRED parameter. A default of `[]` would read as "this chain
+        // has no overrides", so a caller that merely forgot the argument
+        // would bypass every operator disable in the database.
+        self::assertStringNotContainsString(
+            'array $overrides = []',
+            $src,
+            'no registry method may default its overrides to "none"'
+        );
+        self::assertStringContainsString('array $overrides): array', $src);
+    }
+
+    /**
+     * Nothing resolves a chain's overrides except through the repository,
+     * and the repository's contract is a value that can say "unavailable".
+     *
+     * Only the CALL site appears here — the repository declares the method
+     * rather than calling it.
+     */
+    public function testOverridesAreOnlyEverSourcedFromTheRepository(): void
+    {
+        self::assertSame(
+            ['app/Domain/Onchain/Support/NftChainCapability.php'],
+            self::filesContaining('ChainNftCapabilityRepository::getForChain')
+        );
+    }
+
+    /**
+     * The verdict must never be handed override rows it has not confirmed
+     * are complete. Pinned as source, because the alternative — a future
+     * edit that drops the `isAvailable()` branch — reads as a simplification
+     * and silently restores every disabled driver.
+     */
+    public function testTheComposedVerdictGatesOnOverrideAvailability(): void
+    {
+        $src = self::codeWithoutComments(
+            self::root() . '/app/Domain/Onchain/Support/NftChainCapability.php'
+        );
+
+        self::assertStringContainsString('$overrides->isAvailable()', $src);
+        self::assertStringContainsString('$overrides->rows()', $src);
     }
 
     // ── The scaffold is unread ──────────────────────────────────────────

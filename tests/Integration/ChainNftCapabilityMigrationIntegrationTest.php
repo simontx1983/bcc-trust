@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Integration;
 
+use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainNftCapabilityRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\NftChainCapability;
+use BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
@@ -361,7 +363,10 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         $wpdb->query($wpdb->prepare($insert, $chain, 'ownership', 'evm_rpc', 1, 5));
         $wpdb->query($wpdb->prepare($insert, $chain, 'ownership', 'alchemy_transfers', 1, 1));
 
-        $rows = ChainNftCapabilityRepository::getForChain($chain);
+        $result = ChainNftCapabilityRepository::getForChain($chain);
+
+        self::assertTrue($result->isAvailable());
+        $rows = $result->rows();
 
         self::assertCount(2, $rows);
         self::assertSame('alchemy_transfers', $rows[0]['driver_key']);
@@ -370,11 +375,309 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         self::assertSame(1, $rows[0]['priority']);
     }
 
-    public function testOverrideRepositoryIsEmptyForAnUnknownChain(): void
+    /**
+     * An unusable chain id is UNAVAILABLE, not "no overrides".
+     *
+     * A chain we cannot identify is one whose operator configuration we
+     * cannot claim to know — and since an absent row means "registry default
+     * applies", answering "no overrides" here would grant defaults for a
+     * chain that may not even exist.
+     *
+     * A chain id that is well-formed but simply has no rows is a different
+     * matter: that read SUCCEEDED, so it is available and empty.
+     */
+    public function testUnusableChainIdIsUnavailableRatherThanEmpty(): void
     {
-        self::assertSame([], ChainNftCapabilityRepository::getForChain(0));
-        self::assertSame([], ChainNftCapabilityRepository::getForChain(-1));
-        self::assertSame([], ChainNftCapabilityRepository::getForChain(999999));
+        foreach ([0, -1] as $bad) {
+            $result = ChainNftCapabilityRepository::getForChain($bad);
+            self::assertFalse($result->isAvailable(), "chain id {$bad} must be unavailable");
+            self::assertSame(ChainNftCapabilityOverrides::REASON_INVALID_CHAIN, $result->reason());
+        }
+
+        // A syntactically valid id with no rows: the read worked.
+        $absent = ChainNftCapabilityRepository::getForChain(999999);
+        self::assertTrue($absent->isAvailable());
+        self::assertSame([], $absent->rows());
+    }
+
+    // ── The override read fails CLOSED ──────────────────────────────────
+
+    /**
+     * THE HEADLINE REGRESSION.
+     *
+     * 1. an operator disables the only enumeration driver on a chain that
+     *    is otherwise fully permitted and configured
+     * 2. the override store then becomes unreadable
+     * 3. the chain must STAY non-scannable
+     * 4. registry defaults must NOT be silently restored
+     *
+     * Step 4 is the one that matters. Because an ABSENT row means "registry
+     * default applies", a failed read reported as "no overrides" would hand
+     * the disabled driver straight back — at exactly the moment the database
+     * is least healthy. The table is really renamed here, so the failure is
+     * a genuine unreadable read rather than a mocked one.
+     */
+    public function testADisabledDriverDoesNotComeBackWhenTheOverrideStoreFails(): void
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = ChainNftCapabilityRepository::table();
+        $chain = self::fullyPermittedCosmosChain();
+
+        // 1. Operator disables the chain's only enumeration driver.
+        $wpdb->query($wpdb->prepare(
+            'INSERT INTO `' . $table . '` (chain_id, operation, driver_key, enabled, priority, updated_at)
+             VALUES (%d, %s, %s, 0, 10, NOW())',
+            (int) $chain->id,
+            'enumeration',
+            'cosmwasm_enumeration'
+        ));
+
+        self::assertSame(
+            NftChainCapability::NO_ENUMERATION_DRIVER,
+            NftChainCapability::forChain($chain),
+            'the operator disable must take effect while the store is readable'
+        );
+
+        // 2. The override store becomes unreadable.
+        $wpdb->query('RENAME TABLE `' . $table . '` TO `' . $table . '_gone`');
+
+        try {
+            $verdict = NftChainCapability::forChain($chain);
+
+            // 3 + 4.
+            self::assertFalse(
+                NftChainCapability::isScannable($verdict),
+                'an unreadable override store must never yield SCANNABLE'
+            );
+            self::assertSame(
+                NftChainCapability::UNKNOWN,
+                $verdict,
+                'a failed override read is "we cannot say", not "no overrides"'
+            );
+        } finally {
+            $wpdb->query('RENAME TABLE `' . $table . '_gone` TO `' . $table . '`');
+        }
+
+        // And the disable is still in force once the store returns.
+        self::assertSame(NftChainCapability::NO_ENUMERATION_DRIVER, NftChainCapability::forChain($chain));
+    }
+
+    public function testUnreadableOverrideStoreReportsUnavailableNotEmpty(): void
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = ChainNftCapabilityRepository::table();
+        $chain = (int) ChainRepository::resolveIdAnyState('cosmos');
+
+        $wpdb->query('RENAME TABLE `' . $table . '` TO `' . $table . '_gone`');
+        try {
+            $result = ChainNftCapabilityRepository::getForChain($chain);
+
+            self::assertFalse($result->isAvailable());
+            self::assertSame(ChainNftCapabilityOverrides::REASON_READ_FAILED, $result->reason());
+        } finally {
+            $wpdb->query('RENAME TABLE `' . $table . '_gone` TO `' . $table . '`');
+        }
+    }
+
+    /** A successful read with zero rows is AVAILABLE — defaults may apply. */
+    public function testZeroOverridesIsAvailableNotUnavailable(): void
+    {
+        $result = ChainNftCapabilityRepository::getForChain(
+            (int) ChainRepository::resolveIdAnyState('cosmos')
+        );
+
+        self::assertTrue($result->isAvailable());
+        self::assertSame([], $result->rows());
+        self::assertNull($result->reason());
+    }
+
+    // ── A truncated override read is not a partial answer ───────────────
+
+    /**
+     * A bounded read that hits its ceiling is a SUBSET of what the operator
+     * configured. Applying a subset would honour some restrictions and
+     * silently drop others — so the whole set is unavailable instead.
+     *
+     * The concrete hazard: corrupt or hostile rows occupy the first N
+     * positions while a genuine disabling row sits beyond the limit.
+     */
+    public function testAnOverflowingOverrideSetIsUnavailableAndNotScannable(): void
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = ChainNftCapabilityRepository::table();
+        $chain = self::fullyPermittedCosmosChain();
+        $id    = (int) $chain->id;
+
+        // 201 rows — one past the 200 ceiling. Distinct driver keys keep
+        // uq_chain_op_driver satisfied.
+        $values = [];
+        for ($i = 0; $i <= 200; $i++) {
+            $values[] = $wpdb->prepare('(%d, %s, %s, 1, %d, NOW())', $id, 'enumeration', 'filler_' . $i, $i);
+        }
+        $wpdb->query(
+            'INSERT INTO `' . $table . '` (chain_id, operation, driver_key, enabled, priority, updated_at)
+             VALUES ' . implode(',', $values)
+        );
+
+        $result = ChainNftCapabilityRepository::getForChain($id);
+        self::assertFalse($result->isAvailable(), 'an overflowing set must not be applied');
+        self::assertSame(ChainNftCapabilityOverrides::REASON_OVERFLOW, $result->reason());
+
+        self::assertFalse(
+            NftChainCapability::isScannable(NftChainCapability::forChain($chain)),
+            'an overflowing override set must never yield SCANNABLE'
+        );
+    }
+
+    /** Exactly at the ceiling is fine — only PAST it is truncation. */
+    public function testExactlyTheCeilingIsStillAvailable(): void
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = ChainNftCapabilityRepository::table();
+        $id    = (int) ChainRepository::resolveIdAnyState('cosmos');
+
+        $values = [];
+        for ($i = 0; $i < 200; $i++) {
+            $values[] = $wpdb->prepare('(%d, %s, %s, 1, %d, NOW())', $id, 'enumeration', 'filler_' . $i, $i);
+        }
+        $wpdb->query(
+            'INSERT INTO `' . $table . '` (chain_id, operation, driver_key, enabled, priority, updated_at)
+             VALUES ' . implode(',', $values)
+        );
+
+        $result = ChainNftCapabilityRepository::getForChain($id);
+        self::assertTrue($result->isAvailable());
+        self::assertCount(200, $result->rows());
+    }
+
+    /** A structurally broken row makes the whole set unavailable. */
+    public function testAMalformedRowMakesTheSetUnavailable(): void
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = ChainNftCapabilityRepository::table();
+        $id    = (int) ChainRepository::resolveIdAnyState('cosmos');
+
+        $wpdb->query($wpdb->prepare(
+            'INSERT INTO `' . $table . '` (chain_id, operation, driver_key, enabled, priority, updated_at)
+             VALUES (%d, %s, %s, 1, 10, NOW())',
+            $id,
+            '',
+            'cosmwasm_enumeration'
+        ));
+
+        $result = ChainNftCapabilityRepository::getForChain($id);
+        self::assertFalse($result->isAvailable());
+        self::assertSame(ChainNftCapabilityOverrides::REASON_MALFORMED, $result->reason());
+    }
+
+    /**
+     * A row naming a driver this build does not implement is NORMAL, not
+     * malformed — an older or newer build wrote it, and the registry
+     * intersection discards it harmlessly. It must not poison the set.
+     */
+    public function testAnUnknownDriverKeyIsNotTreatedAsMalformed(): void
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = ChainNftCapabilityRepository::table();
+        $id    = (int) ChainRepository::resolveIdAnyState('cosmos');
+
+        $wpdb->query($wpdb->prepare(
+            'INSERT INTO `' . $table . '` (chain_id, operation, driver_key, enabled, priority, updated_at)
+             VALUES (%d, %s, %s, 1, 10, NOW())',
+            $id,
+            'enumeration',
+            'driver_from_a_future_build'
+        ));
+
+        $result = ChainNftCapabilityRepository::getForChain($id);
+        self::assertTrue($result->isAvailable());
+        self::assertCount(1, $result->rows());
+    }
+
+    // ── The CosmWasm measurement is scoped to Cosmos ────────────────────
+
+    /**
+     * A Cosmos chain measured at HTTP 501 is CHAIN_UNSUPPORTED.
+     */
+    public function testCosmosChainWithMeasured501IsChainUnsupported(): void
+    {
+        $chain = self::fullyPermittedCosmosChain();
+        self::markCwUnsupported((int) $chain->id);
+
+        self::assertSame(NftChainCapability::CHAIN_UNSUPPORTED, NftChainCapability::forChain($chain));
+    }
+
+    /**
+     * AN EVM OR SOLANA CHAIN CARRYING A STALE `cw_discovery_state` IS NOT.
+     *
+     * `cw_discovery_state` lives on `wp_bcc_chain_checkpoints`, a row shared
+     * with the EVM indexer's own `state` column, so a non-Cosmos chain can
+     * carry a `cw_*` value that means nothing there. Reading it would answer
+     * "this chain has no wasm module" — true, irrelevant, and it would MASK
+     * the real reason an EVM scan is refused: no provider sells chain-wide
+     * EVM enumeration.
+     *
+     * @param string $slug
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('nonCosmosChains')]
+    public function testNonCosmosChainIgnoresAStaleCosmWasmState(string $slug): void
+    {
+        $chain = self::fullyPermittedChain($slug);
+        self::markCwUnsupported((int) $chain->id);
+
+        $verdict = NftChainCapability::forChain($chain);
+
+        self::assertNotSame(
+            NftChainCapability::CHAIN_UNSUPPORTED,
+            $verdict,
+            "{$slug} must not be classified by a CosmWasm measurement"
+        );
+        self::assertSame(
+            NftChainCapability::NO_ENUMERATION_DRIVER,
+            $verdict,
+            'the honest reason is that no driver can enumerate this family'
+        );
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function nonCosmosChains(): array
+    {
+        return ['evm' => ['ethereum'], 'solana' => ['solana']];
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────────
+
+    /** A chain row with both capability columns set to 1, freshly projected. */
+    private static function fullyPermittedChain(string $slug): object
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        $wpdb->query($wpdb->prepare(
+            'UPDATE `' . ChainRepository::table() . '`
+                SET ' . self::SUPPORT_COLUMN . ' = 1, ' . self::MANUAL_COLUMN . ' = 1
+              WHERE slug = %s',
+            $slug
+        ));
+        ChainRepository::clearCache();
+
+        $chain = ChainRepository::getBySlug($slug);
+        self::assertNotNull($chain, "chain {$slug} must exist");
+
+        return $chain;
+    }
+
+    private static function fullyPermittedCosmosChain(): object
+    {
+        return self::fullyPermittedChain('cosmos');
+    }
+
+    /** Record the measured HTTP 501 on a chain's checkpoint row. */
+    private static function markCwUnsupported(int $chainId): void
+    {
+        ChainCheckpointRepository::ensureExists($chainId);
+        ChainCheckpointRepository::setCwDiscoveryState(
+            $chainId,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
     }
 
     /**

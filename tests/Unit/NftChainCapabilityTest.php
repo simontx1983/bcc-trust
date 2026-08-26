@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -42,7 +41,7 @@ final class NftChainCapabilityTest extends TestCase
     /** A chain that is fully permitted and fully configured. */
     private static function scannableArgs(): array
     {
-        return [null, true, true, [self::COSMWASM], [self::COSMWASM]];
+        return [false, true, true, true, [self::COSMWASM], [self::COSMWASM]];
     }
 
     // ── The one YES ─────────────────────────────────────────────────────
@@ -58,15 +57,17 @@ final class NftChainCapabilityTest extends TestCase
     /**
      * A chain with no checkpoint row yet is NOT refused.
      *
-     * `cw_discovery_state === null` means no pass has ever measured this
-     * chain. Refusing it would be a permanent deadlock dressed up as
-     * caution: the first pass is what CREATES the measurement.
+     * `measuredUnsupported = false` covers both "measured and fine" and
+     * "never measured". Refusing the unmeasured case would be a permanent
+     * deadlock dressed up as caution: the first pass is what CREATES the
+     * measurement. (Scoping that flag to Cosmos is the composed layer's job
+     * — see ChainNftCapabilityMigrationIntegrationTest.)
      */
     public function testUnmeasuredChainIsNotRefusedForBeingUnmeasured(): void
     {
         self::assertSame(
             NftChainCapability::SCANNABLE,
-            NftChainCapability::verdict(null, true, true, [self::COSMWASM], [self::COSMWASM])
+            NftChainCapability::verdict(false, true, true, true, [self::COSMWASM], [self::COSMWASM])
         );
     }
 
@@ -79,7 +80,7 @@ final class NftChainCapabilityTest extends TestCase
      */
     public function testShippedDefaultsAreNotScannable(): void
     {
-        $verdict = NftChainCapability::verdict(null, false, false, [self::COSMWASM], [self::COSMWASM]);
+        $verdict = NftChainCapability::verdict(false, true, false, false, [self::COSMWASM], [self::COSMWASM]);
 
         self::assertSame(NftChainCapability::NO_BCC_SUPPORT, $verdict);
         self::assertFalse(NftChainCapability::isScannable($verdict));
@@ -147,7 +148,7 @@ final class NftChainCapabilityTest extends TestCase
     {
         self::assertSame(
             NftChainCapability::NO_BCC_SUPPORT,
-            NftChainCapability::verdict(null, false, true, [self::COSMWASM], [self::COSMWASM]),
+            NftChainCapability::verdict(false, true, false, true, [self::COSMWASM], [self::COSMWASM]),
             'a validator-carrying chain must not become scannable merely by being permitted'
         );
     }
@@ -163,7 +164,7 @@ final class NftChainCapabilityTest extends TestCase
     {
         self::assertSame(
             NftChainCapability::NO_ENUMERATION_DRIVER,
-            NftChainCapability::verdict(null, true, true, [], [])
+            NftChainCapability::verdict(false, true, true, true, [], [])
         );
     }
 
@@ -178,8 +179,8 @@ final class NftChainCapabilityTest extends TestCase
      */
     public function testProviderUnavailableIsDistinctFromNoDriver(): void
     {
-        $noDriver = NftChainCapability::verdict(null, true, true, [], []);
-        $notReady = NftChainCapability::verdict(null, true, true, [self::COSMWASM], []);
+        $noDriver = NftChainCapability::verdict(false, true, true, true, [], []);
+        $notReady = NftChainCapability::verdict(false, true, true, true, [self::COSMWASM], []);
 
         self::assertSame(NftChainCapability::NO_ENUMERATION_DRIVER, $noDriver);
         self::assertSame(NftChainCapability::PROVIDER_UNAVAILABLE, $notReady);
@@ -197,7 +198,7 @@ final class NftChainCapabilityTest extends TestCase
     {
         self::assertSame(
             NftChainCapability::PROVIDER_UNAVAILABLE,
-            NftChainCapability::verdict(null, true, true, [self::COSMWASM, 'another'], [])
+            NftChainCapability::verdict(false, true, true, true, [self::COSMWASM, 'another'], [])
         );
     }
 
@@ -206,7 +207,7 @@ final class NftChainCapabilityTest extends TestCase
     {
         self::assertSame(
             NftChainCapability::SCANNABLE,
-            NftChainCapability::verdict(null, true, true, ['a', self::COSMWASM], [self::COSMWASM])
+            NftChainCapability::verdict(false, true, true, true, ['a', self::COSMWASM], [self::COSMWASM])
         );
     }
 
@@ -223,7 +224,8 @@ final class NftChainCapabilityTest extends TestCase
         self::assertSame(
             NftChainCapability::CHAIN_UNSUPPORTED,
             NftChainCapability::verdict(
-                ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+                true,
+                true,
                 true,
                 true,
                 [self::COSMWASM],
@@ -232,18 +234,70 @@ final class NftChainCapabilityTest extends TestCase
         );
     }
 
-    /** A paused chain is not "unsupported" — pause is not measured incapability. */
-    public function testPausedStateIsNotTreatedAsUnsupported(): void
+    // ── An unreadable override store fails closed ───────────────────────
+
+    /**
+     * THE FAIL-OPEN THIS GUARDS AGAINST.
+     *
+     * An absent override row MEANS "registry default applies". So if a
+     * failed read were reported as "no overrides", a chain whose operator
+     * had DISABLED its enumeration driver would silently get the driver
+     * back — at exactly the moment the database is least healthy.
+     *
+     * `overridesAvailable = false` therefore refuses, and it refuses BEFORE
+     * anything derived from the driver list is considered, because that list
+     * is precisely what cannot be trusted.
+     */
+    public function testUnavailableOverridesRefuseEvenWhenEverythingElsePasses(): void
     {
-        self::assertNotSame(
+        $verdict = NftChainCapability::verdict(
+            false,
+            false,                       // overrides could not be established
+            true,
+            true,
+            [self::COSMWASM],
+            [self::COSMWASM]
+        );
+
+        self::assertSame(NftChainCapability::UNKNOWN, $verdict);
+        self::assertFalse(NftChainCapability::isScannable($verdict));
+    }
+
+    /**
+     * An unreadable override store can NEVER produce SCANNABLE, whatever
+     * else is true. Swept across every combination of the remaining inputs
+     * so no future reordering can open a path through.
+     */
+    public function testUnavailableOverridesCanNeverBeScannable(): void
+    {
+        foreach ([true, false] as $measured) {
+            foreach ([true, false, null] as $support) {
+                foreach ([true, false, null] as $manual) {
+                    foreach ([[], [self::COSMWASM]] as $drivers) {
+                        foreach ([[], [self::COSMWASM]] as $ready) {
+                            self::assertNotSame(
+                                NftChainCapability::SCANNABLE,
+                                NftChainCapability::verdict($measured, false, $support, $manual, $drivers, $ready)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Measured incapability still outranks an unreadable override store.
+     *
+     * A chain with no wasm module cannot be scanned however the override
+     * table is feeling, and CHAIN_UNSUPPORTED is the more useful sentence:
+     * it names the one thing no operator action can change.
+     */
+    public function testMeasuredUnsupportedOutranksUnavailableOverrides(): void
+    {
+        self::assertSame(
             NftChainCapability::CHAIN_UNSUPPORTED,
-            NftChainCapability::verdict(
-                ChainCheckpointRepository::CW_STATE_PAUSED,
-                true,
-                true,
-                [self::COSMWASM],
-                [self::COSMWASM]
-            )
+            NftChainCapability::verdict(true, false, true, true, [self::COSMWASM], [self::COSMWASM])
         );
     }
 
@@ -260,7 +314,7 @@ final class NftChainCapabilityTest extends TestCase
     {
         self::assertSame(
             NftChainCapability::UNKNOWN,
-            NftChainCapability::verdict(null, $support, $manual, [self::COSMWASM], [self::COSMWASM])
+            NftChainCapability::verdict(false, true, $support, $manual, [self::COSMWASM], [self::COSMWASM])
         );
     }
 
@@ -282,7 +336,7 @@ final class NftChainCapabilityTest extends TestCase
         // report a specific reason.
         self::assertSame(
             NftChainCapability::UNKNOWN,
-            NftChainCapability::verdict(null, null, null, [], [])
+            NftChainCapability::verdict(false, true, null, null, [], [])
         );
     }
 
@@ -292,7 +346,7 @@ final class NftChainCapabilityTest extends TestCase
     {
         self::assertSame(
             NftChainCapability::MANUAL_DISABLED,
-            NftChainCapability::verdict(null, true, false, [self::COSMWASM], [self::COSMWASM])
+            NftChainCapability::verdict(false, true, true, false, [self::COSMWASM], [self::COSMWASM])
         );
     }
 
@@ -307,7 +361,7 @@ final class NftChainCapabilityTest extends TestCase
     {
         self::assertSame(
             NftChainCapability::NO_ENUMERATION_DRIVER,
-            NftChainCapability::verdict(null, true, false, [], [])
+            NftChainCapability::verdict(false, true, true, false, [], [])
         );
     }
 

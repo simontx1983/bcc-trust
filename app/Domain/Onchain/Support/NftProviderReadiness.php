@@ -116,11 +116,12 @@ final class NftProviderReadiness
 
             // ── Solana ──────────────────────────────────────────────────
             // Needs a Helius (or other DAS-capable) endpoint AND no observed
-            // "method not found" for this chain. The second half matters:
-            // a key can be present and still point at an endpoint that has
-            // already told us it cannot serve getAssets*.
+            // "method not found" FOR THE ENDPOINT CURRENTLY IN USE. The
+            // second half matters: a key can be present and still point at
+            // an endpoint that has already told us it cannot serve
+            // getAssets*.
             NftDriverRegistry::DRIVER_DAS => HeliusEndpoint::isConfigured()
-                && !self::dasMarkedUnsupported($chainId),
+                && !self::dasMarkApplies($chainId, $rpcUrl),
 
             // Public marketplace API; no per-chain credential.
             NftDriverRegistry::DRIVER_MAGICEDEN => true,
@@ -172,23 +173,61 @@ final class NftProviderReadiness
     }
 
     /**
-     * Has this chain's Solana endpoint already answered a DAS call with
-     * "method not found"?
+     * Does a stored "this endpoint has no DAS" mark apply to the endpoint we
+     * would use RIGHT NOW?
      *
-     * Written only on an OBSERVED `-32601` / `-32603` from a `getAssets*`
-     * call, so its presence is evidence, not a guess. A malformed or
-     * non-array option value is treated as NOT a mark — the option is a
-     * negative signal and an unreadable one must not silently disable a
-     * driver an operator has correctly configured.
+     * ── A NEGATIVE OBSERVATION BELONGS TO THE ENDPOINT THAT PRODUCED IT ──
+     * The mark is written only on an OBSERVED `-32601` / `-32603` from a
+     * `getAssets*` call, so its presence is evidence rather than a guess —
+     * but it is evidence about ONE endpoint. Treating any stored mark as
+     * permanent produced a dead end an operator could not escape:
+     *
+     *   1. the seeded public RPC answers "method not found"
+     *   2. the mark is stored
+     *   3. the operator repoints `chains.rpc_url` at a DAS-capable endpoint
+     *   4. readiness stays false forever, because nobody ever compared the
+     *      mark against the endpoint now in use
+     *
+     * The mark records `redactEndpoint($chain->rpc_url)` as observed by
+     * `SolanaFetcher::rpcCall()`, so the current endpoint is put through the
+     * SAME redaction and compared. A changed endpoint does not inherit the
+     * previous one's verdict; an unchanged endpoint keeps its refusal.
+     *
+     * ── UNATTRIBUTABLE MARKS DO NOT APPLY ───────────────────────────────
+     * A non-array option, an empty one, or one carrying no `rpc_url` cannot
+     * be tied to an endpoint. Those are treated as NOT applying, for the
+     * same reason the malformed case always was: this is a NEGATIVE signal,
+     * and an unreadable one must not permanently disable a driver an
+     * operator has correctly configured with no way to clear it. The
+     * decision is also self-correcting — if the endpoint really is
+     * DAS-incapable, the very next call re-writes the mark, this time WITH
+     * an endpoint attached.
+     *
+     * ⚠️ Comparison is on the REDACTED form, so two endpoints differing only
+     * in their query string (e.g. the same host with a rotated `?api-key=`)
+     * compare EQUAL. That is deliberate and conservative here: a rotated key
+     * on a host that has already proven it cannot serve DAS is still not
+     * going to serve DAS, and the redaction is what keeps the secret out of
+     * the stored option in the first place.
+     *
+     * No network call is made.
      */
-    private static function dasMarkedUnsupported(int $chainId): bool
+    private static function dasMarkApplies(int $chainId, string $currentRpcUrl): bool
     {
         if ($chainId <= 0) {
             return false;
         }
 
         $flag = get_option(HeliusEndpoint::dasUnsupportedOptionKey($chainId), null);
+        if (!is_array($flag) || $flag === []) {
+            return false;
+        }
 
-        return is_array($flag) && $flag !== [];
+        $markedEndpoint = isset($flag['rpc_url']) ? trim((string) $flag['rpc_url']) : '';
+        if ($markedEndpoint === '') {
+            return false;
+        }
+
+        return $markedEndpoint === HeliusEndpoint::redactEndpoint($currentRpcUrl);
     }
 }

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Support;
 
-use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -292,13 +292,26 @@ final class NftDriverRegistry
      * An unknown `$operation` returns `[]` rather than throwing: this feeds
      * a fail-closed verdict, and an empty list is already the refusal.
      *
+     * ── `$overrides` IS REQUIRED, DELIBERATELY ──────────────────────────
+     * It has no default. A default of `[]` would read as "this chain has no
+     * overrides", so any caller that simply forgot the argument would get
+     * full registry defaults and silently bypass every operator disable in
+     * the database — the same fail-open trap that removed the old
+     * `enumerationDriversForChainId()` helper. Making it required forces
+     * every call site to have an opinion about where the overrides came
+     * from, and to have handled the case where they could not be read.
+     *
+     * Passing `[]` explicitly is fine and means what it says: no overrides
+     * apply. It cannot happen by omission.
+     *
      * @param object $chain     a `ChainRow`-shaped projection
      * @param string $operation one of the six OP_* constants
      * @param list<array{operation: string, driver_key: string, enabled: bool, priority: int}> $overrides
-     *        rows from `wp_bcc_chain_nft_capabilities` for THIS chain
+     *        rows from `wp_bcc_chain_nft_capabilities` for THIS chain, from a
+     *        read that {@see ChainNftCapabilityOverrides::isAvailable()} confirmed
      * @return list<string> ordered driver keys; `[]` means "cannot"
      */
-    public static function driversFor(object $chain, string $operation, array $overrides = []): array
+    public static function driversFor(object $chain, string $operation, array $overrides): array
     {
         if (!self::isOperation($operation)) {
             return [];
@@ -357,24 +370,17 @@ final class NftDriverRegistry
         return array_map(static fn(array $r): string => $r['key'], $ordered);
     }
 
-    /**
-     * Convenience: the ordered enumeration drivers for a chain id.
-     *
-     * Resolves the chain through {@see ChainRepository::getById()} (which
-     * also serves inactive chains) and returns `[]` when the chain is
-     * unknown — an unresolvable chain cannot be enumerated, which is the
-     * fail-closed answer.
-     *
-     * @param list<array{operation: string, driver_key: string, enabled: bool, priority: int}> $overrides
-     * @return list<string>
-     */
-    public static function enumerationDriversForChainId(int $chainId, array $overrides = []): array
-    {
-        $chain = ChainRepository::getById($chainId);
-        if ($chain === null) {
-            return [];
-        }
-
-        return self::driversFor($chain, self::OP_ENUMERATION, $overrides);
-    }
+    // ── THERE IS DELIBERATELY NO `enumerationDriversForChainId()` ────────
+    //
+    // A chain-id convenience wrapper with `array $overrides = []` existed
+    // here and was removed. Its name promised a complete, persisted answer,
+    // but its DEFAULT argument silently meant "this chain has no overrides"
+    // — so every call that omitted the parameter would bypass every operator
+    // disable in the database and hand back full registry defaults.
+    //
+    // That is the fail-open shape {@see ChainNftCapabilityOverrides} exists
+    // to prevent, wearing a helpful name. Callers therefore resolve the
+    // overrides explicitly and must decide what to do when they are
+    // unavailable; {@see \BCC\Trust\Onchain\Support\NftChainCapability::forChain()}
+    // is the worked example.
 }

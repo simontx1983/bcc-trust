@@ -71,6 +71,12 @@ if (!defined('ABSPATH')) {
  */
 final class NftChainCapability
 {
+    /**
+     * The only `chain_type` for which `cw_discovery_state` carries meaning.
+     * See {@see measuredUnsupported()}.
+     */
+    private const COSMOS_CHAIN_TYPE = 'cosmos';
+
     // ── THE VERDICTS ────────────────────────────────────────────────────
 
     /** Nothing is blocking it: an administrator may start a discovery. */
@@ -80,6 +86,20 @@ final class NftChainCapability
      * MEASURED CAPABILITY: the chain's wasm module answered with a 501.
      * No operator action can make a wasm module appear, which is why this
      * is named before every reason an operator CAN change.
+     *
+     * ── COSMOS ONLY ─────────────────────────────────────────────────────
+     * The evidence behind this verdict — `cw_discovery_state` — is a
+     * statement about a **CosmWasm** module, and it lives on
+     * `wp_bcc_chain_checkpoints`, a table shared with the EVM indexer. A
+     * non-Cosmos chain can therefore carry a `cw_*` value that means
+     * nothing there: stale, defaulted, or written by an unrelated code path.
+     * Reading it on an EVM or Solana row would report "this chain has no
+     * wasm module" as though it explained why an Ethereum scan is refused —
+     * true, irrelevant, and it would mask the real reason
+     * ({@see NO_ENUMERATION_DRIVER}).
+     *
+     * {@see verdict()} therefore takes an already-scoped BOOLEAN, and
+     * {@see forChain()} is the only place that decides a chain is Cosmos.
      */
     public const CHAIN_UNSUPPORTED = 'chain_unsupported';
 
@@ -135,7 +155,9 @@ final class NftChainCapability
      * produces the most useful SENTENCE when the answer is no:
      *
      *   1. CHAIN_UNSUPPORTED       nothing anyone does can change it
-     *   2. UNKNOWN                 nobody can even read the setting yet
+     *   2. UNKNOWN                 we cannot read the overrides, or a
+     *                              permission column is absent — either way
+     *                              nobody can say anything yet
      *   3. NO_BCC_SUPPORT          a product decision, not a technical one
      *   4. NO_ENUMERATION_DRIVER   the code cannot, on any configuration
      *   5. MANUAL_DISABLED         a permission, one click away
@@ -154,11 +176,18 @@ final class NftChainCapability
      * a NO. There is no branch that falls through to "no restriction" — that
      * fall-through is the fail-OPEN shape this codebase already shipped once.
      *
-     * @param string|null $cwDiscoveryState     null = no checkpoint row yet, which is
-     *                                          NOT "unsupported": no pass has measured
-     *                                          this chain, and refusing an unmeasured
-     *                                          chain would be a permanent deadlock
-     *                                          dressed up as caution.
+     * @param bool $measuredUnsupported  ALREADY SCOPED to Cosmos by the caller —
+     *                                   see {@see CHAIN_UNSUPPORTED}. `false` covers
+     *                                   both "measured and fine" and "never measured";
+     *                                   an unmeasured chain is NOT refused, because the
+     *                                   first pass is what CREATES the measurement and
+     *                                   refusing it would be a permanent deadlock
+     *                                   dressed up as caution.
+     * @param bool $overridesAvailable   did we actually establish what this chain's
+     *                                   driver overrides are? `false` = the override
+     *                                   store was missing, failed, malformed or
+     *                                   truncated, so `$enumerationDrivers` cannot be
+     *                                   trusted and the verdict must fail closed.
      * @param bool|null   $bccSupportsNft       null = the column is absent from the projection
      * @param bool|null   $manualEnabled        null = the column is absent from the projection
      * @param list<string> $enumerationDrivers  ordered, from {@see NftDriverRegistry}
@@ -167,14 +196,24 @@ final class NftChainCapability
      * @return string one of the seven verdict constants on this class
      */
     public static function verdict(
-        ?string $cwDiscoveryState,
+        bool $measuredUnsupported,
+        bool $overridesAvailable,
         ?bool $bccSupportsNft,
         ?bool $manualEnabled,
         array $enumerationDrivers,
         array $readyEnumerationDrivers
     ): string {
-        if ($cwDiscoveryState === ChainCheckpointRepository::CW_STATE_UNSUPPORTED) {
+        if ($measuredUnsupported) {
             return self::CHAIN_UNSUPPORTED;
+        }
+        // An unreadable override store is named right after the one fact no
+        // operator can change, and BEFORE every reason derived from the
+        // driver list — because when the overrides are unknown, that list is
+        // exactly what we cannot trust. Reporting NO_ENUMERATION_DRIVER or
+        // SCANNABLE from registry defaults here would silently restore a
+        // driver an operator had disabled.
+        if (!$overridesAvailable) {
+            return self::UNKNOWN;
         }
         if ($bccSupportsNft === null || $manualEnabled === null) {
             return self::UNKNOWN;
@@ -243,22 +282,63 @@ final class NftChainCapability
     {
         $chainId = (int) ($chain->id ?? 0);
 
-        $overrides  = $chainId > 0 ? ChainNftCapabilityRepository::getForChain($chainId) : [];
-        $enumeration = NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_ENUMERATION, $overrides);
-        $ready       = NftProviderReadiness::readyDrivers($chain, $enumeration);
+        // Overrides FIRST. If we cannot establish them, the driver list is
+        // untrustworthy and every conclusion drawn from it would be a guess
+        // in the permissive direction.
+        $overrides = ChainNftCapabilityRepository::getForChain($chainId);
 
-        $checkpoint = $chainId > 0 ? ChainCheckpointRepository::get($chainId) : null;
-        $cwState    = $checkpoint !== null && isset($checkpoint->cw_discovery_state)
-            ? (string) $checkpoint->cw_discovery_state
-            : null;
+        $enumeration = $overrides->isAvailable()
+            ? NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_ENUMERATION, $overrides->rows())
+            : [];
+        $ready = NftProviderReadiness::readyDrivers($chain, $enumeration);
 
         return self::verdict(
-            $cwState,
+            self::measuredUnsupported($chain),
+            $overrides->isAvailable(),
             self::bccNftSupportState($chain),
             self::manualDiscoveryState($chain),
             $enumeration,
             $ready
         );
+    }
+
+    /**
+     * Is this chain MEASURED as lacking a CosmWasm module?
+     *
+     * ── THE COSMOS SCOPE LIVES HERE, AND ONLY HERE ──────────────────────
+     * `cw_discovery_state` is evidence about a CosmWasm module, but it sits
+     * on `wp_bcc_chain_checkpoints`, a row shared with the EVM indexer's own
+     * `state` column. A non-Cosmos chain can carry a `cw_*` value that means
+     * nothing there — stale, defaulted, or written by an unrelated path.
+     *
+     * Consulting it on an EVM or Solana row would answer "this chain has no
+     * wasm module": true, irrelevant, and actively misleading, because it
+     * would MASK the real reason an EVM scan is refused
+     * ({@see NO_ENUMERATION_DRIVER} — no provider sells chain-wide EVM
+     * enumeration) behind one that sounds like a chain defect.
+     *
+     * So the measurement is only consulted when the chain is actually
+     * Cosmos, and {@see verdict()} receives a boolean it can trust.
+     *
+     * @param object $chain a `ChainRow`-shaped projection
+     */
+    private static function measuredUnsupported(object $chain): bool
+    {
+        if ((string) ($chain->chain_type ?? '') !== self::COSMOS_CHAIN_TYPE) {
+            return false;
+        }
+
+        $chainId = (int) ($chain->id ?? 0);
+        if ($chainId <= 0) {
+            return false;
+        }
+
+        $checkpoint = ChainCheckpointRepository::get($chainId);
+        if ($checkpoint === null || !isset($checkpoint->cw_discovery_state)) {
+            return false;
+        }
+
+        return (string) $checkpoint->cw_discovery_state === ChainCheckpointRepository::CW_STATE_UNSUPPORTED;
     }
 
     /**
