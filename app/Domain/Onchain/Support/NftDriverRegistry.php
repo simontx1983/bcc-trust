@@ -108,7 +108,8 @@ final class NftDriverRegistry
     public const DRIVER_ALCHEMY_NFT          = 'alchemy_nft';
     public const DRIVER_ALCHEMY_TRANSFERS    = 'alchemy_transfers';
     public const DRIVER_EVM_RPC              = 'evm_rpc';
-    public const DRIVER_DAS                  = 'das';
+    public const DRIVER_DAS_RPC              = 'das_rpc';
+    public const DRIVER_DAS_HELIUS           = 'das_helius';
     public const DRIVER_MAGICEDEN            = 'magiceden';
 
     /** Chain slug of the Cosmos Hub — the only chain `stargaze_marketplace` serves. */
@@ -185,14 +186,26 @@ final class NftDriverRegistry
             'operations' => [self::OP_OWNERSHIP],
             'priority'   => 20,
         ],
-        self::DRIVER_DAS => [
-            // getAssetsByOwner / getAsset.
-            'operations' => [
-                self::OP_WALLET_DISCOVERY,
-                self::OP_VALIDATION,
-                self::OP_METADATA,
-                self::OP_OWNERSHIP,
-            ],
+        self::DRIVER_DAS_RPC => [
+            // getAssetsByOwner, via SolanaFetcher::rpcCall() -> the CHAIN
+            // ROW's rpc_url. Backs fetch_collections (wallet discovery) and
+            // count_holdings / list_holdings (ownership).
+            //
+            // NOT the same endpoint as DRIVER_DAS_HELIUS below, which is the
+            // whole reason they are two drivers — see SolanaEndpoints.
+            'operations' => [self::OP_WALLET_DISCOVERY, self::OP_OWNERSHIP],
+            'priority'   => 10,
+        ],
+        self::DRIVER_DAS_HELIUS => [
+            // getAsset, via fetchMetadataForMint() -> the HELIUS constants.
+            // Deliberately ignores the chain row: the chain's rpc_url is the
+            // public endpoint by default, and getAsset needs a DAS provider.
+            //
+            // VALIDATION is NOT claimed. Solana collection adds are
+            // "trusted as entered" today, exactly as they are on EVM — there
+            // is no validation entry point to point a driver at. Whoever
+            // builds one registers it then, alongside evm_rpc VALIDATION.
+            'operations' => [self::OP_METADATA],
             'priority'   => 10,
         ],
         self::DRIVER_MAGICEDEN => [
@@ -266,7 +279,8 @@ final class NftDriverRegistry
             self::DRIVER_ALCHEMY_NFT,
             self::DRIVER_ALCHEMY_TRANSFERS,
             self::DRIVER_EVM_RPC              => $type === 'evm',
-            self::DRIVER_DAS,
+            self::DRIVER_DAS_RPC,
+            self::DRIVER_DAS_HELIUS,
             self::DRIVER_MAGICEDEN            => $type === 'solana',
             default                           => false,
         };

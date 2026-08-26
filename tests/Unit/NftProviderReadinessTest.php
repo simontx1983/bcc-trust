@@ -9,6 +9,7 @@ use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\NftCapabilityOptionState;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
 use BCC\Trust\Onchain\Support\NftProviderReadiness;
+use BCC\Trust\Onchain\Support\SolanaEndpoints;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -45,6 +46,7 @@ require_once __DIR__ . '/../Stubs/nft-capability-stubs.php';
 #[CoversClass(NftProviderReadiness::class)]
 #[CoversClass(AlchemyEndpoint::class)]
 #[CoversClass(HeliusEndpoint::class)]
+#[CoversClass(SolanaEndpoints::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class NftProviderReadinessTest extends TestCase
@@ -68,23 +70,110 @@ final class NftProviderReadinessTest extends TestCase
     // ── The reason this class is per-driver ─────────────────────────────
 
     /**
-     * ONE READY DRIVER MUST NOT MAKE AN UNRELATED ONE LOOK READY.
+     * THE REPORTED DEFECT, PINNED.
      *
-     * Seeded Solana: no Helius constant defined, so `das` cannot work;
-     * `magiceden` is a public API and can. Same chain, same instant, two
-     * different answers.
+     * Helius IS configured, and the chain row still carries the public RPC.
+     * Three drivers on one chain at one instant, and no single answer covers
+     * them:
+     *
+     *   magiceden   ready     - public marketplace API, no credential
+     *   das_helius  ready     - getAsset goes to the Helius constants
+     *   das_rpc     NOT ready - getAssetsByOwner goes to the CHAIN ROW's
+     *                           rpc_url, which is the public endpoint
+     *
+     * Before the split, `das` read the Helius credential and reported wallet
+     * discovery READY while every call went to an endpoint with no DAS.
      */
-    public function testOneReadyDriverDoesNotMakeItsNeighbourReady(): void
+    public function testConfiguringHeliusDoesNotMakeTheRpcPathReady(): void
     {
-        $solana = self::chain('solana', 'solana', 'https://api.mainnet-beta.solana.com');
+        define('BCC_HELIUS_API_KEY', 'real-key');
+
+        $solana = self::chain('solana', 'solana', SolanaEndpoints::PUBLIC_MAINNET_RPC);
 
         self::assertTrue(
             NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_MAGICEDEN),
             'the public marketplace feed needs no credential'
         );
+        self::assertTrue(
+            NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS_HELIUS),
+            'Helius-backed metadata is ready independently of the chain row'
+        );
         self::assertFalse(
-            NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS),
-            'DAS needs Helius; the seeded public RPC has none'
+            NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS_RPC),
+            'wallet discovery still calls the chain rpc_url, which has no DAS'
+        );
+    }
+
+    /**
+     * The same fact stated as an operation question: a Helius key must not
+     * make WALLET_DISCOVERY or OWNERSHIP ready while those paths use a
+     * different RPC.
+     */
+    public function testHeliusDoesNotMakeWalletDiscoveryOrOwnershipReady(): void
+    {
+        define('BCC_HELIUS_API_KEY', 'real-key');
+
+        $solana = self::chain('solana', 'solana', SolanaEndpoints::PUBLIC_MAINNET_RPC);
+
+        foreach ([NftDriverRegistry::OP_WALLET_DISCOVERY, NftDriverRegistry::OP_OWNERSHIP] as $operation) {
+            $drivers = NftDriverRegistry::driversFor($solana, $operation, []);
+            self::assertSame(
+                [],
+                NftProviderReadiness::readyDrivers($solana, $drivers),
+                "no driver may be ready for {$operation} while that path uses a non-DAS RPC"
+            );
+        }
+
+        // METADATA, which really does use Helius, is unaffected.
+        self::assertSame(
+            [NftDriverRegistry::DRIVER_DAS_HELIUS],
+            NftProviderReadiness::readyDrivers(
+                $solana,
+                NftDriverRegistry::driversFor($solana, NftDriverRegistry::OP_METADATA, [])
+            )
+        );
+    }
+
+    /** Repointing the chain row at a DAS provider makes the rpc path ready. */
+    public function testRepointingTheChainRowMakesTheRpcPathReady(): void
+    {
+        $solana = self::chain('solana', 'solana', 'https://mainnet.helius-rpc.com/?api-key=k');
+
+        self::assertTrue(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS_RPC));
+    }
+
+    /**
+     * THE MODEL AND THE FETCHER CANNOT DRIFT.
+     *
+     * Both resolve the rpc endpoint through SolanaEndpoints, including its
+     * public-default fallback. A chain row with a NULL rpc_url still makes
+     * calls - to the default - so a readiness check reading the raw column
+     * would be describing a different endpoint from the one being used.
+     */
+    public function testNullRpcUrlIsDescribedAsTheEndpointTheFetcherWouldUse(): void
+    {
+        $chain = (object) ['id' => '1', 'slug' => 'solana', 'chain_type' => 'solana', 'rpc_url' => null];
+
+        self::assertSame(SolanaEndpoints::PUBLIC_MAINNET_RPC, SolanaEndpoints::rpcEndpoint($chain));
+        self::assertFalse(
+            NftProviderReadiness::isReady($chain, NftDriverRegistry::DRIVER_DAS_RPC),
+            'a null rpc_url falls back to the public endpoint, which has no DAS'
+        );
+    }
+
+    /** The fetcher resolves its endpoints through the SAME shared class. */
+    public function testFetcherResolvesEndpointsThroughTheSharedResolver(): void
+    {
+        $src = (string) file_get_contents(
+            dirname(__DIR__, 2) . '/app/Domain/Onchain/Fetchers/SolanaFetcher.php'
+        );
+
+        self::assertStringContainsString('SolanaEndpoints::rpcEndpoint($this->chain)', $src);
+        self::assertStringContainsString('SolanaEndpoints::metadataEndpoint()', $src);
+        self::assertStringNotContainsString(
+            'https://api.mainnet-beta.solana.com',
+            $src,
+            'the default endpoint literal must live only in SolanaEndpoints'
         );
     }
 
@@ -105,7 +194,8 @@ final class NftProviderReadinessTest extends TestCase
             "define('BCC_HELIUS_API_KEY', '') is defined and useless — it must not read as configured"
         );
         self::assertFalse(
-            NftProviderReadiness::isReady(self::chain('solana', 'solana'), NftDriverRegistry::DRIVER_DAS)
+            NftProviderReadiness::isReady(self::chain('solana', 'solana'), NftDriverRegistry::DRIVER_DAS_HELIUS),
+            'the Helius-backed metadata path is the one an empty key disables'
         );
     }
 
@@ -131,7 +221,7 @@ final class NftProviderReadinessTest extends TestCase
         self::assertFalse(HeliusEndpoint::isConfigured());
         self::assertNull(HeliusEndpoint::resolveRpcUrl());
         self::assertFalse(
-            NftProviderReadiness::isReady(self::chain('solana', 'solana'), NftDriverRegistry::DRIVER_DAS)
+            NftProviderReadiness::isReady(self::chain('solana', 'solana'), NftDriverRegistry::DRIVER_DAS_HELIUS)
         );
     }
 
@@ -186,7 +276,7 @@ final class NftProviderReadinessTest extends TestCase
             HeliusEndpoint::resolveRpcUrl()
         );
         self::assertTrue(
-            NftProviderReadiness::isReady(self::chain('solana', 'solana'), NftDriverRegistry::DRIVER_DAS)
+            NftProviderReadiness::isReady(self::chain('solana', 'solana'), NftDriverRegistry::DRIVER_DAS_HELIUS)
         );
     }
 
@@ -210,19 +300,22 @@ final class NftProviderReadinessTest extends TestCase
     {
         define('BCC_HELIUS_API_KEY', 'real-key');
 
-        $publicRpc = 'https://api.mainnet-beta.solana.com';
-        $solana    = self::chain('solana', 'solana', $publicRpc, '', 42);
-        self::assertTrue(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS));
+        // A DAS-capable endpoint, so the stored mark is the only thing that
+        // can make this unready. Using the public default here would prove
+        // nothing: it is refused on its own account.
+        $endpoint = 'https://das-provider.example/?api-key=k';
+        $solana   = self::chain('solana', 'solana', $endpoint, '', 42);
+        self::assertTrue(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS_RPC));
 
         NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
-            'rpc_url'     => HeliusEndpoint::redactEndpoint($publicRpc),
+            'rpc_url'     => HeliusEndpoint::redactEndpoint($endpoint),
             'code'        => -32601,
             'message'     => 'Method not found',
             'detected_at' => 1,
         ];
 
         self::assertFalse(
-            NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS),
+            NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS_RPC),
             'the endpoint that answered "method not found" is not ready, key or no key'
         );
     }
@@ -241,7 +334,9 @@ final class NftProviderReadinessTest extends TestCase
     {
         define('BCC_HELIUS_API_KEY', 'real-key');
 
-        $oldRpc = 'https://api.mainnet-beta.solana.com';
+        // Both endpoints are DAS-capable, so the ONLY difference between the
+        // two assertions below is which endpoint the mark describes.
+        $oldRpc = 'https://old-provider.example/?api-key=k';
         $newRpc = 'https://mainnet.helius-rpc.com/?api-key=real-key';
 
         // The old endpoint was observed to lack DAS.
@@ -253,12 +348,12 @@ final class NftProviderReadinessTest extends TestCase
         ];
 
         self::assertFalse(
-            NftProviderReadiness::isReady(self::chain('solana', 'solana', $oldRpc, '', 42), NftDriverRegistry::DRIVER_DAS),
+            NftProviderReadiness::isReady(self::chain('solana', 'solana', $oldRpc, '', 42), NftDriverRegistry::DRIVER_DAS_RPC),
             'the same endpoint keeps its refusal'
         );
 
         self::assertTrue(
-            NftProviderReadiness::isReady(self::chain('solana', 'solana', $newRpc, '', 42), NftDriverRegistry::DRIVER_DAS),
+            NftProviderReadiness::isReady(self::chain('solana', 'solana', $newRpc, '', 42), NftDriverRegistry::DRIVER_DAS_RPC),
             'a DIFFERENT endpoint must not inherit the previous one\'s verdict'
         );
     }
@@ -276,10 +371,10 @@ final class NftProviderReadinessTest extends TestCase
     {
         define('BCC_HELIUS_API_KEY', 'real-key');
 
-        $solana = self::chain('solana', 'solana', 'https://api.mainnet-beta.solana.com', '', 42);
+        $solana = self::chain('solana', 'solana', 'https://das-provider.example/?api-key=k', '', 42);
         NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = $stored;
 
-        self::assertTrue(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS));
+        self::assertTrue(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS_RPC));
     }
 
     /** @return array<string, array{0: mixed}> */
@@ -314,7 +409,7 @@ final class NftProviderReadinessTest extends TestCase
         self::assertFalse(
             NftProviderReadiness::isReady(
                 self::chain('solana', 'solana', 'https://dead.example/?api-key=NEW', '', 42),
-                NftDriverRegistry::DRIVER_DAS
+                NftDriverRegistry::DRIVER_DAS_RPC
             )
         );
     }
@@ -324,14 +419,14 @@ final class NftProviderReadinessTest extends TestCase
     {
         define('BCC_HELIUS_API_KEY', 'real-key');
 
-        $rpc = 'https://api.mainnet-beta.solana.com';
+        $rpc = 'https://das-provider.example/?api-key=k';
         NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
             'rpc_url' => HeliusEndpoint::redactEndpoint($rpc),
             'code'    => -32601,
         ];
 
         self::assertTrue(
-            NftProviderReadiness::isReady(self::chain('solana', 'solana', $rpc, '', 99), NftDriverRegistry::DRIVER_DAS),
+            NftProviderReadiness::isReady(self::chain('solana', 'solana', $rpc, '', 99), NftDriverRegistry::DRIVER_DAS_RPC),
             'chain 99 must not inherit chain 42\'s mark'
         );
     }

@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
+use BCC\Trust\Onchain\Support\SolanaEndpoints;
 
 /**
  * Solana Chain Fetcher
@@ -23,7 +24,6 @@ use BCC\Trust\Onchain\Support\HeliusEndpoint;
 class SolanaFetcher implements FetcherInterface
 {
     private const HTTP_TIMEOUT = 30;
-    private const SOLANA_RPC   = 'https://api.mainnet-beta.solana.com';
 
     /** @var ChainRow */
     private object $chain;
@@ -37,9 +37,17 @@ class SolanaFetcher implements FetcherInterface
         $this->chain = $chain;
     }
 
+    /**
+     * The endpoint every rpcCall() goes to.
+     *
+     * Resolution moved to {@see SolanaEndpoints::rpcEndpoint()} — including
+     * the public-default fallback — because NftProviderReadiness has to
+     * describe THIS endpoint, and a second copy of the fallback rule would
+     * let the description drift from the call. The behaviour is unchanged.
+     */
     private function rpcUrl(): string
     {
-        return $this->chain->rpc_url ?? self::SOLANA_RPC;
+        return SolanaEndpoints::rpcEndpoint($this->chain);
     }
 
     /** @return ChainRow */
@@ -347,7 +355,7 @@ class SolanaFetcher implements FetcherInterface
      */
     private static function resolveHeliusRpcUrl(): ?string
     {
-        return HeliusEndpoint::resolveRpcUrl();
+        return SolanaEndpoints::metadataEndpoint();
     }
 
     // ══════════════════════════════════════════════════════════════════

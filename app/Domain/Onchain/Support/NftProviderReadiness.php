@@ -17,18 +17,30 @@ if (!defined('ABSPATH')) {
  * carries several drivers with completely different prerequisites, and one
  * ready provider must never make an unrelated driver look ready.
  *
- * Solana is the standing proof. On the seeded configuration:
+ * Solana is the standing proof, and it is worse than it first looks. On a
+ * chain row carrying the public RPC, with `BCC_HELIUS_API_KEY` configured:
  *
- *   - `magiceden` (CURATED_FEED) is ready — it is a public marketplace API
- *     needing no per-chain credential;
- *   - `das` (WALLET_DISCOVERY / VALIDATION / METADATA / OWNERSHIP) is NOT
- *     ready — the seeded `api.mainnet-beta.solana.com` has no DAS and no
- *     Helius key is configured.
+ *   - `magiceden` (CURATED_FEED) is ready — a public marketplace API needing
+ *     no per-chain credential;
+ *   - `das_helius` (METADATA) is ready — `getAsset` goes to the Helius
+ *     constants and ignores the chain row entirely;
+ *   - `das_rpc` (WALLET_DISCOVERY / OWNERSHIP) is NOT ready — those calls go
+ *     through `rpcCall()` to the CHAIN ROW's `rpc_url`, which is the public
+ *     endpoint, which does not implement DAS.
  *
- * A chain-wide boolean would have to pick one of those and be wrong about
- * the other. Worse, it would be wrong in the permissive direction the moment
- * ANY driver was ready, which is exactly how an operator ends up starting a
- * job that cannot make a single successful call.
+ * Three drivers, one chain, one instant, and not one answer covers them.
+ *
+ * ── "DAS" WAS ONE DRIVER AND HAD TO BECOME TWO ──────────────────────────
+ * The last of those was originally folded into a single `das` driver whose
+ * readiness read the Helius credential. That produced precisely the defect
+ * this model exists to prevent: configure Helius, leave the chain row on the
+ * public RPC, and the model reported wallet discovery READY while every
+ * `getAssetsByOwner` call went to an endpoint with no DAS and failed.
+ *
+ * A capability answer must describe the endpoint the OPERATION actually
+ * uses. Since the two DAS paths resolve their endpoints differently, they
+ * are two drivers, and {@see SolanaEndpoints} resolves both so the
+ * description and the call cannot drift apart.
  *
  * So the API is {@see isReady()} — (chain, driverKey) — and
  * {@see readinessMap()} when a caller wants several at once.
@@ -114,14 +126,25 @@ final class NftProviderReadiness
             // why Avalanche and BSC keep ERC-721 gating with no Alchemy key.
             NftDriverRegistry::DRIVER_EVM_RPC => $rpcUrl !== '',
 
-            // ── Solana ──────────────────────────────────────────────────
-            // Needs a Helius (or other DAS-capable) endpoint AND no observed
-            // "method not found" FOR THE ENDPOINT CURRENTLY IN USE. The
-            // second half matters: a key can be present and still point at
-            // an endpoint that has already told us it cannot serve
-            // getAssets*.
-            NftDriverRegistry::DRIVER_DAS => HeliusEndpoint::isConfigured()
-                && !self::dasMarkApplies($chainId, $rpcUrl),
+            // ── Solana: TWO DAS paths, TWO answers ──────────────────────
+            //
+            // `getAssetsByOwner` (wallet discovery, ownership) goes through
+            // SolanaFetcher::rpcCall() to the CHAIN ROW's rpc_url. Helius
+            // credentials are irrelevant to it — they are not on that call.
+            // Reading them here is what let a Helius key report "ready" for
+            // a path that was still hitting the public RPC.
+            //
+            // The endpoint comes from the SHARED resolver, including its
+            // public-default fallback, so what we describe is exactly what
+            // rpcCall() will POST to.
+            NftDriverRegistry::DRIVER_DAS_RPC => SolanaEndpoints::rpcSupportsDas($chain)
+                && !self::dasMarkApplies($chainId, SolanaEndpoints::rpcEndpoint($chain)),
+
+            // `getAsset` (metadata) goes to the Helius constants and ignores
+            // the chain row entirely. No DAS-unsupported mark is ever
+            // written against this path — markDasUnsupported() is reached
+            // only from rpcCall() — so there is nothing to re-check.
+            NftDriverRegistry::DRIVER_DAS_HELIUS => SolanaEndpoints::metadataEndpoint() !== null,
 
             // Public marketplace API; no per-chain credential.
             NftDriverRegistry::DRIVER_MAGICEDEN => true,
