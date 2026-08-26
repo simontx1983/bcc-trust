@@ -451,3 +451,16 @@ bcc_create_validator_msg_activation_table();
 // column and an index.
 require_once dirname(__DIR__, 2) . '/includes/database/schema-chains.php';
 bcc_onchain_create_chains_table();
+
+// Per-chain NFT driver overrides. Created AFTER the chains table because
+// its rows are keyed by chain_id (no FOREIGN KEY is declared, but the
+// capability tests resolve real chain ids, so the registry has to exist).
+//
+// The ALTER migration runs here too, immediately after the CREATE TABLE that
+// already carries both columns — deliberately, because that is exactly the
+// no-op an EXISTING install performs on upgrade, and it is the path that
+// must not disturb anything. A migration that only ever ran against a table
+// missing its columns would never exercise the branch real sites take.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-chain-nft-capabilities.php';
+bcc_onchain_add_chains_nft_capability_columns();
+bcc_onchain_create_chain_nft_capabilities_table();
