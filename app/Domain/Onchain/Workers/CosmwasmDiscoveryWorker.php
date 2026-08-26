@@ -24,104 +24,81 @@ if (!defined('ABSPATH')) {
 /**
  * CosmWasm CW-721 discovery worker.
  *
- * ONE resumable historical backfill per chain, then incremental-only
- * work. Discovery is automatic; verification and provisioning stay
- * manual — nothing here sets `is_verified` or calls a provisioning
- * service.
+ * ── DISCOVERY IS OPERATOR-INITIATED. THERE ARE NO SCHEDULED PASSES. ─────
+ * This worker owns no cron hooks. Chain-wide CW-721 discovery runs only
+ * when a human starts it, one chain at a time, and every entry point here
+ * takes a single chain id:
  *
- * ── THE FOUR PASSES ─────────────────────────────────────────────────────
- *   {@see BACKFILL_HOOK} — HISTORICAL BACKFILL. Bounded, resumable, and
- *       behind its OWN explicit switch on top of the master gate. One
- *       chain slice per tick.
- *   {@see DAILY_HOOK} — INCREMENTAL. (a) newly-uploaded code ids, via an
- *       offset tail read of the code listing; (b) newly-instantiated
- *       contracts under CONFIRMED/PROBABLE families; (c) classify what
- *       is queued; (d) emit the classified CW-721s.
- *   {@see WEEKLY_HOOK} — RETRY. `temporarily_unreachable` and
- *       `inconclusive` only, under a retry cap and staged exponential
- *       backoff. CONFIRMED `not_cw721` IS NEVER RETRIED — that
- *       exclusion lives in SQL, in
- *       {@see CosmwasmCodeFamilyRepository::findPendingClassification()},
- *       so no caller can forget it.
- *   {@see METADATA_HOOK} — MIGRATION CHECK + MUTABLE METADATA, monthly.
- *       wp-cron HAS NO MONTHLY INTERVAL and we do not invent one: the
- *       hook is DAILY and a durable ≥30-day elapsed guard
- *       (`cw_metadata_refreshed_at`) is what makes the work monthly.
+ *   {@see runSupervisedSingleChainPass()} — ONE incremental pass on ONE
+ *       chain, driven from WP-CLI by an operator who is watching.
+ *   {@see runBackfillForChain()} — ONE historical backfill slice on ONE
+ *       chain, driven from the admin Chains page, behind its own explicit
+ *       switch on top of the master gate.
+ *
+ * Nothing in this class iterates chains. A caller names the chain or no
+ * work happens — which is what makes "starting a scan for one chain
+ * cannot touch another chain's fetcher" true by construction rather than
+ * by review.
+ *
+ * Verification and provisioning stay manual regardless: nothing here sets
+ * `is_verified` or calls a provisioning service.
+ *
+ * ── WHAT A PASS DOES ────────────────────────────────────────────────────
+ * {@see dailyChainStep()} is the canonical incremental pass: (a) newly-
+ * uploaded code ids, via a reverse tail read of the code listing against
+ * the numeric watermark; (b) newly-instantiated contracts under
+ * CONFIRMED/PROBABLE families; (c) classify what is queued; (d) emit the
+ * classified CW-721s.
+ *
+ * Retry needs no pass of its own. The ordinary pending queries ALREADY
+ * encode the whole policy — cap, staged backoff, exclusion of settled
+ * negatives — so a retry is just the next pass reaching a row whose
+ * `next_attempt_at` has come round. CONFIRMED `not_cw721` is never
+ * retried, and that exclusion lives in SQL, in
+ * {@see CosmwasmCodeFamilyRepository::findPendingClassification()}, so no
+ * caller can forget it.
  *
  * Nothing routinely reprocesses a previously-inspected contract: the
  * durable inventory row IS the memory, and every work query filters on
  * it. A classifier-version bump requeues ONLY the explicitly-affected
  * classifications (never settled negatives).
  *
- * ── AND ONE NON-PASS: THE SUPERVISED ONE-SHOT ───────────────────────────
- * {@see runSupervisedSingleChainPass()} is NOT a fifth pass. It is the
- * DAILY pass ({@see dailyChainStep()}) inside the SAME per-chain envelope
- * ({@see runChainPass()}), for one chain, once, driven from WP-CLI by a
- * human who is watching. It exists because there was otherwise no way to
- * run exactly one supervised pass: defining
- * `BCC_COSMWASM_DISCOVERY_ENABLED` arms three scheduled hooks, and
- * unscheduling them does not hold — {@see register()} runs on
- * `plugins_loaded`, i.e. on every request, and re-adds anything missing.
- * It reaches NO other pass: not the backfill, not the weekly retry, not
- * the monthly metadata refresh.
- *
  * ── OPERATIONAL SHAPE (copied from {@see NftEthIndexerWorker}) ──────────
  *   - {@see CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS} wall-clock
  *     deadline that WINS over the request budget;
- *   - one chain slice per backfill tick;
+ *   - one chain slice per backfill invocation;
  *   - request/page budget as a configurable ceiling (default 50 per
  *     invocation);
  *   - per-chain NON-BLOCKING `AdvisoryLock` in try/finally, so two
  *     overlapping invocations cannot corrupt cursor state;
  *   - durable SAFE progress written BEFORE the deadline can bite, so a
- *     cut-short tick resumes rather than restarts;
+ *     cut-short pass resumes rather than restarts;
  *   - `OnchainCircuitBreaker` consulted per chain;
  *   - retry/backoff on the row, not in memory;
- *   - failure isolation — every chain runs in its own try/catch and
- *     stamps its own last-run time, so one broken chain never stops the
- *     others and never starves them;
+ *   - failure isolation — the pass runs in its own try/catch and stamps
+ *     its own last-run time;
  *   - manual pause/resume via `cw_discovery_state = paused`.
  *
  * Injective is INCLUDED, in the sense that nothing here excludes it by
- * name. Its curated Talis-whitelist path stays as-is for
- * `fetch_top_collections`, but the whole point of this feature is that
- * discovery must not be bounded by what someone already curated — a
- * whitelist is a curation, so code-id discovery runs there too, once an
- * operator opts the chain in.
+ * name. Its curated Talis-whitelist path stays as-is, but the whole point
+ * of this feature is that discovery must not be bounded by what someone
+ * already curated — a whitelist is a curation, so code-id discovery runs
+ * there too, once an operator opts the chain in and starts a pass.
  *
- * ── WHICH CHAINS ────────────────────────────────────────────────────────
- * Exactly one function RESOLVES them: {@see eligibleChainIds()}. All four
- * passes route through it. Exactly one function DECIDES per chain:
+ * ── WHICH CHAINS MAY BE SCANNED ─────────────────────────────────────────
+ * Exactly one function RESOLVES them: {@see eligibleChainIds()}, reached
+ * through the {@see isChainScannable()} membership test every entry point
+ * gates on. Exactly one function DECIDES per chain:
  * {@see CosmwasmScanEligibility::verdict()} — which the admin panel calls
- * as well, so the dashboard and the worker cannot answer "will this chain
+ * as well, so the dashboard and the worker cannot answer "may this chain
  * be scanned?" differently. Both fail closed on every unsure branch.
  * `wp_bcc_chains.cosmwasm_nft_discovery_enabled` ships DEFAULT 0, so a
- * fresh install — and every install this migration lands on — scans
- * nothing until someone says otherwise, per chain.
+ * fresh install scans nothing until someone says otherwise, per chain.
  *
  * @phpstan-import-type CheckpointRow from ChainCheckpointRepository
  */
 final class CosmwasmDiscoveryWorker
 {
-    public const BACKFILL_HOOK     = 'bcc_cosmwasm_backfill_tick';
-    public const BACKFILL_INTERVAL = 'bcc_five_minutes';
-
-    public const DAILY_HOOK     = 'bcc_cosmwasm_daily_discovery';
-    public const DAILY_INTERVAL = 'daily';
-
-    public const WEEKLY_HOOK     = 'bcc_cosmwasm_weekly_retry';
-    public const WEEKLY_INTERVAL = 'bcc_weekly';
-
-    /**
-     * The "monthly" pass rides a DAILY hook. wp-cron has no monthly
-     * interval; inventing one would put an unregistered interval in the
-     * schedules filter and drift from the cron-hooks SSOT. The real
-     * cadence is the durable
-     * {@see CosmwasmDiscoveryGate::METADATA_REFRESH_MIN_ELAPSED} guard.
-     */
-    public const METADATA_HOOK     = 'bcc_cosmwasm_metadata_refresh';
-    public const METADATA_INTERVAL = 'daily';
-
     private const ADVISORY_LOCK_PREFIX = 'bcc_cosmwasm_chain_';
 
     /**
@@ -149,9 +126,6 @@ final class CosmwasmDiscoveryWorker
 
     /** Collections emitted per chain per pass. */
     private const EMIT_PER_PASS = 25;
-
-    /** Families migration-checked per chain per monthly pass. */
-    private const MIGRATION_CHECKS_PER_PASS = 10;
 
     /** Rows requeued per chain when the classifier version moves. */
     private const REQUEUE_PER_PASS = 100;
@@ -207,95 +181,42 @@ final class CosmwasmDiscoveryWorker
     /** After the drained-family tail: one whole family + the above. */
     private const RESERVE_AFTER_TAIL = 10 + self::RESERVE_AFTER_FAMILIES;
 
-    /**
-     * Self-heal the cron registrations.
-     *
-     * Same anti-drift shape as {@see NftEthIndexerWorker::register()}: a
-     * hook added by a plugin UPDATE (rather than a reactivation) would
-     * otherwise never appear in `wp_options.cron` and the pass would
-     * silently never run.
-     *
-     * REGISTRATION IS NOT PERMISSION. Scheduling a hook does not enable
-     * discovery — every handler re-checks
-     * {@see CosmwasmDiscoveryGate}, which fails CLOSED. A scheduled hook
-     * on an environment that has not opted in is a no-op that costs one
-     * function call.
-     *
-     * NEVER unschedules — cleanup is owned by the plugin's deactivation
-     * hook, driven by includes/cron-hooks.php.
-     */
-    public static function register(): void
-    {
-        $hooks = [
-            self::BACKFILL_HOOK => self::BACKFILL_INTERVAL,
-            self::DAILY_HOOK    => self::DAILY_INTERVAL,
-            self::WEEKLY_HOOK   => self::WEEKLY_INTERVAL,
-            self::METADATA_HOOK => self::METADATA_INTERVAL,
-        ];
-
-        $offset = 120;
-        foreach ($hooks as $hook => $interval) {
-            if (!wp_next_scheduled($hook)) {
-                wp_schedule_event(time() + $offset, $interval, $hook);
-            }
-            $offset += 120;
-        }
-    }
-
-    // ── Pass 1: historical backfill ─────────────────────────────────────
-
-    /**
-     * ONE chain slice of the historical backfill.
-     *
-     * Behind BOTH gates. One chain per tick, chosen least-recently-worked
-     * first, so a chain that keeps failing cannot monopolise the ticks
-     * and cannot starve the others.
-     */
-    public static function runBackfillTick(): void
-    {
-        if (!CosmwasmDiscoveryGate::backfillEnabled()) {
-            return;
-        }
-
-        $chainIds = self::eligibleChainIds();
-        if ($chainIds === []) {
-            return;
-        }
-
-        foreach ($chainIds as $chainId) {
-            ChainCheckpointRepository::ensureExists($chainId);
-        }
-
-        $chainId = ChainCheckpointRepository::nextCwDiscoveryChain($chainIds);
-        if ($chainId === null) {
-            return;
-        }
-
-        try {
-            self::runBackfillForChain($chainId);
-        } catch (\Throwable $e) {
-            \BCC\Core\Log\Logger::error('[CosmwasmDiscoveryWorker] backfill tick failed', [
-                'chain_id' => $chainId,
-                'error'    => $e->getMessage(),
-            ]);
-            ChainCheckpointRepository::setCwDiscoveryState(
-                $chainId,
-                ChainCheckpointRepository::CW_STATE_BACKFILLING,
-                CosmwasmClassifier::sanitizeExcerpt($e->getMessage())
-            );
-        }
-    }
+    // ── Historical backfill ─────────────────────────────────────────────
 
     /**
      * Backfill one chain. Public so an admin "Run now" can drive it.
      *
      * The advisory lock is NON-BLOCKING: if another invocation (a
-     * concurrent cron tick, an admin click) already holds it, this one
-     * skips rather than interleaving cursor writes.
+     * admin click, a CLI run) already holds it, this one skips rather
+     * than interleaving cursor writes.
      */
     public static function runBackfillForChain(int $chainId, ?CosmwasmTickBudget $budget = null): void
     {
         if ($chainId <= 0 || !CosmwasmDiscoveryGate::backfillEnabled()) {
+            return;
+        }
+
+        // THE ELIGIBILITY SET, ASKED HERE AND NOT ONLY AT THE CALLER.
+        //
+        // A round-robin backfill tick used to resolve the chain through
+        // eligibleChainIds() before ever reaching this method, so operator
+        // opt-in and the canary allowlist were enforced upstream and this
+        // method inherited them. That tick is gone: the admin "Run backfill
+        // slice" control is now the ONLY way in, and it gates on the two
+        // environment constants and the pause state — not on opt-in and not
+        // on the allowlist.
+        //
+        // Without this check, retiring the tick would have QUIETLY WIDENED
+        // what a backfill may touch: a chain nobody opted in, or one
+        // deliberately held outside BCC_COSMWASM_CHAIN_ALLOWLIST, would
+        // have become backfillable by pressing a button. Membership is
+        // tested against the same selector the supervised pass uses, so
+        // both operator entry points enforce one rule.
+        if (!self::isChainScannable($chainId)) {
+            \BCC\Core\Log\Logger::info('[CosmwasmDiscoveryWorker] backfill refused — chain is not in the eligible set', [
+                'chain_id' => $chainId,
+            ]);
+
             return;
         }
 
@@ -433,43 +354,18 @@ final class CosmwasmDiscoveryWorker
         self::classifyAndEnumerate($chainId, $fetcher, $budget);
     }
 
-    // ── Pass 2: daily incremental discovery ─────────────────────────────
-
-    /**
-     * Daily: new code ids, new contracts under known CW-721 families,
-     * classification of whatever is queued, and emit.
-     *
-     * Loops every ELIGIBLE chain ({@see eligibleChainIds()}) with per-chain
-     * isolation and the shared wall-clock deadline (the
-     * {@see NftEthIndexerWorker::runAllChains()} shape): a broken chain
-     * records its failure and the loop moves on.
-     */
-    public static function runDailyDiscovery(): void
-    {
-        if (!CosmwasmDiscoveryGate::discoveryEnabled()) {
-            return;
-        }
-
-        self::forEachChain(static function (int $chainId, CosmosFetcher $fetcher, CosmwasmTickBudget $budget): void {
-            self::dailyChainStep($chainId, $fetcher, $budget);
-        });
-    }
+    // ── The incremental pass ────────────────────────────────────────────
 
     /**
      * THE CANONICAL INCREMENTAL PASS, for ONE chain.
      *
-     * Extracted from {@see runDailyDiscovery()}'s closure so that exactly
-     * one body of code defines what "a discovery pass" means, and both
-     * callers reach it:
+     * One body of code defines what "a discovery pass" means, and the
+     * operator entry point reaches it: {@see runSupervisedSingleChainPass()}.
      *
-     *   - the SCHEDULED daily hook, via {@see forEachChain()};
-     *   - the SUPERVISED operator one-shot, via
-     *     {@see runSupervisedSingleChainPass()}.
-     *
-     * There is deliberately NO second implementation for the supervised
-     * path. A hand-written "just run the important bits" variant is how
-     * an operator ends up watching something that is not the thing cron
-     * runs, and concluding from it.
+     * There is deliberately NO second implementation. A hand-written
+     * "just run the important bits" variant is how an operator ends up
+     * watching something that is not the thing the system does, and
+     * concluding from it.
      *
      * ── EMISSION IS PART OF THIS PASS ───────────────────────────────────
      * Step (c)+(d) is {@see classifyAndEnumerate()}, which ENDS with
@@ -478,7 +374,6 @@ final class CosmwasmDiscoveryWorker
      * pass without it.
      *
      * @param ?CosmwasmPassReport $report OPTIONAL write-only telemetry.
-     *                                    Null on every scheduled path.
      */
     private static function dailyChainStep(
         int $chainId,
@@ -486,11 +381,10 @@ final class CosmwasmDiscoveryWorker
         CosmwasmTickBudget $budget,
         ?CosmwasmPassReport $report = null
     ): void {
-        // The budget is SHARED ACROSS CHAINS by forEachChain(), and a
-        // chain whose step threw leaves whatever reserve it had set. Start
-        // every chain from zero so one chain's failure cannot hold requests
-        // hostage from the next. Stage (a) below is deliberately
-        // unreserved — see the RESERVE_* constants.
+        // A caller may hand in a budget that already carries a reserve
+        // from earlier work. Start from zero so this pass's own stage
+        // floors are the only ones in force. Stage (a) below is
+        // deliberately unreserved — see the RESERVE_* constants.
         $budget->reserve(0);
 
         // A classifier-version bump requeues ONLY the affected
@@ -608,79 +502,6 @@ final class CosmwasmDiscoveryWorker
         self::classifyAndEnumerate($chainId, $fetcher, $budget, $report);
     }
 
-    // ── Pass 3: weekly retry ────────────────────────────────────────────
-
-    /**
-     * Weekly: retry `temporarily_unreachable` + `inconclusive` under the
-     * cap and the staged backoff.
-     *
-     * There is no special "retry" query. The ordinary pending queries
-     * ALREADY encode the whole policy — cap, backoff, exclusion of
-     * settled negatives and of decided CW-721s — so this pass is the
-     * same classification work on a slower cadence. One policy, one
-     * place; a second retry query is exactly how the two would drift.
-     */
-    public static function runWeeklyRetry(): void
-    {
-        if (!CosmwasmDiscoveryGate::discoveryEnabled()) {
-            return;
-        }
-
-        self::forEachChain(static function (int $chainId, CosmosFetcher $fetcher, CosmwasmTickBudget $budget): void {
-            self::classifyAndEnumerate($chainId, $fetcher, $budget);
-        });
-    }
-
-    // ── Pass 4: monthly migration + metadata ────────────────────────────
-
-    /**
-     * Monthly (daily hook + durable ≥30-day elapsed guard): re-read each
-     * CW-721 family's sampled contract to notice a code MIGRATION, and
-     * refresh mutable metadata.
-     *
-     * A migration re-points the existing inventory row. It never creates
-     * a second contract row and never creates a second collection — the
-     * address is the identity and its collection already exists.
-     */
-    public static function runMetadataRefresh(): void
-    {
-        if (!CosmwasmDiscoveryGate::discoveryEnabled()) {
-            return;
-        }
-
-        $cutoffTs = time() - CosmwasmDiscoveryGate::METADATA_REFRESH_MIN_ELAPSED;
-        $cutoff   = gmdate('Y-m-d H:i:s', $cutoffTs);
-
-        self::forEachChain(static function (int $chainId, CosmosFetcher $fetcher, CosmwasmTickBudget $budget) use ($cutoff, $cutoffTs): void {
-            $checkpoint = ChainCheckpointRepository::get($chainId);
-            if ($checkpoint === null) {
-                return;
-            }
-
-            // THE ELAPSED GUARD. This is what makes a daily hook monthly.
-            $last = is_string($checkpoint->cw_metadata_refreshed_at)
-                ? strtotime($checkpoint->cw_metadata_refreshed_at . ' UTC')
-                : false;
-            if ($last !== false && $last > $cutoffTs) {
-                return;
-            }
-
-            $families = CosmwasmCodeFamilyRepository::findDueForMetadataCheck(
-                $chainId,
-                $cutoff,
-                self::MIGRATION_CHECKS_PER_PASS
-            );
-            foreach ($families as $family) {
-                if ($budget->exhausted()) {
-                    break;
-                }
-                CosmwasmDiscoveryService::checkFamilyMigration($chainId, $fetcher, $family, $budget);
-            }
-
-            ChainCheckpointRepository::touchCwMetadataRefresh($chainId);
-        });
-    }
-
     // ── Shared machinery ────────────────────────────────────────────────
 
     /**
@@ -761,44 +582,9 @@ final class CosmwasmDiscoveryWorker
         }
     }
 
-    /**
-     * Run a callback for every eligible cosmos chain, with the shared
-     * deadline, per-chain locking and failure isolation.
-     *
-     * Every chain gets its own advisory lock, its own try/catch, and its
-     * own `cw_last_discovery_at` stamp — that stamp is what stops a
-     * broken chain from being re-picked first forever and starving the
-     * rest. All three live in {@see runChainPass()}, which is also what
-     * the supervised one-shot calls, so the loop and the operator run
-     * cannot diverge on any of them.
-     *
-     * @param callable(int, CosmosFetcher, CosmwasmTickBudget): void $step
-     */
-    private static function forEachChain(callable $step): void
-    {
-        $chainIds = self::eligibleChainIds();
-        if ($chainIds === []) {
-            return;
-        }
-
-        $budget = new CosmwasmTickBudget();
-
-        foreach ($chainIds as $chainId) {
-            if ($budget->exhausted()) {
-                \BCC\Core\Log\Logger::info('[CosmwasmDiscoveryWorker] tick budget exhausted — deferring remaining chains', [
-                    'spent' => $budget->spent(),
-                ]);
-                break;
-            }
-
-            self::runChainPass($chainId, $step, $budget);
-        }
-    }
-
     // ── The outcome of ONE chain's pass ─────────────────────────────────
     //
-    // The scheduled loop ignores these — it isolates failures and moves
-    // on. The SUPERVISED one-shot maps them onto process exit codes, so
+    // The SUPERVISED one-shot maps them onto process exit codes, so
     // an operator (or a script) can tell "another worker holds the lock"
     // apart from "the chain refused to prepare" apart from "the pass
     // threw". They are constants on the worker rather than on the CLI
@@ -822,9 +608,9 @@ final class CosmwasmDiscoveryWorker
      *
      * Lock, prepare, run, circuit breaker, and the `finally` that stamps
      * `cw_last_discovery_at` and releases the lock: every caller gets all
-     * of it or none of it. {@see forEachChain()} calls this in a loop;
-     * {@see runSupervisedSingleChainPass()} calls it exactly once. Neither
-     * of them owns a copy.
+     * of it or none of it. {@see runSupervisedSingleChainPass()} and
+     * {@see runBackfillForChain()} both go through it; neither owns a
+     * copy.
      *
      * ── ORDERING: NOTHING IS WRITTEN BEFORE THE LOCK ────────────────────
      * `ensureExists()` used to run BEFORE `acquire()`, which meant a chain
@@ -908,37 +694,20 @@ final class CosmwasmDiscoveryWorker
      * EXACTLY ONE incremental discovery pass, for EXACTLY ONE chain,
      * driven by a human at a terminal.
      *
-     * ── WHY THIS EXISTS ─────────────────────────────────────────────────
-     * There was no way to run one supervised pass. Defining
-     * `BCC_COSMWASM_DISCOVERY_ENABLED` arms three scheduled hooks, and
-     * unscheduling them does not hold: {@see register()} runs on
-     * `plugins_loaded` — every request — and re-adds anything missing. So
-     * the only ways to see a pass were "arm cron and hope" or "write a
-     * second implementation", and the second one is how an operator ends
-     * up watching something that is not what cron runs.
-     *
-     * ── WHAT IT IS NOT ──────────────────────────────────────────────────
-     * It is NOT a fifth pass. It runs {@see dailyChainStep()} — the same
-     * body {@see runDailyDiscovery()} runs — inside {@see runChainPass()}
-     * — the same envelope {@see forEachChain()} uses. It cannot reach the
-     * backfill, the weekly retry or the monthly metadata pass: those are
-     * other methods and this one does not name them.
+     * ── IT IS THE ONLY INCREMENTAL ENTRY POINT ──────────────────────────
+     * It runs {@see dailyChainStep()} inside {@see runChainPass()} — the
+     * canonical pass inside the canonical per-chain envelope. It cannot
+     * reach the historical backfill: that is {@see runBackfillForChain()},
+     * behind its own switch, and this method does not name it.
      *
      * ── AUTHORIZATION IS THE CALLER'S JOB, AND IT IS STRICTER ───────────
      * This method deliberately does NOT check
      * {@see CosmwasmDiscoveryGate::discoveryEnabled()} — bypassing that
      * one constant is the entire point of a supervised run. EVERY other
      * condition still applies and is enforced by the CLI command before it
-     * gets here, via {@see isChainScannable()} — which is membership in
-     * the very set the scheduled passes walk, so this path can never be
-     * more permissive than cron.
-     *
-     * And the bypass is ONE-DIRECTIONAL: the caller runs this while the
-     * constant is OFF and REFUSES while it is ON, because an armed
-     * constant means the hooks above are live and a scheduled pass can
-     * fire immediately before or after this one. The per-chain lock in
-     * {@see runChainPass()} excludes SIMULTANEOUS execution and nothing
-     * else, so it is not a substitute for that refusal.
+     * gets here, via {@see isChainScannable()} — membership in the same
+     * eligibility set every other entry point resolves, so this path can
+     * never be the most permissive one.
      *
      * @param CosmwasmPassReport $report write-only telemetry for the summary
      * @return string one of the PASS_* constants
@@ -962,7 +731,7 @@ final class CosmwasmDiscoveryWorker
     }
 
     /**
-     * Is this ONE chain in the set the scheduled passes would walk?
+     * Is this ONE chain in the set an operator may start a scan on?
      *
      * ── MEMBERSHIP, NOT A RE-DERIVATION ─────────────────────────────────
      * Implemented as `in_array($chainId, eligibleChainIds())` on purpose.
@@ -971,8 +740,8 @@ final class CosmwasmDiscoveryWorker
      * gathered here — would be a THIRD place that knows how to resolve
      * those facts, and the two prior times this rule was maintained in two
      * places they drifted inside a fortnight. Asking the production
-     * selector for the production set and testing membership cannot drift,
-     * and cannot be more permissive than cron by construction.
+     * selector for the production set and testing membership cannot
+     * drift.
      *
      * Public only so the supervised CLI command can gate on it.
      */
@@ -1047,16 +816,12 @@ final class CosmwasmDiscoveryWorker
      * THE ELIGIBILITY CHOKEPOINT — every chain this worker may scan, and
      * the only place that decision is made.
      *
-     * All four passes reach it: {@see runBackfillTick()} calls it directly
-     * before handing the list to
-     * {@see ChainCheckpointRepository::nextCwDiscoveryChain()}, and
-     * {@see runDailyDiscovery()}, {@see runWeeklyRetry()} and
-     * {@see runMetadataRefresh()} all route through {@see forEachChain()},
-     * which calls it. Adding a fifth pass gets the policy by construction
-     * as long as it resolves its chains here. It is deliberately NOT named
-     * `cosmosChainIds()` any more: a reader who believed that name would
-     * conclude the returned list is "the cosmos chains", and would then
-     * quite reasonably filter it further somewhere else.
+     * Every entry point reaches it through {@see isChainScannable()},
+     * which is a membership test against this set. A new entry point gets
+     * the policy by construction as long as it gates the same way. It is
+     * deliberately NOT named `cosmosChainIds()`: a reader who believed
+     * that name would conclude the returned list is "the cosmos chains",
+     * and would then quite reasonably filter it further somewhere else.
      *
      * ── IT DOES NOT OWN THE RULE, IT RESOLVES THE DATA FOR IT ───────────
      * The per-chain decision lives in
@@ -1108,7 +873,8 @@ final class CosmwasmDiscoveryWorker
      *   - a defined-but-unusable allowlist yields NO chains — never a
      *     fall-through to "all";
      *   - a checkpoint read that did not run yields NO chains.
-     * A tick that scans nothing costs one cron invocation and self-heals.
+     * A pass that scans nothing costs one operator invocation and is
+     * corrected by fixing the configuration it named.
      *
      * @return list<int>
      */

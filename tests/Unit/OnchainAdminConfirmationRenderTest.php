@@ -74,9 +74,11 @@ final class OnchainAdminConfirmationRenderTest extends TestCase
             . $this->renderHelius('')
             . $this->renderHelius('wh_123');
 
-        // 4 sweeps + run + pause + run + resume + provision + resync = 10 forms.
-        $this->assertSame(10, substr_count($markup, '<form method="post"'));
-        $this->assertSame(10, substr_count($markup, 'admin-post.php'));
+        // sweeps + run + pause + run + resume + provision + resync.
+        $expected = count(self::sweepMatrix()) + 6;
+
+        $this->assertSame($expected, substr_count($markup, '<form method="post"'));
+        $this->assertSame($expected, substr_count($markup, 'admin-post.php'));
 
         // Not one anchor-as-button remains.
         $this->assertStringNotContainsString('<a class="button"', $markup);
@@ -105,15 +107,14 @@ final class OnchainAdminConfirmationRenderTest extends TestCase
         }
     }
 
-    // ── The four sweeps ─────────────────────────────────────────────────────
+    // ── The three sweeps ────────────────────────────────────────────────────
 
     /** @return list<array{0: string, 1: string}> */
     public static function sweepMatrix(): array
     {
         return [
-            [ChainSweepActions::ACTION_ALL, 'All (validators + collections + enrichment)'],
+            [ChainSweepActions::ACTION_ALL, 'All (validators + enrichment)'],
             [ChainSweepActions::ACTION_VALIDATORS, 'Validators only'],
-            [ChainSweepActions::ACTION_COLLECTIONS, 'Collections only'],
             [ChainSweepActions::ACTION_ENRICHMENT, 'Enrichment only'],
         ];
     }
@@ -128,12 +129,14 @@ final class OnchainAdminConfirmationRenderTest extends TestCase
         $this->assertStringContainsString($label, $markup);
     }
 
-    public function testSweepNoncesAreFourDistinctScopesNotOneShared(): void
+    public function testSweepNoncesAreDistinctScopesNotOneShared(): void
     {
         preg_match_all('/data-nonce-action="([^"]+)"/', $this->renderSweepBar(), $m);
 
-        $this->assertCount(4, $m[1]);
-        $this->assertCount(4, array_unique($m[1]), 'The four sweeps must not share a nonce.');
+        $expected = count(self::sweepMatrix());
+
+        $this->assertCount($expected, $m[1]);
+        $this->assertCount($expected, array_unique($m[1]), 'The sweeps must not share a nonce.');
         $this->assertNotContains('bcc_onchain_admin_trigger', $m[1]);
     }
 
@@ -142,8 +145,8 @@ final class OnchainAdminConfirmationRenderTest extends TestCase
     {
         $markup = $this->renderSweepBar();
 
-        // Four forms, four confirms — including the three that had none.
-        $this->assertSame(4, substr_count($markup, 'onsubmit="return confirm('));
+        // One confirm per sweep — including the ones that had none.
+        $this->assertSame(count(self::sweepMatrix()), substr_count($markup, 'onsubmit="return confirm('));
         $this->assertStringContainsString($label, $markup);
     }
 

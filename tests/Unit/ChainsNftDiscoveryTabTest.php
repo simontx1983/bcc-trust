@@ -180,7 +180,7 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
         // Accepted by the tab whitelist…
         $this->assertStringContainsString(
-            "in_array(\$activeTab, ['validators', 'collections', 'identity', self::SUBTAB_NFT_DISCOVERY], true)",
+            "in_array(\$activeTab, ['validators', 'identity', self::SUBTAB_NFT_DISCOVERY], true)",
             $source
         );
         // …linked in the nav with the canonical `subtab=` parameter…

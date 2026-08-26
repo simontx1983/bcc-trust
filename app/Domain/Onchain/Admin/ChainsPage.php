@@ -7,7 +7,6 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Trust\Onchain\Repositories\ChainRepository;
-use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
@@ -28,7 +27,6 @@ use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
  *
  * @phpstan-import-type ChainRow from ChainRepository
  * @phpstan-import-type ValidatorCountByChain from ValidatorRepository
- * @phpstan-import-type CollectionCountByChain from CollectionRepository
  */
 class ChainsPage
 {
@@ -126,7 +124,6 @@ class ChainsPage
     public static function register_ajax(): void
     {
         add_action('wp_ajax_bcc_chain_refresh', [self::class, 'ajax_refresh']);
-        add_action('wp_ajax_bcc_collection_refresh', [self::class, 'ajax_collection_refresh']);
     }
 
     /**
@@ -945,76 +942,6 @@ class ChainsPage
         }
     }
 
-    // ── AJAX: Collection Refresh ────────────────────────────────────────────
-
-    public static function ajax_collection_refresh(): void
-    {
-        check_ajax_referer('bcc_chain_refresh', 'nonce');
-
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => 'Unauthorized.']);
-        }
-
-        $chainId = (int) ($_POST['chain_id'] ?? 0);
-        $chain   = ChainRepository::getById($chainId);
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] Chain collection refresh (manual)', [
-            'action'   => 'chain_refresh_collections',
-            'chain_id' => $chainId,
-            'operator' => get_current_user_id(),
-        ]);
-
-        if (!$chain) {
-            wp_send_json_error(['message' => 'Chain not found.']);
-        }
-
-        if (!FetcherFactory::has_driver($chain->chain_type)) {
-            wp_send_json_error(['message' => "No fetcher driver for chain type: {$chain->chain_type}"]);
-        }
-
-        try {
-            $fetcher = FetcherFactory::make_for_chain($chain);
-
-            if (!$fetcher->supports_feature('top_collections')) {
-                wp_send_json_error(['message' => $chain->name . ' does not support collection indexing.']);
-            }
-
-            $collections = $fetcher->fetch_top_collections(100);
-
-            if (empty($collections)) {
-                wp_send_json_success([
-                    'message' => "No collections returned for {$chain->name}.",
-                    'stats'   => ['total' => 0],
-                ]);
-            }
-
-            $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
-
-            AdminActionSupport::audit(
-                'admin_chain_collections_refreshed',
-                'chain',
-                $chainId,
-                ['total' => (int) $count]
-            );
-
-            wp_send_json_success([
-                'message' => sprintf('%s: %d collections indexed.', $chain->name, $count),
-                'stats'   => ['total' => $count],
-            ]);
-        } catch (\Throwable $e) {
-            $correlationId = AdminActionSupport::failure(
-                $e,
-                'admin_chain_collections_refresh_failed',
-                'chain',
-                $chainId,
-                ['chain' => (string) $chain->name]
-            );
-            wp_send_json_error([
-                'message' => $chain->name . ': ' . AdminActionSupport::failureMessage($correlationId),
-            ]);
-        }
-    }
-
     // ── Render ──────────────────────────────────────────────────────────────
 
     public static function render_page(): void
@@ -1036,10 +963,9 @@ class ChainsPage
 
         $chains         = ChainRepository::getAll();
         $valCountMap    = ValidatorRepository::getCountsByChain();
-        $collCountMap   = CollectionRepository::getCountsByChain();
         $nonce          = wp_create_nonce('bcc_chain_refresh');
         $activeTab      = sanitize_key($_GET['subtab'] ?? 'validators');
-        if (!in_array($activeTab, ['validators', 'collections', 'identity', self::SUBTAB_NFT_DISCOVERY], true)) {
+        if (!in_array($activeTab, ['validators', 'identity', self::SUBTAB_NFT_DISCOVERY], true)) {
             $activeTab = 'validators';
         }
         ?>
@@ -1061,10 +987,6 @@ class ChainsPage
                    class="nav-tab <?php echo $activeTab === 'validators' ? 'nav-tab-active' : ''; ?>">
                     Validators
                 </a>
-                <a href="<?php echo esc_url(add_query_arg('subtab', 'collections')); ?>"
-                   class="nav-tab <?php echo $activeTab === 'collections' ? 'nav-tab-active' : ''; ?>">
-                    NFT Collections
-                </a>
                 <a href="<?php echo esc_url(add_query_arg('subtab', self::SUBTAB_NFT_DISCOVERY)); ?>"
                    class="nav-tab <?php echo $activeTab === self::SUBTAB_NFT_DISCOVERY ? 'nav-tab-active' : ''; ?>">
                     NFT Discovery
@@ -1077,8 +999,6 @@ class ChainsPage
 
             <?php if ($activeTab === 'validators'): ?>
                 <?php self::render_validators_tab($chains, $valCountMap); ?>
-            <?php elseif ($activeTab === 'collections'): ?>
-                <?php self::render_collections_tab($chains, $collCountMap); ?>
             <?php elseif ($activeTab === self::SUBTAB_NFT_DISCOVERY): ?>
                 <?php self::render_nft_discovery_tab(); ?>
             <?php else: ?>
@@ -1086,7 +1006,7 @@ class ChainsPage
             <?php endif; ?>
         </div>
 
-        <?php self::render_js($nonce, $activeTab); ?>
+        <?php self::render_js($nonce); ?>
         <?php
     }
 
@@ -1163,82 +1083,6 @@ class ChainsPage
             <button class="button button-primary"
                     id="bcc-refresh-all"
                     onclick="return confirm('Refresh validators for ALL chains? This fans out per-chain API calls (Alchemy / Helius / Subscan / etc.), can take 1-3 minutes, and consumes provider quota. Confirm only if you actually want a full refresh — for one chain, use the per-row Refresh button instead.');">Refresh All Chains</button>
-            <span id="bcc-refresh-all-status" style="margin-left:12px;font-size:13px;"></span>
-        </p>
-        <?php
-    }
-
-    /**
-     * @param list<ChainRow> $chains
-     * @param array<int, CollectionCountByChain> $countMap
-     */
-    private static function render_collections_tab(array $chains, array $countMap): void
-    {
-        ?>
-        <p>Click <strong>Refresh</strong> to fetch top NFT collections for a chain. Only chains with <code>top_collections</code> support are shown.</p>
-
-        <table class="widefat striped" style="max-width:1000px">
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Name</th>
-                    <th>Slug</th>
-                    <th>Type</th>
-                    <th>Collections</th>
-                    <th>Last Indexed</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php
-                $hasAny = false;
-                foreach ($chains as $chain):
-                    $cid       = (int) $chain->id;
-                    $hasDriver = FetcherFactory::has_driver($chain->chain_type);
-                    $isActive  = (int) $chain->is_active;
-
-                    if (!$isActive || !$hasDriver) {
-                        continue;
-                    }
-
-                    $fetcher = FetcherFactory::make_for_chain($chain);
-                    if (!$fetcher->supports_feature('top_collections')) {
-                        continue;
-                    }
-
-                    $hasAny    = true;
-                    $info      = $countMap[$cid] ?? null;
-                    $collCount = $info ? (int) $info->cnt : 0;
-                    $lastFetch = $info->last_fetched ?? null;
-                ?>
-                <tr>
-                    <td><?php echo esc_html((string) $cid); ?></td>
-                    <td><strong><?php echo esc_html($chain->name); ?></strong></td>
-                    <td><code><?php echo esc_html($chain->slug); ?></code></td>
-                    <td><code><?php echo esc_html($chain->chain_type); ?></code></td>
-                    <td><?php echo esc_html((string) $collCount); ?></td>
-                    <td><?php echo $lastFetch ? esc_html($lastFetch) : '<em>Never</em>'; ?></td>
-                    <td>
-                        <button class="button bcc-chain-refresh-btn"
-                                data-chain-id="<?php echo esc_attr((string) $cid); ?>"
-                                data-chain-name="<?php echo esc_attr($chain->name); ?>"
-                                data-action="bcc_collection_refresh">
-                            Refresh
-                        </button>
-                        <span class="bcc-chain-status" style="margin-left:8px;font-size:12px;"></span>
-                    </td>
-                </tr>
-                <?php endforeach; ?>
-                <?php if (!$hasAny): ?>
-                <tr><td colspan="7"><em>No chains with collection indexing support.</em></td></tr>
-                <?php endif; ?>
-            </tbody>
-        </table>
-
-        <p style="margin-top:16px">
-            <button class="button button-primary"
-                    id="bcc-refresh-all"
-                    onclick="return confirm('Refresh top NFT collections for ALL chains? This fans out per-chain API calls (Alchemy / Helius / Cosmos LCD / etc.) and consumes provider quota. Confirm only if you actually want a full refresh — for one chain, use the per-row Refresh button instead.');">Refresh All Collections</button>
             <span id="bcc-refresh-all-status" style="margin-left:12px;font-size:13px;"></span>
         </p>
         <?php
@@ -1369,26 +1213,21 @@ class ChainsPage
         return [
             [
                 'action'  => ChainSweepActions::ACTION_ALL,
-                'label'   => 'All (validators + collections + enrichment)',
+                'label'   => 'All (validators + enrichment)',
                 'primary' => true,
-                'confirm' => 'Run validator index + collection index + enrichment for EVERY active chain, right now?'
+                'confirm' => 'Run validator index + validator enrichment for EVERY active chain, right now?'
                     . "\n\n"
                     . 'This runs synchronously against live provider APIs (Alchemy / Helius / Subscan / Cosmos LCD) '
-                    . 'and consumes provider quota. It cannot be cancelled once started and may take 30+ seconds.',
+                    . 'and consumes provider quota. It cannot be cancelled once started and may take 30+ seconds.'
+                    . "\n\n"
+                    . 'It does NOT discover NFT collections. Chain-wide collection discovery is started one named '
+                    . 'chain at a time and is never part of a sweep.',
             ],
             [
                 'action'  => ChainSweepActions::ACTION_VALIDATORS,
                 'label'   => 'Validators only',
                 'primary' => false,
                 'confirm' => 'Re-index validators for EVERY active chain now?'
-                    . "\n\n"
-                    . 'Synchronous, runs against live provider APIs, and consumes provider quota.',
-            ],
-            [
-                'action'  => ChainSweepActions::ACTION_COLLECTIONS,
-                'label'   => 'Collections only',
-                'primary' => false,
-                'confirm' => 'Re-index NFT collections for EVERY active chain now?'
                     . "\n\n"
                     . 'Synchronous, runs against live provider APIs, and consumes provider quota.',
             ],
@@ -2435,7 +2274,7 @@ class ChainsPage
         <?php
     }
 
-    private static function render_js(string $nonce, string $activeTab): void
+    private static function render_js(string $nonce): void
     {
         ?>
         <script>
@@ -2498,7 +2337,7 @@ class ChainsPage
                     function next() {
                         if (buttons.length === 0) {
                             refreshAllBtn.disabled = false;
-                            refreshAllBtn.textContent = '<?php echo $activeTab === 'validators' ? 'Refresh All Chains' : 'Refresh All Collections'; ?>';
+                            refreshAllBtn.textContent = 'Refresh All Chains';
                             if (refreshAllStatus) refreshAllStatus.textContent = 'Done! ' + done + ' / ' + total + ' completed.';
                             return;
                         }

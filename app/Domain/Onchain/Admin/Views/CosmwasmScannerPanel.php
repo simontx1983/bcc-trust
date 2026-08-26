@@ -171,8 +171,8 @@ final class CosmwasmScannerPanel
                     <?php if (!$enabled): ?>
                         <p>
                             <?php echo esc_html((string) ($summary['disabled_reason'] ?? '')); ?>
-                            That gate would have to be opened as well before any scheduled
-                            pass ran, but on its own it changes nothing while no chain is
+                            That gate would have to be opened as well before a pass could
+                            be started, but on its own it changes nothing while no chain is
                             opted in.
                         </p>
                     <?php endif; ?>
@@ -216,8 +216,8 @@ final class CosmwasmScannerPanel
                     <?php if (!$enabled): ?>
                         <p>
                             <?php echo esc_html((string) ($summary['disabled_reason'] ?? '')); ?>
-                            That gate would have to be opened as well before any scheduled
-                            pass ran, but on its own it changes nothing while no opted-in
+                            That gate would have to be opened as well before a pass could
+                            be started, but on its own it changes nothing while no opted-in
                             chain can be scanned.
                         </p>
                     <?php endif; ?>
@@ -256,23 +256,19 @@ final class CosmwasmScannerPanel
             <?php endif; ?>
 
             <?php
-            // The cron table is NOT a database read (wp_next_scheduled), so
-            // it survives an unavailable summary and is worth keeping: a
-            // stalled cron and a broken DB otherwise look the same.
             if (!$unavailable) {
                 self::renderTotals($summary);
                 self::renderCoverage($summary, $chains);
             }
-            self::renderSchedule($summary);
             // VC-B3b: the per-chain table — the status columns AND the four
             // scanner controls — moved to Chains ▸ NFT Discovery ▸ CosmWasm /
             // CW-721 Discovery, which is now their single owner. Keeping a
             // second copy here is what the transitional duplication existed
             // to avoid becoming permanent.
             //
-            // What stays: the chain-wide aggregate and schedule, which the
-            // NFT Discovery section does not show, and the per-collection
-            // candidate detail rendered from the verification table below.
+            // What stays: the chain-wide aggregate, which the NFT Discovery
+            // section does not show, and the per-collection candidate detail
+            // rendered from the verification table below.
             //
             // Rendered UNCONDITIONALLY, outside the `$unavailable` guard that
             // hides every DB-derived block. It derives nothing from the
@@ -385,8 +381,8 @@ final class CosmwasmScannerPanel
             <p style="margin:8px 0;">
                 <strong>Per-chain scanner status and controls have moved.</strong>
                 Per-chain CosmWasm/CW-721 scanner status and controls now live under
-                <strong>Chains ▸ NFT Discovery</strong>. Overall scanner schedule and
-                aggregate discovery totals remain here.
+                <strong>Chains ▸ NFT Discovery</strong>. Aggregate discovery totals
+                remain here.
             </p>
             <p style="margin:8px 0;color:#646970;font-size:12px;">
                 That section covers the CosmWasm/CW-721 engine specifically. Chains
@@ -467,60 +463,6 @@ final class CosmwasmScannerPanel
                 </div>
             <?php endforeach; ?>
         </div>
-        <?php
-    }
-
-    /**
-     * The cron picture. Registration and permission are separate facts and
-     * both are shown: a hook can be scheduled on a site where the gate is
-     * off, in which case it fires and does nothing.
-     *
-     * @param array<string, mixed> $summary
-     */
-    private static function renderSchedule(array $summary): void
-    {
-        /** @var list<array<string, mixed>> $schedule */
-        $schedule = is_array($summary['schedule'] ?? null) ? array_values($summary['schedule']) : [];
-        if ($schedule === []) {
-            return;
-        }
-        $now = time();
-        ?>
-        <table class="widefat striped" style="margin-bottom:12px;">
-            <thead>
-                <tr>
-                    <th style="width:34%;">Scheduled pass</th>
-                    <th style="width:16%;">Cadence</th>
-                    <th style="width:25%;">Next run</th>
-                    <th>Hook</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($schedule as $entry): ?>
-                    <?php
-                    $scheduled = (bool) ($entry['scheduled'] ?? false);
-                    $nextAt    = is_int($entry['next_run_at'] ?? null) ? (int) $entry['next_run_at'] : null;
-                    $overdue   = (int) ($entry['overdue_seconds'] ?? 0);
-                    ?>
-                    <tr>
-                        <td><?php echo esc_html((string) ($entry['label'] ?? '')); ?></td>
-                        <td><code><?php echo esc_html((string) ($entry['interval'] ?? '')); ?></code></td>
-                        <td>
-                            <?php if (!$scheduled): ?>
-                                <span style="color:#d63638;font-weight:600;">not scheduled</span>
-                            <?php elseif ($overdue > 0): ?>
-                                <span style="color:#dba617;">
-                                    overdue by <?php echo esc_html(CosmwasmDiscoveryHealthSnapshot::formatDuration($overdue)); ?>
-                                </span>
-                            <?php else: ?>
-                                in <?php echo esc_html(CosmwasmDiscoveryHealthSnapshot::formatDuration(max(0, ($nextAt ?? $now) - $now))); ?>
-                            <?php endif; ?>
-                        </td>
-                        <td><code style="font-size:11px;"><?php echo esc_html((string) ($entry['hook'] ?? '')); ?></code></td>
-                    </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
         <?php
     }
 

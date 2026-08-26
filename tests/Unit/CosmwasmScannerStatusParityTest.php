@@ -458,11 +458,6 @@ final class CosmwasmScannerStatusParityTest extends TestCase
             define('BCC_COSMWASM_CHAIN_ALLOWLIST', $fixture['allowlist']);
         }
 
-        // The four hooks, on the schedule and not overdue. Without this
-        // every fixture would be RED for an unscheduled pass and the
-        // arithmetic under test would never be reached.
-        CosmwasmDiscoveryWorker::register();
-
         foreach ($fixture['chains'] as $chain) {
             ChainRepository::seed(
                 $chain['id'],

@@ -533,8 +533,8 @@ final class CosmwasmBudgetFairnessTest extends TestCase
         self::assertLessThan($c3, $c2, 'then enumeration');
         self::assertLessThan($d, $c3, 'then contract classification, then emission');
 
-        self::assertSame(2, substr_count($src, 'new CosmwasmTickBudget'),
-            'forEachChain + the backfill default only — no hidden second allowance');
+        self::assertSame(1, substr_count($src, 'new CosmwasmTickBudget'),
+            'the backfill default only — no hidden second allowance');
         self::assertStringContainsString('$budget->reserve(0);' , $body, 'released before emission');
     }
 

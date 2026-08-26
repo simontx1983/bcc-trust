@@ -229,12 +229,33 @@ final class CosmwasmScannerPanelOwnershipTest extends TestCase
         $this->assertStringContainsString('Next backfill slice goes to', $html);
     }
 
-    public function testTheAggregateTotalsAndScheduleRemain(): void
+    public function testTheAggregateTotalsRemain(): void
     {
         $html = $this->render();
 
         $this->assertStringContainsString('Code families known', $html);
-        $this->assertStringContainsString('bcc_cosmwasm_metadata_refresh', $html);
+    }
+
+    /**
+     * The schedule table is gone with the schedule.
+     *
+     * The panel used to print one row per discovery cron hook. Discovery
+     * has no cron hooks, so every row would have read "not scheduled" —
+     * a permanent red alarm about a system working exactly as designed,
+     * which is the fastest way to teach an operator to ignore the panel.
+     */
+    public function testNoScheduledPassTableIsRendered(): void
+    {
+        $html = $this->render();
+
+        foreach ([
+            'bcc_cosmwasm_metadata_refresh',
+            'bcc_cosmwasm_daily_discovery',
+            'Scheduled pass',
+            'not scheduled',
+        ] as $gone) {
+            $this->assertStringNotContainsString($gone, $html);
+        }
     }
 
     /**

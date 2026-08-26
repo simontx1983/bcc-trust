@@ -132,7 +132,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
 
         self::assertSame(CosmwasmScanEligibility::ELIGIBLE, $row['eligibility'], 'precondition: scannable');
         self::assertSame(1, $row['families_errored']);
-        self::assertSame(H::STATUS_YELLOW, H::deriveStatus(true, [$row], $this->schedule()));
+        self::assertSame(H::STATUS_YELLOW, H::deriveStatus(true, [$row]));
     }
 
     /**
@@ -150,7 +150,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
 
         self::assertNull($row['last_error'], 'the checkpoint really does say "no error"');
         self::assertSame(15, $row['families_errored']);
-        self::assertSame(H::STATUS_YELLOW, H::deriveStatus(true, [$row], $this->schedule()));
+        self::assertSame(H::STATUS_YELLOW, H::deriveStatus(true, [$row]));
     }
 
     /**
@@ -175,13 +175,13 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
         $before = $this->row(familiesErrored: 0, checkpointError: null, familyCounts: $dungeonCounts);
         self::assertSame(
             H::STATUS_GREEN,
-            H::deriveStatus(true, [$before], $this->schedule()),
+            H::deriveStatus(true, [$before]),
             'this is the green the operator was shown while 15 families were blocked'
         );
 
         // AFTER: the same chain, with the count it always had.
         $after = $this->row(familiesErrored: 15, checkpointError: null, familyCounts: $dungeonCounts);
-        self::assertSame(H::STATUS_YELLOW, H::deriveStatus(true, [$after], $this->schedule()));
+        self::assertSame(H::STATUS_YELLOW, H::deriveStatus(true, [$after]));
 
         // Everything else about the row is identical.
         self::assertSame($before['eligibility'], $after['eligibility']);
@@ -199,7 +199,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
         self::assertSame(1, $counts[self::CHAIN] ?? 0);
 
         $row = $this->row(familiesErrored: $counts[self::CHAIN]);
-        self::assertSame(H::STATUS_YELLOW, H::deriveStatus(true, [$row], $this->schedule()));
+        self::assertSame(H::STATUS_YELLOW, H::deriveStatus(true, [$row]));
     }
 
     /** The grouped aggregate returns the right count, per chain. */
@@ -250,7 +250,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
             familiesErrored: $counts[self::CHAIN] ?? 0,
             familyCounts: [CosmwasmClassifier::NOT_CW721 => 21]
         );
-        self::assertSame(H::STATUS_GREEN, H::deriveStatus(true, [$row], $this->schedule()));
+        self::assertSame(H::STATUS_GREEN, H::deriveStatus(true, [$row]));
     }
 
     /** An empty family table is a legitimate zero, not a hidden failure. */
@@ -260,7 +260,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
 
         $row = $this->row(familiesErrored: 0);
         self::assertSame(0, $row['families_errored']);
-        self::assertSame(H::STATUS_GREEN, H::deriveStatus(true, [$row], $this->schedule()));
+        self::assertSame(H::STATUS_GREEN, H::deriveStatus(true, [$row]));
     }
 
     // ── (3) precedence is preserved exactly ─────────────────────────────
@@ -272,7 +272,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
 
         self::assertSame(CosmwasmScanEligibility::NOT_OPTED_IN, $row['eligibility']);
         self::assertSame(99, $row['families_errored'], 'the row still reports it');
-        self::assertSame(H::STATUS_IDLE, H::deriveStatus(true, [$row], $this->schedule()));
+        self::assertSame(H::STATUS_IDLE, H::deriveStatus(true, [$row]));
     }
 
     /**
@@ -292,7 +292,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
             self::assertSame(42, $row['families_errored'], $label . ' still reports on its own row');
             self::assertSame(
                 H::STATUS_BLOCKED,
-                H::deriveStatus(true, [$row], $this->schedule()),
+                H::deriveStatus(true, [$row]),
                 $label . ' is blocked, never yellow'
             );
         }
@@ -308,7 +308,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
         $healthy  = $this->row(familiesErrored: 0);
         $excluded = $this->row(state: ChainCheckpointRepository::CW_STATE_PAUSED, familiesErrored: 500);
 
-        self::assertSame(H::STATUS_GREEN, H::deriveStatus(true, [$healthy, $excluded], $this->schedule()));
+        self::assertSame(H::STATUS_GREEN, H::deriveStatus(true, [$healthy, $excluded]));
     }
 
     /** The disabled gate still outranks green/yellow. */
@@ -316,7 +316,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
     {
         $row = $this->row(familiesErrored: 15);
 
-        self::assertSame(H::STATUS_DISABLED, H::deriveStatus(false, [$row], $this->schedule()));
+        self::assertSame(H::STATUS_DISABLED, H::deriveStatus(false, [$row]));
     }
 
     // ── (4) fail-closed ─────────────────────────────────────────────────

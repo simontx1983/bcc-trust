@@ -845,15 +845,39 @@ final class CollectionRepository
         return $result !== false;
     }
 
-    /** @return list<CollectionRow> */
-    public static function getExpired(int $limit = 50): array
+    /**
+     * Expired collections that belong to a LINKED WALLET.
+     *
+     * `wallet_link_id IS NOT NULL` is part of the query rather than a
+     * filter in the caller, and that placement is the point.
+     *
+     * This used to be an unscoped `getExpired()`, and the wallet-less rows
+     * it returned were rows nothing on the refresh path could act on — a
+     * chain-level collection has no wallet address to re-fetch from. The
+     * caller dealt with them by calling {@see backoffRow()} to push
+     * `expires_at` forward so they would not be selected again before the
+     * next `bcc_index_collections` sweep re-fetched them.
+     *
+     * That sweep is retired. Left unscoped, every chain-level expired row
+     * would be re-selected on every cycle, consume the `BATCH_SIZE` budget
+     * and be skipped — starving the wallet-linked rows the sweep exists to
+     * refresh, while writing a rolling `expires_at` to say so. Excluding
+     * them here is what makes the batch budget mean "wallets to refresh".
+     *
+     * @return list<CollectionRow>
+     */
+    public static function getExpiredWalletLinked(int $limit = 50): array
     {
         global $wpdb;
         $table = self::table();
 
         /** @var list<CollectionRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT " . self::COLUMNS . " FROM {$table} WHERE expires_at < NOW() ORDER BY expires_at ASC LIMIT %d",
+            "SELECT " . self::COLUMNS . " FROM {$table}
+              WHERE expires_at < NOW()
+                AND wallet_link_id IS NOT NULL
+              ORDER BY expires_at ASC
+              LIMIT %d",
             $limit
         ));
 

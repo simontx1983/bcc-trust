@@ -583,53 +583,6 @@ final class CosmwasmOneShotCliTest extends TestCase
     }
 
     /**
-     * THE INVERSION, AND THE REASON THE LOCK IS NOT ENOUGH.
-     *
-     * `BCC_COSMWASM_DISCOVERY_ENABLED` is the ONE constant this command
-     * bypasses — while it is OFF. Armed, it means the three scheduled
-     * hooks are LIVE, and then a supervised run is no longer supervising
-     * anything it can attribute.
-     *
-     * The per-chain advisory lock does NOT close this. It excludes
-     * SIMULTANEOUS execution and only that; a cron tick that fires a
-     * second before this process acquires the lock, or a second after it
-     * releases, is ordinary armed-cron behaviour and is invisible in this
-     * command's summary. The operator would read one JSON object and
-     * attribute to it the writes, the request spend and the watermark
-     * movement of a pass they never saw. So the command refuses BEFORE
-     * the first request and BEFORE the first write.
-     *
-     * Note the constants: the backfill constant is NOT defined here, so
-     * this refusal cannot be the backfill one wearing a different hat.
-     */
-    public function testItRefusesWhileTheScheduledDiscoveryGateIsArmed(): void
-    {
-        $this->arrange();
-        $this->queueOneCleanCodePage();
-        define('BCC_COSMWASM_DISCOVERY_ENABLED', true);
-        self::assertFalse(defined('BCC_COSMWASM_BACKFILL_ENABLED'), 'precondition: only the discovery gate is armed');
-
-        // Proof this is NOT an eligibility problem in disguise: with the
-        // gate armed the scheduled passes would happily walk this chain.
-        self::assertTrue(CosmwasmDiscoveryWorker::isChainScannable(self::CHAIN));
-
-        $code = $this->invoke($this->executeArgs());
-
-        self::assertSame(CosmwasmOneShotDiscoveryCommand::EXIT_NOT_ELIGIBLE, $code);
-
-        $output = \WP_CLI::output();
-        self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED is on', $output);
-        // And it says WHY the lock does not make this safe, because the
-        // next operator to hit it will reach for exactly that argument.
-        self::assertStringContainsString('immediately before', $output);
-        self::assertStringNotContainsString('BCC_COSMWASM_BACKFILL_ENABLED is on', $output);
-
-        $this->assertInertRun('the scheduled discovery gate is armed');
-        // The queued page is still unread: the refusal beat the network.
-        self::assertCount(1, ApiRetry::$queue);
-    }
-
-    /**
      * Both gates refuse, and each names ITSELF.
      *
      * `backfillEnabled()` is AND-ed with `discoveryEnabled()`, so an armed
@@ -667,14 +620,7 @@ final class CosmwasmOneShotCliTest extends TestCase
         $code = $this->codeWithoutComments((string) file_get_contents($file));
 
         foreach ([
-            'runBackfillTick',
             'runBackfillForChain',
-            'runWeeklyRetry',
-            'runMetadataRefresh',
-            'BACKFILL_HOOK',
-            'WEEKLY_HOOK',
-            'METADATA_HOOK',
-            'DAILY_HOOK',
         ] as $forbidden) {
             self::assertStringNotContainsString(
                 $forbidden,
@@ -959,105 +905,17 @@ final class CosmwasmOneShotCliTest extends TestCase
         self::assertSame([], ApiRetry::$calls);
     }
 
-    // ── (k) parity with the scheduled worker ────────────────────────────
-
     /**
-     * THE POINT OF THE WHOLE EXERCISE.
+     * The supervised pass runs the production code, not a variant.
      *
-     * An operator watches this command in order to learn what cron will
-     * do. If the two diverge, the observation is worthless — so the same
-     * fixtures through the supervised path and through
-     * {@see CosmwasmDiscoveryWorker::runDailyDiscovery()} must produce the
-     * same request sequence and the same rows.
-     *
-     * The comparison is a SEQUENCE, not a count: two paths that make the
-     * same NUMBER of requests in a different ORDER are not the same pass.
-     *
-     * ── WHY THE GATE IS DEFINED HALFWAY THROUGH ─────────────────────────
-     * Each half runs under the gate setting its own caller REQUIRES, and
-     * they are opposites:
-     *
-     *   supervised → `BCC_COSMWASM_DISCOVERY_ENABLED` must be OFF (with it
-     *                on, cron is live and the command refuses — see
-     *                {@see testItRefusesWhileTheScheduledDiscoveryGateIsArmed()});
-     *   scheduled  → it must be ON, or `runDailyDiscovery()` returns
-     *                immediately and compares nothing.
-     *
-     * A constant cannot be undefined, so the supervised half runs FIRST
-     * and the constant is defined between the two. That is not a
-     * workaround — it is the real-world comparison: this is exactly the
-     * pair of environments the two callers run in, and the pass still has
-     * to be identical across them.
+     * It used to be one of TWO callers of the incremental envelope, and
+     * this test proved the pair could not diverge. The scheduled caller is
+     * retired, so there is nothing left to diverge FROM — which is a
+     * stronger guarantee, not a weaker one. What still has to hold is that
+     * this entry point owns no private copy of the envelope: the lock, the
+     * try/finally and the last-run stamp all stay in runChainPass().
      */
-    public function testTheSupervisedPassAndTheScheduledPassBehaveIdentically(): void
-    {
-        define('WP_CLI', true);
-        define('BCC_COSMWASM_CHAIN_ALLOWLIST', (string) self::CHAIN);
-
-        $fixtures = function (): void {
-            $this->queueJson([
-                'code_infos' => [
-                    ['code_id' => '3', 'data_hash' => 'AA11'],
-                    ['code_id' => '2', 'data_hash' => 'BB22'],
-                    ['code_id' => '1', 'data_hash' => 'CC33'],
-                ],
-                'pagination' => ['next_key' => null],
-            ]);
-            // Code 3 is a CW-721: num_tokens answers, contract_info answers.
-            $this->queueJson(['data' => ['count' => 55]]);
-            $this->queueJson(['data' => ['name' => 'AshFall', 'symbol' => 'ASH']]);
-        };
-
-        // ── the supervised path, with the scheduled gate OFF ────────────
-        self::assertFalse(defined('BCC_COSMWASM_DISCOVERY_ENABLED'), 'the supervised half runs with cron inert');
-        ChainRepository::seed(self::CHAIN, self::SLUG, self::REST, 'cosmos', 1);
-        $fixtures();
-        self::assertSame(
-            CosmwasmOneShotDiscoveryCommand::EXIT_OK,
-            $this->invoke($this->executeArgs())
-        );
-
-        $cliUrls       = $this->urls();
-        $cliFamilies   = json_encode(CosmwasmCodeFamilyRepository::$families);
-        $cliContracts  = json_encode(CosmwasmContractRepository::$contracts);
-        $cliCheckpoint = json_encode(ChainCheckpointRepository::$rows);
-        $cliUpserts    = json_encode(CollectionRepository::$upserted);
-
-        // ── the scheduled path, from the same starting state ────────────
-        ApiRetry::reset();
-        CosmwasmCodeFamilyRepository::reset();
-        CosmwasmContractRepository::reset();
-        CollectionRepository::reset();
-        ChainCheckpointRepository::reset();
-        ChainRepository::reset();
-        \BCC\Core\DB\AdvisoryLock::reset();
-        \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::reset();
-
-        // NOW arm the gate — the scheduled pass needs it, and the
-        // supervised half above has already run without it.
-        define('BCC_COSMWASM_DISCOVERY_ENABLED', true);
-
-        ChainRepository::seed(self::CHAIN, self::SLUG, self::REST, 'cosmos', 1);
-        $fixtures();
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
-
-        self::assertSame($cliUrls, $this->urls(), 'the request SEQUENCE must be identical');
-        self::assertNotSame([], $cliUrls, 'precondition: the fixtures actually drove requests');
-        self::assertSame($cliFamilies, json_encode(CosmwasmCodeFamilyRepository::$families));
-        self::assertSame($cliContracts, json_encode(CosmwasmContractRepository::$contracts));
-        self::assertSame($cliCheckpoint, json_encode(ChainCheckpointRepository::$rows));
-        self::assertSame($cliUpserts, json_encode(CollectionRepository::$upserted));
-        self::assertSame(['bcc_cosmwasm_chain_17'], \BCC\Core\DB\AdvisoryLock::$acquired);
-    }
-
-    /**
-     * And the two share the code, rather than merely agreeing today.
-     *
-     * Agreement that is maintained by hand is agreement that drifts. Both
-     * entry points must route through the SAME per-chain envelope and the
-     * SAME step body.
-     */
-    public function testBothPathsRouteThroughTheSameSharedMethods(): void
+    public function testTheSupervisedPassRoutesThroughTheSharedMethods(): void
     {
         $reflection = new \ReflectionClass(CosmwasmDiscoveryWorker::class);
         $source     = (string) file_get_contents((string) $reflection->getFileName());
@@ -1073,13 +931,11 @@ final class CosmwasmOneShotCliTest extends TestCase
             ));
         };
 
-        // The scheduled loop and the supervised one-shot both call the
-        // shared envelope, and neither owns a lock/finally of its own.
-        self::assertStringContainsString('self::runChainPass(', $bodyOf('forEachChain'));
+        // The supervised one-shot calls the shared envelope and owns no
+        // lock/finally of its own.
         self::assertStringContainsString('self::runChainPass(', $bodyOf('runSupervisedSingleChainPass'));
 
-        // The step body is the daily one in both cases.
-        self::assertStringContainsString('self::dailyChainStep(', $bodyOf('runDailyDiscovery'));
+        // And it runs the canonical step body rather than a variant.
         self::assertStringContainsString('self::dailyChainStep(', $bodyOf('runSupervisedSingleChainPass'));
 
         // Neither caller owns a lock, a try/finally or a stamp of its own —
@@ -1092,7 +948,7 @@ final class CosmwasmOneShotCliTest extends TestCase
         // and it keeps its own lock. This assertion is about the two
         // callers of the INCREMENTAL envelope, not about the file having
         // exactly one AdvisoryLock call.
-        foreach (['forEachChain', 'runSupervisedSingleChainPass', 'runDailyDiscovery'] as $caller) {
+        foreach (['runSupervisedSingleChainPass'] as $caller) {
             $body = $bodyOf($caller);
             self::assertStringNotContainsString('AdvisoryLock::acquire', $body, $caller . ' must not take its own lock');
             self::assertStringNotContainsString('AdvisoryLock::release', $body, $caller . ' must not release a lock');

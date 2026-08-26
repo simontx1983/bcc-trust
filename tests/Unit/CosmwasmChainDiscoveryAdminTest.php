@@ -613,7 +613,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // denied it would be wrong.
         $flat = self::flatten($html);
         self::assertStringContainsString('it answered the code listing with a 501', $flat);
-        self::assertStringContainsString('No scheduled pass retries that verdict', $flat);
+        self::assertStringContainsString('No pass retries that verdict', $flat);
         self::assertStringContainsString('no control on this page clears it', $flat);
         self::assertStringContainsString('only a direct database change would', $flat);
 

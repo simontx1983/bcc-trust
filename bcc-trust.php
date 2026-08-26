@@ -250,6 +250,11 @@ require_once BCC_TRUST_PATH . 'includes/database/repair-orphaned-cosmos-gates.ph
 // curated-sampling loop and are superseded by
 // wp_bcc_chain_checkpoints.cw_* + the two cosmwasm tables.
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-cw721-scan-options.php';
+// One-shot removal of the five retired automatic NFT discovery schedules
+// (bcc_index_collections + the four bcc_cosmwasm_* hooks). Chain-wide
+// discovery is operator-initiated now; these events survive in
+// wp_options.cron on any install that already scheduled them.
+require_once BCC_TRUST_PATH . 'includes/database/unschedule-automatic-nft-discovery.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
@@ -873,26 +878,6 @@ add_action(
     [\BCC\Trust\Onchain\Services\NftEnrichmentService::class, 'runAllChains']
 );
 
-// CosmWasm CW-721 discovery handlers. Each one re-checks the fail-CLOSED
-// CosmwasmDiscoveryGate before doing any work, so binding them here costs
-// nothing on an environment that has not opted in.
-add_action(
-    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::BACKFILL_HOOK,
-    [\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class, 'runBackfillTick']
-);
-add_action(
-    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::DAILY_HOOK,
-    [\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class, 'runDailyDiscovery']
-);
-add_action(
-    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::WEEKLY_HOOK,
-    [\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class, 'runWeeklyRetry']
-);
-add_action(
-    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::METADATA_HOOK,
-    [\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class, 'runMetadataRefresh']
-);
-
 // V2 Phase 1 hardening: self-heal cron registration.
 //
 // ┌─ DO NOT REMOVE AS "REDUNDANT WITH ACTIVATION" ─────────────────┐
@@ -924,14 +909,13 @@ add_action(
 add_action('plugins_loaded', static function (): void {
     \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::register();
     \BCC\Trust\Onchain\Services\NftEnrichmentService::register();
-    // CosmWasm CW-721 discovery — four hooks, same anti-drift shape.
-    // REGISTRATION IS NOT PERMISSION: every handler re-checks the
-    // fail-CLOSED CosmwasmDiscoveryGate, so on an environment that has
-    // not defined BCC_COSMWASM_DISCOVERY_ENABLED these hooks fire and
-    // immediately return. Scheduling them unconditionally is what stops
-    // the "hook added by an update, never scheduled, silently never
-    // runs" failure mode documented above.
-    \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::register();
+    // NOTHING SCHEDULES CW-721 DISCOVERY, AND NOTHING MAY.
+    // CosmwasmDiscoveryWorker deliberately has no register() and owns no
+    // cron hooks: chain-wide discovery is operator-initiated, one named
+    // chain at a time. Re-adding a self-healing registration here would
+    // silently restore unattended chain sweeps on every request — which is
+    // precisely what the anti-drift block above is built to do, and
+    // precisely what discovery must not have.
     // Validator-messaging backlog delivery + its recovery sweep. Same
     // self-healing shape: registering from plugins_loaded means a hook
     // added by an update schedules itself without a reactivation.
@@ -2022,11 +2006,10 @@ if (defined('WP_CLI') && WP_CLI) {
     // ONE supervised CosmWasm discovery pass, for ONE chain, watched by a
     // human. THIS IS THE ONLY ENTRY POINT IT HAS: there is deliberately no
     // REST route, no admin-post handler, no AJAX action and no cron hook
-    // that reaches CosmwasmOneShotDiscoveryCommand. The reason it exists
-    // is that arming BCC_COSMWASM_DISCOVERY_ENABLED also arms three
-    // scheduled hooks that then fire unsupervised, and unscheduling them
-    // does not hold — CosmwasmDiscoveryWorker::register() runs on
-    // plugins_loaded and reschedules anything missing.
+    // that reaches CosmwasmOneShotDiscoveryCommand. Since the scheduled
+    // passes were retired it is also the only way an incremental pass runs
+    // at all — an operator names a chain, watches it, and reads a summary
+    // that pass alone produced.
     \WP_CLI::add_command(
         'bcc-trust cosmwasm',
         \BCC\Trust\Onchain\CLI\CosmwasmOneShotDiscoveryCommand::class
