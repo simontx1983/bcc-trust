@@ -9,6 +9,7 @@ if (!defined('ABSPATH')) {
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\HeliusEndpoint;
 
 /**
  * Solana Chain Fetcher
@@ -330,22 +331,23 @@ class SolanaFetcher implements FetcherInterface
      * BCC_HELIUS_RPC_URL constant; falls back to the canonical
      * `https://mainnet.helius-rpc.com/?api-key=...` shape using
      * BCC_HELIUS_API_KEY. Returns null when neither is configured.
+     *
+     * ── THE RESOLUTION MOVED; THE BEHAVIOUR DID NOT ─────────────────────
+     * It now lives in {@see HeliusEndpoint}, unchanged, because
+     * {@see \BCC\Trust\Onchain\Support\NftProviderReadiness} must report
+     * whether the `das` driver is usable and has to get EXACTLY the answer
+     * this fetcher would act on. A second copy of the constant-reading logic
+     * would drift, and the drift would be silent: readiness would say
+     * configured while every DAS call returned nothing.
+     *
+     * Note the shared implementation keeps the non-empty checks. `defined()`
+     * alone is not configuration — `define('BCC_HELIUS_API_KEY', '')` is
+     * defined and useless, and reading it as configured would mark a chain
+     * ready for work it cannot perform.
      */
     private static function resolveHeliusRpcUrl(): ?string
     {
-        if (defined('BCC_HELIUS_RPC_URL')) {
-            $url = (string) constant('BCC_HELIUS_RPC_URL');
-            if ($url !== '') {
-                return $url;
-            }
-        }
-        if (defined('BCC_HELIUS_API_KEY')) {
-            $key = (string) constant('BCC_HELIUS_API_KEY');
-            if ($key !== '') {
-                return 'https://mainnet.helius-rpc.com/?api-key=' . rawurlencode($key);
-            }
-        }
-        return null;
+        return HeliusEndpoint::resolveRpcUrl();
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -917,7 +919,7 @@ class SolanaFetcher implements FetcherInterface
     private static function markDasUnsupported(int $chainId, string $rpcUrl, int $code, string $message): void
     {
         update_option(
-            'bcc_onchain_das_unsupported_' . $chainId,
+            HeliusEndpoint::dasUnsupportedOptionKey($chainId),
             [
                 'rpc_url'     => $rpcUrl,
                 'code'        => $code,
