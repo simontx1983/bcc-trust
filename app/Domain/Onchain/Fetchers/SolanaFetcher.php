@@ -343,10 +343,16 @@ class SolanaFetcher implements FetcherInterface
      * ── THE RESOLUTION MOVED; THE BEHAVIOUR DID NOT ─────────────────────
      * It now lives in {@see HeliusEndpoint}, unchanged, because
      * {@see \BCC\Trust\Onchain\Support\NftProviderReadiness} must report
-     * whether the `das` driver is usable and has to get EXACTLY the answer
-     * this fetcher would act on. A second copy of the constant-reading logic
-     * would drift, and the drift would be silent: readiness would say
-     * configured while every DAS call returned nothing.
+     * whether the `das_helius` driver is usable and has to get EXACTLY the
+     * answer this fetcher would act on. A second copy of the
+     * constant-reading logic would drift, and the drift would be silent:
+     * readiness would say configured while every call returned nothing.
+     *
+     * `das_helius` is the METADATA path only — `getAsset`, reached from
+     * {@see fetchMetadataForMint()}. The `getAssetsByOwner` calls behind
+     * wallet discovery and ownership are a DIFFERENT driver, `das_rpc`,
+     * because they go through {@see rpcCall()} to the chain row's `rpc_url`
+     * and never touch these constants. See {@see SolanaEndpoints}.
      *
      * Note the shared implementation keeps the non-empty checks. `defined()`
      * alone is not configuration — `define('BCC_HELIUS_API_KEY', '')` is

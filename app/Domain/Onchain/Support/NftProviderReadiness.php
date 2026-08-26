@@ -211,9 +211,16 @@ final class NftProviderReadiness
      *   4. readiness stays false forever, because nobody ever compared the
      *      mark against the endpoint now in use
      *
-     * The mark records `redactEndpoint($chain->rpc_url)` as observed by
-     * `SolanaFetcher::rpcCall()`, so the current endpoint is put through the
-     * SAME redaction and compared. A changed endpoint does not inherit the
+     * The mark records the endpoint `SolanaFetcher::rpcCall()` actually
+     * POSTed to — that is `redactEndpoint(SolanaEndpoints::rpcEndpoint($chain))`,
+     * the RESOLVED endpoint, not the raw `rpc_url` column. The distinction is
+     * load-bearing: `rpcEndpoint()` falls back to the public default when the
+     * column is NULL or blank, and such a chain still makes calls. Comparing
+     * the raw nullable column would therefore never match the mark on exactly
+     * the rows most likely to carry one.
+     *
+     * So the current endpoint is put through the SAME resolution and the SAME
+     * redaction before comparing. A changed endpoint does not inherit the
      * previous one's verdict; an unchanged endpoint keeps its refusal.
      *
      * ── UNATTRIBUTABLE MARKS DO NOT APPLY ───────────────────────────────

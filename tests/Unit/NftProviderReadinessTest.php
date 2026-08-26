@@ -23,12 +23,18 @@ require_once __DIR__ . '/../Stubs/nft-capability-stubs.php';
  *
  * ── WHAT IS BEING PINNED ────────────────────────────────────────────────
  * 1. READINESS IS PER DRIVER. The headline test is
- *    {@see testOneReadyDriverDoesNotMakeItsNeighbourReady()}: on the seeded
- *    Solana configuration `magiceden` is ready and `das` is not, on the same
- *    chain, at the same moment. Any chain-wide boolean would have to be
- *    wrong about one of them — and would be wrong in the permissive
- *    direction, which is how an operator ends up starting a job that cannot
- *    make a single successful call.
+ *    {@see testConfiguringHeliusDoesNotMakeTheRpcPathReady()}: with Helius
+ *    configured and the chain row still on the public RPC, `magiceden` and
+ *    `das_helius` are ready while `das_rpc` is NOT — same chain, same
+ *    moment, three drivers, and no single answer covers them. Any chain-wide
+ *    boolean would have to be wrong about at least one, and would be wrong in
+ *    the permissive direction, which is how an operator ends up starting a
+ *    job that cannot make a single successful call.
+ *
+ *    The two Solana DAS drivers are separate because they call different
+ *    endpoints: `das_rpc` (wallet discovery, ownership) goes through
+ *    `rpcCall()` to the chain row's `rpc_url`; `das_helius` (metadata) goes
+ *    to the Helius constants.
  *
  * 2. DEFINED IS NOT CONFIGURED. `define('BCC_HELIUS_API_KEY', '')` is a real
  *    production shape — a stripped staging config, a secret that failed to

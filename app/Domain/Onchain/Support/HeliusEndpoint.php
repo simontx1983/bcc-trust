@@ -14,10 +14,19 @@ if (!defined('ABSPATH')) {
  * ── WHY THIS CLASS EXISTS ───────────────────────────────────────────────
  * Same reason as {@see AlchemyEndpoint}. The Solana fetcher already knew how
  * to resolve Helius credentials into a usable URL; {@see NftProviderReadiness}
- * needs the identical answer to report whether the `das` driver is usable.
- * Two hand-maintained copies of "is Helius configured?" would drift, and the
- * drift would be invisible: the panel would say configured, the fetcher would
- * return nothing.
+ * needs the identical answer to report whether the `das_helius` driver is
+ * usable. Two hand-maintained copies of "is Helius configured?" would drift,
+ * and the drift would be invisible: the panel would say configured, the
+ * fetcher would return nothing.
+ *
+ * ── THIS CLASS BACKS `das_helius` ONLY ──────────────────────────────────
+ * These constants serve the METADATA path (`getAsset`, via
+ * `SolanaFetcher::fetchMetadataForMint()`). The other Solana DAS driver,
+ * `das_rpc`, calls `getAssetsByOwner` through `rpcCall()` against the CHAIN
+ * ROW's `rpc_url` and never reads anything here — which is exactly why the
+ * two are separate drivers with separate readiness answers. Reading these
+ * constants to decide whether `das_rpc` is usable is the defect that split
+ * them. See {@see SolanaEndpoints}.
  *
  * Extracted verbatim from `SolanaFetcher::resolveHeliusRpcUrl()`, which
  * remains the only production consumer of the URL itself.
