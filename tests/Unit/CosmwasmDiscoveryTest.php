@@ -15,6 +15,7 @@ use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
+use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -123,6 +124,23 @@ final class CosmwasmDiscoveryTest extends TestCase
     private function budget(int $requests = 100): CosmwasmTickBudget
     {
         return new CosmwasmTickBudget($requests, 60);
+    }
+
+    /**
+     * ONE incremental pass on ONE chain — the only way discovery runs.
+     *
+     * Stands in for the retired `runDailyDiscovery()` sweep. That method
+     * looped every eligible chain; this names one, which is the whole
+     * shape of the change. The step body underneath is identical, so what
+     * these tests assert about a pass is unchanged.
+     */
+    private function runPass(int $chainId = self::CHAIN_ID): void
+    {
+        CosmwasmDiscoveryWorker::runSupervisedSingleChainPass(
+            $chainId,
+            new CosmwasmTickBudget(),
+            new CosmwasmPassReport()
+        );
     }
 
     // ── (a) the closed loop, opened ─────────────────────────────────────
@@ -291,7 +309,7 @@ final class CosmwasmDiscoveryTest extends TestCase
             ]);
         }
 
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
+        $this->runPass();
 
         // The watermark MUST NOT move: advancing to 5000 would strand
         // everything between 101 and 4995 forever.
@@ -321,7 +339,7 @@ final class CosmwasmDiscoveryTest extends TestCase
             'pagination' => ['next_key' => 'MORE=='],
         ]);
 
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
+        $this->runPass();
 
         self::assertSame(
             [['chain_id' => self::CHAIN_ID, 'max' => 713]],
@@ -340,7 +358,7 @@ final class CosmwasmDiscoveryTest extends TestCase
 
         $this->queueJson(['code_infos' => [], 'pagination' => ['next_key' => null]]);
 
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
+        $this->runPass();
 
         self::assertSame([], ChainCheckpointRepository::$watermarkAdvances);
         self::assertNotSame([], ChainCheckpointRepository::$backfillRestarts);
@@ -1170,7 +1188,16 @@ final class CosmwasmDiscoveryTest extends TestCase
         self::assertSame([], ChainCheckpointRepository::$codeProgress, 'and writes no cursor');
     }
 
-    public function testOneBrokenChainDoesNotStopTheOthers(): void
+    /**
+     * A failed pass on one chain leaves the next chain's pass untouched.
+     *
+     * This used to prove failure ISOLATION inside a fan-out loop. There is
+     * no loop: each pass names one chain. The property still worth pinning
+     * is that a chain whose pass failed still gets its last-run stamp — so
+     * a broken chain records that it was tried — and that its failure
+     * leaves no residue in the next chain's pass.
+     */
+    public function testAFailedPassStampsItsChainAndLeavesTheNextChainClean(): void
     {
         define('BCC_COSMWASM_DISCOVERY_ENABLED', true);
 
@@ -1180,10 +1207,9 @@ final class CosmwasmDiscoveryTest extends TestCase
         ApiRetry::$queue[] = new \WP_Error('lcd down');
         $this->queueJson(['code_infos' => [['code_id' => '7', 'data_hash' => 'BB']], 'pagination' => []]);
 
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
+        $this->runPass(self::CHAIN_ID);
+        $this->runPass(self::CHAIN_B);
 
-        // Both chains were attempted, and both got their last-run stamp so
-        // neither starves the other next tick.
         self::assertContains(self::CHAIN_ID, ChainCheckpointRepository::$discoveryTouches);
         self::assertContains(self::CHAIN_B, ChainCheckpointRepository::$discoveryTouches);
         self::assertSame(7, (int) ChainCheckpointRepository::$rows[self::CHAIN_B]->cw_max_code_id);
@@ -1197,8 +1223,8 @@ final class CosmwasmDiscoveryTest extends TestCase
         ApiRetry::$queue[] = ['code' => 200, 'body' => 'not json at all <html>'];
         ApiRetry::$queue[] = ['code' => 200, 'body' => '{"unexpected":"shape"}'];
 
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
-        CosmwasmDiscoveryWorker::runWeeklyRetry();
+        $this->runPass();
+        $this->runPass();
 
         self::assertTrue(true, 'no fatal, no exception escaped the worker');
     }
@@ -1363,18 +1389,18 @@ final class CosmwasmDiscoveryTest extends TestCase
         self::assertSame([2, 3], $pendingIds);
     }
 
-    public function testConfirmedNonNftIsNotRetriedWeekly(): void
+    public function testConfirmedNonNftIsNeverRetriedByALaterPass(): void
     {
         define('BCC_COSMWASM_DISCOVERY_ENABLED', true);
 
         CosmwasmCodeFamilyRepository::seed(self::CHAIN_ID, 3, CosmwasmClassifier::NOT_CW721, null, CosmwasmClassifier::VERSION, '2026-08-01 00:00:00');
         CosmwasmContractRepository::seed(self::CHAIN_ID, self::CONTRACT_A, CosmwasmClassifier::NOT_CW721, 3, false, false, CosmwasmClassifier::VERSION, '2026-08-01 00:00:00');
 
-        // Only the daily tail read of the code listing is answered; if the
+        // Only the tail read of the code listing is answered; if the
         // settled rows were swept, more calls would follow.
         $this->queueJson(['code_infos' => [], 'pagination' => ['next_key' => null]]);
 
-        CosmwasmDiscoveryWorker::runWeeklyRetry();
+        $this->runPass();
 
         self::assertSame([], CosmwasmCodeFamilyRepository::$classifications);
         self::assertSame([], CosmwasmContractRepository::$classifications);
@@ -1393,10 +1419,11 @@ final class CosmwasmDiscoveryTest extends TestCase
 
         $this->queueJson(['code_infos' => [['code_id' => '1', 'data_hash' => 'AA']], 'pagination' => []]);
 
-        CosmwasmDiscoveryWorker::runBackfillTick();
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
-        CosmwasmDiscoveryWorker::runWeeklyRetry();
-        CosmwasmDiscoveryWorker::runMetadataRefresh();
+        // The backfill entry point HONOURS the master gate, so it is the
+        // one probed here. The supervised pass deliberately bypasses that
+        // constant — that bypass is its purpose, and its authorization
+        // lives in the CLI (see CosmwasmOneShotCliTest).
+        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_ID);
 
         self::assertSame([], ApiRetry::$calls, 'no transport at all on an environment that has not opted in');
         self::assertSame(0, CosmwasmCodeFamilyRepository::countForChain(self::CHAIN_ID));
@@ -1409,7 +1436,7 @@ final class CosmwasmDiscoveryTest extends TestCase
         self::assertTrue(CosmwasmDiscoveryGate::discoveryEnabled());
         self::assertFalse(CosmwasmDiscoveryGate::backfillEnabled(), 'the backfill needs its OWN switch');
 
-        CosmwasmDiscoveryWorker::runBackfillTick();
+        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_ID);
 
         self::assertSame([], ApiRetry::$calls);
     }
@@ -1421,7 +1448,7 @@ final class CosmwasmDiscoveryTest extends TestCase
 
         self::assertFalse(CosmwasmDiscoveryGate::backfillEnabled());
 
-        CosmwasmDiscoveryWorker::runBackfillTick();
+        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_ID);
 
         self::assertSame([], ApiRetry::$calls);
     }
@@ -1472,42 +1499,65 @@ final class CosmwasmDiscoveryTest extends TestCase
         self::assertSame(1000, $budget->remaining());
     }
 
-    // ── (i) cron registration ───────────────────────────────────────────
+    // ── (i) the worker owns no cron ─────────────────────────────────────
 
-    public function testAllFourHooksAreRegisteredAndDeclaredInTheCronSsot(): void
+    /**
+     * THE RETIRED HOOKS ARE GONE FROM THE CODE AND FROM THE SSOT.
+     *
+     * Deleting a wp_schedule_event() call is only half of retiring a hook.
+     * The other half is the SSOT: a hook left in `recurring` would be
+     * expected by the drift detector forever, and its permanent absence
+     * would read as drift rather than as a decision. They move to
+     * `cleanup_only`, which is cleared on deactivate/uninstall and not
+     * drift-tracked.
+     */
+    public function testTheRetiredDiscoveryHooksAreAbsentFromTheCronSsot(): void
     {
-        CosmwasmDiscoveryWorker::register();
-
-        $hooks = [
-            CosmwasmDiscoveryWorker::BACKFILL_HOOK => CosmwasmDiscoveryWorker::BACKFILL_INTERVAL,
-            CosmwasmDiscoveryWorker::DAILY_HOOK    => CosmwasmDiscoveryWorker::DAILY_INTERVAL,
-            CosmwasmDiscoveryWorker::WEEKLY_HOOK   => CosmwasmDiscoveryWorker::WEEKLY_INTERVAL,
-            CosmwasmDiscoveryWorker::METADATA_HOOK => CosmwasmDiscoveryWorker::METADATA_INTERVAL,
-        ];
-
         /** @var array{recurring: array<string, array{interval: string, description: string}>, cleanup_only: list<string>} $ssot */
         $ssot = require dirname(__DIR__, 2) . '/includes/cron-hooks.php';
 
-        foreach ($hooks as $hook => $interval) {
-            self::assertArrayHasKey($hook, \BccTestCronStore::$events, "$hook must self-heal its schedule");
-            self::assertSame($interval, \BccTestCronStore::$events[$hook]['interval']);
-            self::assertArrayHasKey($hook, $ssot['recurring'], "$hook must be in the cron SSOT or it escapes health tracking");
-            self::assertSame($interval, $ssot['recurring'][$hook]['interval']);
+        foreach ([
+            'bcc_index_collections',
+            'bcc_cosmwasm_backfill_tick',
+            'bcc_cosmwasm_daily_discovery',
+            'bcc_cosmwasm_weekly_retry',
+            'bcc_cosmwasm_metadata_refresh',
+        ] as $retired) {
+            self::assertArrayNotHasKey(
+                $retired,
+                $ssot['recurring'],
+                "{$retired} must not be drift-tracked — it has no handler"
+            );
+            self::assertContains(
+                $retired,
+                $ssot['cleanup_only'],
+                "{$retired} must still be cleared on deactivate/uninstall"
+            );
         }
-
-        // wp-cron has no monthly interval — we ride daily + an elapsed guard.
-        self::assertSame('daily', CosmwasmDiscoveryWorker::METADATA_INTERVAL);
-        self::assertSame(30 * 86400, CosmwasmDiscoveryGate::METADATA_REFRESH_MIN_ELAPSED);
     }
 
-    public function testRegistrationIsNotPermission(): void
+    /**
+     * The worker cannot re-arm anything, because it schedules nothing.
+     *
+     * `register()` used to self-heal four hooks from `plugins_loaded` — on
+     * every request. That is exactly the mechanism that would silently
+     * restore unattended chain sweeps after this change, so the method is
+     * gone rather than emptied.
+     */
+    public function testTheWorkerSchedulesNothing(): void
     {
-        // The hooks schedule themselves even with the gate undefined —
-        // and the handlers still do nothing.
-        CosmwasmDiscoveryWorker::register();
+        self::assertFalse(
+            method_exists(CosmwasmDiscoveryWorker::class, 'register'),
+            'register() must not exist — it re-armed retired cron hooks on every request'
+        );
 
-        self::assertNotSame([], \BccTestCronStore::$events);
-        self::assertFalse(CosmwasmDiscoveryGate::discoveryEnabled());
+        $code = (string) file_get_contents(
+            (string) (new \ReflectionClass(CosmwasmDiscoveryWorker::class))->getFileName()
+        );
+        self::assertStringNotContainsString('wp_schedule_event(', $code);
+        self::assertStringNotContainsString('wp_schedule_single_event(', $code);
+
+        self::assertSame([], \BccTestCronStore::$events, 'nothing scheduled a hook');
     }
 
     // ── (j) the retired path is really gone ─────────────────────────────

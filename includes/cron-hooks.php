@@ -57,16 +57,6 @@ return [
         'bcc_helius_dedupe_sweep'               => ['interval' => 'bcc_five_minutes',             'description' => 'Helius signature replay LRU eviction'],
         'bcc_helius_subscription_reconcile'     => ['interval' => 'twicedaily',                   'description' => 'Helius subscription address-list reconcile (covers dropped subscribe/unsubscribe)'],
         'bcc_nft_enrichment_tick'               => ['interval' => 'bcc_five_minutes',             'description' => 'NFT metadata backfill (name + image_url)'],
-        // CosmWasm CW-721 discovery. All four handlers re-check the
-        // fail-CLOSED CosmwasmDiscoveryGate, so a scheduled hook on an
-        // environment that has not opted in is a no-op — being listed here
-        // is drift tracking, not permission. The "monthly" pass rides a
-        // DAILY interval plus a durable >=30-day elapsed guard, because
-        // wp-cron has no monthly interval and we do not invent one.
-        'bcc_cosmwasm_backfill_tick'            => ['interval' => 'bcc_five_minutes',             'description' => 'CosmWasm CW-721 historical backfill (one chain slice per tick; needs BCC_COSMWASM_BACKFILL_ENABLED)'],
-        'bcc_cosmwasm_daily_discovery'          => ['interval' => 'daily',                        'description' => 'CosmWasm CW-721 incremental discovery — new code ids + new contracts under known families'],
-        'bcc_cosmwasm_weekly_retry'             => ['interval' => 'bcc_weekly',                   'description' => 'CosmWasm CW-721 retry sweep — temporarily_unreachable + inconclusive, capped and backed off'],
-        'bcc_cosmwasm_metadata_refresh'         => ['interval' => 'daily',                        'description' => 'CosmWasm CW-721 migration check + mutable metadata refresh (monthly via a durable elapsed guard)'],
         'bcc_watch_batch_sweep'                 => ['interval' => 'bcc_minute',                   'description' => 'WatchBatchAggregator sweep (WatchBatchAggregator::SWEEP_HOOK / ::SWEEP_INTERVAL)'],
         // Disputes domain
         'bcc_disputes_auto_resolve'             => ['interval' => 'daily',                        'description' => 'dispute auto-resolve sweep'],
@@ -88,6 +78,27 @@ return [
         // Fire-once bootstrap jobs.
         'bcc_trust_initial_user_sync',
         'bcc_trust_initial_read_model_sync',
+        // Retired automatic NFT collection discovery. These five ran
+        // unattended chain-wide sweeps: `bcc_index_collections` walked
+        // every active EVM/Solana/Cosmos chain for "top collections", and
+        // the four `bcc_cosmwasm_*` hooks walked every opted-in Cosmos
+        // chain for CW-721 code families. Chain-wide discovery is now
+        // operator-initiated, one named chain at a time, so none of them
+        // has a handler any more.
+        //
+        // They are listed here — not merely deleted from `recurring` —
+        // because installs that ran an earlier build still carry these
+        // events in `wp_options.cron`. Removing the registration does not
+        // remove the event; a scheduled hook with no handler simply fires
+        // into nothing on every cron run, forever. Deactivation clears
+        // them from here, and
+        // includes/database/unschedule-automatic-nft-discovery.php clears
+        // them on installs that are never deactivated.
+        'bcc_index_collections',
+        'bcc_cosmwasm_backfill_tick',
+        'bcc_cosmwasm_daily_discovery',
+        'bcc_cosmwasm_weekly_retry',
+        'bcc_cosmwasm_metadata_refresh',
         // Scale-hardening / legacy drains still worth clearing on long-lived installs.
         'bcc_pull_batch_sweep',
         // Retired hooks (kept for uninstall hygiene on installs that scheduled them pre-retirement).

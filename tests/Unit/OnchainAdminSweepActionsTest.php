@@ -22,7 +22,7 @@ use PHPUnit\Framework\TestCase;
  *   - each operation has its own nonce, so a "Validators only" nonce cannot
  *     drive the full "All" sweep;
  *   - the step SEQUENCE through ChainRefreshService is byte-identical to the
- *     admin_init closure it replaced (validators → collections → enrichment);
+ *     admin_init closure it replaced (validators → enrichment);
  *   - a mid-sweep failure records which steps completed and does not leak the
  *     exception text;
  *   - every run ends in a redirect, so a refresh cannot replay it.
@@ -63,7 +63,6 @@ final class OnchainAdminSweepActionsTest extends TestCase
 
         $this->assertSame([
             'admin_post_bcc_onchain_sweep_validators',
-            'admin_post_bcc_onchain_sweep_collections',
             'admin_post_bcc_onchain_sweep_enrichment',
             'admin_post_bcc_onchain_sweep_all',
         ], $GLOBALS['bcc_test_registered_actions']);
@@ -134,20 +133,20 @@ final class OnchainAdminSweepActionsTest extends TestCase
         // The operation is resolved from the admin_post_ hook that fired, not
         // from $_POST. A forged `action` field claiming the full sweep must
         // neither steer the nonce check nor widen the work performed.
-        \BccAdminTestState::$validNonceAction = ChainSweepActions::ACTION_COLLECTIONS;
+        \BccAdminTestState::$validNonceAction = ChainSweepActions::ACTION_ENRICHMENT;
         $_POST['action'] = ChainSweepActions::ACTION_ALL;
 
         try {
-            $this->fire(ChainSweepActions::ACTION_COLLECTIONS);
+            $this->fire(ChainSweepActions::ACTION_ENRICHMENT);
             $this->fail('Expected PRG redirect.');
         } catch (\BccAdminRedirect $r) {
-            $this->assertSame('collections', $r->args['bcc_sweep']);
+            $this->assertSame('enrichment', $r->args['bcc_sweep']);
         }
 
-        // Only the hook's own step ran — not validators, not enrichment.
-        $this->assertSame(['collections'], \BCC\Trust\Onchain\Services\ChainRefreshService::$calls);
+        // Only the hook's own step ran — not validators.
+        $this->assertSame(['enrichment'], \BCC\Trust\Onchain\Services\ChainRefreshService::$calls);
         $this->assertSame(
-            [['action' => ChainSweepActions::ACTION_COLLECTIONS, 'arg' => '_wpnonce']],
+            [['action' => ChainSweepActions::ACTION_ENRICHMENT, 'arg' => '_wpnonce']],
             \BccAdminTestState::$nonceChecks
         );
     }
@@ -179,11 +178,10 @@ final class OnchainAdminSweepActionsTest extends TestCase
     {
         return [
             [ChainSweepActions::ACTION_VALIDATORS,  ['validators'], 'validators'],
-            [ChainSweepActions::ACTION_COLLECTIONS, ['collections'], 'collections'],
             [ChainSweepActions::ACTION_ENRICHMENT,  ['enrichment'], 'enrichment'],
             // Order matters: the replaced closure ran validators, then
-            // collections, then enrichment, in that sequence.
-            [ChainSweepActions::ACTION_ALL, ['validators', 'collections', 'enrichment'], 'all'],
+            // then enrichment, in that sequence.
+            [ChainSweepActions::ACTION_ALL, ['validators', 'enrichment'], 'all'],
         ];
     }
 
@@ -201,7 +199,7 @@ final class OnchainAdminSweepActionsTest extends TestCase
         $this->assertCount(1, $rows);
         $this->assertSame('admin_onchain_sweep_all', $rows[0]['action']);
         $this->assertSame('onchain_sweep', $rows[0]['targetType']);
-        $this->assertSame('validators,collections,enrichment', $rows[0]['meta']['steps']);
+        $this->assertSame('validators,enrichment', $rows[0]['meta']['steps']);
     }
 
     // ── Failure handling ────────────────────────────────────────────────────
@@ -209,7 +207,7 @@ final class OnchainAdminSweepActionsTest extends TestCase
     public function testMidSweepFailureReportsCompletedStepsAndHidesTheException(): void
     {
         \BccAdminTestState::$validNonceAction = ChainSweepActions::ACTION_ALL;
-        \BCC\Trust\Onchain\Services\ChainRefreshService::$throwOn['collections'] =
+        \BCC\Trust\Onchain\Services\ChainRefreshService::$throwOn['enrichment'] =
             new \RuntimeException('SQLSTATE[HY000] at /var/www/html/secret.php');
 
         try {
@@ -217,7 +215,7 @@ final class OnchainAdminSweepActionsTest extends TestCase
             $this->fail('Expected PRG redirect after failure.');
         } catch (\BccAdminRedirect $r) {
             $this->assertSame('failed', $r->args['bcc_result']);
-            $this->assertSame('collections', $r->args['bcc_failed_at']);
+            $this->assertSame('enrichment', $r->args['bcc_failed_at']);
             $this->assertMatchesRegularExpression('/^bcc-[0-9a-f]{8}$/', $r->args['bcc_ref']);
 
             // No fragment of the exception may ride the redirect.
@@ -231,7 +229,7 @@ final class OnchainAdminSweepActionsTest extends TestCase
         $rows = \BCC\Trust\Core\Security\AuditLogger::$rows;
         $this->assertSame(['admin_onchain_sweep_failed'], \BCC\Trust\Core\Security\AuditLogger::actions());
         $this->assertSame('validators', $rows[0]['meta']['completed']);
-        $this->assertSame('collections', $rows[0]['meta']['failed_at']);
+        $this->assertSame('enrichment', $rows[0]['meta']['failed_at']);
 
         // Enrichment must NOT have run after the failure.
         $this->assertNotContains('enrichment', \BCC\Trust\Onchain\Services\ChainRefreshService::$calls);
@@ -273,9 +271,9 @@ final class OnchainAdminSweepActionsTest extends TestCase
 
     public function testStepLabelsAndStepsForSlugStayInSyncWithTheOperations(): void
     {
-        $this->assertSame(['validators', 'collections', 'enrichment'], ChainSweepActions::stepsForSlug('all'));
+        $this->assertSame(['validators', 'enrichment'], ChainSweepActions::stepsForSlug('all'));
         $this->assertSame(
-            'validators + collections + validator enrichment',
+            'validators + validator enrichment',
             ChainSweepActions::stepLabels(ChainSweepActions::stepsForSlug('all'))
         );
         $this->assertSame([], ChainSweepActions::stepsForSlug('not-a-sweep'));

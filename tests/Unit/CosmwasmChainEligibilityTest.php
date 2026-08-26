@@ -85,13 +85,28 @@ final class CosmwasmChainEligibilityTest extends TestCase
         define('BCC_COSMWASM_BACKFILL_ENABLED', true);
     }
 
-    /** Drive every one of the four passes once. */
-    private function runAllFourPasses(): void
+    /**
+     * Offer EVERY registered chain to the operator entry point once.
+     *
+     * The scanner has no scheduled passes any more: an operator names one
+     * chain and that chain's pass runs. So the analogue of "run the sweep"
+     * is to offer every registered chain to an entry point and see which
+     * ones the eligibility filter actually let through.
+     *
+     * {@see CosmwasmDiscoveryWorker::runBackfillForChain()} is the one used
+     * because it self-gates on {@see CosmwasmDiscoveryWorker::isChainScannable()},
+     * so what reaches a checkpoint row is exactly what the selector
+     * permits. The supervised pass is gated by its CLI caller instead —
+     * see testEveryOperatorEntryPointIsGatedByTheOneSelector().
+     */
+    private function driveEveryEntryPoint(): void
     {
-        CosmwasmDiscoveryWorker::runBackfillTick();
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
-        CosmwasmDiscoveryWorker::runWeeklyRetry();
-        CosmwasmDiscoveryWorker::runMetadataRefresh();
+        foreach (ChainRepository::getActive() as $chain) {
+            $chainId = (int) ($chain->id ?? 0);
+            if ($chainId > 0) {
+                CosmwasmDiscoveryWorker::runBackfillForChain($chainId);
+            }
+        }
     }
 
     /**
@@ -136,7 +151,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         $this->enableEnvironment();
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([self::CHAIN_A], $this->reachedChainIds());
         self::assertSame(['a.example'], $this->contactedHosts());
@@ -144,26 +159,19 @@ final class CosmwasmChainEligibilityTest extends TestCase
 
     // ── (b) operator intent ─────────────────────────────────────────────
 
-    public function testADisabledChainIsNeverScannedByAnyOfTheFourPasses(): void
+    public function testADisabledChainIsNeverScannedByAnyEntryPoint(): void
     {
         $this->enableEnvironment();
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 0);
 
-        CosmwasmDiscoveryWorker::runBackfillTick();
-        self::assertSame([], $this->reachedChainIds(), 'backfill tick');
-        self::assertSame([], ApiRetry::$calls, 'backfill tick spent a request');
+        self::assertFalse(
+            CosmwasmDiscoveryWorker::isChainScannable(self::CHAIN_A),
+            'a chain nobody opted in is not in the eligible set'
+        );
 
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
-        self::assertSame([], $this->reachedChainIds(), 'daily discovery');
-        self::assertSame([], ApiRetry::$calls, 'daily discovery spent a request');
-
-        CosmwasmDiscoveryWorker::runWeeklyRetry();
-        self::assertSame([], $this->reachedChainIds(), 'weekly retry');
-        self::assertSame([], ApiRetry::$calls, 'weekly retry spent a request');
-
-        CosmwasmDiscoveryWorker::runMetadataRefresh();
-        self::assertSame([], $this->reachedChainIds(), 'metadata refresh');
-        self::assertSame([], ApiRetry::$calls, 'metadata refresh spent a request');
+        $this->driveEveryEntryPoint();
+        self::assertSame([], $this->reachedChainIds(), 'backfill entry point');
+        self::assertSame([], ApiRetry::$calls, 'the entry point spent a request');
 
         // And nothing was stamped either — a disabled chain does not even
         // enter the least-recently-worked rotation.
@@ -176,7 +184,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
         ChainRepository::seed(self::CHAIN_B, 'osmosis', self::REST_B, 'cosmos', 0);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([self::CHAIN_A], $this->reachedChainIds());
         self::assertSame(['a.example'], $this->contactedHosts(), 'b.example must never be contacted');
@@ -189,7 +197,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         // an EVM chain has no wasmd endpoints to walk at all.
         ChainRepository::seed(self::CHAIN_A, 'ethereum', self::REST_A, 'evm', 1);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([], $this->reachedChainIds());
         self::assertSame([], ApiRetry::$calls);
@@ -204,7 +212,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         // a transient written before it). The column is ABSENT, not 0.
         ChainRepository::seedWithoutDiscoveryColumn(self::CHAIN_A, 'cosmos', self::REST_A);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         // "The field is missing, so skip that filter" is the fail-OPEN
         // reading and would scan here.
@@ -224,7 +232,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
             throw new \RuntimeException("PHP diagnostic during eligibility: {$message}");
         });
         try {
-            CosmwasmDiscoveryWorker::runDailyDiscovery();
+            $this->driveEveryEntryPoint();
         } finally {
             restore_error_handler();
         }
@@ -246,7 +254,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainCheckpointRepository::$rows[self::CHAIN_B]->cw_discovery_state
             = ChainCheckpointRepository::CW_STATE_UNSUPPORTED;
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame(['a.example'], $this->contactedHosts());
         self::assertNotContains(self::CHAIN_B, ChainCheckpointRepository::$discoveryTouches);
@@ -277,7 +285,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainCheckpointRepository::$rows[self::CHAIN_B]->cw_discovery_state
             = ChainCheckpointRepository::CW_STATE_PAUSED;
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame(['a.example'], $this->contactedHosts(), 'b.example is paused and must not be contacted');
         self::assertNotContains(
@@ -314,7 +322,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
 
         self::assertSame([], ChainCheckpointRepository::$rows, 'precondition: nothing measured yet');
 
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
+        $this->driveEveryEntryPoint();
 
         // Refusing an unmeasured chain would be a deadlock dressed up as
         // caution: the first pass is what CREATES the measurement, so a
@@ -331,7 +339,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         // not run is not evidence that a chain IS supported.
         ChainCheckpointRepository::$failGetAll = true;
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([], ApiRetry::$calls);
         self::assertSame([], ChainCheckpointRepository::$discoveryTouches);
@@ -348,7 +356,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
         ChainRepository::seed(self::CHAIN_B, 'osmosis', self::REST_B, 'cosmos', 1);
 
-        CosmwasmDiscoveryWorker::runDailyDiscovery();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([self::CHAIN_A, self::CHAIN_B], $this->reachedChainIds());
     }
@@ -361,7 +369,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
         ChainRepository::seed(self::CHAIN_B, 'osmosis', self::REST_B, 'cosmos', 1);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([self::CHAIN_A], $this->reachedChainIds());
         self::assertSame(['a.example'], $this->contactedHosts());
@@ -375,7 +383,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
         ChainRepository::seed(self::CHAIN_B, 'osmosis', self::REST_B, 'cosmos', 0);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         // Naming a chain in the canary scope is not a way to grant it
         // permission — the allowlist is an AND, never an OR.
@@ -392,7 +400,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainCheckpointRepository::$rows[self::CHAIN_B]->cw_discovery_state
             = ChainCheckpointRepository::CW_STATE_UNSUPPORTED;
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([], ApiRetry::$calls);
         self::assertSame([], ChainCheckpointRepository::$discoveryTouches);
@@ -405,7 +413,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
 
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([], $this->reachedChainIds());
     }
@@ -420,7 +428,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
         ChainRepository::seed(self::CHAIN_B, 'osmosis', self::REST_B, 'cosmos', 1);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([], $this->reachedChainIds());
         self::assertSame([], ApiRetry::$calls);
@@ -434,7 +442,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
         ChainRepository::seed(self::CHAIN_B, 'osmosis', self::REST_B, 'cosmos', 1);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         // Slugs are the obvious operator mistake here, and the tempting
         // implementation ("nothing parsed, so no restriction") would scan
@@ -449,7 +457,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
 
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([], $this->reachedChainIds());
     }
@@ -465,7 +473,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
 
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         self::assertSame([], $this->reachedChainIds());
     }
@@ -480,7 +488,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         ChainRepository::seed(self::CHAIN_A, 'cosmos', self::REST_A, 'cosmos', 1);
         ChainRepository::seed(self::CHAIN_B, 'osmosis', self::REST_B, 'cosmos', 1);
 
-        $this->runAllFourPasses();
+        $this->driveEveryEntryPoint();
 
         // Dropping an unparseable entry can only make the set smaller, so
         // it can never become a widening bug. `9.5` must NOT become 9.
@@ -553,43 +561,85 @@ final class CosmwasmChainEligibilityTest extends TestCase
         self::assertStringNotContainsString('cosmosChainIds', $code);
     }
 
-    public function testTheSelectorIsReachedFromAllFourPasses(): void
+    public function testEveryOperatorEntryPointIsGatedByTheOneSelector(): void
     {
         $reflection = new \ReflectionClass(CosmwasmDiscoveryWorker::class);
         $source     = (string) file_get_contents((string) $reflection->getFileName());
-        $lines      = explode("\n", $source);
+        $lines      = explode("
+", $source);
 
-        /** @var array<string, bool> $reaches */
-        $reaches = [];
-        foreach (['runBackfillTick', 'runDailyDiscovery', 'runWeeklyRetry', 'runMetadataRefresh'] as $pass) {
-            $method = $reflection->getMethod($pass);
-            $body   = implode("\n", array_slice(
+        $bodyOf = static function (string $method) use ($reflection, $lines): string {
+            $m = $reflection->getMethod($method);
+
+            return implode("
+", array_slice(
                 $lines,
-                $method->getStartLine() - 1,
-                $method->getEndLine() - $method->getStartLine() + 1
+                $m->getStartLine() - 1,
+                $m->getEndLine() - $m->getStartLine() + 1
             ));
-            // Either directly, or via forEachChain — which is the only
-            // other thing in this class that resolves a chain set.
-            $reaches[$pass] = str_contains($body, 'self::eligibleChainIds(')
-                || str_contains($body, 'self::forEachChain(');
-        }
+        };
 
-        self::assertSame(
-            [
-                'runBackfillTick'    => true,
-                'runDailyDiscovery'  => true,
-                'runWeeklyRetry'     => true,
-                'runMetadataRefresh' => true,
-            ],
-            $reaches
+        // The BACKFILL entry point gates itself. It is public and the admin
+        // "Run backfill slice" control calls it directly, so a gate that
+        // lived only in the caller would be one forgotten call site away
+        // from scanning a chain nobody opted in.
+        self::assertStringContainsString(
+            'self::isChainScannable(',
+            $bodyOf('runBackfillForChain'),
+            'runBackfillForChain must test eligibility itself'
         );
 
-        $forEach = $reflection->getMethod('forEachChain');
-        $body    = implode("\n", array_slice(
-            $lines,
-            $forEach->getStartLine() - 1,
-            $forEach->getEndLine() - $forEach->getStartLine() + 1
-        ));
-        self::assertStringContainsString('self::eligibleChainIds(', $body);
+        // The SUPERVISED pass deliberately does not: bypassing
+        // BCC_COSMWASM_DISCOVERY_ENABLED is its whole purpose, and its CLI
+        // caller enforces isChainScannable() instead — a STRICTER gate,
+        // because membership is the same set every other entry point uses.
+        self::assertStringNotContainsString(
+            'CosmwasmDiscoveryGate::discoveryEnabled(',
+            $bodyOf('runSupervisedSingleChainPass'),
+            'the supervised pass must not re-check the constant it exists to bypass'
+        );
+
+        // And membership is not re-derived anywhere: isChainScannable() is
+        // the selector, asked as a set-membership question.
+        self::assertStringContainsString(
+            'self::eligibleChainIds(',
+            $bodyOf('isChainScannable'),
+            'membership must be tested against the production selector'
+        );
+    }
+
+    /**
+     * NOTHING IN THE WORKER ITERATES CHAINS.
+     *
+     * The retired passes each looped every eligible chain. With discovery
+     * operator-initiated, a caller names one chain or no work happens —
+     * which is what makes "starting a scan for one chain cannot touch
+     * another chain's fetcher" a property of the code rather than a claim
+     * about it. `getActive()` survives in exactly one place: the selector,
+     * which answers "which chains MAY be scanned", not "scan these".
+     */
+    public function testTheWorkerHasNoChainFanOut(): void
+    {
+        $reflection = new \ReflectionClass(CosmwasmDiscoveryWorker::class);
+        $code       = $this->codeWithoutComments(
+            (string) file_get_contents((string) $reflection->getFileName())
+        );
+
+        foreach ([
+            'forEachChain',
+            'runBackfillTick',
+            'runDailyDiscovery',
+            'runWeeklyRetry',
+            'runMetadataRefresh',
+            'register',
+        ] as $retired) {
+            self::assertFalse(
+                $reflection->hasMethod($retired),
+                "{$retired}() must not exist — it fanned out across chains or re-armed a cron hook"
+            );
+        }
+
+        self::assertStringNotContainsString('wp_schedule_event(', $code, 'the worker must schedule nothing');
+        self::assertStringNotContainsString('wp_next_scheduled(', $code, 'the worker must own no cron hook');
     }
 }

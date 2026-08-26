@@ -434,7 +434,7 @@ namespace BCC\Trust\Tests\Unit {
         public function testRetiredHooksAreStillClearedOnAVersionChange(): void
         {
             CronHealState::$options['bcc_trust_cron_version'] = '0.0.1-old';
-            CronHealState::$scheduled['bcc_trust_hourly_graph_update'] = ['interval' => 'hourly', 'next' => 1];
+            CronHealState::record('bcc_trust_hourly_graph_update', [], 'hourly', 1);
 
             CronService::maybeReschedule();
 

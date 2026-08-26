@@ -20,8 +20,7 @@ use PHPUnit\Framework\TestCase;
  * page (which can carry SQL fragments and absolute paths).
  *
  * The bounds tests exist because the conversion must not have changed what
- * the handlers ask the fetchers for — `fetch_top_collections(100)` in
- * particular is the only cap on the collection path.
+ * the handlers ask the fetchers for.
  */
 #[CoversClass(ChainsPage::class)]
 #[RunTestsInSeparateProcesses]
@@ -91,21 +90,6 @@ final class OnchainAdminChainAjaxTest extends TestCase
         $this->assertSame([], \BCC\Trust\Core\Security\AuditLogger::$rows);
     }
 
-    public function testCollectionRefreshRejectsMissingCapability(): void
-    {
-        \BccAdminTestState::$can = false;
-        \BccAdminTestState::$validNonceAction = self::NONCE;
-
-        try {
-            ChainsPage::ajax_collection_refresh();
-            $this->fail('Expected an error response.');
-        } catch (\BccAjaxResponse $r) {
-            $this->assertFalse($r->success);
-        }
-
-        $this->assertSame(0, \BCC\Trust\Onchain\Repositories\CollectionRepository::$upsertCalls);
-    }
-
     // ── 2. Nonce rejection ──────────────────────────────────────────────────
 
     public function testValidatorRefreshRejectsInvalidNonce(): void
@@ -118,18 +102,6 @@ final class OnchainAdminChainAjaxTest extends TestCase
         } finally {
             $this->assertSame(0, \BCC\Trust\Onchain\Repositories\ValidatorRepository::$upsertCalls);
             $this->assertSame([], \BCC\Trust\Core\Security\AuditLogger::$rows);
-        }
-    }
-
-    public function testCollectionRefreshRejectsInvalidNonce(): void
-    {
-        \BccAdminTestState::$validNonceAction = null;
-
-        $this->expectException(\BccAdminDie::class);
-        try {
-            ChainsPage::ajax_collection_refresh();
-        } finally {
-            $this->assertSame(0, \BCC\Trust\Onchain\Repositories\CollectionRepository::$upsertCalls);
         }
     }
 
@@ -149,21 +121,6 @@ final class OnchainAdminChainAjaxTest extends TestCase
         }
 
         $this->assertSame(0, \BCC\Trust\Onchain\Repositories\ValidatorRepository::$upsertCalls);
-    }
-
-    public function testCollectionRefreshRejectsUnknownChain(): void
-    {
-        $_POST['chain_id'] = 999;
-        \BccAdminTestState::$validNonceAction = self::NONCE;
-
-        try {
-            ChainsPage::ajax_collection_refresh();
-            $this->fail('Expected an error response.');
-        } catch (\BccAjaxResponse $r) {
-            $this->assertSame('Chain not found.', $r->message());
-        }
-
-        $this->assertSame(0, \BCC\Trust\Onchain\Repositories\CollectionRepository::$upsertCalls);
     }
 
     // ── 4 + 5. Successful dispatch exactly once, with audit ─────────────────
@@ -189,21 +146,6 @@ final class OnchainAdminChainAjaxTest extends TestCase
         $this->assertSame('chain', $rows[0]['targetType']);
         $this->assertSame(self::CHAIN_ID, $rows[0]['targetId']);
         $this->assertSame(3, $rows[0]['meta']['total']);
-    }
-
-    public function testCollectionRefreshDispatchesOnceAndAudits(): void
-    {
-        \BccAdminTestState::$validNonceAction = self::NONCE;
-
-        $this->invoke([ChainsPage::class, 'ajax_collection_refresh']);
-
-        $r = \BccAjaxRecorder::first();
-        $this->assertTrue($r->success);
-        $this->assertStringContainsString('7 collections indexed', $r->message());
-
-        $this->assertSame(1, \BCC\Trust\Onchain\Repositories\CollectionRepository::$upsertCalls);
-        // First row only — see the note in the validator test above.
-        $this->assertSame('admin_chain_collections_refreshed', \BCC\Trust\Core\Security\AuditLogger::actions()[0]);
     }
 
     // ── 6 + 7. Failure audit; no provider/exception detail in the response ──
@@ -242,38 +184,7 @@ final class OnchainAdminChainAjaxTest extends TestCase
         $this->assertStringContainsString('SECRETKEY', $errors[0]['context']['message']);
     }
 
-    public function testCollectionRefreshFailureAuditsAndHidesProviderDetail(): void
-    {
-        \BccAdminTestState::$validNonceAction = self::NONCE;
-        $fetcher = new \BccFakeFetcher();
-        $fetcher->throws = new \RuntimeException('Duplicate entry in wp_bcc_onchain_collections');
-        \BCC\Trust\Onchain\Factories\FetcherFactory::$fetcher = $fetcher;
-
-        try {
-            ChainsPage::ajax_collection_refresh();
-            $this->fail('Expected an error response.');
-        } catch (\BccAjaxResponse $r) {
-            $this->assertStringNotContainsString('wp_bcc_onchain_collections', $r->message());
-            $this->assertMatchesRegularExpression('/bcc-[0-9a-f]{8}/', $r->message());
-        }
-
-        $this->assertSame(
-            ['admin_chain_collections_refresh_failed'],
-            \BCC\Trust\Core\Security\AuditLogger::actions()
-        );
-    }
-
     // ── 8. Bounds unchanged ─────────────────────────────────────────────────
-
-    public function testCollectionRefreshStillRequestsExactlyOneHundred(): void
-    {
-        \BccAdminTestState::$validNonceAction = self::NONCE;
-
-        $this->invoke([ChainsPage::class, 'ajax_collection_refresh']);
-
-        // The only cap on this path. Batch 1 must not have widened it.
-        $this->assertSame(100, \BccFakeFetcher::$lastCollectionsLimit);
-    }
 
     public function testValidatorRefreshStillDefersEnrichmentToCronRatherThanInlining(): void
     {

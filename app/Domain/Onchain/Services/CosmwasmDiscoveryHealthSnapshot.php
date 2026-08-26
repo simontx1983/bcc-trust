@@ -56,14 +56,6 @@ if (!defined('ABSPATH')) {
  *
  * @phpstan-import-type CheckpointRow from ChainCheckpointRepository
  *
- * @phpstan-type ScheduleEntry array{
- *     hook: string,
- *     label: string,
- *     interval: string,
- *     scheduled: bool,
- *     next_run_at: int|null,
- *     overdue_seconds: int
- * }
  * @phpstan-type ChainPanelRow array{
  *     chain_id: int,
  *     slug: string,
@@ -256,14 +248,12 @@ final class CosmwasmDiscoveryHealthSnapshot
      * A chain that has not been touched in this long, while discovery is
      * enabled and the chain is neither paused nor unsupported, is stale.
      *
-     * Sized off the DAILY pass with a full day of slack: the incremental
-     * hooks run daily, so 48h without a stamp means two consecutive
-     * misses, which is a real signal rather than cron jitter.
+     * 48h without a stamp on a chain an operator has opted in and is
+     * actively working through is worth surfacing. It is not a fault —
+     * passes are operator-initiated, so a quiet chain may simply not have
+     * been started — which is why it reads YELLOW and never RED.
      */
     public const CHAIN_STALE_SECONDS = 172800;
-
-    /** Cron lateness that means wp-cron itself is probably not running. */
-    public const CRON_OVERDUE_SECONDS = 3600;
 
     /**
      * The whole operator view, derived in one pass.
@@ -295,7 +285,6 @@ final class CosmwasmDiscoveryHealthSnapshot
      *     status: string,
      *     data_unavailable: bool,
      *     unavailable_reason: string|null,
-     *     schedule: list<ScheduleEntry>,
      *     chains: list<ChainPanelRow>,
      *     allowlist_chain_ids: list<int>|null,
      *     eligible_chain_count: int|null,
@@ -359,7 +348,7 @@ final class CosmwasmDiscoveryHealthSnapshot
             $familyErrored = CosmwasmCodeFamilyRepository::erroredCountsByChain();
             $contractStats = CosmwasmContractRepository::inventoryByChain();
         } catch (RepositoryReadFailure $e) {
-            return self::unavailableSummary($discoveryEnabled, $backfillEnabled, $now, $e);
+            return self::unavailableSummary($discoveryEnabled, $backfillEnabled, $e);
         }
 
         $checkpointByChain = [];
@@ -425,17 +414,15 @@ final class CosmwasmDiscoveryHealthSnapshot
             $totals['denied']                   += $row['contracts_denied'];
         }
 
-        $schedule = self::deriveSchedule($now);
-        $issues   = self::deriveIssues($discoveryEnabled, $backfillEnabled, $chains, $schedule);
+        $issues = self::deriveIssues($discoveryEnabled, $backfillEnabled, $chains);
 
         return [
             'discovery_enabled'  => $discoveryEnabled,
             'backfill_enabled'   => $backfillEnabled,
             'disabled_reason'    => self::disabledReason($discoveryEnabled, $backfillEnabled),
-            'status'             => self::deriveStatus($discoveryEnabled, $chains, $schedule),
+            'status'             => self::deriveStatus($discoveryEnabled, $chains),
             'data_unavailable'   => false,
             'unavailable_reason' => null,
-            'schedule'             => $schedule,
             'chains'               => $chains,
             'allowlist_chain_ids'  => $allowlist,
             'eligible_chain_count' => $eligibleCount,
@@ -450,11 +437,7 @@ final class CosmwasmDiscoveryHealthSnapshot
      * The summary for "a read failed, so there is nothing to report".
      *
      * Everything derived from the DB is ABSENT rather than zero: no chain
-     * rows, no working/next chain, `totals => null`. The cron schedule
-     * survives because `wp_next_scheduled()` is not a database read and
-     * "is the pass even registered?" is still answerable — and still worth
-     * answering, since a stalled cron and a broken DB look identical from
-     * the outside otherwise.
+     * rows, no working/next chain, `totals => null`.
      *
      * `eligible_chain_count` is null here for the same reason `totals` is.
      * The eligibility of a chain depends on the checkpoint read that just
@@ -478,7 +461,6 @@ final class CosmwasmDiscoveryHealthSnapshot
      *     status: string,
      *     data_unavailable: bool,
      *     unavailable_reason: string|null,
-     *     schedule: list<ScheduleEntry>,
      *     chains: list<ChainPanelRow>,
      *     allowlist_chain_ids: list<int>|null,
      *     eligible_chain_count: null,
@@ -491,7 +473,6 @@ final class CosmwasmDiscoveryHealthSnapshot
     private static function unavailableSummary(
         bool $discoveryEnabled,
         bool $backfillEnabled,
-        int $now,
         RepositoryReadFailure $failure
     ): array {
         $reason = sprintf(
@@ -508,10 +489,9 @@ final class CosmwasmDiscoveryHealthSnapshot
             'status'               => self::STATUS_UNAVAILABLE,
             'data_unavailable'     => true,
             'unavailable_reason'   => $reason,
-            'schedule'             => self::deriveSchedule($now),
             'chains'               => [],
             // The allowlist is read from a CONSTANT, not the database, so
-            // it survives the failure the way the cron schedule does.
+            // it survives a failed read.
             'allowlist_chain_ids'  => CosmwasmDiscoveryGate::chainAllowlist(),
             'eligible_chain_count' => null,
             'working_chain'        => null,
@@ -747,7 +727,7 @@ final class CosmwasmDiscoveryHealthSnapshot
                 // what it proves rather than more. CosmwasmDiscoveryWorker::
                 // prepareChain() returns null on this state ("durable,
                 // never retried"); the shared eligibility verdict excludes
-                // it, so no scheduled pass resolves the chain at all;
+                // it, so no pass resolves the chain at all;
                 // ChainCheckpointRepository::pauseCwDiscovery() REFUSES
                 // when the state is already unsupported; and
                 // cwResumeState()/resumeCwDiscovery() require the state to
@@ -757,11 +737,11 @@ final class CosmwasmDiscoveryHealthSnapshot
                 // What that does NOT license is "it can never change".
                 // Somebody with database access can still edit the row,
                 // and a later build could add a re-measurement path. So
-                // the copy claims the guarantee — no scheduled pass, no
-                // control on this page — and names the one thing that
-                // would, instead of asserting a fact about the universe.
+                // the copy claims the guarantee — no pass, no control on
+                // this page — and names the one thing that would, instead
+                // of asserting a fact about the universe.
                 return 'This chain has no CosmWasm module — it answered the code listing with a 501. '
-                    . 'No scheduled pass retries that verdict and no control on this page clears it, '
+                    . 'No pass retries that verdict and no control on this page clears it, '
                     . 'so opting the chain in changes nothing; only a direct database change would.';
 
             case self::ELIGIBILITY_PAUSED:
@@ -792,44 +772,6 @@ final class CosmwasmDiscoveryHealthSnapshot
                     . 'That is what a pre-migration install looks like — the cosmwasm_nft_discovery_enabled column '
                     . 'is missing from the chain registry. Check the bcc-trust error log.';
         }
-    }
-
-    /**
-     * PURE. The cron picture: one entry per discovery hook, with whether
-     * it is registered at all and how late it is.
-     *
-     * "Registered" and "enabled" are different questions and both are
-     * shown: the hooks self-heal onto the schedule regardless of the
-     * gate, and every handler re-checks the gate before doing work, so a
-     * scheduled hook on a gated-off site is a no-op, not a promise.
-     *
-     * @return list<ScheduleEntry>
-     */
-    public static function deriveSchedule(int $now): array
-    {
-        $hooks = [
-            [CosmwasmDiscoveryWorker::BACKFILL_HOOK, 'Historical backfill slice', CosmwasmDiscoveryWorker::BACKFILL_INTERVAL],
-            [CosmwasmDiscoveryWorker::DAILY_HOOK,    'New code IDs + new contracts', CosmwasmDiscoveryWorker::DAILY_INTERVAL],
-            [CosmwasmDiscoveryWorker::WEEKLY_HOOK,   'Retry sweep (backed off)',     CosmwasmDiscoveryWorker::WEEKLY_INTERVAL],
-            [CosmwasmDiscoveryWorker::METADATA_HOOK, 'Migration + metadata (monthly guard)', CosmwasmDiscoveryWorker::METADATA_INTERVAL],
-        ];
-
-        $out = [];
-        foreach ($hooks as [$hook, $label, $interval]) {
-            $next = wp_next_scheduled($hook);
-            $ts   = is_int($next) ? $next : null;
-
-            $out[] = [
-                'hook'            => $hook,
-                'label'           => $label,
-                'interval'        => $interval,
-                'scheduled'       => $ts !== null,
-                'next_run_at'     => $ts,
-                'overdue_seconds' => $ts !== null ? max(0, $now - $ts) : 0,
-            ];
-        }
-
-        return $out;
     }
 
     /**
@@ -967,8 +909,8 @@ final class CosmwasmDiscoveryHealthSnapshot
      * `disabled_reason`, and both notices name it when it is undefined.
      *
      * Blocked outranks the red/yellow/green arithmetic for the same
-     * reason: an unscheduled or overdue cron pass is real, but it changes
-     * nothing while there is no chain for that pass to walk.
+     * reason: a chain-level fault is real, but it changes nothing while
+     * there is no chain an operator could scan.
      *
      * ── AND WHY EMPTY CHAINS ARE NEITHER IDLE NOR BLOCKED ───────────────
      * `$chains === []` means the registry lists no active Cosmos chain at
@@ -980,9 +922,8 @@ final class CosmwasmDiscoveryHealthSnapshot
      * to derive into a calm "idle" or an explanatory "blocked".
      *
      * @param list<ChainPanelRow> $chains
-     * @param list<ScheduleEntry> $schedule
      */
-    public static function deriveStatus(bool $discoveryEnabled, array $chains, array $schedule): string
+    public static function deriveStatus(bool $discoveryEnabled, array $chains): string
     {
         $optedIn = self::optedInChainCount($chains);
 
@@ -1042,16 +983,6 @@ final class CosmwasmDiscoveryHealthSnapshot
             return self::STATUS_DISABLED;
         }
 
-        $unscheduled = 0;
-        $overdue     = 0;
-        foreach ($schedule as $entry) {
-            if (!$entry['scheduled']) {
-                $unscheduled++;
-            } elseif ($entry['overdue_seconds'] > self::CRON_OVERDUE_SECONDS) {
-                $overdue++;
-            }
-        }
-
         // `$eligible === 0` survives as the BACKSTOP it always was, and it
         // now only answers for the empty registry: every other route to
         // zero eligible chains is an opt-in that cannot be scanned, which
@@ -1059,10 +990,10 @@ final class CosmwasmDiscoveryHealthSnapshot
         // operator can act on. It is kept rather than tidied away because
         // the fail-closed direction is the whole point — an unforeseen way
         // to reach zero must land on RED, never on green with no chains.
-        if ($eligible === 0 || $unscheduled > 0) {
+        if ($eligible === 0) {
             return self::STATUS_RED;
         }
-        if ($errored > 0 || $stale === $eligible || $overdue > 0) {
+        if ($errored > 0 || $stale === $eligible) {
             return self::STATUS_YELLOW;
         }
 
@@ -1125,21 +1056,19 @@ final class CosmwasmDiscoveryHealthSnapshot
      * escape at render, not here.
      *
      * @param  list<ChainPanelRow> $chains
-     * @param  list<ScheduleEntry> $schedule
      * @return list<string>
      */
     public static function deriveIssues(
         bool $discoveryEnabled,
         bool $backfillEnabled,
-        array $chains,
-        array $schedule
+        array $chains
     ): array {
         $issues = [];
 
         if (!$discoveryEnabled) {
             $issues[] = 'Discovery is OFF because `BCC_COSMWASM_DISCOVERY_ENABLED` is not defined in wp-config.php. '
-                . 'The gate fails closed on purpose — a missing constant never means "enabled" — so no scheduled pass '
-                . 'does any work and the controls below cannot start one.';
+                . 'The gate fails closed on purpose — a missing constant never means "enabled" — so the controls '
+                . 'below cannot start a pass.';
 
             return $issues;
         }
@@ -1149,27 +1078,10 @@ final class CosmwasmDiscoveryHealthSnapshot
                 . 'Incremental discovery still runs; the one-time walk of each chain\'s full code listing does not.';
         }
 
-        foreach ($schedule as $entry) {
-            if (!$entry['scheduled']) {
-                $issues[] = sprintf(
-                    'Cron `%s` (%s) is not scheduled — that pass will never run. It self-heals on the next request; if it does not, reactivate the plugin.',
-                    $entry['hook'],
-                    $entry['label']
-                );
-            } elseif ($entry['overdue_seconds'] > self::CRON_OVERDUE_SECONDS) {
-                $issues[] = sprintf(
-                    'Cron `%s` (%s) is %s overdue. WP-Cron may be stalled.',
-                    $entry['hook'],
-                    $entry['label'],
-                    self::formatDuration($entry['overdue_seconds'])
-                );
-            }
-        }
-
         foreach ($chains as $chain) {
             if ($chain['unsupported']) {
                 $issues[] = sprintf(
-                    '%s has no CosmWasm module — it answered with a 501, so no scheduled pass asks it again and '
+                    '%s has no CosmWasm module — it answered with a 501, so no pass asks it again and '
                         . 'no control on this page clears that. This is a fact about the chain, not a failure.',
                     $chain['slug']
                 );
@@ -1177,7 +1089,7 @@ final class CosmwasmDiscoveryHealthSnapshot
             }
             if ($chain['paused']) {
                 $issues[] = sprintf(
-                    '%s is PAUSED by an operator. Nothing runs for it — no backfill, no daily pass, no retries — until it is resumed.',
+                    '%s is PAUSED by an operator. Nothing runs for it — no backfill, no incremental pass, no retries — until it is resumed.',
                     $chain['slug']
                 );
                 continue;
@@ -1191,7 +1103,7 @@ final class CosmwasmDiscoveryHealthSnapshot
             $age = $chain['last_discovery_age_seconds'];
             if ($age !== null && $age > self::CHAIN_STALE_SECONDS) {
                 $issues[] = sprintf(
-                    '%s has not been touched in %s, which is more than two daily passes.',
+                    '%s has not been touched in %s.',
                     $chain['slug'],
                     self::formatDuration($age)
                 );

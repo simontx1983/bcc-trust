@@ -30,41 +30,44 @@ if (!defined('ABSPATH')) {
  *   - Failures no longer surface raw exception text.
  *
  * WHAT DELIBERATELY DID NOT CHANGE:
- *   - ChainRefreshService::index_validators() / index_collections() /
- *     refresh_validators() are called exactly as before, in the same order,
- *     with the same arguments (none). Their advisory lock (group `bcc_cron`),
- *     per-chain circuit-breaker skip, and EnrichmentScheduler API-call cap are
+ *   - ChainRefreshService::index_validators() / refresh_validators() are
+ *     called exactly as before, in the same order, with the same arguments
+ *     (none). Their advisory lock (group `bcc_cron`), per-chain
+ *     circuit-breaker skip, and EnrichmentScheduler API-call cap are
  *     untouched.
- *   - The fan-out is still synchronous and still unbounded across active
- *     chains. Making dispatch deliberate is this batch's scope; bounding the
- *     work is the later bounded-jobs batch. See the confirmation copy on
- *     ChainsPage, which now states the scope explicitly.
+ *   - The validator fan-out is still synchronous and still unbounded across
+ *     active chains. Making dispatch deliberate was this batch's scope;
+ *     bounding the work is a later batch.
+ *
+ * NO COLLECTION STEP. A `collections` step used to sit between the two,
+ * calling `ChainRefreshService::index_collections()` — a chain-wide sweep of
+ * every active EVM/Solana/Cosmos chain for "top collections". It is retired
+ * along with the cron hook that drove it: chain-wide NFT collection
+ * discovery is operator-initiated, one named chain at a time, and a "Run
+ * All" button is the opposite of naming one chain. The remaining operations
+ * are validator work only, and the labels say so.
  */
 final class ChainSweepActions
 {
-    public const ACTION_VALIDATORS  = 'bcc_onchain_sweep_validators';
-    public const ACTION_COLLECTIONS = 'bcc_onchain_sweep_collections';
-    public const ACTION_ENRICHMENT  = 'bcc_onchain_sweep_enrichment';
-    public const ACTION_ALL         = 'bcc_onchain_sweep_all';
+    public const ACTION_VALIDATORS = 'bcc_onchain_sweep_validators';
+    public const ACTION_ENRICHMENT = 'bcc_onchain_sweep_enrichment';
+    public const ACTION_ALL        = 'bcc_onchain_sweep_all';
 
     /**
-     * Steps each operation runs, in order. Mirrors the original closure's
-     * branch order exactly: validators → collections → enrichment.
+     * Steps each operation runs, in order: validators → enrichment.
      *
      * @var array<string, list<string>>
      */
     private const STEPS = [
-        self::ACTION_VALIDATORS  => ['validators'],
-        self::ACTION_COLLECTIONS => ['collections'],
-        self::ACTION_ENRICHMENT  => ['enrichment'],
-        self::ACTION_ALL         => ['validators', 'collections', 'enrichment'],
+        self::ACTION_VALIDATORS => ['validators'],
+        self::ACTION_ENRICHMENT => ['enrichment'],
+        self::ACTION_ALL        => ['validators', 'enrichment'],
     ];
 
     /** @var array<string, string> Human labels for the result notice. */
     private const STEP_LABELS = [
-        'validators'  => 'validators',
-        'collections' => 'collections',
-        'enrichment'  => 'validator enrichment',
+        'validators' => 'validators',
+        'enrichment' => 'validator enrichment',
     ];
 
     public static function register(): void
@@ -174,9 +177,6 @@ final class ChainSweepActions
         switch ($step) {
             case 'validators':
                 ChainRefreshService::index_validators();
-                return;
-            case 'collections':
-                ChainRefreshService::index_collections();
                 return;
             case 'enrichment':
                 ChainRefreshService::refresh_validators();

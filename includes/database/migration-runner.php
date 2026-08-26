@@ -168,6 +168,17 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_cw721_scan_options_cleaned',
                 'callback'    => 'bcc_trust_cleanup_cw721_scan_options',
             ],
+            // Clears the five retired automatic NFT discovery schedules from
+            // wp_options.cron. Deleting the wp_schedule_event() calls stops
+            // new installs from creating them; installs that already have
+            // them keep firing a handler-less hook forever unless the event
+            // itself is removed. Fail-closed: COMPLETE only once
+            // wp_next_scheduled() proves all five are gone.
+            [
+                'id'          => 'unschedule_automatic_nft_discovery_v1',
+                'done_option' => 'bcc_trust_automatic_nft_discovery_unscheduled',
+                'callback'    => 'bcc_trust_unschedule_automatic_nft_discovery',
+            ],
         ];
     }
 

@@ -240,13 +240,21 @@ final class CosmwasmScannerFailClosedTest extends TestCase
      * still worth knowing when the DB is unreachable — otherwise a
      * stalled cron and a broken database look identical.
      */
-    public function test_the_cron_schedule_survives_an_unavailable_summary(): void
+    public function test_the_unavailable_summary_carries_no_invented_chain_data(): void
     {
         $this->armFailure('inventoryByChain');
 
         $summary = CosmwasmDiscoveryHealthSnapshot::buildSummary();
 
-        self::assertCount(4, $summary['schedule']);
+        // Everything DB-derived is absent rather than zero. There is no
+        // cron schedule to fall back on any more — discovery has no
+        // scheduled passes — so a failed read leaves nothing to report
+        // except that it failed, which is what the status says.
+        self::assertTrue($summary['data_unavailable']);
+        self::assertSame([], $summary['chains']);
+        self::assertNull($summary['totals']);
+        self::assertNull($summary['eligible_chain_count']);
+        self::assertArrayNotHasKey('schedule', $summary);
     }
 
     // ── the rendered panel ──────────────────────────────────────────────

@@ -330,12 +330,12 @@ final class CosmwasmSmartQueryRetryTest extends TestCase
      * Both reach the breaker through the single `runChainPass()`
      * implementation, so their semantics cannot diverge by construction.
      */
-    public function testScheduledAndSupervisedPathsShareTheSameBreakerEnvelope(): void
+    public function testTheSupervisedPathUsesTheOneBreakerEnvelope(): void
     {
         $src = $this->source('app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php');
 
         self::assertSame(1, substr_count($src, 'private static function runChainPass'), 'one envelope');
-        self::assertSame(2, substr_count($src, 'self::runChainPass('), 'forEachChain + the supervised one-shot');
+        self::assertSame(1, substr_count($src, 'self::runChainPass('), 'the supervised one-shot only');
         self::assertStringContainsString('return self::runChainPass(', $src);
     }
 }

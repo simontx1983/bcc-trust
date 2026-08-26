@@ -22,7 +22,16 @@ use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
  *
  * Jobs:
  *  - bcc_refresh_validators   (every 1 hour)
+ *  - bcc_index_validators     (every 4 hours)
  *  - bcc_refresh_collections  (every 4 hours)
+ *
+ * COLLECTION DISCOVERY IS NOT HERE. `bcc_index_collections` used to sweep
+ * every active EVM/Solana/Cosmos chain for "top collections" on a 4-hour
+ * cadence; it is retired. Chain-wide NFT collection discovery is now
+ * operator-initiated, one named chain at a time. What survives on this
+ * class is validator indexing and refresh, plus the WALLET-LINKED half of
+ * the collection refresh — a wallet whose owner verified it is not a
+ * chain-wide scan.
  */
 class ChainRefreshService
 {
@@ -38,7 +47,6 @@ class ChainRefreshService
         add_action('bcc_refresh_validators',  [__CLASS__, 'refresh_validators']);
         add_action('bcc_refresh_collections', [__CLASS__, 'refresh_collections']);
         add_action('bcc_index_validators',   [__CLASS__, 'index_validators']);
-        add_action('bcc_index_collections',  [__CLASS__, 'index_collections']);
 
         // Schedule crons directly — init() is already called during plugins_loaded,
         // so hooking plugins_loaded again would never fire.
@@ -76,7 +84,6 @@ class ChainRefreshService
             'bcc_refresh_validators'  => 'hourly',
             'bcc_refresh_collections' => 'every_4_hours',
             'bcc_index_validators'    => 'every_4_hours',
-            'bcc_index_collections'   => 'every_4_hours',
         ];
 
         foreach ($jobs as $hook => $interval) {
@@ -94,7 +101,6 @@ class ChainRefreshService
         wp_clear_scheduled_hook('bcc_refresh_validators');
         wp_clear_scheduled_hook('bcc_refresh_collections');
         wp_clear_scheduled_hook('bcc_index_validators');
-        wp_clear_scheduled_hook('bcc_index_collections');
     }
 
     // ── Locking ──────────────────────────────────────────────────────────────
@@ -273,67 +279,6 @@ class ChainRefreshService
         }
     }
 
-    // ── Collection Indexing (bulk — top NFT collections per EVM chain) ─────
-
-    /**
-     * Fetch and store top NFT collections for every EVM chain.
-     *
-     * Uses Reservoir API (free tier) to get the same data shown on
-     * etherscan.io/nft-top-contracts: name, floor, volume, holders, image.
-     * Runs every 4 hours. Collections with wallet_link_id = NULL are
-     * unclaimed — displayed with "Claim Your Community" button.
-     */
-    public static function index_collections(): void
-    {
-        if (!self::acquireLock('index_collections')) {
-            return;
-        }
-
-        try {
-            // Process all chain types that may support top collections.
-            // Each chain type is indexed independently — no cross-chain mixing.
-            $chain_types = ['evm', 'solana', 'cosmos'];
-
-            foreach ($chain_types as $type) {
-                $chains = ChainRepository::getActive($type);
-
-                foreach ($chains as $chain) {
-                    $chainId = (int) $chain->id;
-
-                    if (OnchainCircuitBreaker::isOpen($chainId)) {
-                        \BCC\Core\Log\Logger::info('[Onchain] Skipping collection index for ' . $chain->name . ' — circuit breaker open');
-                        continue;
-                    }
-
-                    try {
-                        if (!FetcherFactory::has_driver($chain->chain_type)) {
-                            continue;
-                        }
-
-                        $fetcher = FetcherFactory::make_for_chain($chain);
-
-                        if (!$fetcher->supports_feature('top_collections')) {
-                            continue;
-                        }
-
-                        $collections = $fetcher->fetch_top_collections(100);
-
-                        if (!empty($collections)) {
-                            $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
-                            \BCC\Core\Log\Logger::info('[Onchain] Indexed ' . $count . ' collections for ' . $chain->name);
-                            OnchainCircuitBreaker::recordSuccess($chainId);
-                        }
-                    } catch (\Exception $e) {
-                        OnchainCircuitBreaker::recordFailure($chainId);
-                        \BCC\Core\Log\Logger::error('[Onchain] Collection index failed for ' . $chain->name . ': ' . $e->getMessage());
-                    }
-                }
-            }
-        } finally {
-            self::releaseLock('index_collections');
-        }
-    }
-
     // ── Validator Refresh (scheduler-driven) ─────────────────────────────────
 
     /**
@@ -353,8 +298,24 @@ class ChainRefreshService
         ]), false);
     }
 
-    // ── Collection Refresh ──────────────────────────────────────────────────
+    // ── Collection Refresh (WALLET-LINKED ONLY) ─────────────────────────────
 
+    /**
+     * Refresh the collections a VERIFIED WALLET holds.
+     *
+     * This is wallet-driven, not chain-wide: every row it touches is
+     * anchored to a `wallet_link_id`, so the work is bounded by how many
+     * wallets members have linked rather than by how large a chain is.
+     * {@see CollectionRepository::getExpiredWalletLinked()} enforces that at the query,
+     * so a chain-level row cannot reach this loop at all.
+     *
+     * The chain-level branch that used to live here called
+     * {@see CollectionRepository::backoffRow()} on rows with no wallet,
+     * purely to push them out of the expired queue until the next
+     * `bcc_index_collections` sweep re-fetched them. That sweep is retired,
+     * so there is nothing to defer to and nothing to defer — the rows are
+     * excluded upstream instead of being re-dated on every cycle.
+     */
     public static function refresh_collections(): void
     {
         if (!self::acquireLock('refresh_collections')) {
@@ -362,7 +323,7 @@ class ChainRefreshService
         }
 
         try {
-            $expired = CollectionRepository::getExpired(self::BATCH_SIZE);
+            $expired = CollectionRepository::getExpiredWalletLinked(self::BATCH_SIZE);
 
             if (empty($expired)) {
                 return;
@@ -381,18 +342,9 @@ class ChainRefreshService
                         continue;
                     }
 
-                    // Bulk-indexed collections (wallet_link_id = NULL) are refreshed
-                    // via top_collections re-fetch — just extend their TTL here so
-                    // they don't clog the expired queue between 4-hour index runs.
-                    if (empty($row->wallet_link_id)) {
-                        if ($fetcher->supports_feature('top_collections')) {
-                            // Backoff extends expires_at, preventing re-fetch every cycle.
-                            CollectionRepository::backoffRow((int) $row->id);
-                        }
-                        continue;
-                    }
-
-                    // Wallet-linked collections: resolve address from wallet link.
+                    // Resolve the wallet address. getExpiredWalletLinked()
+                    // guarantees wallet_link_id is set; a missing wallet row
+                    // is a dangling reference, not a chain-level collection.
                     $wallet = WalletRepository::getById((int) $row->wallet_link_id);
                     if (!$wallet) {
                         continue;

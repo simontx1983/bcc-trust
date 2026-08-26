@@ -151,18 +151,6 @@ final class CosmwasmScannerAdminTest extends TestCase
      * @param array<string, mixed> $overrides
      * @return array<string, mixed>
      */
-    private function scheduleEntry(array $overrides = []): array
-    {
-        return array_merge([
-            'hook'            => 'bcc_cosmwasm_daily_discovery',
-            'label'           => 'New code IDs + new contracts',
-            'interval'        => 'daily',
-            'scheduled'       => true,
-            'next_run_at'     => self::NOW + 3600,
-            'overdue_seconds' => 0,
-        ], $overrides);
-    }
-
     // ── chain-row derivation ────────────────────────────────────────────
 
     public function test_derive_chain_row_folds_aggregate_slices_into_one_row(): void
@@ -586,19 +574,7 @@ final class CosmwasmScannerAdminTest extends TestCase
     {
         $this->assertSame(
             CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED,
-            CosmwasmDiscoveryHealthSnapshot::deriveStatus(false, [$this->chainRow()], [$this->scheduleEntry()])
-        );
-    }
-
-    public function test_an_unscheduled_hook_is_red(): void
-    {
-        $this->assertSame(
-            CosmwasmDiscoveryHealthSnapshot::STATUS_RED,
-            CosmwasmDiscoveryHealthSnapshot::deriveStatus(
-                true,
-                [$this->chainRow()],
-                [$this->scheduleEntry(['scheduled' => false, 'next_run_at' => null])]
-            )
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(false, [$this->chainRow()])
         );
     }
 
@@ -615,8 +591,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
             CosmwasmDiscoveryHealthSnapshot::deriveStatus(
                 true,
-                [$this->chainRow(['state' => self::PAUSED]), $this->chainRow(['chain_id' => 2, 'state' => self::UNSUPPORTED])],
-                [$this->scheduleEntry()]
+                [$this->chainRow(['state' => self::PAUSED]), $this->chainRow(['chain_id' => 2, 'state' => self::UNSUPPORTED])]
             )
         );
     }
@@ -627,8 +602,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW,
             CosmwasmDiscoveryHealthSnapshot::deriveStatus(
                 true,
-                [$this->chainRow(['last_error' => 'lcd 502']), $this->chainRow(['chain_id' => 2])],
-                [$this->scheduleEntry()]
+                [$this->chainRow(['last_error' => 'lcd 502']), $this->chainRow(['chain_id' => 2])]
             )
         );
     }
@@ -639,8 +613,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
             CosmwasmDiscoveryHealthSnapshot::deriveStatus(
                 true,
-                [$this->chainRow()],
-                [$this->scheduleEntry()]
+                [$this->chainRow()]
             )
         );
     }
@@ -662,9 +635,8 @@ final class CosmwasmScannerAdminTest extends TestCase
             [
                 $this->chainRow(['discovery_opted_in' => false]),
                 $this->chainRow(['chain_id' => 2, 'slug' => 'juno', 'discovery_opted_in' => false]),
-            ],
-            [$this->scheduleEntry()]
-        );
+            ]
+            );
 
         $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE, $status);
         // Named one at a time so the failure says WHICH verdict leaked.
@@ -677,10 +649,10 @@ final class CosmwasmScannerAdminTest extends TestCase
      * The zero-opt-in state stays idle even when every OTHER signal the
      * arithmetic keys on is screaming. None of them is about the operator's
      * intent, and none of them can make a scanner with nowhere to go into a
-     * scanner that is behind: an unscheduled cron pass would do nothing if
-     * it fired, and a chain that is not opted in cannot be stale.
+     * scanner that is behind: a chain that is not opted in cannot be
+     * stale, and its recorded error answers for nothing.
      */
-    public function test_zero_opt_in_outranks_the_stale_and_unscheduled_signals(): void
+    public function test_zero_opt_in_outranks_the_stale_and_error_signals(): void
     {
         $this->assertSame(
             CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE,
@@ -690,8 +662,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                     'discovery_opted_in'         => false,
                     'last_discovery_age_seconds' => null,
                     'last_error'                 => 'lcd 502',
-                ])],
-                [$this->scheduleEntry(['scheduled' => false, 'next_run_at' => null])]
+                ])]
             )
         );
     }
@@ -708,8 +679,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             CosmwasmDiscoveryHealthSnapshot::STATUS_IDLE,
             CosmwasmDiscoveryHealthSnapshot::deriveStatus(
                 false,
-                [$this->chainRow(['discovery_opted_in' => false])],
-                [$this->scheduleEntry()]
+                [$this->chainRow(['discovery_opted_in' => false])]
             ),
             'a gate-off site with nothing opted in is idle, not merely disabled'
         );
@@ -726,8 +696,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED,
             CosmwasmDiscoveryHealthSnapshot::deriveStatus(
                 false,
-                [$this->chainRow(['discovery_opted_in' => true])],
-                [$this->scheduleEntry()]
+                [$this->chainRow(['discovery_opted_in' => true])]
             )
         );
     }
@@ -746,7 +715,7 @@ final class CosmwasmScannerAdminTest extends TestCase
     {
         $this->assertSame(
             CosmwasmDiscoveryHealthSnapshot::STATUS_RED,
-            CosmwasmDiscoveryHealthSnapshot::deriveStatus(true, [], [$this->scheduleEntry()])
+            CosmwasmDiscoveryHealthSnapshot::deriveStatus(true, [])
         );
     }
 
@@ -754,33 +723,30 @@ final class CosmwasmScannerAdminTest extends TestCase
      * ONE opted-in chain is enough to hand the verdict back to the
      * pre-existing arithmetic, and the not-opted-in chains beside it change
      * nothing about the answer it gives. This is the regression fence
-     * around "presentation and classification only": red, yellow and green
-     * must still be reachable, and still on exactly the conditions they
-     * were reachable on before.
+     * around "presentation and classification only": yellow and green must
+     * still be reachable, and still on exactly the chain-derived conditions
+     * they were reachable on before.
      *
-     * @return list<array{0: string, 1: array<string, mixed>, 2: array<string, mixed>}>
+     * The two cron-derived cases this provider used to carry are gone with
+     * the schedule they keyed on — discovery has no scheduled passes, so
+     * "unscheduled hook" and "overdue cron" are no longer states the
+     * scanner can be in.
+     *
+     * @return list<array{0: string, 1: array<string, mixed>}>
      */
     public static function preExistingVerdict(): array
     {
         return [
-            'unscheduled hook is still red' => [
-                CosmwasmDiscoveryHealthSnapshot::STATUS_RED,
-                [],
-                ['scheduled' => false, 'next_run_at' => null],
-            ],
             'recorded chain error is still yellow' => [
                 CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW,
                 ['last_error' => 'lcd 502'],
-                [],
             ],
-            'overdue cron is still yellow' => [
+            'a stale opted-in chain is still yellow' => [
                 CosmwasmDiscoveryHealthSnapshot::STATUS_YELLOW,
-                [],
-                ['overdue_seconds' => CosmwasmDiscoveryHealthSnapshot::CRON_OVERDUE_SECONDS + 1],
+                ['last_discovery_age_seconds' => CosmwasmDiscoveryHealthSnapshot::CHAIN_STALE_SECONDS + 1],
             ],
             'a healthy opted-in chain is still green' => [
                 CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
-                [],
                 [],
             ],
         ];
@@ -788,13 +754,11 @@ final class CosmwasmScannerAdminTest extends TestCase
 
     /**
      * @param array<string, mixed> $chainOverrides
-     * @param array<string, mixed> $scheduleOverrides
      */
     #[DataProvider('preExistingVerdict')]
     public function test_one_opted_in_chain_keeps_the_pre_existing_arithmetic(
         string $expected,
-        array $chainOverrides,
-        array $scheduleOverrides
+        array $chainOverrides
     ): void {
         $this->assertSame(
             $expected,
@@ -810,8 +774,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                         'discovery_opted_in'         => false,
                         'last_discovery_age_seconds' => null,
                     ]),
-                ],
-                [$this->scheduleEntry($scheduleOverrides)]
+                ]
             )
         );
     }
@@ -884,9 +847,8 @@ final class CosmwasmScannerAdminTest extends TestCase
                     'slug'               => 'juno',
                     'discovery_opted_in' => false,
                 ]),
-            ],
-            [$this->scheduleEntry()]
-        );
+            ]
+            );
 
         $this->assertNotSame(
             CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
@@ -905,8 +867,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                 true,
                 [$this->chainRow([
                     'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
-                ])],
-                [$this->scheduleEntry()]
+                ])]
             )
         );
     }
@@ -930,9 +891,8 @@ final class CosmwasmScannerAdminTest extends TestCase
                     'slug'        => 'stargaze',
                     'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
                 ]),
-            ],
-            [$this->scheduleEntry()]
-        );
+            ]
+            );
 
         $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
         $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN, $status, 'blocked is not healthy');
@@ -959,8 +919,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                         'slug'        => 'jackal',
                         'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
                     ]),
-                ],
-                [$this->scheduleEntry()]
+                ]
             )
         );
     }
@@ -978,8 +937,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
             CosmwasmDiscoveryHealthSnapshot::deriveStatus(
                 true,
-                [$this->chainRow(['state' => self::PAUSED])],
-                [$this->scheduleEntry()]
+                [$this->chainRow(['state' => self::PAUSED])]
             )
         );
     }
@@ -1000,9 +958,8 @@ final class CosmwasmScannerAdminTest extends TestCase
             true,
             [$this->chainRow([
                 'eligibility' => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
-            ])],
-            [$this->scheduleEntry()]
-        );
+            ])]
+            );
 
         $this->assertNotSame(
             CosmwasmDiscoveryHealthSnapshot::STATUS_GREEN,
@@ -1030,8 +987,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                         'slug'        => 'jackal',
                         'eligibility' => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
                     ]),
-                ],
-                [$this->scheduleEntry()]
+                ]
             )
         );
     }
@@ -1058,8 +1014,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                         'last_error'                 => 'lcd 502',
                         'last_discovery_age_seconds' => null,
                     ]),
-                ],
-                [$this->scheduleEntry()]
+                ]
             ),
             'a chain outside the canary scope is excluded from the arithmetic, not folded into it as a fault'
         );
@@ -1079,18 +1034,17 @@ final class CosmwasmScannerAdminTest extends TestCase
                 false,
                 [$this->chainRow([
                     'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
-                ])],
-                [$this->scheduleEntry()]
+                ])]
             )
         );
     }
 
     /**
-     * And it outranks the cron signals, again for the idle reason: an
-     * unscheduled pass would do nothing if it fired, because there is no
-     * chain for it to walk.
+     * And it outranks the staleness signal, again for the idle reason:
+     * there is no chain a pass could walk, so "not touched recently" is
+     * not the fact an operator needs first.
      */
-    public function test_blocked_outranks_the_unscheduled_cron_signal(): void
+    public function test_blocked_outranks_the_staleness_signal(): void
     {
         $this->assertSame(
             CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED,
@@ -1099,8 +1053,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                 [$this->chainRow([
                     'state'                      => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
                     'last_discovery_age_seconds' => null,
-                ])],
-                [$this->scheduleEntry(['scheduled' => false, 'next_run_at' => null])]
+                ])]
             )
         );
     }
@@ -1113,7 +1066,7 @@ final class CosmwasmScannerAdminTest extends TestCase
      */
     public function test_an_empty_chain_list_is_never_blocked(): void
     {
-        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(true, [], [$this->scheduleEntry()]);
+        $status = CosmwasmDiscoveryHealthSnapshot::deriveStatus(true, []);
 
         $this->assertNotSame(CosmwasmDiscoveryHealthSnapshot::STATUS_BLOCKED, $status);
         $this->assertSame(CosmwasmDiscoveryHealthSnapshot::STATUS_RED, $status);
@@ -1143,8 +1096,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                         'last_discovery_age_seconds' => null,
                         'last_error'                 => 'lcd 501',
                     ]),
-                ],
-                [$this->scheduleEntry()]
+                ]
             ),
             'an unsupported chain is excluded from the arithmetic, not folded into it as a fault'
         );
@@ -1168,8 +1120,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                         'slug'        => 'jackal',
                         'state'       => ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
                     ]),
-                ],
-                [$this->scheduleEntry()]
+                ]
             )
         );
     }
@@ -1199,8 +1150,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                         'last_error'                 => 'lcd 502',
                         'last_discovery_age_seconds' => null,
                     ]),
-                ],
-                [$this->scheduleEntry()]
+                ]
             )
         );
     }
@@ -1212,9 +1162,8 @@ final class CosmwasmScannerAdminTest extends TestCase
         $issues = CosmwasmDiscoveryHealthSnapshot::deriveIssues(
             false,
             false,
-            [$this->chainRow(['last_error' => 'ignored while off'])],
-            [$this->scheduleEntry(['scheduled' => false])]
-        );
+            [$this->chainRow(['last_error' => 'ignored while off'])]
+            );
 
         $this->assertCount(1, $issues, 'a switched-off scanner must not also complain about downstream symptoms');
         $this->assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED', $issues[0]);
@@ -1228,9 +1177,8 @@ final class CosmwasmScannerAdminTest extends TestCase
             [
                 $this->chainRow(['slug' => 'kujira', 'state' => self::PAUSED]),
                 $this->chainRow(['chain_id' => 2, 'slug' => 'cryptoorgchain', 'state' => self::UNSUPPORTED]),
-            ],
-            [$this->scheduleEntry()]
-        );
+            ]
+            );
 
         $joined = implode(' ', $issues);
         $this->assertStringContainsString('kujira is PAUSED', $joined);
@@ -1242,9 +1190,8 @@ final class CosmwasmScannerAdminTest extends TestCase
         $issues = CosmwasmDiscoveryHealthSnapshot::deriveIssues(
             true,
             true,
-            [$this->chainRow(['slug' => 'juno', 'last_discovery_age_seconds' => 3 * 86400])],
-            [$this->scheduleEntry()]
-        );
+            [$this->chainRow(['slug' => 'juno', 'last_discovery_age_seconds' => 3 * 86400])]
+            );
 
         $this->assertStringContainsString('juno has not been touched in 3d 0h', implode(' ', $issues));
     }
