@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Admin\ChainsPage;
+use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
+use BCC\Trust\Onchain\Services\NftDiscoveryControlPlaneSnapshot;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
@@ -40,7 +41,7 @@ use PHPUnit\Framework\TestCase;
  * gate is proven with every LATER gate satisfied, so a test cannot pass
  * because two checks happened to fail at once.
  */
-#[CoversClass(ChainsPage::class)]
+#[CoversClass(NftDiscoveryPage::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class ChainsCwScannerOperationRouteTest extends TestCase
@@ -78,20 +79,20 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
     public static function routes(): array
     {
         return [
-            'pause'    => [ChainsPage::ACTION_CW_PAUSE],
-            'resume'   => [ChainsPage::ACTION_CW_RESUME],
-            'backfill' => [ChainsPage::ACTION_CW_BACKFILL],
-            'retry'    => [ChainsPage::ACTION_CW_RETRY],
+            'pause'    => [NftDiscoveryPage::ACTION_CW_PAUSE],
+            'resume'   => [NftDiscoveryPage::ACTION_CW_RESUME],
+            'backfill' => [NftDiscoveryPage::ACTION_CW_BACKFILL],
+            'retry'    => [NftDiscoveryPage::ACTION_CW_RETRY],
         ];
     }
 
     private static function handler(string $route): string
     {
         return [
-            ChainsPage::ACTION_CW_PAUSE    => 'handle_cw_pause',
-            ChainsPage::ACTION_CW_RESUME   => 'handle_cw_resume',
-            ChainsPage::ACTION_CW_BACKFILL => 'handle_cw_backfill',
-            ChainsPage::ACTION_CW_RETRY    => 'handle_cw_retry',
+            NftDiscoveryPage::ACTION_CW_PAUSE    => 'handle_cw_pause',
+            NftDiscoveryPage::ACTION_CW_RESUME   => 'handle_cw_resume',
+            NftDiscoveryPage::ACTION_CW_BACKFILL => 'handle_cw_backfill',
+            NftDiscoveryPage::ACTION_CW_RETRY    => 'handle_cw_retry',
         ][$route];
     }
 
@@ -104,7 +105,7 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
 
     private function call(string $route): void
     {
-        ChainsPage::{self::handler($route)}();
+        NftDiscoveryPage::{self::handler($route)}();
     }
 
     private function invoke(string $route): \BccAdminRedirect
@@ -229,10 +230,10 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
         if ($chainId !== null) {
             $_POST['chain_id'] = $chainId;
         }
-        \BccAdminTestState::$validNonceAction = ChainsPage::ACTION_CW_PAUSE . '_' . self::CHAIN_ID;
+        \BccAdminTestState::$validNonceAction = NftDiscoveryPage::ACTION_CW_PAUSE . '_' . self::CHAIN_ID;
 
         try {
-            ChainsPage::handle_cw_pause();
+            NftDiscoveryPage::handle_cw_pause();
             $this->fail('A malformed chain id must be refused with a real 400.');
         } catch (\BccAdminDie $e) {
             $this->assertSame(400, $e->status, 'a 302 carrying a notice is not a rejection');
@@ -254,7 +255,7 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
         \BccAdminTestState::$can = false;
 
         try {
-            ChainsPage::handle_cw_pause();
+            NftDiscoveryPage::handle_cw_pause();
             $this->fail('expected a refusal');
         } catch (\BccAdminDie $e) {
             $this->assertSame(403, $e->status, 'authorization outranks input validation');
@@ -268,7 +269,7 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
         $_SERVER['REQUEST_METHOD'] = 'GET';
 
         try {
-            ChainsPage::handle_cw_pause();
+            NftDiscoveryPage::handle_cw_pause();
             $this->fail('expected a refusal');
         } catch (\BccAdminDie $e) {
             $this->assertSame(405, $e->status);
@@ -303,12 +304,12 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
     public static function crossRoutePairs(): array
     {
         return [
-            'pause nonce on resume'     => [ChainsPage::ACTION_CW_PAUSE, ChainsPage::ACTION_CW_RESUME],
-            'resume nonce on pause'     => [ChainsPage::ACTION_CW_RESUME, ChainsPage::ACTION_CW_PAUSE],
-            'retry nonce on backfill'   => [ChainsPage::ACTION_CW_RETRY, ChainsPage::ACTION_CW_BACKFILL],
-            'backfill nonce on retry'   => [ChainsPage::ACTION_CW_BACKFILL, ChainsPage::ACTION_CW_RETRY],
-            'pause nonce on backfill'   => [ChainsPage::ACTION_CW_PAUSE, ChainsPage::ACTION_CW_BACKFILL],
-            'discovery nonce on pause'  => [ChainsPage::ACTION_CW_DISCOVERY_ENABLE, ChainsPage::ACTION_CW_PAUSE],
+            'pause nonce on resume'     => [NftDiscoveryPage::ACTION_CW_PAUSE, NftDiscoveryPage::ACTION_CW_RESUME],
+            'resume nonce on pause'     => [NftDiscoveryPage::ACTION_CW_RESUME, NftDiscoveryPage::ACTION_CW_PAUSE],
+            'retry nonce on backfill'   => [NftDiscoveryPage::ACTION_CW_RETRY, NftDiscoveryPage::ACTION_CW_BACKFILL],
+            'backfill nonce on retry'   => [NftDiscoveryPage::ACTION_CW_BACKFILL, NftDiscoveryPage::ACTION_CW_RETRY],
+            'pause nonce on backfill'   => [NftDiscoveryPage::ACTION_CW_PAUSE, NftDiscoveryPage::ACTION_CW_BACKFILL],
+            'discovery nonce on pause'  => [NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE, NftDiscoveryPage::ACTION_CW_PAUSE],
         ];
     }
 
@@ -390,11 +391,20 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
 
         $this->assertSame(
             [],
-            array_diff(array_keys($redirect->args), ChainsPage::OPERATION_REDIRECT_KEYS),
+            array_diff(array_keys($redirect->args), NftDiscoveryPage::OPERATION_REDIRECT_KEYS),
             'the destination must carry no key outside the declared allowlist'
         );
-        $this->assertSame(ChainsPage::PAGE_SLUG, $redirect->args['page'] ?? null);
-        $this->assertSame(ChainsPage::SUBTAB_NFT_DISCOVERY, $redirect->args['subtab'] ?? null);
+        $this->assertSame(NftDiscoveryPage::PAGE_SLUG, $redirect->args['page'] ?? null);
+
+        // The destination used to be a sub-tab of the Chains page and is now
+        // a family tab on the page that owns these routes. The KEY changed
+        // with it; the discipline did not — a bounded, fixed value, and
+        // still no chain id, direction or submitted value anywhere near it.
+        $this->assertSame(
+            NftDiscoveryControlPlaneSnapshot::FAMILY_COSMOS,
+            $redirect->args['family'] ?? null
+        );
+        $this->assertArrayNotHasKey('subtab', $redirect->args);
     }
 
     /**
@@ -407,12 +417,47 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
     {
         $this->arrange($route);
 
-        $encoded = json_encode($this->invoke($route)->args) ?: '';
+        $args = $this->invoke($route)->args;
+
+        // ── `family` IS A CONSTANT, AND IT COLLIDES WITH A CHAIN SLUG ───
+        //
+        // The destination carries `family=cosmos`. The Cosmos Hub's slug is
+        // also `cosmos`, so a naive substring search for the slug matches
+        // the navigation value and reports a leak that is not one.
+        //
+        // It is not one because the value is FIXED: every one of these four
+        // routes redirects to the same family regardless of which chain was
+        // acted on, so it distinguishes nothing. Asserted as an exact
+        // identity first — which is the stronger claim, since a `family`
+        // that ever varied with the target WOULD be a leak and would fail
+        // here — and then removed before the substring sweep, so the sweep
+        // keeps meaning what it was written to mean.
+        $this->assertSame(
+            NftDiscoveryControlPlaneSnapshot::FAMILY_COSMOS,
+            $args['family'] ?? null,
+            'family must be a fixed constant, never derived from the target chain'
+        );
+        unset($args['family']);
+
+        // `bcc_run` gets the same treatment, for a sharper version of the
+        // same reason: it is 16 random hex characters, so it can contain
+        // the digit of a chain id purely by chance. Left in, this sweep
+        // would fail intermittently and for a reason that has nothing to
+        // do with what it tests. Its own shape is asserted instead — an
+        // opaque reference and nothing else — and its correlation rules
+        // are covered by NftDiscoveryRunnerGateTest.
+        if (isset($args['bcc_run'])) {
+            $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $args['bcc_run']);
+            unset($args['bcc_run']);
+        }
+
+        $encoded = json_encode($args) ?: '';
 
         $this->assertStringNotContainsString((string) self::CHAIN_ID, $encoded, 'no chain id under any key');
         $this->assertStringNotContainsString($route, $encoded, 'no route name');
         $this->assertStringNotContainsString('nonce', $encoded);
         $this->assertStringNotContainsString('cosmos', $encoded, 'no chain slug either');
+        $this->assertStringNotContainsString('juno', $encoded, 'nor any other chain slug');
     }
 
     /**
@@ -435,8 +480,8 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
      */
     public function testReplayingTheRedirectDestinationDoesNothing(): void
     {
-        $this->arrange(ChainsPage::ACTION_CW_PAUSE);
-        $redirect = $this->invoke(ChainsPage::ACTION_CW_PAUSE);
+        $this->arrange(NftDiscoveryPage::ACTION_CW_PAUSE);
+        $redirect = $this->invoke(NftDiscoveryPage::ACTION_CW_PAUSE);
 
         $pausesAfterFirst = ChainCheckpointRepository::$pauseCalls;
         $this->assertSame(1, $pausesAfterFirst);
@@ -446,7 +491,7 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
         $_POST = [];
         $_SERVER['REQUEST_METHOD'] = 'GET';
 
-        $notice = new \ReflectionMethod(ChainsPage::class, 'cw_operation_notice_from_query');
+        $notice = new \ReflectionMethod(NftDiscoveryPage::class, 'cw_operation_notice_from_query');
         $notice->setAccessible(true);
         $notice->invoke(null);
 
@@ -457,12 +502,12 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
 
     public function testAnExceptionIsRedactedAndCorrelated(): void
     {
-        $this->arrange(ChainsPage::ACTION_CW_PAUSE);
+        $this->arrange(NftDiscoveryPage::ACTION_CW_PAUSE);
         ChainCheckpointRepository::$pauseThrows = new \RuntimeException(
             'SQLSTATE[HY000]: SELECT * FROM wp_bcc_chain_checkpoints at C:\\Users\\deploy\\wp-config.php'
         );
 
-        $redirect = $this->invoke(ChainsPage::ACTION_CW_PAUSE);
+        $redirect = $this->invoke(NftDiscoveryPage::ACTION_CW_PAUSE);
 
         $encoded = json_encode($redirect->args) ?: '';
         $this->assertStringNotContainsString('SELECT', $encoded);
@@ -477,10 +522,10 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
 
     public function testAnExceptionWritesExactlyOneErrorAuditRow(): void
     {
-        $this->arrange(ChainsPage::ACTION_CW_PAUSE);
+        $this->arrange(NftDiscoveryPage::ACTION_CW_PAUSE);
         ChainCheckpointRepository::$pauseThrows = new \RuntimeException('boom');
 
-        $this->invoke(ChainsPage::ACTION_CW_PAUSE);
+        $this->invoke(NftDiscoveryPage::ACTION_CW_PAUSE);
 
         $this->assertSame(
             ['admin_chain_cw_pause_error'],
@@ -494,11 +539,11 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
     public function testEachRouteIsRegisteredAsItsOwnAdminPostAction(string $route): void
     {
         $source = (string) file_get_contents(
-            __DIR__ . '/../../app/Domain/Onchain/Admin/ChainsPage.php'
+            __DIR__ . '/../../app/Domain/Onchain/Admin/NftDiscoveryPage.php'
         );
 
         $this->assertStringContainsString("add_action('admin_post_' . self::", $source);
         $this->assertStringContainsString($route, $source);
-        $this->assertTrue(method_exists(ChainsPage::class, self::handler($route)));
+        $this->assertTrue(method_exists(NftDiscoveryPage::class, self::handler($route)));
     }
 }

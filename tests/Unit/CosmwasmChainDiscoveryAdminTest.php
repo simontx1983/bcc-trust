@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Admin\ChainsPage;
+use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
 use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
 use BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
@@ -121,7 +121,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // What this file protects is the DOMAIN half — the surgical
         // single-column write, the cache bust, the read-back, and the
         // refusal to claim success it cannot confirm. That lives in
-        // ChainsPage::apply_cw_discovery(), which is exactly what the new
+        // NftDiscoveryPage::apply_cw_discovery(), which is exactly what the new
         // route calls, so every assertion below keeps its meaning.
         //
         // The TRANSPORT half — capability, POST-only, direction- and
@@ -131,7 +131,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         $enable  = strpos($action, 'cw_discovery_on_') === 0;
         $chainId = (int) substr($action, strrpos($action, '_') + 1);
 
-        $handler = new ReflectionMethod(ChainsPage::class, 'apply_cw_discovery');
+        $handler = new ReflectionMethod(NftDiscoveryPage::class, 'apply_cw_discovery');
         $handler->setAccessible(true);
 
         $result = (string) $handler->invoke(null, $chainId, $enable);
@@ -141,7 +141,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // would assert wording nobody ships.
         $_GET = ['bcc_cwd' => $result];
 
-        $notice = new ReflectionMethod(ChainsPage::class, 'cw_discovery_notice_from_query');
+        $notice = new ReflectionMethod(NftDiscoveryPage::class, 'cw_discovery_notice_from_query');
         $notice->setAccessible(true);
 
         /** @var array{type: string, message: string}|null $built */
@@ -227,7 +227,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertIsArray($chains);
 
         ob_start();
-        ChainsPage::render_cw_discovery_section(array_values($chains));
+        NftDiscoveryPage::render_cw_discovery_section(array_values($chains));
         $html = ob_get_clean();
 
         self::assertIsString($html);
@@ -521,7 +521,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         $html = $this->renderPanel();
 
         self::assertStringContainsString('<strong>1 of 1</strong>', self::flatten($html));
-        self::assertStringContainsString('subtab=nft-discovery', $html);
+        self::assertStringContainsString('page=' . NftDiscoveryPage::PAGE_SLUG, $html);
         self::assertStringNotContainsString('cw_discovery_off_', $html);
         self::assertStringNotContainsString('Disable discovery', $html, 'the mutation moved to Chains ▸ NFT Discovery');
     }
@@ -567,7 +567,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // direction, and points at the canonical page instead.
         $panel = $this->renderPanel();
         self::assertStringNotContainsString('cw_discovery_on_', $panel);
-        self::assertStringContainsString('subtab=nft-discovery', $panel);
+        self::assertStringContainsString('page=' . NftDiscoveryPage::PAGE_SLUG, $panel);
     }
 
     /**
@@ -594,10 +594,10 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // VC-B3b: an unsupported chain is offered NO scanner operation —
         // there is no pass to pause, resume, backfill or retry.
         foreach ([
-            ChainsPage::ACTION_CW_PAUSE,
-            ChainsPage::ACTION_CW_RESUME,
-            ChainsPage::ACTION_CW_BACKFILL,
-            ChainsPage::ACTION_CW_RETRY,
+            NftDiscoveryPage::ACTION_CW_PAUSE,
+            NftDiscoveryPage::ACTION_CW_RESUME,
+            NftDiscoveryPage::ACTION_CW_BACKFILL,
+            NftDiscoveryPage::ACTION_CW_RETRY,
         ] as $route) {
             self::assertStringNotContainsString($route, $html);
         }
@@ -620,11 +620,11 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // Still reversible: an opted-in unsupported chain must not be
         // stranded with no way to switch it back off. The opt-out control
         // is present — on the canonical surface, and only there.
-        self::assertStringContainsString(ChainsPage::ACTION_CW_DISCOVERY_DISABLE, $html);
+        self::assertStringContainsString(NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE, $html);
 
         $panel = $this->renderPanel();
         self::assertStringNotContainsString('cw_discovery_off_', $panel);
-        self::assertStringContainsString('subtab=nft-discovery', $panel);
+        self::assertStringContainsString('page=' . NftDiscoveryPage::PAGE_SLUG, $panel);
     }
 
     /**
@@ -705,7 +705,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // Nothing is hidden: the undefined gate is still named, and the
         // per-chain controls are still there to act on.
         self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED', $html);
-        self::assertStringContainsString('subtab=nft-discovery', $html);
+        self::assertStringContainsString('page=' . NftDiscoveryPage::PAGE_SLUG, $html);
         self::assertStringContainsString('Code families known', $html);
     }
 
@@ -818,7 +818,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // Nothing is hidden: the undefined gate is still named, the row
         // says WHICH chain is in the way, and the controls are there.
         self::assertStringContainsString('BCC_COSMWASM_DISCOVERY_ENABLED', $html);
-        self::assertStringContainsString('subtab=nft-discovery', $html);
+        self::assertStringContainsString('page=' . NftDiscoveryPage::PAGE_SLUG, $html);
         // WHICH chain is in the way is a per-chain fact, and lives with
         // the per-chain row on the canonical surface.
         self::assertStringContainsString('No CosmWasm module', $this->renderDiscovery());
@@ -983,7 +983,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // property under test are unchanged: an absent or merely-truthy
         // opt-in must never render as opted in.
         ob_start();
-        ChainsPage::render_cw_discovery_section([$chain]);
+        NftDiscoveryPage::render_cw_discovery_section([$chain]);
         $html = ob_get_clean();
         self::assertIsString($html);
 

@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Admin\ChainsPage;
+use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\ChainNftCapabilityRepository;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
+use BCC\Trust\Onchain\Services\NftDiscoveryControlPlaneSnapshot;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -34,7 +36,7 @@ use PHPUnit\Framework\TestCase;
  * renderer that recomputed a label instead of printing the supplied one
  * fails rather than coincidentally agreeing.
  */
-#[CoversClass(ChainsPage::class)]
+#[CoversClass(NftDiscoveryPage::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class ChainsNftDiscoveryStatusParityTest extends TestCase
@@ -61,6 +63,7 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
 
         \BccAdminTestState::reset();
         ChainRepository::reset();
+        ChainNftCapabilityRepository::reset();
         CosmwasmDiscoveryWorker::reset();
         CosmwasmDiscoveryHealthSnapshot::reset();
 
@@ -104,7 +107,7 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
     private function render(array $rows): string
     {
         ob_start();
-        ChainsPage::render_cw_discovery_section($rows);
+        NftDiscoveryPage::render_cw_discovery_section($rows);
 
         return (string) ob_get_clean();
     }
@@ -369,11 +372,16 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
     {
         CosmwasmDiscoveryHealthSnapshot::$chains = [$this->sentinelRow()];
 
-        $m = new \ReflectionMethod(ChainsPage::class, 'render_nft_discovery_tab');
-        $m->setAccessible(true);
+        // Through the REAL pair the page runs: the builder fetches the
+        // shared summary once for the whole family, and the renderer prints
+        // the finished rows it is handed. One read per render is the whole
+        // point — two would be two chances to disagree.
+        $snapshot = NftDiscoveryControlPlaneSnapshot::buildForFamily(
+            NftDiscoveryControlPlaneSnapshot::FAMILY_COSMOS
+        );
 
         ob_start();
-        $m->invoke(null);
+        NftDiscoveryPage::render_cw_discovery_section($snapshot['cw_chains']);
         ob_get_clean();
 
         $this->assertSame(1, CosmwasmDiscoveryHealthSnapshot::$summaryCalls);
@@ -385,11 +393,12 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
     {
         CosmwasmDiscoveryHealthSnapshot::$chains = [$this->sentinelRow()];
 
-        $m = new \ReflectionMethod(ChainsPage::class, 'render_nft_discovery_tab');
-        $m->setAccessible(true);
+        $snapshot = NftDiscoveryControlPlaneSnapshot::buildForFamily(
+            NftDiscoveryControlPlaneSnapshot::FAMILY_COSMOS
+        );
 
         ob_start();
-        $m->invoke(null);
+        NftDiscoveryPage::render_cw_discovery_section($snapshot['cw_chains']);
         $html = (string) ob_get_clean();
 
         $text = preg_replace('/\s+/', ' ', strip_tags($html)) ?? '';
@@ -440,12 +449,12 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
         $html = $this->renderStatusRow($this->sentinelRow(['last_error' => 'x']));
 
         foreach ([
-            ChainsPage::ACTION_CW_PAUSE,
-            ChainsPage::ACTION_CW_RESUME,
-            ChainsPage::ACTION_CW_BACKFILL,
-            ChainsPage::ACTION_CW_RETRY,
-            ChainsPage::ACTION_CW_DISCOVERY_ENABLE,
-            ChainsPage::ACTION_CW_DISCOVERY_DISABLE,
+            NftDiscoveryPage::ACTION_CW_PAUSE,
+            NftDiscoveryPage::ACTION_CW_RESUME,
+            NftDiscoveryPage::ACTION_CW_BACKFILL,
+            NftDiscoveryPage::ACTION_CW_RETRY,
+            NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE,
+            NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE,
         ] as $route) {
             $this->assertStringNotContainsString($route, $html, 'status display must offer no route');
         }
@@ -493,7 +502,7 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
     /** @param array<string, mixed> $row */
     private function renderStatusRow(array $row): string
     {
-        $m = new \ReflectionMethod(ChainsPage::class, 'render_cw_status_row');
+        $m = new \ReflectionMethod(NftDiscoveryPage::class, 'render_cw_status_row');
         $m->setAccessible(true);
 
         ob_start();

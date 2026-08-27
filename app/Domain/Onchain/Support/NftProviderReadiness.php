@@ -196,6 +196,82 @@ final class NftProviderReadiness
     }
 
     /**
+     * The endpoint-bound refusal currently in force for one driver, if any.
+     *
+     * ── WHY A SURFACE NEEDS THIS AND MUST NOT DERIVE IT ─────────────────
+     * {@see isReady()} answers yes/no. An operator staring at a `das_rpc`
+     * that reads "not ready" needs the next sentence: is a credential
+     * missing, or has this exact endpoint already been OBSERVED refusing
+     * DAS? Those are different problems with different fixes, and the
+     * second one is invisible without the stored mark.
+     *
+     * The obvious alternative — have the admin page read the option and
+     * compare it itself — would put a second copy of the attribution rule
+     * ({@see dasMarkApplies()}) outside the class that owns it, and would
+     * be free to disagree with the readiness answer printed beside it. So
+     * the question is answered HERE, by the same predicate, and the caller
+     * only formats.
+     *
+     * ── IT IS EVIDENCE, NOT A VERDICT ──────────────────────────────────
+     * A non-null return NEVER means "refused" on its own — it means "there
+     * is a mark and it attaches to the endpoint currently in use". The
+     * refusal itself is still {@see isReady()}'s to state. A caller that
+     * treated this as the answer would resurrect exactly the failure the
+     * split exists to prevent.
+     *
+     * ── WHAT COMES BACK IS ALREADY REDACTED ────────────────────────────
+     * `rpc_url` is stored by {@see \BCC\Trust\Onchain\Fetchers\SolanaFetcher}
+     * having already been through {@see HeliusEndpoint::redactEndpoint()},
+     * so it carries no query string and therefore no credential. `message`
+     * is UPSTREAM PROVIDER TEXT and is NOT sanitised here — a caller that
+     * displays it must put it through
+     * {@see \BCC\Trust\Onchain\Admin\AdminActionSupport::operatorSafeExcerpt()}
+     * first.
+     *
+     * No network call is made.
+     *
+     * @return array{rpc_url: string, code: int, message: string, detected_at: int}|null
+     *         null when no mark applies — including when the driver is not
+     *         endpoint-marked at all
+     */
+    public static function endpointRefusal(object $chain, string $driverKey): ?array
+    {
+        // Only `das_rpc` is ever endpoint-marked. `das_helius` resolves
+        // through the constants and never carries a mark; saying otherwise
+        // would re-fuse the two endpoints the split pulled apart.
+        if ($driverKey !== NftDriverRegistry::DRIVER_DAS_RPC) {
+            return null;
+        }
+        if (!NftDriverRegistry::driverSupportsChain($driverKey, $chain)) {
+            return null;
+        }
+
+        $chainId = (int) ($chain->id ?? 0);
+        if ($chainId <= 0) {
+            return null;
+        }
+
+        // The SAME predicate readiness uses. Asked first, so a mark that no
+        // longer attaches to the current endpoint is reported as absent
+        // rather than as stale evidence an operator cannot clear.
+        if (!self::dasMarkApplies($chainId, SolanaEndpoints::rpcEndpoint($chain))) {
+            return null;
+        }
+
+        $flag = get_option(HeliusEndpoint::dasUnsupportedOptionKey($chainId), null);
+        if (!is_array($flag)) {
+            return null;
+        }
+
+        return [
+            'rpc_url'     => isset($flag['rpc_url']) ? trim((string) $flag['rpc_url']) : '',
+            'code'        => isset($flag['code']) ? (int) $flag['code'] : 0,
+            'message'     => isset($flag['message']) ? (string) $flag['message'] : '',
+            'detected_at' => isset($flag['detected_at']) ? (int) $flag['detected_at'] : 0,
+        ];
+    }
+
+    /**
      * Does a stored "this endpoint has no DAS" mark apply to the endpoint we
      * would use RIGHT NOW?
      *

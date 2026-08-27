@@ -1732,12 +1732,23 @@ add_action('plugins_loaded', function (): void {
     add_action('admin_menu', function () {
         \BCC\Trust\Onchain\Admin\SettingsPage::register_page();
         \BCC\Trust\Onchain\Admin\ChainsPage::register_page();
+        \BCC\Trust\Onchain\Admin\NftDiscoveryPage::register_page();
         \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_page();
         \BCC\Trust\Onchain\Admin\WebhooksPage::register_page();
         \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_page();
     }, 20);
     \BCC\Trust\Onchain\Admin\ChainsPage::register_ajax();
     \BCC\Trust\Onchain\Admin\ChainsPage::register_actions();
+
+    // The per-chain NFT capability control plane. It absorbed the Chains
+    // page's NFT Discovery sub-tab and all six of its CosmWasm discovery
+    // routes, with every route STRING unchanged — so this call is what now
+    // answers the admin-post actions ChainsPage::register_actions() used to.
+    //
+    // It registers NO cron hook, NO REST route and NO AJAX action. The only
+    // way to reach a discovery entry point through it is admin-post, behind
+    // a capability check, POST-only, with a route-and-chain-scoped nonce.
+    \BCC\Trust\Onchain\Admin\NftDiscoveryPage::register_actions();
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_ajax();
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_actions();
     \BCC\Trust\Onchain\Admin\WebhooksPage::register_actions();

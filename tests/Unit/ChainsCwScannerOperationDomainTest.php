@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Admin\ChainsPage;
+use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
@@ -41,7 +41,7 @@ use PHPUnit\Framework\TestCase;
  * budget counts reserve()/available() so "the boundary did not reach into
  * that sequence" is a measured zero rather than a reading of the source.
  */
-#[CoversClass(ChainsPage::class)]
+#[CoversClass(NftDiscoveryPage::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class ChainsCwScannerOperationDomainTest extends TestCase
@@ -78,14 +78,14 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         \BccAdminTestState::$validNonceAction = $route . '_' . self::CHAIN_ID;
 
         $handler = [
-            ChainsPage::ACTION_CW_PAUSE    => 'handle_cw_pause',
-            ChainsPage::ACTION_CW_RESUME   => 'handle_cw_resume',
-            ChainsPage::ACTION_CW_BACKFILL => 'handle_cw_backfill',
-            ChainsPage::ACTION_CW_RETRY    => 'handle_cw_retry',
+            NftDiscoveryPage::ACTION_CW_PAUSE    => 'handle_cw_pause',
+            NftDiscoveryPage::ACTION_CW_RESUME   => 'handle_cw_resume',
+            NftDiscoveryPage::ACTION_CW_BACKFILL => 'handle_cw_backfill',
+            NftDiscoveryPage::ACTION_CW_RETRY    => 'handle_cw_retry',
         ][$route];
 
         try {
-            ChainsPage::{$handler}();
+            NftDiscoveryPage::{$handler}();
         } catch (\BccAdminRedirect $r) {
             return (string) ($r->args['bcc_cwo'] ?? '');
         }
@@ -114,7 +114,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID, ChainCheckpointRepository::CW_STATE_BACKFILLING);
 
-        $this->assertSame('paused', $this->drive(ChainsPage::ACTION_CW_PAUSE));
+        $this->assertSame('paused', $this->drive(NftDiscoveryPage::ACTION_CW_PAUSE));
         $this->assertSame(1, ChainCheckpointRepository::$pauseCalls, 'exactly one write');
         $this->assertSame(ChainCheckpointRepository::CW_STATE_PAUSED, $this->state());
         $this->assertSame(['admin_chain_cw_paused'], $this->audits());
@@ -129,7 +129,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID);
 
-        $this->drive(ChainsPage::ACTION_CW_PAUSE);
+        $this->drive(NftDiscoveryPage::ACTION_CW_PAUSE);
 
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
         $this->assertSame([], CosmwasmTickBudget::$constructions);
@@ -140,7 +140,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID, ChainCheckpointRepository::CW_STATE_PAUSED);
 
-        $this->assertSame('pause_noop', $this->drive(ChainsPage::ACTION_CW_PAUSE));
+        $this->assertSame('pause_noop', $this->drive(NftDiscoveryPage::ACTION_CW_PAUSE));
         $this->assertSame(0, ChainCheckpointRepository::$pauseCalls);
         $this->assertSame([], $this->audits(), 'a no-op is not a state change');
     }
@@ -156,7 +156,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID, ChainCheckpointRepository::CW_STATE_UNSUPPORTED);
 
-        $this->assertSame('pause_unsupported', $this->drive(ChainsPage::ACTION_CW_PAUSE));
+        $this->assertSame('pause_unsupported', $this->drive(NftDiscoveryPage::ACTION_CW_PAUSE));
         $this->assertSame(0, ChainCheckpointRepository::$pauseCalls);
         $this->assertSame(ChainCheckpointRepository::CW_STATE_UNSUPPORTED, $this->state());
         $this->assertSame([], $this->audits());
@@ -167,7 +167,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         ChainCheckpointRepository::seed(self::CHAIN_ID);
         ChainCheckpointRepository::$pauseResult = false;
 
-        $this->assertSame('pause_failed', $this->drive(ChainsPage::ACTION_CW_PAUSE));
+        $this->assertSame('pause_failed', $this->drive(NftDiscoveryPage::ACTION_CW_PAUSE));
         $this->assertSame(['admin_chain_cw_pause_failed'], $this->audits());
         $this->assertNotSame(ChainCheckpointRepository::CW_STATE_PAUSED, $this->state());
     }
@@ -183,7 +183,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         ChainCheckpointRepository::seed(self::CHAIN_ID);
         ChainCheckpointRepository::$readBackState = ChainCheckpointRepository::CW_STATE_IDLE;
 
-        $this->assertSame('pause_unconfirmed', $this->drive(ChainsPage::ACTION_CW_PAUSE));
+        $this->assertSame('pause_unconfirmed', $this->drive(NftDiscoveryPage::ACTION_CW_PAUSE));
         $this->assertSame(['admin_chain_cw_pause_unconfirmed'], $this->audits());
         $this->assertNotContains('admin_chain_cw_paused', $this->audits());
     }
@@ -194,7 +194,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         ChainCheckpointRepository::seed(self::CHAIN_ID);
         ChainCheckpointRepository::$readBackNull = true;
 
-        $this->assertSame('pause_unconfirmed', $this->drive(ChainsPage::ACTION_CW_PAUSE));
+        $this->assertSame('pause_unconfirmed', $this->drive(NftDiscoveryPage::ACTION_CW_PAUSE));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -237,7 +237,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID, ChainCheckpointRepository::CW_STATE_PAUSED, $progress);
 
-        $this->assertSame('resumed', $this->drive(ChainsPage::ACTION_CW_RESUME));
+        $this->assertSame('resumed', $this->drive(NftDiscoveryPage::ACTION_CW_RESUME));
         $this->assertSame($expected, $this->state());
         $this->assertSame(1, ChainCheckpointRepository::$resumeCalls);
         $this->assertSame(['admin_chain_cw_resumed'], $this->audits());
@@ -247,7 +247,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID, ChainCheckpointRepository::CW_STATE_PAUSED);
 
-        $this->drive(ChainsPage::ACTION_CW_RESUME);
+        $this->drive(NftDiscoveryPage::ACTION_CW_RESUME);
 
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, 'resume starts nothing');
         $this->assertSame([], CosmwasmTickBudget::$constructions);
@@ -269,7 +269,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID, $state);
 
-        $this->assertSame('resume_noop', $this->drive(ChainsPage::ACTION_CW_RESUME));
+        $this->assertSame('resume_noop', $this->drive(NftDiscoveryPage::ACTION_CW_RESUME));
         $this->assertSame(0, ChainCheckpointRepository::$resumeCalls);
         $this->assertSame($state, $this->state(), 'an unsupported chain is not resumed into the rotation');
         $this->assertSame([], $this->audits());
@@ -280,7 +280,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         ChainCheckpointRepository::seed(self::CHAIN_ID, ChainCheckpointRepository::CW_STATE_PAUSED);
         ChainCheckpointRepository::$resumeResult = false;
 
-        $this->assertSame('resume_failed', $this->drive(ChainsPage::ACTION_CW_RESUME));
+        $this->assertSame('resume_failed', $this->drive(NftDiscoveryPage::ACTION_CW_RESUME));
         $this->assertSame(['admin_chain_cw_resume_failed'], $this->audits());
         $this->assertSame(ChainCheckpointRepository::CW_STATE_PAUSED, $this->state(), 'still paused');
     }
@@ -300,7 +300,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         // Expected `backfilled`; the store reports `idle`.
         ChainCheckpointRepository::$readBackState = ChainCheckpointRepository::CW_STATE_IDLE;
 
-        $this->assertSame('resume_unconfirmed', $this->drive(ChainsPage::ACTION_CW_RESUME));
+        $this->assertSame('resume_unconfirmed', $this->drive(NftDiscoveryPage::ACTION_CW_RESUME));
         $this->assertSame(['admin_chain_cw_resume_unconfirmed'], $this->audits());
     }
 
@@ -316,7 +316,10 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID);
 
-        $this->assertSame('backfill_requested', $this->drive(ChainsPage::ACTION_CW_BACKFILL));
+        // `backfill_ran`, not `backfill_requested`. The worker used to
+        // return void, so the handler could only say it had ASKED; it now
+        // returns a PASS_* outcome and the result code carries it.
+        $this->assertSame('backfill_ran', $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL));
 
         $this->assertSame(
             [['requests' => 20, 'seconds' => 8]],
@@ -336,7 +339,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID);
 
-        $this->drive(ChainsPage::ACTION_CW_BACKFILL);
+        $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL);
 
         $this->assertSame(0, CosmwasmTickBudget::$reserveCalls, 'reserve() belongs to the worker');
         $this->assertSame(0, CosmwasmTickBudget::$availableCalls, 'available() belongs to the worker');
@@ -352,16 +355,53 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
      * `_succeeded` would be a claim the contract does not support, and
      * this asserts the vocabulary directly.
      */
-    public function testTheBackfillAuditClaimsOnlyWhatTheContractSupports(): void
+    /**
+     * The audit now names the OUTCOME — and still refuses to claim more.
+     *
+     * ── WHAT CHANGED, AND WHY IT IS NOT A WEAKENING ─────────────────────
+     * This used to be pinned to `admin_chain_cw_backfill_requested`,
+     * because `runBackfillForChain()` returned void: the handler could not
+     * prove the lock was taken or that any request was made, so "requested"
+     * was the strongest true thing it could write.
+     *
+     * The worker now returns a `PASS_*` outcome, so `_ran` IS supported —
+     * it is a value the worker produced, not an inference from the call
+     * returning. `_locked` and `_skipped` are equally observed.
+     *
+     * `_completed`, `_succeeded` and `_finished` remain forbidden, and that
+     * is the part that matters: a pass that RAN may still have been cut
+     * short by its budget or aborted on a provider answer, so none of those
+     * three is ever a claim this contract supports.
+     */
+    public function testTheBackfillAuditNamesTheOutcomeAndNoMore(): void
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID);
 
-        $this->drive(ChainsPage::ACTION_CW_BACKFILL);
+        $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL);
 
-        $this->assertSame(['admin_chain_cw_backfill_requested'], $this->audits());
+        $this->assertSame(['admin_chain_cw_backfill_ran'], $this->audits());
 
-        foreach (['_ran', '_completed', '_succeeded', '_finished'] as $overclaim) {
+        foreach (['_completed', '_succeeded', '_finished'] as $overclaim) {
             $this->assertStringNotContainsString($overclaim, $this->audits()[0]);
+        }
+    }
+
+    /**
+     * A pass that did NOT run is audited as such, never as one that did.
+     */
+    public function testALockedOrSkippedPassIsNeverAuditedAsHavingRun(): void
+    {
+        foreach (['locked', 'skipped'] as $outcome) {
+            $this->setUp();
+            ChainCheckpointRepository::seed(self::CHAIN_ID);
+            CosmwasmDiscoveryWorker::$outcome = $outcome;
+
+            $this->assertSame(
+                'backfill_' . $outcome,
+                $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL)
+            );
+            $this->assertSame(['admin_chain_cw_backfill_' . $outcome], $this->audits());
+            $this->assertStringNotContainsString('_ran', $this->audits()[0]);
         }
     }
 
@@ -389,7 +429,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         CosmwasmDiscoveryGate::$discovery = $discovery;
         CosmwasmDiscoveryGate::$backfill  = $backfill;
 
-        $this->assertSame($expected, $this->drive(ChainsPage::ACTION_CW_BACKFILL));
+        $this->assertSame($expected, $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL));
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, 'no pass may start');
         $this->assertSame([], CosmwasmTickBudget::$constructions, 'no provider budget taken');
         $this->assertSame([], $this->audits(), 'a refused gate is not a state change');
@@ -399,7 +439,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID, ChainCheckpointRepository::CW_STATE_PAUSED);
 
-        $this->assertSame('backfill_paused', $this->drive(ChainsPage::ACTION_CW_BACKFILL));
+        $this->assertSame('backfill_paused', $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL));
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
         $this->assertSame([], CosmwasmTickBudget::$constructions);
         $this->assertSame([], $this->audits());
@@ -411,7 +451,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         ChainCheckpointRepository::seed(self::CHAIN_ID);
         CosmwasmDiscoveryWorker::$throws = new \RuntimeException('lcd exploded');
 
-        $this->assertSame('error', $this->drive(ChainsPage::ACTION_CW_BACKFILL));
+        $this->assertSame('error', $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL));
         $this->assertSame(['admin_chain_cw_backfill_error'], $this->audits());
         $this->assertNotContains('admin_chain_cw_backfill_requested', $this->audits());
     }
@@ -430,7 +470,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         CosmwasmCodeFamilyRepository::$retryResult = 7;
         CosmwasmContractRepository::$retryResult   = 3;
 
-        $this->assertSame('retry_requeued', $this->drive(ChainsPage::ACTION_CW_RETRY));
+        $this->assertSame('retry_requeued', $this->drive(NftDiscoveryPage::ACTION_CW_RETRY));
 
         $this->assertSame(
             [['chain_id' => self::CHAIN_ID, 'limit' => 100]],
@@ -449,7 +489,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         ChainCheckpointRepository::seed(self::CHAIN_ID);
         CosmwasmCodeFamilyRepository::$retryResult = 5;
 
-        $this->drive(ChainsPage::ACTION_CW_RETRY);
+        $this->drive(NftDiscoveryPage::ACTION_CW_RETRY);
 
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
         $this->assertSame([], CosmwasmTickBudget::$constructions);
@@ -466,7 +506,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         CosmwasmCodeFamilyRepository::$retryResult = 0;
         CosmwasmContractRepository::$retryResult   = 0;
 
-        $this->assertSame('retry_none_pending', $this->drive(ChainsPage::ACTION_CW_RETRY));
+        $this->assertSame('retry_none_pending', $this->drive(NftDiscoveryPage::ACTION_CW_RETRY));
         $this->assertSame([], $this->audits());
     }
 
@@ -476,7 +516,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         ChainCheckpointRepository::seed(self::CHAIN_ID);
         CosmwasmContractRepository::$retryResult = 1;
 
-        $this->assertSame('retry_requeued', $this->drive(ChainsPage::ACTION_CW_RETRY));
+        $this->assertSame('retry_requeued', $this->drive(NftDiscoveryPage::ACTION_CW_RETRY));
         $this->assertSame(['admin_chain_cw_retry_requeued'], $this->audits());
     }
 
@@ -486,7 +526,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         ChainCheckpointRepository::seed(self::CHAIN_ID);
         CosmwasmDiscoveryGate::$discovery = false;
 
-        $this->assertSame('retry_discovery_off', $this->drive(ChainsPage::ACTION_CW_RETRY));
+        $this->assertSame('retry_discovery_off', $this->drive(NftDiscoveryPage::ACTION_CW_RETRY));
         $this->assertSame([], CosmwasmCodeFamilyRepository::$retryCalls);
         $this->assertSame([], CosmwasmContractRepository::$retryCalls);
         $this->assertSame([], $this->audits());
@@ -500,7 +540,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     public function testRetryDoesNotTouchTheClassifierVersion(): void
     {
         $source = (string) file_get_contents(
-            __DIR__ . '/../../app/Domain/Onchain/Admin/ChainsPage.php'
+            __DIR__ . '/../../app/Domain/Onchain/Admin/NftDiscoveryPage.php'
         );
 
         $code = '';
@@ -572,7 +612,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     {
         ChainCheckpointRepository::seed(self::CHAIN_ID);
 
-        $this->drive(ChainsPage::ACTION_CW_PAUSE);
+        $this->drive(NftDiscoveryPage::ACTION_CW_PAUSE);
 
         $rows = \BCC\Trust\Core\Security\AuditLogger::$rows;
         $this->assertCount(1, $rows);
@@ -590,14 +630,14 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
     public static function outcomes(): array
     {
         return [
-            'pause ok'          => [ChainsPage::ACTION_CW_PAUSE, 'seedIdle', 1],
-            'pause noop'        => [ChainsPage::ACTION_CW_PAUSE, 'seedPaused', 0],
-            'pause unsupported' => [ChainsPage::ACTION_CW_PAUSE, 'seedUnsupported', 0],
-            'resume ok'         => [ChainsPage::ACTION_CW_RESUME, 'seedPaused', 1],
-            'resume noop'       => [ChainsPage::ACTION_CW_RESUME, 'seedIdle', 0],
-            'backfill ok'       => [ChainsPage::ACTION_CW_BACKFILL, 'seedIdle', 1],
-            'backfill paused'   => [ChainsPage::ACTION_CW_BACKFILL, 'seedPaused', 0],
-            'retry none'        => [ChainsPage::ACTION_CW_RETRY, 'seedIdle', 0],
+            'pause ok'          => [NftDiscoveryPage::ACTION_CW_PAUSE, 'seedIdle', 1],
+            'pause noop'        => [NftDiscoveryPage::ACTION_CW_PAUSE, 'seedPaused', 0],
+            'pause unsupported' => [NftDiscoveryPage::ACTION_CW_PAUSE, 'seedUnsupported', 0],
+            'resume ok'         => [NftDiscoveryPage::ACTION_CW_RESUME, 'seedPaused', 1],
+            'resume noop'       => [NftDiscoveryPage::ACTION_CW_RESUME, 'seedIdle', 0],
+            'backfill ok'       => [NftDiscoveryPage::ACTION_CW_BACKFILL, 'seedIdle', 1],
+            'backfill paused'   => [NftDiscoveryPage::ACTION_CW_BACKFILL, 'seedPaused', 0],
+            'retry none'        => [NftDiscoveryPage::ACTION_CW_RETRY, 'seedIdle', 0],
         ];
     }
 
