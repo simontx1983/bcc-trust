@@ -9,6 +9,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
+use BCC\Trust\Onchain\Support\CosmwasmPassStopReason;
 use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 
@@ -954,30 +955,19 @@ final class CosmwasmOneShotDiscoveryCommand
     /**
      * Why the pass stopped, in one machine-readable token.
      *
-     * The wall clock is checked before the request budget for the same
-     * reason {@see CosmwasmTickBudget::exhausted()} does: a tick with
-     * requests left but no time left stopped because of the clock, and
-     * saying otherwise would send an operator to raise the wrong ceiling.
+     * ── THE RULE MOVED OUT; THE TOKENS DID NOT CHANGE ───────────────────
+     * The body lived here until the wp-admin runner needed the same answer.
+     * It now lives in {@see CosmwasmPassStopReason}, and this method is the
+     * thin call through to it — deliberately kept so the CLI's reading order
+     * still reads top-to-bottom, and so there is exactly one place that
+     * decides what "stopped because of the clock" means.
+     *
+     * Every emitted token is byte-identical to the one this command emitted
+     * before the extraction.
      */
     private static function stopReason(string $outcome, CosmwasmTickBudget $budget): string
     {
-        if ($outcome === CosmwasmDiscoveryWorker::PASS_LOCKED) {
-            return 'lock_contended';
-        }
-        if ($outcome === CosmwasmDiscoveryWorker::PASS_SKIPPED) {
-            return 'chain_refused_to_prepare';
-        }
-        if ($outcome === CosmwasmDiscoveryWorker::PASS_FAILED) {
-            return 'execution_failed';
-        }
-        if ($budget->timedOut()) {
-            return 'runtime_deadline_reached';
-        }
-        if ($budget->remaining() <= 0) {
-            return 'request_budget_exhausted';
-        }
-
-        return 'pass_completed';
+        return CosmwasmPassStopReason::forOutcome($outcome, $budget);
     }
 
     private static function exitCodeFor(string $outcome, string $stopReason): int

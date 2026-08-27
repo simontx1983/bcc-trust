@@ -189,11 +189,39 @@ final class CosmwasmDiscoveryWorker
      * The advisory lock is NON-BLOCKING: if another invocation (a
      * admin click, a CLI run) already holds it, this one skips rather
      * than interleaving cursor writes.
+     *
+     * ── IT NOW SAYS WHAT HAPPENED. THE WORK IS UNCHANGED ────────────────
+     * This used to return `void`, and the admin handler that drove it could
+     * therefore prove nothing: not that the lock was taken, not that a
+     * request was made, not that progress moved. So its audit event had to
+     * be called `..._requested`, because `_ran` would have been a claim the
+     * signature could not support.
+     *
+     * It now returns one of the same `PASS_*` constants
+     * {@see runSupervisedSingleChainPass()} returns, and threads the same
+     * OPTIONAL {@see CosmwasmPassReport}. Not one line of the backfill
+     * itself moved — every gate, every write, every early return is exactly
+     * where it was. The only difference is that the outcome is no longer
+     * discarded on the way out, so a caller can report it honestly instead
+     * of hedging.
+     *
+     * Existing callers that ignore the return value are unaffected.
+     *
+     * ── WHAT IT STILL DOES NOT DO ───────────────────────────────────────
+     * It does not catch. A throw propagates, exactly as before, so the
+     * caller's own failure path (correlation id, durable row) still owns
+     * that case. There is deliberately no `PASS_FAILED` return here.
+     *
+     * @param ?CosmwasmPassReport $report OPTIONAL write-only telemetry.
+     * @return string one of the PASS_* constants
      */
-    public static function runBackfillForChain(int $chainId, ?CosmwasmTickBudget $budget = null): void
-    {
+    public static function runBackfillForChain(
+        int $chainId,
+        ?CosmwasmTickBudget $budget = null,
+        ?CosmwasmPassReport $report = null
+    ): string {
         if ($chainId <= 0 || !CosmwasmDiscoveryGate::backfillEnabled()) {
-            return;
+            return self::PASS_SKIPPED;
         }
 
         // THE ELIGIBILITY SET, ASKED HERE AND NOT ONLY AT THE CALLER.
@@ -217,7 +245,7 @@ final class CosmwasmDiscoveryWorker
                 'chain_id' => $chainId,
             ]);
 
-            return;
+            return self::PASS_SKIPPED;
         }
 
         $lockKey = self::ADVISORY_LOCK_PREFIX . $chainId;
@@ -225,21 +253,28 @@ final class CosmwasmDiscoveryWorker
             \BCC\Core\Log\Logger::info('[CosmwasmDiscoveryWorker] backfill skipped — concurrent run holds the lock', [
                 'chain_id' => $chainId,
             ]);
-            return;
+            return self::PASS_LOCKED;
         }
 
         try {
-            self::backfillInsideLock($chainId, $budget ?? new CosmwasmTickBudget());
+            return self::backfillInsideLock($chainId, $budget ?? new CosmwasmTickBudget(), $report);
         } finally {
             \BCC\Core\DB\AdvisoryLock::release($lockKey);
         }
     }
 
-    private static function backfillInsideLock(int $chainId, CosmwasmTickBudget $budget): void
-    {
+    /**
+     * @param ?CosmwasmPassReport $report OPTIONAL write-only telemetry.
+     * @return string one of the PASS_* constants
+     */
+    private static function backfillInsideLock(
+        int $chainId,
+        CosmwasmTickBudget $budget,
+        ?CosmwasmPassReport $report = null
+    ): string {
         $context = self::prepareChain($chainId);
         if ($context === null) {
-            return;
+            return self::PASS_SKIPPED;
         }
         $fetcher    = $context['fetcher'];
         $checkpoint = $context['checkpoint'];
@@ -277,7 +312,17 @@ final class CosmwasmDiscoveryWorker
                             'error'    => $page['message'],
                         ]);
 
-                        return;
+                        // The pass DID run and then aborted on a provider
+                        // answer. Recorded on the report so a surface that
+                        // shows the run cannot present this as a clean
+                        // finish: the budget may be untouched, so the stop
+                        // reason alone would read `pass_completed`.
+                        $report?->addError(
+                            'stale pagination cursor rejected — walk will restart: '
+                                . CosmwasmClassifier::sanitizeExcerpt($page['message'])
+                        );
+
+                        return self::PASS_RAN;
                     }
 
                     if (CosmwasmDiscoveryService::isUnsupportedChainError($page['error_kind'], $page['http_code'])) {
@@ -294,7 +339,12 @@ final class CosmwasmDiscoveryWorker
                             'http_code' => $page['http_code'],
                         ]);
 
-                        return;
+                        $report?->addError(
+                            'wasm module not available (HTTP ' . $page['http_code'] . ') — '
+                                . 'discovery is now marked unsupported for this chain'
+                        );
+
+                        return self::PASS_RAN;
                     }
 
                     // Merely unreachable: keep the cursor, record why,
@@ -306,7 +356,12 @@ final class CosmwasmDiscoveryWorker
                         CosmwasmClassifier::sanitizeExcerpt($page['message'])
                     );
 
-                    return;
+                    $report?->addError(
+                        'code listing unreachable — cursor kept for the next pass: '
+                            . CosmwasmClassifier::sanitizeExcerpt($page['message'])
+                    );
+
+                    return self::PASS_RAN;
                 }
 
                 // A RESUMED page that is empty AND final is, on the wire,
@@ -325,9 +380,15 @@ final class CosmwasmDiscoveryWorker
                         'max_code_id'    => $maxCodeId,
                     ]);
 
-                    return;
+                    $report?->addError(
+                        'resumed pagination cursor returned an empty final page — walk will restart'
+                    );
+
+                    return self::PASS_RAN;
                 }
                 $resuming = false;
+
+                $report?->addCodePages(1);
 
                 $maxCodeId = max($maxCodeId, $page['max_code_id']);
                 $cursor    = $page['next_key'];
@@ -351,7 +412,9 @@ final class CosmwasmDiscoveryWorker
         // Phase B — spend whatever budget is left classifying families and
         // enumerating the CW-721 ones. Phase A owns the tick early on;
         // once the inventory is drained the whole budget lands here.
-        self::classifyAndEnumerate($chainId, $fetcher, $budget);
+        self::classifyAndEnumerate($chainId, $fetcher, $budget, $report);
+
+        return self::PASS_RAN;
     }
 
     // ── The incremental pass ────────────────────────────────────────────
