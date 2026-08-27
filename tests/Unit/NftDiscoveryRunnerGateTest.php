@@ -79,17 +79,44 @@ final class NftDiscoveryRunnerGateTest extends TestCase
 
     private function drive(): string
     {
+        return (string) ($this->driveArgs()['bcc_cwo'] ?? '');
+    }
+
+    /**
+     * Drive the backfill and return the FULL redirect argument set.
+     *
+     * @return array<string, string>
+     */
+    private function driveArgs(string $route = NftDiscoveryPage::ACTION_CW_BACKFILL): array
+    {
         $_POST['chain_id'] = self::CHAIN_ID;
-        \BccAdminTestState::$validNonceAction =
-            NftDiscoveryPage::ACTION_CW_BACKFILL . '_' . self::CHAIN_ID;
+        \BccAdminTestState::$validNonceAction = $route . '_' . self::CHAIN_ID;
+
+        $handler = [
+            NftDiscoveryPage::ACTION_CW_PAUSE    => 'handle_cw_pause',
+            NftDiscoveryPage::ACTION_CW_RESUME   => 'handle_cw_resume',
+            NftDiscoveryPage::ACTION_CW_BACKFILL => 'handle_cw_backfill',
+            NftDiscoveryPage::ACTION_CW_RETRY    => 'handle_cw_retry',
+        ][$route];
 
         try {
-            NftDiscoveryPage::handle_cw_backfill();
+            NftDiscoveryPage::{$handler}();
         } catch (\BccAdminRedirect $r) {
-            return (string) ($r->args['bcc_cwo'] ?? '');
+            return $r->args;
         }
 
         $this->fail('The handler must terminate in a PRG redirect.');
+    }
+
+    /** Render the page as it would be reached by a PRG landing. */
+    private function land(array $query): string
+    {
+        $_GET = $query;
+
+        ob_start();
+        NftDiscoveryPage::render_page();
+
+        return (string) ob_get_clean();
     }
 
     /** @return list<string> */
@@ -436,5 +463,255 @@ final class NftDiscoveryRunnerGateTest extends TestCase
         $report = reset($stored);
 
         return $report;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  A REPORT BELONGS TO ONE REDIRECT, NOT TO AN OPERATOR
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    //  The failure this section exists to prevent: a backfill stores a
+    //  report, its landing is never visited, and the report sits there
+    //  under a key built from the user id alone. The operator's next
+    //  action — a pause, a retry, a refused backfill — lands on a page
+    //  that displayed any pending report whenever a result code was
+    //  present, and an unrelated run's figures appeared as though that
+    //  action had produced them.
+
+    /** A run that reached the worker names its report in the redirect. */
+    public function testARunThatReachedTheWorkerCarriesAnOpaqueReference(): void
+    {
+        $args = $this->driveArgs();
+
+        $this->assertArrayHasKey('bcc_run', $args);
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $args['bcc_run']);
+        $this->assertSame(1, CosmwasmDiscoveryWorker::$passes);
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function nonRunningOperations(): array
+    {
+        return [
+            'pause'  => [NftDiscoveryPage::ACTION_CW_PAUSE],
+            'resume' => [NftDiscoveryPage::ACTION_CW_RESUME],
+            'retry'  => [NftDiscoveryPage::ACTION_CW_RETRY],
+        ];
+    }
+
+    /** Operations that never call the worker never name a report. */
+    #[DataProvider('nonRunningOperations')]
+    public function testAnOperationThatRunsNothingCarriesNoReference(string $route): void
+    {
+        $args = $this->driveArgs($route);
+
+        $this->assertArrayNotHasKey('bcc_run', $args);
+        $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     *
+     * Discriminator strings rather than closures: these tests run in
+     * separate processes, and PHPUnit serializes provider arguments to get
+     * them there — a Closure cannot make that trip.
+     */
+    public static function preWorkerRefusals(): array
+    {
+        return [
+            'product support off'       => ['product'],
+            'manual permission off'     => ['manual'],
+            'override store unreadable' => ['overrides'],
+            'environment gate off'      => ['env'],
+            'chain paused'              => ['paused'],
+        ];
+    }
+
+    /** A backfill refused BEFORE the worker has no report and names none. */
+    #[DataProvider('preWorkerRefusals')]
+    public function testABackfillRefusedBeforeTheWorkerCarriesNoReference(string $refusal): void
+    {
+        switch ($refusal) {
+            case 'product':
+                ChainRepository::seed(self::CHAIN_ID, 'cosmos', true, false, true);
+                break;
+            case 'manual':
+                ChainRepository::seed(self::CHAIN_ID, 'cosmos', true, true, false);
+                break;
+            case 'overrides':
+                ChainNftCapabilityRepository::seedUnavailable(
+                    self::CHAIN_ID,
+                    ChainNftCapabilityOverrides::REASON_READ_FAILED
+                );
+                break;
+            case 'env':
+                CosmwasmDiscoveryGate::$discovery = false;
+                break;
+            case 'paused':
+                ChainCheckpointRepository::seed(
+                    self::CHAIN_ID,
+                    ChainCheckpointRepository::CW_STATE_PAUSED
+                );
+                break;
+            default:
+                $this->fail('unknown refusal: ' . $refusal);
+        }
+
+        $args = $this->driveArgs();
+
+        $this->assertArrayNotHasKey('bcc_run', $args);
+        $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
+        $this->assertSame([], \BccNftDiscoveryTransientStore::$store, 'nothing was stored to be found');
+    }
+
+    /** An exception after the run does not hand out a reference. */
+    public function testAnExceptionAfterTheRunCarriesNoReference(): void
+    {
+        CosmwasmDiscoveryWorker::$throws = new \RuntimeException('provider exploded');
+
+        $args = $this->driveArgs();
+
+        $this->assertSame('error', $args['bcc_cwo']);
+        $this->assertArrayHasKey('bcc_ref', $args, 'the correlation id is what an error landing carries');
+        $this->assertArrayNotHasKey('bcc_run', $args);
+    }
+
+    /** The correct operator with the correct reference reads it once. */
+    public function testTheCorrectReferenceReadsTheReportExactlyOnce(): void
+    {
+        $args = $this->driveArgs();
+
+        \BccAdminTestState::$can = true;
+        $first = $this->land([
+            'page'    => NftDiscoveryPage::PAGE_SLUG,
+            'family'  => 'cosmos',
+            'bcc_cwo' => $args['bcc_cwo'],
+            'bcc_run' => $args['bcc_run'],
+        ]);
+
+        $this->assertStringContainsString('ran to its own conclusion', $first);
+        $this->assertSame([], \BccNftDiscoveryTransientStore::$store, 'consumed on the one read');
+    }
+
+    /** And a refresh does not show it again. */
+    public function testARefreshDoesNotRedisplayTheReport(): void
+    {
+        $args  = $this->driveArgs();
+        $query = [
+            'page'    => NftDiscoveryPage::PAGE_SLUG,
+            'family'  => 'cosmos',
+            'bcc_cwo' => $args['bcc_cwo'],
+            'bcc_run' => $args['bcc_run'],
+        ];
+
+        \BccAdminTestState::$can = true;
+        $this->land($query);
+        $second = $this->land($query);
+
+        $this->assertStringNotContainsString('ran to its own conclusion', $second);
+        $this->assertStringNotContainsString('Requests', $second);
+    }
+
+    /**
+     * ⚠️ THE ONE THIS SECTION EXISTS FOR.
+     *
+     * A stored-but-unvisited report must NOT surface beside a later,
+     * unrelated action — and must not be silently consumed by it either.
+     */
+    public function testAnUnrelatedResultCodeNeitherDisplaysNorConsumesAPendingReport(): void
+    {
+        $this->driveArgs();
+        $this->assertNotSame([], \BccNftDiscoveryTransientStore::$store, 'a report is pending');
+
+        \BccAdminTestState::$can = true;
+        $html = $this->land([
+            'page'    => NftDiscoveryPage::PAGE_SLUG,
+            'family'  => 'cosmos',
+            'bcc_cwo' => 'paused',
+        ]);
+
+        $this->assertStringNotContainsString('ran to its own conclusion', $html);
+        $this->assertStringNotContainsString('Pages fetched', $html);
+        $this->assertNotSame(
+            [],
+            \BccNftDiscoveryTransientStore::$store,
+            'an unrelated landing must not consume a report it had no right to'
+        );
+    }
+
+    /** Another operator cannot read it, even holding the reference. */
+    public function testAnotherOperatorCannotReadTheReport(): void
+    {
+        $args = $this->driveArgs();
+
+        \BccAdminTestState::$can    = true;
+        \BccAdminTestState::$userId = 99;   // a different administrator
+
+        $html = $this->land([
+            'page'    => NftDiscoveryPage::PAGE_SLUG,
+            'family'  => 'cosmos',
+            'bcc_cwo' => $args['bcc_cwo'],
+            'bcc_run' => $args['bcc_run'],
+        ]);
+
+        $this->assertStringNotContainsString('ran to its own conclusion', $html);
+        $this->assertNotSame(
+            [],
+            \BccNftDiscoveryTransientStore::$store,
+            'and must not consume the owner\'s report on the way past'
+        );
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function badReferences(): array
+    {
+        return [
+            'wrong but well formed' => ['0123456789abcdef'],
+            'too short'             => ['abc'],
+            'too long'              => ['0123456789abcdef0'],
+            'not hex'               => ['zzzzzzzzzzzzzzzz'],
+            'empty'                 => [''],
+            'path traversal'        => ['../../etc/passwd'],
+            'sql-looking'           => ["' OR 1=1 --"],
+        ];
+    }
+
+    /** A wrong or malformed reference consumes nothing. */
+    #[DataProvider('badReferences')]
+    public function testABadReferenceConsumesNothing(string $reference): void
+    {
+        $args = $this->driveArgs();
+        $this->assertNotSame([], \BccNftDiscoveryTransientStore::$store);
+
+        \BccAdminTestState::$can = true;
+        $html = $this->land([
+            'page'    => NftDiscoveryPage::PAGE_SLUG,
+            'family'  => 'cosmos',
+            'bcc_cwo' => $args['bcc_cwo'],
+            'bcc_run' => $reference,
+        ]);
+
+        $this->assertStringNotContainsString('ran to its own conclusion', $html);
+        $this->assertNotSame(
+            [],
+            \BccNftDiscoveryTransientStore::$store,
+            'the real report must survive a bad reference untouched'
+        );
+    }
+
+    /** The reference names a report; it never carries one. */
+    public function testTheReferenceCarriesNoReportDetail(): void
+    {
+        CosmwasmDiscoveryWorker::$onRun = static function (?object $report): void {
+            if ($report !== null && method_exists($report, 'addError')) {
+                $report->addError('https://mainnet.helius-rpc.com/?api-key=SUPERSECRET');
+            }
+        };
+
+        $args    = $this->driveArgs();
+        $encoded = json_encode($args) ?: '';
+
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $args['bcc_run']);
+        foreach (['SUPERSECRET', 'helius', 'requests', 'pages', 'errors', 'emitted', 'families'] as $detail) {
+            $this->assertStringNotContainsString($detail, $encoded);
+        }
     }
 }

@@ -439,6 +439,18 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
         );
         unset($args['family']);
 
+        // `bcc_run` gets the same treatment, for a sharper version of the
+        // same reason: it is 16 random hex characters, so it can contain
+        // the digit of a chain id purely by chance. Left in, this sweep
+        // would fail intermittently and for a reason that has nothing to
+        // do with what it tests. Its own shape is asserted instead — an
+        // opaque reference and nothing else — and its correlation rules
+        // are covered by NftDiscoveryRunnerGateTest.
+        if (isset($args['bcc_run'])) {
+            $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $args['bcc_run']);
+            unset($args['bcc_run']);
+        }
+
         $encoded = json_encode($args) ?: '';
 
         $this->assertStringNotContainsString((string) self::CHAIN_ID, $encoded, 'no chain id under any key');

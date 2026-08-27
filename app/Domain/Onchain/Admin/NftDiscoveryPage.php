@@ -163,11 +163,23 @@ class NftDiscoveryPage
      * query string without dismantling the rule that keeps the destination
      * un-resubmittable and free of upstream text.
      *
-     * So it goes in a short-lived, OPERATOR-SCOPED transient and the URL
-     * carries only `bcc_run`. Same mechanism {@see VerifyCollectionsPage}
-     * already uses for its richer notices, and scoped per user id for the
-     * same reason: two administrators acting at once must not read each
-     * other's results.
+     * So it goes in a short-lived transient and the URL carries only
+     * `bcc_run` — 16 opaque hex characters naming it. Same mechanism
+     * {@see VerifyCollectionsPage} already uses for its richer notices.
+     *
+     * ── SCOPED BY OPERATOR *AND* BY INVOCATION ──────────────────────────
+     * The key is built from both, and both matter for different reasons.
+     *
+     * Per operator, because two administrators acting at once must not read
+     * each other's results.
+     *
+     * Per invocation, because a report is not the operator's "latest run" —
+     * it belongs to ONE redirect. Keyed on the user alone, a backfill whose
+     * landing was never visited leaves a report sitting there, and the next
+     * pause, resume or refused backfill picks it up and presents an older
+     * run's figures as its own result. So a landing displays a report only
+     * when it NAMES one, and only a run that actually reached the worker
+     * gets a name to carry.
      *
      * It is read ONCE and deleted, so a refresh does not re-show a run that
      * is no longer happening.
@@ -303,6 +315,13 @@ class NftDiscoveryPage
         try {
             $result = self::apply_cw_operation($route, $chainId);
         } catch (\Throwable $e) {
+            // An exception AFTER the report was stored would otherwise send
+            // the operator a run reference alongside a generic failure
+            // notice, inviting them to read a report for a request that did
+            // not finish. The error landing shows the correlation id and
+            // nothing else; the orphaned report simply expires.
+            self::$pendingRunReference = '';
+
             $ref = AdminActionSupport::failure(
                 $e,
                 'admin_chain_cw_' . self::cw_operation_slug($route) . '_error',
@@ -599,7 +618,18 @@ class NftDiscoveryPage
 
         $after = CosmwasmDiscoveryService::chainSummary($chainId);
 
-        self::store_run_report($chainId, $outcome, $budget, $report, $before, $after);
+        // The reference is parked for the redirect. This line is reached
+        // ONLY by a backfill that got past every gate and actually called
+        // the worker — which is precisely what makes `bcc_run` mean "this
+        // redirect is the one that ran".
+        self::$pendingRunReference = self::store_run_report(
+            $chainId,
+            $outcome,
+            $budget,
+            $report,
+            $before,
+            $after
+        );
 
         AdminActionSupport::audit('admin_chain_cw_backfill_' . $outcome, 'chain', $chainId);
 
@@ -659,14 +689,20 @@ class NftDiscoveryPage
      * PRG terminator for the scanner operations.
      *
      * Same allowlist discipline the retired sub-tab had, with `subtab`
-     * replaced by `family`: page, family, a bounded result code, and an
-     * optional correlation id. No chain id under any name, no action, no
-     * nonce, no direction, no submitted value, no provider response, no
-     * scanner error text.
+     * replaced by `family`: page, family, a bounded result code, an
+     * optional correlation id, and an optional opaque run reference. No
+     * chain id under any name, no action, no nonce, no direction, no
+     * submitted value, no provider response, no scanner error text.
+     *
+     * ── `bcc_run` IS A NAME, NOT A PAYLOAD ──────────────────────────────
+     * It is 16 hex characters identifying a report held server-side for
+     * this operator. It carries no counts, no endpoint, no error text and
+     * nothing an operator submitted — the report itself never enters the
+     * URL, which is the whole reason it lives in a transient.
      *
      * @var list<string> OPERATION_REDIRECT_KEYS
      */
-    public const OPERATION_REDIRECT_KEYS = ['page', 'family', 'bcc_cwo', 'bcc_ref'];
+    public const OPERATION_REDIRECT_KEYS = ['page', 'family', 'bcc_cwo', 'bcc_ref', 'bcc_run'];
 
     private static function redirect_cw_operation(string $result, string $ref = ''): never
     {
@@ -677,6 +713,14 @@ class NftDiscoveryPage
         ];
         if ($ref !== '') {
             $args['bcc_ref'] = $ref;
+        }
+
+        // Present only when a run actually stored a report. Pause, resume,
+        // retry and every backfill refused before the worker ran leave
+        // this empty, so their landings cannot pick up somebody's
+        // unvisited report and present it as their own result.
+        if (self::$pendingRunReference !== '') {
+            $args['bcc_run'] = self::$pendingRunReference;
         }
 
         AdminActionSupport::redirect($args);
@@ -976,10 +1020,70 @@ class NftDiscoveryPage
 
     // ── The run report ──────────────────────────────────────────────────
 
-    /** The transient key for one operator's pending run report. */
-    private static function run_report_key(): string
+    /**
+     * The opaque reference minted by the run that is about to redirect.
+     *
+     * ── WHY A STATIC AND NOT A RETURN VALUE ─────────────────────────────
+     * `apply_cw_operation()` returns one string — the PRG result code — to
+     * a shared boundary that drives four different operations. Widening
+     * that return type so ONE of the four can carry a second value would
+     * push a backfill-specific concern into the dispatcher every operation
+     * goes through.
+     *
+     * So the reference is parked here instead, by the only method that
+     * mints one, and read by the only method that redirects. It is set
+     * AFTER the report is stored, which is what makes the guarantee below
+     * structural rather than a matter of remembering: pause, resume, retry
+     * and every backfill refused before the worker ran never reach the
+     * line that sets it, so they cannot carry `bcc_run`.
+     */
+    private static string $pendingRunReference = '';
+
+    /**
+     * The transient key for ONE report belonging to ONE operator.
+     *
+     * ── BOTH HALVES ARE LOAD-BEARING ────────────────────────────────────
+     * The user id scopes the report to the administrator who ran it: two
+     * operators acting at once must not read each other's results, and a
+     * reference leaking out of one browser must not open another's.
+     *
+     * The reference scopes it to ONE INVOCATION. Keyed on the user alone,
+     * a report stored by a backfill that its operator never looked at
+     * would still be sitting there on their next visit — and would render
+     * beside whatever they did next, presenting a stale run as though the
+     * pause or retry they just performed had produced it.
+     */
+    private static function run_report_key(string $reference): string
     {
-        return self::RUN_REPORT_TRANSIENT_PREFIX . get_current_user_id();
+        return self::RUN_REPORT_TRANSIENT_PREFIX . get_current_user_id() . '_' . $reference;
+    }
+
+    /**
+     * The shape a run reference must have to be looked up at all.
+     *
+     * 16 hex characters. Checked BEFORE the store is touched, so a
+     * malformed value cannot reach a key builder, and cannot consume or
+     * disturb a real pending report.
+     */
+    private const RUN_REFERENCE_PATTERN = '/^[0-9a-f]{16}$/';
+
+    /**
+     * A bounded, opaque, single-use reference.
+     *
+     * Opaque on purpose: it identifies a report and describes nothing. It
+     * is the only thing about a run that travels in the URL, which is what
+     * lets the PRG allowlist stay a list of bounded codes.
+     */
+    private static function mint_run_reference(): string
+    {
+        try {
+            return bin2hex(random_bytes(8));
+        } catch (\Throwable $e) {
+            // A reference only needs to be unguessable enough to scope a
+            // 120-second, user-keyed lookup. If the CSPRNG is unavailable
+            // the run still has to be reportable.
+            return substr(md5(uniqid('', true)), 0, 16);
+        }
     }
 
     /**
@@ -991,8 +1095,14 @@ class NftDiscoveryPage
      * filled, and the deltas from two reads of the same aggregate the
      * engine table prints. Nothing is inferred from "the call returned".
      *
+     * Returns the opaque reference the redirect must carry to find it
+     * again. A caller that discards the reference has stored a report
+     * nobody can reach — which is the correct outcome for a run whose
+     * redirect never happens.
+     *
      * @param array<string, mixed> $before
      * @param array<string, mixed> $after
+     * @return string the opaque run reference
      */
     private static function store_run_report(
         int $chainId,
@@ -1001,11 +1111,12 @@ class NftDiscoveryPage
         CosmwasmPassReport $report,
         array $before,
         array $after
-    ): void {
+    ): string {
         $stopReason = CosmwasmPassStopReason::forOutcome($outcome, $budget);
+        $reference  = self::mint_run_reference();
 
         set_transient(
-            self::run_report_key(),
+            self::run_report_key($reference),
             [
                 'chain_id'    => $chainId,
                 'outcome'     => $outcome,
@@ -1045,19 +1156,38 @@ class NftDiscoveryPage
             ],
             self::RUN_REPORT_TTL
         );
+
+        return $reference;
     }
 
     /**
-     * Read the pending run report ONCE and delete it.
+     * Read ONE named run report, once, and delete it.
      *
-     * Deleted on read so a browser refresh does not re-display a run that
-     * finished minutes ago as though it had just happened.
+     * ── THREE THINGS HAVE TO LINE UP ────────────────────────────────────
+     * The reference must be well-formed, it must name a report that
+     * exists, and the CURRENT operator must be the one who stored it —
+     * because the key is built from both. Any of the three failing returns
+     * null and touches nothing.
+     *
+     * "Touches nothing" is the part worth stating: a wrong or malformed
+     * reference must not consume, shorten or disturb a report that is
+     * legitimately pending. The malformed case is rejected before a key is
+     * even built; the wrong-reference and wrong-operator cases build a
+     * DIFFERENT key, which simply is not there.
+     *
+     * ── AND IT IS SINGLE USE ────────────────────────────────────────────
+     * Deleted on the one successful read, so a refresh does not re-display
+     * a run that finished minutes ago as though it had just happened.
      *
      * @return array<string, mixed>|null
      */
-    private static function take_run_report(): ?array
+    private static function take_run_report(string $reference): ?array
     {
-        $key    = self::run_report_key();
+        if (preg_match(self::RUN_REFERENCE_PATTERN, $reference) !== 1) {
+            return null;
+        }
+
+        $key    = self::run_report_key($reference);
         $stored = get_transient($key);
 
         if (!is_array($stored) || $stored === []) {
@@ -1098,7 +1228,17 @@ class NftDiscoveryPage
         // present on any given PRG landing since each redirect carries its
         // own key.
         $notice = self::cw_discovery_notice_from_query() ?? self::cw_operation_notice_from_query();
-        $run    = isset($_GET['bcc_run']) || isset($_GET['bcc_cwo']) ? self::take_run_report() : null;
+
+        // ── A REPORT IS SHOWN ONLY WHEN THIS LANDING NAMES ONE ──────────
+        //
+        // Keyed off `bcc_run` ALONE, never off the presence of a result
+        // code. An earlier draft read the operator's pending report
+        // whenever any `bcc_cwo` was set, which meant a report stored by a
+        // backfill nobody looked at would surface beside the next pause,
+        // resume, retry or refused backfill — presenting an older run's
+        // figures as though that action had produced them.
+        $runRef = isset($_GET['bcc_run']) ? sanitize_key((string) $_GET['bcc_run']) : '';
+        $run    = $runRef !== '' ? self::take_run_report($runRef) : null;
         ?>
         <div class="wrap">
             <h1>NFT Discovery</h1>
