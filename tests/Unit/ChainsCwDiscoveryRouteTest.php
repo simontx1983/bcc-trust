@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Admin\ChainsPage;
+use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
+use BCC\Trust\Onchain\Services\NftDiscoveryControlPlaneSnapshot;
 use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
@@ -28,7 +29,7 @@ use PHPUnit\Framework\TestCase;
  * read-back, the no-op — is pinned by CosmwasmChainDiscoveryAdminTest
  * against the CosmWasm stub family. This file owns the request boundary.
  */
-#[CoversClass(ChainsPage::class)]
+#[CoversClass(NftDiscoveryPage::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class ChainsCwDiscoveryRouteTest extends TestCase
@@ -67,8 +68,8 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
     private static function route(bool $enable): string
     {
         return $enable
-            ? ChainsPage::ACTION_CW_DISCOVERY_ENABLE
-            : ChainsPage::ACTION_CW_DISCOVERY_DISABLE;
+            ? NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE
+            : NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE;
     }
 
     /** Arrange a well-formed request for one direction. */
@@ -82,8 +83,8 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
     {
         try {
             $enable
-                ? ChainsPage::handle_cw_discovery_enable()
-                : ChainsPage::handle_cw_discovery_disable();
+                ? NftDiscoveryPage::handle_cw_discovery_enable()
+                : NftDiscoveryPage::handle_cw_discovery_disable();
         } catch (\BccAdminRedirect $r) {
             return $r;
         }
@@ -108,7 +109,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         \BccAdminTestState::$can = false;
 
         try {
-            $enable ? ChainsPage::handle_cw_discovery_enable() : ChainsPage::handle_cw_discovery_disable();
+            $enable ? NftDiscoveryPage::handle_cw_discovery_enable() : NftDiscoveryPage::handle_cw_discovery_disable();
             $this->fail('A request without manage_options must be refused.');
         } catch (\BccAdminDie $e) {
             $this->assertSame(403, $e->status);
@@ -124,7 +125,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         $_SERVER['REQUEST_METHOD'] = 'GET';
 
         try {
-            $enable ? ChainsPage::handle_cw_discovery_enable() : ChainsPage::handle_cw_discovery_disable();
+            $enable ? NftDiscoveryPage::handle_cw_discovery_enable() : NftDiscoveryPage::handle_cw_discovery_disable();
             $this->fail('admin-post.php dispatches GET too; the handler must refuse it.');
         } catch (\BccAdminDie $e) {
             $this->assertSame(405, $e->status);
@@ -168,10 +169,10 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         // A nonce that WOULD be valid for chain 4, to prove the shape gate
         // fires before the nonce and is not merely a nonce failure.
         \BccAdminTestState::$validNonceAction =
-            ChainsPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
+            NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
 
         try {
-            ChainsPage::handle_cw_discovery_enable();
+            NftDiscoveryPage::handle_cw_discovery_enable();
             $this->fail('A malformed chain id must terminate the request.');
         } catch (\BccAdminDie $e) {
             $this->assertSame(400, $e->status, 'a malformed request gets a real 400, not a redirect');
@@ -188,10 +189,10 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
     public function testAMissingChainIdIsARealBadRequest(): void
     {
         \BccAdminTestState::$validNonceAction =
-            ChainsPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
+            NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
 
         try {
-            ChainsPage::handle_cw_discovery_enable();
+            NftDiscoveryPage::handle_cw_discovery_enable();
             $this->fail('A missing chain id must terminate the request.');
         } catch (\BccAdminDie $e) {
             $this->assertSame(400, $e->status);
@@ -218,10 +219,10 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
 
         $_POST['chain_id'] = $id;
         \BccAdminTestState::$validNonceAction =
-            ChainsPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
+            NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
 
         try {
-            ChainsPage::handle_cw_discovery_enable();
+            NftDiscoveryPage::handle_cw_discovery_enable();
         } catch (\BccAdminDie | \BccAdminRedirect $e) {
             // expected
         } finally {
@@ -250,10 +251,10 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         $_POST['chain_id'] = self::CHAIN_ID;
         \BccAdminTestState::$can = false;
         \BccAdminTestState::$validNonceAction =
-            ChainsPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
+            NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
 
         try {
-            ChainsPage::handle_cw_discovery_enable();
+            NftDiscoveryPage::handle_cw_discovery_enable();
             $this->fail('Expected a 403.');
         } catch (\BccAdminDie $e) {
             $this->assertSame(403, $e->status, 'capability is checked before the target is processed');
@@ -285,7 +286,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         \BccAdminTestState::$can = false;
 
         try {
-            ChainsPage::handle_cw_discovery_enable();
+            NftDiscoveryPage::handle_cw_discovery_enable();
             $this->fail('Expected a 403.');
         } catch (\BccAdminDie $e) {
             $this->assertSame(403, $e->status, 'capability first — the target is never processed');
@@ -304,7 +305,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         \BccAdminTestState::$validNonceAction = 'something-else-entirely';
 
         try {
-            $enable ? ChainsPage::handle_cw_discovery_enable() : ChainsPage::handle_cw_discovery_disable();
+            $enable ? NftDiscoveryPage::handle_cw_discovery_enable() : NftDiscoveryPage::handle_cw_discovery_disable();
             $this->fail('A forged nonce must be refused.');
         } catch (\BccAdminDie $e) {
             // expected
@@ -319,20 +320,20 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
     {
         $_POST['chain_id'] = self::CHAIN_ID;
         \BccAdminTestState::$validNonceAction =
-            ChainsPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
+            NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE . '_' . self::CHAIN_ID;
 
         $this->expectException(\BccAdminDie::class);
-        ChainsPage::handle_cw_discovery_disable();
+        NftDiscoveryPage::handle_cw_discovery_disable();
     }
 
     public function testADisableNonceCannotEnable(): void
     {
         $_POST['chain_id'] = self::CHAIN_ID;
         \BccAdminTestState::$validNonceAction =
-            ChainsPage::ACTION_CW_DISCOVERY_DISABLE . '_' . self::CHAIN_ID;
+            NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE . '_' . self::CHAIN_ID;
 
         $this->expectException(\BccAdminDie::class);
-        ChainsPage::handle_cw_discovery_enable();
+        NftDiscoveryPage::handle_cw_discovery_enable();
     }
 
     #[DataProvider('directions')]
@@ -342,7 +343,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         \BccAdminTestState::$validNonceAction = self::route($enable) . '_' . self::OTHER_CHAIN_ID;
 
         try {
-            $enable ? ChainsPage::handle_cw_discovery_enable() : ChainsPage::handle_cw_discovery_disable();
+            $enable ? NftDiscoveryPage::handle_cw_discovery_enable() : NftDiscoveryPage::handle_cw_discovery_disable();
             $this->fail('A nonce scoped to another chain must be refused.');
         } catch (\BccAdminDie $e) {
             // expected
@@ -358,7 +359,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         \BccAdminTestState::$validNonceAction = 'bcc_verify_collections_nonce';
 
         try {
-            $enable ? ChainsPage::handle_cw_discovery_enable() : ChainsPage::handle_cw_discovery_disable();
+            $enable ? NftDiscoveryPage::handle_cw_discovery_enable() : NftDiscoveryPage::handle_cw_discovery_disable();
             $this->fail('The shared Verify Collections nonce must not authorise this route.');
         } catch (\BccAdminDie $e) {
             // expected
@@ -560,16 +561,21 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
 
         $r = $this->invoke($enable);
 
+        // `subtab` became `family` when NFT Discovery was promoted out of
+        // the Chains page. The KEY changed; the rule did not — a fixed
+        // page, a fixed navigation value, a bounded result code, and an
+        // optional correlation id. Nothing that identifies the target.
         $this->assertSame(
-            ['page', 'subtab', 'bcc_cwd'],
+            ['page', 'family', 'bcc_cwd'],
             array_keys($r->args),
-            'the destination allowlist is page, subtab, bcc_cwd and optionally bcc_ref — nothing else'
+            'the destination allowlist is page, family, bcc_cwd and optionally bcc_ref — nothing else'
         );
-        $this->assertSame(ChainsPage::PAGE_SLUG, $r->args['page']);
-        $this->assertSame('nft-discovery', $r->args['subtab']);
+        $this->assertSame(NftDiscoveryPage::PAGE_SLUG, $r->args['page']);
+        $this->assertSame(NftDiscoveryControlPlaneSnapshot::FAMILY_COSMOS, $r->args['family']);
+        $this->assertArrayNotHasKey('subtab', $r->args);
 
         foreach (array_keys($r->args) as $key) {
-            $this->assertContains($key, ChainsPage::REDIRECT_KEYS);
+            $this->assertContains($key, NftDiscoveryPage::REDIRECT_KEYS);
         }
     }
 
@@ -634,7 +640,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         \BccAdminTestState::$can = false;
 
         try {
-            $enable ? ChainsPage::handle_cw_discovery_enable() : ChainsPage::handle_cw_discovery_disable();
+            $enable ? NftDiscoveryPage::handle_cw_discovery_enable() : NftDiscoveryPage::handle_cw_discovery_disable();
         } catch (\BccAdminDie $e) {
             // expected
         }
@@ -664,7 +670,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         $this->arrange($enable);
         \BccAdminTestState::$can = false;
         try {
-            $enable ? ChainsPage::handle_cw_discovery_enable() : ChainsPage::handle_cw_discovery_disable();
+            $enable ? NftDiscoveryPage::handle_cw_discovery_enable() : NftDiscoveryPage::handle_cw_discovery_disable();
         } catch (\BccAdminDie $e) {
         }
         $this->assertSame($expected, (string) ChainRepository::$rows[self::CHAIN_ID]->cosmwasm_nft_discovery_enabled);
@@ -673,7 +679,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         \BccAdminTestState::$can = true;
         \BccAdminTestState::$validNonceAction = 'not-the-nonce';
         try {
-            $enable ? ChainsPage::handle_cw_discovery_enable() : ChainsPage::handle_cw_discovery_disable();
+            $enable ? NftDiscoveryPage::handle_cw_discovery_enable() : NftDiscoveryPage::handle_cw_discovery_disable();
         } catch (\BccAdminDie $e) {
         }
         $this->assertSame($expected, (string) ChainRepository::$rows[self::CHAIN_ID]->cosmwasm_nft_discovery_enabled);
@@ -726,7 +732,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
     ): void {
         $_GET = ['bcc_cwd' => $code];
 
-        $m = new \ReflectionMethod(ChainsPage::class, 'cw_discovery_notice_from_query');
+        $m = new \ReflectionMethod(NftDiscoveryPage::class, 'cw_discovery_notice_from_query');
         $m->setAccessible(true);
         /** @var array{type: string, message: string}|null $notice */
         $notice = $m->invoke(null);
@@ -752,7 +758,7 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
     {
         foreach (['enabled', 'disabled'] as $code) {
             $_GET = ['bcc_cwd' => $code];
-            $m = new \ReflectionMethod(ChainsPage::class, 'cw_discovery_notice_from_query');
+            $m = new \ReflectionMethod(NftDiscoveryPage::class, 'cw_discovery_notice_from_query');
             $m->setAccessible(true);
             /** @var array{type: string, message: string} $notice */
             $notice = $m->invoke(null);

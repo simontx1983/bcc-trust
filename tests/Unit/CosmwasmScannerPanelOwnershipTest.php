@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Admin\ChainsPage;
+use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
 use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
 use BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
@@ -175,7 +175,7 @@ final class CosmwasmScannerPanelOwnershipTest extends TestCase
         ] as $method) {
             $this->assertFalse(
                 method_exists(CosmwasmScannerPanel::class, $method),
-                "{$method}() moved to ChainsPage; two copies is what this batch removed"
+                "{$method}() moved to NftDiscoveryPage; two copies is what this batch removed"
             );
         }
     }
@@ -294,7 +294,13 @@ final class CosmwasmScannerPanelOwnershipTest extends TestCase
                 continue;
             }
             $href = $a->getAttribute('href');
-            if (str_contains($href, 'subtab=' . ChainsPage::SUBTAB_NFT_DISCOVERY)) {
+
+            // Matched on the PAGE, not on a sub-tab. NFT Discovery was
+            // promoted from a Chains sub-tab to its own page, so the notice
+            // that says "it moved" now links straight at it — following the
+            // compatibility redirect instead would be one hop of misdirection
+            // in the one notice whose entire job is to point somewhere.
+            if (str_contains($href, 'page=' . NftDiscoveryPage::PAGE_SLUG)) {
                 $matching[] = $a;
             }
         }
@@ -304,7 +310,7 @@ final class CosmwasmScannerPanelOwnershipTest extends TestCase
         // Parsed through the DOM so the entity-encoded `&` in the rendered
         // href cannot hide a wrong target.
         $href = $matching[0]->getAttribute('href');
-        $this->assertStringContainsString('page=' . ChainsPage::PAGE_SLUG, $href);
+        $this->assertStringContainsString('page=' . NftDiscoveryPage::PAGE_SLUG, $href);
         $this->assertSame('Open NFT Discovery', trim($matching[0]->textContent));
     }
 

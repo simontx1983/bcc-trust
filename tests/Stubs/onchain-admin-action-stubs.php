@@ -478,9 +478,21 @@ namespace BCC\Trust\Onchain\Repositories {
             public const STATE_HEALTHY  = 'healthy';
             public const STATE_DISABLED = 'disabled';
 
+            // The `cw_*` half of the row. It lives on the SAME record as the
+            // EVM indexer's state — the table is shared — which is exactly
+            // why NftChainCapability only consults it for Cosmos chains.
+            public const CW_STATE_IDLE        = 'idle';
+            public const CW_STATE_BACKFILLING = 'backfilling';
+            public const CW_STATE_BACKFILLED  = 'backfilled';
+            public const CW_STATE_UNSUPPORTED = 'unsupported';
+            public const CW_STATE_PAUSED      = 'paused';
+
             /** @var list<array{chain_id: int, state: string}> */
             public static array $stateWrites = [];
             public static bool $setStateResult = true;
+
+            /** @var array<int, object> */
+            public static array $rows = [];
 
             public static function setState(int $chainId, string $state): bool
             {
@@ -488,10 +500,27 @@ namespace BCC\Trust\Onchain\Repositories {
                 return self::$setStateResult;
             }
 
+            /**
+             * No seeded row means "never measured", which production treats
+             * as NOT refused — the first pass is what creates the
+             * measurement, so refusing an unmeasured chain would be a
+             * permanent deadlock dressed up as caution.
+             */
+            public static function get(int $chainId): ?object
+            {
+                return self::$rows[$chainId] ?? null;
+            }
+
+            public static function seedCwState(int $chainId, string $cwState): void
+            {
+                self::$rows[$chainId] = (object) ['cw_discovery_state' => $cwState];
+            }
+
             public static function reset(): void
             {
                 self::$stateWrites = [];
                 self::$setStateResult = true;
+                self::$rows = [];
             }
         }
     }

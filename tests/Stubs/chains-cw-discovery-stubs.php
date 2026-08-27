@@ -133,6 +133,21 @@ namespace BCC\Trust\Onchain\Repositories {
                 return array_values(self::$rows);
             }
 
+            /**
+             * Admin-only projection — includes deactivated chains.
+             *
+             * The NFT discovery control plane reads through this rather than
+             * getActive(), because a deactivated chain that still carries
+             * capability state is exactly what an operator comes to the page
+             * to look at.
+             *
+             * @return list<object>
+             */
+            public static function getAll(): array
+            {
+                return array_values(self::$rows);
+            }
+
             public static function setCosmwasmNftDiscoveryEnabled(int $chainId, bool $enable): bool
             {
                 self::$discoveryWrites[] = ['chain_id' => $chainId, 'enable' => $enable];
@@ -155,20 +170,61 @@ namespace BCC\Trust\Onchain\Repositories {
                 return true;
             }
 
-            public static function seed(int $id, string $slug = 'cosmos', bool $optedIn = false): void
-            {
+            /**
+             * A normally-configured, NFT-capable chain.
+             *
+             * ── WHY THE TWO CAPABILITY COLUMNS DEFAULT TO '1' HERE ──────
+             * In PRODUCTION they are `DEFAULT 0`, and PR 3 ships no writer
+             * for either — a stock install has every chain refused. That is
+             * the intended fail-closed state and it is proven by the tests
+             * that seed `false` explicitly.
+             *
+             * This helper is the OTHER fixture: "a chain an operator has
+             * already granted". Defaulting it to capable keeps every test
+             * that predates the capability gate exercising the behaviour it
+             * was written to pin, instead of silently all landing on the
+             * same refusal and asserting nothing about the code under test.
+             *
+             * Both are explicit parameters, so no test is capable by
+             * accident.
+             */
+            public static function seed(
+                int $id,
+                string $slug = 'cosmos',
+                bool $optedIn = false,
+                bool $bccSupportsNft = true,
+                bool $manualDiscovery = true
+            ): void {
                 self::$rows[$id] = (object) [
-                    'id'                             => $id,
-                    'slug'                           => $slug,
-                    'name'                           => ucfirst($slug),
-                    'chain_type'                     => 'cosmos',
-                    'is_active'                      => 1,
-                    'rest_url'                       => 'https://' . $slug . '.example',
-                    'description'                    => 'About ' . $slug . '.',
-                    'icon_url'                       => 'https://cdn.example/' . $slug . '.png',
-                    'color'                          => '#123456',
-                    'cosmwasm_nft_discovery_enabled' => $optedIn ? '1' : '0',
+                    'id'                                  => $id,
+                    'slug'                                => $slug,
+                    'name'                                => ucfirst($slug),
+                    'chain_type'                          => 'cosmos',
+                    'is_active'                           => 1,
+                    'rest_url'                            => 'https://' . $slug . '.example',
+                    'description'                         => 'About ' . $slug . '.',
+                    'icon_url'                            => 'https://cdn.example/' . $slug . '.png',
+                    'color'                               => '#123456',
+                    'cosmwasm_nft_discovery_enabled'      => $optedIn ? '1' : '0',
+                    'bcc_supports_nft_collections'        => $bccSupportsNft ? '1' : '0',
+                    'manual_collection_discovery_enabled' => $manualDiscovery ? '1' : '0',
                 ];
+            }
+
+            /**
+             * Drop a capability column entirely, as a pre-migration
+             * projection would.
+             *
+             * `unset` and not `= null`: the production reader branches on
+             * `array_key_exists`, because "the column is absent" and "the
+             * column holds NULL" are different facts and only the first one
+             * means "this install cannot say".
+             */
+            public static function dropColumn(int $id, string $column): void
+            {
+                if (isset(self::$rows[$id])) {
+                    unset(self::$rows[$id]->{$column});
+                }
             }
 
             public static function reset(): void
@@ -180,6 +236,61 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$readBackOverride = null;
                 self::$readBackNull     = false;
                 self::$cacheBusts       = 0;
+            }
+        }
+    }
+
+    /**
+     * The driver-override store.
+     *
+     * ── IT RETURNS THE REAL VALUE OBJECT ────────────────────────────────
+     * `ChainNftCapabilityOverrides` is a pure value object with no database
+     * access, so it autoloads and is used verbatim. Faking it too would
+     * mean the tests could not tell `loaded([])` — "read fine, no overrides,
+     * registry defaults apply" — from `unavailable(...)` — "we know nothing"
+     * — which is the single most load-bearing distinction in the model.
+     *
+     * Default is `loaded([])`: a readable store with no override rows, i.e.
+     * what every install actually has, since PR 3 ships no writer for this
+     * table either.
+     */
+    if (!class_exists(ChainNftCapabilityRepository::class, false)) {
+        final class ChainNftCapabilityRepository
+        {
+            /** @var array<int, \BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides> */
+            public static array $forChain = [];
+
+            /** Reads observed, so a test can assert the store is read ONCE per render. */
+            public static int $reads = 0;
+
+            public static function getForChain(int $chainId): \BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides
+            {
+                self::$reads++;
+
+                return self::$forChain[$chainId]
+                    ?? \BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides::loaded([]);
+            }
+
+            /**
+             * @param list<array{operation: string, driver_key: string, enabled: bool, priority: int}> $rows
+             */
+            public static function seedLoaded(int $chainId, array $rows = []): void
+            {
+                self::$forChain[$chainId] =
+                    \BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides::loaded($rows);
+            }
+
+            /** REASON_READ_FAILED / REASON_OVERFLOW / REASON_MALFORMED / REASON_INVALID_CHAIN. */
+            public static function seedUnavailable(int $chainId, string $reason): void
+            {
+                self::$forChain[$chainId] =
+                    \BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides::unavailable($reason);
+            }
+
+            public static function reset(): void
+            {
+                self::$forChain = [];
+                self::$reads    = 0;
             }
         }
     }

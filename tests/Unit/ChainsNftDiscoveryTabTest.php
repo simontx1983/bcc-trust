@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Admin\ChainsPage;
+use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
+use BCC\Trust\Onchain\Repositories\ChainNftCapabilityRepository;
+use BCC\Trust\Onchain\Services\NftDiscoveryControlPlaneSnapshot;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -27,7 +29,7 @@ use PHPUnit\Framework\TestCase;
  * NFT discovery", which is false and unfixable from this screen. So the
  * assertions below check what is NOT said as carefully as what is.
  */
-#[CoversClass(ChainsPage::class)]
+#[CoversClass(NftDiscoveryPage::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class ChainsNftDiscoveryTabTest extends TestCase
@@ -43,6 +45,7 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
         \BccAdminTestState::reset();
         ChainRepository::reset();
+        ChainNftCapabilityRepository::reset();
         CosmwasmDiscoveryHealthSnapshot::reset();
 
         $_GET  = [];
@@ -66,13 +69,24 @@ final class ChainsNftDiscoveryTabTest extends TestCase
         ];
     }
 
+    /**
+     * The Cosmos family body, through the REAL production path.
+     *
+     * NFT Discovery was a sub-tab of Chains that fetched the health
+     * snapshot itself; it is now a page whose builder fetches the snapshot
+     * once and hands finished rows to the section renderer. This drives
+     * that same pair — builder then renderer — rather than a private tab
+     * method that no longer exists, so what these tests exercise is what
+     * the page runs.
+     */
     private function render(): string
     {
-        $m = new \ReflectionMethod(ChainsPage::class, 'render_nft_discovery_tab');
-        $m->setAccessible(true);
+        $snapshot = NftDiscoveryControlPlaneSnapshot::buildForFamily(
+            NftDiscoveryControlPlaneSnapshot::FAMILY_COSMOS
+        );
 
         ob_start();
-        $m->invoke(null);
+        NftDiscoveryPage::render_cw_discovery_section($snapshot['cw_chains']);
 
         return (string) ob_get_clean();
     }
@@ -138,7 +152,7 @@ final class ChainsNftDiscoveryTabTest extends TestCase
      */
     private function discoveryForms(\DOMDocument $doc): array
     {
-        $routes = [ChainsPage::ACTION_CW_DISCOVERY_ENABLE, ChainsPage::ACTION_CW_DISCOVERY_DISABLE];
+        $routes = [NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE, NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE];
 
         $out = [];
         foreach ($this->elements($doc, 'form') as $form) {
@@ -167,28 +181,57 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
     // ── Registration and identity ───────────────────────────────────────
 
-    public function testTheCanonicalSlugIsNftDiscovery(): void
+    public function testTheCanonicalSlugIsTheNftDiscoveryPage(): void
     {
-        $this->assertSame('nft-discovery', ChainsPage::SUBTAB_NFT_DISCOVERY);
+        $this->assertSame('bcc-onchain-nft-discovery', NftDiscoveryPage::PAGE_SLUG);
     }
 
-    public function testTheSubtabIsRegisteredInTheChainsTabList(): void
+    /**
+     * The old sub-tab address is still an address.
+     *
+     * NFT Discovery was `?page=bcc-onchain-chains&subtab=nft-discovery` for
+     * long enough to be bookmarked, linked from notes, and sitting in open
+     * tabs. Promoting it to its own page is not a reason to break those,
+     * so the retired location is kept as a named constant and forwarded.
+     */
+    public function testTheRetiredSubtabAddressIsStillNamedAndForwarded(): void
+    {
+        $this->assertSame('bcc-onchain-chains', NftDiscoveryPage::LEGACY_PAGE_SLUG);
+        $this->assertSame('nft-discovery', NftDiscoveryPage::LEGACY_SUBTAB);
+
+        $source = (string) file_get_contents(
+            __DIR__ . '/../../app/Domain/Onchain/Admin/NftDiscoveryPage.php'
+        );
+
+        // On admin_init, because a submenu page callback runs after
+        // wp-admin has already sent headers.
+        $this->assertStringContainsString(
+            "add_action('admin_init', [self::class, 'maybe_redirect_legacy_url'])",
+            $source
+        );
+        $this->assertStringContainsString('wp_safe_redirect(', $source);
+    }
+
+    /**
+     * The Chains page no longer offers the tab, in either direction.
+     *
+     * Both halves matter. A stale link in the nav would 404 into a fallback
+     * tab; a stale entry in the allowlist would render an empty body for a
+     * sub-tab whose renderer has gone.
+     */
+    public function testTheChainsPageNoLongerOffersTheSubtab(): void
     {
         $source = (string) file_get_contents(
             __DIR__ . '/../../app/Domain/Onchain/Admin/ChainsPage.php'
         );
 
-        // Accepted by the tab whitelist…
+        $this->assertStringNotContainsString('SUBTAB_NFT_DISCOVERY', $source);
+        $this->assertStringNotContainsString("add_query_arg('subtab', self::SUBTAB", $source);
+        $this->assertStringNotContainsString('render_nft_discovery_tab', $source);
         $this->assertStringContainsString(
-            "in_array(\$activeTab, ['validators', 'identity', self::SUBTAB_NFT_DISCOVERY], true)",
+            "in_array(\$activeTab, ['validators', 'identity'], true)",
             $source
         );
-        // …linked in the nav with the canonical `subtab=` parameter…
-        $this->assertStringContainsString("add_query_arg('subtab', self::SUBTAB_NFT_DISCOVERY)", $source);
-        // …labelled for the capability, not the engine…
-        $this->assertStringContainsString('NFT Discovery', $source);
-        // …and dispatched to its renderer.
-        $this->assertStringContainsString('self::render_nft_discovery_tab()', $source);
     }
 
     public function testTheSectionHeadingNamesTheEngine(): void
@@ -326,7 +369,7 @@ final class ChainsNftDiscoveryTabTest extends TestCase
         ]];
 
         ob_start();
-        ChainsPage::render_cw_discovery_section($rows);
+        NftDiscoveryPage::render_cw_discovery_section($rows);
         $html = (string) ob_get_clean();
 
         // The supplied identity, reason and flags all survive.
@@ -383,13 +426,24 @@ final class ChainsNftDiscoveryTabTest extends TestCase
             $this->assertStringNotContainsString(
                 $forbidden,
                 $code,
-                "ChainsPage must not derive eligibility itself; `{$forbidden}` would be a second authority."
+                "NftDiscoveryPage must not derive eligibility itself; `{$forbidden}` would be a second authority."
             );
         }
 
         // And no RENDER method may consult the environment gates.
+        //
+        // `render_nft_discovery_tab` is gone from this list because the
+        // method is gone: the page's entry point is render_page(), which
+        // fetches ONE snapshot and hands finished rows down. The renderers
+        // below are the ones that print those rows, and they are the ones
+        // that must not form a second opinion.
+        //
+        // render_cw_operations_row is DELIBERATELY absent: it is the one
+        // renderer that is allowed to read the environment gates, because
+        // it decides which controls to draw. Its own test pins that.
         foreach ([
-            'render_nft_discovery_tab',
+            'render_capability_matrix',
+            'render_capability_row',
             'render_cw_discovery_section',
             'render_cw_discovery_row',
             'render_cw_status_row',
@@ -422,11 +476,11 @@ final class ChainsNftDiscoveryTabTest extends TestCase
         $this->assertStringContainsString('backfillEnabled(', $body);
     }
 
-    /** ChainsPage source with all comments removed. */
+    /** NftDiscoveryPage source with all comments removed. */
     private function strippedSource(): string
     {
         $source = (string) file_get_contents(
-            __DIR__ . '/../../app/Domain/Onchain/Admin/ChainsPage.php'
+            __DIR__ . '/../../app/Domain/Onchain/Admin/NftDiscoveryPage.php'
         );
 
         // Strip comments — the docblocks legitimately NAME these classes to
@@ -483,9 +537,9 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
         $ids      = [];
         $expected = [
-            self::COSMOS_A => ChainsPage::ACTION_CW_DISCOVERY_DISABLE, // opted in → offer Disable
-            self::COSMOS_B => ChainsPage::ACTION_CW_DISCOVERY_ENABLE,
-            self::COSMOS_C => ChainsPage::ACTION_CW_DISCOVERY_ENABLE,
+            self::COSMOS_A => NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE, // opted in → offer Disable
+            self::COSMOS_B => NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE,
+            self::COSMOS_C => NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE,
         ];
 
         foreach ($forms as $form) {
@@ -505,7 +559,7 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
             // The form id encodes the direction, and agrees with the row.
             $this->assertSame(
-                ChainsPage::cw_discovery_form_id($chainId, $route === ChainsPage::ACTION_CW_DISCOVERY_DISABLE),
+                NftDiscoveryPage::cw_discovery_form_id($chainId, $route === NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE),
                 $form->getAttribute('id')
             );
         }

@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Admin\ChainsPage;
+use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
+use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -30,7 +31,7 @@ use PHPUnit\Framework\TestCase;
  * paused chain, or where the environment gate is closed, is a button that
  * cannot work — and an operator who clicks it learns to distrust the page.
  */
-#[CoversClass(ChainsPage::class)]
+#[CoversClass(NftDiscoveryPage::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class ChainsCwScannerOperationsDomTest extends TestCase
@@ -66,10 +67,20 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
             'paused'             => false,
             'eligibility'        => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ELIGIBLE,
             'eligibility_reason' => 'Nothing is blocking this chain.',
+
+            // The capability verdict for the ENUMERATION operation, joined
+            // onto the row by NftDiscoveryControlPlaneSnapshot. The default
+            // here is READY because this fixture is "a chain with nothing
+            // blocking it", and these tests are about what the ENVIRONMENT
+            // gates do. The capability gate has its own test below, and a
+            // row that omits this key entirely fails closed — which is also
+            // pinned, so the default cannot hide a missing annotation.
+            'enumeration_status' => NftChainCapability::OP_READY,
+            'enumeration_reason' => NftChainCapability::REASON_READY,
         ], $overrides);
 
         ob_start();
-        ChainsPage::render_cw_discovery_section([$row]);
+        NftDiscoveryPage::render_cw_discovery_section([$row]);
         $html = (string) ob_get_clean();
 
         $doc = new \DOMDocument();
@@ -97,10 +108,10 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
     private function operationForms(\DOMDocument $doc): array
     {
         $routes = [
-            ChainsPage::ACTION_CW_PAUSE,
-            ChainsPage::ACTION_CW_RESUME,
-            ChainsPage::ACTION_CW_BACKFILL,
-            ChainsPage::ACTION_CW_RETRY,
+            NftDiscoveryPage::ACTION_CW_PAUSE,
+            NftDiscoveryPage::ACTION_CW_RESUME,
+            NftDiscoveryPage::ACTION_CW_BACKFILL,
+            NftDiscoveryPage::ACTION_CW_RETRY,
         ];
 
         $out = [];
@@ -176,7 +187,7 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
 
         foreach ($this->operationForms($doc) as $route => $form) {
             $this->assertSame(
-                ChainsPage::cw_operation_form_id($route, self::CHAIN_ID),
+                NftDiscoveryPage::cw_operation_form_id($route, self::CHAIN_ID),
                 $form->getAttribute('id')
             );
             $this->assertStringContainsString((string) self::CHAIN_ID, $form->getAttribute('id'));
@@ -215,8 +226,8 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
     {
         $forms = $this->operationForms($this->dom(['paused' => false]));
 
-        $this->assertArrayHasKey(ChainsPage::ACTION_CW_PAUSE, $forms);
-        $this->assertArrayNotHasKey(ChainsPage::ACTION_CW_RESUME, $forms);
+        $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_PAUSE, $forms);
+        $this->assertArrayNotHasKey(NftDiscoveryPage::ACTION_CW_RESUME, $forms);
     }
 
     /**
@@ -229,8 +240,8 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
     {
         $forms = $this->operationForms($this->dom(['paused' => true]));
 
-        $this->assertArrayHasKey(ChainsPage::ACTION_CW_RESUME, $forms);
-        $this->assertArrayNotHasKey(ChainsPage::ACTION_CW_PAUSE, $forms);
+        $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_RESUME, $forms);
+        $this->assertArrayNotHasKey(NftDiscoveryPage::ACTION_CW_PAUSE, $forms);
     }
 
     /** Backfill is refused while paused, so it is not offered while paused. */
@@ -238,7 +249,7 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
     {
         $forms = $this->operationForms($this->dom(['paused' => true]));
 
-        $this->assertArrayNotHasKey(ChainsPage::ACTION_CW_BACKFILL, $forms);
+        $this->assertArrayNotHasKey(NftDiscoveryPage::ACTION_CW_BACKFILL, $forms);
     }
 
     /** @return array<string, array{0: bool, 1: bool, 2: bool, 3: bool}> */
@@ -265,12 +276,73 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
 
         $forms = $this->operationForms($this->dom());
 
-        $this->assertSame($offersBackfill, isset($forms[ChainsPage::ACTION_CW_BACKFILL]));
-        $this->assertSame($offersRetry, isset($forms[ChainsPage::ACTION_CW_RETRY]));
+        $this->assertSame($offersBackfill, isset($forms[NftDiscoveryPage::ACTION_CW_BACKFILL]));
+        $this->assertSame($offersRetry, isset($forms[NftDiscoveryPage::ACTION_CW_RETRY]));
 
         // Pause is a local hold and never depends on the environment gate:
         // a chain must remain pausable even with discovery switched off.
-        $this->assertArrayHasKey(ChainsPage::ACTION_CW_PAUSE, $forms);
+        $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_PAUSE, $forms);
+    }
+
+    /**
+     * The capability gate is a SECOND, independent condition on Backfill.
+     *
+     * Both environment gates open and the chain unpaused is no longer
+     * enough: the enumeration operation must also be READY. Backfill is the
+     * only control on this page that spends provider budget, so it is the
+     * one that has to answer to the capability model as well.
+     *
+     * Pause, Resume and Retry are deliberately unaffected — none of them
+     * contacts a provider, and a chain must stay pausable whatever its
+     * capability says.
+     */
+    public function testBackfillAlsoRequiresTheEnumerationOperationToBeReady(): void
+    {
+        CosmwasmDiscoveryGate::$discovery = true;
+        CosmwasmDiscoveryGate::$backfill  = true;
+
+        foreach ([
+            NftChainCapability::OP_UNKNOWN,
+            NftChainCapability::OP_NO_BCC_SUPPORT,
+            NftChainCapability::OP_NO_DRIVER,
+            NftChainCapability::OP_DISABLED,
+            NftChainCapability::OP_MANUAL_DISABLED,
+            NftChainCapability::OP_PROVIDER_UNAVAILABLE,
+            NftChainCapability::OP_CHAIN_UNSUPPORTED,
+        ] as $status) {
+            $forms = $this->operationForms($this->dom(['enumeration_status' => $status]));
+
+            $this->assertArrayNotHasKey(
+                NftDiscoveryPage::ACTION_CW_BACKFILL,
+                $forms,
+                "status {$status} must not offer a provider-consuming control"
+            );
+            $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_PAUSE, $forms);
+            $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_RETRY, $forms);
+        }
+    }
+
+    /**
+     * A row with NO capability annotation fails closed.
+     *
+     * The annotation is joined on by the snapshot builder. If that join
+     * ever silently stops happening — a renamed key, a row from an
+     * authority that did not go through it — the button must disappear,
+     * not default to available. An absent field must never read as a
+     * permission.
+     */
+    public function testARowWithNoCapabilityAnnotationOffersNoBackfill(): void
+    {
+        CosmwasmDiscoveryGate::$discovery = true;
+        CosmwasmDiscoveryGate::$backfill  = true;
+
+        $doc = $this->dom(['enumeration_status' => null, 'enumeration_reason' => null]);
+
+        $this->assertArrayNotHasKey(
+            NftDiscoveryPage::ACTION_CW_BACKFILL,
+            $this->operationForms($doc),
+            'an unannotated row must fail closed'
+        );
     }
 
     /**
@@ -307,20 +379,20 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
 
         $expectations = [
             // Pause cannot stop work already inside the advisory lock.
-            ChainsPage::ACTION_CW_PAUSE => [
+            NftDiscoveryPage::ACTION_CW_PAUSE => [
                 'is NOT cancelled',
                 'already',
                 'different from disabling',
             ],
             // Resume starts nothing and contacts nothing.
-            ChainsPage::ACTION_CW_RESUME => [
+            NftDiscoveryPage::ACTION_CW_RESUME => [
                 'does NOT start a scan',
                 'contacts nothing',
                 'not re-walked',
             ],
             // Backfill is the one control that spends provider budget, and
             // it says so plainly — with its bound and its lock caveat.
-            ChainsPage::ACTION_CW_BACKFILL => [
+            NftDiscoveryPage::ACTION_CW_BACKFILL => [
                 'CONTACTS THE CHAIN IMMEDIATELY',
                 'one bounded slice',
                 'not a full scan',
@@ -328,7 +400,7 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
                 'arrives unverified',
             ],
             // Retry clears a wait; the work happens on a future pass.
-            ChainsPage::ACTION_CW_RETRY => [
+            NftDiscoveryPage::ACTION_CW_RETRY => [
                 'Nothing is contacted now',
                 'next scheduled pass',
                 'up to 100',
@@ -384,8 +456,8 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
             $this->assertNotSame('Go', $label);
         }
 
-        $this->assertStringContainsString('Pause', $labels[ChainsPage::ACTION_CW_PAUSE]);
-        $this->assertStringContainsString('Resume', $labels[ChainsPage::ACTION_CW_RESUME]);
+        $this->assertStringContainsString('Pause', $labels[NftDiscoveryPage::ACTION_CW_PAUSE]);
+        $this->assertStringContainsString('Resume', $labels[NftDiscoveryPage::ACTION_CW_RESUME]);
     }
 
     // ── Ownership ───────────────────────────────────────────────────────

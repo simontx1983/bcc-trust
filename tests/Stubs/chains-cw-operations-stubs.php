@@ -66,11 +66,50 @@ namespace BCC\Trust\Onchain\Support {
                 return $this->requests;
             }
 
+            // ── READ-ONLY ACCESSORS, COUNTED SEPARATELY ─────────────────
+            //
+            // The run report reads how much of the budget was spent and
+            // whether the clock or the request ceiling ended the pass.
+            // Those are OBSERVATIONS, not participation in the reserve
+            // sequence the worker owns, so they get their own counter —
+            // `$reserveCalls` and `$availableCalls` must stay assertable
+            // as zero, and folding these into them would destroy the one
+            // check that proves the boundary kept its hands off.
+            public static int $readCalls = 0;
+
+            /** What the fake reports as consumed. Tests set it directly. */
+            public static int $spent    = 0;
+            public static bool $timedOut = false;
+
+            public function spent(): int
+            {
+                self::$readCalls++;
+
+                return self::$spent;
+            }
+
+            public function remaining(): int
+            {
+                self::$readCalls++;
+
+                return max(0, $this->requests - self::$spent);
+            }
+
+            public function timedOut(): bool
+            {
+                self::$readCalls++;
+
+                return self::$timedOut;
+            }
+
             public static function reset(): void
             {
                 self::$constructions  = [];
                 self::$reserveCalls   = 0;
                 self::$availableCalls = 0;
+                self::$readCalls      = 0;
+                self::$spent          = 0;
+                self::$timedOut       = false;
             }
         }
     }
@@ -288,6 +327,14 @@ namespace BCC\Trust\Onchain\Workers {
          */
         final class CosmwasmDiscoveryWorker
         {
+            // The pass outcomes, mirroring production. The handler maps
+            // these straight onto its result codes, so a fake that did not
+            // carry them would let the mapping go untested.
+            public const PASS_RAN     = 'ran';
+            public const PASS_LOCKED  = 'locked';
+            public const PASS_SKIPPED = 'skipped';
+            public const PASS_FAILED  = 'failed';
+
             public static int $passes = 0;
 
             /** @var list<?CosmwasmTickBudget> */
@@ -295,14 +342,43 @@ namespace BCC\Trust\Onchain\Workers {
 
             public static ?\Throwable $throws = null;
 
-            public static function runBackfillForChain(int $chainId, ?CosmwasmTickBudget $budget = null): void
-            {
+            /** What the next pass reports. Default: it ran. */
+            public static string $outcome = self::PASS_RAN;
+
+            /** @var list<?object> the report objects the handler passed in */
+            public static array $reports = [];
+
+            /**
+             * Lets a test act on the report the way a real pass would.
+             *
+             * Production records a provider abort ON THE REPORT and still
+             * returns PASS_RAN — that combination is what makes a slice
+             * with budget to spare nevertheless partial. Without a hook the
+             * fake could not reproduce it, and the honesty rule that
+             * depends on it would go untested.
+             *
+             * @var null|callable(?object): void
+             */
+            public static $onRun = null;
+
+            public static function runBackfillForChain(
+                int $chainId,
+                ?CosmwasmTickBudget $budget = null,
+                ?object $report = null
+            ): string {
                 self::$passes++;
                 self::$budgets[] = $budget;
+                self::$reports[] = $report;
+
+                if (self::$onRun !== null) {
+                    (self::$onRun)($report);
+                }
 
                 if (self::$throws !== null) {
                     throw self::$throws;
                 }
+
+                return self::$outcome;
             }
 
             /** Production reads the opt-in with `=== '1'` and nothing else. */
@@ -322,12 +398,100 @@ namespace BCC\Trust\Onchain\Workers {
                 self::$passes  = 0;
                 self::$budgets = [];
                 self::$throws  = null;
+                self::$outcome = self::PASS_RAN;
+                self::$reports = [];
+                self::$onRun   = null;
+            }
+        }
+    }
+}
+
+namespace BCC\Trust\Onchain\Services {
+
+    /**
+     * The chain aggregate the run report brackets its pass with.
+     *
+     * Production reads this BEFORE and AFTER the slice so the report can
+     * show a real delta — and reads the same aggregate the engine table
+     * prints, so the two cannot disagree about what a chain holds.
+     *
+     * `$summaries` is a queue: push a before and an after and the handler
+     * consumes them in order. `$calls` exists so a test can prove the
+     * handler read it exactly twice and not once per row.
+     */
+    if (!class_exists(CosmwasmDiscoveryService::class, false)) {
+        final class CosmwasmDiscoveryService
+        {
+            /** @var list<array<string, mixed>> */
+            public static array $summaries = [];
+
+            public static int $calls = 0;
+
+            /** @return array<string, mixed> */
+            public static function chainSummary(int $chainId): array
+            {
+                self::$calls++;
+
+                return array_shift(self::$summaries) ?? [
+                    'state'           => 'idle',
+                    'families_total'  => 0,
+                    'contracts_total' => 0,
+                ];
+            }
+
+            public static function reset(): void
+            {
+                self::$summaries = [];
+                self::$calls     = 0;
             }
         }
     }
 }
 
 namespace {
+
+    // The run report is parked in an operator-scoped transient between the
+    // POST and the redirect landing, because the PRG allowlist forbids
+    // provider data in the query string. An in-memory store is enough to
+    // prove the round trip, and `$store` is inspectable so a test can
+    // assert what was — and was not — put in it.
+    if (!class_exists('BccNftDiscoveryTransientStore', false)) {
+        final class BccNftDiscoveryTransientStore
+        {
+            /** @var array<string, mixed> */
+            public static array $store = [];
+
+            public static function reset(): void
+            {
+                self::$store = [];
+            }
+        }
+    }
+
+    if (!function_exists('set_transient')) {
+        function set_transient(string $key, $value, int $ttl = 0): bool
+        {
+            \BccNftDiscoveryTransientStore::$store[$key] = $value;
+
+            return true;
+        }
+    }
+
+    if (!function_exists('get_transient')) {
+        function get_transient(string $key)
+        {
+            return \BccNftDiscoveryTransientStore::$store[$key] ?? false;
+        }
+    }
+
+    if (!function_exists('delete_transient')) {
+        function delete_transient(string $key): bool
+        {
+            unset(\BccNftDiscoveryTransientStore::$store[$key]);
+
+            return true;
+        }
+    }
 
     // LAST. Everything above is declared first so the richer fakes win the
     // class_exists guards in the file this pulls in — which in turn loads

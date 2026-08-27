@@ -352,7 +352,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
     // per-chain table moved to Chains ▸ NFT Discovery ▸ CosmWasm / CW-721
     // Discovery, which is now its single owner. The assertions follow the
     // surface — same strings, same singular/plural sentence, checked
-    // against ChainsPage::render_cw_status_row().
+    // against NftDiscoveryPage::render_cw_status_row().
     //
     // The sentence itself moved with them. The new status row already
     // showed "N errored"; the count alone is the half that sends an
@@ -413,7 +413,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
     {
         self::assertFalse(
             method_exists(\BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel::class, 'renderChainRow'),
-            'the per-chain renderer moved to ChainsPage; two copies is what VC-B3b removed'
+            'the per-chain renderer moved to NftDiscoveryPage; two copies is what VC-B3b removed'
         );
     }
 
@@ -421,7 +421,7 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
     private static function renderStatusRow(array $row): string
     {
         $m = new \ReflectionMethod(
-            \BCC\Trust\Onchain\Admin\ChainsPage::class,
+            \BCC\Trust\Onchain\Admin\NftDiscoveryPage::class,
             'render_cw_status_row'
         );
         $m->setAccessible(true);

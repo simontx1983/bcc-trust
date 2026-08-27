@@ -2,9 +2,10 @@
 
 namespace BCC\Trust\Onchain\Admin\Views;
 
-use BCC\Trust\Onchain\Admin\ChainsPage;
+use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
+use BCC\Trust\Onchain\Services\NftDiscoveryControlPlaneSnapshot;
 use BCC\Trust\Onchain\Services\CosmwasmEvidenceNarrator;
 use BCC\Trust\Onchain\Support\ExplorerLinkBuilder;
 
@@ -372,16 +373,20 @@ final class CosmwasmScannerPanel
      */
     private static function renderMovedNotice(): void
     {
+        // NFT Discovery was a sub-tab of Chains and is now its own page.
+        // This link points at the CURRENT location rather than relying on
+        // the compatibility redirect: a notice whose whole job is to say
+        // "it moved" should not send the operator through a forward.
         $url = admin_url(
-            'admin.php?page=' . ChainsPage::PAGE_SLUG
-            . '&subtab=' . ChainsPage::SUBTAB_NFT_DISCOVERY
+            'admin.php?page=' . NftDiscoveryPage::PAGE_SLUG
+            . '&family=' . NftDiscoveryControlPlaneSnapshot::FAMILY_COSMOS
         );
         ?>
         <div class="notice notice-info inline bcc-cw-scanner-moved" style="margin:12px 0 4px 0;">
             <p style="margin:8px 0;">
                 <strong>Per-chain scanner status and controls have moved.</strong>
-                Per-chain CosmWasm/CW-721 scanner status and controls now live under
-                <strong>Chains ▸ NFT Discovery</strong>. Aggregate discovery totals
+                Per-chain CosmWasm/CW-721 scanner status and controls now live on the
+                <strong>NFT Discovery</strong> page. Aggregate discovery totals
                 remain here.
             </p>
             <p style="margin:8px 0;color:#646970;font-size:12px;">

@@ -390,30 +390,76 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
     }
 
     /**
-     * Nothing calls the verdict yet.
+     * ONLY the discovery control plane consults the verdict.
      *
-     * `NftChainCapability` is referenced only by its own file and by the
-     * classes it documents itself against. No admin page, REST endpoint,
-     * controller, service or worker consults it — which is exactly what
-     * "scaffold, unread" means and what makes this PR safe to ship at
-     * DEFAULT 0.
+     * ── THIS LIST WENT FROM EMPTY TO THREE, DELIBERATELY ────────────────
+     * While the capability model was a scaffold the answer here was NO
+     * FILES AT ALL, and that emptiness was what made shipping it safe at
+     * `DEFAULT 0`: a model nothing reads cannot refuse anything it should
+     * not, and cannot grant anything either.
+     *
+     * The admin control plane is the first consumer, so the list now names
+     * exactly the files that may read it:
+     *
+     *   NftDiscoveryPage                  the surface — displays the
+     *                                     statuses, and gates its one
+     *                                     provider-consuming control on
+     *                                     the enumeration operation
+     *   NftDiscoveryControlPlaneSnapshot  builds the finished rows the
+     *                                     page prints
+     *
+     * The model's OWN file is absent, and that is not an oversight: inside
+     * it every reference is `self::`, which this needle does not match.
+     *
+     * ── WHY IT IS STILL AN EXPLICIT LIST ────────────────────────────────
+     * The point of this test never was "zero"; it was that the set of
+     * consumers is small, known, and changes only on purpose. A fourth
+     * file appearing here is a review question — especially a worker, a
+     * cron callback or a REST endpoint, none of which may start a
+     * discovery.
+     *
+     * Asserted as an explicit equality rather than a foreach, because a
+     * loop over a list asserts nothing about entries it never sees.
      */
-    public function testNoAdminRestOrWorkerCallsTheVerdictYet(): void
+    public function testOnlyTheDiscoveryControlPlaneConsultsTheVerdict(): void
     {
         // `NftChainCapability::` — a static CALL or constant read, not the
         // bare class name, which also appears in `@see` docblocks pointing
         // readers at the consumer of a value.
-        //
-        // The expected answer today is NO FILES AT ALL: inside the class
-        // itself every reference is `self::`. Asserted as an explicit
-        // equality rather than a foreach, because a loop over an empty list
-        // asserts nothing and would keep passing if the list later filled up
-        // with something the loop no longer ran over.
         self::assertSame(
-            [],
+            [
+                'app/Domain/Onchain/Admin/NftDiscoveryPage.php',
+                'app/Domain/Onchain/Services/NftDiscoveryControlPlaneSnapshot.php',
+            ],
             self::filesContaining('NftChainCapability::'),
-            'nothing in production may consult the verdict while PR 2 is a scaffold'
+            'only the NFT discovery control plane may consult the capability model'
         );
+    }
+
+    /**
+     * And no WORKER, CRON CALLBACK or REST ENDPOINT is among them.
+     *
+     * The list above is reviewed by eye; this is the part of it that must
+     * never change without a very deliberate argument. A discovery that can
+     * be started by anything other than a logged-in administrator pressing
+     * a button is the failure the automatic-discovery retirement removed,
+     * and the capability model is exactly what such a caller would reach
+     * for first.
+     */
+    public function testNothingOutsideAdminAndItsSnapshotConsultsTheVerdict(): void
+    {
+        foreach (self::filesContaining('NftChainCapability::') as $path) {
+            $isAdminSurface = str_contains($path, '/Admin/')
+                || str_contains($path, 'NftDiscoveryControlPlaneSnapshot.php')
+                || str_contains($path, 'Support/NftChainCapability.php');
+
+            self::assertTrue(
+                $isAdminSurface,
+                $path . ' consults the capability model but is not the admin control plane'
+            );
+            self::assertStringNotContainsString('/Workers/', $path);
+            self::assertStringNotContainsString('/REST/', $path);
+        }
     }
 
     // ── Withdrawn designs must not reappear ─────────────────────────────
