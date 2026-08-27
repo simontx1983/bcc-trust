@@ -2,6 +2,7 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
 if (!defined('ABSPATH')) {
@@ -447,7 +448,7 @@ class SettingsPage
 
         $chains = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive();
         foreach ($chains as $chain) {
-            $flag = get_option('bcc_onchain_das_unsupported_' . (int) $chain->id, null);
+            $flag = get_option(HeliusEndpoint::dasUnsupportedOptionKey((int) $chain->id), null);
             if (!is_array($flag)) {
                 continue;
             }

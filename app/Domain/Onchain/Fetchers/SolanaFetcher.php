@@ -9,6 +9,8 @@ if (!defined('ABSPATH')) {
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\HeliusEndpoint;
+use BCC\Trust\Onchain\Support\SolanaEndpoints;
 
 /**
  * Solana Chain Fetcher
@@ -22,7 +24,6 @@ use BCC\Trust\Onchain\Support\ApiRetry;
 class SolanaFetcher implements FetcherInterface
 {
     private const HTTP_TIMEOUT = 30;
-    private const SOLANA_RPC   = 'https://api.mainnet-beta.solana.com';
 
     /** @var ChainRow */
     private object $chain;
@@ -36,9 +37,17 @@ class SolanaFetcher implements FetcherInterface
         $this->chain = $chain;
     }
 
+    /**
+     * The endpoint every rpcCall() goes to.
+     *
+     * Resolution moved to {@see SolanaEndpoints::rpcEndpoint()} — including
+     * the public-default fallback — because NftProviderReadiness has to
+     * describe THIS endpoint, and a second copy of the fallback rule would
+     * let the description drift from the call. The behaviour is unchanged.
+     */
     private function rpcUrl(): string
     {
-        return $this->chain->rpc_url ?? self::SOLANA_RPC;
+        return SolanaEndpoints::rpcEndpoint($this->chain);
     }
 
     /** @return ChainRow */
@@ -330,22 +339,29 @@ class SolanaFetcher implements FetcherInterface
      * BCC_HELIUS_RPC_URL constant; falls back to the canonical
      * `https://mainnet.helius-rpc.com/?api-key=...` shape using
      * BCC_HELIUS_API_KEY. Returns null when neither is configured.
+     *
+     * ── THE RESOLUTION MOVED; THE BEHAVIOUR DID NOT ─────────────────────
+     * It now lives in {@see HeliusEndpoint}, unchanged, because
+     * {@see \BCC\Trust\Onchain\Support\NftProviderReadiness} must report
+     * whether the `das_helius` driver is usable and has to get EXACTLY the
+     * answer this fetcher would act on. A second copy of the
+     * constant-reading logic would drift, and the drift would be silent:
+     * readiness would say configured while every call returned nothing.
+     *
+     * `das_helius` is the METADATA path only — `getAsset`, reached from
+     * {@see fetchMetadataForMint()}. The `getAssetsByOwner` calls behind
+     * wallet discovery and ownership are a DIFFERENT driver, `das_rpc`,
+     * because they go through {@see rpcCall()} to the chain row's `rpc_url`
+     * and never touch these constants. See {@see SolanaEndpoints}.
+     *
+     * Note the shared implementation keeps the non-empty checks. `defined()`
+     * alone is not configuration — `define('BCC_HELIUS_API_KEY', '')` is
+     * defined and useless, and reading it as configured would mark a chain
+     * ready for work it cannot perform.
      */
     private static function resolveHeliusRpcUrl(): ?string
     {
-        if (defined('BCC_HELIUS_RPC_URL')) {
-            $url = (string) constant('BCC_HELIUS_RPC_URL');
-            if ($url !== '') {
-                return $url;
-            }
-        }
-        if (defined('BCC_HELIUS_API_KEY')) {
-            $key = (string) constant('BCC_HELIUS_API_KEY');
-            if ($key !== '') {
-                return 'https://mainnet.helius-rpc.com/?api-key=' . rawurlencode($key);
-            }
-        }
-        return null;
+        return SolanaEndpoints::metadataEndpoint();
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -917,7 +933,7 @@ class SolanaFetcher implements FetcherInterface
     private static function markDasUnsupported(int $chainId, string $rpcUrl, int $code, string $message): void
     {
         update_option(
-            'bcc_onchain_das_unsupported_' . $chainId,
+            HeliusEndpoint::dasUnsupportedOptionKey($chainId),
             [
                 'rpc_url'     => $rpcUrl,
                 'code'        => $code,
@@ -937,10 +953,10 @@ class SolanaFetcher implements FetcherInterface
      */
     private static function redactRpcUrl(string $url): string
     {
-        $queryPos = strpos($url, '?');
-        if ($queryPos === false) {
-            return $url;
-        }
-        return substr($url, 0, $queryPos) . '?***REDACTED***';
+        // Shared with NftProviderReadiness, which must put the CURRENT
+        // endpoint through the identical transformation to decide whether a
+        // stored mark still describes it. Two copies would drift, and the
+        // drift would silently make every stored mark un-matchable.
+        return HeliusEndpoint::redactEndpoint($url);
     }
 }

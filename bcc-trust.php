@@ -289,6 +289,10 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-holdings.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-pieces.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-chain-checkpoints.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-nft-spam-contracts.php';
+// Per-chain NFT driver OVERRIDES. Narrow-only: rows disable or reorder
+// drivers the code registry already offers and can never grant a new one.
+// Empty on every install — an absent row means "registry default".
+require_once BCC_TRUST_PATH . 'includes/database/schema-chain-nft-capabilities.php';
 // CosmWasm CW-721 discovery (2026-08) — durable code-family inventory +
 // contract inventory. See each schema file's docblock for the five-table
 // division of responsibility and why non-NFT / inconclusive candidates
@@ -408,6 +412,14 @@ function bcc_onchain_ensure_schema(): void {
     // DEFAULT 0 with NO backfill: running this migration enables discovery
     // on exactly zero chains.
     bcc_onchain_add_chains_cosmwasm_discovery_column();
+    // Per-chain NFT capability model (PR 2). Two TINYINT(1) NOT NULL
+    // DEFAULT 0 columns — BCC product support, and permission to start an
+    // administrator-initiated discovery — plus the narrow-only driver
+    // override table below. THIS ENABLES NOTHING: there is no backfill and
+    // no UPDATE ... SET ... = 1 anywhere in either migration, so every
+    // existing row lands at 0 and behaviour is unchanged.
+    bcc_onchain_add_chains_nft_capability_columns();
+    bcc_onchain_create_chain_nft_capabilities_table();
 
     // Signals table is owned by SignalRepository — included here so its
     // column-type migrations run on version bump, not just on fresh

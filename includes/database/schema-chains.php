@@ -13,6 +13,10 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// Shared "does this exist, or could I not tell?" probe — see schema-probe.php
+// for why an unreadable probe must never be read as absence.
+require_once __DIR__ . '/schema-probe.php';
+
 /**
  * Table name helper.
  */
@@ -22,6 +26,15 @@ function bcc_onchain_chains_table(): string {
 
 /**
  * Create the chains table and seed default chains.
+ *
+ * The three NFT flags — `cosmwasm_nft_discovery_enabled`,
+ * `bcc_supports_nft_collections` and `manual_collection_discovery_enabled` —
+ * are ALL `DEFAULT 0`, and nothing in this file, the seed loop, or the
+ * migrations below ever sets any of them to 1. Installing the plugin
+ * therefore grants zero NFT capability on zero chains; every enablement is
+ * an explicit operator act. The two capability columns are documented in
+ * full on {@see bcc_onchain_add_chains_nft_capability_columns()}, which is
+ * how EXISTING installs acquire them — fresh installs get them here.
  *
  * `cosmwasm_nft_discovery_enabled` is DEFAULT 0 deliberately. It is the
  * per-chain operator opt-in for the CosmWasm CW-721 scanner
@@ -58,6 +71,8 @@ function bcc_onchain_create_chains_table(): void {
         is_testnet TINYINT(1) NOT NULL DEFAULT 0,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
         cosmwasm_nft_discovery_enabled TINYINT(1) NOT NULL DEFAULT 0,
+        bcc_supports_nft_collections TINYINT(1) NOT NULL DEFAULT 0,
+        manual_collection_discovery_enabled TINYINT(1) NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         UNIQUE KEY slug (slug),
@@ -479,6 +494,194 @@ function bcc_onchain_add_chains_cosmwasm_discovery_column(): void {
     // TTL, with no way to tell the two apart.
     if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')) {
         \BCC\Trust\Onchain\Repositories\ChainRepository::clearCache();
+    }
+}
+
+/**
+ * Add the two per-chain NFT capability columns to bcc_onchain_chains
+ * (idempotent).
+ *
+ * ── TWO DIFFERENT KINDS OF FACT, TWO COLUMNS ────────────────────────────
+ *   `bcc_supports_nft_collections`
+ *       BCC's PRODUCT decision — "we support NFT collections on this chain".
+ *       It is NEVER a claim about the blockchain. A chain can be perfectly
+ *       capable of CW-721 and still sit at 0 because BCC has not taken it on.
+ *
+ *   `manual_collection_discovery_enabled`
+ *       PERMISSION to start an administrator-initiated discovery. NO CRON
+ *       READS IT, and after the automatic-discovery retirement there is no
+ *       cron left that could: every recurring discovery hook was removed and
+ *       cannot re-arm. This column can therefore only ever be consulted by a
+ *       human-initiated action.
+ *
+ * They are separate columns because they answer to different people. Fusing
+ * them would mean an operator granting permission implicitly asserted
+ * product support, and a product decision implicitly armed a button.
+ *
+ * TECHNICAL capability is deliberately NOT here. It stays MEASURED
+ * (`wp_bcc_chain_checkpoints.cw_discovery_state = 'unsupported'`, an observed
+ * HTTP 501) or DERIVED (the code-owned driver registry, and per-driver
+ * provider readiness computed at read time). A hand-maintained "this chain
+ * can do NFTs" column would let an operator assert a wasm module that is not
+ * there, and the measured 501 would have nowhere to be recorded.
+ *
+ * ── THIS MIGRATION ENABLES NOTHING ──────────────────────────────────────
+ * `NOT NULL DEFAULT 0` on both means every pre-existing row lands at 0
+ * without a backfill statement, so running this on a live install changes
+ * zero behaviour — deliberately. There is no `UPDATE ... SET ... = 1` here
+ * and there must never be one; the seed-time `WHERE ... IS NULL` backfills
+ * earlier in this file exist to author CONTENT, not to grant capability.
+ *
+ * ── WHY THERE IS NO "STILL ZERO" POSTCONDITION ──────────────────────────
+ * It is tempting to assert `COUNT(*) WHERE ... = 1` is 0 afterwards. That
+ * assertion is true only on the first run, and this migration runs on every
+ * schema-version bump forever. Once a later change legitimately enables a
+ * chain, a permanent zero-count check would report correct configuration as
+ * a migration failure — and the obvious "fix" would be to zero the column,
+ * silently reverting an operator's decision on every deploy.
+ *
+ * SHAPE is the permanent invariant and is what gets verified: the column
+ * exists, is TINYINT, is NOT NULL, and defaults to 0. "Nobody has enabled
+ * anything yet" is a fact about a moment, and it is pinned where moments
+ * belong — in the integration test that observes a fresh install.
+ *
+ * Same idempotent ALTER shape as
+ * {@see bcc_onchain_add_chains_cosmwasm_discovery_column()}: an
+ * INFORMATION_SCHEMA existence probe gates the ADD because
+ * `ADD COLUMN IF NOT EXISTS` is unavailable on MariaDB < 10.0 / MySQL
+ * < 8.0.29.
+ */
+function bcc_onchain_add_chains_nft_capability_columns(): void {
+    global $wpdb;
+
+    $chains_table = \BCC\Core\DB\DB::table('chains');
+
+    // Ordered so each lands directly after the existing per-chain NFT flag,
+    // keeping the three capability/permission columns adjacent in DESCRIBE.
+    $columns = [
+        'bcc_supports_nft_collections'        => 'cosmwasm_nft_discovery_enabled',
+        'manual_collection_discovery_enabled' => 'bcc_supports_nft_collections',
+    ];
+
+    $changed = false;
+
+    foreach ($columns as $column => $after) {
+        $columnExists = bcc_onchain_probe_count(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME   = %s
+                AND COLUMN_NAME  = %s
+              LIMIT 1",
+            [$chains_table, $column]
+        );
+
+        // An unreadable probe is NOT absence. Skipping is the fail-closed
+        // move: a column we could not see may well exist, and re-adding it
+        // would error; a column that truly is missing is picked up on the
+        // next run, when the database is readable again.
+        if ($columnExists === null) {
+            \BCC\Core\Log\Logger::error(
+                '[schema-chains] could not verify NFT capability column; treating as UNVERIFIED, not absent',
+                ['table' => $chains_table, 'column' => $column]
+            );
+            continue;
+        }
+
+        if ($columnExists === 0) {
+            // `wpdb::query()` returns 0 on a successful DDL statement, so
+            // `=== false` is the only correct failure test.
+            $added = $wpdb->query(
+                "ALTER TABLE {$chains_table}
+                 ADD COLUMN {$column} TINYINT(1) NOT NULL DEFAULT 0 AFTER {$after}"
+            );
+            if ($added === false) {
+                \BCC\Core\Log\Logger::error(
+                    '[schema-chains] failed to add NFT capability column',
+                    ['table' => $chains_table, 'column' => $column, 'db_error' => $wpdb->last_error]
+                );
+                continue;
+            }
+            $changed = true;
+        }
+
+        bcc_onchain_verify_tinyint_default_zero($chains_table, $column);
+    }
+
+    // AF-6 — ALWAYS clear, not only when this run changed something.
+    //
+    // The projection is cached for five minutes across the object cache AND
+    // a shared transient. Both readers of these columns treat an ABSENT
+    // property as "cannot say" and refuse, which is the right fail-closed
+    // answer and also completely silent: a stale pre-migration projection is
+    // indistinguishable, from the outside, from "the operator enabled
+    // nothing". Clearing unconditionally costs one cache miss; not clearing
+    // costs a wrong answer nobody can see.
+    unset($changed);
+    if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')) {
+        \BCC\Trust\Onchain\Repositories\ChainRepository::clearCache();
+    }
+}
+
+if (!function_exists('bcc_onchain_verify_tinyint_default_zero')) {
+    /**
+     * Verify a column's SHAPE — the part of a migration's postcondition that
+     * stays true forever.
+     *
+     * Checks type, nullability and default rather than any row VALUES, for
+     * the reason spelled out in
+     * {@see bcc_onchain_add_chains_nft_capability_columns()}: a later change
+     * may legitimately set these columns to 1, and a value-based
+     * postcondition would then flag correct configuration as breakage.
+     *
+     * Reports and returns; it never rewrites the column. A shape mismatch on
+     * a live install is something to look at, not something to "repair"
+     * automatically underneath an operator.
+     */
+    function bcc_onchain_verify_tinyint_default_zero(string $table, string $column): void {
+        global $wpdb;
+
+        $prepared = $wpdb->prepare(
+            "SELECT DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+               FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME   = %s
+                AND COLUMN_NAME  = %s
+              LIMIT 1",
+            $table,
+            $column
+        );
+        if (!is_string($prepared) || $prepared === '') {
+            return;
+        }
+
+        /** @var object{DATA_TYPE: string, IS_NULLABLE: string, COLUMN_DEFAULT: string|null}|null $row */
+        $row = $wpdb->get_row($prepared);
+
+        if ($row === null) {
+            \BCC\Core\Log\Logger::error(
+                '[schema-chains] NFT capability column missing or unreadable after migration',
+                ['table' => $table, 'column' => $column]
+            );
+            return;
+        }
+
+        $isTinyint  = strtolower((string) $row->DATA_TYPE) === 'tinyint';
+        $isNotNull  = strtoupper((string) $row->IS_NULLABLE) === 'NO';
+        $defaultsTo = $row->COLUMN_DEFAULT;
+        $isZero     = $defaultsTo !== null && (int) $defaultsTo === 0;
+
+        if (!$isTinyint || !$isNotNull || !$isZero) {
+            \BCC\Core\Log\Logger::error(
+                '[schema-chains] NFT capability column has an unexpected shape',
+                [
+                    'table'       => $table,
+                    'column'      => $column,
+                    'data_type'   => (string) $row->DATA_TYPE,
+                    'is_nullable' => (string) $row->IS_NULLABLE,
+                    'default'     => $defaultsTo,
+                ]
+            );
+        }
     }
 }
 

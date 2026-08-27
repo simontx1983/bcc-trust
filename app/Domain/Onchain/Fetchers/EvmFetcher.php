@@ -12,6 +12,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Services\NftSpamFilter;
 use BCC\Trust\Onchain\Services\V1FetchFailureTracker;
+use BCC\Trust\Onchain\Support\AlchemyEndpoint;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 
@@ -979,17 +980,25 @@ class EvmFetcher implements FetcherInterface
             return null;
         }
 
-        // Derive the NFT v3 base from the JSON-RPC URL. Anchored regex
-        // so a non-Alchemy rpc_url (custom RPC, public node) returns null
-        // rather than producing a malformed request.
-        if (!preg_match(
-            '#^(https://[a-z0-9-]+\.g\.alchemy\.com)/v2/([A-Za-z0-9_-]+)/?$#',
-            $rpcUrl,
-            $m
-        )) {
+        // Derive the NFT v3 base from the JSON-RPC URL. Anchored so a
+        // non-Alchemy rpc_url (custom RPC, public node) returns null rather
+        // than producing a malformed request.
+        //
+        // ── THIS USED TO BE A SECOND, SLIGHTLY DIFFERENT REGEX ──────────
+        // Until this change the method carried its own copy, matching the
+        // host as `[a-z0-9-]+` where fetch_collections() used `[a-z0-9.-]+`.
+        // Two hand-maintained copies of one predicate had already drifted:
+        // an Alchemy host with a dotted label was accepted by one method and
+        // rejected by the other, so the SAME chain could enrich metadata but
+        // not discover collections, or the reverse, with nothing to explain
+        // why. Consolidated onto the shared definition — which is the more
+        // permissive of the two, and safe because the pattern is anchored at
+        // both ends on a fixed `.g.alchemy.com` suffix, so a dotted label
+        // still cannot escape the domain and leak the key elsewhere.
+        $nftV3Base = AlchemyEndpoint::nftBaseFromRpcUrl($rpcUrl);
+        if ($nftV3Base === null) {
             return null;
         }
-        $nftV3Base = $m[1] . '/nft/v3/' . $m[2];
 
         $url = $nftV3Base . '/getContractMetadata?contractAddress=' . rawurlencode($contractLc);
 
@@ -1100,16 +1109,24 @@ class EvmFetcher implements FetcherInterface
      * bsc-dataseed.binance.org) flow this branch and the caller
      * fail-loud-and-empties for the chain. Strict regex prevents
      * api-key leakage to non-Alchemy hosts.
+     *
+     * ── THE REGEX MOVED; THE BEHAVIOUR DID NOT ──────────────────────────
+     * The pattern now lives in {@see AlchemyEndpoint}, unchanged, because a
+     * SECOND caller needs the identical answer:
+     * {@see \BCC\Trust\Onchain\Support\NftProviderReadiness} reports whether
+     * the Alchemy-backed NFT drivers are usable on a chain. Had that been
+     * written as its own copy of this regex, the capability panel and this
+     * fetcher would have been two hand-maintained definitions of one
+     * predicate — and a panel that says "Alchemy configured" while
+     * `fetch_collections()` returns `[]` for the same chain is worse than no
+     * panel, because it gets believed.
+     *
+     * This method stays as the fetcher's local vocabulary; it just no longer
+     * owns the fact.
      */
     private function alchemyNftBaseFromRpcUrl(string $rpcUrl): ?string
     {
-        if ($rpcUrl === '') {
-            return null;
-        }
-        if (!preg_match('~^(https://[a-z0-9.-]+\.g\.alchemy\.com)/v2/([A-Za-z0-9_-]+)/?$~', $rpcUrl, $m)) {
-            return null;
-        }
-        return $m[1] . '/nft/v3/' . $m[2];
+        return AlchemyEndpoint::nftBaseFromRpcUrl($rpcUrl);
     }
 
     /**
