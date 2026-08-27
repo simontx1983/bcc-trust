@@ -212,20 +212,15 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
     // ── Rung 2: a capability column is absent ───────────────────────────
 
-    /** @return array<string, array{0: string}> */
-    public static function capabilityColumns(): array
-    {
-        return [
-            'product support' => ['bcc_supports_nft_collections'],
-            'manual permission' => ['manual_collection_discovery_enabled'],
-        ];
-    }
-
-    #[DataProvider('capabilityColumns')]
-    public function testAnAbsentCapabilityColumnMakesEveryOperationUnknown(string $column): void
+    /**
+     * The PRODUCT column is global: it says whether BCC supports NFT
+     * collections on this chain at all, so an install that cannot store it
+     * cannot describe any operation.
+     */
+    public function testAnAbsentProductColumnMakesEveryOperationUnknown(): void
     {
         $chain = self::cosmos();
-        unset($chain->{$column});
+        unset($chain->bcc_supports_nft_collections);
 
         foreach (NftChainCapability::operationMatrix($chain)['operations'] as $operation => $row) {
             self::assertSame(
@@ -237,27 +232,93 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
     }
 
     /**
-     * The manual permission is read for EVERY operation, not only the one
-     * it gates.
-     *
-     * An install whose projection cannot carry the permission cannot
-     * describe itself, and reporting the other five operations as
-     * confidently ready would be a half-answer.
+     * The MANUAL column is scoped: it is permission to START a discovery,
+     * so an install that cannot store it cannot say whether one may be
+     * started — and that is the whole of what it cannot say.
      */
-    public function testAnAbsentManualColumnIsNotShruggedOffForNonStartedOperations(): void
+    public function testAnAbsentManualColumnMakesTheStartedOperationUnknown(): void
     {
         $chain = self::cosmos();
         unset($chain->manual_collection_discovery_enabled);
 
+        $row = self::op($chain, NftDriverRegistry::OP_ENUMERATION);
+
+        self::assertSame(NftChainCapability::OP_UNKNOWN, $row['status']);
+        self::assertSame(NftChainCapability::REASON_MANUAL_COLUMN_ABSENT, $row['reason']);
+    }
+
+    /**
+     * ⚠️ AND IT LEAVES THE OTHERS ALONE.
+     *
+     * Nothing but the operator-started operations reads this column.
+     * Marking metadata, ownership, validation, curated feeds and wallet
+     * discovery `UNKNOWN` because of it blamed five working operations on
+     * a switch none of them consults — and on a stock install, where the
+     * column is present but the projection could stop carrying it, that
+     * would black out the entire page.
+     */
+    public function testAnAbsentManualColumnDoesNotMakeNonStartedOperationsUnknown(): void
+    {
+        $chain = self::cosmos();
+        unset($chain->manual_collection_discovery_enabled);
+
+        $matrix = NftChainCapability::operationMatrix($chain)['operations'];
+
+        foreach (NftDriverRegistry::operations() as $operation) {
+            if ($operation === NftDriverRegistry::OP_ENUMERATION) {
+                continue;
+            }
+
+            self::assertNotSame(
+                NftChainCapability::REASON_MANUAL_COLUMN_ABSENT,
+                $matrix[$operation]['reason'],
+                "{$operation} must not be refused by a column it never reads"
+            );
+        }
+
+        // The LCD-backed ones answer for themselves, and answer READY.
         self::assertSame(
-            NftChainCapability::OP_UNKNOWN,
-            self::op($chain, NftDriverRegistry::OP_METADATA)['status']
+            NftChainCapability::OP_READY,
+            $matrix[NftDriverRegistry::OP_METADATA]['status']
         );
+        self::assertSame(
+            NftChainCapability::OP_READY,
+            $matrix[NftDriverRegistry::OP_OWNERSHIP]['status']
+        );
+        self::assertSame(
+            NftChainCapability::OP_READY,
+            $matrix[NftDriverRegistry::OP_VALIDATION]['status']
+        );
+    }
+
+    /**
+     * Permission FALSE refuses the started operation and, again, only it.
+     */
+    public function testManualPermissionFalseRefusesOnlyTheStartedOperation(): void
+    {
+        $matrix = NftChainCapability::operationMatrix(self::cosmos(true, false))['operations'];
+
+        self::assertSame(
+            NftChainCapability::OP_MANUAL_DISABLED,
+            $matrix[NftDriverRegistry::OP_ENUMERATION]['status']
+        );
+
+        foreach ([
+            NftDriverRegistry::OP_METADATA,
+            NftDriverRegistry::OP_OWNERSHIP,
+            NftDriverRegistry::OP_VALIDATION,
+        ] as $operation) {
+            self::assertSame(
+                NftChainCapability::OP_READY,
+                $matrix[$operation]['status'],
+                "{$operation} must not be refused by the manual-START permission"
+            );
+        }
     }
 
     // ── Rung 3: the measured refusal, and where it sits ─────────────────
 
-    public function testAMeasuredRefusalRefusesEveryOperationOnACosmosChain(): void
+    public function testAMeasuredRefusalRefusesEnumeration(): void
     {
         ChainCheckpointRepository::seedCwState(
             self::CHAIN_ID,
@@ -274,6 +335,91 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         self::assertSame(
             NftChainCapability::REASON_MEASURED_NO_WASM,
             $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['reason']
+        );
+    }
+
+    /**
+     * ⚠️ AND IT REFUSES NOTHING ELSE.
+     *
+     * `cw_discovery_state` is evidence about whether the wasm module can be
+     * WALKED to enumerate the chain. A chain with no wasm module can still
+     * validate a CW-721 contract an operator hands us, report its owner and
+     * return its metadata — those go through `cw721_lcd`, which needs an
+     * LCD endpoint and never touches the code listing.
+     *
+     * An earlier version of this model marked all six operations
+     * `CHAIN_UNSUPPORTED` from this one measurement, calling a chain wholly
+     * incapable on the strength of a fact about one of its operations. The
+     * test that covered it claimed "every operation" in its name while
+     * asserting only enumeration, so the over-reach was invisible.
+     */
+    public function testAMeasuredRefusalDoesNotRefuseAnyOtherOperation(): void
+    {
+        ChainCheckpointRepository::seedCwState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+
+        $matrix = NftChainCapability::operationMatrix(self::cosmos());
+
+        foreach ($matrix['operations'] as $operation => $row) {
+            if ($operation === NftDriverRegistry::OP_ENUMERATION) {
+                continue;
+            }
+
+            self::assertNotSame(
+                NftChainCapability::OP_CHAIN_UNSUPPORTED,
+                $row['status'],
+                "{$operation} must not inherit a measurement about the code listing"
+            );
+            self::assertNotSame(NftChainCapability::REASON_MEASURED_NO_WASM, $row['reason']);
+        }
+    }
+
+    /**
+     * Each non-enumeration operation gets the answer ITS OWN drivers and
+     * readiness dictate — the same answer it would have with no
+     * measurement present at all.
+     *
+     * Asserted as an equality against the unmeasured chain rather than as a
+     * list of "not this": that catches a measurement leaking into any
+     * status, including one this test did not think to name.
+     */
+    public function testNonEnumerationOperationsAreUnchangedByTheMeasurement(): void
+    {
+        $withoutMeasurement = NftChainCapability::operationMatrix(self::cosmos())['operations'];
+
+        ChainCheckpointRepository::seedCwState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+        $withMeasurement = NftChainCapability::operationMatrix(self::cosmos())['operations'];
+
+        foreach (NftDriverRegistry::operations() as $operation) {
+            if ($operation === NftDriverRegistry::OP_ENUMERATION) {
+                continue;
+            }
+
+            self::assertSame(
+                $withoutMeasurement[$operation]['status'],
+                $withMeasurement[$operation]['status'],
+                "{$operation} changed answer because of a measurement that does not describe it"
+            );
+        }
+
+        // And the LCD-backed operations really are answering for
+        // themselves, so the equality above is not two refusals matching.
+        self::assertSame(
+            NftChainCapability::OP_READY,
+            $withMeasurement[NftDriverRegistry::OP_VALIDATION]['status']
+        );
+        self::assertSame(
+            NftChainCapability::OP_READY,
+            $withMeasurement[NftDriverRegistry::OP_METADATA]['status']
+        );
+        self::assertSame(
+            NftChainCapability::OP_READY,
+            $withMeasurement[NftDriverRegistry::OP_OWNERSHIP]['status']
         );
     }
 

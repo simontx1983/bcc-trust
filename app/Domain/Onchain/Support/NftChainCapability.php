@@ -353,18 +353,39 @@ final class NftChainCapability
      *
      * ── THE LADDER, AND HOW IT DIFFERS FROM verdict() ───────────────────
      *
-     *   1. overrides unavailable         OP_UNKNOWN
-     *   2. a capability column is absent OP_UNKNOWN
-     *   3. measured no wasm module       OP_CHAIN_UNSUPPORTED
-     *   4. product support off           OP_NO_BCC_SUPPORT
-     *   5. no registered driver          OP_NO_DRIVER
-     *   6. every driver overridden off   OP_DISABLED
-     *   7. manual permission off         OP_MANUAL_DISABLED  (started ops only)
-     *   8. no ready driver               OP_PROVIDER_UNAVAILABLE
-     *   9.                               OP_READY
+     *   1. overrides unavailable         OP_UNKNOWN               GLOBAL
+     *   2. product column absent         OP_UNKNOWN               GLOBAL
+     *   3. manual column absent          OP_UNKNOWN               started ops
+     *   4. measured no wasm module       OP_CHAIN_UNSUPPORTED     enumeration
+     *   5. product support off           OP_NO_BCC_SUPPORT        GLOBAL
+     *   6. no registered driver          OP_NO_DRIVER
+     *   7. every driver overridden off   OP_DISABLED
+     *   8. manual permission off         OP_MANUAL_DISABLED       started ops
+     *   9. no ready driver               OP_PROVIDER_UNAVAILABLE
+     *  10.                               OP_READY
      *
-     * (1) and (2) come BEFORE (3), and that is the one deliberate departure
-     * from {@see verdict()}, which names the measured refusal first.
+     * ── A DISCOVERY-ONLY FACT REFUSES DISCOVERY, AND NOTHING ELSE ───────
+     * Rungs (3), (4) and (8) are SCOPED, and the scopes are not identical.
+     *
+     * (4) is enumeration only. `cw_discovery_state` is evidence about
+     * whether the wasm module can be walked; a chain with no wasm module
+     * can still validate a contract, report an owner and return metadata
+     * through drivers that never touch it. Marking all six operations
+     * `CHAIN_UNSUPPORTED` on that one measurement called a chain wholly
+     * incapable on the strength of a fact about one of its operations.
+     *
+     * (3) and (8) are operator-started operations only — a LIST, not one
+     * name. `manual_collection_discovery_enabled` is permission to START
+     * something; nothing else reads it, so nothing else may be refused by
+     * it being false OR absent.
+     *
+     * (1), (2) and (5) stay global: an unreadable override store means
+     * operator intent is unknown for every driver on the chain, and the
+     * product decision is about the chain rather than any one operation.
+     *
+     * ── AND THE ORDERING THAT DIFFERS FROM verdict() ────────────────────
+     * (1)–(3) come BEFORE (4), which is the deliberate departure from
+     * {@see verdict()}, which names the measured refusal first.
      *
      * The reason is what each answer is FOR. `verdict()` produces a decision,
      * and for a decision the measured 501 is the most useful thing to say
@@ -452,10 +473,32 @@ final class NftChainCapability
 
             $operatorStarted = in_array($operation, self::OPERATOR_STARTED_OPERATIONS, true);
 
+            // ── TWO SCOPES, AND THEY ARE NOT THE SAME SCOPE ─────────────
+            //
+            // `cw_discovery_state = unsupported` is evidence about ONE
+            // thing: whether the CosmWasm module can be walked to enumerate
+            // the chain. It says nothing about reading a token's metadata,
+            // checking an owner, or validating a contract somebody handed
+            // us — all of which keep working on a chain with no wasm
+            // module, through drivers that never touch it.
+            //
+            // The manual permission is scoped differently again: it is
+            // permission to START something, so it binds the operations an
+            // administrator can start — which is a list, not one name.
+            //
+            // Today both scopes contain exactly `enumeration`, so they
+            // could have been collapsed into one flag. They are kept apart
+            // because they answer different questions, and a second
+            // operator-started operation that does not depend on wasm would
+            // otherwise silently inherit a refusal that has nothing to do
+            // with it.
+            $measurementApplies = $operation === NftDriverRegistry::OP_ENUMERATION;
+
             [$status, $reason] = self::operationStatus(
                 $available,
                 $overrides->reason(),
                 $measuredUnsupported,
+                $measurementApplies,
                 $bccSupports,
                 $manualEnabled,
                 $operatorStarted,
@@ -519,6 +562,7 @@ final class NftChainCapability
         bool $overridesAvailable,
         ?string $overridesReason,
         bool $measuredUnsupported,
+        bool $measurementApplies,
         ?bool $bccSupportsNft,
         ?bool $manualEnabled,
         bool $operatorStarted,
@@ -526,6 +570,7 @@ final class NftChainCapability
         array $drivers,
         array $ready
     ): array {
+        // ── GLOBAL: nothing can be said about this chain at all ─────────
         if (!$overridesAvailable) {
             return [
                 self::OP_UNKNOWN,
@@ -536,19 +581,38 @@ final class NftChainCapability
         if ($bccSupportsNft === null) {
             return [self::OP_UNKNOWN, self::REASON_PRODUCT_COLUMN_ABSENT];
         }
-        // Read for EVERY operation, not only the operator-started ones. An
-        // install that cannot store the permission cannot describe itself,
-        // and reporting the other five as confidently ready while the
-        // permission column is missing would be a half-answer.
-        if ($manualEnabled === null) {
+
+        // ── SCOPED: permission to START, so only what can be started ────
+        //
+        // An install whose projection cannot carry the permission cannot
+        // say whether a discovery may be STARTED — and that is the whole of
+        // what it cannot say. Metadata, ownership, validation, curated
+        // feeds and wallet discovery do not consult this column and are not
+        // refused by its absence; reporting them unknown would blame five
+        // working operations on a switch none of them reads.
+        if ($operatorStarted && $manualEnabled === null) {
             return [self::OP_UNKNOWN, self::REASON_MANUAL_COLUMN_ABSENT];
         }
-        if ($measuredUnsupported) {
+
+        // ── SCOPED: evidence about walking the wasm module ──────────────
+        //
+        // `cw_discovery_state = unsupported` means the chain answered that
+        // it has no CosmWasm module to enumerate. That refuses enumeration
+        // and nothing else: a CW-721 contract handed to us by an operator
+        // still validates, still reports an owner, and still yields
+        // metadata over the LCD. Applying this to all six operations
+        // reported a chain as wholly incapable on the strength of one
+        // measurement about one of them.
+        if ($measurementApplies && $measuredUnsupported) {
             return [self::OP_CHAIN_UNSUPPORTED, self::REASON_MEASURED_NO_WASM];
         }
+
+        // ── GLOBAL: a product decision about the whole chain ────────────
         if ($bccSupportsNft === false) {
             return [self::OP_NO_BCC_SUPPORT, self::REASON_PRODUCT_SUPPORT_DISABLED];
         }
+
+        // ── PER OPERATION: what the code, the operator and the config say ──
         if ($registered === []) {
             return [self::OP_NO_DRIVER, self::REASON_NO_REGISTERED_DRIVER];
         }
