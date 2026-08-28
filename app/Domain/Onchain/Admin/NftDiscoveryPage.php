@@ -6,6 +6,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Trust\Onchain\Admin\Views\NftCapabilityEditorPanel;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
@@ -13,6 +14,7 @@ use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
+use BCC\Trust\Onchain\Services\NftCapabilityEditor;
 use BCC\Trust\Onchain\Services\NftDiscoveryControlPlaneSnapshot;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
@@ -187,8 +189,47 @@ class NftDiscoveryPage
     private const RUN_REPORT_TRANSIENT_PREFIX = 'bcc_nftd_run_';
     private const RUN_REPORT_TTL              = 120;
 
+    /**
+     * The CAPABILITY EDITOR routes — the only sanctioned way any of the
+     * three capability values is written.
+     *
+     * ── EIGHT ROUTES, NOT THREE TOGGLES ─────────────────────────────────
+     * Every one names its direction, for the reason this file has argued
+     * since the CosmWasm opt-in was written: a toggle takes its direction
+     * from the state the page held at RENDER time, so a tab left open across
+     * somebody else's change applies the opposite of what its operator is
+     * looking at. The route names the direction and the nonce is bound to
+     * it, so a stale submit is a no-op instead of a reversal.
+     *
+     * The four driver routes bind their nonce to the DRIVER and OPERATION as
+     * well as the chain, so a nonce minted to disable `cw721_lcd` for
+     * `metadata` cannot authorise anything else — including the stale
+     * removal, which is the one route whose strings are not registry-checked.
+     *
+     * There is deliberately no bulk route, no family-wide route and no
+     * "enable everything" route. Capability is granted one decision at a
+     * time or not at all.
+     */
+    public const ACTION_CAP_PRODUCT_ENABLE  = 'bcc_nft_cap_product_enable';
+    public const ACTION_CAP_PRODUCT_DISABLE = 'bcc_nft_cap_product_disable';
+    public const ACTION_CAP_MANUAL_ENABLE   = 'bcc_nft_cap_manual_enable';
+    public const ACTION_CAP_MANUAL_DISABLE  = 'bcc_nft_cap_manual_disable';
+    public const ACTION_CAP_DRIVER_DISABLE  = 'bcc_nft_cap_driver_disable';
+    public const ACTION_CAP_DRIVER_ENABLE   = 'bcc_nft_cap_driver_enable';
+    public const ACTION_CAP_DRIVER_INHERIT  = 'bcc_nft_cap_driver_inherit';
+    public const ACTION_CAP_STALE_REMOVE    = 'bcc_nft_cap_stale_remove';
+
     public static function register_actions(): void
     {
+        add_action('admin_post_' . self::ACTION_CAP_PRODUCT_ENABLE,  [self::class, 'handle_cap_product_enable']);
+        add_action('admin_post_' . self::ACTION_CAP_PRODUCT_DISABLE, [self::class, 'handle_cap_product_disable']);
+        add_action('admin_post_' . self::ACTION_CAP_MANUAL_ENABLE,   [self::class, 'handle_cap_manual_enable']);
+        add_action('admin_post_' . self::ACTION_CAP_MANUAL_DISABLE,  [self::class, 'handle_cap_manual_disable']);
+        add_action('admin_post_' . self::ACTION_CAP_DRIVER_DISABLE,  [self::class, 'handle_cap_driver_disable']);
+        add_action('admin_post_' . self::ACTION_CAP_DRIVER_ENABLE,   [self::class, 'handle_cap_driver_enable']);
+        add_action('admin_post_' . self::ACTION_CAP_DRIVER_INHERIT,  [self::class, 'handle_cap_driver_inherit']);
+        add_action('admin_post_' . self::ACTION_CAP_STALE_REMOVE,    [self::class, 'handle_cap_stale_remove']);
+
         add_action(
             'admin_post_' . self::ACTION_CW_DISCOVERY_ENABLE,
             [self::class, 'handle_cw_discovery_enable']
@@ -822,13 +863,23 @@ class NftDiscoveryPage
      * cast raises a PHP warning and yields 1 — a valid-looking chain id from
      * pure garbage). Nothing derived from the raw value reaches the wp_die
      * message, so it cannot be reflected back.
+     *
+     * ── `\z` AND NOT `$` ────────────────────────────────────────────────
+     * In PCRE, `$` matches at the end of the subject OR immediately before
+     * a trailing newline. So `/^[1-9][0-9]*$/` ACCEPTS "4\n" — a value that
+     * looks validated, casts to 4, and carries a control character that a
+     * caller could rely on being stripped. `\z` matches only the true end
+     * of the subject, so a trailing newline is what it is: not a chain id.
+     * The same anchor is used by {@see require_key_shape()} and
+     * {@see require_priority_shape()}, where the value is used as a STRING
+     * and the newline would survive into the nonce action and the domain.
      */
     private static function require_chain_id_shape(): int
     {
         $raw = $_POST['chain_id'] ?? null;
 
         $valid = is_scalar($raw)
-            && preg_match('/^[1-9][0-9]{0,17}$/', (string) $raw) === 1;
+            && preg_match('/^[1-9][0-9]{0,17}\z/', (string) $raw) === 1;
 
         if (!$valid) {
             wp_die(
@@ -1016,6 +1067,331 @@ class NftDiscoveryPage
         }
 
         AdminActionSupport::redirect($args);
+    }
+
+    // ── The capability editor ───────────────────────────────────────────
+
+    public static function handle_cap_product_enable(): void
+    {
+        self::handle_cap_flag(self::ACTION_CAP_PRODUCT_ENABLE);
+    }
+
+    public static function handle_cap_product_disable(): void
+    {
+        self::handle_cap_flag(self::ACTION_CAP_PRODUCT_DISABLE);
+    }
+
+    public static function handle_cap_manual_enable(): void
+    {
+        self::handle_cap_flag(self::ACTION_CAP_MANUAL_ENABLE);
+    }
+
+    public static function handle_cap_manual_disable(): void
+    {
+        self::handle_cap_flag(self::ACTION_CAP_MANUAL_DISABLE);
+    }
+
+    public static function handle_cap_driver_disable(): void
+    {
+        self::handle_cap_driver(self::ACTION_CAP_DRIVER_DISABLE);
+    }
+
+    public static function handle_cap_driver_enable(): void
+    {
+        self::handle_cap_driver(self::ACTION_CAP_DRIVER_ENABLE);
+    }
+
+    public static function handle_cap_driver_inherit(): void
+    {
+        self::handle_cap_driver(self::ACTION_CAP_DRIVER_INHERIT);
+    }
+
+    public static function handle_cap_stale_remove(): void
+    {
+        self::handle_cap_driver(self::ACTION_CAP_STALE_REMOVE);
+    }
+
+    /**
+     * Request boundary for the two chain-flag pairs.
+     *
+     * Order, and every step of it is load-bearing:
+     *
+     *   refusal trace (server-known values only)
+     *   → capability          reachable via admin-post without the page
+     *   → POST-only           admin-post dispatches GET too
+     *   → chain-id SHAPE      no lookup: the nonce action is built from it
+     *   → direction-and-chain nonce
+     *   → the domain          which does the authoritative lookup itself
+     *   → PRG
+     *
+     * Nothing touches a repository before the nonce has proven the request
+     * authentic, and the shape check does no lookup — so an unauthenticated
+     * POST cannot probe which chain ids exist.
+     */
+    private static function handle_cap_flag(string $route): never
+    {
+        // The trace carries NOTHING from the request. `chain_id` is
+        // attacker-controlled and unvalidated at this point: echoing it
+        // would let an unauthenticated caller write our log, and would
+        // answer "does chain 41 exist?" for anyone who can POST.
+        if (!current_user_can('manage_options')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] NFT capability change refused', [
+                'action'   => 'nft_capability_edit_denied',
+                'route'    => self::cap_route_slug($route),
+                'operator' => get_current_user_id(),
+            ]);
+        }
+
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
+
+        $chainId = self::require_chain_id_shape();
+
+        AdminActionSupport::requireNonce($route . '_' . $chainId);
+
+        try {
+            $result = match ($route) {
+                self::ACTION_CAP_PRODUCT_ENABLE  => NftCapabilityEditor::enableProductSupport($chainId),
+                self::ACTION_CAP_PRODUCT_DISABLE => NftCapabilityEditor::disableProductSupport($chainId),
+                self::ACTION_CAP_MANUAL_ENABLE   => NftCapabilityEditor::enableManualDiscovery($chainId),
+                self::ACTION_CAP_MANUAL_DISABLE  => NftCapabilityEditor::disableManualDiscovery($chainId),
+                default                          => NftCapabilityEditor::RESULT_UNKNOWN_CHAIN,
+            };
+        } catch (\Throwable $e) {
+            // The correlation id goes to the LOG ONLY. Unlike the scanner
+            // routes above, the capability PRG carries no reference: see
+            // redirect_capability().
+            AdminActionSupport::failure(
+                $e,
+                'admin_nft_capability_error',
+                'chain',
+                $chainId
+            );
+
+            self::redirect_capability(self::CAP_RESULT_ERROR);
+        }
+
+        self::redirect_capability($result);
+    }
+
+    /**
+     * Request boundary for the four driver-override routes.
+     *
+     * Same order as the flag routes, with the target widened: the nonce is
+     * bound to `route + chain + operation + driver`, so a nonce minted for
+     * one triple authorises exactly that triple and nothing else.
+     *
+     * ── SHAPE IS CHECKED BEFORE THE NONCE, AND SEPARATELY FROM MEANING ──
+     * The operation and driver strings are part of the nonce ACTION, so
+     * they must be read before the nonce can be verified. What is checked
+     * here is only that they are plausible column values — a lowercase key
+     * of at most 32 characters, which is what the storage holds. Whether
+     * they name something this build implements is a DOMAIN question, and
+     * it is answered by {@see NftCapabilityEditor} after the nonce passes,
+     * because the stale-removal route deliberately accepts strings the
+     * registry no longer recognises.
+     */
+    private static function handle_cap_driver(string $route): never
+    {
+        if (!current_user_can('manage_options')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] NFT driver override refused', [
+                'action'   => 'nft_capability_edit_denied',
+                'route'    => self::cap_route_slug($route),
+                'operator' => get_current_user_id(),
+            ]);
+        }
+
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
+
+        $chainId   = self::require_chain_id_shape();
+        $operation = self::require_key_shape('operation');
+        $driverKey = self::require_key_shape('driver_key');
+
+        // The priority is read for exactly one route, and BEFORE the nonce,
+        // so a malformed value cannot reach the domain even with a valid
+        // nonce. Shape only — the 0..1000 RANGE is the domain's to enforce,
+        // and it refuses rather than clamping.
+        $priority = $route === self::ACTION_CAP_DRIVER_ENABLE
+            ? self::require_priority_shape()
+            : 0;
+
+        AdminActionSupport::requireNonce(
+            $route . '_' . $chainId . '_' . $operation . '_' . $driverKey
+        );
+
+        try {
+            $result = match ($route) {
+                self::ACTION_CAP_DRIVER_DISABLE =>
+                    NftCapabilityEditor::disableDriver($chainId, $operation, $driverKey),
+                self::ACTION_CAP_DRIVER_ENABLE =>
+                    NftCapabilityEditor::enableDriver($chainId, $operation, $driverKey, $priority),
+                self::ACTION_CAP_DRIVER_INHERIT =>
+                    NftCapabilityEditor::inheritDriver($chainId, $operation, $driverKey),
+                self::ACTION_CAP_STALE_REMOVE =>
+                    NftCapabilityEditor::removeStaleOverride($chainId, $operation, $driverKey),
+                default => NftCapabilityEditor::RESULT_OVERRIDE_INVALID_TRIPLE,
+            };
+        } catch (\Throwable $e) {
+            AdminActionSupport::failure(
+                $e,
+                'admin_nft_capability_error',
+                'chain',
+                $chainId
+            );
+
+            self::redirect_capability(self::CAP_RESULT_ERROR);
+        }
+
+        self::redirect_capability($result);
+    }
+
+    /** Short, fixed route name for a log line — derived from the ROUTE, never the request. */
+    private static function cap_route_slug(string $route): string
+    {
+        return match ($route) {
+            self::ACTION_CAP_PRODUCT_ENABLE  => 'product_enable',
+            self::ACTION_CAP_PRODUCT_DISABLE => 'product_disable',
+            self::ACTION_CAP_MANUAL_ENABLE   => 'manual_enable',
+            self::ACTION_CAP_MANUAL_DISABLE  => 'manual_disable',
+            self::ACTION_CAP_DRIVER_DISABLE  => 'driver_disable',
+            self::ACTION_CAP_DRIVER_ENABLE   => 'driver_enable',
+            self::ACTION_CAP_DRIVER_INHERIT  => 'driver_inherit',
+            self::ACTION_CAP_STALE_REMOVE    => 'stale_remove',
+            default                          => 'unknown',
+        };
+    }
+
+    /**
+     * The shape an operation or driver key must have to be looked at at all.
+     *
+     * Lowercase letters, digits and underscores, 1–32 characters — exactly
+     * what `VARCHAR(32)` columns hold, and exactly the alphabet every real
+     * operation and driver key uses.
+     *
+     * ── NOTHING IS SANITISED INTO VALIDITY ──────────────────────────────
+     * A value is either already of this shape or the request is refused.
+     * Running `sanitize_key()` over it first — which lowercases and strips
+     * disallowed characters — would turn `Cw721_LCD!` into `cw721_lcd` and
+     * accept a request nobody sent, and would turn a 200-character string
+     * into a 200-character key that still fails but only at the database.
+     * `is_scalar()` comes first so an ARRAY is rejected before any cast: an
+     * array-to-string cast raises a warning and yields "Array", which is a
+     * perfectly well-shaped-looking key.
+     *
+     * A real HTTP 400, not a redirect: a malformed target has no page to
+     * send the operator back to, and no nonce could have been verified for
+     * a triple that does not parse. Nothing derived from the raw value
+     * reaches the response, so it cannot be reflected back.
+     */
+    private static function require_key_shape(string $field): string
+    {
+        $raw = $_POST[$field] ?? null;
+
+        $valid = is_scalar($raw)
+            && preg_match('/^[a-z0-9_]{1,32}\z/', (string) $raw) === 1;
+
+        if (!$valid) {
+            wp_die(
+                esc_html__('Invalid capability target.', 'bcc-trust'),
+                esc_html__('Bad Request', 'bcc-trust'),
+                ['response' => 400]
+            );
+        }
+
+        return (string) $raw;
+    }
+
+    /**
+     * Shape-only validation of a driver priority.
+     *
+     * Up to four digits, no sign, no whitespace, no separators. That admits
+     * 0–9999, which is deliberately WIDER than the accepted range: the
+     * 0–1000 bound is a domain rule, and refusing 5000 with a bounded
+     * `override_invalid_priority` notice tells an operator what the limit is,
+     * where a 400 would only tell them the request was malformed.
+     *
+     * What this stops is the other thing: an array, a negative number, a
+     * float, `1e3`, or a value long enough to overflow — none of which is a
+     * priority anybody typed.
+     */
+    private static function require_priority_shape(): int
+    {
+        $raw = $_POST['priority'] ?? null;
+
+        $valid = is_scalar($raw)
+            && preg_match('/^[0-9]{1,4}\z/', (string) $raw) === 1;
+
+        if (!$valid) {
+            wp_die(
+                esc_html__('Invalid priority.', 'bcc-trust'),
+                esc_html__('Bad Request', 'bcc-trust'),
+                ['response' => 400]
+            );
+        }
+
+        return (int) $raw;
+    }
+
+    /**
+     * PRG terminator for every capability edit.
+     *
+     * ── NARROWER THAN THE SCANNER ROUTES ABOVE, ON PURPOSE ──────────────
+     * The destination carries three keys and no fourth:
+     *
+     *   page        fixed
+     *   family      fixed
+     *   bcc_nftcap  a bounded result code from a closed set that this
+     *               codebase authors — see NftCapabilityEditor's constants
+     *
+     * No chain id under any name. No operation, no driver key, no priority,
+     * no submitted value, no exception text, and — unlike
+     * {@see redirect_cw_discovery()} — not even a correlation reference.
+     * The scanner routes carry `bcc_ref` because they report on WORK that
+     * ran; a capability edit reports on a CONFIGURATION CHANGE, its failure
+     * modes are ours rather than a provider's, and the fewer things this URL
+     * can carry the less there is to reason about. The correlation id is
+     * still minted and still written to the file log under the durable audit
+     * row; it simply does not travel in the browser.
+     *
+     * The cost is that the notice is generic and the editor closes. The
+     * DURABLE AUDIT ROW carries the real chain target, which is where
+     * "which chain was that?" is answered.
+     *
+     * @var list<string> CAPABILITY_REDIRECT_KEYS the only keys this destination may carry
+     */
+    public const CAPABILITY_REDIRECT_KEYS = ['page', 'family', 'bcc_nftcap'];
+
+    /** The one result code that is the PAGE's rather than the editor's. */
+    public const CAP_RESULT_ERROR = 'error';
+
+    private static function redirect_capability(string $result): never
+    {
+        AdminActionSupport::redirect([
+            'page'       => self::PAGE_SLUG,
+            'family'     => self::current_family(),
+            'bcc_nftcap' => $result,
+        ]);
+    }
+
+    /**
+     * The family tab to land on.
+     *
+     * Read from the SUBMITTED form, because the four families are a closed
+     * set this class owns and an unrecognised value falls back to the
+     * default — so the worst a hostile value achieves is landing the
+     * operator on the Cosmos tab. It is navigation, not a target: the write
+     * has already happened, and nothing downstream reads this.
+     */
+    private static function current_family(): string
+    {
+        $family = isset($_POST['family']) && is_scalar($_POST['family'])
+            ? sanitize_key((string) $_POST['family'])
+            : '';
+
+        return NftDiscoveryControlPlaneSnapshot::isFamily($family)
+            ? $family
+            : NftDiscoveryControlPlaneSnapshot::DEFAULT_FAMILY;
     }
 
     // ── The run report ──────────────────────────────────────────────────
@@ -1227,7 +1603,19 @@ class NftDiscoveryPage
         // Three independent notice sources, only one of which can be
         // present on any given PRG landing since each redirect carries its
         // own key.
-        $notice = self::cw_discovery_notice_from_query() ?? self::cw_operation_notice_from_query();
+        $notice = self::cw_discovery_notice_from_query()
+            ?? self::cw_operation_notice_from_query()
+            ?? self::capability_notice_from_query();
+
+        // ── THE SELECTED CHAIN COMES FROM THE CANONICAL ROWS ────────────
+        //
+        // `?chain=` is a request value and is never trusted as an identity:
+        // it selects among the rows the SNAPSHOT already built from
+        // `ChainRepository::getAll()`, and an id that matches none of them
+        // simply selects nothing. So the editor cannot be pointed at a chain
+        // this family does not contain, at a chain that does not exist, or
+        // at a row assembled from the query string.
+        $selected = self::selected_chain($snapshot);
 
         // ── A REPORT IS SHOWN ONLY WHEN THIS LANDING NAMES ONE ──────────
         //
@@ -1245,9 +1633,19 @@ class NftDiscoveryPage
 
             <p style="max-width:900px;">
                 What each chain can actually do for NFTs, which driver would do it, and — when it
-                cannot — exactly which permission, driver or credential is missing. This page
-                <strong>reads</strong> capability; it cannot grant it. Nothing here verifies a
-                collection or creates a community.
+                cannot — exactly which permission, driver or credential is missing. Select a chain
+                to edit the two permissions BCC controls and to narrow or reorder the drivers the
+                code already offers.
+            </p>
+
+            <p style="max-width:900px;color:#646970;">
+                <strong>Nothing on this page starts work.</strong> Granting product support does not
+                start a discovery. Granting the manual permission does not start a discovery — it
+                only allows an administrator to start one later. A driver override can narrow or
+                reorder what the code already declares; it can never add a capability the build does
+                not have. Provider readiness is observed here, never edited. The backfill is a
+                separate, explicit action and appears only when every gate passes. Nothing here
+                verifies a collection or creates a community.
             </p>
 
             <?php if ($notice !== null): ?>
@@ -1272,7 +1670,12 @@ class NftDiscoveryPage
                 <?php self::render_run_report($run); ?>
             <?php endif; ?>
 
-            <?php self::render_capability_matrix($snapshot); ?>
+            <?php self::render_capability_matrix(
+                $snapshot,
+                $selected === null ? null : (int) ($selected['chain_id'] ?? 0)
+            ); ?>
+
+            <?php NftCapabilityEditorPanel::render($snapshot, $selected); ?>
 
             <?php if ($snapshot['supports_enumeration_engine']): ?>
                 <?php self::render_cw_discovery_section($snapshot['cw_chains']); ?>
@@ -1283,6 +1686,249 @@ class NftDiscoveryPage
             <?php self::render_wallet_refresh_method($snapshot); ?>
         </div>
         <?php
+    }
+
+    /**
+     * The chain whose editor is open, chosen from the SNAPSHOT's own rows.
+     *
+     * ── A REQUEST VALUE SELECTS; IT NEVER IDENTIFIES ────────────────────
+     * `?chain=` is compared against rows the snapshot already built from
+     * `ChainRepository::getAll()`. It cannot introduce a chain, cannot reach
+     * a chain of another family, and cannot produce a row of its own — an id
+     * matching nothing selects nothing and the editor is simply not shown.
+     *
+     * This also means the editor and the matrix directly above it are the
+     * same rows from the same read, so they cannot disagree about a chain
+     * they are both describing.
+     *
+     * @param array<string, mixed> $snapshot
+     * @return array<string, mixed>|null
+     */
+    private static function selected_chain(array $snapshot): ?array
+    {
+        $raw = $_GET['chain'] ?? null;
+        if (!is_scalar($raw) || preg_match('/^[1-9][0-9]{0,17}\z/', (string) $raw) !== 1) {
+            return null;
+        }
+
+        $wanted = (int) $raw;
+        /** @var list<array<string, mixed>> $chains */
+        $chains = is_array($snapshot['chains'] ?? null) ? $snapshot['chains'] : [];
+
+        foreach ($chains as $chain) {
+            if ((int) ($chain['chain_id'] ?? 0) === $wanted) {
+                return $chain;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Rebuild the capability-editor notice from the PRG landing.
+     *
+     * Deliberately GENERIC about WHICH chain: the destination carries no
+     * target (see {@see CAPABILITY_REDIRECT_KEYS}), so this cannot name one
+     * and must not try. The durable audit row answers "which chain was
+     * that?".
+     *
+     * Every sentence is written to be true of an action that CHANGED
+     * CONFIGURATION and did nothing else. None of them may say a provider
+     * ran, a collection was discovered, or a capability was proven ready —
+     * because none of that happened, and a notice is the place an operator
+     * is most likely to take our word for it.
+     *
+     * @return array{type: string, message: string}|null
+     */
+    private static function capability_notice_from_query(): ?array
+    {
+        $result = isset($_GET['bcc_nftcap']) ? sanitize_key((string) $_GET['bcc_nftcap']) : '';
+        if ($result === '') {
+            return null;
+        }
+
+        switch ($result) {
+            // ── Product support ─────────────────────────────────────────
+            case NftCapabilityEditor::RESULT_PRODUCT_ENABLED:
+                return ['type' => 'success', 'message' =>
+                    'NFT product support is now ON for that chain. This does NOT start a discovery and '
+                    . 'does NOT permit one — the manual permission is a separate grant, and it was left '
+                    . 'as it was. Nothing was contacted and no collection was touched.'];
+
+            case NftCapabilityEditor::RESULT_PRODUCT_DISABLED:
+                return ['type' => 'success', 'message' =>
+                    'NFT product support is now OFF for that chain. Existing collections were kept and '
+                    . 'nothing was unverified or removed; the chain simply reports no NFT capability.'];
+
+            case NftCapabilityEditor::RESULT_PRODUCT_DISABLED_CASCADE:
+                return ['type' => 'success', 'message' =>
+                    'NFT product support is now OFF for that chain, AND the manual discovery permission '
+                    . 'was cleared with it. That is deliberate: a permission left behind on an '
+                    . 'unsupported chain is invisible until support is granted again, and would then '
+                    . 'come back already permitted. Grant it again explicitly if you re-enable support. '
+                    . 'Existing collections were kept.'];
+
+            case NftCapabilityEditor::RESULT_PRODUCT_NOOP_ENABLED:
+                return ['type' => 'info', 'message' =>
+                    'NFT product support was already ON for that chain. Nothing was changed.'];
+
+            case NftCapabilityEditor::RESULT_PRODUCT_NOOP_DISABLED:
+                return ['type' => 'info', 'message' =>
+                    'NFT product support was already OFF for that chain, and no manual permission was '
+                    . 'left set. Nothing was changed.'];
+
+            case NftCapabilityEditor::RESULT_PRODUCT_WRITE_FAILED:
+                return ['type' => 'error', 'message' =>
+                    'Product support could NOT be changed — the database write failed and nothing was '
+                    . 'changed. Check the bcc-trust error log.'];
+
+            case NftCapabilityEditor::RESULT_PRODUCT_UNVERIFIED:
+                return ['type' => 'error', 'message' =>
+                    'The change was attempted but could NOT be confirmed: the stored value does not read '
+                    . 'back as expected, so this is not being reported as done. Nothing else was touched '
+                    . '— no discovery, no provider, no collection. Reload to see the current state and '
+                    . 'check the bcc-trust error log.'];
+
+            // ── Manual discovery permission ─────────────────────────────
+            case NftCapabilityEditor::RESULT_MANUAL_ENABLED:
+                return ['type' => 'success', 'message' =>
+                    'An administrator may now START a chain-wide discovery on that chain. Nothing was '
+                    . 'started by this action and nothing is scheduled — the permission only allows the '
+                    . 'button. Every other gate still applies: the driver must be registered and '
+                    . 'enabled, its provider configured, and the chain must not be measured as having '
+                    . 'no CosmWasm module.'];
+
+            case NftCapabilityEditor::RESULT_MANUAL_DISABLED:
+                return ['type' => 'success', 'message' =>
+                    'The manual discovery permission was withdrawn for that chain. No administrator can '
+                    . 'start a chain-wide discovery on it. Existing collections and progress were kept.'];
+
+            case NftCapabilityEditor::RESULT_MANUAL_NOOP_ENABLED:
+                return ['type' => 'info', 'message' =>
+                    'That chain already permitted operator-started discovery. Nothing was changed.'];
+
+            case NftCapabilityEditor::RESULT_MANUAL_NOOP_DISABLED:
+                return ['type' => 'info', 'message' =>
+                    'That chain did not permit operator-started discovery. Nothing was changed.'];
+
+            case NftCapabilityEditor::RESULT_MANUAL_NO_PRODUCT:
+                return ['type' => 'warning', 'message' =>
+                    'The manual permission was refused because BCC product support for NFT collections '
+                    . 'is currently OFF for that chain. Grant product support first — it is a separate '
+                    . 'decision, and it starts nothing on its own. Nothing was changed.'];
+
+            case NftCapabilityEditor::RESULT_MANUAL_NO_STARTABLE:
+                return ['type' => 'warning', 'message' =>
+                    'The manual permission was refused: no driver in this build can perform an '
+                    . 'administrator-started operation on that chain, so the permission could not '
+                    . 'authorise anything. This is a structural limit, not a configuration gap — no '
+                    . 'credential or setting adds chain-wide enumeration to EVM or Solana. Nothing was '
+                    . 'changed.'];
+
+            case NftCapabilityEditor::RESULT_MANUAL_WRITE_FAILED:
+                return ['type' => 'error', 'message' =>
+                    'The manual permission could NOT be changed — the database write failed and nothing '
+                    . 'was changed. Check the bcc-trust error log.'];
+
+            case NftCapabilityEditor::RESULT_MANUAL_UNVERIFIED:
+                return ['type' => 'error', 'message' =>
+                    'The permission change was attempted but could NOT be confirmed: the stored value '
+                    . 'does not read back as expected, so this is not being reported as done. Nothing '
+                    . 'was started. Reload to see the current state and check the bcc-trust error log.'];
+
+            // ── Driver overrides ────────────────────────────────────────
+            case NftCapabilityEditor::RESULT_OVERRIDE_DISABLED:
+                return ['type' => 'success', 'message' =>
+                    'That driver is now switched OFF for that operation on that chain. The capability '
+                    . 'table above has been rebuilt from the stored state — if it was the only driver, '
+                    . 'the operation now reads Disabled.'];
+
+            case NftCapabilityEditor::RESULT_OVERRIDE_ENABLED:
+                return ['type' => 'success', 'message' =>
+                    'That driver is switched ON for that operation at the priority you set (lower runs '
+                    . 'first). An override can only restore or reorder a driver the code already offers '
+                    . '— it cannot add one, and it does not make an unconfigured provider ready.'];
+
+            case NftCapabilityEditor::RESULT_OVERRIDE_INHERITED:
+                return ['type' => 'success', 'message' =>
+                    'The override row was removed, so that driver follows the code registry again — '
+                    . 'including its priority, now and after any future change to it.'];
+
+            case NftCapabilityEditor::RESULT_OVERRIDE_NOOP:
+                return ['type' => 'info', 'message' =>
+                    'That driver was already in the state you asked for. Nothing was changed and no '
+                    . 'row was written.'];
+
+            case NftCapabilityEditor::RESULT_OVERRIDE_UNREADABLE:
+                return ['type' => 'error', 'message' =>
+                    'That chain\'s driver-override rows could not be established — the read failed, a '
+                    . 'row is malformed, or there are more rows than can be read at once. No override '
+                    . 'may be changed while the stored set is unknown, because a change applied to a '
+                    . 'set we only partly read could silently drop another restriction. Nothing was '
+                    . 'changed. Check the bcc-trust error log.'];
+
+            case NftCapabilityEditor::RESULT_OVERRIDE_INVALID_TRIPLE:
+                return ['type' => 'error', 'message' =>
+                    'That combination of chain, operation and driver is not one this build offers, so '
+                    . 'no override was written. Configuration can narrow or reorder what the code '
+                    . 'declares; it can never add a capability. Nothing was changed.'];
+
+            case NftCapabilityEditor::RESULT_OVERRIDE_INVALID_PRIORITY:
+                return ['type' => 'error', 'message' =>
+                    'That priority is outside the accepted range of 0–1000, so nothing was written. It '
+                    . 'was refused rather than adjusted — storing a number you did not choose would be '
+                    . 'an ordering nobody decided on.'];
+
+            case NftCapabilityEditor::RESULT_OVERRIDE_WRITE_FAILED:
+                return ['type' => 'error', 'message' =>
+                    'The driver override could NOT be saved — the database write failed and nothing was '
+                    . 'changed. Check the bcc-trust error log.'];
+
+            case NftCapabilityEditor::RESULT_OVERRIDE_UNVERIFIED:
+                return ['type' => 'error', 'message' =>
+                    'The driver override was attempted but could NOT be confirmed: the stored rows do '
+                    . 'not read back as expected, so this is not being reported as done. Caches were '
+                    . 'invalidated in case the write did land. Reload to see the current state and '
+                    . 'check the bcc-trust error log.'];
+
+            // ── Stale rows ──────────────────────────────────────────────
+            case NftCapabilityEditor::RESULT_STALE_REMOVED:
+                return ['type' => 'success', 'message' =>
+                    'That leftover override row was removed. It was already inert — this build discards '
+                    . 'rows it does not recognise at every read — so nothing was enabled, nothing was '
+                    . 'granted, and no capability changed. Only the row is gone.'];
+
+            case NftCapabilityEditor::RESULT_STALE_NOT_FOUND:
+                return ['type' => 'info', 'message' =>
+                    'There is no such override row on that chain. Nothing was changed — it may already '
+                    . 'have been removed.'];
+
+            case NftCapabilityEditor::RESULT_STALE_STILL_VALID:
+                return ['type' => 'warning', 'message' =>
+                    'That row is NOT a leftover — this build still recognises that driver for that '
+                    . 'operation on that chain, so it was not removed here. Use "Use code default" on '
+                    . 'the driver itself to return it to the registry. Nothing was changed.'];
+
+            // ── Shared ──────────────────────────────────────────────────
+            case NftCapabilityEditor::RESULT_UNKNOWN_CHAIN:
+                return ['type' => 'error', 'message' =>
+                    'Capability: chain not found. Nothing was changed.'];
+
+            case NftCapabilityEditor::RESULT_COLUMN_ABSENT:
+                return ['type' => 'error', 'message' =>
+                    'This install cannot store that capability value — the column is absent from the '
+                    . 'chain projection, which means the migration has not run here. Nothing was '
+                    . 'changed, and nothing was assumed about the chain.'];
+
+            case self::CAP_RESULT_ERROR:
+                // No reference in the URL by design — the correlation id is
+                // in the file log beside the durable audit row.
+                return ['type' => 'error', 'message' =>
+                    'Capability: the change could not be completed, and nothing was started. The full '
+                    . 'error is in the bcc-trust log.'];
+        }
+
+        return null;
     }
 
     /**
@@ -1298,11 +1944,12 @@ class NftDiscoveryPage
      *
      * @param array<string, mixed> $snapshot
      */
-    private static function render_capability_matrix(array $snapshot): void
+    private static function render_capability_matrix(array $snapshot, ?int $selectedId = null): void
     {
         /** @var list<array<string, mixed>> $chains */
         $chains = is_array($snapshot['chains'] ?? null) ? $snapshot['chains'] : [];
         $operations = NftDriverRegistry::operations();
+        $family     = (string) ($snapshot['family'] ?? NftDiscoveryControlPlaneSnapshot::DEFAULT_FAMILY);
         ?>
         <h2>Capability by chain</h2>
 
@@ -1326,7 +1973,7 @@ class NftDiscoveryPage
             </thead>
             <tbody>
                 <?php foreach ($chains as $chain): ?>
-                    <?php self::render_capability_row($chain, $operations); ?>
+                    <?php self::render_capability_row($chain, $operations, $family, $selectedId); ?>
                 <?php endforeach; ?>
             </tbody>
         </table>
@@ -1345,14 +1992,19 @@ class NftDiscoveryPage
      * @param array<string, mixed> $chain
      * @param list<string>         $operations
      */
-    private static function render_capability_row(array $chain, array $operations): void
-    {
+    private static function render_capability_row(
+        array $chain,
+        array $operations,
+        string $family = NftDiscoveryControlPlaneSnapshot::DEFAULT_FAMILY,
+        ?int $selectedId = null
+    ): void {
         $chainId = (int) ($chain['chain_id'] ?? 0);
         $slug    = (string) ($chain['slug'] ?? '');
         $name    = (string) ($chain['name'] ?? $slug);
         $ops     = is_array($chain['operations'] ?? null) ? $chain['operations'] : [];
+        $isOpen  = $selectedId !== null && $selectedId === $chainId;
         ?>
-        <tr>
+        <tr<?php echo $isOpen ? ' style="outline:2px solid #2271b1;"' : ''; ?>>
             <td>
                 <strong><?php echo esc_html($name); ?></strong><br>
                 <code><?php echo esc_html($slug); ?></code>
@@ -1362,6 +2014,18 @@ class NftDiscoveryPage
                 <?php endif; ?>
                 <?php if (($chain['is_testnet'] ?? false) === true): ?>
                     <div style="color:#646970;font-size:11px;">testnet</div>
+                <?php endif; ?>
+                <?php if ($chainId > 0): ?>
+                    <div style="margin-top:6px;">
+                        <?php if ($isOpen): ?>
+                            <strong style="font-size:11px;color:#2271b1;">editing below</strong>
+                        <?php else: ?>
+                            <a style="font-size:11px;" href="<?php echo esc_url(add_query_arg(
+                                ['page' => self::PAGE_SLUG, 'family' => $family, 'chain' => $chainId],
+                                admin_url('admin.php')
+                            )); ?>">Edit capability</a>
+                        <?php endif; ?>
+                    </div>
                 <?php endif; ?>
             </td>
             <?php foreach ($operations as $operation): ?>

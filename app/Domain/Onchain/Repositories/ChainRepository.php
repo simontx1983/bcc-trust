@@ -3,6 +3,7 @@
 namespace BCC\Trust\Onchain\Repositories;
 
 use BCC\Core\DB\DB;
+use BCC\Trust\Onchain\ValueObjects\RepositoryWriteResult;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -455,6 +456,202 @@ final class ChainRepository
         self::clearCache();
 
         return $result !== false;
+    }
+
+    // ── The NFT capability columns ───────────────────────────────────────
+    //
+    // THE ONLY WRITE PATH for `bcc_supports_nft_collections` and
+    // `manual_collection_discovery_enabled`. Three narrowly named methods,
+    // deliberately NOT one `setChainColumn($name, $value)`: a general column
+    // updater would take the column name from its caller, and the one thing
+    // this table must never allow is a caller deciding which column a
+    // capability write lands in.
+    //
+    // Each one mirrors setCosmwasmNftDiscoveryEnabled(): bounded to a single
+    // row by primary key, touching only the named column(s), and busting the
+    // chains cache INSIDE the write so no caller can forget it.
+    //
+    // ── WHY THEY RETURN A RESULT AND NOT A BOOLEAN ───────────────────────
+    // `$result !== false` cannot tell a refused statement from one that ran
+    // and matched nothing, and the editor above has to distinguish them —
+    // see {@see RepositoryWriteResult}. The cache is cleared regardless,
+    // including on a zero-row result: a concurrent writer may have applied
+    // the change, and leaving this request's memo in place would make the
+    // caller's postcondition read answer from a projection taken BEFORE it.
+
+    /**
+     * Grant BCC product support for NFT collections on one chain.
+     *
+     * Touches that column and no other. In particular it does NOT enable
+     * `manual_collection_discovery_enabled`: product support is BCC's
+     * decision that a chain is in scope, and permission to START a discovery
+     * is a second, separate grant. Fusing them would mean a product decision
+     * silently armed an operator button.
+     */
+    public static function enableNftProductSupport(int $chainId): RepositoryWriteResult
+    {
+        if ($chainId <= 0) {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET bcc_supports_nft_collections = 1
+              WHERE id = %d
+              LIMIT 1",
+            $chainId
+        ));
+
+        self::clearCache();
+
+        return RepositoryWriteResult::fromWpdb($result);
+    }
+
+    /**
+     * Withdraw product support — AND the manual permission with it, in ONE
+     * statement.
+     *
+     * ── WHY THE CASCADE IS PART OF THE SQL ───────────────────────────────
+     * A dormant `manual_collection_discovery_enabled = 1` left behind on a
+     * chain BCC no longer supports is a permission nobody can see: the
+     * capability model reports `no_bcc_support` and stops, so the stale
+     * permission is invisible on every surface — until product support is
+     * granted again later, at which point the chain silently comes back
+     * already permitted to start a discovery.
+     *
+     * Doing it as two statements would leave a window in which the first
+     * succeeded and the second did not, which is precisely that state. So
+     * both columns move in one `UPDATE` against one row, and there is no
+     * ordering for a caller to get wrong.
+     */
+    public static function disableNftProductSupport(int $chainId): RepositoryWriteResult
+    {
+        if ($chainId <= 0) {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET bcc_supports_nft_collections        = 0,
+                    manual_collection_discovery_enabled = 0
+              WHERE id = %d
+              LIMIT 1",
+            $chainId
+        ));
+
+        self::clearCache();
+
+        return RepositoryWriteResult::fromWpdb($result);
+    }
+
+    /**
+     * GRANT the permission for an administrator to START a chain-wide NFT
+     * collection discovery — but only while product support still stands.
+     *
+     * ── THE PREDICATE IS THE POINT, AND IT IS NOT BELT-AND-BRACES ───────
+     * {@see \BCC\Trust\Onchain\Services\NftCapabilityEditor} reads product
+     * support before calling this, and that read cannot be enough on its
+     * own. An unconditional `SET manual = 1` admits this interleaving:
+     *
+     *   1. the grant reads `product = 1`
+     *   2. a product-withdrawal atomically writes `product = 0, manual = 0`
+     *   3. the grant writes `manual = 1`
+     *   4. the row now says `product = 0, manual = 1`
+     *
+     * — which is precisely the dormant-permission state the cascade in
+     * {@see disableNftProductSupport()} exists to make impossible: invisible
+     * on every surface (the model reports `no_bcc_support` and stops), and
+     * live again the moment support is restored. A service-layer check
+     * cannot close it, because the window is between our read and our write
+     * and no amount of re-reading removes it.
+     *
+     * So the cross-column invariant is enforced by MySQL, in the same
+     * statement that does the write: `AND bcc_supports_nft_collections = 1`.
+     * If support was withdrawn in the window, the UPDATE matches no row,
+     * reports ZERO affected rows, and the permission is simply not granted.
+     *
+     * The reverse ordering is safe for the other reason: if the grant
+     * commits first, the withdrawal's single-statement cascade clears both
+     * columns. Either way `product = 0, manual = 1` is unreachable.
+     *
+     * ── WHAT IT STILL DOES NOT ARBITRATE ────────────────────────────────
+     * Whether an administrator-started operation exists for the chain at all
+     * remains a DOMAIN question — it is a property of the code registry, not
+     * of any column, and the service answers it. This predicate covers
+     * exactly the one rule that is expressible in the row, and it covers it
+     * where the race actually is.
+     *
+     * Granting starts nothing. No cron reads this column — every recurring
+     * discovery hook was retired and cannot re-arm — so it can only ever be
+     * consulted by a human-initiated action that still has to pass every
+     * other gate.
+     *
+     * ⚠️ ZERO AFFECTED ROWS IS AMBIGUOUS HERE and the caller must resolve
+     * it by reading BOTH columns back: it means either "already granted" or
+     * "refused because support is gone". {@see RepositoryWriteResult} cannot
+     * tell them apart, and neither should it.
+     */
+    public static function grantManualCollectionDiscovery(int $chainId): RepositoryWriteResult
+    {
+        if ($chainId <= 0) {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET manual_collection_discovery_enabled = 1
+              WHERE id = %d
+                AND bcc_supports_nft_collections = 1
+              LIMIT 1",
+            $chainId
+        ));
+
+        self::clearCache();
+
+        return RepositoryWriteResult::fromWpdb($result);
+    }
+
+    /**
+     * WITHDRAW the permission. Unconditional, and deliberately so.
+     *
+     * No product-support predicate, because the asymmetry is the design:
+     * the condition on {@see grantManualCollectionDiscovery()} exists to
+     * stop a permission being CREATED where it cannot mean anything.
+     * Applying it to removal would mean a row that already holds a wrong
+     * value — a restored backup, an older build, a hand-run `UPDATE` — could
+     * not be returned to the safe state through the only sanctioned path.
+     * Taking a permission away is safe by definition and must never be
+     * blocked by the state it is being used to correct.
+     */
+    public static function withdrawManualCollectionDiscovery(int $chainId): RepositoryWriteResult
+    {
+        if ($chainId <= 0) {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET manual_collection_discovery_enabled = 0
+              WHERE id = %d
+              LIMIT 1",
+            $chainId
+        ));
+
+        self::clearCache();
+
+        return RepositoryWriteResult::fromWpdb($result);
     }
 
     /**

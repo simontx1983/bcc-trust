@@ -7,6 +7,7 @@ namespace BCC\Trust\Onchain\Repositories;
 use BCC\Core\DB\DB;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
 use BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides;
+use BCC\Trust\Onchain\ValueObjects\RepositoryWriteResult;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -48,10 +49,23 @@ if (!defined('ABSPATH')) {
  * more than the ceiling, and the presence of that extra row makes the whole
  * set unavailable rather than partially applied.
  *
- * ── NOTHING WRITES TO THIS TABLE YET ────────────────────────────────────
- * PR 2 is a scaffold. The capability editor that populates it lands with the
- * admin surface. The read path and the generation-counter invalidation are
- * built now so the editor cannot invent its own.
+ * ── EXACTLY ONE THING WRITES TO THIS TABLE ──────────────────────────────
+ * {@see \BCC\Trust\Onchain\Services\NftCapabilityEditor}, reached only from
+ * the administrator capability editor on the NFT Discovery page. There is no
+ * migration, installer, cron, REST, AJAX, CLI or provider-callback writer,
+ * and no seed: the table is empty on every install and stays empty until an
+ * administrator narrows something by hand.
+ *
+ * The read path and the generation counter were built one PR ahead of that
+ * editor, deliberately unread, so the editor could not invent its own.
+ *
+ * ── A WRITE VALIDATES; A READ ENFORCES ──────────────────────────────────
+ * The editor validates every triple against {@see NftDriverRegistry} and the
+ * authoritative chain row before calling {@see upsertOverride()}. That is a
+ * courtesy to the operator, not the guarantee: the guarantee is still the
+ * registry INTERSECTION at {@see NftDriverRegistry::driversFor()}, because
+ * that is the only code a row from a manual INSERT, a restored backup or a
+ * future build is certain to meet.
  */
 final class ChainNftCapabilityRepository
 {
@@ -177,6 +191,151 @@ final class ChainNftCapabilityRepository
         );
 
         return ChainNftCapabilityOverrides::unavailable($reason);
+    }
+
+    // ── Writes ───────────────────────────────────────────────────────────
+    //
+    // ── THE UNIQUE KEY IS THE CONCURRENCY AUTHORITY ──────────────────────
+    // `uq_chain_op_driver (chain_id, operation, driver_key)` decides what
+    // "the row for this triple" means, and both statements below are written
+    // to it: the upsert is a single `INSERT … ON DUPLICATE KEY UPDATE`, and
+    // the delete matches the whole key. Neither reads first and then writes,
+    // because a read-then-write over an exact key is a race with no upside —
+    // the key already serialises it.
+    //
+    // ── WHAT THESE STILL CANNOT DO ───────────────────────────────────────
+    // Nothing here validates that a triple is one the code registry offers.
+    // That is deliberate and unchanged: the read
+    // ({@see NftDriverRegistry::driversFor()}) intersects every row against
+    // the registry and discards the rest, which is what makes a row from a
+    // future admin build, a manual INSERT or a restored backup INERT rather
+    // than dangerous. The editor above validates as well — belt and braces,
+    // in that order — but the structural guarantee stays at the read, which
+    // is the only thing guaranteed to run.
+
+    /**
+     * Write one explicit override row for one exact triple.
+     *
+     * `enabled = false` removes a registry default; `enabled = true` with a
+     * priority may only REORDER something the registry already offers. An
+     * ABSENT row is the third state and is written by {@see deleteOverride()},
+     * not by this method — which is why there is no "inherit" value here.
+     *
+     * ── AFFECTED ROWS MEANS SOMETHING SPECIFIC HERE ──────────────────────
+     * MySQL reports 1 for an insert, 2 for an update that changed something,
+     * and 0 when the row already held exactly these values. All three ran;
+     * only the first two moved anything. {@see RepositoryWriteResult} keeps
+     * them apart so the caller can bump a generation for a real change and
+     * stay silent for a re-submitted form.
+     *
+     * ── WHICH IS WHY `updated_at` IS CONDITIONAL ─────────────────────────
+     * An unconditional `updated_at = CURRENT_TIMESTAMP` destroys that whole
+     * distinction. If a concurrent request applies the same `enabled` and
+     * `priority` after this request's pre-read, this statement changes
+     * nothing SEMANTIC — and MySQL still reports 2 affected rows, because
+     * the timestamp moved. The caller then bumps a generation and writes an
+     * audit row for a change somebody else made, which is exactly the
+     * misattribution the no-op contract exists to prevent.
+     *
+     * So the timestamp advances only when `enabled` or `priority` actually
+     * differ, and the statement becomes SEMANTICALLY IDEMPOTENT: applying
+     * the current state again is a true zero-row no-op.
+     *
+     * ⚠️ THE ASSIGNMENT ORDER IS LOAD-BEARING. Assignments in
+     * `ON DUPLICATE KEY UPDATE` are evaluated left to right and later ones
+     * see the values earlier ones already wrote. `updated_at` is therefore
+     * assigned FIRST, while `enabled` and `priority` still hold the STORED
+     * values its comparison needs. Listed last, the comparison would run
+     * against the values it was about to be told about, always find them
+     * equal, and leave a genuine change carrying a stale timestamp —
+     * measured, not assumed: a priority change under the reversed order
+     * reports 2 affected rows and does not advance `updated_at`.
+     *
+     * Both columns are `NOT NULL`, so `<>` is total here and no null-safe
+     * comparison is needed.
+     *
+     * @param string $operation one of {@see NftDriverRegistry}'s OP_* values
+     * @param string $driverKey one of its DRIVER_* values
+     * @param int    $priority  ascending; lower runs first
+     */
+    public static function upsertOverride(
+        int $chainId,
+        string $operation,
+        string $driverKey,
+        bool $enabled,
+        int $priority
+    ): RepositoryWriteResult {
+        if ($chainId <= 0 || $operation === '' || $driverKey === '') {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $prepared = $wpdb->prepare(
+            "INSERT INTO {$table} (chain_id, operation, driver_key, enabled, priority)
+                  VALUES (%d, %s, %s, %d, %d)
+             ON DUPLICATE KEY UPDATE
+                  updated_at = IF(enabled <> VALUES(enabled) OR priority <> VALUES(priority),
+                                  CURRENT_TIMESTAMP, updated_at),
+                  enabled    = VALUES(enabled),
+                  priority   = VALUES(priority)",
+            $chainId,
+            $operation,
+            $driverKey,
+            $enabled ? 1 : 0,
+            $priority
+        );
+
+        // A placeholder/argument mismatch makes prepare() return ''. Handing
+        // that to query() would run nothing and report a no-op, which the
+        // caller would read as "already in the desired state".
+        if (!is_string($prepared) || $prepared === '') {
+            return RepositoryWriteResult::failure();
+        }
+
+        return RepositoryWriteResult::fromWpdb($wpdb->query($prepared));
+    }
+
+    /**
+     * Remove the override row for one exact triple — "inherit the registry".
+     *
+     * Bounded by the full unique key plus `LIMIT 1`, so it can only ever
+     * reach the one row it names. There is no bulk delete and no
+     * delete-by-chain: a control that could clear a chain's overrides in one
+     * press would be an undo button for decisions taken one at a time, and
+     * "restore everything the operator switched off" is not a safe thing to
+     * offer behind a single click.
+     *
+     * Zero affected rows is a legitimate outcome (nothing was there, or a
+     * concurrent request removed it first) and is NOT a failure.
+     */
+    public static function deleteOverride(
+        int $chainId,
+        string $operation,
+        string $driverKey
+    ): RepositoryWriteResult {
+        if ($chainId <= 0 || $operation === '' || $driverKey === '') {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $prepared = $wpdb->prepare(
+            "DELETE FROM {$table}
+              WHERE chain_id = %d AND operation = %s AND driver_key = %s
+              LIMIT 1",
+            $chainId,
+            $operation,
+            $driverKey
+        );
+
+        if (!is_string($prepared) || $prepared === '') {
+            return RepositoryWriteResult::failure();
+        }
+
+        return RepositoryWriteResult::fromWpdb($wpdb->query($prepared));
     }
 
     // ── Cache invalidation (§5 generation counter) ───────────────────────
