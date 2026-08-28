@@ -548,6 +548,98 @@ final class NftCapabilityEditorRenderTest extends TestCase
         }
     }
 
+    /**
+     * ⚠️ THE PRODUCT-SUPPORT RULE IS IN THE ALWAYS-VISIBLE INTRODUCTION.
+     *
+     * ── WHY THIS SLICES INSTEAD OF SEARCHING THE PAGE ───────────────────
+     * The submit confirmation already carries equivalent wording ("It does
+     * NOT grant the manual discovery permission — that is a separate
+     * action"), and for a while that was the ONLY place the rule appeared.
+     * A whole-page `assertStringContainsString` would have passed against
+     * that defect — the confirmation text is in the DOM either way — so it
+     * would have false-greened the exact gap an acceptance pass found.
+     *
+     * A confirmation is also the wrong place for the rule on its own: it is
+     * read after the decision, by somebody already reaching for the button.
+     *
+     * So this isolates the section from its heading up to the FIRST table
+     * or form inside it — everything an operator reads before any control
+     * exists — strips the tags, and asserts on what is left. The dialog text
+     * lives in a form's `onsubmit`, which is beyond that boundary and cannot
+     * contribute.
+     */
+    public function testTheVisibleProductSupportIntroStatesBothRules(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, 'injective', false, true, true);
+
+        $visible = $this->visibleProductSupportIntro($this->renderPanelOnly());
+
+        $this->assertStringContainsString('starts nothing', $visible);
+        $this->assertStringContainsString('does not grant the manual discovery permission', $visible);
+
+        // The four points the correction had to preserve.
+        $this->assertStringContainsString('product', $visible);
+        $this->assertStringContainsString('never a claim about the blockchain', $visible);
+        $this->assertStringContainsString('does not claim any provider is configured', $visible);
+
+        $this->assertRenderChangedNothing();
+    }
+
+    /**
+     * The slice really is a slice: the confirmation text is on the page and
+     * NOT in it.
+     *
+     * Without this, a future edit that widened the boundary to include the
+     * forms would silently restore the false-green the test above exists to
+     * prevent — and nothing would fail.
+     */
+    public function testTheIsolatedIntroExcludesTheConfirmationDialogText(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, 'injective', false, true, true);
+
+        $panel   = $this->renderPanelOnly();
+        $visible = $this->visibleProductSupportIntro($panel);
+
+        // The dialog wording IS present on the page …
+        $this->assertStringContainsString(
+            'It does NOT grant the manual discovery permission',
+            $panel,
+            'the confirmation keeps its copy — it is now a reminder, not the only statement'
+        );
+        // … and is NOT what the assertion above is reading.
+        $this->assertStringNotContainsString('It does NOT grant the manual discovery permission', $visible);
+        $this->assertStringNotContainsString('onsubmit', $visible);
+        $this->assertStringNotContainsString('<form', $visible);
+        $this->assertStringNotContainsString('<table', $visible);
+    }
+
+    /**
+     * The always-visible copy of the "BCC product support" section: from the
+     * heading to the first table or form inside it, tags stripped.
+     */
+    private function visibleProductSupportIntro(string $html): string
+    {
+        $heading = strpos($html, 'BCC product support');
+        self::assertNotFalse($heading, 'the product-support heading must exist');
+
+        $afterHeading = strpos($html, '</h3>', $heading);
+        self::assertNotFalse($afterHeading, 'the heading must be closed');
+        $afterHeading += strlen('</h3>');
+
+        $bounds = [];
+        foreach (['<table', '<form'] as $stop) {
+            $at = strpos($html, $stop, $afterHeading);
+            if ($at !== false) {
+                $bounds[] = $at;
+            }
+        }
+        self::assertNotSame([], $bounds, 'the section must contain a control to bound the intro');
+
+        $intro = substr($html, $afterHeading, min($bounds) - $afterHeading);
+
+        return trim((string) preg_replace('/\s+/', ' ', strip_tags($intro)));
+    }
+
     /** Each notice code renders a sentence that does not overclaim. */
     #[DataProvider('noticeCodes')]
     public function testEveryNoticeCodeRendersAndClaimsNoWork(string $code): void

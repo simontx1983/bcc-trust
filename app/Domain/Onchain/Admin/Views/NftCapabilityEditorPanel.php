@@ -118,11 +118,29 @@ final class NftCapabilityEditorPanel
         $state = $chain['bcc_supports'] ?? null;
         ?>
         <h3 style="margin-bottom:4px;">BCC product support</h3>
+        <?php
+        /*
+         * ── THE SEPARATION IS STATED HERE, NOT ONLY IN THE CONFIRM DIALOG ──
+         *
+         * The submit confirmation already says enabling does not grant the
+         * manual permission, and that was the ONLY place it was said. A
+         * confirmation is read after the decision has been made, by somebody
+         * who has already reached for the button — so it cannot be where an
+         * operator learns what the control means. An acceptance pass found
+         * exactly this gap.
+         *
+         * So the rule is in the always-visible introduction, before any
+         * table, button or dialog. The confirmation keeps its copy; it is
+         * now a reminder rather than the only statement of the rule.
+         */
+        ?>
         <p style="max-width:900px;color:#646970;margin-top:0;">
             Whether BCC treats this chain as one it does NFT collections for. It is a product
             decision, never a claim about the blockchain — a chain can be perfectly CW-721 capable
             and sit at off because BCC has not taken it on. It does not claim any provider is
-            configured, and <strong>it starts nothing</strong>.
+            configured, <strong>it starts nothing</strong>, and enabling it
+            <strong>does not grant the manual discovery permission</strong>. That permission is a
+            separate administrator decision.
         </p>
 
         <table class="widefat striped" style="max-width:900px;">
