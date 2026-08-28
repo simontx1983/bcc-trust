@@ -356,7 +356,8 @@ final class NftDiscoveryBoundaryTest extends TestCase
         foreach ([
             'enableNftProductSupport',
             'disableNftProductSupport',
-            'setManualCollectionDiscoveryEnabled',
+            'grantManualCollectionDiscovery',
+            'withdrawManualCollectionDiscovery',
             'upsertOverride',
             'deleteOverride',
             'bumpChainGeneration',

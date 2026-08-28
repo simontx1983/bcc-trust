@@ -360,6 +360,222 @@ final class NftCapabilityEditorFlagTest extends TestCase
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    //  ⚠️ THE FORBIDDEN STATE IS UNREACHABLE FROM EITHER INTERLEAVING
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // `product = 0, manual = 1` is a permission nothing can see: the model
+    // reports `no_bcc_support` and stops, so the row sits there invisibly
+    // until support is restored — at which point the chain returns already
+    // permitted, on a decision nobody remembers taking.
+    //
+    // Two writes can interleave two ways, and each is closed by a DIFFERENT
+    // mechanism. That is why both are tested, and why neither test would
+    // catch the other's defect.
+
+    /**
+     * ORDERING A — the withdrawal commits while the grant is deciding.
+     *
+     * The grant reads `product = 1`, a product-withdrawal atomically writes
+     * `product = 0, manual = 0`, and only then does the grant's UPDATE run.
+     * It carries `AND bcc_supports_nft_collections = 1`, so it matches no
+     * row: zero affected rows, nothing written.
+     *
+     * ⚠️ NO SERVICE-LAYER CHECK CAN CLOSE THIS. The window is between the
+     * read and the write, and re-reading only makes a smaller window. The
+     * interleave hook fires INSIDE the repository call, which is the only
+     * place a test can honestly stand.
+     */
+    public function testAWithdrawalDuringAGrantLeavesNoDormantPermission(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, 'osmosis', false, true, false);
+
+        ChainRepository::$interleavedWriter = static function (): void {
+            // The other request, committing in the window.
+            ChainRepository::disableNftProductSupport(self::CHAIN_ID);
+        };
+
+        $result = NftCapabilityEditor::enableManualDiscovery(self::CHAIN_ID);
+
+        $this->assertSame(
+            NftCapabilityEditor::RESULT_MANUAL_NO_PRODUCT,
+            $result,
+            'the predicate refused it, and the operator is told which permission is missing'
+        );
+        $this->assertFalse($this->product());
+        $this->assertFalse($this->manual(), 'THE FORBIDDEN STATE');
+        $this->assertNotContains(
+            'admin_nft_manual_discovery_enabled',
+            $this->audits(),
+            'nothing changed, so no state-change row may claim it did'
+        );
+        $this->assertNoWorkRan();
+    }
+
+    /**
+     * ORDERING B — the grant commits first, then the withdrawal runs.
+     *
+     * Closed by the OTHER mechanism: the withdrawal's cascade sets both
+     * columns in one statement, so it cannot clear product support and leave
+     * the permission standing.
+     */
+    public function testAGrantFollowedByAWithdrawalLeavesNoDormantPermission(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, 'osmosis', false, true, false);
+
+        $this->assertSame(
+            NftCapabilityEditor::RESULT_MANUAL_ENABLED,
+            NftCapabilityEditor::enableManualDiscovery(self::CHAIN_ID)
+        );
+        $this->assertTrue($this->manual());
+
+        NftCapabilityEditor::disableProductSupport(self::CHAIN_ID);
+
+        $this->assertFalse($this->product());
+        $this->assertFalse($this->manual(), 'THE FORBIDDEN STATE');
+        $this->assertNoWorkRan();
+    }
+
+    /**
+     * And the exhaustive statement of it: after ANY sequence of these four
+     * actions, the row is never `product = 0, manual = 1`.
+     *
+     * @return array<string, array{0: list<string>}>
+     */
+    public static function actionSequences(): array
+    {
+        return [
+            'grant then withdraw support' => [['enableManualDiscovery', 'disableProductSupport']],
+            'support off then grant'      => [['disableProductSupport', 'enableManualDiscovery']],
+            'grant, withdraw, re-enable'  => [['enableManualDiscovery', 'disableProductSupport', 'enableProductSupport']],
+            'churn'                       => [[
+                'enableProductSupport', 'enableManualDiscovery', 'disableProductSupport',
+                'enableProductSupport', 'disableManualDiscovery', 'enableManualDiscovery',
+                'disableProductSupport',
+            ]],
+        ];
+    }
+
+    /** @param list<string> $sequence */
+    #[DataProvider('actionSequences')]
+    public function testNoSequenceReachesTheForbiddenState(array $sequence): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, 'osmosis', false, true, false);
+
+        foreach ($sequence as $step) {
+            NftCapabilityEditor::{$step}(self::CHAIN_ID);
+
+            $this->assertFalse(
+                $this->product() === false && $this->manual() === true,
+                'reached product=0, manual=1 after ' . $step
+            );
+        }
+
+        // ⚠️ And re-enabling support never resurrects a permission: the
+        // cascade cleared it, so it has to be granted again explicitly.
+        if (end($sequence) === 'enableProductSupport') {
+            $this->assertFalse($this->manual(), 'support came back WITHOUT the permission');
+        }
+
+        $this->assertNoWorkRan();
+    }
+
+    /**
+     * A zero-row conditional grant is a REFUSAL, not a success.
+     *
+     * The affected-row count alone cannot say which: zero means "already
+     * granted" or "the predicate matched nothing". Only reading BOTH columns
+     * back separates them, and product support is asked about first.
+     */
+    public function testAZeroRowGrantWithProductOffIsRefusedNotReportedAsSuccess(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, 'osmosis', false, true, false);
+
+        ChainRepository::$interleavedWriter = static function (): void {
+            ChainRepository::disableNftProductSupport(self::CHAIN_ID);
+        };
+
+        $result = NftCapabilityEditor::enableManualDiscovery(self::CHAIN_ID);
+
+        $this->assertSame(NftCapabilityEditor::RESULT_MANUAL_NO_PRODUCT, $result);
+        $this->assertNotSame(NftCapabilityEditor::RESULT_MANUAL_ENABLED, $result);
+        $this->assertNotSame(NftCapabilityEditor::RESULT_MANUAL_NOOP_ENABLED, $result);
+        $this->assertSame([], $this->audits(), 'a refusal is not a state change');
+    }
+
+    /**
+     * A CONCURRENT IDENTICAL GRANT is a no-op with no state-change audit.
+     *
+     * Product support is still on and the permission is now on — but this
+     * statement moved nothing, so the change belongs to whoever made it.
+     * This is the case a pre-write read can only guess at.
+     */
+    public function testAConcurrentIdenticalGrantIsANoOpWithNoAudit(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, 'osmosis', false, true, false);
+
+        ChainRepository::$interleavedWriter = static function (): void {
+            // Another operator grants the same permission first.
+            ChainRepository::grantManualCollectionDiscovery(self::CHAIN_ID);
+        };
+        // Our statement then matches a row already holding the value.
+        ChainRepository::$capabilityWriteNoOp       = true;
+        ChainRepository::$capabilityConcurrentApply = true;
+
+        $result = NftCapabilityEditor::enableManualDiscovery(self::CHAIN_ID);
+
+        $this->assertSame(NftCapabilityEditor::RESULT_MANUAL_NOOP_ENABLED, $result);
+        $this->assertTrue($this->manual(), 'the desired state is there');
+        $this->assertTrue($this->product());
+        $this->assertNotContains('admin_nft_manual_discovery_enabled', $this->audits());
+        $this->assertNoWorkRan();
+    }
+
+    /**
+     * The grant statement really is the conditional one, and the withdrawal
+     * really is not.
+     *
+     * Named-method assertion rather than a behavioural one: the two
+     * directions must never collapse back into a single
+     * `set…(bool $enabled)`, because the predicate belongs to exactly one of
+     * them.
+     */
+    public function testTheTwoDirectionsUseTheTwoDifferentStatements(): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, 'osmosis', false, true, false);
+
+        NftCapabilityEditor::enableManualDiscovery(self::CHAIN_ID);
+        NftCapabilityEditor::disableManualDiscovery(self::CHAIN_ID);
+
+        $methods = array_column(ChainRepository::$capabilityWrites, 'method');
+        $this->assertSame(
+            ['grantManualCollectionDiscovery', 'withdrawManualCollectionDiscovery'],
+            $methods
+        );
+    }
+
+    /**
+     * ⚠️ WITHDRAWAL IS UNCONDITIONAL — including with product support off.
+     *
+     * If the grant's predicate were copied onto the withdrawal, a row that
+     * already holds `product = 0, manual = 1` (a restored backup, an older
+     * build) could never be corrected through the sanctioned path.
+     */
+    public function testWithdrawalWorksOnARowAlreadyInTheForbiddenState(): void
+    {
+        // The state the predicate makes unreachable going forward, planted
+        // directly as a restored backup would.
+        ChainRepository::seed(self::CHAIN_ID, 'osmosis', false, false, true);
+        $this->assertFalse($this->product());
+        $this->assertTrue($this->manual());
+
+        $result = NftCapabilityEditor::disableManualDiscovery(self::CHAIN_ID);
+
+        $this->assertSame(NftCapabilityEditor::RESULT_MANUAL_DISABLED, $result);
+        $this->assertFalse($this->manual(), 'the bad value can always be cleared');
+        $this->assertNoWorkRan();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     //  NO-OPS WRITE NOTHING
     // ═══════════════════════════════════════════════════════════════════
 

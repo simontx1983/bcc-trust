@@ -228,6 +228,32 @@ final class ChainNftCapabilityRepository
      * them apart so the caller can bump a generation for a real change and
      * stay silent for a re-submitted form.
      *
+     * ── WHICH IS WHY `updated_at` IS CONDITIONAL ─────────────────────────
+     * An unconditional `updated_at = CURRENT_TIMESTAMP` destroys that whole
+     * distinction. If a concurrent request applies the same `enabled` and
+     * `priority` after this request's pre-read, this statement changes
+     * nothing SEMANTIC — and MySQL still reports 2 affected rows, because
+     * the timestamp moved. The caller then bumps a generation and writes an
+     * audit row for a change somebody else made, which is exactly the
+     * misattribution the no-op contract exists to prevent.
+     *
+     * So the timestamp advances only when `enabled` or `priority` actually
+     * differ, and the statement becomes SEMANTICALLY IDEMPOTENT: applying
+     * the current state again is a true zero-row no-op.
+     *
+     * ⚠️ THE ASSIGNMENT ORDER IS LOAD-BEARING. Assignments in
+     * `ON DUPLICATE KEY UPDATE` are evaluated left to right and later ones
+     * see the values earlier ones already wrote. `updated_at` is therefore
+     * assigned FIRST, while `enabled` and `priority` still hold the STORED
+     * values its comparison needs. Listed last, the comparison would run
+     * against the values it was about to be told about, always find them
+     * equal, and leave a genuine change carrying a stale timestamp —
+     * measured, not assumed: a priority change under the reversed order
+     * reports 2 affected rows and does not advance `updated_at`.
+     *
+     * Both columns are `NOT NULL`, so `<>` is total here and no null-safe
+     * comparison is needed.
+     *
      * @param string $operation one of {@see NftDriverRegistry}'s OP_* values
      * @param string $driverKey one of its DRIVER_* values
      * @param int    $priority  ascending; lower runs first
@@ -250,9 +276,10 @@ final class ChainNftCapabilityRepository
             "INSERT INTO {$table} (chain_id, operation, driver_key, enabled, priority)
                   VALUES (%d, %s, %s, %d, %d)
              ON DUPLICATE KEY UPDATE
+                  updated_at = IF(enabled <> VALUES(enabled) OR priority <> VALUES(priority),
+                                  CURRENT_TIMESTAMP, updated_at),
                   enabled    = VALUES(enabled),
-                  priority   = VALUES(priority),
-                  updated_at = CURRENT_TIMESTAMP",
+                  priority   = VALUES(priority)",
             $chainId,
             $operation,
             $driverKey,

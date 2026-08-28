@@ -551,25 +551,54 @@ final class ChainRepository
     }
 
     /**
-     * Set the permission for an administrator to START a chain-wide NFT
-     * collection discovery.
+     * GRANT the permission for an administrator to START a chain-wide NFT
+     * collection discovery — but only while product support still stands.
      *
-     * Whether the permission is ALLOWED to be granted — product support must
-     * be on, and an administrator-started operation must actually exist for
-     * the chain — is a domain question answered above this layer by
-     * {@see \BCC\Trust\Onchain\Services\NftCapabilityEditor}. This method
-     * stores the decision it is given and nothing more; a repository that
-     * also arbitrated would be a second authority on the same rule.
+     * ── THE PREDICATE IS THE POINT, AND IT IS NOT BELT-AND-BRACES ───────
+     * {@see \BCC\Trust\Onchain\Services\NftCapabilityEditor} reads product
+     * support before calling this, and that read cannot be enough on its
+     * own. An unconditional `SET manual = 1` admits this interleaving:
      *
-     * Granting it starts nothing. No cron reads this column — every
-     * recurring discovery hook was retired and cannot re-arm — so it can
-     * only ever be consulted by a human-initiated action that still has to
-     * pass every other gate.
+     *   1. the grant reads `product = 1`
+     *   2. a product-withdrawal atomically writes `product = 0, manual = 0`
+     *   3. the grant writes `manual = 1`
+     *   4. the row now says `product = 0, manual = 1`
+     *
+     * — which is precisely the dormant-permission state the cascade in
+     * {@see disableNftProductSupport()} exists to make impossible: invisible
+     * on every surface (the model reports `no_bcc_support` and stops), and
+     * live again the moment support is restored. A service-layer check
+     * cannot close it, because the window is between our read and our write
+     * and no amount of re-reading removes it.
+     *
+     * So the cross-column invariant is enforced by MySQL, in the same
+     * statement that does the write: `AND bcc_supports_nft_collections = 1`.
+     * If support was withdrawn in the window, the UPDATE matches no row,
+     * reports ZERO affected rows, and the permission is simply not granted.
+     *
+     * The reverse ordering is safe for the other reason: if the grant
+     * commits first, the withdrawal's single-statement cascade clears both
+     * columns. Either way `product = 0, manual = 1` is unreachable.
+     *
+     * ── WHAT IT STILL DOES NOT ARBITRATE ────────────────────────────────
+     * Whether an administrator-started operation exists for the chain at all
+     * remains a DOMAIN question — it is a property of the code registry, not
+     * of any column, and the service answers it. This predicate covers
+     * exactly the one rule that is expressible in the row, and it covers it
+     * where the race actually is.
+     *
+     * Granting starts nothing. No cron reads this column — every recurring
+     * discovery hook was retired and cannot re-arm — so it can only ever be
+     * consulted by a human-initiated action that still has to pass every
+     * other gate.
+     *
+     * ⚠️ ZERO AFFECTED ROWS IS AMBIGUOUS HERE and the caller must resolve
+     * it by reading BOTH columns back: it means either "already granted" or
+     * "refused because support is gone". {@see RepositoryWriteResult} cannot
+     * tell them apart, and neither should it.
      */
-    public static function setManualCollectionDiscoveryEnabled(
-        int $chainId,
-        bool $enabled
-    ): RepositoryWriteResult {
+    public static function grantManualCollectionDiscovery(int $chainId): RepositoryWriteResult
+    {
         if ($chainId <= 0) {
             return RepositoryWriteResult::failure();
         }
@@ -579,10 +608,44 @@ final class ChainRepository
 
         $result = $wpdb->query($wpdb->prepare(
             "UPDATE {$table}
-                SET manual_collection_discovery_enabled = %d
+                SET manual_collection_discovery_enabled = 1
+              WHERE id = %d
+                AND bcc_supports_nft_collections = 1
+              LIMIT 1",
+            $chainId
+        ));
+
+        self::clearCache();
+
+        return RepositoryWriteResult::fromWpdb($result);
+    }
+
+    /**
+     * WITHDRAW the permission. Unconditional, and deliberately so.
+     *
+     * No product-support predicate, because the asymmetry is the design:
+     * the condition on {@see grantManualCollectionDiscovery()} exists to
+     * stop a permission being CREATED where it cannot mean anything.
+     * Applying it to removal would mean a row that already holds a wrong
+     * value — a restored backup, an older build, a hand-run `UPDATE` — could
+     * not be returned to the safe state through the only sanctioned path.
+     * Taking a permission away is safe by definition and must never be
+     * blocked by the state it is being used to correct.
+     */
+    public static function withdrawManualCollectionDiscovery(int $chainId): RepositoryWriteResult
+    {
+        if ($chainId <= 0) {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET manual_collection_discovery_enabled = 0
               WHERE id = %d
               LIMIT 1",
-            $enabled ? 1 : 0,
             $chainId
         ));
 

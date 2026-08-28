@@ -407,6 +407,78 @@ final class NftCapabilityEditorOverrideTest extends TestCase
         $this->assertSame([], ChainNftCapabilityRepository::$bumps, 'nothing moved, nothing to invalidate');
     }
 
+    /**
+     * ⚠️ ANOTHER WRITER APPLYING THE REQUESTED STATE IN THE WINDOW IS A
+     * NO-OP FOR THIS REQUEST — NO BUMP, NO AUDIT.
+     *
+     * The interleave is real: this request pre-reads (no row, so not a
+     * no-op), another request writes exactly what we were about to write,
+     * and only then does our upsert run against a row that already says it.
+     *
+     * ── AND THIS IS EXACTLY WHAT `updated_at` USED TO BREAK ─────────────
+     * With an unconditional `updated_at = CURRENT_TIMESTAMP`, our statement
+     * would still change the timestamp, MySQL would report 2 affected rows,
+     * and this request would bump a generation and write
+     * `admin_nft_driver_override_disabled` for a change the OTHER request
+     * made. The conditional timestamp is what makes the statement
+     * semantically idempotent, and this test is what fails if it is ever
+     * made unconditional again.
+     */
+    public function testAnInterleavedIdenticalApplyIsANoOpForThisRequest(): void
+    {
+        ChainNftCapabilityRepository::$interleavedWriter = static function (): void {
+            // The other request, committing between our pre-read and our
+            // statement — writing precisely what we intended to write.
+            ChainNftCapabilityRepository::seedRow(self::CHAIN_ID, self::OP, self::DRV, false, 10);
+        };
+
+        $result = NftCapabilityEditor::disableDriver(self::CHAIN_ID, self::OP, self::DRV);
+
+        $this->assertSame(
+            NftCapabilityEditor::RESULT_OVERRIDE_NOOP,
+            $result,
+            'the desired state is there and this statement did not put it there'
+        );
+        $this->assertSame(
+            [],
+            ChainNftCapabilityRepository::$bumps,
+            'nothing moved, so no generation may be invalidated on our behalf'
+        );
+        $this->assertSame(
+            [],
+            $this->audits(),
+            'and no durable row may credit this request with the other one\'s change'
+        );
+
+        // The state itself is correct — this is a no-op, not a failure.
+        $this->assertSame(
+            [['operation' => self::OP, 'driver_key' => self::DRV, 'enabled' => false, 'priority' => 10]],
+            $this->rows()
+        );
+    }
+
+    /**
+     * But an interleaved DIFFERENT write still leaves ours a real mutation.
+     *
+     * The counterpart, so the test above is not passing because the
+     * interleave hook simply suppresses everything: another request writes
+     * priority 99, ours writes priority 10, and ours genuinely changes the
+     * row — bump and audit both fire.
+     */
+    public function testAnInterleavedDifferentApplyStillLeavesOursAMutation(): void
+    {
+        ChainNftCapabilityRepository::$interleavedWriter = static function (): void {
+            ChainNftCapabilityRepository::seedRow(self::CHAIN_ID, self::OP, self::DRV, true, 99);
+        };
+
+        $result = NftCapabilityEditor::enableDriver(self::CHAIN_ID, self::OP, self::DRV, 10);
+
+        $this->assertSame(NftCapabilityEditor::RESULT_OVERRIDE_ENABLED, $result);
+        $this->assertSame([self::CHAIN_ID], ChainNftCapabilityRepository::$bumps);
+        $this->assertSame(['admin_nft_driver_override_enabled'], $this->audits());
+        $this->assertSame(10, $this->rows()[0]['priority']);
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     //  UNREADABLE STATE REFUSES EVERY MUTATION
     // ═══════════════════════════════════════════════════════════════════

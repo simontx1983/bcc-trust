@@ -96,6 +96,18 @@ namespace BCC\Trust\Onchain\Repositories {
             /** Suppress the stored change, so the read-back disagrees. */
             public static bool $capabilityWriteSilentlyDrops = false;
 
+            /**
+             * The OTHER request in a race.
+             *
+             * Invoked once, inside the write, AFTER this request has read
+             * and decided and BEFORE the statement evaluates its predicate.
+             * That is the only window a service-layer check cannot close, so
+             * it is the only place a concurrency test can honestly stand.
+             *
+             * @var (callable(): void)|null
+             */
+            public static $interleavedWriter = null;
+
             public static function getById(int $id): ?object
             {
                 if (self::$readBackNull && self::$discoveryWrites !== []) {
@@ -178,26 +190,66 @@ namespace BCC\Trust\Onchain\Repositories {
                 );
             }
 
-            public static function setManualCollectionDiscoveryEnabled(
-                int $chainId,
-                bool $enabled
-            ): RepositoryWriteResult {
+            /**
+             * The CONDITIONAL grant, modelled as MySQL executes it.
+             *
+             * ── THE PREDICATE IS PART OF THE FAKE, NOT SKIPPED BY IT ────
+             * `AND bcc_supports_nft_collections = 1` is evaluated HERE,
+             * against the stored row, at write time. A fake that ignored it
+             * would let the service's own pre-read stand in for the
+             * predicate — and every concurrency test below would then be
+             * asserting that the check the service already made was made,
+             * which proves nothing about the interleaving they exist for.
+             *
+             * Zero affected rows therefore has the same two meanings it has
+             * in production: already granted, or refused because support is
+             * gone.
+             */
+            public static function grantManualCollectionDiscovery(int $chainId): RepositoryWriteResult
+            {
                 return self::applyCapabilityWrite(
-                    'setManualCollectionDiscoveryEnabled',
+                    'grantManualCollectionDiscovery',
                     $chainId,
-                    $enabled,
-                    ['manual_collection_discovery_enabled' => $enabled ? '1' : '0']
+                    true,
+                    ['manual_collection_discovery_enabled' => '1'],
+                    // The WHERE predicate, evaluated against the row as it
+                    // stands when the statement runs.
+                    static function (object $row): bool {
+                        return property_exists($row, 'bcc_supports_nft_collections')
+                            && (string) $row->bcc_supports_nft_collections === '1';
+                    }
+                );
+            }
+
+            /** The UNCONDITIONAL withdrawal. No predicate, by design. */
+            public static function withdrawManualCollectionDiscovery(int $chainId): RepositoryWriteResult
+            {
+                return self::applyCapabilityWrite(
+                    'withdrawManualCollectionDiscovery',
+                    $chainId,
+                    false,
+                    ['manual_collection_discovery_enabled' => '0']
                 );
             }
 
             /**
-             * @param array<string, string> $columns the columns this statement sets
+             * Run one capability statement against the in-memory row.
+             *
+             * `$predicate` is the statement's own `WHERE` clause beyond the
+             * primary key. When it is present and does not hold, the
+             * statement matches NO ROW: nothing is written and ZERO affected
+             * rows are reported — which is what MySQL does, and what makes
+             * the conditional grant testable at all.
+             *
+             * @param array<string, string>       $columns   the columns this statement sets
+             * @param (callable(object): bool)|null $predicate extra WHERE, evaluated at write time
              */
             private static function applyCapabilityWrite(
                 string $method,
                 int $chainId,
                 bool $value,
-                array $columns
+                array $columns,
+                ?callable $predicate = null
             ): RepositoryWriteResult {
                 self::$capabilityWrites[] = [
                     'method'   => $method,
@@ -207,6 +259,16 @@ namespace BCC\Trust\Onchain\Repositories {
 
                 if (self::$writeThrows !== null) {
                     throw self::$writeThrows;
+                }
+
+                // A hook for the OTHER writer in a race: it runs after this
+                // request has decided and immediately before the statement
+                // executes, which is exactly the window a service-layer
+                // check cannot close.
+                if (self::$interleavedWriter !== null) {
+                    $hook = self::$interleavedWriter;
+                    self::$interleavedWriter = null;   // once, not on the re-read
+                    $hook();
                 }
 
                 // Production clears the cache after the query regardless of
@@ -219,13 +281,22 @@ namespace BCC\Trust\Onchain\Repositories {
                     return RepositoryWriteResult::failure();
                 }
 
+                $row = self::$rows[$chainId] ?? null;
+
+                // THE STATEMENT'S OWN WHERE CLAUSE. Matching no row is not a
+                // failure — it is zero affected rows, and the caller has to
+                // work out which of its two meanings applies.
+                if ($row !== null && $predicate !== null && !$predicate($row)) {
+                    return RepositoryWriteResult::executed(0);
+                }
+
                 $apply = !self::$capabilityWriteSilentlyDrops
                     && (!self::$capabilityWriteNoOp || self::$capabilityConcurrentApply);
 
-                if ($apply && isset(self::$rows[$chainId])) {
+                if ($apply && $row !== null) {
                     foreach ($columns as $column => $stored) {
-                        if (property_exists(self::$rows[$chainId], $column)) {
-                            self::$rows[$chainId]->{$column} = $stored;
+                        if (property_exists($row, $column)) {
+                            $row->{$column} = $stored;
                         }
                     }
                 }
@@ -300,6 +371,7 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$capabilityWriteNoOp         = false;
                 self::$capabilityConcurrentApply   = false;
                 self::$capabilityWriteSilentlyDrops = false;
+                self::$interleavedWriter           = null;
             }
         }
     }
@@ -342,6 +414,12 @@ namespace BCC\Trust\Onchain\Repositories {
             /** Make the SECOND read (the postcondition) unavailable. */
             public static ?string $postconditionUnavailable = null;
 
+            /**
+             * The OTHER request in a race, invoked once immediately before
+             * the upsert evaluates what is stored. @var (callable(): void)|null
+             */
+            public static $interleavedWriter = null;
+
             public static function getForChain(int $chainId): ChainNftCapabilityOverrides
             {
                 self::$reads++;
@@ -374,10 +452,18 @@ namespace BCC\Trust\Onchain\Repositories {
                     'priority'   => $priority,
                 ];
 
+                if (self::$interleavedWriter !== null) {
+                    $hook = self::$interleavedWriter;
+                    self::$interleavedWriter = null;
+                    $hook();
+                }
+
                 if (self::$writeFails) {
                     return RepositoryWriteResult::failure();
                 }
 
+                // Read AFTER the interleave, exactly as MySQL evaluates the
+                // stored row when the statement actually runs.
                 $key      = self::key($operation, $driverKey);
                 $existing = self::$table[$chainId][$key] ?? null;
 
@@ -498,6 +584,7 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$writeNoOp                = false;
                 self::$writeSilentlyDrops       = false;
                 self::$postconditionUnavailable = null;
+                self::$interleavedWriter        = null;
             }
         }
     }

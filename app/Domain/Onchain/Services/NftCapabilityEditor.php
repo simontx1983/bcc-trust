@@ -55,6 +55,20 @@ if (!defined('ABSPATH')) {
  * operator is told NO at the moment they ask, instead of being handed a
  * stored row that quietly means nothing forever.
  *
+ * ── AND ONE INVARIANT IS ENFORCED IN SQL, NOT HERE ──────────────────────
+ * "The manual permission may not be set while product support is off" is a
+ * CROSS-COLUMN invariant, and a service that reads one column and then
+ * writes another cannot hold it under concurrency — the withdrawal it is
+ * racing lands in the gap. So that one rule is carried by the statement:
+ * {@see ChainRepository::grantManualCollectionDiscovery()} is conditional,
+ * and {@see ChainRepository::disableNftProductSupport()} clears both columns
+ * in one UPDATE. Between them, `product = 0, manual = 1` is unreachable from
+ * either interleaving.
+ *
+ * The rules that are NOT expressible in a row — which drivers the registry
+ * offers, whether an administrator-started operation exists at all — stay
+ * here, because they are properties of the code rather than of the data.
+ *
  * ── EVERY WRITE ANSWERS FOUR QUESTIONS, IN THIS ORDER ───────────────────
  *   Did the statement RUN?          `isFailure()` — a refusal is never a change
  *   Did it MOVE anything?           `mutated()` — the generation bumps on this
@@ -258,6 +272,25 @@ final class NftCapabilityEditor
      * browser was rendering, which may be minutes old and may describe a
      * chain whose support was withdrawn since.
      *
+     * ── AND THE READ IS NOT WHAT ENFORCES IT ────────────────────────────
+     * Reading product support here is a courtesy: it produces a notice that
+     * names the missing permission instead of a generic refusal. It cannot
+     * be the enforcement, because the window between this read and the write
+     * is exactly where a concurrent product-withdrawal lands, and no amount
+     * of re-reading closes a window you are standing in.
+     *
+     * The enforcement is a PREDICATE IN THE STATEMENT —
+     * {@see ChainRepository::grantManualCollectionDiscovery()} carries
+     * `AND bcc_supports_nft_collections = 1`, so a withdrawal that commits
+     * in the window makes this UPDATE match no row. `product = 0, manual = 1`
+     * is unreachable from either interleaving: the other ordering is covered
+     * by the withdrawal's single-statement cascade.
+     *
+     * Which is why the outcome is settled by {@see settleManualGrant()}
+     * rather than the shared settler: zero affected rows here means EITHER
+     * "already granted" OR "refused by the predicate", and only a fresh read
+     * of both columns can say which.
+     *
      * Naming the structural refusal first is the same choice
      * {@see NftChainCapability::verdict()} documents: sending an operator to
      * turn on product support, so that they can then grant a permission that
@@ -292,21 +325,127 @@ final class NftCapabilityEditor
             return self::RESULT_MANUAL_NOOP_ENABLED;
         }
 
-        $write = ChainRepository::setManualCollectionDiscoveryEnabled($chainId, true);
+        // CONDITIONAL on product support at the moment MySQL executes it.
+        // The check above is a courtesy that produces a useful notice; THIS
+        // is what makes `product = 0, manual = 1` unreachable when a
+        // withdrawal commits in the window between them.
+        $write = ChainRepository::grantManualCollectionDiscovery($chainId);
 
-        return self::settleChainFlagWrite(
-            $write,
-            $chainId,
-            (string) $chain->slug,
-            static fn(object $row): bool => NftChainCapability::manualDiscoveryState($row) === true,
+        return self::settleManualGrant($write, $chainId, (string) $chain->slug);
+    }
+
+    /**
+     * Settle a CONDITIONAL grant, where zero affected rows is ambiguous.
+     *
+     * ── WHY THIS CANNOT USE THE SHARED SETTLER ──────────────────────────
+     * Everywhere else, zero affected rows means "the row already held the
+     * value". Here it means that OR "the `AND bcc_supports_nft_collections
+     * = 1` predicate matched nothing, because support was withdrawn while
+     * we were deciding". Those are a no-op and a refusal, and the affected-
+     * row count cannot separate them — only a fresh read of BOTH columns
+     * can, which is why this ladder reads both and asks about product
+     * support FIRST.
+     *
+     *   product unreadable / chain gone   UNVERIFIED — no claim either way
+     *   product now off                   REFUSED    — the predicate bit
+     *   manual now on, zero rows          NO-OP      — somebody else did it
+     *   manual now on, rows moved         GRANTED
+     *   manual still off                  UNVERIFIED
+     *
+     * A refusal writes NO state-change audit row, because no state changed:
+     * the operator asked for something that was no longer permitted by the
+     * time it ran, and the correct record of that is the notice, not a
+     * durable row implying the chain moved.
+     */
+    private static function settleManualGrant(
+        RepositoryWriteResult $write,
+        int $chainId,
+        string $slug
+    ): string {
+        if ($write->isFailure()) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] NFT capability flag write failed', [
+                'action'   => 'nft_capability_flag_write_failed',
+                'chain_id' => $chainId,
+                'chain'    => $slug,
+                'event'    => 'admin_nft_manual_discovery_enable_failed',
+                'operator' => get_current_user_id(),
+            ]);
+
+            AdminActionSupport::audit(
+                'admin_nft_manual_discovery_enable_failed',
+                'chain',
+                $chainId,
+                ['chain' => $slug]
+            );
+
+            return self::RESULT_MANUAL_WRITE_FAILED;
+        }
+
+        // BOTH columns, from a re-resolved row. The repository cleared the
+        // chain cache inside the write — including on a zero-row result —
+        // so this reaches the database rather than the projection we
+        // decided from.
+        $after        = ChainRepository::getById($chainId);
+        $afterProduct = $after === null ? null : NftChainCapability::bccNftSupportState($after);
+        $afterManual  = $after === null ? null : NftChainCapability::manualDiscoveryState($after);
+
+        if ($afterProduct === null || $afterManual === null) {
+            return self::unconfirmedManualGrant($chainId, $slug);
+        }
+
+        if ($afterProduct === false) {
+            // The predicate refused it. Nothing changed, and the operator is
+            // told the same thing they would have been told a moment
+            // earlier — which is now simply true rather than nearly true.
+            \BCC\Core\Log\Logger::info('[bcc-trust] manual discovery grant refused by the product-support predicate', [
+                'action'   => 'nft_manual_grant_refused_product_withdrawn',
+                'chain_id' => $chainId,
+                'chain'    => $slug,
+                'operator' => get_current_user_id(),
+            ]);
+
+            return self::RESULT_MANUAL_NO_PRODUCT;
+        }
+
+        if ($afterManual !== true) {
+            return self::unconfirmedManualGrant($chainId, $slug);
+        }
+
+        if ($write->isNoOp()) {
+            // Product on, permission on, and this statement moved nothing:
+            // a concurrent request granted it. No audit row — the change
+            // belongs to whoever made it.
+            return self::RESULT_MANUAL_NOOP_ENABLED;
+        }
+
+        AdminActionSupport::audit(
             'admin_nft_manual_discovery_enabled',
-            'admin_nft_manual_discovery_enable_failed',
-            'admin_nft_manual_discovery_enable_unconfirmed',
-            self::RESULT_MANUAL_ENABLED,
-            self::RESULT_MANUAL_NOOP_ENABLED,
-            self::RESULT_MANUAL_WRITE_FAILED,
-            self::RESULT_MANUAL_UNVERIFIED
+            'chain',
+            $chainId,
+            ['chain' => $slug]
         );
+
+        return self::RESULT_MANUAL_ENABLED;
+    }
+
+    private static function unconfirmedManualGrant(int $chainId, string $slug): string
+    {
+        \BCC\Core\Log\Logger::error('[bcc-trust] NFT capability flag change could not be confirmed', [
+            'action'   => 'nft_capability_flag_unconfirmed',
+            'chain_id' => $chainId,
+            'chain'    => $slug,
+            'event'    => 'admin_nft_manual_discovery_enable_unconfirmed',
+            'operator' => get_current_user_id(),
+        ]);
+
+        AdminActionSupport::audit(
+            'admin_nft_manual_discovery_enable_unconfirmed',
+            'chain',
+            $chainId,
+            ['chain' => $slug]
+        );
+
+        return self::RESULT_MANUAL_UNVERIFIED;
     }
 
     /**
@@ -335,7 +474,10 @@ final class NftCapabilityEditor
             return self::RESULT_MANUAL_NOOP_DISABLED;
         }
 
-        $write = ChainRepository::setManualCollectionDiscoveryEnabled($chainId, false);
+        // UNCONDITIONAL — see withdrawManualCollectionDiscovery(). A gate on
+        // product support here would leave a restored backup holding a wrong
+        // value with no sanctioned way to correct it.
+        $write = ChainRepository::withdrawManualCollectionDiscovery($chainId);
 
         return self::settleChainFlagWrite(
             $write,

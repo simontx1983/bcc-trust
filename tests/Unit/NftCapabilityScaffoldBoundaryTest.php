@@ -554,7 +554,8 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
         foreach ([
             'ChainRepository::enableNftProductSupport',
             'ChainRepository::disableNftProductSupport',
-            'ChainRepository::setManualCollectionDiscoveryEnabled',
+            'ChainRepository::grantManualCollectionDiscovery',
+            'ChainRepository::withdrawManualCollectionDiscovery',
             'ChainNftCapabilityRepository::upsertOverride',
             'ChainNftCapabilityRepository::deleteOverride',
             'ChainNftCapabilityRepository::bumpChainGeneration',
@@ -615,7 +616,8 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
         $writers = [
             'enableNftProductSupport',
             'disableNftProductSupport',
-            'setManualCollectionDiscoveryEnabled',
+            'grantManualCollectionDiscovery',
+            'withdrawManualCollectionDiscovery',
             'upsertOverride',
             'deleteOverride',
         ];
@@ -674,7 +676,8 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
 
             foreach ([
                 'enableNftProductSupport',
-                'setManualCollectionDiscoveryEnabled',
+                'grantManualCollectionDiscovery',
+                'withdrawManualCollectionDiscovery',
                 'upsertOverride',
             ] as $writer) {
                 self::assertStringNotContainsString(
@@ -690,6 +693,74 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
                 "{$relative} must not seed an override row"
             );
         }
+    }
+
+    /**
+     * ⚠️ THE TWO CROSS-COLUMN INVARIANTS LIVE IN THE SQL, AND MUST STAY THERE.
+     *
+     * Both are concurrency properties, and both would look like harmless
+     * simplifications to remove — which is why they are pinned as source
+     * rather than left to a behavioural test that happens to cover them.
+     *
+     *   1. The manual GRANT carries `AND bcc_supports_nft_collections = 1`.
+     *      Without it, a product-withdrawal committing between the service's
+     *      read and its write leaves `product = 0, manual = 1` — the dormant
+     *      permission the whole cascade exists to make unreachable. A
+     *      service-layer check cannot close that window.
+     *
+     *   2. The override upsert advances `updated_at` only on a real change,
+     *      and assigns it FIRST. Unconditional, an identical concurrent
+     *      apply still moves the timestamp, MySQL reports 2 affected rows,
+     *      and this request bumps a generation and writes an audit row for
+     *      somebody else's change. Assigned LAST, the comparison sees the
+     *      values it is about to be told about and a genuine change keeps a
+     *      stale timestamp.
+     *
+     * The withdrawal is checked to be UNCONDITIONAL for the opposite reason:
+     * a predicate there would strand a restored backup holding a wrong value.
+     */
+    public function testTheCrossColumnInvariantsAreEnforcedInSql(): void
+    {
+        $chains = self::read('app/Domain/Onchain/Repositories/ChainRepository.php');
+
+        // 1 — the grant is conditional, the withdrawal is not.
+        self::assertMatchesRegularExpression(
+            '/function grantManualCollectionDiscovery.*?AND bcc_supports_nft_collections = 1/s',
+            $chains,
+            'the manual grant must be conditional on product support IN THE STATEMENT'
+        );
+        self::assertDoesNotMatchRegularExpression(
+            '/function withdrawManualCollectionDiscovery.*?AND bcc_supports_nft_collections/s',
+            $chains,
+            'withdrawal must stay unconditional so a wrong stored value can always be cleared'
+        );
+
+        // And the cascade is still one statement.
+        self::assertMatchesRegularExpression(
+            '/function disableNftProductSupport.*?SET bcc_supports_nft_collections\s*=\s*0,\s*'
+                . 'manual_collection_discovery_enabled\s*=\s*0/s',
+            $chains,
+            'both columns must move in ONE UPDATE'
+        );
+
+        // 2 — the upsert is semantically idempotent, and ordered.
+        $caps = self::read('app/Domain/Onchain/Repositories/ChainNftCapabilityRepository.php');
+
+        self::assertStringNotContainsString(
+            'updated_at = CURRENT_TIMESTAMP,',
+            $caps,
+            'an unconditional updated_at makes an identical concurrent apply look like a mutation'
+        );
+        self::assertMatchesRegularExpression(
+            '/ON DUPLICATE KEY UPDATE\s*\n\s*updated_at = IF\(/',
+            $caps,
+            'updated_at must be assigned FIRST — assignments are evaluated left to right, '
+                . 'so listed last its comparison would see the values it is about to be told about'
+        );
+        self::assertStringContainsString(
+            'enabled <> VALUES(enabled) OR priority <> VALUES(priority)',
+            $caps
+        );
     }
 
     /**

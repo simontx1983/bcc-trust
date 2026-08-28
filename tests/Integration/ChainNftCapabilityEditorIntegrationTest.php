@@ -200,7 +200,7 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
     public function testDisablingProductSupportClearsBothColumnsInOneStatement(): void
     {
         ChainRepository::enableNftProductSupport(self::$chainId);
-        ChainRepository::setManualCollectionDiscoveryEnabled(self::$chainId, true);
+        ChainRepository::grantManualCollectionDiscovery(self::$chainId);
         $this->assertSame(1, $this->storedFlag(self::PRODUCT));
         $this->assertSame(1, $this->storedFlag(self::MANUAL));
 
@@ -212,10 +212,28 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
         $this->assertSame(0, $this->storedFlag(self::MANUAL));
     }
 
-    /** A stale permission with support already off is still cleared. */
+    /**
+     * A stale permission with support already off is still cleared.
+     *
+     * ── THE FIXTURE HAS TO BE PLANTED WITH RAW SQL, AND THAT IS THE POINT ──
+     * This test used to build its own starting state by calling the manual
+     * setter with support off. It cannot any more:
+     * {@see ChainRepository::grantManualCollectionDiscovery()} carries
+     * `AND bcc_supports_nft_collections = 1` and now correctly refuses. The
+     * state is therefore unreachable through the sanctioned path, which is
+     * the whole fix — so it is written directly, the way a restored backup
+     * or an older build actually produces it.
+     *
+     * The cascade still has to clean it up, because rows like this exist in
+     * databases that predate the predicate.
+     */
     public function testTheCascadeClearsAStalePermissionWhenSupportIsAlreadyOff(): void
     {
-        ChainRepository::setManualCollectionDiscoveryEnabled(self::$chainId, true);
+        $GLOBALS['wpdb']->query(
+            'UPDATE `' . ChainRepository::table() . '`'
+            . ' SET ' . self::PRODUCT . ' = 0, ' . self::MANUAL . ' = 1'
+            . ' WHERE id = ' . self::$chainId
+        );
         $this->assertSame(0, $this->storedFlag(self::PRODUCT));
         $this->assertSame(1, $this->storedFlag(self::MANUAL));
 
@@ -223,6 +241,26 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
 
         $this->assertTrue($result->mutated(), 'one column still had to move');
         $this->assertSame(0, $this->storedFlag(self::MANUAL));
+    }
+
+    /**
+     * ⚠️ AND THE SANCTIONED PATH CAN NO LONGER PRODUCE IT.
+     *
+     * The companion assertion to the test above, stated on its own so the
+     * fixture change there cannot be mistaken for a workaround: with support
+     * off, the grant leaves the permission at 0.
+     */
+    public function testTheGrantCannotProduceTheStaleStateAtAll(): void
+    {
+        $this->assertSame(0, $this->storedFlag(self::PRODUCT));
+
+        ChainRepository::grantManualCollectionDiscovery(self::$chainId);
+
+        $this->assertSame(
+            0,
+            $this->storedFlag(self::MANUAL),
+            'the state the test above has to plant by hand is no longer reachable'
+        );
     }
 
     /** A flag write touches exactly one chain. */
@@ -246,12 +284,108 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
         foreach ([0, -1] as $bad) {
             $this->assertTrue(ChainRepository::enableNftProductSupport($bad)->isFailure());
             $this->assertTrue(ChainRepository::disableNftProductSupport($bad)->isFailure());
-            $this->assertTrue(
-                ChainRepository::setManualCollectionDiscoveryEnabled($bad, true)->isFailure()
-            );
+            $this->assertTrue(ChainRepository::grantManualCollectionDiscovery($bad)->isFailure());
+            $this->assertTrue(ChainRepository::withdrawManualCollectionDiscovery($bad)->isFailure());
         }
 
         $this->assertSame(0, $this->storedFlag(self::PRODUCT));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  ⚠️ THE CROSS-COLUMN INVARIANT, ENFORCED BY THE STATEMENT
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * PRODUCT SUPPORT OFF PREVENTS THE MANUAL COLUMN FROM CHANGING.
+     *
+     * The grant carries `AND bcc_supports_nft_collections = 1`. With support
+     * off the UPDATE matches no row: zero affected, and the column does not
+     * move. This is the half of the fix that cannot be checked anywhere but
+     * against a real server — the predicate either exists in the statement
+     * MySQL runs or it does not.
+     */
+    public function testTheManualGrantIsRefusedBySqlWhenProductSupportIsOff(): void
+    {
+        $this->assertSame(0, $this->storedFlag(self::PRODUCT), 'support is off');
+        $this->assertSame(0, $this->storedFlag(self::MANUAL));
+
+        $result = ChainRepository::grantManualCollectionDiscovery(self::$chainId);
+
+        $this->assertFalse($result->isFailure(), 'the statement ran perfectly well');
+        $this->assertTrue($result->isNoOp(), 'it simply matched no row');
+        $this->assertSame(0, $result->affectedRows());
+        $this->assertSame(
+            0,
+            $this->storedFlag(self::MANUAL),
+            'THE FORBIDDEN STATE: the permission must not be storable while support is off'
+        );
+    }
+
+    /** And with support on, the same statement grants. */
+    public function testTheManualGrantSucceedsWhenProductSupportIsOn(): void
+    {
+        ChainRepository::enableNftProductSupport(self::$chainId);
+
+        $result = ChainRepository::grantManualCollectionDiscovery(self::$chainId);
+
+        $this->assertTrue($result->mutated());
+        $this->assertSame(1, $result->affectedRows());
+        $this->assertSame(1, $this->storedFlag(self::MANUAL));
+        $this->assertSame(1, $this->storedFlag(self::PRODUCT), 'and support is untouched');
+    }
+
+    /**
+     * ⚠️ NEITHER INTERLEAVING REACHES `product = 0, manual = 1`.
+     *
+     * Ordering A — the withdrawal commits first, then the grant runs: the
+     * predicate matches nothing. Ordering B — the grant commits first, then
+     * the withdrawal runs: the cascade clears both columns in one statement.
+     * Executed here as real, sequential SQL against a real server, which is
+     * exactly what the two interleavings reduce to once each statement is
+     * atomic.
+     */
+    public function testNeitherOrderingLeavesADormantPermission(): void
+    {
+        // ORDERING A: support withdrawn, then a grant attempted.
+        ChainRepository::enableNftProductSupport(self::$chainId);
+        ChainRepository::disableNftProductSupport(self::$chainId);
+        ChainRepository::grantManualCollectionDiscovery(self::$chainId);
+
+        $this->assertSame(0, $this->storedFlag(self::PRODUCT));
+        $this->assertSame(0, $this->storedFlag(self::MANUAL), 'ordering A');
+
+        // ORDERING B: granted, then support withdrawn.
+        ChainRepository::enableNftProductSupport(self::$chainId);
+        ChainRepository::grantManualCollectionDiscovery(self::$chainId);
+        $this->assertSame(1, $this->storedFlag(self::MANUAL), 'granted while support stood');
+
+        ChainRepository::disableNftProductSupport(self::$chainId);
+
+        $this->assertSame(0, $this->storedFlag(self::PRODUCT));
+        $this->assertSame(0, $this->storedFlag(self::MANUAL), 'ordering B');
+    }
+
+    /**
+     * ⚠️ WITHDRAWAL IS UNCONDITIONAL, so a row already in the forbidden
+     * state can always be corrected.
+     *
+     * The row is planted with raw SQL — the way a restored backup or an
+     * older build leaves one — precisely because the grant can no longer
+     * produce it.
+     */
+    public function testWithdrawalClearsAPlantedForbiddenState(): void
+    {
+        $GLOBALS['wpdb']->query(
+            'UPDATE `' . ChainRepository::table() . '`'
+            . ' SET ' . self::PRODUCT . ' = 0, ' . self::MANUAL . ' = 1'
+            . ' WHERE id = ' . self::$chainId
+        );
+        $this->assertSame(1, $this->storedFlag(self::MANUAL), 'the bad state exists');
+
+        $result = ChainRepository::withdrawManualCollectionDiscovery(self::$chainId);
+
+        $this->assertTrue($result->mutated());
+        $this->assertSame(0, $this->storedFlag(self::MANUAL), 'and it can always be cleared');
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -271,7 +405,7 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
     public function testBothCapabilityColumnsAreInTheProjection(): void
     {
         ChainRepository::enableNftProductSupport(self::$chainId);
-        ChainRepository::setManualCollectionDiscoveryEnabled(self::$chainId, true);
+        ChainRepository::grantManualCollectionDiscovery(self::$chainId);
 
         $chain = ChainRepository::getById(self::$chainId);
         self::assertNotNull($chain);
@@ -431,6 +565,158 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
         );
         $this->assertTrue($identical->isNoOp(), 'nothing moved');
         $this->assertFalse($identical->isFailure(), 'and it certainly did not fail');
+    }
+
+    /**
+     * ⚠️ THE UPSERT IS SEMANTICALLY IDEMPOTENT — INCLUDING `updated_at`.
+     *
+     * The defect this closes: with an unconditional
+     * `updated_at = CURRENT_TIMESTAMP`, re-applying the state a row already
+     * holds still moves the timestamp, so MySQL reports 2 affected rows. The
+     * service reads that as a mutation and bumps a generation and writes an
+     * audit row — for a change another request made between its pre-read and
+     * its write.
+     *
+     * The row is aged to a fixed old timestamp first, so "unchanged" is
+     * unmistakable rather than merely "within the same second".
+     */
+    public function testAnIdenticalUpsertIsAZeroRowNoOpAndLeavesTheTimestampAlone(): void
+    {
+        ChainNftCapabilityRepository::upsertOverride(
+            self::$chainId,
+            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            false,
+            10
+        );
+
+        $this->ageOverrideRow();
+        $before = $this->overrideTimestamp();
+        $this->assertSame('2020-01-01 00:00:00', $before);
+
+        // The SAME values again — what a concurrent writer would already
+        // have applied.
+        $repeat = ChainNftCapabilityRepository::upsertOverride(
+            self::$chainId,
+            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            false,
+            10
+        );
+
+        $this->assertFalse($repeat->isFailure(), 'the statement ran');
+        $this->assertSame(0, $repeat->affectedRows(), 'EXACTLY zero affected rows');
+        $this->assertTrue($repeat->isNoOp());
+        $this->assertSame(
+            $before,
+            $this->overrideTimestamp(),
+            'updated_at must not move for a semantic no-op'
+        );
+    }
+
+    /** A real change to `priority` reports a mutation and advances the stamp. */
+    public function testAPriorityChangeReportsAMutationAndAdvancesTheTimestamp(): void
+    {
+        ChainNftCapabilityRepository::upsertOverride(
+            self::$chainId,
+            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            false,
+            10
+        );
+        $this->ageOverrideRow();
+
+        $changed = ChainNftCapabilityRepository::upsertOverride(
+            self::$chainId,
+            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            false,
+            20
+        );
+
+        $this->assertTrue($changed->mutated());
+        $this->assertSame(2, $changed->affectedRows(), 'MySQL reports 2 for a changed update');
+        $this->assertNotSame(
+            '2020-01-01 00:00:00',
+            $this->overrideTimestamp(),
+            'a real change MUST advance updated_at — this is what the assignment ORDER buys'
+        );
+    }
+
+    /** And so does a real change to `enabled`. */
+    public function testAnEnabledChangeReportsAMutationAndAdvancesTheTimestamp(): void
+    {
+        ChainNftCapabilityRepository::upsertOverride(
+            self::$chainId,
+            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            false,
+            10
+        );
+        $this->ageOverrideRow();
+
+        $changed = ChainNftCapabilityRepository::upsertOverride(
+            self::$chainId,
+            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            true,
+            10
+        );
+
+        $this->assertTrue($changed->mutated());
+        $this->assertSame(2, $changed->affectedRows());
+        $this->assertNotSame('2020-01-01 00:00:00', $this->overrideTimestamp());
+
+        $rows = ChainNftCapabilityRepository::getForChain(self::$chainId)->rows();
+        $this->assertTrue($rows[0]['enabled'], 'and the change actually landed');
+    }
+
+    /**
+     * Repeating an identical upsert many times never advances the stamp.
+     *
+     * The property stated as a loop rather than a single repeat, because the
+     * failure mode being guarded against is "moves every time", which one
+     * repeat could coincidentally hide inside a single clock second.
+     */
+    public function testRepeatedIdenticalUpsertsNeverAdvanceTheTimestamp(): void
+    {
+        ChainNftCapabilityRepository::upsertOverride(
+            self::$chainId,
+            NftDriverRegistry::OP_METADATA,
+            NftDriverRegistry::DRIVER_CW721_LCD,
+            true,
+            42
+        );
+        $this->ageOverrideRow();
+
+        for ($i = 0; $i < 5; $i++) {
+            $result = ChainNftCapabilityRepository::upsertOverride(
+                self::$chainId,
+                NftDriverRegistry::OP_METADATA,
+                NftDriverRegistry::DRIVER_CW721_LCD,
+                true,
+                42
+            );
+            $this->assertSame(0, $result->affectedRows(), 'repeat #' . $i);
+        }
+
+        $this->assertSame('2020-01-01 00:00:00', $this->overrideTimestamp());
+        $this->assertSame(1, $this->overrideRowCount(), 'and still one row');
+    }
+
+    /** Force every override row to a fixed old timestamp. */
+    private function ageOverrideRow(): void
+    {
+        $GLOBALS['wpdb']->query(
+            'UPDATE `' . ChainNftCapabilityRepository::table() . "` SET updated_at = '2020-01-01 00:00:00'"
+        );
+    }
+
+    private function overrideTimestamp(): string
+    {
+        return (string) $GLOBALS['wpdb']->get_var(
+            'SELECT updated_at FROM `' . ChainNftCapabilityRepository::table() . '` LIMIT 1'
+        );
     }
 
     /** Delete removes only the exact key, and reports whether it did. */
