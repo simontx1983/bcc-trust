@@ -3,6 +3,7 @@
 namespace BCC\Trust\Onchain\Repositories;
 
 use BCC\Core\DB\DB;
+use BCC\Trust\Onchain\ValueObjects\RepositoryWriteResult;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -455,6 +456,139 @@ final class ChainRepository
         self::clearCache();
 
         return $result !== false;
+    }
+
+    // ── The NFT capability columns ───────────────────────────────────────
+    //
+    // THE ONLY WRITE PATH for `bcc_supports_nft_collections` and
+    // `manual_collection_discovery_enabled`. Three narrowly named methods,
+    // deliberately NOT one `setChainColumn($name, $value)`: a general column
+    // updater would take the column name from its caller, and the one thing
+    // this table must never allow is a caller deciding which column a
+    // capability write lands in.
+    //
+    // Each one mirrors setCosmwasmNftDiscoveryEnabled(): bounded to a single
+    // row by primary key, touching only the named column(s), and busting the
+    // chains cache INSIDE the write so no caller can forget it.
+    //
+    // ── WHY THEY RETURN A RESULT AND NOT A BOOLEAN ───────────────────────
+    // `$result !== false` cannot tell a refused statement from one that ran
+    // and matched nothing, and the editor above has to distinguish them —
+    // see {@see RepositoryWriteResult}. The cache is cleared regardless,
+    // including on a zero-row result: a concurrent writer may have applied
+    // the change, and leaving this request's memo in place would make the
+    // caller's postcondition read answer from a projection taken BEFORE it.
+
+    /**
+     * Grant BCC product support for NFT collections on one chain.
+     *
+     * Touches that column and no other. In particular it does NOT enable
+     * `manual_collection_discovery_enabled`: product support is BCC's
+     * decision that a chain is in scope, and permission to START a discovery
+     * is a second, separate grant. Fusing them would mean a product decision
+     * silently armed an operator button.
+     */
+    public static function enableNftProductSupport(int $chainId): RepositoryWriteResult
+    {
+        if ($chainId <= 0) {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET bcc_supports_nft_collections = 1
+              WHERE id = %d
+              LIMIT 1",
+            $chainId
+        ));
+
+        self::clearCache();
+
+        return RepositoryWriteResult::fromWpdb($result);
+    }
+
+    /**
+     * Withdraw product support — AND the manual permission with it, in ONE
+     * statement.
+     *
+     * ── WHY THE CASCADE IS PART OF THE SQL ───────────────────────────────
+     * A dormant `manual_collection_discovery_enabled = 1` left behind on a
+     * chain BCC no longer supports is a permission nobody can see: the
+     * capability model reports `no_bcc_support` and stops, so the stale
+     * permission is invisible on every surface — until product support is
+     * granted again later, at which point the chain silently comes back
+     * already permitted to start a discovery.
+     *
+     * Doing it as two statements would leave a window in which the first
+     * succeeded and the second did not, which is precisely that state. So
+     * both columns move in one `UPDATE` against one row, and there is no
+     * ordering for a caller to get wrong.
+     */
+    public static function disableNftProductSupport(int $chainId): RepositoryWriteResult
+    {
+        if ($chainId <= 0) {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET bcc_supports_nft_collections        = 0,
+                    manual_collection_discovery_enabled = 0
+              WHERE id = %d
+              LIMIT 1",
+            $chainId
+        ));
+
+        self::clearCache();
+
+        return RepositoryWriteResult::fromWpdb($result);
+    }
+
+    /**
+     * Set the permission for an administrator to START a chain-wide NFT
+     * collection discovery.
+     *
+     * Whether the permission is ALLOWED to be granted — product support must
+     * be on, and an administrator-started operation must actually exist for
+     * the chain — is a domain question answered above this layer by
+     * {@see \BCC\Trust\Onchain\Services\NftCapabilityEditor}. This method
+     * stores the decision it is given and nothing more; a repository that
+     * also arbitrated would be a second authority on the same rule.
+     *
+     * Granting it starts nothing. No cron reads this column — every
+     * recurring discovery hook was retired and cannot re-arm — so it can
+     * only ever be consulted by a human-initiated action that still has to
+     * pass every other gate.
+     */
+    public static function setManualCollectionDiscoveryEnabled(
+        int $chainId,
+        bool $enabled
+    ): RepositoryWriteResult {
+        if ($chainId <= 0) {
+            return RepositoryWriteResult::failure();
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET manual_collection_discovery_enabled = %d
+              WHERE id = %d
+              LIMIT 1",
+            $enabled ? 1 : 0,
+            $chainId
+        ));
+
+        self::clearCache();
+
+        return RepositoryWriteResult::fromWpdb($result);
     }
 
     /**

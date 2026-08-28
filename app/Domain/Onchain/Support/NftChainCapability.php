@@ -319,6 +319,28 @@ final class NftChainCapability
     public const REASON_NO_READY_DRIVER           = 'no_ready_driver';
     public const REASON_READY                     = 'ready';
 
+    // ── The three override states, for the editor ───────────────────────
+    //
+    // Named constants rather than bare strings because the editor renders
+    // them, the tests assert on them and a typo in any one place would show
+    // an operator the wrong control for a driver that is switched off.
+
+    /** No row exists — the code registry decides, priority included. */
+    public const OVERRIDE_STATE_DEFAULT = 'default';
+
+    /** A row with `enabled = 0` removes a registry default. */
+    public const OVERRIDE_STATE_DISABLED = 'disabled';
+
+    /** A row with `enabled = 1` restores or reorders a registry default. */
+    public const OVERRIDE_STATE_ENABLED = 'enabled';
+
+    // ── Why a stored row is inert ───────────────────────────────────────
+
+    public const STALE_UNKNOWN_OPERATION      = 'unknown_operation';
+    public const STALE_UNKNOWN_DRIVER         = 'unknown_driver';
+    public const STALE_DRIVER_LACKS_OPERATION = 'driver_does_not_perform_operation';
+    public const STALE_DRIVER_LACKS_CHAIN     = 'driver_does_not_serve_chain';
+
     /**
      * The operations an ADMINISTRATOR can start, and therefore the only ones
      * the manual permission gates.
@@ -338,6 +360,64 @@ final class NftChainCapability
     private const OPERATOR_STARTED_OPERATIONS = [NftDriverRegistry::OP_ENUMERATION];
 
     /**
+     * The operations an administrator can start, for callers outside this
+     * class.
+     *
+     * Exposed so the capability EDITOR can ask the same question this class
+     * answers internally, rather than restating "the manual permission is
+     * about enumeration" in a second place. When a second operator-started
+     * operation is added, the constant above is still the only edit.
+     *
+     * @return list<string>
+     */
+    public static function operatorStartedOperations(): array
+    {
+        return self::OPERATOR_STARTED_OPERATIONS;
+    }
+
+    /**
+     * PURE. Could an operator-started operation EVER run on this chain, on
+     * any configuration, per the code registry alone?
+     *
+     * ── WHAT THE MANUAL PERMISSION IS ALLOWED TO MEAN ───────────────────
+     * `manual_collection_discovery_enabled` is permission to START a
+     * discovery. On every EVM chain and on Solana no driver in this build
+     * can enumerate a chain at all — the registry PROVES it by returning an
+     * empty list — so the permission there would authorise something that
+     * cannot happen. Storing it would leave a row saying an operator granted
+     * a capability, which is exactly the misreading the whole model is built
+     * to prevent, and a restored backup or a later build could read it as
+     * consent it never was.
+     *
+     * So the editor refuses to grant it, and this is the predicate it asks.
+     *
+     * ── DELIBERATELY OVERRIDE-FREE, AND NOT FAMILY-KEYED ────────────────
+     * Overrides are passed as `[]` on purpose: this asks what the CODE can
+     * do, which is the same baseline {@see operationStatus()} uses to tell
+     * {@see OP_NO_DRIVER} ("nothing can") from {@see OP_DISABLED} ("you
+     * switched it off"). An operator who has disabled the only enumeration
+     * driver has not made the chain structurally incapable, and must still
+     * be able to hold the permission while they re-enable it.
+     *
+     * And it is asked of the REGISTRY, never of `chain_type`. "Which
+     * families can be enumerated" is the registry's answer to give; a
+     * hardcoded family list here would be a second one, free to disagree the
+     * day an enumeration driver is registered for a new family.
+     *
+     * @param object $chain a `ChainRow`-shaped projection
+     */
+    public static function hasOperatorStartableOperation(object $chain): bool
+    {
+        foreach (self::OPERATOR_STARTED_OPERATIONS as $operation) {
+            if (NftDriverRegistry::driversFor($chain, $operation, []) !== []) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * EVERY operation's status for one chain, from ONE override read.
      *
      * ── WHY THIS LIVES HERE AND NOT ON THE ADMIN PAGE ───────────────────
@@ -347,9 +427,20 @@ final class NftChainCapability
      * free to disagree with {@see verdict()} on the row directly above it.
      *
      * It is also why {@see ChainNftCapabilityRepository::getForChain()} is
-     * called exactly once here and nowhere else in the codebase — the
-     * override store has one reader, and this method and {@see forChain()}
-     * are both downstream of it.
+     * called exactly ONCE per render here — the six rows an operator sees
+     * are one read, so they cannot disagree with each other.
+     *
+     * ── THE EDITOR CALLS getForChain() TOO, AND THAT IS CORRECT ─────────
+     * {@see \BCC\Trust\Onchain\Services\NftCapabilityEditor} is the second
+     * caller in the codebase. It deliberately uses the SAME whole-chain read
+     * rather than a narrower "fetch one triple" helper, because the narrow
+     * read cannot answer the question a write has to ask first: is this
+     * chain's override state readable, well-formed, and below the row
+     * ceiling? A single-row lookup would happily return a clean row from a
+     * set that is truncated or contains a malformed sibling — and would then
+     * permit a write against a store this class would refuse to draw any
+     * conclusion from. So the write path reads everything, twice: once to
+     * validate and detect a no-op, once afterwards to verify.
      *
      * ── THE LADDER, AND HOW IT DIFFERS FROM verdict() ───────────────────
      *
@@ -413,6 +504,8 @@ final class NftChainCapability
      *     chain_type: string,
      *     overrides_available: bool,
      *     overrides_reason: string|null,
+     *     stale_overrides: list<array{operation: string, driver_key: string, enabled: bool, priority: int, reason: string}>,
+     *     operator_startable: bool,
      *     bcc_supports: bool|null,
      *     manual_enabled: bool|null,
      *     measured_unsupported: bool,
@@ -426,7 +519,8 @@ final class NftChainCapability
      *         drivers: list<string>,
      *         readiness: array<string, bool>,
      *         ready: list<string>,
-     *         endpoint_refusals: array<string, array{rpc_url: string, code: int, message: string, detected_at: int}>
+     *         endpoint_refusals: array<string, array{rpc_url: string, code: int, message: string, detected_at: int}>,
+     *         editable: list<array{driver_key: string, state: string, priority: int, default_priority: int, ready: bool}>
      *     }>
      * }
      */
@@ -517,6 +611,16 @@ final class NftChainCapability
                 'readiness'         => $readiness,
                 'ready'             => $ready,
                 'endpoint_refusals' => $refusals,
+                // The EDITABLE view of the same facts: one entry per
+                // registry-declared driver, saying which of the three states
+                // it is in. Derived from `$registered` and the SAME override
+                // read — never a second read and never a second opinion. Empty
+                // when the override store could not be established, because
+                // an editor cannot honestly offer to change a state it could
+                // not determine.
+                'editable'          => $available
+                    ? self::editableDrivers($chain, $operation, $registered, $overrides->rows())
+                    : [],
             ];
         }
 
@@ -531,6 +635,20 @@ final class NftChainCapability
             'chain_type'           => (string) ($chain->chain_type ?? ''),
             'overrides_available'  => $available,
             'overrides_reason'     => $overrides->reason(),
+            // Rows this build no longer recognises for this chain. They are
+            // already INERT — driversFor() discards them — but they are not
+            // invisible, and an operator who cannot see them cannot remove
+            // them. Listed separately from `editable` precisely because they
+            // are not editable: the only thing that may be done to one is an
+            // exact-row removal.
+            'stale_overrides'      => $available
+                ? self::staleOverrides($chain, $overrides->rows())
+                : [],
+            // Can the manual permission mean anything here AT ALL? Registry
+            // only — see hasOperatorStartableOperation(). The editor renders
+            // the structural explanation instead of a control when false, and
+            // refuses the grant server-side on the same answer.
+            'operator_startable'   => self::hasOperatorStartableOperation($chain),
             'bcc_supports'         => $bccSupports,
             'manual_enabled'       => $manualEnabled,
             'measured_unsupported' => $measuredUnsupported,
@@ -544,6 +662,134 @@ final class NftChainCapability
             ),
             'operations'           => $operations,
         ];
+    }
+
+    /**
+     * PURE. The three-state editable view of one operation's drivers.
+     *
+     * ── THE THREE STATES, AND WHY "ABSENT" IS ONE OF THEM ───────────────
+     *   default   NO ROW EXISTS. The registry decides, including its
+     *             priority. This is what every chain has on a fresh install.
+     *   disabled  a row with `enabled = 0` removes a registry default.
+     *   enabled   a row with `enabled = 1` restores or REORDERS one.
+     *
+     * "Absent" is a genuine state and not a synonym for "enabled at the
+     * default priority", which is why the editor offers a way back to it
+     * (an exact-row DELETE) rather than writing `enabled = 1` at the
+     * registry priority. Materialising a row for every default would fill
+     * the table with rows that say nothing, and the day a registry priority
+     * changes, every one of them would silently pin the old value.
+     *
+     * Only drivers the registry ALREADY OFFERS for this chain and operation
+     * appear. That is what makes the editor incapable of inventing a
+     * capability: there is nothing to press for a triple the code does not
+     * have.
+     *
+     * @param list<string> $registered registry defaults for this (chain, operation)
+     * @param list<array{operation: string, driver_key: string, enabled: bool, priority: int}> $rows
+     * @return list<array{driver_key: string, state: string, priority: int, default_priority: int, ready: bool}>
+     */
+    private static function editableDrivers(
+        object $chain,
+        string $operation,
+        array $registered,
+        array $rows
+    ): array {
+        $byDriver = [];
+        foreach ($rows as $row) {
+            if (($row['operation'] ?? '') !== $operation) {
+                continue;
+            }
+            $byDriver[(string) ($row['driver_key'] ?? '')] = $row;
+        }
+
+        $out = [];
+        foreach ($registered as $driverKey) {
+            $default = NftDriverRegistry::defaultPriority($driverKey) ?? 0;
+            $row     = $byDriver[$driverKey] ?? null;
+
+            if ($row === null) {
+                $state    = self::OVERRIDE_STATE_DEFAULT;
+                $priority = $default;
+            } else {
+                $state    = ($row['enabled'] ?? false) === true
+                    ? self::OVERRIDE_STATE_ENABLED
+                    : self::OVERRIDE_STATE_DISABLED;
+                $priority = (int) ($row['priority'] ?? $default);
+            }
+
+            $out[] = [
+                'driver_key'       => $driverKey,
+                'state'            => $state,
+                'priority'         => $priority,
+                'default_priority' => $default,
+                'ready'            => NftProviderReadiness::isReady($chain, $driverKey),
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * PURE. Override rows this build cannot honour for this chain.
+     *
+     * ── FOUR WAYS A ROW GOES STALE, AND NONE OF THEM IS CORRUPTION ──────
+     * A row can name an operation this build no longer has, a driver it
+     * never had, a driver that has since stopped performing that operation,
+     * or a driver pointed at a chain it does not serve. Every one of those
+     * is a NORMAL consequence of a build changing under a database that did
+     * not — a downgrade, a restored backup, a driver retired between
+     * releases. (`das`, retired when the single Solana DAS driver became
+     * `das_rpc` and `das_helius`, is the standing example.)
+     *
+     * They are already harmless: {@see NftDriverRegistry::driversFor()}
+     * discards each one at the read. Surfacing them is about a different
+     * problem — a row nobody can see is a row nobody can clean up, and the
+     * next person to run a `SELECT` against this table finds configuration
+     * they cannot account for.
+     *
+     * ── LISTED, NEVER SILENTLY REPAIRED ─────────────────────────────────
+     * Nothing here rewrites or deletes. A save on some unrelated driver must
+     * not quietly take a stale row with it: the row records that somebody
+     * once made a decision, and discarding it as a side effect of an
+     * unrelated action destroys that record without anybody choosing to.
+     * Removal is its own explicit, exact-row action.
+     *
+     * @param list<array{operation: string, driver_key: string, enabled: bool, priority: int}> $rows
+     * @return list<array{operation: string, driver_key: string, enabled: bool, priority: int, reason: string}>
+     */
+    private static function staleOverrides(object $chain, array $rows): array
+    {
+        $out = [];
+        foreach ($rows as $row) {
+            $operation = (string) ($row['operation'] ?? '');
+            $driverKey = (string) ($row['driver_key'] ?? '');
+
+            $reason = null;
+            if (!NftDriverRegistry::isOperation($operation)) {
+                $reason = self::STALE_UNKNOWN_OPERATION;
+            } elseif (!NftDriverRegistry::isDriver($driverKey)) {
+                $reason = self::STALE_UNKNOWN_DRIVER;
+            } elseif (!NftDriverRegistry::driverPerformsOperation($driverKey, $operation)) {
+                $reason = self::STALE_DRIVER_LACKS_OPERATION;
+            } elseif (!NftDriverRegistry::driverSupportsChain($driverKey, $chain)) {
+                $reason = self::STALE_DRIVER_LACKS_CHAIN;
+            }
+
+            if ($reason === null) {
+                continue;               // A live triple; it belongs in `editable`.
+            }
+
+            $out[] = [
+                'operation'  => $operation,
+                'driver_key' => $driverKey,
+                'enabled'    => (bool) ($row['enabled'] ?? false),
+                'priority'   => (int) ($row['priority'] ?? 0),
+                'reason'     => $reason,
+            ];
+        }
+
+        return $out;
     }
 
     /**

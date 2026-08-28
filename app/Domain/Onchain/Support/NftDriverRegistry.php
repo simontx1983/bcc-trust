@@ -255,6 +255,49 @@ final class NftDriverRegistry
     }
 
     /**
+     * PURE. Does this driver actually PERFORM this operation, per code?
+     *
+     * ── WHY THIS IS PUBLIC ──────────────────────────────────────────────
+     * {@see driversFor()} has always applied this rule privately, as one of
+     * the three tests that decide whether an override row survives the
+     * intersection. That is enough to keep a bad row INERT, and it is not
+     * enough to keep a bad row from being WRITTEN.
+     *
+     * The capability editor validates before it writes, so that an operator
+     * who somehow submits `das_helius` for `ownership` is told no rather
+     * than handed a stored row that silently does nothing for the rest of
+     * its life. Relying on the read-side discard alone would mean the
+     * database accumulated rows the UI had already accepted — which reads,
+     * to the next person, as configuration that stopped working.
+     *
+     * It answers from the REGISTRY only. Whether the driver serves a given
+     * chain is {@see driverSupportsChain()}, and whether its provider is
+     * configured is {@see NftProviderReadiness} — three separate questions,
+     * and a write has to satisfy all three.
+     */
+    public static function driverPerformsOperation(string $driverKey, string $operation): bool
+    {
+        if (!self::isDriver($driverKey)) {
+            return false;
+        }
+
+        return in_array($operation, self::REGISTRY[$driverKey]['operations'], true);
+    }
+
+    /**
+     * PURE. The registry's DEFAULT priority for a driver, for display beside
+     * an override that changes it.
+     *
+     * Returns null for a driver this build does not implement — a stale row
+     * has no default to compare against, and inventing one (0, say) would
+     * print a number the code never declared.
+     */
+    public static function defaultPriority(string $driverKey): ?int
+    {
+        return self::isDriver($driverKey) ? self::REGISTRY[$driverKey]['priority'] : null;
+    }
+
+    /**
      * PURE. Does this driver serve this chain, per code?
      *
      * Deliberately answers from `chain_type` and `slug` alone — the two
@@ -344,7 +387,7 @@ final class NftDriverRegistry
             if (!self::isDriver($key)) {
                 continue;                       // DB names a driver this build lacks.
             }
-            if (!in_array($operation, self::REGISTRY[$key]['operations'], true)) {
+            if (!self::driverPerformsOperation($key, $operation)) {
                 continue;                       // DB claims an operation this driver lacks.
             }
             if (!self::driverSupportsChain($key, $chain)) {
