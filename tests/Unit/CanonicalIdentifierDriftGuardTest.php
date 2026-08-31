@@ -34,13 +34,48 @@ use PHPUnit\Framework\TestCase;
  * rather than accidental.
  *
  * ── WHAT IS DELIBERATELY NOT REGISTERED ─────────────────────────────────
- * `findLegacyByChainContractInsensitive` is the sanctioned legacy path for
- * the 99 pre-PR-5a alias rows. It is case-insensitive BY DESIGN, named so
- * that a caller must ask for it, and is expected to be deleted by PR 5b.
+ * These still case-fold chain-agnostically. That is a KNOWN, deliberate
+ * exclusion in PR 5a, not an oversight — listed here so a later reader does
+ * not "fix" one and silently break the legacy rows it protects:
  *
- * Sibling tables (`wp_bcc_collection_signals`, `wp_bcc_nft_holdings`, …)
- * carry their own duplicated `contract_address` columns and are out of
- * PR 5a's scope; they are inventoried in the handoff, not guarded here.
+ *   CollectionRepository::findLegacyByChainContractInsensitive
+ *       The sanctioned legacy path for the 99 pre-PR-5a alias rows.
+ *       Case-insensitive BY DESIGN, named so a caller must ask for it, and
+ *       expected to be deleted by PR 5b.
+ *
+ *   CollectionRepository::verifiedMapForContracts
+ *   CollectionRepository::getUserHoldings
+ *       PHP array-key folds. Making these canonical would drop the 24
+ *       VERIFIED legacy Solana rows out of the verified map, so their
+ *       badges would vanish from the gallery and stance panel. Keeping
+ *       legacy rows visible is an explicit PR 5a requirement.
+ *
+ *   GatedGroupRepository (findGroupForCollection, getGateConfig, the
+ *   META_CONTRACT write) and GatedGroupProvisioningService
+ *       Community gate authority. The 24 live Solana gates store lowercased
+ *       ALIASES in `_bcc_gate_contract_address` — values the canonical
+ *       service must refuse. Routing these through it would orphan 24
+ *       existing communities, which PR 5a is forbidden from doing.
+ *       Migrating them is gated on PR 5b resolving the aliases.
+ *
+ *   SolanaFetcher::count_holdings / fetch_collections
+ *       Provider-side comparison against DAS `grouping[].group_value`.
+ *       This is where the PR 5b defect lives (a stored symbol can never
+ *       equal a mint, so the count is always 0 and the holder gate reads
+ *       INELIGIBLE rather than UNKNOWN). Fixing it needs the alias repair.
+ *
+ *   VerifyCollectionsPage (admin listing join keys)
+ *       Display-only dedupe keys for the CosmWasm scanner table.
+ *
+ *   Sibling tables — `wp_bcc_collection_signals`, `wp_bcc_nft_holdings`,
+ *   `wp_bcc_nft_spam_contracts`, `wp_bcc_onchain_collection_pieces`,
+ *   `wp_bcc_user_nft_selections`, `wp_bcc_cosmwasm_contracts`
+ *       Eight tables re-carry `contract_address` rather than a surrogate
+ *       FK, so the identity rule is duplicated across nine columns. PR 5a
+ *       canonicalises the collections table only.
+ *
+ *   WalletRepository / ClaimService / auth controllers
+ *       Wallet identity, not collection identity. Different rules.
  */
 final class CanonicalIdentifierDriftGuardTest extends TestCase
 {
