@@ -1275,11 +1275,17 @@ final class CollectionRepository
      * `contract_address`, bypassing canonical identity entirely.
      *
      * ── WHEN THIS IS THE RIGHT METHOD ───────────────────────────────────
-     * Only for reaching rows whose identity is not yet canonicalisable: the
-     * 99 chain-13 rows holding Magic Eden *symbols* rather than mints, 24 of
-     * which are verified and back a holder community. They carry
-     * `canonical_identifier IS NULL`, so {@see findByChainContract} cannot
-     * and must not find them.
+     * Only for reaching rows whose identity is not yet canonicalisable:
+     * pre-PR-5a Solana rows holding a Magic Eden *symbol* rather than a
+     * mint, some of which are verified and back a holder community. They
+     * carry `canonical_identifier IS NULL`, so {@see findByChainContract}
+     * cannot and must not find them.
+     *
+     * As of PR 5a this method has NO production caller — pinned by
+     * LegacyAliasRouteCompatibilityTest, because the one route that could
+     * plausibly need it rejects such values upstream at
+     * WalletAddressValidator. It exists for PR 5b's repair path and for
+     * direct administrative use.
      *
      * ── WHY IT IS NOT A FALLBACK ────────────────────────────────────────
      * Chaining this after a failed canonical lookup would restore exactly

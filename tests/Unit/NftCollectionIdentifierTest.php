@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Unit;
 
+use BCC\Trust\Onchain\Support\Base58;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\Support\NftCollectionIdentity;
 use PHPUnit\Framework\TestCase;
@@ -18,13 +19,86 @@ use PHPUnit\Framework\TestCase;
  */
 final class NftCollectionIdentifierTest extends TestCase
 {
-    // Two REAL Solana mints (well-known Metaplex collection addresses),
-    // used only for their shape.
-    private const SOL_A = 'J1S9H3QjnRtBbbuD4HjPV6RpRhwuk4zKbxsnCHuTgh9w';
+    /**
+     * Two genuine 32-byte public keys differing ONLY in the final
+     * character's case. Both are proven to decode to exactly 32 bytes by
+     * {@see testTheCaseDistinctFixturesAreGenuineThirtyTwoByteKeys} BEFORE
+     * the uniqueness test below relies on them — otherwise that test would
+     * be asserting on two strings that merely look like keys.
+     */
+    private const SOL_A = '7cmUkdkC4Z5fBWk42hqnvjPftNNWwBy9GKe6FcyFVwH9';
+    private const SOL_B = '7cmUkdkC4Z5fBWk42hqnvjPftNNWwBy9GKe6FcyFVwh9';
+
+    /** Real Solana program/mint ids — every one is a 32-byte key. */
+    private const REAL_KEYS = [
+        'System Program'      => '11111111111111111111111111111111',
+        'Token Program'       => 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+        'Assoc Token Program' => 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+        'Memo Program'        => 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr',
+        'USDC mint'           => 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        'Wrapped SOL mint'    => 'So11111111111111111111111111111111111111112',
+        'Metaplex Token Meta' => 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s',
+    ];
+
+    /** Base58-shaped, right length band, but decodes to 31 / 33 bytes. */
+    private const DECODES_TO_31 = 'mhuioF2uqSeGwJustsK8U4xo6Pbqc4m9TFR86wKeaY';
+    private const DECODES_TO_33 = 'V144wP39My4EhyEkJqXwXby9HqEFZ8ZHbpf1DBcZoyrW';
+
     private const EVM_CHECKSUMMED = '0x6e60bCdF52078A250932CF9FeC174c5F67348845';
     private const COSMOS_BECH32   = 'cosmos1qypqxpq9qcrsszg2pvxq6rs0zqg3yyc5lzv7xu';
 
-    // ── Solana: exact case, never folded ────────────────────────────────
+    // ── Solana: a real 32-byte key, not a shape ─────────────────────────
+
+    /** Known-good anchor: if these fail, the decoder itself is wrong. */
+    public function testRealSolanaPublicKeysAreAccepted(): void
+    {
+        foreach (self::REAL_KEYS as $label => $key) {
+            self::assertSame(
+                32,
+                Base58::decodedLength($key),
+                "{$label} must decode to 32 bytes"
+            );
+            self::assertTrue(
+                NftCollectionIdentifier::canonicalize('solana', $key)->isAccepted(),
+                "{$label} is a real Solana address and must be accepted"
+            );
+        }
+    }
+
+    /**
+     * The System Program id is 32 '1' characters — every byte is zero. It
+     * is the case that a naive decoder gets wrong by stripping leading
+     * zeros, so it pins the leading-'1' handling specifically.
+     */
+    public function testTheAllZeroKeyDecodesToThirtyTwoZeroBytes(): void
+    {
+        $decoded = Base58::decode('11111111111111111111111111111111');
+
+        self::assertSame(32, strlen((string) $decoded));
+        self::assertSame(str_repeat("\x00", 32), $decoded);
+    }
+
+    /**
+     * Guards the fixtures the uniqueness test depends on. Without this,
+     * that test could pass on two strings that are not keys at all.
+     */
+    public function testTheCaseDistinctFixturesAreGenuineThirtyTwoByteKeys(): void
+    {
+        self::assertSame(32, Base58::decodedLength(self::SOL_A), 'fixture A must be a real 32-byte key');
+        self::assertSame(32, Base58::decodedLength(self::SOL_B), 'fixture B must be a real 32-byte key');
+
+        self::assertNotSame(self::SOL_A, self::SOL_B, 'the fixtures must differ');
+        self::assertSame(
+            strtolower(self::SOL_A),
+            strtolower(self::SOL_B),
+            'the fixtures must differ ONLY by case'
+        );
+        self::assertNotSame(
+            Base58::decode(self::SOL_A),
+            Base58::decode(self::SOL_B),
+            'they must be genuinely different keys, not one key spelled twice'
+        );
+    }
 
     /**
      * The headline requirement. Two valid mints differing ONLY by letter
@@ -32,14 +106,8 @@ final class NftCollectionIdentifierTest extends TestCase
      */
     public function testTwoSolanaMintsDifferingOnlyByCaseAreDistinctIdentities(): void
     {
-        $upper = self::SOL_A;                       // ...Tgh9w
-        $lower = 'J1S9H3QjnRtBbbuD4HjPV6RpRhwuk4zKbxsnCHuTGH9W';
-
-        self::assertNotSame($upper, $lower, 'precondition: the two inputs differ only by case');
-        self::assertSame(strtolower($upper), strtolower($lower), 'precondition: they differ ONLY by case');
-
-        $a = NftCollectionIdentifier::canonicalize('solana', $upper);
-        $b = NftCollectionIdentifier::canonicalize('solana', $lower);
+        $a = NftCollectionIdentifier::canonicalize('solana', self::SOL_A);
+        $b = NftCollectionIdentifier::canonicalize('solana', self::SOL_B);
 
         self::assertTrue($a->isAccepted());
         self::assertTrue($b->isAccepted());
@@ -55,11 +123,47 @@ final class NftCollectionIdentifierTest extends TestCase
         $identity = NftCollectionIdentifier::canonicalize('solana', self::SOL_A);
 
         self::assertTrue($identity->isAccepted());
-        self::assertSame(self::SOL_A, $identity->canonical());
+        self::assertSame(self::SOL_A, $identity->canonical(), 'the ENCODED text is the identity');
     }
 
     /**
-     * The 99 legacy rows are Magic Eden symbols. None may ever become an
+     * The defect this rule replaced: a base58-SHAPED string in the right
+     * length band is not a public key. Both of these satisfy
+     * `/^[1-9A-HJ-NP-Za-km-z]{32,44}$/` and neither is 32 bytes.
+     */
+    public function testBase58ShapedValuesThatDoNotDecodeToThirtyTwoBytesAreRejected(): void
+    {
+        self::assertSame(31, Base58::decodedLength(self::DECODES_TO_31));
+        self::assertSame(33, Base58::decodedLength(self::DECODES_TO_33));
+
+        foreach ([self::DECODES_TO_31, self::DECODES_TO_33] as $notAKey) {
+            self::assertMatchesRegularExpression(
+                '/^[1-9A-HJ-NP-Za-km-z]{32,44}$/',
+                $notAKey,
+                'precondition: the OLD shape-only rule would have accepted this'
+            );
+
+            $identity = NftCollectionIdentifier::canonicalize('solana', $notAKey);
+            self::assertFalse($identity->isAccepted(), 'only a 32-byte decode is a Solana key');
+            self::assertSame(NftCollectionIdentity::REASON_NOT_BASE58_MINT, $identity->reason());
+        }
+    }
+
+    /**
+     * Pins the exact values the removed length-only tests used to assert
+     * were valid. They are not keys, and now they are refused.
+     */
+    public function testRepeatedCharacterStringsAreNotKeys(): void
+    {
+        self::assertSame(24, Base58::decodedLength(str_repeat('a', 32)));
+        self::assertSame(33, Base58::decodedLength(str_repeat('a', 44)));
+
+        self::assertFalse(NftCollectionIdentifier::canonicalize('solana', str_repeat('a', 32))->isAccepted());
+        self::assertFalse(NftCollectionIdentifier::canonicalize('solana', str_repeat('a', 44))->isAccepted());
+    }
+
+    /**
+     * Pre-PR-5a Solana rows hold Magic Eden symbols. None may ever become an
      * identity — that is the defect PR 5a exists to stop repeating.
      */
     public function testMarketplaceSymbolsAreRefusedAsSolanaIdentity(): void
@@ -82,14 +186,18 @@ final class NftCollectionIdentifierTest extends TestCase
         $bad = '0OIl' . substr(self::SOL_A, 4);
 
         self::assertSame(strlen(self::SOL_A), strlen($bad), 'precondition: length is still plausible');
+        self::assertNull(Base58::decode($bad), 'the decoder must reject the alphabet violation outright');
         self::assertFalse(NftCollectionIdentifier::canonicalize('solana', $bad)->isAccepted());
     }
 
-    public function testSolanaRejectsLengthsOutsideThirtyTwoToFortyFour(): void
+    /**
+     * Length is a pre-filter, not the rule. Anything outside 32-44 cannot
+     * be a 32-byte key, so it is refused before the decoder runs — but
+     * passing the band proves nothing on its own (see the 31/33-byte test).
+     */
+    public function testSolanaRejectsLengthsOutsideThePreFilterBand(): void
     {
         self::assertFalse(NftCollectionIdentifier::canonicalize('solana', str_repeat('a', 31))->isAccepted());
-        self::assertTrue(NftCollectionIdentifier::canonicalize('solana', str_repeat('a', 32))->isAccepted());
-        self::assertTrue(NftCollectionIdentifier::canonicalize('solana', str_repeat('a', 44))->isAccepted());
         self::assertFalse(NftCollectionIdentifier::canonicalize('solana', str_repeat('a', 45))->isAccepted());
     }
 

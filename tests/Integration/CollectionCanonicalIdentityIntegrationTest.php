@@ -29,9 +29,13 @@ final class CollectionCanonicalIdentityIntegrationTest extends TestCase
     private const NEW_KEY    = 'uq_chain_canonical';
     private const OLD_KEY    = 'uq_chain_contract';
 
-    // Two valid Solana mints differing ONLY by trailing case.
-    private const SOL_UPPER = 'J1S9H3QjnRtBbbuD4HjPV6RpRhwuk4zKbxsnCHuTgh9w';
-    private const SOL_LOWER = 'J1S9H3QjnRtBbbuD4HjPV6RpRhwuk4zKbxsnCHuTGH9W';
+    // Two GENUINE 32-byte Solana public keys differing ONLY in the case of
+    // the penultimate character. Both are proven to decode to exactly 32
+    // bytes by testTheFixturesAreGenuineThirtyTwoByteKeys() below, which
+    // runs before anything else relies on them — a shape-only fixture would
+    // make the uniqueness proof meaningless.
+    private const SOL_UPPER = '7cmUkdkC4Z5fBWk42hqnvjPftNNWwBy9GKe6FcyFVwH9';
+    private const SOL_LOWER = '7cmUkdkC4Z5fBWk42hqnvjPftNNWwBy9GKe6FcyFVwh9';
 
     private const EVM_CHECKSUMMED = '0x6e60bCdF52078A250932CF9FeC174c5F67348845';
 
@@ -113,6 +117,30 @@ final class CollectionCanonicalIdentityIntegrationTest extends TestCase
         return array_values($ordered);
     }
 
+    // ── (0) the fixtures are real keys, not shapes ──────────────────────
+
+    /**
+     * Everything below about "two case-distinct mints" is only meaningful
+     * if both fixtures really are Solana public keys. Base58 decoding to
+     * exactly 32 bytes is that test; a 32-44 character shape check is not.
+     */
+    public function testTheFixturesAreGenuineThirtyTwoByteKeys(): void
+    {
+        self::assertSame(32, \BCC\Trust\Onchain\Support\Base58::decodedLength(self::SOL_UPPER));
+        self::assertSame(32, \BCC\Trust\Onchain\Support\Base58::decodedLength(self::SOL_LOWER));
+
+        self::assertSame(
+            strtolower(self::SOL_UPPER),
+            strtolower(self::SOL_LOWER),
+            'the fixtures must differ ONLY by case'
+        );
+        self::assertNotSame(
+            \BCC\Trust\Onchain\Support\Base58::decode(self::SOL_UPPER),
+            \BCC\Trust\Onchain\Support\Base58::decode(self::SOL_LOWER),
+            'they must be two genuinely different keys'
+        );
+    }
+
     // ── (1) schema shape ────────────────────────────────────────────────
 
     /**
@@ -146,7 +174,7 @@ final class CollectionCanonicalIdentityIntegrationTest extends TestCase
         self::assertSame(
             'YES',
             strtoupper((string) $row->IS_NULLABLE),
-            'NULL is how the 99 legacy alias rows survive PR 5a; NOT NULL is PR 5b'
+            'NULL is how pre-PR-5a alias rows survive; NOT NULL is PR 5b'
         );
     }
 
@@ -246,7 +274,7 @@ final class CollectionCanonicalIdentityIntegrationTest extends TestCase
      *
      * `uq_chain_contract` is case-INSENSITIVE, so in the real table the
      * second mint is still rejected. That is EXPECTED in PR 5a. PR 5b drops
-     * the old key once the 99 legacy aliases are resolved, at which point
+     * the old key once the legacy aliases are resolved, at which point
      * the probe above becomes the production behaviour.
      */
     public function testTheTransitionalTableStillBlocksCaseDistinctSolanaPairs(): void
@@ -469,7 +497,7 @@ final class CollectionCanonicalIdentityIntegrationTest extends TestCase
     // ── (7) legacy rows survive, and stay reachable by name ─────────────
 
     /**
-     * The 99 pre-PR-5a alias rows, in miniature: present, verified,
+     * A pre-PR-5a alias row, in miniature: present, verified,
      * NULL-canonical, invisible to strict lookup, reachable only through
      * the explicitly-named legacy method.
      */

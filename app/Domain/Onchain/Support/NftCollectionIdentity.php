@@ -10,10 +10,11 @@
  *     "this row has no canonical identity"  -> legacy, leave it alone
  *
  * `canonical_identifier` is NULLable in the database precisely because the
- * second state exists (99 legacy Magic Eden aliases, 24 of them verified and
- * community-linked, quarantined for PR 5b). If the service returned `null`
- * for a refusal, a caller that forgot to check would write that `null`
- * straight into the column and silently manufacture a new legacy row.
+ * second state exists: rows predating PR 5a may hold a Magic Eden symbol
+ * rather than a mint, and those are quarantined for PR 5b. If the service
+ * returned `null` for a refusal, a caller that forgot to check would write
+ * that `null` straight into the column and silently manufacture a new
+ * legacy row.
  *
  * So a refusal is a distinct object carrying a machine-readable reason, and
  * `canonical()` on a refusal throws rather than returning anything at all.

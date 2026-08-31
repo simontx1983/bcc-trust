@@ -15,8 +15,14 @@
  *           not identity) -> canonical form is LOWERCASE.
  *   cosmos  bech32, defined lowercase; mixed case is invalid, and the
  *           checksum is verified -> canonical form is LOWERCASE.
- *   solana  base58. The alphabet deliberately contains both cases and they
- *           are DIFFERENT bytes -> canonical form is EXACT, never folded.
+ *   solana  base58 decoding to EXACTLY 32 bytes. The alphabet deliberately
+ *           contains both cases and they are DIFFERENT bytes -> canonical
+ *           form is the encoded text, EXACT, never folded.
+ *
+ * Each family is validated, not pattern-matched. Cosmos verifies the real
+ * bech32 checksum; Solana decodes the value and requires a 32-byte public
+ * key. A shape regex would accept `str_repeat('a', 44)` as a mint — it
+ * decodes to 33 bytes and is not a key.
  *
  * Folding Solana is not a cosmetic bug: two distinct mints can differ only
  * by case, so a case-insensitive identity silently merges two collections
@@ -65,8 +71,15 @@ final class NftCollectionIdentifier
      */
     public const MAX_LENGTH = 128;
 
-    /** Base58 (Bitcoin/Solana alphabet): no 0, O, I or l. */
-    private const BASE58 = '/^[1-9A-HJ-NP-Za-km-z]{32,44}$/';
+    /**
+     * A Solana public key is exactly 32 bytes. Base58 encodes 32 bytes as
+     * 32-44 characters, so this is a cheap PRE-FILTER only — the authority
+     * is {@see Base58::decode()} plus the byte-length check below.
+     */
+    private const BASE58_SHAPE = '/^[1-9A-HJ-NP-Za-km-z]{32,44}$/';
+
+    /** Solana public keys are Ed25519 points / PDAs — always 32 bytes. */
+    public const SOLANA_KEY_BYTES = 32;
 
     /** EIP-55-agnostic EVM contract address. */
     private const EVM_HEX = '/^0x[0-9a-fA-F]{40}$/';
@@ -109,14 +122,24 @@ final class NftCollectionIdentifier
                 return NftCollectionIdentity::accept(strtolower($value));
 
             case self::FAMILY_SOLANA:
-                // Length 32-44 is what separates a real mint from a Magic
-                // Eden symbol: every one of the 99 legacy alias rows is
-                // 4-31 characters, and 46 of them contain `_` or `-`,
-                // which are not in the base58 alphabet at all.
-                if (preg_match(self::BASE58, $value) !== 1) {
+                // Cheap shape pre-filter, then the real test. The pattern
+                // alone is NOT the rule: `str_repeat('a', 32)` and
+                // `str_repeat('a', 44)` both match it and decode to 24 and
+                // 33 bytes respectively, so neither is a public key.
+                if (preg_match(self::BASE58_SHAPE, $value) !== 1) {
                     return NftCollectionIdentity::refuse(NftCollectionIdentity::REASON_NOT_BASE58_MINT);
                 }
-                // Byte-for-byte. No case folding, ever.
+
+                // Decode the whole value and require exactly 32 bytes.
+                // Deliberately NOT an Ed25519 on-curve check: program-derived
+                // addresses are chosen to be OFF-curve, and a collection can
+                // legitimately be a PDA. 32 bytes is the real invariant.
+                if (Base58::decodedLength($value) !== self::SOLANA_KEY_BYTES) {
+                    return NftCollectionIdentity::refuse(NftCollectionIdentity::REASON_NOT_BASE58_MINT);
+                }
+
+                // The canonical identity is the ENCODED text, byte-for-byte —
+                // never the decoded bytes, and never case-folded.
                 return NftCollectionIdentity::accept($value);
 
             default:

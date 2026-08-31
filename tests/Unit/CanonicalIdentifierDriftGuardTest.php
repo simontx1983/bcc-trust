@@ -39,22 +39,22 @@ use PHPUnit\Framework\TestCase;
  * not "fix" one and silently break the legacy rows it protects:
  *
  *   CollectionRepository::findLegacyByChainContractInsensitive
- *       The sanctioned legacy path for the 99 pre-PR-5a alias rows.
+ *       The sanctioned legacy path for pre-PR-5a alias rows.
  *       Case-insensitive BY DESIGN, named so a caller must ask for it, and
  *       expected to be deleted by PR 5b.
  *
  *   CollectionRepository::verifiedMapForContracts
  *   CollectionRepository::getUserHoldings
- *       PHP array-key folds. Making these canonical would drop the 24
- *       VERIFIED legacy Solana rows out of the verified map, so their
- *       badges would vanish from the gallery and stance panel. Keeping
- *       legacy rows visible is an explicit PR 5a requirement.
+ *       PHP array-key folds. Making these canonical would drop VERIFIED
+ *       legacy Solana rows out of the verified map, so their badges would
+ *       vanish from the gallery and stance panel. Keeping legacy rows
+ *       visible is an explicit PR 5a requirement.
  *
  *   GatedGroupRepository (findGroupForCollection, getGateConfig, the
  *   META_CONTRACT write) and GatedGroupProvisioningService
- *       Community gate authority. The 24 live Solana gates store lowercased
+ *       Community gate authority. Live Solana gates can store lowercased
  *       ALIASES in `_bcc_gate_contract_address` — values the canonical
- *       service must refuse. Routing these through it would orphan 24
+ *       service must refuse. Routing these through it would orphan
  *       existing communities, which PR 5a is forbidden from doing.
  *       Migrating them is gated on PR 5b resolving the aliases.
  *

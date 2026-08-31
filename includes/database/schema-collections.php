@@ -90,12 +90,13 @@ if (!defined('BCC_TRUST_CANONICAL_ID_LOCK')) {
  * since it is the thing preventing two case-distinct Solana mints from
  * coexisting. PR 5a does NOT do that, for two reasons:
  *
- *  1. 99 rows on chain 13 hold Magic Eden *symbols* rather than mints
- *     (4-31 chars; a mint is 32-44 base58). 24 are verified and back a
- *     holder community. The service cannot canonicalise them, so they keep
+ *  1. Pre-PR-5a Solana rows may hold Magic Eden *symbols* rather than
+ *     mints, and some are verified and back a holder community. The
+ *     service cannot canonicalise a symbol, so those rows keep
  *     `canonical_identifier = NULL`. MySQL exempts NULLs from a unique key,
- *     so `uq_chain_canonical` ALONE would leave those 99 rows with no
- *     uniqueness constraint at all.
+ *     so `uq_chain_canonical` ALONE would leave every such row with no
+ *     uniqueness constraint at all. Measured prevalence is environment
+ *     specific and lives in the PR 5a handoff, not here.
  *
  *  2. All four `INSERT … ON DUPLICATE KEY UPDATE` writers in
  *     CollectionRepository resolve their conflict against `uq_chain_contract`.
@@ -320,7 +321,7 @@ function bcc_onchain_add_collections_canonical_identifier(): void
  * Rows the service refuses are LEFT ALONE with a NULL canonical identity —
  * never guessed at, never derived from a name or symbol, never deleted.
  * That NULL means "legacy identity unresolved", and it is the mechanism by
- * which the 99 Magic Eden alias rows survive this migration untouched.
+ * which pre-PR-5a Magic Eden alias rows survive this migration untouched.
  *
  * @return bool true when the whole table was walked successfully.
  */
@@ -453,8 +454,8 @@ function bcc_onchain_backfill_collections_canonical_identifier(): bool
 
     if ($accepted > 0 || $refused !== []) {
         // Counts only — no identifiers. `refused` is the quarantine census
-        // and is expected to be non-empty until PR 5b lands (99 legacy
-        // Magic Eden aliases, of which 24 are verified).
+        // and is expected to be non-empty wherever pre-PR-5a Magic Eden
+        // alias rows exist, until PR 5b resolves them.
         \BCC\Core\Log\Logger::info(
             '[schema-collections-canonical] backfill complete',
             ['accepted' => $accepted, 'refused_by_reason' => $refused]

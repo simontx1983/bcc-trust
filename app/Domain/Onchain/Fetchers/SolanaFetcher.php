@@ -702,14 +702,17 @@ class SolanaFetcher implements FetcherInterface
      * A symbol is not a mint. The endpoint returns no mint at all, so there
      * was never anything correct to store.
      *
-     * The damage is measurable and still live: 99 rows on chain 13 hold
-     * symbols rather than mints (4-31 characters; a Solana mint is 32-44
-     * base58). 24 of them are verified and back a holder community. Because
-     * a symbol can never equal the mint that Solana DAS reports in
-     * `grouping[].group_value`, {@see count_holdings} returns 0 for every
-     * wallet, and 0 is a REAL count — so the holder gate reads INELIGIBLE
-     * rather than UNKNOWN and those 24 communities are unjoinable, in a way
-     * indistinguishable from "you don't hold it".
+     * The consequence is structural, not incidental. Any alias-backed
+     * Solana holder gate is ineligible BY CONSTRUCTION: a symbol can never
+     * equal the mint that Solana DAS reports in `grouping[].group_value`, so
+     * {@see count_holdings} returns 0 for every wallet — and 0 is a REAL
+     * count, so the holder gate reads INELIGIBLE rather than UNKNOWN, which
+     * is indistinguishable from "you don't hold it".
+     *
+     * This affects any environment containing alias-backed Solana gates.
+     * Prevalence per environment is an operational question, not an
+     * invariant, so the measured counts live in the PR 5a handoff rather
+     * than here. Repair is PR 5b.
      *
      * ── WHY IT RETURNS [] RATHER THAN BEING FIXED HERE ──────────────────
      * Resolving a symbol to its real collection mint needs an authoritative
