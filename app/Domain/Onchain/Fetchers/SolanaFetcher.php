@@ -693,77 +693,62 @@ class SolanaFetcher implements FetcherInterface
     // ══════════════════════════════════════════════════════════════════
 
     /**
-     * Fetch top Solana NFT collections via Magic Eden API v2.
-     * Free endpoint, no API key required.
+     * RETIRED as a collection-identity source (PR 5a).
      *
-     * @param int $limit Max collections to return (max 100).
-     * @return array<int, array<string, mixed>> Normalized collection rows for bulkUpsert().
+     * ── WHAT THIS USED TO DO, AND WHY IT WAS WRONG ──────────────────────
+     * It fetched Magic Eden's `popular_collections` and wrote each item's
+     * `symbol` — a marketplace slug like `mad_lads` — straight into
+     * `contract_address`, the column that defines a collection's identity.
+     * A symbol is not a mint. The endpoint returns no mint at all, so there
+     * was never anything correct to store.
+     *
+     * The damage is measurable and still live: 99 rows on chain 13 hold
+     * symbols rather than mints (4-31 characters; a Solana mint is 32-44
+     * base58). 24 of them are verified and back a holder community. Because
+     * a symbol can never equal the mint that Solana DAS reports in
+     * `grouping[].group_value`, {@see count_holdings} returns 0 for every
+     * wallet, and 0 is a REAL count — so the holder gate reads INELIGIBLE
+     * rather than UNKNOWN and those 24 communities are unjoinable, in a way
+     * indistinguishable from "you don't hold it".
+     *
+     * ── WHY IT RETURNS [] RATHER THAN BEING FIXED HERE ──────────────────
+     * Resolving a symbol to its real collection mint needs an authoritative
+     * source and a decision about one-to-many mappings; that is PR 5b's
+     * work, gated on separate approval. Until then this method must not be
+     * able to create an identity, so it creates nothing.
+     *
+     * The request body is DELETED rather than commented out or left behind
+     * as an unused private method — a retired path that still exists is a
+     * path that gets called again. `git log` is the record of what it did.
+     *
+     * `popular_collections` remains legitimate as alias / curated-feed
+     * information. It is simply not an identity source, and this method's
+     * only contract was to supply rows to
+     * {@see \BCC\Trust\Onchain\Repositories\CollectionRepository::bulkUpsert}.
+     *
+     * Containment is deliberately in two independent layers: this method
+     * returns nothing, AND `bulkUpsert` refuses any row whose identifier the
+     * canonical service rejects. Re-arming a caller cannot reintroduce the
+     * bug on its own.
+     *
+     * NOTE ON REACHABILITY: as of PR 5a this method has NO production
+     * caller. `bcc_index_collections` is retired and unscheduled, and
+     * `ChainSweepActions` has no collection step. It stays on
+     * {@see \BCC\Trust\Onchain\Contracts\FetcherInterface}, which is why
+     * hardening it matters — the interface keeps it one call site away from
+     * returning.
+     *
+     * @param int $limit Ignored. Retained for interface compatibility.
+     * @return array<int, array<string, mixed>> Always empty.
      */
     public function fetch_top_collections(int $limit = 100): array
     {
-        $chainId = (int) $this->chain->id;
+        \BCC\Core\Log\Logger::info(
+            '[Solana Fetcher] fetch_top_collections is retired as an identity source; Magic Eden symbols are not collection mints (PR 5a). Returning no rows.',
+            ['chain_id' => (int) $this->chain->id]
+        );
 
-        $url = add_query_arg([
-            'timeRange' => '7d',
-            'limit'     => min($limit, 100),
-        ], 'https://api-mainnet.magiceden.dev/v2/marketplace/popular_collections');
-
-        $response = ApiRetry::get($url, [
-            'timeout' => 20,
-            'headers' => ['Accept' => 'application/json'],
-        ], [
-            'label'    => 'Magic Eden top collections',
-            'chain_id' => $chainId,
-        ]);
-
-        if (is_wp_error($response)) {
-            \BCC\Core\Log\Logger::error('[Solana Fetcher] Magic Eden fetch failed: ' . $response->get_error_message());
-            return [];
-        }
-
-        $code = wp_remote_retrieve_response_code($response);
-        if ($code !== 200) {
-            \BCC\Core\Log\Logger::error('[Solana Fetcher] Magic Eden returned ' . $code);
-            return [];
-        }
-
-        $items = json_decode(wp_remote_retrieve_body($response), true);
-        if (!is_array($items)) {
-            return [];
-        }
-
-        $collections = [];
-
-        foreach ($items as $item) {
-            $symbol = $item['symbol'] ?? '';
-            if (!$symbol) {
-                continue;
-            }
-
-            $floorLamports = $item['floorPrice'] ?? null;
-            // volumeAll is already in SOL (not lamports).
-            $volumeSol     = $item['volumeAll'] ?? null;
-
-            $collections[] = [
-                'contract_address'   => $symbol,
-                'chain_id'           => $chainId,
-                'collection_name'    => $item['name'] ?? $symbol,
-                'token_standard'     => 'Metaplex',
-                'total_supply'       => isset($item['totalItems']) ? (int) $item['totalItems'] : null,
-                'floor_price'        => $floorLamports !== null ? (float) $floorLamports / 1e9 : null,
-                'floor_currency'     => 'SOL',
-                'unique_holders'     => isset($item['ownerCount']) ? (int) $item['ownerCount'] : null,
-                'total_volume'       => $volumeSol !== null ? (float) $volumeSol : null,
-                'listed_percentage'  => isset($item['listedCount'], $item['totalItems']) && $item['totalItems'] > 0
-                    ? round((int) $item['listedCount'] / (int) $item['totalItems'] * 100, 2)
-                    : null,
-                'royalty_percentage' => null,
-                'metadata_storage'   => null,
-                'image_url'          => $item['image'] ?? null,
-            ];
-        }
-
-        return $collections;
+        return [];
     }
 
     // ══════════════════════════════════════════════════════════════════

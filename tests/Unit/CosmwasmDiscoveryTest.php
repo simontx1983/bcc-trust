@@ -1564,8 +1564,13 @@ final class CosmwasmDiscoveryTest extends TestCase
 
     public function testCosmosFetcherNoLongerRunsCodeIdDiscoveryOnARequestPath(): void
     {
-        // fetch_top_collections is reachable from an admin button and the
-        // generic refresh sweep. No discovery work may happen there.
+        // fetch_top_collections has no production caller as of PR 5a:
+        // `bcc_index_collections` is retired and unscheduled, and
+        // ChainSweepActions has no collection step. It remains on
+        // FetcherInterface, though, so it stays one call site away from
+        // returning — which is exactly why it must do no discovery work.
+        // (The previous comment here claimed it was "reachable from an
+        // admin button and the generic refresh sweep"; that was stale.)
         $rows = $this->fetcher()->fetch_top_collections(100);
 
         self::assertSame([], $rows);

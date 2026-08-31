@@ -3,6 +3,8 @@
 namespace BCC\Trust\Onchain\Repositories;
 
 use BCC\Core\DB\DB;
+use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
+use BCC\Trust\Onchain\Support\NftCollectionIdentity;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -13,6 +15,7 @@ if (!defined('ABSPATH')) {
  *     id: string,
  *     wallet_link_id: string|null,
  *     contract_address: string,
+ *     canonical_identifier: string|null,
  *     chain_id: string,
  *     collection_name: string|null,
  *     token_standard: string|null,
@@ -35,6 +38,7 @@ if (!defined('ABSPATH')) {
  *     id: string,
  *     wallet_link_id: string|null,
  *     contract_address: string,
+ *     canonical_identifier: string|null,
  *     chain_id: string,
  *     collection_name: string|null,
  *     token_standard: string|null,
@@ -114,7 +118,7 @@ if (!defined('ABSPATH')) {
 final class CollectionRepository
 {
     /** @var string Explicit column list — must match schema-collections.php. */
-    private const COLUMNS = 'id, wallet_link_id, contract_address, chain_id, collection_name,
+    private const COLUMNS = 'id, wallet_link_id, contract_address, canonical_identifier, chain_id, collection_name,
                  token_standard, total_supply, floor_price, floor_currency, unique_holders,
                  total_volume, listed_percentage, royalty_percentage, metadata_storage,
                  image_url, show_on_profile, is_verified, fetched_at, expires_at';
@@ -122,6 +126,39 @@ final class CollectionRepository
     public static function table(): string
     {
         return DB::table('onchain_collections');
+    }
+
+    // ── Canonical identity (PR 5a) ──────────────────────────────────────
+
+    /**
+     * Resolve a collection identifier to its canonical database identity.
+     *
+     * The chain family is READ FROM THE REGISTRY, never inferred from how
+     * the identifier looks — that is the whole point of routing every
+     * writer through one service. An unresolvable chain yields an empty
+     * family, which {@see NftCollectionIdentifier} refuses: fail closed.
+     */
+    private static function canonicalIdentityFor(int $chainId, string $contract): NftCollectionIdentity
+    {
+        $chain  = ChainRepository::getById($chainId);
+        $family = is_object($chain) ? (string) ($chain->chain_type ?? '') : '';
+
+        return NftCollectionIdentifier::canonicalize($family, $contract);
+    }
+
+    /**
+     * Record a refused identity as a bounded, non-secret count.
+     *
+     * Logs the REASON and the chain, never the rejected value: a refused
+     * identifier is attacker- or third-party-supplied text, and the reason
+     * codes are a closed set that is enough to diagnose a bad feed.
+     */
+    private static function logRefusedIdentity(string $writer, int $chainId, NftCollectionIdentity $identity): void
+    {
+        \BCC\Core\Log\Logger::warning(
+            '[CollectionRepository] refused a non-canonical collection identity; no row was written',
+            ['writer' => $writer, 'chain_id' => $chainId, 'reason' => $identity->reason()]
+        );
     }
 
     // ── NULL-safe SQL value fragments ───────────────────────────────────
@@ -259,6 +296,18 @@ final class CollectionRepository
             return ['status' => 'failed', 'id' => 0];
         }
 
+        // PR 5a: a new collection identity must canonicalise, or there is no
+        // write at all. A refusal is not a soft failure to be logged and
+        // stepped over — it means the value is not a contract or mint (a
+        // Magic Eden symbol, a malformed address, an unsupported chain
+        // family), and admitting it would manufacture another row that no
+        // canonical lookup can ever reach.
+        $identity = self::canonicalIdentityFor($chainId, $contract);
+        if (!$identity->isAccepted()) {
+            self::logRefusedIdentity('upsert', $chainId, $identity);
+            return ['status' => 'failed', 'id' => 0];
+        }
+
         global $wpdb;
         $table     = self::table();
         $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
@@ -286,14 +335,20 @@ final class CollectionRepository
 
         $result = $wpdb->query($wpdb->prepare(
             "INSERT INTO {$table}
-                (wallet_link_id, contract_address, chain_id, collection_name, token_standard,
+                (wallet_link_id, contract_address, canonical_identifier, chain_id, collection_name, token_standard,
                  total_supply, floor_price, floor_currency, unique_holders, total_volume,
                  listed_percentage, royalty_percentage, metadata_storage, image_url,
                  source, fetched_at, expires_at)
-             VALUES ({$sqlWallet}, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSupply}, {$sqlFloor},
+             VALUES ({$sqlWallet}, %s, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSupply}, {$sqlFloor},
                      {$sqlCurrency}, {$sqlHolders}, {$sqlVolume}, {$sqlListed}, {$sqlRoyalty},
                      {$sqlMetaStor}, {$sqlImage}, 'discovery', %s, %s)
              ON DUPLICATE KEY UPDATE
+                -- canonical_identifier is INSERT-only and deliberately not
+                -- listed below. `uq_chain_contract` is case-INSENSITIVE, so
+                -- a write for `mint1` collides with an existing row storing
+                -- `Mint1`; updating the column here would silently re-point
+                -- that collection's identity at a different mint. An
+                -- existing row's identity is immutable.
                 collection_name    = COALESCE(VALUES(collection_name), collection_name),
                 token_standard     = COALESCE(VALUES(token_standard), token_standard),
                 total_supply       = COALESCE(VALUES(total_supply), total_supply),
@@ -308,6 +363,7 @@ final class CollectionRepository
                 fetched_at         = VALUES(fetched_at),
                 expires_at         = VALUES(expires_at)",
             $contract,
+            $identity->canonical(),
             $chainId,
             $now,
             $expiresAt
@@ -378,6 +434,22 @@ final class CollectionRepository
         }
 
         foreach ($collections as $data) {
+            // PR 5a: canonicalise before anything else. A refused row is
+            // SKIPPED, not aborted — a curated feed carrying one bad entry
+            // must not discard the good ones, and it must not roll back the
+            // batch. The skip is counted, and `$count` (the return value)
+            // only ever counts rows actually written.
+            $rowChainId  = (int) ($data['chain_id'] ?? 0);
+            $rowContract = isset($data['contract_address']) ? (string) $data['contract_address'] : '';
+            $identity    = $rowChainId > 0
+                ? self::canonicalIdentityFor($rowChainId, $rowContract)
+                : NftCollectionIdentity::refuse(NftCollectionIdentity::REASON_UNSUPPORTED_FAMILY);
+
+            if (!$identity->isAccepted()) {
+                self::logRefusedIdentity('bulkUpsert', $rowChainId, $identity);
+                continue;
+            }
+
             // Every nullable column routes through the shared helpers, so an
             // absent value reaches MySQL as a real NULL rather than 0 or ''
             // — which is what lets the COALESCE below preserve instead of
@@ -401,12 +473,14 @@ final class CollectionRepository
 
             $result = $wpdb->query($wpdb->prepare(
                 "INSERT INTO {$table}
-                    (wallet_link_id, contract_address, chain_id, collection_name, token_standard,
+                    (wallet_link_id, contract_address, canonical_identifier, chain_id, collection_name, token_standard,
                      total_supply, floor_price, floor_currency, unique_holders, total_volume,
                      listed_percentage, royalty_percentage, metadata_storage, image_url,
                      source, fetched_at, expires_at)
-                 VALUES (NULL, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSupply}, {$sqlFloor}, {$sqlCurrency}, {$sqlHolders}, {$sqlVolume}, {$sqlListed}, {$sqlRoyalty}, {$sqlMetaStor}, {$sqlImage}, 'toplist', %s, %s)
+                 VALUES (NULL, %s, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSupply}, {$sqlFloor}, {$sqlCurrency}, {$sqlHolders}, {$sqlVolume}, {$sqlListed}, {$sqlRoyalty}, {$sqlMetaStor}, {$sqlImage}, 'toplist', %s, %s)
                  ON DUPLICATE KEY UPDATE
+                    -- canonical_identifier is INSERT-only; see upsert().
+                    -- An existing row's identity is never re-pointed.
                     -- COALESCE, not a bare VALUES(): a sync that does not
                     -- report a field is saying it does not know, never that
                     -- the field should be cleared. So a later thin response
@@ -431,8 +505,9 @@ final class CollectionRepository
                     source             = IF(source = 'manual', 'manual', VALUES(source)),
                     fetched_at         = VALUES(fetched_at),
                     expires_at         = VALUES(expires_at)",
-                $data['contract_address'],
-                (int) $data['chain_id'],
+                $rowContract,
+                $identity->canonical(),
+                $rowChainId,
                 $now,
                 $expiresAt
             ));
@@ -486,6 +561,17 @@ final class CollectionRepository
             return false;
         }
 
+        // PR 5a: the admin Add Collection form is the one writer where a
+        // human types the identifier, and before this it validated nothing
+        // outside Cosmos — a non-Cosmos chain got a "trusted as entered"
+        // warning and the string went straight to the column. It now goes
+        // through the same service as every automated writer.
+        $identity = self::canonicalIdentityFor($chainId, $contract);
+        if (!$identity->isAccepted()) {
+            self::logRefusedIdentity('addManual', $chainId, $identity);
+            return false;
+        }
+
         global $wpdb;
         $table     = self::table();
         $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
@@ -517,10 +603,11 @@ final class CollectionRepository
 
         $result = $wpdb->query($wpdb->prepare(
             "INSERT INTO {$table}
-                (wallet_link_id, contract_address, chain_id, collection_name, token_standard,
+                (wallet_link_id, contract_address, canonical_identifier, chain_id, collection_name, token_standard,
                  total_supply, image_url, show_on_profile, is_verified, source, fetched_at, expires_at)
-             VALUES (NULL, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSupply}, {$sqlImage}, %d, 0, 'manual', %s, %s)
+             VALUES (NULL, %s, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSupply}, {$sqlImage}, %d, 0, 'manual', %s, %s)
              ON DUPLICATE KEY UPDATE
+                -- canonical_identifier is INSERT-only; see upsert().
                 -- COALESCE for the same reason as bulkUpsert: an operator
                 -- leaving a field blank on the Add Collection form has
                 -- nothing to add, and is not asking for the stored value to
@@ -534,6 +621,7 @@ final class CollectionRepository
                 fetched_at      = VALUES(fetched_at),
                 expires_at      = VALUES(expires_at)",
             $contract,
+            $identity->canonical(),
             $chainId,
             $showOnProfile,
             $now,
@@ -1144,13 +1232,79 @@ final class CollectionRepository
             return null;
         }
 
+        // PR 5a: STRICT canonical lookup. This used to be
+        // `contract_address = strtolower($contract)`, which folded case for
+        // every chain family — right for EVM, wrong for Solana, and it only
+        // ever "worked" because the column collation is case-insensitive.
+        //
+        // A value the service refuses is NOT a collection identity, so this
+        // returns null rather than degrading to an alias match. There is
+        // deliberately no fallback: a silent drop from canonical lookup to
+        // case-insensitive alias lookup would make an alias indistinguishable
+        // from a mint, which is the confusion this column exists to end.
+        // Callers that genuinely need the legacy behaviour must ask for it by
+        // name — see {@see findLegacyByChainContractInsensitive}.
+        $identity = self::canonicalIdentityFor($chainId, $contract);
+        if (!$identity->isAccepted()) {
+            return null;
+        }
+
         global $wpdb;
         $table  = self::table();
         $chains = ChainRepository::table();
 
         /** @var CollectionWithChain|null */
         return $wpdb->get_row($wpdb->prepare(
-            "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id, c.collection_name,
+            "SELECT c.id, c.wallet_link_id, c.contract_address, c.canonical_identifier, c.chain_id, c.collection_name,
+                    c.token_standard, c.total_supply, c.floor_price, c.floor_currency,
+                    c.unique_holders, c.total_volume, c.listed_percentage, c.royalty_percentage,
+                    c.metadata_storage, c.image_url, c.show_on_profile, c.fetched_at, c.expires_at,
+                    ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
+               FROM {$table} c
+               JOIN {$chains} ch ON ch.id = c.chain_id
+              WHERE c.chain_id = %d
+                AND c.canonical_identifier = %s
+              LIMIT 1",
+            $chainId,
+            $identity->canonical()
+        ));
+    }
+
+    /**
+     * LEGACY compatibility lookup — case-insensitive match on the ORIGINAL
+     * `contract_address`, bypassing canonical identity entirely.
+     *
+     * ── WHEN THIS IS THE RIGHT METHOD ───────────────────────────────────
+     * Only for reaching rows whose identity is not yet canonicalisable: the
+     * 99 chain-13 rows holding Magic Eden *symbols* rather than mints, 24 of
+     * which are verified and back a holder community. They carry
+     * `canonical_identifier IS NULL`, so {@see findByChainContract} cannot
+     * and must not find them.
+     *
+     * ── WHY IT IS NOT A FALLBACK ────────────────────────────────────────
+     * Chaining this after a failed canonical lookup would restore exactly
+     * the ambiguity PR 5a removes — an alias would silently satisfy a
+     * request for a mint. A caller must decide, explicitly and in its own
+     * code, that legacy semantics are what it wants.
+     *
+     * This method is expected to be DELETED by PR 5b, once the legacy
+     * aliases are resolved to real mints.
+     *
+     * @return CollectionWithChain|null
+     */
+    public static function findLegacyByChainContractInsensitive(int $chainId, string $contract): ?object
+    {
+        if ($chainId <= 0 || trim($contract) === '') {
+            return null;
+        }
+
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        /** @var CollectionWithChain|null */
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT c.id, c.wallet_link_id, c.contract_address, c.canonical_identifier, c.chain_id, c.collection_name,
                     c.token_standard, c.total_supply, c.floor_price, c.floor_currency,
                     c.unique_holders, c.total_volume, c.listed_percentage, c.royalty_percentage,
                     c.metadata_storage, c.image_url, c.show_on_profile, c.fetched_at, c.expires_at,
@@ -1161,7 +1315,7 @@ final class CollectionRepository
                 AND c.contract_address = %s
               LIMIT 1",
             $chainId,
-            strtolower($contract)
+            trim($contract)
         ));
     }
 
@@ -1186,14 +1340,23 @@ final class CollectionRepository
         global $wpdb;
         $table = self::table();
 
+        // PR 5a: strict canonical, same reasoning as findByChainContract().
+        // A refusal degrades to "standard unknown", which every caller
+        // already handles — the holder gate falls back to its RPC route
+        // rather than the persistent index. Failing closed here is safe.
+        $identity = self::canonicalIdentityFor($chainId, $contract);
+        if (!$identity->isAccepted()) {
+            return null;
+        }
+
         $value = $wpdb->get_var($wpdb->prepare(
             "SELECT token_standard
                FROM {$table}
               WHERE chain_id = %d
-                AND contract_address = %s
+                AND canonical_identifier = %s
               LIMIT 1",
             $chainId,
-            strtolower($contract)
+            $identity->canonical()
         ));
 
         if ($value === null) {
@@ -1572,16 +1735,34 @@ final class CollectionRepository
             return 0;
         }
 
-        // Dedupe by (chain_id, contract_address) — the indexer's batch
+        // Dedupe by (chain_id, CANONICAL identity) — the indexer's batch
         // typically contains many holdings rows for the same contract.
+        //
+        // PR 5a: the dedupe key was `strtolower($contract)`, which is right
+        // for EVM and wrong for Solana — two distinct base58 mints differing
+        // only by case collapsed into one entry before the database ever saw
+        // them. The key is now whatever the chain-aware service says the
+        // identity is, so the fold happens only where the chain actually
+        // folds.
         $deduped = [];
         foreach ($rows as $r) {
-            $chainId  = (int) ($r['chain_id'] ?? 0);
-            $contract = strtolower((string) ($r['contract_address'] ?? ''));
-            if ($chainId <= 0 || $contract === '') {
+            $chainId = (int) ($r['chain_id'] ?? 0);
+            $raw     = trim((string) ($r['contract_address'] ?? ''));
+            if ($chainId <= 0 || $raw === '') {
                 continue;
             }
-            $key = $chainId . '|' . $contract;
+
+            $identity = self::canonicalIdentityFor($chainId, $raw);
+            if (!$identity->isAccepted()) {
+                self::logRefusedIdentity('ensureExistsBatch', $chainId, $identity);
+                continue;
+            }
+
+            // The original text is what lands in `contract_address`; the
+            // canonical form is what lands in `canonical_identifier`.
+            $contract  = $raw;
+            $canonical = $identity->canonical();
+            $key       = $chainId . '|' . $canonical;
             // Last-write-wins on token_standard within the dedupe pass —
             // any non-null standard supersedes a null. Lets a single batch
             // with both 721 and 1155 transfers for the same contract
@@ -1591,9 +1772,10 @@ final class CollectionRepository
                 ? $r['token_standard']
                 : null;
             $deduped[$key] = [
-                'chain_id'         => $chainId,
-                'contract_address' => $contract,
-                'token_standard'   => $existing ?? $incoming,
+                'chain_id'             => $chainId,
+                'contract_address'     => $contract,
+                'canonical_identifier' => $canonical,
+                'token_standard'       => $existing ?? $incoming,
             ];
         }
 
@@ -1608,9 +1790,10 @@ final class CollectionRepository
         $inserted  = 0;
 
         foreach ($deduped as $entry) {
-            $chainId  = $entry['chain_id'];
-            $contract = $entry['contract_address'];
-            $std      = $entry['token_standard'];
+            $chainId   = $entry['chain_id'];
+            $contract  = $entry['contract_address'];
+            $canonical = $entry['canonical_identifier'];
+            $std       = $entry['token_standard'];
 
             // Inline the token_standard literal so we can pass NULL when
             // unknown without %s coercing it to an empty string. Same
@@ -1621,12 +1804,14 @@ final class CollectionRepository
 
             $result = $wpdb->query($wpdb->prepare(
                 "INSERT INTO {$table}
-                    (wallet_link_id, contract_address, chain_id, token_standard,
+                    (wallet_link_id, contract_address, canonical_identifier, chain_id, token_standard,
                      show_on_profile, is_verified, fetched_at, expires_at)
-                 VALUES (NULL, %s, %d, {$stdSql}, 1, 0, %s, %s)
+                 VALUES (NULL, %s, %s, %d, {$stdSql}, 1, 0, %s, %s)
                  ON DUPLICATE KEY UPDATE
+                    -- canonical_identifier is INSERT-only; see upsert().
                     token_standard = COALESCE(token_standard, VALUES(token_standard))",
                 $contract,
+                $canonical,
                 $chainId,
                 $now,
                 $expiresAt

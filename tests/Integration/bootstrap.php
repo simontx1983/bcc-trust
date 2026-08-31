@@ -464,3 +464,16 @@ bcc_onchain_create_chains_table();
 require_once dirname(__DIR__, 2) . '/includes/database/schema-chain-nft-capabilities.php';
 bcc_onchain_add_chains_nft_capability_columns();
 bcc_onchain_create_chain_nft_capabilities_table();
+
+// PR 5a canonical collection identity. Runs LAST of the collection-related
+// installers, and specifically AFTER the chains table exists: the backfill
+// joins collections to chains to learn each row's family, so running it
+// earlier would silently backfill nothing and look like success.
+//
+// In production this sits inside bcc_onchain_ensure_schema() right after
+// bcc_onchain_create_collections_table(); the ordering constraint is the
+// same one, since ensure_schema() creates chains first.
+//
+// (schema-collections.php is already required above — the migration lives
+// alongside the CREATE TABLE it amends.)
+bcc_onchain_add_collections_canonical_identifier();

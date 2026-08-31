@@ -14,6 +14,7 @@ use BCC\Trust\Onchain\Repositories\NftCollectionPiecesRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Support\MarketplaceLinkBuilder;
+use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use stdClass;
 
 if (!defined('ABSPATH')) {
@@ -119,8 +120,21 @@ final class NftPieceViewModelBuilder
         $chainId   = (int) $chain->id;
         $chainType = (string) $chain->chain_type;
 
-        // ── 2. Normalize contract per chain ─────────────────────────
-        $normalizedContract = self::normalizeContract($contractAddress, $chainType);
+        // ── 2. Canonicalize contract per chain ──────────────────────
+        // PR 5a: this was a PRIVATE chain-aware normalizer whose answer was
+        // thrown away one line later — CollectionRepository::findByChainContract
+        // re-lowercased the value unconditionally, so the Solana "preserve
+        // case" branch never actually reached the database. Both halves now
+        // route through the one shared service, so the decision made here is
+        // the decision the query uses.
+        $identity = NftCollectionIdentifier::canonicalize($chainType, $contractAddress);
+        if (!$identity->isAccepted()) {
+            // Not a contract or mint on this chain — a marketplace symbol, a
+            // malformed address, or a chain family with no identity rule.
+            // This is a 404, not an upstream failure: there is no such piece.
+            throw new PieceBuilderException(self::ERROR_NOT_FOUND, 'Collection not indexed.');
+        }
+        $normalizedContract = $identity->canonical();
 
         // ── 3. Resolve collection (read-time fallback for Cosmos) ──
         $collectionRow = CollectionRepository::findByChainContract($chainId, $normalizedContract);
@@ -252,18 +266,6 @@ final class NftPieceViewModelBuilder
             _n('Held by %d collector', 'Held by %d collectors', $ownersCount, 'bcc-trust'),
             $ownersCount
         );
-    }
-
-    /**
-     * Normalize contract per chain type (lowercase EVM; verbatim
-     * Solana / Cosmos which are case-sensitive base58 / bech32).
-     */
-    private static function normalizeContract(string $contract, string $chainType): string
-    {
-        if ($chainType === 'evm') {
-            return strtolower($contract);
-        }
-        return $contract;
     }
 
     /**

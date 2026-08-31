@@ -377,6 +377,11 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_validators_table();
     bcc_onchain_create_delegations_table();
     bcc_onchain_create_collections_table();
+    // PR 5a: canonical_identifier + uq_chain_canonical. Runs on BOTH the
+    // fresh-install and the upgrade path, immediately after the dbDelta
+    // above, so the two paths converge on the same transitional schema
+    // (both unique keys present). Idempotent — every step probes first.
+    bcc_onchain_add_collections_canonical_identifier();
     bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
