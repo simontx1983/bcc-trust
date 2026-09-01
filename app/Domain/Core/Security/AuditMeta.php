@@ -151,16 +151,15 @@ final class AuditMeta {
      * The same holds for moderation notes, which are private operator prose
      * about a member and may name third parties.
      *
-     * So these keys keep no content at all. Each is replaced with a structured
-     * descriptor — `{omitted, len, digest}` — which preserves what an operator
-     * legitimately needs from an audit row (that text existed, how long it
-     * was, and whether the SAME text recurs across rows) while storing none
-     * of it.
+     * So these keys keep no content at all, and no derivative of it. Each is
+     * replaced with `{omitted, len}` — enough to show an operator that text
+     * existed and roughly how much, and nothing that could identify it.
      *
-     * NOTE ON THE DIGEST: it is a correlation handle, not a security boundary.
-     * A short SHA-256 prefix over a guessable candidate string could be
-     * confirmed by someone who already has the candidate. It is here so two
-     * identical failures can be recognised as identical, nothing more.
+     * Deliberately NOT stored: any hash or fingerprint of the omitted text.
+     * See {@see describeText()} — a digest over guessable prose is a
+     * confirmation oracle, which is the same reason `email_hash` is dropped
+     * outright above. Correlation of repeated errors belongs in a bounded
+     * `error_code` / exception-class value chosen at the caller.
      *
      * The operational cost is near zero: the sites that pass these keys
      * already write the full text to the FILE log next to the audit call
@@ -324,18 +323,31 @@ final class AuditMeta {
     /**
      * Replace free text with a structured descriptor that keeps NONE of it.
      *
-     * @return array{omitted: string, len: int, digest: string}
+     * NO DIGEST. An earlier revision stored a truncated unsalted SHA-256 of
+     * the omitted text as a "correlation handle". That was a mistake, and its
+     * own docblock admitted the flaw: anyone holding a SUSPECTED sentence
+     * could hash it and confirm whether that exact sentence was recorded.
+     * For private moderation notes — operator prose about a member, often
+     * naming third parties — that is a confirmation oracle over a small,
+     * highly guessable message space, retained for 90 days and then archived
+     * indefinitely.
+     *
+     * It is the same defect this class already rejects in `email_hash`: a hash
+     * of low-entropy input is not anonymisation, it is a durable matching
+     * handle. Something that is explicitly "not a security boundary" has no
+     * business being kept forever.
+     *
+     * If recurring application errors need correlating later, the right answer
+     * is a bounded, structured value chosen AT THE CALLER — an exception class
+     * name or a stable `error_code` — passed under its own key, where it is
+     * meaningful and reviewable. Not a fingerprint of the raw message.
+     *
+     * @return array{omitted: string, len: int}
      */
     private static function describeText(string $value): array {
-        $length = function_exists('mb_strlen') ? (int) mb_strlen($value, 'UTF-8') : strlen($value);
-
         return [
             'omitted' => 'free_text',
-            'len'     => $length,
-            // A short prefix: enough to recognise "this exact text again"
-            // across rows, not a reconstruction path. See STRUCTURED_TEXT_KEYS
-            // on why this is a correlation handle, not a security boundary.
-            'digest'  => substr(hash('sha256', $value), 0, 12),
+            'len'     => function_exists('mb_strlen') ? (int) mb_strlen($value, 'UTF-8') : strlen($value),
         ];
     }
 

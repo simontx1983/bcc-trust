@@ -288,6 +288,36 @@ namespace BCC\Trust\Tests\Integration {
             self::assertStringContainsString('free_text', $row->meta);
         }
 
+        public function testNoFingerprintOfPrivateTextIsDurable(): void
+        {
+            // Omitting the text is not enough if a hash of it is kept: anyone
+            // holding a SUSPECTED sentence could hash it and confirm the exact
+            // sentence was recorded. Moderation prose is a small, guessable
+            // message space, and this row is retained 90 days then archived.
+            // Same defect as `email_hash`, which is dropped outright.
+            $note = 'Suspended after repeated harassment reports';
+
+            AuditLogger::log('itlog_negfp', 15, ['moderation_note' => $note], 'user');
+
+            $row = $this->fetch('itlog_negfp');
+            self::assertNotNull($row);
+            self::assertIsString($row->meta);
+
+            $sha = hash('sha256', $note);
+            foreach ([$sha, substr($sha, 0, 12), substr($sha, 0, 8), md5($note), sha1($note)] as $candidate) {
+                self::assertStringNotContainsString(
+                    $candidate,
+                    $row->meta,
+                    'a guessed sentence must not be confirmable against the stored row'
+                );
+            }
+
+            // Only shape survives.
+            $decoded = json_decode($row->meta, true);
+            self::assertSame(['omitted', 'len'], array_keys($decoded['moderation_note']));
+            self::assertSame(mb_strlen($note, 'UTF-8'), $decoded['moderation_note']['len']);
+        }
+
         private function countRows(string $action): int
         {
             $wpdb = $GLOBALS['wpdb'];

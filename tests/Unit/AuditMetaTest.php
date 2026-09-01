@@ -208,26 +208,79 @@ final class AuditMetaTest extends TestCase
             self::assertStringNotContainsString($fragment, $result['json'], "`{$fragment}` must not survive");
         }
 
-        // What is kept is only shape.
+        // What is kept is only shape — and ONLY shape.
+        self::assertSame(['omitted', 'len'], array_keys($decoded[$key]), 'no third field may creep in');
         self::assertSame('free_text', $decoded[$key]['omitted']);
         self::assertSame(mb_strlen($text, 'UTF-8'), $decoded[$key]['len']);
-        self::assertMatchesRegularExpression('/^[0-9a-f]{12}$/', $decoded[$key]['digest']);
     }
 
-    public function testIdenticalFreeTextProducesTheSameDigestAndDifferentTextDoesNot(): void
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function guessableFreeText(): array
     {
-        // The one thing an operator legitimately needs from an omitted string:
-        // "is this the same failure recurring?"
-        $a = AuditMeta::encode(['last_error' => 'Deadlock found when trying to get lock']);
-        $b = AuditMeta::encode(['last_error' => 'Deadlock found when trying to get lock']);
-        $c = AuditMeta::encode(['last_error' => 'Lost connection to MySQL server']);
+        return [
+            'moderation note' => ['Suspended after repeated harassment reports'],
+            'common db error' => ['Deadlock found when trying to get lock'],
+            'short sentence'  => ['spam'],
+        ];
+    }
 
-        $da = json_decode((string) $a['json'], true)['last_error']['digest'];
-        $db = json_decode((string) $b['json'], true)['last_error']['digest'];
-        $dc = json_decode((string) $c['json'], true)['last_error']['digest'];
+    /**
+     * No fingerprint of the omitted text may survive — not truncated, not
+     * salted-by-nothing, not in any encoding.
+     *
+     * A hash of guessable prose is a CONFIRMATION ORACLE: someone holding a
+     * suspected sentence can hash it and check whether that exact sentence was
+     * recorded. Moderation notes are exactly that — a small, highly guessable
+     * message space, retained 90 days and archived after. It is the same
+     * defect this class already rejects in `email_hash`.
+     */
+    #[DataProvider('guessableFreeText')]
+    public function testNoFingerprintOfOmittedTextIsRetained(string $text): void
+    {
+        $result = AuditMeta::encode(['moderation_note' => $text]);
+        self::assertIsString($result['json']);
 
-        self::assertSame($da, $db, 'the same text must correlate');
-        self::assertNotSame($da, $dc, 'different text must not');
+        // Try to confirm the guess the way an attacker would.
+        $full = hash('sha256', $text);
+        foreach ([$full, substr($full, 0, 12), substr($full, 0, 8), md5($text), sha1($text), crc32($text)] as $candidate) {
+            self::assertStringNotContainsString(
+                (string) $candidate,
+                $result['json'],
+                'a guessed sentence must not be confirmable from the stored row'
+            );
+        }
+    }
+
+    public function testIdenticalAndDifferentFreeTextAreIndistinguishableOnceOmitted(): void
+    {
+        // The flip side, stated as an intentional LOSS rather than a bug:
+        // two different errors of the same length are now indistinguishable.
+        // Correlating recurring failures is a caller concern — it belongs in a
+        // bounded error_code, not a hash of the raw message.
+        $a = AuditMeta::encode(['last_error' => 'Deadlock found when trying to get lockX']);
+        $b = AuditMeta::encode(['last_error' => 'Lost connection to MySQL serverXXXXXXXX']);
+
+        self::assertSame(39, mb_strlen('Deadlock found when trying to get lockX', 'UTF-8'));
+        self::assertSame($a['json'], $b['json'], 'equal-length free text must be indistinguishable once omitted');
+    }
+
+    public function testACallerSuppliedErrorCodeIsTheSupportedCorrelationRoute(): void
+    {
+        // The replacement the review asked for: a bounded, structured value
+        // chosen at the caller survives intact and IS reviewable.
+        $result = AuditMeta::encode([
+            'error_code'      => 'DB_DEADLOCK',
+            'exception_class' => 'RuntimeException',
+            'last_error'      => 'Deadlock found when trying to get lock; SELECT * FROM wp_bcc_trust_votes',
+        ]);
+
+        self::assertIsString($result['json']);
+        self::assertStringContainsString('DB_DEADLOCK', $result['json']);
+        self::assertStringContainsString('RuntimeException', $result['json']);
+        self::assertStringNotContainsString('SELECT', $result['json']);
+        self::assertStringNotContainsString('wp_bcc_trust_votes', $result['json']);
     }
 
     // ---------------------------------------------------------------
