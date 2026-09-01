@@ -22,6 +22,7 @@ use BCC\Trust\Onchain\Support\CosmwasmPassStopReason;
 use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
+use BCC\Trust\Onchain\Services\ManualCollectionIntakeService;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 
 /**
@@ -219,6 +220,16 @@ class NftDiscoveryPage
     public const ACTION_CAP_DRIVER_INHERIT  = 'bcc_nft_cap_driver_inherit';
     public const ACTION_CAP_STALE_REMOVE    = 'bcc_nft_cap_stale_remove';
 
+    /**
+     * PR 6: the ONE manual collection-intake route.
+     *
+     * Replaces `bcc_vc_add_collection` and `bcc_vc_add_cosmos` on Verify
+     * Collections, neither of which is registered any more. The nonce is
+     * bound to the CHAIN (`<route>_<chainId>`), so an add authorised for
+     * one chain cannot be replayed against another.
+     */
+    public const ACTION_ADD_COLLECTION = 'bcc_nftd_add_collection';
+
     public static function register_actions(): void
     {
         add_action('admin_post_' . self::ACTION_CAP_PRODUCT_ENABLE,  [self::class, 'handle_cap_product_enable']);
@@ -229,6 +240,7 @@ class NftDiscoveryPage
         add_action('admin_post_' . self::ACTION_CAP_DRIVER_ENABLE,   [self::class, 'handle_cap_driver_enable']);
         add_action('admin_post_' . self::ACTION_CAP_DRIVER_INHERIT,  [self::class, 'handle_cap_driver_inherit']);
         add_action('admin_post_' . self::ACTION_CAP_STALE_REMOVE,    [self::class, 'handle_cap_stale_remove']);
+        add_action('admin_post_' . self::ACTION_ADD_COLLECTION,      [self::class, 'handle_add_collection']);
 
         add_action(
             'admin_post_' . self::ACTION_CW_DISCOVERY_ENABLE,
@@ -1676,6 +1688,16 @@ class NftDiscoveryPage
             ); ?>
 
             <?php NftCapabilityEditorPanel::render($snapshot, $selected); ?>
+
+            <?php
+            // PR 6: the one manual intake form, chain-locked to this family.
+            // Rendered AFTER the capability editor deliberately — when it is
+            // refused, the control that fixes it is the thing directly above.
+            self::add_result_notice(
+                isset($_GET['bcc_nftadd']) ? sanitize_key((string) $_GET['bcc_nftadd']) : ''
+            );
+            self::render_add_collection($family, $snapshot['chains']);
+            ?>
 
             <?php if ($snapshot['supports_enumeration_engine']): ?>
                 <?php self::render_cw_discovery_section($snapshot['cw_chains']); ?>
@@ -3274,4 +3296,280 @@ class NftDiscoveryPage
 
         return null;
     }
+
+    // ── PR 6: the one manual Add Collection entry point ─────────────────
+
+    /**
+     * @var list<string> ADD_REDIRECT_KEYS the only keys this destination may carry
+     *
+     * Same allowlist discipline as the capability and operation redirects.
+     * Deliberately carries NO chain id: the result copy is family-scoped, and
+     * a chain id in the URL is a target an operator can edit by hand into an
+     * action they were never shown.
+     */
+    public const ADD_REDIRECT_KEYS = ['page', 'family', 'bcc_nftadd'];
+
+    /**
+     * Request boundary for the manual Add Collection route.
+     *
+     * Ordering, identical to the capability routes: capability → POST →
+     * shape → scoped nonce → domain. The chain id is part of the nonce
+     * action, so it has to be READ before the nonce can be verified — but
+     * nothing is looked up, contacted or written until the nonce has proven
+     * the request authentic.
+     */
+    public static function handle_add_collection(): void
+    {
+        if (!current_user_can('manage_options')) {
+            // The trace carries nothing from the request: `chain_id` is
+            // attacker-controlled and unvalidated here, so echoing it would
+            // let an unauthenticated caller write our log.
+            \BCC\Core\Log\Logger::warning('[bcc-trust] manual collection add refused', [
+                'action'   => 'nft_manual_add_denied',
+                'operator' => get_current_user_id(),
+            ]);
+        }
+
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
+
+        $chainId = self::require_chain_id_shape();
+
+        AdminActionSupport::requireNonce(self::ACTION_ADD_COLLECTION . '_' . $chainId);
+
+        $family = self::current_family();
+
+        $identifier = isset($_POST['bcc_nftd_identifier']) && is_scalar($_POST['bcc_nftd_identifier'])
+            ? trim(sanitize_text_field((string) $_POST['bcc_nftd_identifier']))
+            : '';
+
+        try {
+            $result = (new ManualCollectionIntakeService())->add(
+                $family,
+                $chainId,
+                $identifier,
+                get_current_user_id()
+            );
+        } catch (\Throwable $e) {
+            AdminActionSupport::failure($e, 'admin_nftd_collection_add_refused', 'chain', $chainId);
+            self::redirect_add(ManualCollectionIntakeService::REFUSED_WRITE_FAILED);
+        }
+
+        self::redirect_add(
+            $result['ok'] === true
+                ? 'added'
+                : (string) ($result['reason'] ?? ManualCollectionIntakeService::REFUSED_WRITE_FAILED)
+        );
+    }
+
+    private static function redirect_add(string $result): never
+    {
+        AdminActionSupport::redirect([
+            'page'       => self::PAGE_SLUG,
+            'family'     => self::current_family(),
+            'bcc_nftadd' => $result,
+        ]);
+    }
+
+    /**
+     * Render the chain-locked Add Collection form for one family.
+     *
+     * ── WHY THE FORM IS RENDERED EVEN WHEN IT CANNOT SUCCEED ────────────
+     * Every chain on this install currently has both capability flags off,
+     * so on most chains this control is refused. It still renders, with the
+     * specific flag named and a link to the editor that sets it — because
+     * an absent control tells an operator nothing, and a control that fails
+     * with "not permitted" tells them exactly which switch to find.
+     *
+     * ── ZERO PROVIDER CALLS HERE ────────────────────────────────────────
+     * Everything below is drawn from the snapshot the page already built.
+     * Nothing is fetched, probed, or asked of a chain to draw this form; the
+     * one bounded validation happens on SUBMIT, and only for Cosmos.
+     *
+     * @param list<array<string, mixed>> $chains snapshot rows of the current family
+     */
+    private static function render_add_collection(string $family, array $chains): void
+    {
+        // Chains that can actually take an add today. The form still renders
+        // when this is empty — with an explanation, not silence.
+        //
+        // ⚠ `bcc_supports` and `manual_enabled` are bool|NULL. Null means the
+        // column could not be read, which is NOT the same as false and must
+        // not be treated as true: `=== true` is the only correct test, and it
+        // is what makes an unreadable capability store fail closed here
+        // rather than opening every chain in the family.
+        $eligible = [];
+        foreach ($chains as $row) {
+            if (($row['is_active'] ?? false) !== true) {
+                continue;
+            }
+            if (($row['bcc_supports'] ?? null) !== true) {
+                continue;
+            }
+            if (($row['manual_enabled'] ?? null) !== true) {
+                continue;
+            }
+            $eligible[] = $row;
+        }
+
+        // What this family can actually PROVE about an identifier. Taken from
+        // NftDriverRegistry rather than restated, so a family that gains a
+        // validation driver stops being labelled "accepted as entered"
+        // without anyone remembering to edit this copy.
+        $hasValidation = self::family_has_validation_driver($family);
+
+        ?>
+        <h2 style="margin-top:32px;">Add a collection</h2>
+        <p style="color:#646970;max-width:60em;">
+            Manual intake for a collection that discovery cannot reach. The chain you
+            pick is authoritative: the form is bound to it, and a submission whose
+            chain does not belong to this family is refused.
+            The new row lands <strong>unverified</strong>, with <strong>no community</strong>,
+            and enabling neither. Verifying it later is a separate decision, and so is
+            requesting its community.
+        </p>
+
+        <?php if ($hasValidation): ?>
+            <p style="color:#646970;max-width:60em;">
+                On this family the contract is checked with a real
+                <code>contract_info</code> query before the row is written. A contract
+                that does not answer is refused — and refused as
+                <em>could not confirm</em>, which is not the same as
+                <em>not an NFT collection</em>.
+            </p>
+        <?php else: ?>
+            <p style="max-width:60em;padding:8px 12px;background:#fcf9e8;border-left:4px solid #dba617;">
+                <strong>Accepted as entered.</strong> On this family nothing proves the
+                address is an NFT contract — there is no validation driver for it in
+                this build. The identifier is checked for shape and canonical form
+                only. A valid address is not a verified collection.
+            </p>
+        <?php endif; ?>
+
+        <?php if ($eligible === []): ?>
+            <p style="max-width:60em;padding:8px 12px;background:#f6f7f7;border-left:4px solid #72aee6;">
+                No chain in this family can take a manual collection yet. A chain needs
+                <strong>product support</strong> and <strong>manual collection discovery</strong>
+                both enabled. Set them per chain in the capability editor on this page.
+            </p>
+        <?php else: ?>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+                  style="margin:8px 0 24px 0;padding:12px;background:#fff;border:1px solid #c3c4c7;border-radius:4px;display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;">
+                <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_ADD_COLLECTION); ?>">
+                <input type="hidden" name="family" value="<?php echo esc_attr($family); ?>">
+
+                <label style="display:flex;flex-direction:column;font-size:12px;">
+                    Chain
+                    <select name="chain_id" id="bcc-nftd-add-chain" required
+                            style="min-width:200px;"
+                            onchange="(function(s){var f=s.form;var n=f.querySelector('input[name=_wpnonce]');if(n){n.value=s.options[s.selectedIndex].dataset.nonce||'';}})(this)">
+                        <?php foreach ($eligible as $row): ?>
+                            <option value="<?php echo (int) $row['chain_id']; ?>"
+                                    data-nonce="<?php
+                                        // ⚠ ONE NONCE PER CHAIN, minted here.
+                                        //
+                                        // The nonce action is bound to the chain
+                                        // (`<route>_<chainId>`), so a single form-wide
+                                        // nonce could not be verified for whichever
+                                        // chain the operator picks. Each option carries
+                                        // its own, and changing the select swaps the
+                                        // hidden field. A nonce minted for chain 8
+                                        // therefore authorises an add on chain 8 and
+                                        // nothing else — including no other route.
+                                        echo esc_attr(wp_create_nonce(self::ACTION_ADD_COLLECTION . '_' . (int) $row['chain_id']));
+                                    ?>"
+                                    >
+                                <?php echo esc_html((string) ($row['name'] ?? $row['slug'] ?? '')); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+
+                <input type="hidden" name="_wpnonce"
+                       value="<?php echo esc_attr(wp_create_nonce(self::ACTION_ADD_COLLECTION . '_' . (int) $eligible[0]['chain_id'])); ?>">
+
+                <label style="display:flex;flex-direction:column;font-size:12px;flex:1;min-width:300px;">
+                    <?php echo esc_html(self::identifier_label($family)); ?>
+                    <input type="text"
+                           name="bcc_nftd_identifier"
+                           required
+                           spellcheck="false"
+                           autocomplete="off"
+                           placeholder="<?php echo esc_attr(self::identifier_placeholder($family)); ?>"
+                           style="font-family:monospace;font-size:12px;">
+                </label>
+
+                <button type="submit" class="button button-primary">Add collection</button>
+            </form>
+        <?php endif; ?>
+        <?php
+    }
+
+    /** Does any registered driver claim VALIDATION for this family's chains? */
+    private static function family_has_validation_driver(string $family): bool
+    {
+        // Only `cw721_lcd` registers OP_VALIDATION, and it serves Cosmos.
+        // Asked through the registry rather than hardcoded, so whoever builds
+        // EVM or Solana validation flips this copy by registering the driver
+        // — not by remembering that this file exists and restates the claim.
+        return $family === 'cosmos'
+            && NftDriverRegistry::driverPerformsOperation(
+                NftDriverRegistry::DRIVER_CW721_LCD,
+                NftDriverRegistry::OP_VALIDATION
+            );
+    }
+
+    private static function identifier_label(string $family): string
+    {
+        switch ($family) {
+            case 'cosmos':
+                return 'CW-721 contract address';
+            case 'evm':
+                return 'Contract address (0x…)';
+            case 'solana':
+                return 'Collection mint address';
+            default:
+                return 'Collection identifier';
+        }
+    }
+
+    private static function identifier_placeholder(string $family): string
+    {
+        switch ($family) {
+            case 'cosmos':
+                return 'cosmos1… / inj1… / juno1…';
+            case 'evm':
+                return '0x0000000000000000000000000000000000000000';
+            case 'solana':
+                return 'base58 mint — case is preserved exactly';
+            default:
+                return '';
+        }
+    }
+
+    /** Operator notice for the Add Collection PRG result. */
+    private static function add_result_notice(string $result): void
+    {
+        if ($result === '') {
+            return;
+        }
+
+        if ($result === 'added') {
+            ?>
+            <div class="notice notice-success is-dismissible">
+                <p>Collection added. It is <strong>unverified</strong> and has
+                <strong>no community</strong> — both are separate decisions, taken on
+                the Verify Collections page.</p>
+            </div>
+            <?php
+            return;
+        }
+
+        ?>
+        <div class="notice notice-error is-dismissible">
+            <p><?php echo esc_html(ManualCollectionIntakeService::refusalMessage($result)); ?></p>
+        </div>
+        <?php
+    }
+
 }
