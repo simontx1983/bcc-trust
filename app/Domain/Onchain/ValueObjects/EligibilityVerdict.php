@@ -37,17 +37,37 @@ final class EligibilityVerdict
     public const INELIGIBLE = 'ineligible';
     public const UNKNOWN    = 'unknown';
 
+    // ── Why an UNKNOWN happened (PR 5b) ─────────────────────────────────
+    // UNKNOWN used to mean exactly one thing: a provider could not answer.
+    // PR 5b adds a second, operationally opposite cause — the gate itself
+    // is misconfigured, so no provider was ever asked. Both refuse to act
+    // against the member, but they need different responses: one clears
+    // itself, the other needs an operator repair run. Collapsing them would
+    // tell an operator to wait out a problem that never expires.
+
+    /** A provider timed out / 429'd / broke. Transient; retry helps. */
+    public const REASON_PROVIDER_UNAVAILABLE = 'provider_unavailable';
+
+    /**
+     * The gate's collection identity could not be resolved, so ZERO
+     * provider calls were made. Retrying cannot help; a repair can.
+     */
+    public const REASON_IDENTITY_UNRESOLVED = 'collection_identity_unresolved';
+
     /**
      * @param self::ELIGIBLE|self::INELIGIBLE|self::UNKNOWN $outcome
      * @param int|null $bestKnownBalance Highest REAL (non-null) single-wallet
      *                 count observed, or null when no wallet returned a real
      *                 count (pure-UNKNOWN). Diagnostic only — never trusted to
      *                 widen the outcome.
+     * @param string   $reason Machine-readable cause; '' for a decided
+     *                 outcome (ELIGIBLE / INELIGIBLE), which has no "why".
      */
     private function __construct(
         public readonly string $outcome,
         public readonly int    $minBalance,
         public readonly ?int   $bestKnownBalance,
+        public readonly string $reason = '',
     ) {}
 
     public static function eligible(int $minBalance, int $bestKnownBalance): self
@@ -60,9 +80,32 @@ final class EligibilityVerdict
         return new self(self::INELIGIBLE, $minBalance, $bestKnownBalance);
     }
 
+    /**
+     * UNKNOWN because a provider could not verify. Unchanged behaviour —
+     * the default reason keeps every existing caller correct without edit.
+     */
     public static function unknown(int $minBalance, ?int $bestKnownBalance): self
     {
-        return new self(self::UNKNOWN, $minBalance, $bestKnownBalance);
+        return new self(self::UNKNOWN, $minBalance, $bestKnownBalance, self::REASON_PROVIDER_UNAVAILABLE);
+    }
+
+    /**
+     * UNKNOWN because the gate's identity is unresolved and nothing was
+     * asked of any provider.
+     *
+     * `bestKnownBalance` is null and MUST stay null: there is no observed
+     * balance, and a `0` here would be the same lie this PR removes.
+     */
+    public static function identityUnresolved(int $minBalance): self
+    {
+        return new self(self::UNKNOWN, $minBalance, null, self::REASON_IDENTITY_UNRESOLVED);
+    }
+
+    /** True when this UNKNOWN was caused by an unresolvable gate identity. */
+    public function isIdentityUnresolved(): bool
+    {
+        return $this->outcome === self::UNKNOWN
+            && $this->reason === self::REASON_IDENTITY_UNRESOLVED;
     }
 
     public function isEligible(): bool

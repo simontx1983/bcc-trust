@@ -8,6 +8,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
+use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -880,16 +881,41 @@ final class HoldingsService
             return (int) ($byWallet[$walletLinkId] ?? 0);
         }
 
-        $cached = get_transient(self::cacheKey($walletLinkId));
+        // PR 5b: the cache scan compares identities, so it uses the one
+        // chain-aware rule instead of `strtolower()` on both sides.
+        //
+        // This is NOT simply "make it case-sensitive": that would break EVM,
+        // where `0xAB…` and `0xab…` ARE the same contract. Only a per-family
+        // rule is correct, which is why the comparison is delegated rather
+        // than inlined. For EVM and Cosmos the canonical form is lowercase,
+        // so the outcome is byte-identical to the old fold — proven by the
+        // 20 Cosmos gate fixtures. For Solana it stops folding a mint into a
+        // different key.
+        $chainFamily = self::chainFamilyFor($chainId);
+        $identity    = $chainFamily === ''
+            ? null
+            : NftCollectionIdentifier::canonicalize($chainFamily, $contract);
+
+        // A target that cannot be canonicalised means the cached list cannot
+        // answer the question. Skip the scan entirely and fall through to the
+        // fetcher, which reports UNKNOWN rather than inventing a zero — the
+        // cache must never be the thing that manufactures a false negative.
+        $cached = ($identity !== null && $identity->isAccepted())
+            ? get_transient(self::cacheKey($walletLinkId))
+            : false;
+
         if (is_array($cached) && isset($cached['items']) && is_array($cached['items'])) {
-            $target  = strtolower($contract);
+            /** @var string $chainFamily */
+            $target  = $identity->canonical();
             $matches = 0;
             foreach ($cached['items'] as $item) {
                 if (!is_array($item)) {
                     continue;
                 }
                 $itemContract = $item['contract_address'] ?? null;
-                if (is_string($itemContract) && strtolower($itemContract) === $target) {
+                if (is_string($itemContract)
+                    && NftCollectionIdentifier::matches($chainFamily, $target, $itemContract)
+                ) {
                     $matches++;
                 }
             }
@@ -932,5 +958,25 @@ final class HoldingsService
             }
         }
         return $filtered;
+    }
+
+    /**
+     * `wp_bcc_chains.chain_type` for a numeric chain id, or '' if unknown.
+     *
+     * The family is ALWAYS looked up, never inferred from the shape of an
+     * identifier — a 42-char lowercase hex string is a valid EVM contract
+     * and a plausible bech32 length, so shape-sniffing would pick the wrong
+     * rule sooner or later. `ChainRepository::getById` memoises per request
+     * and answers for inactive chains too.
+     */
+    private static function chainFamilyFor(int $chainId): string
+    {
+        if ($chainId <= 0) {
+            return '';
+        }
+
+        $chain = ChainRepository::getById($chainId);
+
+        return $chain === null ? '' : (string) ($chain->chain_type ?? '');
     }
 }

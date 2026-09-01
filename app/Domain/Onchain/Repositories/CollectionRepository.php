@@ -64,6 +64,7 @@ if (!defined('ABSPATH')) {
  *     id: string,
  *     wallet_link_id: string|null,
  *     contract_address: string,
+ *     canonical_identifier: string|null,
  *     chain_id: string,
  *     collection_name: string|null,
  *     token_standard: string|null,
@@ -878,7 +879,7 @@ final class CollectionRepository
 
         /** @var CollectionIdWithChain|null */
         return $wpdb->get_row($wpdb->prepare(
-            "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id,
+            "SELECT c.id, c.wallet_link_id, c.contract_address, c.canonical_identifier, c.chain_id,
                     c.collection_name, c.token_standard, c.total_supply,
                     c.floor_price, c.unique_holders, c.total_volume, c.is_verified,
                     ch.slug AS chain_slug, ch.chain_type
@@ -1461,6 +1462,7 @@ final class CollectionRepository
      *     id: string,
      *     chain_id: string,
      *     contract_address: string,
+     *     canonical_identifier: string|null,
      *     collection_name: string|null,
      *     image_url: string|null,
      *     token_standard: string|null,
@@ -1490,6 +1492,7 @@ final class CollectionRepository
          *     id: string,
          *     chain_id: string,
          *     contract_address: string,
+         *     canonical_identifier: string|null,
          *     collection_name: string|null,
          *     image_url: string|null,
          *     token_standard: string|null,
@@ -1503,8 +1506,14 @@ final class CollectionRepository
          *     chain_slug: string,
          *     chain_type: string
          * }>|null $rows */
+        // PR 5b: `canonical_identifier` joins the projection because the
+        // holder gate resolves identity from THIS row, not from the gate's
+        // own `_bcc_gate_contract_address` post meta. Selected explicitly
+        // (§2 — never `SELECT *`); `chain_type` was already here, so the
+        // gate resolver gets the row and its chain family in one read.
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT c.id, c.chain_id, c.contract_address, c.collection_name, c.image_url,
+            "SELECT c.id, c.chain_id, c.contract_address, c.canonical_identifier,
+                    c.collection_name, c.image_url,
                     c.token_standard, c.total_supply, c.unique_holders,
                     c.floor_price, c.floor_currency, c.total_volume,
                     c.listed_percentage, c.royalty_percentage,
@@ -1533,6 +1542,7 @@ final class CollectionRepository
      *     id: string,
      *     chain_id: string,
      *     contract_address: string,
+     *     canonical_identifier: string|null,
      *     collection_name: string|null,
      *     image_url: string|null,
      *     chain_slug: string,
@@ -1549,13 +1559,15 @@ final class CollectionRepository
          *     id: string,
          *     chain_id: string,
          *     contract_address: string,
+         *     canonical_identifier: string|null,
          *     collection_name: string|null,
          *     image_url: string|null,
          *     chain_slug: string,
          *     chain_type: string
          * }>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT c.id, c.chain_id, c.contract_address, c.collection_name, c.image_url,
+            "SELECT c.id, c.chain_id, c.contract_address, c.canonical_identifier,
+                    c.collection_name, c.image_url,
                     ch.slug AS chain_slug, ch.chain_type
              FROM {$table} c
              JOIN {$chains} ch ON ch.id = c.chain_id
@@ -1586,6 +1598,7 @@ final class CollectionRepository
      *     id: string,
      *     chain_id: string,
      *     contract_address: string,
+     *     canonical_identifier: string|null,
      *     collection_name: string|null,
      *     image_url: string|null,
      *     chain_slug: string,
@@ -1607,13 +1620,15 @@ final class CollectionRepository
          *     id: string,
          *     chain_id: string,
          *     contract_address: string,
+         *     canonical_identifier: string|null,
          *     collection_name: string|null,
          *     image_url: string|null,
          *     chain_slug: string,
          *     chain_type: string
          * }>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT c.id, c.chain_id, c.contract_address, c.collection_name, c.image_url,
+            "SELECT c.id, c.chain_id, c.contract_address, c.canonical_identifier,
+                    c.collection_name, c.image_url,
                     ch.slug AS chain_slug, ch.chain_type
              FROM {$table} c
              JOIN {$chains} ch ON ch.id = c.chain_id

@@ -36,9 +36,9 @@ use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\ValueObjects\GroupVerification;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
+use BCC\Trust\Onchain\Services\GateIdentityResolver;
 use BCC\Trust\Onchain\Services\HoldingsService;
 use BCC\Trust\Onchain\ValueObjects\GatedGroupConfig;
 use BCC\Trust\Onchain\ValueObjects\JoinResult;
@@ -159,17 +159,27 @@ final class HolderGroupsEndpoint
         $collections = CollectionRepository::findManyByIds($collectionIds);
         $activity    = Plugin::instance()->groupActivityHeatService()->forGroups($groupIds);
 
-        // Resolve chain slug per config once, then batched holdings query.
-        $slugByGroup = [];
-        $pairs       = [];
+        // PR 5b: resolve each gate's identity from its linked collection
+        // row once, then run the batched holdings query on the CANONICAL
+        // identifiers. A gate whose identity is unresolved contributes no
+        // pair, so no provider is asked about it.
+        //
+        // Note the asymmetry, which is deliberate: an unresolved group is
+        // still listed under `joined`/`opted_out` (those are membership
+        // facts, true regardless of whether the gate can be evaluated) but
+        // can never appear under `eligible_to_join`, because we have no
+        // basis to claim the viewer qualifies.
+        $balanceKeyByGroup = [];
+        $pairs             = [];
         foreach ($configs as $cfg) {
-            $chain = ChainRepository::getById($cfg->chainId);
-            if ($chain === null) {
+            $identity = GateIdentityResolver::resolve($cfg);
+            if (!$identity->isResolved()) {
                 continue;
             }
-            $slug = (string) $chain->slug;
-            $slugByGroup[$cfg->groupId] = $slug;
-            $pairs[] = [$slug, $cfg->contractAddress];
+            $slug      = $identity->chainSlug();
+            $canonical = $identity->canonical();
+            $balanceKeyByGroup[$cfg->groupId] = $slug . ':' . $canonical;
+            $pairs[] = [$slug, $canonical];
         }
         $balances = HoldingsService::ownsAnyMany($userId, $pairs);
 
@@ -200,8 +210,9 @@ final class HolderGroupsEndpoint
                 continue;
             }
 
-            $slug = $slugByGroup[$cfg->groupId] ?? null;
-            if ($slug === null) {
+            $balKey = $balanceKeyByGroup[$cfg->groupId] ?? null;
+            if ($balKey === null) {
+                // Unresolved gate identity — never suggested as eligible.
                 continue;
             }
             // null = UNKNOWN (provider outage). Do NOT surface an
@@ -213,7 +224,6 @@ final class HolderGroupsEndpoint
             //
             // array_key_exists (NOT `?? 0`): a present null is UNKNOWN and
             // `??` would collapse it to a false real-0.
-            $balKey  = $slug . ':' . $cfg->contractAddress;
             $balance = array_key_exists($balKey, $balances) ? $balances[$balKey] : 0;
             if ($balance !== null && $balance >= $cfg->minBalance) {
                 $eligible[] = $item;
@@ -503,6 +513,29 @@ final class HolderGroupsEndpoint
                     'bcc_upstream_unavailable',
                     'We could not verify your NFT ownership right now. Please try again in a moment.',
                     503
+                );
+
+            case JoinResult::CODE_IDENTITY_UNRESOLVED:
+                // PR 5b. The community's collection identity could not be
+                // resolved, so NO provider was asked. Deliberately NOT
+                // `bcc_upstream_unavailable`: §1.4.2 classes that as
+                // Transient/"retry with backoff", and retrying cannot fix a
+                // misconfigured gate — only an operator repair can. It is
+                // also not `bcc_internal_error`, for the same retry reason
+                // and because `chain_unsupported` already emits that code
+                // here, which would make the two indistinguishable on the
+                // one field §1.4.1 says clients MUST branch on.
+                //
+                // `bcc_gate_not_configured` joins the existing Configuration
+                // class (`bcc_push_not_configured`, `x_not_configured`,
+                // `github_not_configured` — all 503, all "the SERVER must be
+                // reconfigured"). `data.reason` carries the specific cause
+                // for logs and support without widening the code vocabulary.
+                return ApiResponse::error(
+                    'bcc_gate_not_configured',
+                    'This community is not fully set up yet, so we could not check your access. An administrator has been notified.',
+                    503,
+                    ['reason' => JoinResult::CODE_IDENTITY_UNRESOLVED]
                 );
         }
 

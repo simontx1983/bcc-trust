@@ -40,8 +40,14 @@ use PHPUnit\Framework\TestCase;
  *
  *   CollectionRepository::findLegacyByChainContractInsensitive
  *       The sanctioned legacy path for pre-PR-5a alias rows.
- *       Case-insensitive BY DESIGN, named so a caller must ask for it, and
- *       expected to be deleted by PR 5b.
+ *       Case-insensitive BY DESIGN, named so a caller must ask for it.
+ *
+ *       PR 5b UPDATE: this was "expected to be deleted by PR 5b". It is
+ *       NOT, and the expectation was wrong. PR 5b resolves the EIGHT
+ *       gated aliases; 91 unrepaired alias rows remain in the collections
+ *       table, so the legacy path still protects real data. It goes when
+ *       the last alias does — which is also when `uq_chain_contract` can
+ *       be dropped and the column made NOT NULL.
  *
  *   CollectionRepository::verifiedMapForContracts
  *   CollectionRepository::getUserHoldings
@@ -50,19 +56,13 @@ use PHPUnit\Framework\TestCase;
  *       vanish from the gallery and stance panel. Keeping legacy rows
  *       visible is an explicit PR 5a requirement.
  *
- *   GatedGroupRepository (findGroupForCollection, getGateConfig, the
- *   META_CONTRACT write) and GatedGroupProvisioningService
- *       Community gate authority. Live Solana gates can store lowercased
- *       ALIASES in `_bcc_gate_contract_address` — values the canonical
- *       service must refuse. Routing these through it would orphan
- *       existing communities, which PR 5a is forbidden from doing.
- *       Migrating them is gated on PR 5b resolving the aliases.
- *
- *   SolanaFetcher::count_holdings / fetch_collections
- *       Provider-side comparison against DAS `grouping[].group_value`.
- *       This is where the PR 5b defect lives (a stored symbol can never
- *       equal a mint, so the count is always 0 and the holder gate reads
- *       INELIGIBLE rather than UNKNOWN). Fixing it needs the alias repair.
+ *   (RESOLVED BY PR 5b — these four are now REGISTERED below, not
+ *   excluded: GatedGroupRepository::findGroupForCollection / getGateConfig
+ *   / writeGateConfig, and SolanaFetcher::count_holdings /
+ *   fetch_collections. The gate no longer derives identity from
+ *   `_bcc_gate_contract_address` at all — GateIdentityResolver reads it
+ *   from the linked collection row — so routing the meta through the
+ *   canonical service no longer risks orphaning a community.)
  *
  *   VerifyCollectionsPage (admin listing join keys)
  *       Display-only dedupe keys for the CosmWasm scanner table.
@@ -106,6 +106,42 @@ final class CanonicalIdentifierDriftGuardTest extends TestCase
             ],
             'app/Domain/Onchain/Services/NftPieceViewModelBuilder.php' => [
                 'build',
+            ],
+            // ── Added by PR 5b ──────────────────────────────────────────
+            // The gate paths the 5a exclusion list named as "gated on PR
+            // 5b". Registering them is the point: the reason they were
+            // excluded (live gates hold lowercased aliases) is exactly what
+            // PR 5b removes, so leaving them unregistered would let the
+            // fold creep straight back in.
+            'app/Domain/Onchain/Repositories/GatedGroupRepository.php' => [
+                // Reverse lookup BY identity, and the identity write.
+                //
+                // `getGateConfig` is deliberately NOT here. It reads
+                // `_bcc_gate_contract_address`, which after PR 5b is a
+                // legacy/display value and no longer decides anything:
+                // identity comes from the linked collection row via
+                // GateIdentityResolver. Registering it would force a
+                // canonicalize() call that must REFUSE the eight live
+                // alias values — turning every one of those gates null and
+                // breaking the communities this PR exists to fix. It is
+                // out because it stopped dealing in identity, which is the
+                // documented reason an entry may be removed.
+                'findGroupForCollection',
+                'writeGateConfig',
+            ],
+            'app/Domain/Onchain/Fetchers/SolanaFetcher.php' => [
+                'count_holdings',
+                'fetch_collections',
+            ],
+            // The transient-cache count. NOT in the 5a list because it is
+            // chain-agnostic, which is precisely why it was dangerous: it
+            // had to become chain-AWARE, not merely case-sensitive.
+            'app/Domain/Onchain/Services/HoldingsService.php' => [
+                'countFromCacheOrFetch',
+            ],
+            // The resolver itself — the one place gate identity is derived.
+            'app/Domain/Onchain/Services/GateIdentityResolver.php' => [
+                'resolve',
             ],
         ];
     }

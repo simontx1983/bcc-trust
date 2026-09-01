@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
+use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\Support\SolanaEndpoints;
 
 /**
@@ -417,7 +418,47 @@ class SolanaFetcher implements FetcherInterface
      */
     public function count_holdings(string $wallet, string $contract): ?int
     {
-        $target  = strtolower($contract);
+        // ── PR 5b: THIS IS WHERE THE DEFECT LIVED ───────────────────────
+        // `$target = strtolower($contract)` compared a case-FOLDED value
+        // against DAS `grouping[].group_value`, which is a real base58
+        // mint. Base58 is case-sensitive, so a folded mint is a different
+        // key and the comparison could never be true. Worse, the eight
+        // production Solana gates stored a Magic Eden SYMBOL there, which
+        // is not an address in any casing.
+        //
+        // Either way the loop below ran to completion and returned a REAL
+        // `0` — and a real 0 is not "we could not check", it is "you own
+        // none". `HoldingsService::eligibilityVerdict` turned that into
+        // INELIGIBLE, and the revoke sweep treats INELIGIBLE as grounds to
+        // EVICT. A question with no valid answer was being reported as a
+        // confident negative about a member.
+        //
+        // So the identifier is validated FIRST. If it is not a real
+        // 32-byte Solana key, this returns null (UNKNOWN) rather than
+        // walking the wallet to arrive at a meaningless zero. Null is the
+        // established "could not verify" signal on this interface and
+        // every caller already fails safe on it.
+        //
+        // On the gate path this is belt-and-braces: GateIdentityResolver
+        // refuses an unresolved identity before a fetcher is ever built.
+        // It matters for the other caller (collection stances), which
+        // reaches here with a raw contract value.
+        $identity = NftCollectionIdentifier::canonicalize(
+            NftCollectionIdentifier::FAMILY_SOLANA,
+            $contract
+        );
+
+        if (!$identity->isAccepted()) {
+            \BCC\Core\Log\Logger::warning(
+                '[Solana Fetcher] count_holdings refused a non-canonical collection identifier; '
+                . 'returning UNKNOWN rather than a meaningless zero',
+                ['reason' => $identity->reason()]
+            );
+
+            return null;
+        }
+
+        $target  = $identity->canonical();
         $count   = 0;
         $page    = 1;
         $limit   = 1000;
@@ -453,8 +494,15 @@ class SolanaFetcher implements FetcherInterface
                 $asset = (object) $raw;
                 foreach ($asset->grouping ?? [] as $g) {
                     $g = (object) $g;
+                    // Chain-aware equality through the one shared rule.
+                    // `$target` is already canonical (validated above), so
+                    // this only canonicalises the provider's value.
                     if (($g->group_key ?? '') === 'collection'
-                        && strtolower((string) ($g->group_value ?? '')) === $target
+                        && NftCollectionIdentifier::matches(
+                            NftCollectionIdentifier::FAMILY_SOLANA,
+                            $target,
+                            (string) ($g->group_value ?? '')
+                        )
                     ) {
                         $count++;
                         break;
@@ -636,7 +684,26 @@ class SolanaFetcher implements FetcherInterface
                 continue;
             }
 
-            $key = strtolower($collectionAddr);
+            // PR 5b: the dedupe key is the CANONICAL identity, not
+            // `strtolower($collectionAddr)`. Folding here merged two
+            // genuinely distinct mints that differ only by case into one
+            // bucket, and the surviving row's `contract_address` was
+            // whichever asset happened to be walked first.
+            //
+            // A value DAS reports that is not a real 32-byte key is skipped
+            // rather than keyed on: it cannot identify a collection, so
+            // carrying it forward would only put another alias row into the
+            // collections table — the very thing this PR is cleaning up.
+            $keyIdentity = NftCollectionIdentifier::canonicalize(
+                NftCollectionIdentifier::FAMILY_SOLANA,
+                (string) $collectionAddr
+            );
+
+            if (!$keyIdentity->isAccepted()) {
+                continue;
+            }
+
+            $key = $keyIdentity->canonical();
 
             if (!isset($collections[$key])) {
                 $collMeta = null;

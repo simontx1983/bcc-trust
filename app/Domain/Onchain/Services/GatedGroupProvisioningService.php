@@ -57,22 +57,54 @@ final class GatedGroupProvisioningService {
         }
 
         foreach ($verified as $row) {
-            $chainId  = (int) $row->chain_id;
-            $contract = strtolower((string) $row->contract_address);
-            $name     = (string) ($row->collection_name ?? '');
-            $colId    = (int) $row->id;
+            $chainId     = (int) $row->chain_id;
+            $chainFamily = (string) ($row->chain_type ?? '');
+            $name        = (string) ($row->collection_name ?? '');
+            $colId       = (int) $row->id;
 
-            if ($chainId <= 0 || $contract === '') {
+            // PR 5b: the gate is built on the collection's CANONICAL
+            // identity, not on `contract_address` (which stays the legacy
+            // display alias). This used to be
+            // `strtolower($row->contract_address)`.
+            $canonical = $row->canonical_identifier ?? null;
+
+            if ($chainId <= 0 || $chainFamily === '') {
                 $skipped++;
                 continue;
             }
+
+            // An unresolved identity is skipped BEFORE any PeepSo group is
+            // created. Order is load-bearing: creating the community first
+            // and then refusing the gate would leave an orphan community
+            // with no gate config — worse than not provisioning at all.
+            //
+            // Logged, deliberately WITHOUT a DegradationMetrics event:
+            // bcc-core's canonical `gated_group_provision` map declares
+            // exactly three (peepso_absent, no_admin_owner,
+            // group_create_failed) and none of them means this. Adding a
+            // fourth would need a bcc-core change plus pattern-registry.md
+            // and GOLDEN_PATHS.md, and subsystem-count-guard.php would hold
+            // umbrella CI red until all three landed. Out of scope here.
+            if (!is_string($canonical) || $canonical === '') {
+                Logger::warning(
+                    '[bcc-trust] skipping holder-group provisioning: collection has no canonical identity',
+                    [
+                        'collection_id' => $colId,
+                        'chain_id'      => $chainId,
+                        'chain_family'  => $chainFamily,
+                    ]
+                );
+                $skipped++;
+                continue;
+            }
+
             if ($name === '') {
                 // Skip collections still awaiting metadata enrichment.
                 $skipped++;
                 continue;
             }
 
-            $existing = GatedGroupRepository::findGroupForCollection($chainId, $contract);
+            $existing = GatedGroupRepository::findGroupForCollection($chainId, $canonical);
             if ($existing !== null) {
                 $skipped++;
                 continue;
@@ -81,9 +113,8 @@ final class GatedGroupProvisioningService {
             $groupId = $this->createPeepSoGroup($ownerId, $name);
             if ($groupId === 0) {
                 $errors[] = sprintf(
-                    'PeepSoGroup creation returned 0 for collection %d (%s)',
-                    $colId,
-                    $contract
+                    'PeepSoGroup creation returned 0 for collection %d',
+                    $colId
                 );
                 // Covers both `new PeepSoGroup` returning a 0-id group
                 // and the catch-block path inside createPeepSoGroup
@@ -94,25 +125,42 @@ final class GatedGroupProvisioningService {
                 continue;
             }
 
-            GatedGroupRepository::writeGateConfig(
+            $wrote = GatedGroupRepository::writeGateConfig(
                 $groupId,
                 $chainId,
-                $contract,
+                $chainFamily,
+                $canonical,
                 self::DEFAULT_MIN_BALANCE,
                 $colId
             );
+
+            if (!$wrote) {
+                // The pre-check above already passed, so reaching here means
+                // the stored canonical identity does not validate for its own
+                // chain — a corrupted row, not an expected legacy one. Report
+                // it rather than leaving a silently ungated community.
+                $errors[] = sprintf(
+                    'Gate config refused for collection %d; community %d has no gate',
+                    $colId,
+                    $groupId
+                );
+                continue;
+            }
 
             Logger::info('[bcc-trust] Provisioned holder group', [
                 'group_id'      => $groupId,
                 'collection_id' => $colId,
                 'chain_id'      => $chainId,
-                'contract'      => $contract,
+                'contract'      => $canonical,
             ]);
 
             // Fan-out hook for downstream subscribers (admin emails,
             // member onboarding flows, analytics writers). Stable
             // signature: (groupId, collectionId, chainId, contractAddress).
-            do_action('bcc_gated_group_provisioned', $groupId, $colId, $chainId, $contract);
+            // PR 5b: the 4th arg is now the CANONICAL identity, byte-exact,
+            // rather than a lower-cased `contract_address`. Same position,
+            // same type — a more correct value.
+            do_action('bcc_gated_group_provisioned', $groupId, $colId, $chainId, $canonical);
 
             $created++;
         }
@@ -144,18 +192,43 @@ final class GatedGroupProvisioningService {
             return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Collection is not verified.'];
         }
 
-        $chainId  = (int) $collection->chain_id;
-        $contract = strtolower((string) $collection->contract_address);
-        $name     = (string) ($collection->collection_name ?? '');
+        $chainId     = (int) $collection->chain_id;
+        $chainFamily = (string) ($collection->chain_type ?? '');
+        $name        = (string) ($collection->collection_name ?? '');
 
-        if ($chainId <= 0 || $contract === '') {
-            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Collection missing chain or contract.'];
+        // PR 5b: gate on the CANONICAL identity, never on `contract_address`
+        // (the legacy display alias). Was `strtolower($contract_address)`.
+        $canonical = $collection->canonical_identifier ?? null;
+
+        if ($chainId <= 0 || $chainFamily === '') {
+            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Collection missing chain.'];
         }
+
+        // Refused BEFORE any community is created — see provisionAll() for
+        // why the ordering is load-bearing and why no degradation metric is
+        // recorded here.
+        if (!is_string($canonical) || $canonical === '') {
+            Logger::warning(
+                '[bcc-trust] refusing single provisioning: collection has no canonical identity',
+                [
+                    'collection_id' => $collectionId,
+                    'chain_id'      => $chainId,
+                    'chain_family'  => $chainFamily,
+                ]
+            );
+
+            return [
+                'status'   => 'skipped',
+                'group_id' => 0,
+                'message'  => 'Collection has no resolved on-chain identity yet; a gate built on it could never be satisfied.',
+            ];
+        }
+
         if ($name === '') {
             return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Collection is still awaiting a name; cannot name the community.'];
         }
 
-        $existing = GatedGroupRepository::findGroupForCollection($chainId, $contract);
+        $existing = GatedGroupRepository::findGroupForCollection($chainId, $canonical);
         if ($existing !== null) {
             return ['status' => 'exists', 'group_id' => (int) $existing, 'message' => 'Community already exists.'];
         }
@@ -172,22 +245,31 @@ final class GatedGroupProvisioningService {
             return ['status' => 'error', 'group_id' => 0, 'message' => 'Community creation failed; see the bcc-trust error log.'];
         }
 
-        GatedGroupRepository::writeGateConfig(
+        $wrote = GatedGroupRepository::writeGateConfig(
             $groupId,
             $chainId,
-            $contract,
+            $chainFamily,
+            $canonical,
             self::DEFAULT_MIN_BALANCE,
             $collectionId
         );
+
+        if (!$wrote) {
+            return [
+                'status'   => 'error',
+                'group_id' => $groupId,
+                'message'  => 'Community was created but its gate config was refused; the stored identity does not validate for its chain.',
+            ];
+        }
 
         Logger::info('[bcc-trust] Provisioned holder group (single)', [
             'group_id'      => $groupId,
             'collection_id' => $collectionId,
             'chain_id'      => $chainId,
-            'contract'      => $contract,
+            'contract'      => $canonical,
         ]);
 
-        do_action('bcc_gated_group_provisioned', $groupId, $collectionId, $chainId, $contract);
+        do_action('bcc_gated_group_provisioned', $groupId, $collectionId, $chainId, $canonical);
 
         return ['status' => 'created', 'group_id' => $groupId, 'message' => 'Community created.'];
     }

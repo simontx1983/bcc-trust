@@ -44,7 +44,6 @@ namespace BCC\Trust\Onchain\Services;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Security\AuditLogger;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\ValueObjects\EligibilityVerdict;
 use BCC\Trust\Onchain\ValueObjects\GatedGroupConfig;
@@ -141,11 +140,23 @@ final class NftGroupRevokeService
                 continue; // No longer a holder group — skip.
             }
 
-            $chain = ChainRepository::getById($config->chainId);
-            if ($chain === null) {
-                continue; // Unsupported / removed chain — can't verify, skip.
+            // PR 5b: resolve the gate's identity from its linked collection
+            // row BEFORE looking at a single member.
+            //
+            // This is the path where the old defect did real damage. An
+            // alias-backed Solana gate made `count_holdings` return a REAL
+            // `0`, which became INELIGIBLE, which this sweep treats as
+            // grounds to EVICT — so a genuine holder could be removed from a
+            // community because the question asked about them was invalid.
+            //
+            // An unresolved identity now skips the whole group: no provider
+            // call, no verdict, and above all no revocation.
+            $identity = GateIdentityResolver::resolve($config);
+            if (!$identity->isResolved()) {
+                continue;
             }
-            $chainSlug = (string) $chain->slug;
+            $chainSlug = $identity->chainSlug();
+            $canonical = $identity->canonical();
 
             $touchedThisGroup = false;
 
@@ -187,7 +198,7 @@ final class NftGroupRevokeService
                     $stats['checked']++;
                     $processed++;
 
-                    $verdict = $this->verdictForMember($userId, $chainSlug, $config);
+                    $verdict = $this->verdictForMember($userId, $chainSlug, $canonical, $config);
 
                     if ($verdict->isUnknown()) {
                         // Provider couldn't verify (timeout / 429 /
@@ -242,13 +253,22 @@ final class NftGroupRevokeService
      * Re-derive a member's eligibility verdict. Isolated for testability
      * and so a single member's failure can't escape the loop.
      */
-    private function verdictForMember(int $userId, string $chainSlug, GatedGroupConfig $config): EligibilityVerdict
-    {
+    private function verdictForMember(
+        int $userId,
+        string $chainSlug,
+        string $canonicalIdentifier,
+        GatedGroupConfig $config
+    ): EligibilityVerdict {
         try {
+            // PR 5b: the CANONICAL identity from the linked collection row,
+            // resolved once per group by the caller. Never
+            // `$config->contractAddress` — that is the legacy display alias,
+            // and on the eight production Solana gates it is a marketplace
+            // symbol that no provider can answer for.
             return HoldingsService::eligibilityVerdict(
                 $userId,
                 $chainSlug,
-                $config->contractAddress,
+                $canonicalIdentifier,
                 $config->minBalance
             );
         } catch (\Throwable $e) {
