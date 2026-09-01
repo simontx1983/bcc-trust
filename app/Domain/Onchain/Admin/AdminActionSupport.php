@@ -220,7 +220,12 @@ final class AdminActionSupport
 
         AuditLogger::log($action, $targetId, $meta, $targetType);
 
-        // The durable row cannot hold $meta, so the counts/context live here.
+        // The durable row NOW HOLDS $meta (2026-09-01), redacted through
+        // AuditMeta. This file-log copy is therefore a second, UNREDACTED
+        // copy of the same payload, with different retention and no masking.
+        // It is kept because operators read the file log during an incident
+        // and it carries `operator` too — but it is no longer the only record,
+        // and it must not be treated as the authoritative one.
         Logger::info('[bcc-trust] admin action: ' . $action, array_merge(
             ['operator' => $operator, 'target_type' => $targetType, 'target_id' => $targetId],
             $meta

@@ -64,8 +64,36 @@ class AuditLogger {
      * @param int|null              $userId
      */
     public static function log(string $action, ?int $targetId = null, array $meta = [], ?string $targetType = null, ?int $userId = null): void {
+        self::write($action, $targetId, $meta, $targetType, $userId);
+    }
+
+    /**
+     * Log an event and CONFIRM the row landed, returning its id.
+     *
+     * `log()` deliberately swallows write failures (§VIII.30: an audit-log
+     * failure must never break a mutation that has already committed). That is
+     * right for the ~85 ordinary callers and wrong for a repair runner, where
+     * the audit record is part of the deliverable rather than a side effect —
+     * an unwitnessed repair is not an acceptable outcome, so its caller needs
+     * to be able to roll back.
+     *
+     * Same write, same redaction, same degradation metrics; the ONLY
+     * difference is that the outcome is reported instead of discarded.
+     *
+     * @param  array<string, mixed> $meta
+     * @return int|null Inserted row id, or null if the row could not be written.
+     */
+    public static function logChecked(string $action, ?int $targetId = null, array $meta = [], ?string $targetType = null, ?int $userId = null): ?int {
+        return self::write($action, $targetId, $meta, $targetType, $userId);
+    }
+
+    /**
+     * @param  array<string, mixed> $meta
+     * @return int|null Inserted row id, or null on any failure.
+     */
+    private static function write(string $action, ?int $targetId, array $meta, ?string $targetType, ?int $userId): ?int {
         if (!self::tableExists()) {
-            return;
+            return null;
         }
 
         $currentUserId = $userId ?? get_current_user_id();
@@ -77,21 +105,38 @@ class AuditLogger {
             $ipBinary = inet_pton($ip);
         }
 
+        // Encode BEFORE the insert so an unserialisable payload costs the
+        // metadata only, never the accountability row. AuditMeta distinguishes
+        // "no metadata" from "could not encode" so the two do not collapse
+        // into the same NULL and hide a bug.
+        $encoded = AuditMeta::encode($meta);
+
+        if ($encoded['failed']) {
+            \BCC\Core\Observability\DegradationMetrics::record('audit_log_swallow', 'meta_encode_failed');
+
+            if ( defined('WP_DEBUG') && WP_DEBUG ) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] Audit meta could not be encoded; base row still written', ['action' => $action]);
+            }
+        }
+
         $data = [
             'user_id'       => $currentUserId ?: 0, // Default to 0 instead of null
             'action'        => sanitize_text_field($action),
             'target_type'   => $targetType ? sanitize_text_field($targetType) : '',
             'target_id'     => $targetId ?: 0,
             'ip_address'    => $ipBinary,
-            'created_at'    => current_time('mysql', true)
+            'created_at'    => current_time('mysql', true),
+            'meta'          => $encoded['json'],
         ];
 
-        $result = self::getRepo()->insertLog(
+        $insertId = self::getRepo()->insertLogReturningId(
             $data,
-            ['%d', '%s', '%s', '%d', '%s', '%s']
+            ['%d', '%s', '%s', '%d', '%s', '%s', '%s']
         );
 
-        if ( $result === false ) {
+        self::emitAlert($action, $currentUserId, $targetId, $targetType, $ip, $meta);
+
+        if ( $insertId === null ) {
             // §VIII.30: audit-log write failures MUST NOT propagate (the
             // mutation has already committed). But silently dropping rows
             // hides accountability gaps from operators. Record a
@@ -107,7 +152,27 @@ class AuditLogger {
             }
         }
 
+        return $insertId;
+    }
+
+    /**
+     * Mirror high-signal events into the file log.
+     *
+     * Meta goes through the SAME encoder as the durable row. Before this, the
+     * alert path called `json_encode($meta)` directly, so the file log held an
+     * unredacted copy of exactly the payload the database row is careful with.
+     * One encoder means one policy; a redaction rule cannot be true in one
+     * half of this method and false in the other.
+     *
+     * (The `IP: %s` field is the resolved request IP and is printed here as it
+     * always has been — pre-existing behaviour, deliberately not changed by
+     * this PR.)
+     *
+     * @param array<string, mixed> $meta
+     */
+    private static function emitAlert(string $action, int $currentUserId, ?int $targetId, ?string $targetType, string $ip, array $meta): void {
         $alertActions = ['fraud', 'suspicious', 'flag', 'block', 'suspend'];
+
         foreach ($alertActions as $alert) {
             if (strpos($action, $alert) === 0) {
                 $logLevel = 'INFO';
@@ -117,6 +182,8 @@ class AuditLogger {
                     $logLevel = 'HIGH';
                 }
 
+                $encoded = AuditMeta::encode($meta);
+
                 \BCC\Core\Log\Logger::error(sprintf(
                     '[BCC Trust %s] %s - User: %d, Target: %d (%s), IP: %s, Meta: %s',
                     $logLevel,
@@ -125,7 +192,7 @@ class AuditLogger {
                     $targetId ?? 0,
                     $targetType ?? 'unknown',
                     $ip,
-                    json_encode($meta)
+                    $encoded['json'] ?? ($encoded['failed'] ? '[unencodable]' : '[]')
                 ));
                 break;
             }
