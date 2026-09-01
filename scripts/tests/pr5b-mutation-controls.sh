@@ -40,10 +40,18 @@ if ! command -v "$PHP" >/dev/null 2>&1; then
     exit 2
 fi
 
+# Extra interpreter flags, e.g. loading mysqli for the integration controls
+# on a dev box whose CLI php.ini does not enable it:
+#   PHP_FLAGS="-d extension_dir=C:/php/ext -d extension=mysqli"
+# Deliberately word-split (not quoted as one argument) because it carries
+# multiple flags.
+# shellcheck disable=SC2206
+PHP_ARGS=(${PHP_FLAGS:-})
+
 # An anchor test: prove the harness can run tests at all before we start
 # concluding anything from failures. Without this, a broken PHPUnit would
 # look like "every mutant killed".
-if ! "$PHP" vendor/bin/phpunit --no-coverage --filter NftCollectionIdentityMatchesTest >/dev/null 2>&1; then
+if ! "$PHP" "${PHP_ARGS[@]}" vendor/bin/phpunit --no-coverage --filter NftCollectionIdentityMatchesTest >/dev/null 2>&1; then
     echo "FATAL: the anchor test does not pass on a clean tree — fix that first." >&2
     echo "       (Concluding 'mutant killed' from a harness that always fails is worthless.)" >&2
     exit 2
@@ -71,7 +79,7 @@ FAIL=0
 plant() {
     local file="$1" search="$2" replace="$3"
     TOUCHED+=("$file")
-    "$PHP" -r '
+    "$PHP" "${PHP_ARGS[@]}" -r '
         $f = $argv[1]; $s = $argv[2]; $r = $argv[3];
         $c = file_get_contents($f);
         if (substr_count($c, $s) !== 1) {
@@ -96,9 +104,9 @@ control() {
 
     local rc=0
     if [ "$suite" = "integration" ]; then
-        "$PHP" vendor/bin/phpunit -c phpunit-integration.xml.dist --no-coverage --filter "$filter" >/dev/null 2>&1 || rc=$?
+        "$PHP" "${PHP_ARGS[@]}" vendor/bin/phpunit -c phpunit-integration.xml.dist --no-coverage --filter "$filter" >/dev/null 2>&1 || rc=$?
     else
-        "$PHP" vendor/bin/phpunit --no-coverage --filter "$filter" >/dev/null 2>&1 || rc=$?
+        "$PHP" "${PHP_ARGS[@]}" vendor/bin/phpunit --no-coverage --filter "$filter" >/dev/null 2>&1 || rc=$?
     fi
 
     git checkout -- "$file" 2>/dev/null
@@ -122,35 +130,43 @@ control 'solana case comparison' \
     'return $identity->canonical() === $canonicalTarget;' \
     'return strtolower($identity->canonical()) === strtolower($canonicalTarget);'
 
-# 2. Fail-closed branch. Let an unresolved identity through to the provider.
+# 2. Fail-closed branch. Stop requiring a real 32-byte key, so a
+#    marketplace alias is accepted as an identity again and reaches the
+#    provider — which is what made the count a meaningless zero.
 control 'unresolved fail-closed branch' \
     'SolanaGateFailClosedIntegrationTest' 'integration' \
-    'app/Domain/Onchain/Fetchers/SolanaFetcher.php' \
-    'if (!$identity->isAccepted()) {
-            \BCC\Core\Log\Logger::warning(' \
-    'if (false) {
-            \BCC\Core\Log\Logger::warning('
+    'app/Domain/Onchain/Support/NftCollectionIdentifier.php' \
+    'if (Base58::decodedLength($value) !== self::SOLANA_KEY_BYTES) {' \
+    'if (false) {'
 
-# 3. Checked-audit rollback. Swallow the null instead of throwing.
+# 3. Checked-audit rollback. Accept a failed audit and carry on, so the
+#    writes commit with no honest record. Anchored on the guard AND the
+#    verification together: skipping only the guard would trip the
+#    verification instead, and the mutant would die for the wrong reason.
 control 'checked-audit rollback' \
     'SolanaGateIdentityRepairRollbackIntegrationTest' 'integration' \
     'app/Domain/Onchain/Repair/SolanaGateIdentityRepairService.php' \
-    "throw new \\RuntimeException('checked audit write failed; rolling back the repair');" \
-    '$auditId = 1;'
+    '        if ($auditId === null || $auditId <= 0) {' \
+    '        $auditId = $auditId ?? 1;
+        if (false) {'
 
-# 4. Postcondition rollback. Stop verifying what was written.
+# 4. Postcondition rollback. Stop asserting the legacy alias survived —
+#    isolated by the direct verifyPostconditions() tests, because in a
+#    healthy run this check changes no observable outcome.
 control 'postcondition rollback' \
-    'SolanaGateIdentityRepairIntegrationTest' 'integration' \
+    'SolanaGateIdentityRepairIntegrationTest|SolanaGateIdentityRepairRollbackIntegrationTest' 'integration' \
     'app/Domain/Onchain/Repair/SolanaGateIdentityRepairService.php' \
-    "throw new \\RuntimeException('postcondition: contract_address was modified');" \
-    'return;'
+    "            throw new \RuntimeException('postcondition: contract_address was modified');" \
+    '            $expectedContractAddress = (string) $row->contract_address;'
 
-# 5. Administrator id. Accept user 0 / a non-integer.
+# 5. Administrator id. Accept a leading zero and, critically, `0` itself —
+#    WP-CLI's default user, and the ambient identity --user-id exists to
+#    replace.
 control 'administrator-id rejection' \
     'SolanaGateIdentityRepairCommandTest' 'unit' \
     'app/Domain/Onchain/CLI/SolanaGateIdentityRepairCommand.php' \
-    "preg_match('/^[1-9][0-9]{0,9}\$/', \$raw) !== 1" \
-    "preg_match('/^[0-9]+\$/', \$raw) !== 1"
+    "return preg_match('/^[1-9][0-9]{0,9}\$/', \$raw) === 1;" \
+    "return preg_match('/^[0-9]+\$/', \$raw) === 1;"
 
 # 6. Manifest eight-row limit. Add a ninth mapping.
 control 'manifest eight-row limit' \

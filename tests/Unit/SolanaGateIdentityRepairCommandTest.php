@@ -165,17 +165,36 @@ final class SolanaGateIdentityRepairCommandTest extends TestCase
      * turns a typo into "user 0" — which is precisely the ambient,
      * unaccountable identity the flag exists to replace.
      */
-    public function testTheUserIdPatternRejectsZeroAndNonIntegers(): void
+    public function testTheUserIdRuleRejectsZeroAndNonIntegers(): void
     {
-        $pattern = '/^[1-9][0-9]{0,9}$/';
-
+        // Calls the REAL validator. An earlier version of this test
+        // re-declared the regex locally and asserted against its own copy —
+        // which passed happily while the production rule was mutated to
+        // accept `0`. A mutation control caught it. Never restate a rule a
+        // test is supposed to be guarding.
         foreach (['0', '00', '007', '-1', '1.0', '', ' 1', '1 ', 'abc', '1e3', '+1', '0x1'] as $bad) {
-            self::assertSame(0, preg_match($pattern, $bad), "'{$bad}' must be rejected");
+            self::assertFalse(
+                SolanaGateIdentityRepairCommand::isValidOperatorId($bad),
+                "'{$bad}' must be rejected"
+            );
         }
 
         foreach (['1', '42', '4242', '999999999'] as $good) {
-            self::assertSame(1, preg_match($pattern, $good), "'{$good}' must be accepted");
+            self::assertTrue(
+                SolanaGateIdentityRepairCommand::isValidOperatorId($good),
+                "'{$good}' must be accepted"
+            );
         }
+    }
+
+    /**
+     * Called out separately because it is the one that matters: WP-CLI runs
+     * as user 0 by default, so "0 is rejected" is what forces a real,
+     * named administrator onto the audit row.
+     */
+    public function testUserIdZeroIsRejected(): void
+    {
+        self::assertFalse(SolanaGateIdentityRepairCommand::isValidOperatorId('0'));
     }
 
     // ── result vocabulary ───────────────────────────────────────────────

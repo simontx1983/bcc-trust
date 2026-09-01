@@ -325,4 +325,98 @@ final class SolanaGateIdentityRepairRollbackIntegrationTest extends TestCase
 
         \BCC\Trust\Onchain\Repositories\GateIdentityRepairRepository::lockCollection(79);
     }
+
+    // ── the postcondition check, isolated ───────────────────────────────
+
+    /**
+     * `verifyPostconditions()` is belt-and-braces: in a healthy run every
+     * value it re-reads is one the same transaction just wrote, so removing
+     * it changes no observable outcome — which means no end-to-end test can
+     * prove it is load-bearing, and a mutation control found exactly that.
+     *
+     * So it is exercised directly, against state that violates each
+     * postcondition in turn. This is what makes "postcondition failure
+     * rolls back" a claim with evidence behind it rather than a comment.
+     */
+    public function testPostconditionVerificationRejectsAnUnwrittenCanonicalIdentifier(): void
+    {
+        $entry = SolanaGateIdentityManifest::entries()[0];
+
+        // Nothing has been repaired, so canonical_identifier is still NULL.
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessageMatches('/canonical_identifier not written/');
+
+        $this->callVerifyPostconditions(
+            $entry['collection_id'],
+            $entry['post_id'],
+            $entry['new_canonical_identifier'],
+            $entry['alias']
+        );
+    }
+
+    /**
+     * The guarantee that the repair ADDS an identity rather than rewriting
+     * history: if `contract_address` ever differs from the reviewed alias,
+     * the mapping must not commit.
+     */
+    public function testPostconditionVerificationRejectsAModifiedContractAddress(): void
+    {
+        $entry = SolanaGateIdentityManifest::entries()[0];
+
+        // Make the row otherwise fully repaired...
+        $wpdb = $GLOBALS['wpdb'];
+        $wpdb->query($wpdb->prepare(
+            'UPDATE `' . CollectionRepository::table() . '` SET canonical_identifier = %s WHERE id = %d',
+            $entry['new_canonical_identifier'],
+            $entry['collection_id']
+        ));
+        $wpdb->query($wpdb->prepare(
+            'UPDATE `' . $wpdb->postmeta . '` SET meta_value = %s WHERE post_id = %d AND meta_key = %s',
+            $entry['new_canonical_identifier'],
+            $entry['post_id'],
+            GatedGroupRepository::META_CONTRACT
+        ));
+
+        // ...then assert against an alias the row does NOT have.
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessageMatches('/contract_address was modified/');
+
+        $this->callVerifyPostconditions(
+            $entry['collection_id'],
+            $entry['post_id'],
+            $entry['new_canonical_identifier'],
+            'an_alias_this_row_does_not_have'
+        );
+    }
+
+    /**
+     * Invoke the private postcondition check inside a real transaction —
+     * required, because its reads are `FOR UPDATE` and the repository
+     * refuses those outside one.
+     */
+    private function callVerifyPostconditions(
+        int $collectionId,
+        int $postId,
+        string $expectedCanonical,
+        string $expectedContractAddress
+    ): void {
+        $service = new SolanaGateIdentityRepairService();
+
+        $method = new \ReflectionMethod($service, 'verifyPostconditions');
+        $method->setAccessible(true);
+
+        try {
+            \BCC\Trust\Core\Security\TransactionManager::run(
+                static function () use ($method, $service, $collectionId, $postId, $expectedCanonical, $expectedContractAddress): array {
+                    $method->invoke($service, $collectionId, $postId, $expectedCanonical, $expectedContractAddress);
+
+                    return ['ok' => true];
+                }
+            );
+        } catch (\Throwable $e) {
+            // TransactionManager rethrows after rolling back; unwrap so the
+            // test asserts on the postcondition's own message.
+            throw $e;
+        }
+    }
 }

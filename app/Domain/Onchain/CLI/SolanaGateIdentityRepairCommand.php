@@ -243,6 +243,24 @@ final class SolanaGateIdentityRepairCommand
     }
 
     /**
+     * Is this raw `--user-id` value a usable WordPress user id?
+     *
+     * Strictly a positive integer: no leading zeros, no sign, no
+     * whitespace, no float, no hex. `(int) "0"` and `(int) "abc"` both
+     * yield 0, so a lax parse turns a typo into "user 0" — the ambient,
+     * unaccountable identity this flag exists to replace.
+     *
+     * Public and separate from {@see requireOperator()} on purpose:
+     * `requireOperator()` terminates the process through WP_CLI, so the
+     * rule itself would otherwise be untestable, and an untestable rule is
+     * one a mutation control cannot prove is load-bearing.
+     */
+    public static function isValidOperatorId(string $raw): bool
+    {
+        return preg_match('/^[1-9][0-9]{0,9}$/', $raw) === 1;
+    }
+
+    /**
      * Validate the operator and return their id. Never returns on failure.
      */
     private static function requireOperator(?string $raw): int
@@ -255,10 +273,7 @@ final class SolanaGateIdentityRepairCommand
             );
         }
 
-        // Strictly a positive integer: no leading zeros, no sign, no
-        // whitespace, no float. `(int) "0"` and `(int) "abc"` both yield 0,
-        // so a lax parse would turn a typo into user 0.
-        if (preg_match('/^[1-9][0-9]{0,9}$/', $raw) !== 1) {
+        if (!self::isValidOperatorId($raw)) {
             self::fail(
                 '--user-id must be a positive integer user id (got "' . $raw . '"). '
                 . 'User id 0 is never accepted.',
