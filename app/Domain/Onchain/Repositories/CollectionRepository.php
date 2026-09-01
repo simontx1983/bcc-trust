@@ -3,8 +3,11 @@
 namespace BCC\Trust\Onchain\Repositories;
 
 use BCC\Core\DB\DB;
+use BCC\Trust\Core\Security\TransactionManager;
+use BCC\Trust\Onchain\Services\CollectionStateClassifier;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\Support\NftCollectionIdentity;
+use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -73,8 +76,61 @@ if (!defined('ABSPATH')) {
  *     unique_holders: string|null,
  *     total_volume: string|null,
  *     is_verified: string,
+ *     provisioning_state: string,
+ *     provisioning_requested_at: string|null,
+ *     provisioning_requested_by: string|null,
+ *     provisioning_failure_code: string|null,
  *     chain_slug: string,
  *     chain_type: string
+ * }
+ *
+ * @phpstan-type CollectionProvisioningRow object{
+ *     id: string,
+ *     is_verified: string,
+ *     canonical_identifier: string|null,
+ *     collection_name: string|null,
+ *     chain_id: string,
+ *     provisioning_state: string,
+ *     provisioning_requested_at: string|null,
+ *     provisioning_requested_by: string|null,
+ *     provisioning_failure_code: string|null
+ * }
+ *
+ * @phpstan-type CollectionRequestedRow object{
+ *     id: string,
+ *     chain_id: string,
+ *     contract_address: string,
+ *     canonical_identifier: string|null,
+ *     collection_name: string|null,
+ *     is_verified: string,
+ *     provisioning_state: string,
+ *     provisioning_requested_at: string|null,
+ *     provisioning_requested_by: string|null,
+ *     chain_slug: string,
+ *     chain_type: string
+ * }
+ *
+ * @phpstan-type CollectionAdminStateRow object{
+ *     id: string,
+ *     contract_address: string,
+ *     canonical_identifier: string|null,
+ *     collection_name: string|null,
+ *     token_standard: string|null,
+ *     total_supply: string|null,
+ *     unique_holders: string|null,
+ *     image_url: string|null,
+ *     is_verified: string,
+ *     source: string,
+ *     provisioning_state: string,
+ *     provisioning_requested_at: string|null,
+ *     provisioning_requested_by: string|null,
+ *     provisioning_failure_code: string|null,
+ *     has_community: string,
+ *     is_hidden: string,
+ *     chain_id: string,
+ *     chain_slug: string,
+ *     chain_type: string,
+ *     explorer_url: string|null
  * }
  *
  * @phpstan-type CollectionCountByChain object{
@@ -882,6 +938,8 @@ final class CollectionRepository
             "SELECT c.id, c.wallet_link_id, c.contract_address, c.canonical_identifier, c.chain_id,
                     c.collection_name, c.token_standard, c.total_supply,
                     c.floor_price, c.unique_holders, c.total_volume, c.is_verified,
+                    c.provisioning_state, c.provisioning_requested_at,
+                    c.provisioning_requested_by, c.provisioning_failure_code,
                     ch.slug AS chain_slug, ch.chain_type
              FROM {$table} c
              INNER JOIN {$chains} ch ON ch.id = c.chain_id
@@ -2002,4 +2060,472 @@ final class CollectionRepository
 
         return $result !== false;
     }
+
+    // ── PR 6: collection-state tabs and provisioning intent ─────────────
+
+    /**
+     * One page of one administrator state tab, with an EXACT total.
+     *
+     * ── WHY SET-BASED AND NOT "FETCH 500 GATED IDS FIRST" ───────────────
+     * The obvious shape is to load every gated collection id and every deny
+     * rule into PHP once, then classify. It is wrong for a reason that only
+     * shows up later: any such read is bounded, and the moment the install
+     * passes that ceiling the subset silently misclassifies every row beyond
+     * it — a `verified_with_community` collection would start appearing under
+     * `needs_attention` with no error anywhere. Pagination would also be
+     * wrong, because the page is a slice of a filtered set the database has
+     * to compute.
+     *
+     * So community-existence and hidden-ness are EXISTS subqueries evaluated
+     * by MySQL as part of the same statement. One query for the page, one for
+     * the count, no N+1, no ceiling, and a total that matches the rows.
+     *
+     * `has_community` and `is_hidden` are also PROJECTED, so the row carries
+     * the two facts the classifier needs without a second lookup per row.
+     *
+     * @param string      $tab           one of CollectionStateClassifier::tabs()
+     * @param int         $page          1-based
+     * @param int         $perPage       clamped to 1..100
+     * @param string|null $chainSlug     optional chain filter
+     * @param string|null $tokenStandard optional standard filter
+     * @return array{items: list<CollectionAdminStateRow>, total: int, pages: int, available: bool}
+     *         `available` is false when the read failed — the caller must
+     *         render "unavailable", never an empty or partial tab.
+     */
+    public static function listForAdminState(
+        string $tab,
+        int $page = 1,
+        int $perPage = 50,
+        ?string $chainSlug = null,
+        ?string $tokenStandard = null
+    ): array {
+        global $wpdb;
+
+        $unavailable = ['items' => [], 'total' => 0, 'pages' => 0, 'available' => false];
+
+        if (!CollectionStateClassifier::isTab($tab)) {
+            // An unknown tab must never degrade to "everything".
+            return $unavailable;
+        }
+
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        $page    = max(1, $page);
+        $perPage = max(1, min(100, $perPage));
+        $offset  = ($page - 1) * $perPage;
+
+        $conditions = [CollectionStateClassifier::sqlForTab($tab, $wpdb->postmeta, $wpdb->posts)];
+        $params     = [];
+
+        if ($chainSlug !== null && $chainSlug !== '') {
+            $chain = ChainRepository::getBySlug($chainSlug);
+            if ($chain === null) {
+                // A filter naming a chain that does not exist genuinely
+                // matches nothing. That is an empty result, not a failure.
+                return ['items' => [], 'total' => 0, 'pages' => 0, 'available' => true];
+            }
+            $conditions[] = 'c.chain_id = %d';
+            $params[]     = (int) $chain->id;
+        }
+
+        if ($tokenStandard !== null && $tokenStandard !== '') {
+            $conditions[] = 'c.token_standard = %s';
+            $params[]     = $tokenStandard;
+        }
+
+        $whereSql = 'WHERE ' . implode(' AND ', $conditions);
+
+        // `id > %d` is a no-op filter (ids are positive) that guarantees at
+        // least one placeholder: wpdb::prepare() warns on a placeholderless
+        // query and the suite runs with failOnWarning.
+        $countSql = "SELECT COUNT(*) FROM {$table} c {$whereSql} AND c.id > %d";
+        $total    = $wpdb->get_var($wpdb->prepare($countSql, ...array_merge($params, [0])));
+
+        // A failed query and a genuine no-rows result are BOTH `[]` from
+        // `wpdb::get_results()` (it returns `last_result`, and returns null only
+        // for an empty query string), so `last_error` is the only discriminator
+        // there is. Without it, "this tab could not be read" is indistinguishable
+        // from "this tab is empty" and an operator is shown a confident zero.
+        //
+        // Read as its own condition rather than the right-hand side of an `||`:
+        // the WordPress stub gives `last_error` a `''` default that static
+        // analysis folds into a literal when it appears as a boolean operand.
+        $readFailed = $total === null;
+        if (!$readFailed && $wpdb->last_error) {
+            $readFailed = true;
+        }
+        
+        if ($readFailed) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] collection-state count failed; reporting the tab as unavailable',
+                ['tab' => $tab, 'db_error' => $wpdb->last_error]
+            );
+            return $unavailable;
+        }
+        $total = (int) $total;
+
+        $hasCommunity = CollectionStateClassifier::sqlHasCommunity($wpdb->postmeta, $wpdb->posts);
+        $isHidden     = CollectionStateClassifier::sqlIsHidden();
+
+        /** @var list<CollectionAdminStateRow>|null $items */
+        $items = $wpdb->get_results($wpdb->prepare(
+            "SELECT c.id, c.contract_address, c.canonical_identifier, c.collection_name,
+                    c.token_standard, c.total_supply, c.unique_holders, c.image_url,
+                    c.is_verified, c.source,
+                    c.provisioning_state, c.provisioning_requested_at,
+                    c.provisioning_requested_by, c.provisioning_failure_code,
+                    ({$hasCommunity}) AS has_community,
+                    ({$isHidden}) AS is_hidden,
+                    c.chain_id, ch.slug AS chain_slug, ch.chain_type, ch.explorer_url
+               FROM {$table} c
+          LEFT JOIN {$chains} ch ON ch.id = c.chain_id
+               {$whereSql}
+               ORDER BY c.id DESC
+               LIMIT %d OFFSET %d",
+            ...array_merge($params, [$perPage, $offset])
+        ));
+
+        // A failed query and a genuine no-rows result are BOTH `[]` from
+        // `wpdb::get_results()` (it returns `last_result`, and returns null only
+        // for an empty query string), so `last_error` is the only discriminator
+        // there is. Without it, "this tab could not be read" is indistinguishable
+        // from "this tab is empty" and an operator is shown a confident zero.
+        //
+        // Read as its own condition rather than the right-hand side of an `||`:
+        // the WordPress stub gives `last_error` a `''` default that static
+        // analysis folds into a literal when it appears as a boolean operand.
+        $readFailed = $items === null;
+        if (!$readFailed && $wpdb->last_error) {
+            $readFailed = true;
+        }
+        
+        if ($readFailed) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] collection-state page read failed; reporting the tab as unavailable',
+                ['tab' => $tab, 'db_error' => $wpdb->last_error]
+            );
+            return $unavailable;
+        }
+
+        return [
+            'items'     => $items,
+            'total'     => $total,
+            'pages'     => (int) ceil($total / $perPage),
+            'available' => true,
+        ];
+    }
+
+    /**
+     * EXACT row counts for all four tabs under the same filters.
+     *
+     * One statement, four conditional sums, so the four numbers are computed
+     * over one consistent snapshot of the table. Four separate COUNT queries
+     * could disagree with each other and with the page if a write lands
+     * between them — a small race, but one that surfaces as a tab whose
+     * header contradicts its own contents.
+     *
+     * @return array{counts: array<string, int>, available: bool}
+     */
+    public static function countsByState(
+        ?string $chainSlug = null,
+        ?string $tokenStandard = null
+    ): array {
+        global $wpdb;
+
+        $zeroes = [];
+        foreach (CollectionStateClassifier::tabs() as $tab) {
+            $zeroes[$tab] = 0;
+        }
+        $unavailable = ['counts' => $zeroes, 'available' => false];
+
+        $table  = self::table();
+        $params = [];
+        $where  = [];
+
+        if ($chainSlug !== null && $chainSlug !== '') {
+            $chain = ChainRepository::getBySlug($chainSlug);
+            if ($chain === null) {
+                return ['counts' => $zeroes, 'available' => true];
+            }
+            $where[]  = 'c.chain_id = %d';
+            $params[] = (int) $chain->id;
+        }
+
+        if ($tokenStandard !== null && $tokenStandard !== '') {
+            $where[]  = 'c.token_standard = %s';
+            $params[] = $tokenStandard;
+        }
+
+        $whereSql = $where === [] ? 'WHERE c.id > %d' : 'WHERE ' . implode(' AND ', $where) . ' AND c.id > %d';
+
+        $selects = [];
+        foreach (CollectionStateClassifier::tabs() as $tab) {
+            // Column aliases are derived from the tab constants, which are
+            // this class's own literals — never caller input.
+            $selects[] = 'SUM(CASE WHEN ' . CollectionStateClassifier::sqlForTab($tab, $wpdb->postmeta, $wpdb->posts)
+                . ' THEN 1 ELSE 0 END) AS ' . $tab;
+        }
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            'SELECT ' . implode(', ', $selects) . " FROM {$table} c {$whereSql}",
+            ...array_merge($params, [0])
+        ));
+
+        // A failed query and a genuine no-rows result are BOTH `[]` from
+        // `wpdb::get_results()` (it returns `last_result`, and returns null only
+        // for an empty query string), so `last_error` is the only discriminator
+        // there is. Without it, "this tab could not be read" is indistinguishable
+        // from "this tab is empty" and an operator is shown a confident zero.
+        //
+        // Read as its own condition rather than the right-hand side of an `||`:
+        // the WordPress stub gives `last_error` a `''` default that static
+        // analysis folds into a literal when it appears as a boolean operand.
+        $readFailed = $row === null;
+        if (!$readFailed && $wpdb->last_error) {
+            $readFailed = true;
+        }
+        
+        if ($readFailed) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] collection-state counts failed; reporting counts as unavailable',
+                ['db_error' => $wpdb->last_error]
+            );
+            return $unavailable;
+        }
+
+        $counts = [];
+        foreach (CollectionStateClassifier::tabs() as $tab) {
+            // SUM() over zero rows is NULL, which is a legitimate zero here.
+            $counts[$tab] = (int) ($row->{$tab} ?? 0);
+        }
+
+        return ['counts' => $counts, 'available' => true];
+    }
+
+    /**
+     * The provisioning queue: collections with RECORDED INTENT, in id order,
+     * after a cursor.
+     *
+     * ── WHY THIS REPLACES `listVerified()` FOR PROVISIONING ─────────────
+     * `listVerified()` selects on `is_verified = 1` alone — it IS the
+     * authorization decision that PR 6 exists to remove. This method selects
+     * on `provisioning_state = 'requested'`, so a collection reaches the
+     * sweep only because an administrator explicitly asked. Verification is
+     * still required, and is re-checked at the moment of provisioning, but it
+     * no longer authorizes anything by itself.
+     *
+     * ── WHY CLAMPED AND CURSORED, WHEN `listVerified()` IS NEITHER ──────
+     * `listVerified()` passes an unclamped caller `$limit` straight to
+     * `LIMIT %d`, and `ORDER BY id ASC` with no cursor means the daily sweep
+     * re-reads the same first 200 rows forever — anything past id-rank 200
+     * is never reached. Inheriting that into a queue would starve it
+     * silently, which is precisely the failure a queue must not have.
+     *
+     * @param int $afterId cursor; 0 starts at the beginning
+     * @param int $limit   clamped to 1..200
+     * @return list<CollectionRequestedRow>
+     */
+    public static function listRequested(int $afterId = 0, int $limit = 50): array
+    {
+        global $wpdb;
+
+        $table  = self::table();
+        $chains = ChainRepository::table();
+        $limit  = max(1, min(200, $limit));
+        $afterId = max(0, $afterId);
+
+        /** @var list<CollectionRequestedRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT c.id, c.chain_id, c.contract_address, c.canonical_identifier,
+                    c.collection_name, c.is_verified,
+                    c.provisioning_state, c.provisioning_requested_at, c.provisioning_requested_by,
+                    ch.slug AS chain_slug, ch.chain_type
+               FROM {$table} c
+               JOIN {$chains} ch ON ch.id = c.chain_id
+              WHERE c.provisioning_state = %s
+                AND c.id > %d
+              ORDER BY c.id ASC
+              LIMIT %d",
+            ProvisioningState::REQUESTED,
+            $afterId,
+            $limit
+        ));
+
+        return $rows ?: [];
+    }
+
+    /**
+     * Read exactly the provisioning fields, under a row lock when one is
+     * available.
+     *
+     * ── WHY `FOR UPDATE` IS CONDITIONAL ─────────────────────────────────
+     * `SELECT … FOR UPDATE` outside a transaction takes no lock and succeeds
+     * silently, which is worse than not locking at all because the code
+     * reads as though it were safe. The lock is requested only inside
+     * `TransactionManager::run()`, and the caller that needs serialisation
+     * is responsible for being in one.
+     *
+     * @return CollectionProvisioningRow|null
+     */
+    public static function readProvisioningRow(int $collectionId, bool $forUpdate = false): ?object
+    {
+        global $wpdb;
+
+        if ($collectionId <= 0) {
+            return null;
+        }
+
+        $table  = self::table();
+        $suffix = '';
+        if ($forUpdate && TransactionManager::isInRunTransaction()) {
+            $suffix = ' FOR UPDATE';
+        }
+
+        /** @var CollectionProvisioningRow|null */
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT id, is_verified, canonical_identifier, collection_name, chain_id,
+                    provisioning_state, provisioning_requested_at,
+                    provisioning_requested_by, provisioning_failure_code
+               FROM {$table}
+              WHERE id = %d" . $suffix,
+            $collectionId
+        ));
+    }
+
+    /**
+     * Move one collection to a new provisioning state, refusing anything the
+     * transition table forbids.
+     *
+     * ── WHY THE EXPECTED CURRENT STATE IS IN THE WHERE CLAUSE ───────────
+     * Checking the transition in PHP and then writing unconditionally is a
+     * TOCTOU: two operators clicking Request and Withdraw at the same moment
+     * both read `none`/`requested`, both validate, and the later write wins
+     * regardless of order. Putting the expected state in the UPDATE makes the
+     * database the arbiter — a zero-row result means someone else moved
+     * first, and the caller is told so rather than believing it succeeded.
+     *
+     * The field invariants are enforced here too, so no caller can write a
+     * `failed` row with no failure code or a `none` row that still names a
+     * requester. {@see ProvisioningState::fieldViolations()}
+     *
+     * @param int         $collectionId
+     * @param string      $expectedFrom the state the caller believes it is in
+     * @param string      $to
+     * @param int|null    $requestedBy  required for requested/failed
+     * @param string|null $requestedAt  UTC 'Y-m-d H:i:s'; required for requested
+     * @param string|null $failureCode  required for failed, forbidden otherwise
+     * @return bool true when exactly one row moved
+     */
+    public static function setProvisioningState(
+        int $collectionId,
+        string $expectedFrom,
+        string $to,
+        ?int $requestedBy = null,
+        ?string $requestedAt = null,
+        ?string $failureCode = null
+    ): bool {
+        global $wpdb;
+
+        if ($collectionId <= 0) {
+            return false;
+        }
+
+        if (!ProvisioningState::canTransition($expectedFrom, $to)) {
+            \BCC\Core\Log\Logger::warning(
+                '[bcc-trust] refused an illegal provisioning transition',
+                ['collection_id' => $collectionId, 'from' => $expectedFrom, 'to' => $to]
+            );
+            return false;
+        }
+
+        $violations = ProvisioningState::fieldViolations($to, $requestedAt, $requestedBy, $failureCode);
+        if ($violations !== []) {
+            \BCC\Core\Log\Logger::warning(
+                '[bcc-trust] refused a provisioning write that would leave a contradictory row',
+                ['collection_id' => $collectionId, 'to' => $to, 'violations' => $violations]
+            );
+            return false;
+        }
+
+        $table = self::table();
+
+        $affected = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET provisioning_state        = %s,
+                    provisioning_requested_at = %s,
+                    provisioning_requested_by = %s,
+                    provisioning_failure_code = %s
+              WHERE id = %d
+                AND provisioning_state = %s",
+            $to,
+            $requestedAt,
+            $requestedBy,
+            $failureCode,
+            $collectionId,
+            $expectedFrom
+        ));
+
+        if ($affected === false) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] provisioning state write failed',
+                ['collection_id' => $collectionId, 'to' => $to, 'db_error' => $wpdb->last_error]
+            );
+            return false;
+        }
+
+        // A guarded UPDATE that matches nothing means the row was not in the
+        // expected state. That is a legitimate concurrent outcome, not an
+        // error, but it is emphatically not success.
+        return (int) $affected === 1;
+    }
+
+    /**
+     * Withdraw a PENDING request because verification was removed.
+     *
+     * Deliberately a separate, narrow method rather than a
+     * `setProvisioningState()` call: it must be impossible to reach
+     * `provisioned` with this, whatever the caller passes. The WHERE clause
+     * names the only two states that may be withdrawn, so a provisioned
+     * community can never be un-provisioned by an unverify — the asymmetry
+     * issue #215 requires.
+     *
+     * @return int number of rows withdrawn (0 or 1)
+     */
+    public static function withdrawPendingProvisioning(int $collectionId): int
+    {
+        global $wpdb;
+
+        if ($collectionId <= 0) {
+            return 0;
+        }
+
+        $table = self::table();
+
+        $affected = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET provisioning_state        = %s,
+                    provisioning_requested_at = NULL,
+                    provisioning_requested_by = NULL,
+                    provisioning_failure_code = NULL
+              WHERE id = %d
+                AND provisioning_state IN (%s, %s)",
+            ProvisioningState::NONE,
+            $collectionId,
+            ProvisioningState::REQUESTED,
+            ProvisioningState::FAILED
+        ));
+
+        if ($affected === false) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] withdraw of a pending provisioning request failed',
+                ['collection_id' => $collectionId, 'db_error' => $wpdb->last_error]
+            );
+            return 0;
+        }
+
+        return (int) $affected;
+    }
+
+
 }
