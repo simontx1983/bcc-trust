@@ -670,3 +670,13 @@ bcc_onchain_create_chain_nft_capabilities_table();
 // (schema-collections.php is already required above — the migration lives
 // alongside the CREATE TABLE it amends.)
 bcc_onchain_add_collections_canonical_identifier();
+
+// PR 6 provisioning intent. Runs after the canonical-identity migration for
+// the same reason production does: its backfill reasons about live gates, and
+// a gate is only meaningful once identity is settled.
+//
+// Note this runs against a table that has just been created, so the backfill
+// marks nothing — which is correct, and is also why the migration's OWN
+// integration test re-runs it against seeded gates rather than relying on
+// this bootstrap pass to prove the backfill works.
+bcc_onchain_add_collections_provisioning_state();

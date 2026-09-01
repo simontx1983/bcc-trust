@@ -480,9 +480,23 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
      *
      * ── WHY IT IS STILL AN EXPLICIT LIST ────────────────────────────────
      * The point of this test never was "zero"; it was that the set of
-     * consumers is small, known, and changes only on purpose. A FIFTH file
+     * consumers is small, known, and changes only on purpose. A SIXTH file
      * appearing here is a review question — especially a worker, a cron
      * callback or a REST endpoint, none of which may start a discovery.
+     *
+     * ── PR 6 ADDED THE FIFTH, DELIBERATELY ──────────────────────────────
+     * `ManualCollectionIntakeService` is the one manual collection-intake
+     * path, reachable only from the NFT Discovery page's Add Collection
+     * form. It asks the model whether the chain has product support and the
+     * manual-discovery permission before it writes anything.
+     *
+     * It belongs here for the same reason `NftCapabilityEditor` does: it is
+     * a control-plane service, not a worker. The alternative — checking the
+     * two flags in the admin handler and passing the answer down — would
+     * move a security decision out of the domain and into a view layer,
+     * leaving the service itself callable with no gate at all. The invariant
+     * this test actually protects is the one asserted below: nothing under
+     * /Workers/ or /REST/ appears in this list.
      *
      * Asserted as an explicit equality rather than a foreach, because a
      * loop over a list asserts nothing about entries it never sees.
@@ -496,6 +510,7 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
             [
                 'app/Domain/Onchain/Admin/NftDiscoveryPage.php',
                 'app/Domain/Onchain/Admin/Views/NftCapabilityEditorPanel.php',
+                'app/Domain/Onchain/Services/ManualCollectionIntakeService.php',
                 'app/Domain/Onchain/Services/NftCapabilityEditor.php',
                 'app/Domain/Onchain/Services/NftDiscoveryControlPlaneSnapshot.php',
             ],
@@ -520,6 +535,10 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
             $isAdminSurface = str_contains($path, '/Admin/')
                 || str_contains($path, 'NftDiscoveryControlPlaneSnapshot.php')
                 || str_contains($path, 'NftCapabilityEditor.php')
+                // PR 6: the manual Add Collection intake. A control-plane
+                // service reachable only from the NFT Discovery form — see
+                // testOnlyTheDiscoveryControlPlaneConsultsTheVerdict().
+                || str_contains($path, 'ManualCollectionIntakeService.php')
                 || str_contains($path, 'Support/NftChainCapability.php');
 
             self::assertTrue(

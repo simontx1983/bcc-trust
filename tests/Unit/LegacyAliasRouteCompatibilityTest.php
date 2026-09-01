@@ -150,6 +150,21 @@ final class LegacyAliasRouteCompatibilityTest extends TestCase
      * The strict lookup's caller set. If a NEW caller appears, someone must
      * decide whether it can receive a legacy alias — this test makes that
      * decision explicit instead of implicit.
+     *
+     * ── PR 6: THE ADMIN CALLER MOVED, AND THE ASSESSMENT MOVED WITH IT ──
+     * `VerifyCollectionsPage` carried two manual Add Collection forms; both
+     * are retired and replaced by `ManualCollectionIntakeService`, reached
+     * from the NFT Discovery page. The caller count is unchanged at two.
+     *
+     * Legacy-alias exposure, assessed: NONE, and less than before. The call
+     * is the DUPLICATE CHECK for a collection being added by hand, and
+     * `findByChainContract()` matches `canonical_identifier` exactly. An
+     * unresolved legacy alias row has `canonical_identifier = NULL`, so it
+     * cannot match, which is the correct outcome — a new, valid identity
+     * must NOT be absorbed by an alias row that has never been resolved.
+     * The service never calls the insensitive lookup (pinned by
+     * testTheLegacyLookupHasNoProductionCallers), so a duplicate check can
+     * never silently resolve through an alias.
      */
     public function testTheStrictLookupCallerInventoryIsUnchanged(): void
     {
@@ -163,7 +178,7 @@ final class LegacyAliasRouteCompatibilityTest extends TestCase
 
         self::assertSame(
             [
-                'app/Domain/Onchain/Admin/VerifyCollectionsPage.php',
+                'app/Domain/Onchain/Services/ManualCollectionIntakeService.php',
                 'app/Domain/Onchain/Services/NftPieceViewModelBuilder.php',
             ],
             $files,

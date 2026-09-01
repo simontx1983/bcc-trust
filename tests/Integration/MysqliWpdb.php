@@ -26,6 +26,21 @@ final class MysqliWpdb
     public int $rows_affected = 0;
     public string $last_error = '';
 
+    /**
+     * Every statement actually sent to the server.
+     *
+     * Exists so a test can assert an N+1 is ABSENT. Counting rows returned
+     * proves nothing about how many round trips produced them, and an
+     * admin list that issues one lookup per row still looks correct until
+     * the page is big enough to time out.
+     */
+    public int $queryCount = 0;
+
+    public function resetQueryCount(): void
+    {
+        $this->queryCount = 0;
+    }
+
     // WP core table-name properties some repo SQL references.
     public string $options;
     public string $users;
@@ -171,6 +186,7 @@ final class MysqliWpdb
             $this->last_error = 'Empty query (prepare() returned an empty string).';
             return false;
         }
+        $this->queryCount++;
         $result = @$this->db->query($sql);
         if ($result === false) {
             $this->last_error = $this->db->error;
@@ -203,6 +219,7 @@ final class MysqliWpdb
             $this->last_error = 'Empty query (prepare() returned an empty string).';
             return [];
         }
+        $this->queryCount++;
         $res = @$this->db->query($sql);
         if ($res === false || $res === true) {
             if ($res === false) {
@@ -228,6 +245,7 @@ final class MysqliWpdb
     public function get_var(string $sql)
     {
         $this->last_error = '';
+        $this->queryCount++;
         $res = @$this->db->query($sql);
         if ($res === false || $res === true) {
             if ($res === false) {
