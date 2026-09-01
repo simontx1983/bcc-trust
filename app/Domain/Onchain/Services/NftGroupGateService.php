@@ -20,7 +20,6 @@
 namespace BCC\Trust\Onchain\Services;
 
 use BCC\Trust\Core\Security\AuditLogger;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\ValueObjects\GatedGroupConfig;
 use BCC\Trust\Onchain\ValueObjects\JoinResult;
@@ -71,9 +70,16 @@ final class NftGroupGateService {
             return JoinResult::alreadyMember($config->minBalance);
         }
 
-        $chain = ChainRepository::getById($config->chainId);
-        if ($chain === null) {
-            return JoinResult::chainUnsupported($config->minBalance);
+        // PR 5b: resolve the gate's identity from the LINKED COLLECTION ROW
+        // before anything else touches a provider. An unresolved identity
+        // returns here, so no fetcher is constructed and no RPC is made —
+        // the "zero provider calls" guarantee is structural, not a promise.
+        //
+        // `$config->contractAddress` is deliberately NOT used: on the eight
+        // production Solana gates it holds a Magic Eden symbol.
+        $identity = GateIdentityResolver::resolve($config);
+        if (!$identity->isResolved()) {
+            return JoinResult::identityUnresolved($config->minBalance);
         }
 
         // Three-outcome verdict. JOIN fails CLOSED: on UNKNOWN (provider
@@ -82,8 +88,8 @@ final class NftGroupGateService {
         // they qualify. They retry once the provider recovers.
         $verdict = HoldingsService::eligibilityVerdict(
             $userId,
-            (string) $chain->slug,
-            $config->contractAddress,
+            $identity->chainSlug(),
+            $identity->canonical(),
             $config->minBalance
         );
         if ($verdict->isUnknown()) {
@@ -136,8 +142,16 @@ final class NftGroupGateService {
             $groupIds
         );
 
-        // Resolve chain slug for each config (skip unsupported chains
-        // upfront so we don't ask HoldingsService for unknown chains).
+        // PR 5b: resolve each gate's identity from its linked collection
+        // row. A gate whose identity is unresolved is DROPPED here, so it
+        // never reaches the batched holdings call — no provider is asked
+        // about it at all.
+        //
+        // Dropping is the right outcome for this method specifically: it
+        // answers "which groups do you qualify for", and a gate we cannot
+        // evaluate is not one we can claim you qualify for. It feeds
+        // auto-join, which must fail CLOSED. The join endpoint reports the
+        // unresolved reason explicitly; a suggestion list stays quiet.
         $candidates = [];
         $pairs      = [];
         foreach ($configs as $cfg) {
@@ -147,13 +161,14 @@ final class NftGroupGateService {
             if ($this->isOptOutActive($userId, $cfg->groupId)) {
                 continue;
             }
-            $chain = ChainRepository::getById($cfg->chainId);
-            if ($chain === null) {
+            $identity = GateIdentityResolver::resolve($cfg);
+            if (!$identity->isResolved()) {
                 continue;
             }
-            $slug = (string) $chain->slug;
-            $candidates[] = [$cfg, $slug];
-            $pairs[]      = [$slug, $cfg->contractAddress];
+            $slug         = $identity->chainSlug();
+            $canonical    = $identity->canonical();
+            $candidates[] = [$cfg, $slug, $canonical];
+            $pairs[]      = [$slug, $canonical];
         }
 
         if ($candidates === []) {
@@ -163,8 +178,8 @@ final class NftGroupGateService {
         $balances = HoldingsService::ownsAnyMany($userId, $pairs);
 
         $eligible = [];
-        foreach ($candidates as [$cfg, $slug]) {
-            $key = $slug . ':' . $cfg->contractAddress;
+        foreach ($candidates as [$cfg, $slug, $canonical]) {
+            $key = $slug . ':' . $canonical;
             // Use array_key_exists, NOT `?? 0`: a present value of null is
             // UNKNOWN (provider couldn't verify), and `??` would silently
             // collapse that null to 0 — re-introducing the exact fail-open

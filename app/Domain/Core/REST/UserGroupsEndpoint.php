@@ -219,25 +219,22 @@ final class UserGroupsEndpoint
             return [];
         }
 
-        // Resolve chain slugs once per unique chain_id, not once per group.
-        $slugByChain = [];
+        // PR 5b: the identity a gate is evaluated on comes from its linked
+        // collection row, never from `$cfg->contractAddress` (the legacy
+        // display alias — a Magic Eden symbol on the eight Solana gates).
+        // A gate that cannot be resolved contributes no pair, so no
+        // provider is asked, and it is simply absent from the result — the
+        // caller already treats an absent group as "no eligibility info"
+        // and renders no badge, which is the correct fail-closed answer.
+        $balanceKeyByGroup = [];
+        $pairs             = [];
         foreach ($configs as $cfg) {
-            if (isset($slugByChain[$cfg->chainId])) {
+            $identity = \BCC\Trust\Onchain\Services\GateIdentityResolver::resolve($cfg);
+            if (!$identity->isResolved()) {
                 continue;
             }
-            $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById($cfg->chainId);
-            if ($chain !== null) {
-                $slugByChain[$cfg->chainId] = (string) $chain->slug;
-            }
-        }
-
-        $pairs = [];
-        foreach ($configs as $cfg) {
-            $slug = $slugByChain[$cfg->chainId] ?? null;
-            if ($slug === null) {
-                continue;
-            }
-            $pairs[] = [$slug, $cfg->contractAddress];
+            $balanceKeyByGroup[$cfg->groupId] = $identity->chainSlug() . ':' . $identity->canonical();
+            $pairs[] = [$identity->chainSlug(), $identity->canonical()];
         }
         if ($pairs === []) {
             return [];
@@ -247,8 +244,8 @@ final class UserGroupsEndpoint
 
         $out = [];
         foreach ($configs as $groupId => $cfg) {
-            $slug = $slugByChain[$cfg->chainId] ?? null;
-            if ($slug === null) {
+            $balKey = $balanceKeyByGroup[$cfg->groupId] ?? null;
+            if ($balKey === null) {
                 continue;
             }
             // null = UNKNOWN (provider couldn't verify). Fail closed on the
@@ -259,7 +256,6 @@ final class UserGroupsEndpoint
             //
             // array_key_exists (NOT `?? 0`): a present null is UNKNOWN and
             // `??` would collapse it to a false real-0 before we can test it.
-            $balKey     = $slug . ':' . $cfg->contractAddress;
             $rawBalance = array_key_exists($balKey, $balances) ? $balances[$balKey] : 0;
             $out[$groupId] = [
                 'eligible'    => $rawBalance !== null && $rawBalance >= $cfg->minBalance,

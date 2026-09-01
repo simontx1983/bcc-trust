@@ -28,6 +28,13 @@ final class JoinResult {
     // user fails the gate, only that we couldn't check right now. Join
     // fails CLOSED on this — never add a member during an outage.
     public const CODE_VERIFY_UNAVAILABLE  = 'verify_unavailable';
+    // The gate's collection identity could not be resolved, so no provider
+    // was asked. Distinct from VERIFY_UNAVAILABLE on purpose: that one is
+    // transient and worth retrying, this one is a server-side
+    // misconfiguration that retrying can never clear. The REST layer maps
+    // it to `bcc_gate_not_configured` (503, Configuration class) rather
+    // than to a Transient code, so a client is not told to retry forever.
+    public const CODE_IDENTITY_UNRESOLVED = 'collection_identity_unresolved';
 
     public function __construct(
         public readonly bool   $success,
@@ -62,5 +69,14 @@ final class JoinResult {
 
     public static function verifyUnavailable(int $minBalance): self {
         return new self(false, self::CODE_VERIFY_UNAVAILABLE, $minBalance);
+    }
+
+    /**
+     * The gate could not be evaluated because its collection identity is
+     * unresolved. No provider call was made, and `userBalance` stays null —
+     * we observed nothing, so we report nothing.
+     */
+    public static function identityUnresolved(int $minBalance): self {
+        return new self(false, self::CODE_IDENTITY_UNRESOLVED, $minBalance);
     }
 }

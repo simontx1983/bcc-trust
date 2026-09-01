@@ -160,4 +160,56 @@ final class NftCollectionIdentifier
             || $chainFamily === self::FAMILY_COSMOS
             || $chainFamily === self::FAMILY_SOLANA;
     }
+
+    /**
+     * True when `$candidate` names the same collection as `$canonicalTarget`.
+     *
+     * ── WHY EQUALITY NEEDS ITS OWN METHOD ───────────────────────────────
+     * PR 5a gave storage one chain-aware rule but left COMPARISON to
+     * whoever needed it, and three call sites independently reached for
+     * `strtolower()`. On EVM and Cosmos that happens to agree with the
+     * canonical rule, so nobody noticed. On Solana it does not: base58 is
+     * case-SENSITIVE, so folding a mint produces a different key, and a
+     * folded comparison can never match what Solana DAS actually returns.
+     * That is the whole PR 5b defect — a comparison that could only ever
+     * be false, whose `0` was then read as a confident "you don't hold it".
+     *
+     * So equality lives HERE, beside the rule it depends on, and every
+     * identity comparison routes through it.
+     *
+     * ── A REFUSED CANDIDATE IS NOT A MATCH, NEVER A FALLBACK ────────────
+     * When `$candidate` cannot be canonicalised this returns `false` — it
+     * does NOT degrade to a case-insensitive compare. Falling back would
+     * reintroduce exactly the drift this method exists to remove, and it
+     * would do so silently, on the one path where being wrong is worst.
+     *
+     * ── THE TARGET MUST ALREADY BE CANONICAL ────────────────────────────
+     * Callers pass an identifier that has already been through
+     * {@see canonicalize()} — in practice `canonical_identifier` straight
+     * out of the collections row, validated by GateIdentityResolver.
+     * Canonicalising it again on every iteration of a holdings loop would
+     * be wasted work.
+     *
+     * This fails CLOSED if that contract is broken: a non-canonical target
+     * simply never equals a canonical candidate, so the answer is `false`
+     * (no match) rather than an accidental true. Pinned by a test.
+     *
+     * @param string $chainFamily     `wp_bcc_chains.chain_type` — NOT inferred.
+     * @param string $canonicalTarget already-canonical identity to match against.
+     * @param string $candidate       raw value from a provider, cache or row.
+     */
+    public static function matches(string $chainFamily, string $canonicalTarget, string $candidate): bool
+    {
+        if ($canonicalTarget === '' || $candidate === '') {
+            return false;
+        }
+
+        $identity = self::canonicalize($chainFamily, $candidate);
+
+        if (!$identity->isAccepted()) {
+            return false;
+        }
+
+        return $identity->canonical() === $canonicalTarget;
+    }
 }

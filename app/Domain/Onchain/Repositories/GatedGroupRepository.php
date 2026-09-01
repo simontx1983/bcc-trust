@@ -5,11 +5,23 @@
  * Five post-meta keys per gated group:
  *   _bcc_group_kind          = 'holders'
  *   _bcc_gate_chain_id       (numeric FK to onchain_chains)
- *   _bcc_gate_contract_address (lowercase canonical)
+ *   _bcc_gate_contract_address (chain-aware canonical identity, BYTE-EXACT)
  *   _bcc_gate_min_balance    (default 1)
- *   _bcc_gate_collection_id  (FK to onchain_collections.id)
+ *   _bcc_gate_collection_id  (FK to onchain_collections.id) — THE AUTHORITY
  *
  * No parallel ledger — membership stays in PeepSo's peepso_group_members.
+ *
+ * ── WHICH KEY IS THE IDENTITY (PR 5b) ───────────────────────────────────
+ * `_bcc_gate_collection_id` is. `_bcc_gate_contract_address` is kept for
+ * backward compatibility and display, and is never allowed to override the
+ * linked collection row — see {@see \BCC\Trust\Onchain\Services\GateIdentityResolver}.
+ *
+ * This docblock previously described `_bcc_gate_contract_address` as
+ * "lowercase canonical". It was neither: lower-casing a base58 Solana mint
+ * produces a different key, and on the eight production Solana gates the
+ * value stored there was a Magic Eden SYMBOL, not an address at all. Both
+ * the reader and the writer below now treat the value as byte-exact and
+ * defer to the collection row for identity.
  *
  * @package BCC\Trust\Onchain\Repositories
  */
@@ -42,7 +54,18 @@ final class GatedGroupRepository {
         }
 
         global $wpdb;
-        $contractCanonical = strtolower($contract);
+
+        // PR 5b: matched BYTE-EXACT. This used to be
+        // `strtolower($contract)`, which is right for EVM and Cosmos and
+        // wrong for Solana, where base58 is case-sensitive — a folded mint
+        // is a DIFFERENT key. The stored meta is now written byte-exact by
+        // `writeGateConfig()`, so folding here would stop the lookup ever
+        // finding a Solana gate.
+        //
+        // The column's collation may still match case-insensitively; that
+        // is a storage property this method does not rely on and must not
+        // reintroduce in PHP.
+        $contractCanonical = $contract;
 
         $row = $wpdb->get_var($wpdb->prepare(
             "SELECT pm_chain.post_id
@@ -95,10 +118,19 @@ final class GatedGroupRepository {
         $collectionMeta = get_post_meta($groupId, self::META_COLLECTION, true);
         $collectionId   = $collectionMeta !== '' ? (int) $collectionMeta : null;
 
+        // PR 5b: the stored meta value is returned BYTE-EXACT. It used to be
+        // `strtolower($contract)`, which silently corrupted every Solana
+        // identity it touched.
+        //
+        // This value is now legacy/display only — `GateIdentityResolver`
+        // derives the identity a provider is actually asked about from the
+        // linked collection row's `canonical_identifier`. Handing back the
+        // raw stored value keeps that distinction honest: a caller reading
+        // `contractAddress` gets what is stored, not a normalised fiction.
         return new GatedGroupConfig(
             $groupId,
             $chainId,
-            strtolower($contract),
+            $contract,
             $minBalance,
             $collectionId
         );
@@ -219,25 +251,70 @@ final class GatedGroupRepository {
     }
 
     /**
-     * Write the five gate post-meta keys atomically (PeepSo group post must exist).
+     * Write the five gate post-meta keys (PeepSo group post must exist).
+     *
+     * ── PR 5b: THIS CAN NOW REFUSE ──────────────────────────────────────
+     * It used to store `strtolower($contractAddress)` unconditionally and
+     * return void. Two things were wrong with that:
+     *
+     *  1. Folding case corrupts a Solana identity outright — base58 is
+     *     case-sensitive, so the stored value became a different key.
+     *  2. It would happily create a gate for a collection with no resolved
+     *     identity. Such a gate is unsatisfiable BY CONSTRUCTION: no
+     *     provider can ever return holdings for a marketplace alias, the
+     *     count is permanently 0, and a real 0 reads as INELIGIBLE. That
+     *     is the exact defect this PR removes — so manufacturing new
+     *     instances of it is refused rather than merely fixed afterwards.
+     *
+     * The value written is now validated for the chain's family and stored
+     * BYTE-EXACT. A refusal writes NOTHING — not a partial gate, not four
+     * of five keys — and returns false for the caller to report.
      *
      * @param int    $groupId          Existing peepso-group post ID.
      * @param int    $chainId          FK to onchain_chains.
-     * @param string $contractAddress  Will be lowercased.
+     * @param string $chainFamily      `wp_bcc_chains.chain_type` — NOT inferred.
+     * @param string $canonicalAddress The collection's canonical identifier.
+     *                                 Stored verbatim when accepted.
      * @param int    $minBalance       Default 1.
      * @param int    $collectionId     FK to onchain_collections.id.
+     *
+     * @return bool true when all five keys were written; false when the
+     *              identity was refused and nothing was written.
      */
     public static function writeGateConfig(
         int $groupId,
         int $chainId,
-        string $contractAddress,
+        string $chainFamily,
+        string $canonicalAddress,
         int $minBalance,
         int $collectionId
-    ): void {
+    ): bool {
+        $identity = \BCC\Trust\Onchain\Support\NftCollectionIdentifier::canonicalize(
+            $chainFamily,
+            $canonicalAddress
+        );
+
+        if (!$identity->isAccepted()) {
+            \BCC\Core\Log\Logger::warning(
+                '[bcc-trust] refusing to write a holder gate with an unresolved collection identity',
+                [
+                    'group_id'      => $groupId,
+                    'collection_id' => $collectionId,
+                    'chain_id'      => $chainId,
+                    'chain_family'  => $chainFamily,
+                    'reason'        => $identity->reason(),
+                ]
+            );
+
+            return false;
+        }
+
         update_post_meta($groupId, self::META_KIND,       self::KIND_HOLDERS);
         update_post_meta($groupId, self::META_CHAIN_ID,   $chainId);
-        update_post_meta($groupId, self::META_CONTRACT,   strtolower($contractAddress));
+        update_post_meta($groupId, self::META_CONTRACT,   $identity->canonical());
         update_post_meta($groupId, self::META_MIN_BAL,    max(1, $minBalance));
         update_post_meta($groupId, self::META_COLLECTION, $collectionId);
+
+        return true;
     }
 }
