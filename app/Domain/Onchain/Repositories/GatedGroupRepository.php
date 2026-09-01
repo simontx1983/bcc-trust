@@ -53,19 +53,31 @@ final class GatedGroupRepository {
             return null;
         }
 
-        global $wpdb;
-
-        // PR 5b: matched BYTE-EXACT. This used to be
-        // `strtolower($contract)`, which is right for EVM and Cosmos and
-        // wrong for Solana, where base58 is case-sensitive — a folded mint
-        // is a DIFFERENT key. The stored meta is now written byte-exact by
-        // `writeGateConfig()`, so folding here would stop the lookup ever
-        // finding a Solana gate.
+        // PR 5b: this is an identity lookup, so the value it matches on
+        // goes through the one chain-aware rule.
         //
-        // The column's collation may still match case-insensitively; that
-        // is a storage property this method does not rely on and must not
-        // reintroduce in PHP.
-        $contractCanonical = $contract;
+        // It used to be `strtolower($contract)` — right for EVM and Cosmos,
+        // wrong for Solana, where base58 is case-sensitive and a folded
+        // mint is a DIFFERENT key. `writeGateConfig()` now stores the
+        // canonical form byte-exact, so folding here would stop the lookup
+        // ever finding a Solana gate.
+        //
+        // A value that is not a valid identity for this chain matches
+        // nothing, so it returns null rather than running a query whose
+        // answer could only be misleading. (The column's collation may
+        // still compare case-insensitively; that is a storage property
+        // this method does not rely on and must not reproduce in PHP.)
+        $chain  = ChainRepository::getById($chainId);
+        $family = $chain === null ? '' : (string) ($chain->chain_type ?? '');
+
+        $identity = \BCC\Trust\Onchain\Support\NftCollectionIdentifier::canonicalize($family, $contract);
+        if (!$identity->isAccepted()) {
+            return null;
+        }
+
+        $contractCanonical = $identity->canonical();
+
+        global $wpdb;
 
         $row = $wpdb->get_var($wpdb->prepare(
             "SELECT pm_chain.post_id

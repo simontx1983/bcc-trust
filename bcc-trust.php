@@ -2042,6 +2042,17 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust cosmwasm',
         \BCC\Trust\Onchain\CLI\CosmwasmOneShotDiscoveryCommand::class
     );
+    // PR 5b — the eight-row Solana gate-identity repair. THIS IS ITS ONLY
+    // ENTRY POINT: there is deliberately no REST route, no admin-post
+    // handler, no AJAX action and no cron hook that reaches it. It writes
+    // the identity column community gating is built on, so it runs when a
+    // named administrator runs it and watches the output. Dry run by
+    // default; mutation needs --apply + the exact --confirm token + an
+    // explicit --user-id holding manage_options.
+    \WP_CLI::add_command(
+        'bcc-trust gate-identity',
+        \BCC\Trust\Onchain\CLI\SolanaGateIdentityRepairCommand::class
+    );
 }
 
 /*
