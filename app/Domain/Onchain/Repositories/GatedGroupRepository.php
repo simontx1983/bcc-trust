@@ -64,9 +64,21 @@ final class GatedGroupRepository {
         //
         // A value that is not a valid identity for this chain matches
         // nothing, so it returns null rather than running a query whose
-        // answer could only be misleading. (The column's collation may
-        // still compare case-insensitively; that is a storage property
-        // this method does not rely on and must not reproduce in PHP.)
+        // answer could only be misleading.
+        //
+        // ⚠ The comparison below is forced to `utf8mb4_bin`, and that is
+        // NOT cosmetic. `wp_postmeta.meta_value` is a WordPress core column
+        // with a case-INSENSITIVE collation, so removing the PHP
+        // `strtolower()` is not by itself enough: MySQL would still match a
+        // case-folded mint against the stored one, and this lookup would
+        // keep resolving two different Solana keys to the same gate. That
+        // is the same class of defect as the PHP fold, one layer down, and
+        // it is invisible until something asserts it (an integration test
+        // caught exactly this).
+        //
+        // Safe for every family: EVM and Cosmos canonical forms are
+        // lowercase and are stored canonical, so a binary comparison
+        // returns the same rows it did before.
         $chain  = ChainRepository::getById($chainId);
         $family = $chain === null ? '' : (string) ($chain->chain_type ?? '');
 
@@ -89,7 +101,7 @@ final class GatedGroupRepository {
                 AND pm_kind.meta_key     = %s
                 AND pm_kind.meta_value   = %s
                 AND pm_contract.meta_key = %s
-                AND pm_contract.meta_value = %s
+                AND pm_contract.meta_value COLLATE utf8mb4_bin = %s
               LIMIT 1",
             self::META_CHAIN_ID,
             $chainId,

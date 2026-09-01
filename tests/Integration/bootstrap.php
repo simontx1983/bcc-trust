@@ -206,6 +206,131 @@ if (!function_exists('wp_json_encode')) {
     }
 }
 
+// WP_Error + is_wp_error, added for PR 5b.
+//
+// bcc-core's SafeHttpClient returns a WP_Error rather than throwing when a
+// request is refused — including its SSRF guard, which rejects a private or
+// reserved IP before opening any socket. A test that points a fetcher at
+// 127.0.0.1 to prove "a provider call WAS attempted" therefore needs this
+// class to exist, or it fails with a missing-class error that looks like a
+// production bug and is not one.
+if (!class_exists('WP_Error')) {
+    class WP_Error
+    {
+        /** @var array<string, list<string>> */
+        private array $errors = [];
+
+        /** @param mixed $data */
+        public function __construct(string $code = '', string $message = '', $data = null)
+        {
+            if ($code !== '') {
+                $this->errors[$code][] = $message;
+            }
+        }
+
+        public function get_error_code(): string
+        {
+            $codes = array_keys($this->errors);
+
+            return $codes === [] ? '' : (string) $codes[0];
+        }
+
+        public function get_error_message(string $code = ''): string
+        {
+            $code = $code !== '' ? $code : $this->get_error_code();
+
+            return $this->errors[$code][0] ?? '';
+        }
+    }
+}
+
+if (!function_exists('is_wp_error')) {
+    /** @param mixed $thing */
+    function is_wp_error($thing): bool
+    {
+        return $thing instanceof \WP_Error;
+    }
+}
+
+// Post-meta shims, added for PR 5b: holder-gate configuration lives
+// entirely in post meta, so GatedGroupRepository cannot run without them.
+//
+// These read and write the REAL `wp_postmeta` table rather than an
+// in-memory array. That is the whole point of this suite: an array-backed
+// stub would return whatever the fixture queued regardless of what the
+// repair actually wrote, so "the gate meta was updated" would be a claim
+// about the stub. Here it is a claim about MySQL.
+if (!function_exists('get_post_meta')) {
+    /**
+     * @return mixed Single value when $single, else a list.
+     */
+    function get_post_meta(int $postId, string $key = '', bool $single = false)
+    {
+        $wpdb = $GLOBALS['wpdb'];
+
+        $values = $wpdb->get_col($wpdb->prepare(
+            "SELECT meta_value FROM `{$wpdb->postmeta}` WHERE post_id = %d AND meta_key = %s ORDER BY meta_id ASC",
+            $postId,
+            $key
+        ));
+
+        if ($single) {
+            // WP returns '' (not null) for a missing key — callers cast to
+            // int/string and rely on that, so the shim must match.
+            return $values === [] ? '' : (string) $values[0];
+        }
+
+        return array_map('strval', $values);
+    }
+}
+
+if (!function_exists('update_post_meta')) {
+    /**
+     * @param  mixed $value
+     * @return bool
+     */
+    function update_post_meta(int $postId, string $key, $value): bool
+    {
+        $wpdb = $GLOBALS['wpdb'];
+
+        $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT meta_id FROM `{$wpdb->postmeta}` WHERE post_id = %d AND meta_key = %s ORDER BY meta_id ASC LIMIT 1",
+            $postId,
+            $key
+        ));
+
+        if ($existing === null) {
+            return $wpdb->query($wpdb->prepare(
+                "INSERT INTO `{$wpdb->postmeta}` (post_id, meta_key, meta_value) VALUES (%d, %s, %s)",
+                $postId,
+                $key,
+                (string) $value
+            )) !== false;
+        }
+
+        return $wpdb->query($wpdb->prepare(
+            "UPDATE `{$wpdb->postmeta}` SET meta_value = %s WHERE meta_id = %d",
+            (string) $value,
+            (int) $existing
+        )) !== false;
+    }
+}
+
+if (!function_exists('update_meta_cache')) {
+    /**
+     * No-op: `get_post_meta()` above always reads the database, so there is
+     * no cache for a batch warm-up to fill. Declared because
+     * GatedGroupRepository::findManyByGroupIds() calls it unconditionally.
+     *
+     * @param  int[] $objectIds
+     * @return array<int, mixed>
+     */
+    function update_meta_cache(string $metaType, array $objectIds): array
+    {
+        return [];
+    }
+}
+
 // Filter shim. ChainRepository::ttl() runs its cache TTL through
 // `bcc_chains_cache_ttl` on EVERY cached read, so getActive() cannot execute
 // at all without this. Pass-through (no filters registered) — which is also
@@ -230,24 +355,37 @@ if (!function_exists('apply_filters')) {
 if (!function_exists('wp_cache_get')) {
     $GLOBALS['__bcc_test_object_cache'] = [];
 
+    // NOTE: `$key` is `int|string`, matching WordPress. It is NOT merely
+    // `string`: object ids are passed as integers throughout core and by
+    // BCC callers (`wp_cache_delete($postId, 'post_meta')`), so a
+    // string-only shim is STRICTER than the thing it stands in for — it
+    // would TypeError on a call that works perfectly in production, which
+    // is a test-harness bug masquerading as a code bug.
     /**
+     * @param int|string $key
      * @param bool $found
      * @return mixed
      */
-    function wp_cache_get(string $key, string $group = '', bool $force = false, &$found = null)
+    function wp_cache_get($key, string $group = '', bool $force = false, &$found = null)
     {
         $hit   = isset($GLOBALS['__bcc_test_object_cache'][$group][$key]);
         $found = $hit;
         return $hit ? $GLOBALS['__bcc_test_object_cache'][$group][$key] : false;
     }
-    /** @param mixed $value */
-    function wp_cache_set(string $key, $value, string $group = '', int $expire = 0): bool
+    /**
+     * @param int|string $key
+     * @param mixed      $value
+     */
+    function wp_cache_set($key, $value, string $group = '', int $expire = 0): bool
     {
         $GLOBALS['__bcc_test_object_cache'][$group][$key] = $value;
         return true;
     }
-    /** @param mixed $value */
-    function wp_cache_add(string $key, $value, string $group = '', int $expire = 0): bool
+    /**
+     * @param int|string $key
+     * @param mixed      $value
+     */
+    function wp_cache_add($key, $value, string $group = '', int $expire = 0): bool
     {
         if (isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
             return false;
@@ -255,13 +393,17 @@ if (!function_exists('wp_cache_get')) {
         $GLOBALS['__bcc_test_object_cache'][$group][$key] = $value;
         return true;
     }
-    function wp_cache_delete(string $key, string $group = ''): bool
+    /** @param int|string $key */
+    function wp_cache_delete($key, string $group = ''): bool
     {
         unset($GLOBALS['__bcc_test_object_cache'][$group][$key]);
         return true;
     }
-    /** @return int|false */
-    function wp_cache_incr(string $key, int $offset = 1, string $group = '')
+    /**
+     * @param  int|string $key
+     * @return int|false
+     */
+    function wp_cache_incr($key, int $offset = 1, string $group = '')
     {
         if (!isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
             return false;
@@ -321,6 +463,47 @@ $created = $GLOBALS['wpdb']->query(
 );
 if ($created === false) {
     fwrite(STDERR, "FATAL: could not create wp_users: " . $GLOBALS['wpdb']->last_error . "\n");
+    exit(1);
+}
+
+// WordPress core wp_posts + wp_postmeta. Added for PR 5b: holder-gate
+// configuration lives entirely in post meta on `peepso-group` posts, so the
+// gate-identity repair cannot be exercised without them.
+//
+// ENGINE=InnoDB is load-bearing, not decoration. The repair runs inside
+// TransactionManager::run() and takes `SELECT … FOR UPDATE` row locks; on
+// MyISAM the transaction would silently do nothing and every rollback
+// assertion in the suite would pass while proving the opposite of what it
+// claims. Only the columns the gate paths actually touch are declared.
+$created = $GLOBALS['wpdb']->query(
+    "CREATE TABLE `wp_posts` (
+        ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        post_title TEXT NOT NULL,
+        post_name VARCHAR(200) NOT NULL DEFAULT '',
+        post_type VARCHAR(20) NOT NULL DEFAULT 'post',
+        post_status VARCHAR(20) NOT NULL DEFAULT 'publish',
+        PRIMARY KEY (ID),
+        KEY type_status (post_type, post_status)
+    ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+);
+if ($created === false) {
+    fwrite(STDERR, "FATAL: could not create wp_posts: " . $GLOBALS['wpdb']->last_error . "\n");
+    exit(1);
+}
+
+$created = $GLOBALS['wpdb']->query(
+    "CREATE TABLE `wp_postmeta` (
+        meta_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        post_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        meta_key VARCHAR(255) DEFAULT NULL,
+        meta_value LONGTEXT,
+        PRIMARY KEY (meta_id),
+        KEY post_id (post_id),
+        KEY meta_key (meta_key(191))
+    ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+);
+if ($created === false) {
+    fwrite(STDERR, "FATAL: could not create wp_postmeta: " . $GLOBALS['wpdb']->last_error . "\n");
     exit(1);
 }
 
