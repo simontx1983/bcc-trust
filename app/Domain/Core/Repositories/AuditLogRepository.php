@@ -61,18 +61,33 @@ class AuditLogRepository {
     }
 
     /**
-     * Insert a new audit log entry.
+     * Insert a new audit log entry and return its id.
+     *
+     * Returns the id rather than a bool so a caller that treats the audit row
+     * as part of its deliverable (the repair runner) can CONFIRM the row
+     * landed and roll its own transaction back if it did not.
+     * {@see \BCC\Trust\Core\Security\AuditLogger::logChecked()}. Ordinary
+     * callers keep ignoring the result, which is the §VIII.30 behaviour.
      *
      * @param array<string, mixed> $data    Column => value pairs.
      * @param string[]             $formats wpdb format specifiers.
-     * @return bool True on success, false on failure.
+     * @return int|null Inserted id, or null on failure.
      */
-    public function insertLog( array $data, array $formats ): bool {
+    public function insertLogReturningId( array $data, array $formats ): ?int {
         global $wpdb;
 
         $result = $wpdb->insert( $this->table, $data, $formats );
 
-        return $result !== false;
+        if ( $result === false ) {
+            return null;
+        }
+
+        $id = (int) $wpdb->insert_id;
+
+        // A successful insert with no usable id would let a caller "confirm" a
+        // row it cannot point at. Treat that as a failure rather than hand
+        // back a meaningless zero.
+        return $id > 0 ? $id : null;
     }
 
     /**
@@ -438,9 +453,16 @@ class AuditLogRepository {
 
         $archiveTable = \BCC\Trust\Core\Database\TableRegistry::activityArchive();
 
+        // The column list is EXPLICIT on both sides, so a new column on the
+        // live table is not carried across automatically — it is silently
+        // dropped at the 90-day boundary instead. `meta` is listed here for
+        // exactly that reason: without it, audit metadata would appear to work
+        // for 90 days and then vanish on archive, which is the worst possible
+        // shape for a data-loss bug. A column added to bcc_trust_activity in
+        // future MUST be added to both lists below.
         $copied = (int) $wpdb->query($wpdb->prepare(
-            "INSERT IGNORE INTO {$archiveTable} (id, user_id, action, target_type, target_id, ip_address, created_at)
-             SELECT id, user_id, action, target_type, target_id, ip_address, created_at FROM {$this->table}
+            "INSERT IGNORE INTO {$archiveTable} (id, user_id, action, target_type, target_id, ip_address, created_at, meta)
+             SELECT id, user_id, action, target_type, target_id, ip_address, created_at, meta FROM {$this->table}
              WHERE created_at < DATE_SUB(NOW(), INTERVAL 90 DAY)
              LIMIT %d",
             $batchSize

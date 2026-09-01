@@ -196,6 +196,7 @@ function bcc_trust_create_core_tables() {
         target_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
         ip_address VARBINARY(16) NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        meta LONGTEXT NULL,
         PRIMARY KEY (id),
         KEY idx_user (user_id),
         KEY idx_action (action),
@@ -232,6 +233,30 @@ function bcc_trust_create_core_tables() {
     if (!$index_exists) {
         $wpdb->query("ALTER TABLE $activity_archive_table ADD INDEX idx_archive_created (created_at)");
     }
+
+    /*
+    ======================================================
+    ACTIVITY META COLUMN (2026-09-01)
+    ======================================================
+    `AuditLogger::log()` has always accepted `array $meta` and always
+    discarded it — the table had nowhere to put it. Adding the column makes
+    ~70 existing call sites start recording the context they already pass.
+
+    ⚠ BOTH TABLES, INDEPENDENTLY. The archive is created with
+    `CREATE TABLE IF NOT EXISTS … LIKE …` a few lines above, which copies
+    the structure ONCE, AT CREATION. On every environment where the archive
+    already exists — i.e. all of them — adding a column to the live table
+    does NOT propagate to the archive. Skipping the second call would leave
+    `archiveBatch()`'s explicit column list referencing a column the archive
+    does not have, and archiving would stall on the next sweep.
+
+    dbDelta is deliberately not relied on for this: it is unreliable for
+    column additions on live tables, and a silent no-op here is exactly the
+    failure this migration exists to prevent. Probe → act → re-verify, and
+    say so out loud if the column is still missing afterwards.
+    */
+    bcc_trust_add_activity_meta_column($activity_table);
+    bcc_trust_add_activity_meta_column($activity_archive_table);
 
     /*
     ======================================================
@@ -403,4 +428,77 @@ function bcc_trust_create_core_tables() {
     ) ENGINE=InnoDB $charset_collate;";
 
     dbDelta($sql);
+}
+
+if (!function_exists('bcc_trust_add_activity_meta_column')) {
+
+    /**
+     * Add the nullable `meta` column to one activity table.
+     *
+     * Co-located with the CREATE TABLE above ON PURPOSE.
+     * `scripts/schema-drift-guard.php` treats the FIRST file (in glob order)
+     * that declares a table as the authority on that table's whole column and
+     * index set. A separate `schema-activity-meta.php` would sort before
+     * `schema-core.php` and become the sole declaration the guard sees,
+     * making every other column and index on the table read as undeclared
+     * live drift. PR 5a was bitten by exactly this; keep the ALTER in the
+     * same file as the CREATE.
+     *
+     * Idempotent: probes INFORMATION_SCHEMA first and re-verifies afterwards,
+     * so a partially-applied or repeated deploy converges instead of erroring.
+     *
+     * @param string $table Fully-qualified table name.
+     * @return bool True if the column is present when this returns.
+     */
+    function bcc_trust_add_activity_meta_column(string $table): bool
+    {
+        global $wpdb;
+
+        $exists = static function () use ($wpdb, $table): bool {
+            return (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_SCHEMA = DATABASE()
+                    AND TABLE_NAME = %s
+                    AND COLUMN_NAME = 'meta'",
+                $table
+            )) > 0;
+        };
+
+        // The table itself may legitimately not exist yet (fresh install part
+        // way through, or an environment that has never archived). Absence of
+        // the table is not drift and must not be reported as a failure.
+        $tableThere = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+            $table
+        )) > 0;
+
+        if (!$tableThere) {
+            return false;
+        }
+
+        if ($exists()) {
+            return true;
+        }
+
+        // LONGTEXT NULL, positioned after created_at so the column order
+        // matches the CREATE TABLE above and `SHOW CREATE TABLE` diffs cleanly
+        // between a fresh install and a migrated one.
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $wpdb->query("ALTER TABLE `{$table}` ADD COLUMN meta LONGTEXT NULL AFTER created_at");
+
+        // Re-verify rather than trusting the return value: wpdb::query()
+        // returns 0 (not false) for a successful DDL statement, so its result
+        // cannot distinguish success from failure here.
+        $now = $exists();
+
+        if (!$now && class_exists('\BCC\Core\Log\Logger')) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] activity meta column migration did not apply',
+                ['table' => $table, 'detail' => $wpdb->last_error]
+            );
+        }
+
+        return $now;
+    }
 }
