@@ -76,12 +76,20 @@ PASS=0
 FAIL=0
 
 # plant <file> <search> <replace>
+#
+# Line endings are normalised to LF on BOTH sides before matching. The repo
+# has `text=auto`, so a Windows checkout writes CRLF while the anchors in
+# this script are LF — a literal match would silently fail to plant. That
+# is reported as ERROR rather than counted as "killed", because a control
+# that never ran proves nothing.
 plant() {
     local file="$1" search="$2" replace="$3"
     TOUCHED+=("$file")
     "$PHP" "${PHP_ARGS[@]}" -r '
-        $f = $argv[1]; $s = $argv[2]; $r = $argv[3];
-        $c = file_get_contents($f);
+        $f = $argv[1];
+        $s = str_replace("\r\n", "\n", $argv[2]);
+        $r = str_replace("\r\n", "\n", $argv[3]);
+        $c = str_replace("\r\n", "\n", (string) file_get_contents($f));
         if (substr_count($c, $s) !== 1) {
             fwrite(STDERR, "anchor not found exactly once in {$f}\n");
             exit(3);
@@ -130,25 +138,41 @@ control 'solana case comparison' \
     'return $identity->canonical() === $canonicalTarget;' \
     'return strtolower($identity->canonical()) === strtolower($canonicalTarget);'
 
-# 2. Fail-closed branch. Stop requiring a real 32-byte key, so a
-#    marketplace alias is accepted as an identity again and reaches the
-#    provider — which is what made the count a meaningless zero.
-control 'unresolved fail-closed branch' \
-    'SolanaGateFailClosedIntegrationTest' 'integration' \
-    'app/Domain/Onchain/Support/NftCollectionIdentifier.php' \
-    'if (Base58::decodedLength($value) !== self::SOLANA_KEY_BYTES) {' \
-    'if (false) {'
+# 2. Fail-closed branch. Restore the ORIGINAL defect exactly: drop the
+#    refusal and fold the raw contract, so an alias is compared against DAS
+#    collection mints and the walk returns a confident, meaningless zero.
+#
+#    Note the anchor covers the guard AND the $target assignment. Removing
+#    only the guard would make $identity->canonical() throw on a refusal,
+#    and the control would "pass" for the wrong reason.
+control 'unresolved fail-closed branch'     'SolanaGateFailClosedIntegrationTest' 'integration'     'app/Domain/Onchain/Fetchers/SolanaFetcher.php'     "        if (!\$identity->isAccepted()) {
+            \BCC\Core\Log\Logger::warning(
+                '[Solana Fetcher] count_holdings refused a non-canonical collection identifier; '
+                . 'returning UNKNOWN rather than a meaningless zero',
+                ['reason' => \$identity->reason()]
+            );
 
-# 3. Checked-audit rollback. Accept a failed audit and carry on, so the
-#    writes commit with no honest record. Anchored on the guard AND the
-#    verification together: skipping only the guard would trip the
-#    verification instead, and the mutant would die for the wrong reason.
-control 'checked-audit rollback' \
-    'SolanaGateIdentityRepairRollbackIntegrationTest' 'integration' \
-    'app/Domain/Onchain/Repair/SolanaGateIdentityRepairService.php' \
-    '        if ($auditId === null || $auditId <= 0) {' \
-    '        $auditId = $auditId ?? 1;
-        if (false) {'
+            return null;
+        }
+
+        \$target  = \$identity->canonical();"     '        $target  = strtolower($contract);'
+
+# 3. Checked-audit rollback. Ignore a failed audit entirely and let the
+#    writes commit with no honest record of what changed.
+#
+#    The anchor spans the guard AND the row verification. Removing only the
+#    guard leaves verifyAuditRow() to throw on the missing row, so the
+#    mapping would still roll back and the mutant would survive while
+#    looking dead — the exact false-negative this control exists to avoid.
+control 'checked-audit rollback'     'SolanaGateIdentityRepairRollbackIntegrationTest' 'integration'     'app/Domain/Onchain/Repair/SolanaGateIdentityRepairService.php'     "        if (\$auditId === null || \$auditId <= 0) {
+            // Metadata could not be encoded, or the insert failed. Either
+            // way there is no honest record of this repair, so it does not
+            // happen.
+            throw new \RuntimeException('checked audit write failed; rolling back the repair');
+        }
+
+        // ── Verify the audit row actually says what we meant ────────────
+        \$this->verifyAuditRow(\$auditId, \$meta);"     '        // mutant: audit failure ignored'
 
 # 4. Postcondition rollback. Stop asserting the legacy alias survived —
 #    isolated by the direct verifyPostconditions() tests, because in a

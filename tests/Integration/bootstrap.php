@@ -475,10 +475,20 @@ if ($created === false) {
 // MyISAM the transaction would silently do nothing and every rollback
 // assertion in the suite would pass while proving the opposite of what it
 // claims. Only the columns the gate paths actually touch are declared.
+// EVERY column carries a default, and `post_title` is VARCHAR rather than
+// core's TEXT (MySQL forbids a default on TEXT). That divergence is
+// deliberate: this table is now SHARED. HallRepositoryIntegrationTest
+// creates its own three-column `wp_posts` with `CREATE TABLE IF NOT
+// EXISTS`, which silently becomes a no-op now that the bootstrap gets
+// there first — so its inserts, which name only (ID, post_type,
+// post_status), must still succeed. With a defaultless NOT NULL column
+// they fail under STRICT mode, the insert is rejected, and the test reads
+// an empty table as a repository bug. A shared harness table has to accept
+// every legitimate subset its users write.
 $created = $GLOBALS['wpdb']->query(
     "CREATE TABLE `wp_posts` (
         ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        post_title TEXT NOT NULL,
+        post_title VARCHAR(255) NOT NULL DEFAULT '',
         post_name VARCHAR(200) NOT NULL DEFAULT '',
         post_type VARCHAR(20) NOT NULL DEFAULT 'post',
         post_status VARCHAR(20) NOT NULL DEFAULT 'publish',
