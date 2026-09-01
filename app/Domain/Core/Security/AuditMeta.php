@@ -124,12 +124,11 @@ final class AuditMeta {
     ];
 
     /**
-     * Keys truncated to a specific length — shorter than the generic scalar
-     * cap because these are identifying or free-text values.
-     *
-     * `fingerprint` / `server_fingerprint` — 20 chars matches what
-     * DeviceFingerprinter already does for the server fingerprint, so this
-     * makes the existing inconsistency consistent in the safer direction.
+     * OPAQUE IDENTIFIERS shortened to a prefix. These are hashes, not prose:
+     * a prefix is still useful for correlation and carries no sentence, no
+     * path and no quoted value. 20 chars matches what DeviceFingerprinter
+     * already does for the server fingerprint, making an existing
+     * inconsistency consistent in the safer direction.
      *
      * @var array<string, int>
      */
@@ -137,13 +136,65 @@ final class AuditMeta {
         'fingerprint'        => 20,
         'server_fingerprint' => 20,
         'device_fingerprint' => 20,
-        'last_error'         => 120,
-        'error'              => 120,
-        'message'            => 120,
-        'note'               => 120,
-        'notes'              => 120,
-        'reason_text'        => 120,
-        'moderation_note'    => 120,
+    ];
+
+    /**
+     * FREE TEXT — content is REPLACED, never merely shortened.
+     *
+     * TRUNCATION IS NOT REDACTION. `substr($e->getMessage(), 0, 120)` keeps
+     * the FIRST 120 characters, and the first 120 characters of an exception
+     * are exactly where the damage lives: the SQL fragment, the absolute file
+     * path, the connection string, the quoted value that failed. Shortening a
+     * leak does not stop it being a leak — it just makes it a shorter one, and
+     * it is now durable for 90 days and archived after that.
+     *
+     * The same holds for moderation notes, which are private operator prose
+     * about a member and may name third parties.
+     *
+     * So these keys keep no content at all. Each is replaced with a structured
+     * descriptor — `{omitted, len, digest}` — which preserves what an operator
+     * legitimately needs from an audit row (that text existed, how long it
+     * was, and whether the SAME text recurs across rows) while storing none
+     * of it.
+     *
+     * NOTE ON THE DIGEST: it is a correlation handle, not a security boundary.
+     * A short SHA-256 prefix over a guessable candidate string could be
+     * confirmed by someone who already has the candidate. It is here so two
+     * identical failures can be recognised as identical, nothing more.
+     *
+     * The operational cost is near zero: the sites that pass these keys
+     * already write the full text to the FILE log next to the audit call
+     * (e.g. `CronService` logs the quarantine error via `Logger::error` on the
+     * line after its `AuditLogger::log`), and the file log has its own, much
+     * shorter retention. Nothing that was previously diagnosable stops being
+     * diagnosable; it just stops being permanent.
+     *
+     * @var list<string>
+     */
+    private const STRUCTURED_TEXT_KEYS = [
+        'last_error',
+        'error',
+        'error_message',
+        'exception',
+        'exception_message',
+        'message',
+        'detail',
+        'details',
+        'trace',
+        'stack_trace',
+        'query',
+        'sql',
+        'note',
+        'notes',
+        'reason_text',
+        'moderation_note',
+        'moderation_notes',
+        'admin_note',
+        'admin_notes',
+        'report_text',
+        'body',
+        'content',
+        'comment',
     ];
 
     /**
@@ -255,6 +306,11 @@ final class AuditMeta {
                 continue;
             }
 
+            if ($lookup !== '' && in_array($lookup, self::STRUCTURED_TEXT_KEYS, true)) {
+                $out[$key] = self::describeText($value);
+                continue;
+            }
+
             $limit = ($lookup !== '' && isset(self::TRUNCATE_KEYS[$lookup]))
                 ? self::TRUNCATE_KEYS[$lookup]
                 : self::MAX_SCALAR_LENGTH;
@@ -266,12 +322,32 @@ final class AuditMeta {
     }
 
     /**
+     * Replace free text with a structured descriptor that keeps NONE of it.
+     *
+     * @return array{omitted: string, len: int, digest: string}
+     */
+    private static function describeText(string $value): array {
+        $length = function_exists('mb_strlen') ? (int) mb_strlen($value, 'UTF-8') : strlen($value);
+
+        return [
+            'omitted' => 'free_text',
+            'len'     => $length,
+            // A short prefix: enough to recognise "this exact text again"
+            // across rows, not a reconstruction path. See STRUCTURED_TEXT_KEYS
+            // on why this is a correlation handle, not a security boundary.
+            'digest'  => substr(hash('sha256', $value), 0, 12),
+        ];
+    }
+
+    /**
      * Layer 2 — mask IP and email literals wherever they appear, whatever the
      * key is called. This is what protects against a future caller inventing a
      * new key name, and against an IP or address embedded inside a raw
      * exception message.
      */
     private static function scrubValue(string $value): string {
+        $value = self::scrubCredentials($value);
+
         // Emails first: an address can contain characters the IP patterns
         // would otherwise chew into.
         $value = (string) preg_replace_callback(
@@ -302,6 +378,51 @@ final class AuditMeta {
                 $masked = self::maskIpString($m[0]);
                 return $masked === self::REDACTED_MARKER ? $m[0] : $masked;
             },
+            $value
+        );
+
+        return $value;
+    }
+
+    /**
+     * Strip credential-shaped material from ANY string, whatever key it is
+     * under. Free-text keys never reach this (their content is replaced
+     * wholesale), so this is the net for a secret that turns up somewhere
+     * nobody classified — a connection string in a `dsn` field, a header
+     * echoed into `context`, a token pasted into an operator-supplied value.
+     *
+     * Deliberately conservative about what it declares a secret, because a
+     * false positive corrupts legitimate context. It matches an explicit
+     * `key = value` shape for known credential words, a `Bearer` token, and a
+     * URL with inline userinfo — all three of which are unambiguous.
+     */
+    private static function scrubCredentials(string $value): string {
+        // ORDER MATTERS. The scheme rules run FIRST, because the generic
+        // `keyword = value` rule below would otherwise treat the SCHEME word
+        // as the value: on `Authorization: Bearer eyJhbGci…` it matches
+        // `Authorization:` + `Bearer`, redacts the word "Bearer", and leaves
+        // the actual token standing. A stored-row test caught exactly that.
+
+        // Bearer / Basic authorization values.
+        $value = (string) preg_replace(
+            '/\b(Bearer|Basic)\s+[A-Za-z0-9._\-\/+=]{8,}/i',
+            '$1 ' . self::REDACTED_MARKER,
+            $value
+        );
+
+        // scheme://user:password@host — the userinfo half only.
+        $value = (string) preg_replace(
+            '#\b([a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@#i',
+            '$1' . self::REDACTED_MARKER . '@',
+            $value
+        );
+
+        // password=…, api_key: …, secret => …, authorization=…
+        // The lookahead keeps this from re-consuming a scheme word (or an
+        // already-inserted marker) as though it were the secret.
+        $value = (string) preg_replace(
+            '/\b(pass(?:word|wd)?|secret|token|api[_\-]?key|apikey|auth(?:orization)?|access[_\-]?key|private[_\-]?key|client[_\-]?secret|session[_\-]?id)\b\s*(=>|[:=])\s*(?!(?:Bearer|Basic)\b)(?!' . preg_quote(self::REDACTED_MARKER, '/') . ')("[^"]*"|\'[^\']*\'|\S+)/i',
+            '$1$2' . self::REDACTED_MARKER,
             $value
         );
 

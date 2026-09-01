@@ -107,6 +107,30 @@ final class AuditMetaRepairFidelityTest extends TestCase
         }
     }
 
+    /**
+     * The free-text policy replaces content outright, so a repair that parked
+     * an identifier under a free-text key would lose it entirely — not
+     * truncated, GONE. Pin both halves of that interaction so the constraint
+     * is discoverable from the test rather than from a broken audit trail.
+     */
+    public function testIdentifiersMustNotBeCarriedUnderFreeTextKeys(): void
+    {
+        $mint = '8Db41NmU1i3gSPq6AZWK1tsndJPPTLRP22LDGAz8CHxD';
+
+        // The keys the repair is allowed to use: value survives byte-exact.
+        $safe = AuditMeta::encode(['before' => 'bozosgroup', 'after' => $mint]);
+        self::assertSame($mint, json_decode((string) $safe['json'], true)['after']);
+
+        // A free-text key: the value is REPLACED, deliberately. If a future
+        // repair record starts failing this expectation, the repair changed
+        // key names into the free-text set and its trail is now useless.
+        $unsafe = AuditMeta::encode(['note' => $mint]);
+        $decoded = json_decode((string) $unsafe['json'], true);
+
+        self::assertIsArray($decoded['note'], 'free-text keys become descriptors');
+        self::assertStringNotContainsString($mint, (string) $unsafe['json']);
+    }
+
     public function testAFullEightRowRepairBatchStaysWithinTheSizeCeiling(): void
     {
         // If the runner ever logged the whole manifest in one record, the

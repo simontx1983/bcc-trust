@@ -103,10 +103,12 @@ final class AuditMetaTest extends TestCase
      */
     public static function truncatedKeys(): array
     {
+        // Opaque identifiers only. Free text is NOT in here any more: it is
+        // replaced wholesale rather than shortened, because the first N
+        // characters of an exception are exactly where the leak lives.
         return [
             'device fingerprint' => ['fingerprint', '20'],
             'server fingerprint' => ['server_fingerprint', '20'],
-            'raw exception text' => ['last_error', '120'],
         ];
     }
 
@@ -137,12 +139,11 @@ final class AuditMetaTest extends TestCase
     // Layer 2 — value shape, whatever the key is called
     // ---------------------------------------------------------------
 
-    public function testIpInsideARawExceptionMessageIsMasked(): void
+    public function testIpInsideAnUnclassifiedStringIsMasked(): void
     {
-        // CronService stores substr($e->getMessage(), 0, 255). A key-name rule
-        // alone would never catch an address embedded in free text.
+        // A key-name rule alone would never catch an address embedded in prose.
         $result = AuditMeta::encode([
-            'last_error' => 'Connection refused connecting to 198.51.100.7 during recalc',
+            'context' => 'Connection refused connecting to 198.51.100.7 during recalc',
         ]);
 
         self::assertIsString($result['json']);
@@ -162,11 +163,113 @@ final class AuditMetaTest extends TestCase
 
     public function testEmailLiteralIsMaskedAnywhere(): void
     {
-        $result = AuditMeta::encode(['note' => 'reported by victim@example.org today']);
+        $result = AuditMeta::encode(['context' => 'reported by victim@example.org today']);
 
         self::assertIsString($result['json']);
         self::assertStringNotContainsString('victim@example.org', $result['json']);
         self::assertStringContainsString('v***@example.org', $result['json']);
+    }
+
+    // ---------------------------------------------------------------
+    // Free text is REPLACED, not shortened
+    // ---------------------------------------------------------------
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function freeTextKeys(): array
+    {
+        return [
+            'raw exception (CronService)' => ['last_error'],
+            'generic error'               => ['error'],
+            'moderation note'             => ['moderation_note'],
+            'operator notes'              => ['notes'],
+            'report body'                 => ['report_text'],
+            'raw sql'                     => ['query'],
+        ];
+    }
+
+    #[DataProvider('freeTextKeys')]
+    public function testFreeTextContentIsReplacedNotTruncated(string $key): void
+    {
+        // A realistic exception: the damage is in the FIRST characters, which
+        // is exactly what a truncating policy would have kept.
+        $text = 'SQLSTATE[42S02]: Base table not found: SELECT secret_col FROM wp_bcc_trust_votes '
+              . 'WHERE token = "hunter2" in /var/www/html/wp-content/plugins/bcc-trust/app/Repo.php:412';
+
+        $result = AuditMeta::encode([$key => $text]);
+        self::assertIsString($result['json']);
+
+        $decoded = json_decode($result['json'], true);
+        self::assertIsArray($decoded[$key], "`{$key}` must become a structured descriptor, not a string");
+
+        // No fragment of the original survives.
+        foreach (['SQLSTATE', 'SELECT', 'wp_bcc_trust_votes', 'hunter2', '/var/www/', 'Repo.php', 'secret_col'] as $fragment) {
+            self::assertStringNotContainsString($fragment, $result['json'], "`{$fragment}` must not survive");
+        }
+
+        // What is kept is only shape.
+        self::assertSame('free_text', $decoded[$key]['omitted']);
+        self::assertSame(mb_strlen($text, 'UTF-8'), $decoded[$key]['len']);
+        self::assertMatchesRegularExpression('/^[0-9a-f]{12}$/', $decoded[$key]['digest']);
+    }
+
+    public function testIdenticalFreeTextProducesTheSameDigestAndDifferentTextDoesNot(): void
+    {
+        // The one thing an operator legitimately needs from an omitted string:
+        // "is this the same failure recurring?"
+        $a = AuditMeta::encode(['last_error' => 'Deadlock found when trying to get lock']);
+        $b = AuditMeta::encode(['last_error' => 'Deadlock found when trying to get lock']);
+        $c = AuditMeta::encode(['last_error' => 'Lost connection to MySQL server']);
+
+        $da = json_decode((string) $a['json'], true)['last_error']['digest'];
+        $db = json_decode((string) $b['json'], true)['last_error']['digest'];
+        $dc = json_decode((string) $c['json'], true)['last_error']['digest'];
+
+        self::assertSame($da, $db, 'the same text must correlate');
+        self::assertNotSame($da, $dc, 'different text must not');
+    }
+
+    // ---------------------------------------------------------------
+    // Credential shapes, under any key
+    // ---------------------------------------------------------------
+
+    /**
+     * @return array<string, array{string, string}>
+     */
+    public static function credentialShapes(): array
+    {
+        return [
+            'password assignment' => ['db connect failed: password=s3cr3tP@ss host=db1', 's3cr3tP@ss'],
+            'api key colon'       => ['api_key: AKIAIOSFODNN7EXAMPLE', 'AKIAIOSFODNN7EXAMPLE'],
+            'bearer token'        => ['Authorization Bearer eyJhbGciOiJIUzI1NiJ9.abc123', 'eyJhbGciOiJIUzI1NiJ9.abc123'],
+            'url userinfo'        => ['mysql://root:tr0ub4dor@10.0.0.5:3306/bcc', 'tr0ub4dor'],
+            'client secret arrow' => ['client_secret => zzz9999secretvalue', 'zzz9999secretvalue'],
+        ];
+    }
+
+    #[DataProvider('credentialShapes')]
+    public function testCredentialShapedValuesAreStrippedUnderAnyKey(string $input, string $secret): void
+    {
+        // Under a key nobody classified — the net for a secret that turns up
+        // somewhere the policy never anticipated.
+        $result = AuditMeta::encode(['diagnostic' => $input]);
+
+        self::assertIsString($result['json']);
+        self::assertStringNotContainsString($secret, $result['json']);
+    }
+
+    public function testCredentialScrubbingDoesNotEatOrdinaryContext(): void
+    {
+        // A false positive corrupts legitimate audit context, so the rule is
+        // deliberately shape-bound rather than keyword-bound.
+        $result = AuditMeta::encode([
+            'summary' => 'token bucket refilled; auth succeeded; secret santa group renamed',
+        ]);
+
+        self::assertIsString($result['json']);
+        self::assertStringContainsString('token bucket refilled', $result['json']);
+        self::assertStringContainsString('secret santa group renamed', $result['json']);
     }
 
     public function testVersionNumbersAreNotMistakenForIpAddresses(): void
@@ -231,7 +334,7 @@ final class AuditMetaTest extends TestCase
         // A cut through the middle of a multi-byte sequence would make the
         // whole encode fail and cost the entire payload, turning a cosmetic
         // limit into data loss.
-        $result = AuditMeta::encode(['note' => str_repeat('é', 400)]);
+        $result = AuditMeta::encode(['context' => str_repeat('é', 400)]);
 
         self::assertIsString($result['json']);
         self::assertFalse($result['failed']);
