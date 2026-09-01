@@ -382,6 +382,12 @@ function bcc_onchain_ensure_schema(): void {
     // above, so the two paths converge on the same transitional schema
     // (both unique keys present). Idempotent — every step probes first.
     bcc_onchain_add_collections_canonical_identifier();
+    // PR 6: provisioning intent columns + the composite queue index, then a
+    // backfill that marks existing communities `provisioned`. Runs AFTER the
+    // canonical-identity migration because the backfill's postcondition
+    // reasons about live gates, and a gate is only meaningful once identity
+    // is settled. Idempotent — every step probes first.
+    bcc_onchain_add_collections_provisioning_state();
     bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
@@ -593,14 +599,19 @@ add_action('bcc_trust_daily_contribution_recovery', function () {
     }
 });
 
-// V2: NFT-gated holder groups — daily provisioning sweep. Reads
-// wp_bcc_onchain_collections.is_verified=1 and creates a closed PeepSo
-// group for any verified collection that doesn't have one yet.
+// V2: NFT-gated holder groups — daily sweep over RECORDED REQUESTS.
+//
+// PR 6: this used to read `is_verified = 1` and create a community for any
+// verified collection that did not have one, which made ticking Verify the
+// authorization to create a live community (issue #215). It now drains the
+// queue of collections an administrator explicitly requested
+// (`provisioning_state = 'requested'`). Verification is still required and is
+// re-checked per collection; it no longer authorizes anything on its own.
 // Idempotent — re-running creates no duplicates.
 add_action('bcc_gated_group_provision', function () {
     $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->gatedGroupProvisioningService()
-        ->provisionAll();
+        ->processRequested();
 
     if ($result['created'] > 0 || !empty($result['errors'])) {
         \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group provisioning sweep', $result);

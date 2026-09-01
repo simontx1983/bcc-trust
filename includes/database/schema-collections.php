@@ -464,3 +464,343 @@ function bcc_onchain_backfill_collections_canonical_identifier(): bool
 
     return true;
 }
+
+/** Advisory-lock key for the PR 6 provisioning-state migration. */
+if (!defined('BCC_TRUST_PROVISIONING_STATE_LOCK')) {
+    define('BCC_TRUST_PROVISIONING_STATE_LOCK', 'bcc_trust_mig_collection_provisioning_v1');
+}
+
+/**
+ * PR 6 — add the four provisioning-intent columns, the composite queue
+ * index, and backfill `provisioned` for communities that already exist.
+ *
+ * ── WHY COLUMNS, AND WHY FOUR ───────────────────────────────────────────
+ * Issue #215 proposed three: `provisioning_state`, `provisioning_requested_at`,
+ * `provisioning_last_error`. Two changes:
+ *
+ *  - `provisioning_last_error VARCHAR(255)` is REPLACED by
+ *    `provisioning_failure_code VARCHAR(32)` over a closed vocabulary
+ *    ({@see \BCC\Trust\Onchain\ValueObjects\ProvisioningFailureCode}).
+ *    A durable free-text column is where provider prose and exception
+ *    messages eventually land, and PR 5b removed exactly that channel from
+ *    the audit path. Prose stays in the short-retention file log.
+ *
+ *  - `provisioning_requested_by BIGINT UNSIGNED` is ADDED. The cron reads
+ *    the ROW, not the audit log, so without it "authorized by administrator
+ *    N" cannot reach provision time except by a fragile query back into
+ *    `wp_bcc_trust_activity`. It is also what replaces the lowest-user-id
+ *    guess as the authorization record.
+ *
+ * ── WHY THIS INDEX ──────────────────────────────────────────────────────
+ * The queue query that actually runs is
+ * {@see \BCC\Trust\Onchain\Repositories\CollectionRepository::listRequested()}:
+ *
+ *     WHERE c.provisioning_state = 'requested' AND c.id > <cursor>
+ *     ORDER BY c.id ASC LIMIT <n>
+ *
+ * `(provisioning_state, id)` serves the equality, the cursor range AND the
+ * ordering from one index, so the plan is a bounded range scan with no
+ * filesort. A state-only index would satisfy the equality and then sort.
+ * The composite is chosen for that query shape, not because it looks
+ * plausible; the EXPLAIN proof is in the integration suite.
+ *
+ * ── SAFETY ──────────────────────────────────────────────────────────────
+ * Additive, idempotent, fail-closed, concurrency-aware, resumable. It drops
+ * nothing, does not touch `canonical_identifier`, does not touch
+ * `is_verified`, creates no community, and cannot modify the legacy alias
+ * rows beyond giving them the same `'none'` default every other row gets.
+ */
+function bcc_onchain_add_collections_provisioning_state(): void
+{
+    global $wpdb;
+
+    $table = bcc_onchain_collections_table();
+
+    if (!\BCC\Core\DB\AdvisoryLock::acquire(BCC_TRUST_PROVISIONING_STATE_LOCK, 0)) {
+        // Another request is doing this work right now. Not an error.
+        return;
+    }
+
+    try {
+        // ── Step 1: the four columns, each probed independently ─────────
+        // Probed one at a time rather than as a group: a partially applied
+        // migration (one ALTER succeeded, the process died) must be
+        // resumable, and "some of them exist" must not read as "done".
+        $columns = [
+            'provisioning_state'        => "ADD COLUMN provisioning_state VARCHAR(20) NOT NULL DEFAULT 'none' AFTER source",
+            'provisioning_requested_at' => 'ADD COLUMN provisioning_requested_at DATETIME NULL AFTER provisioning_state',
+            'provisioning_requested_by' => 'ADD COLUMN provisioning_requested_by BIGINT UNSIGNED NULL AFTER provisioning_requested_at',
+            'provisioning_failure_code' => 'ADD COLUMN provisioning_failure_code VARCHAR(32) NULL AFTER provisioning_requested_by',
+        ];
+
+        foreach ($columns as $column => $clause) {
+            $exists = bcc_onchain_probe_count(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+                  LIMIT 1",
+                [$table, $column]
+            );
+
+            if ($exists === null) {
+                \BCC\Core\Log\Logger::error(
+                    '[schema-collections-provisioning] could not determine whether a column exists; treating as UNVERIFIED, not absent',
+                    ['table' => $table, 'column' => $column]
+                );
+                return;
+            }
+
+            if ($exists > 0) {
+                continue;
+            }
+
+            // A successful DDL returns 0 rows affected, so `=== false` is the
+            // only correct failure test.
+            $added = $wpdb->query("ALTER TABLE {$table} {$clause}");
+            if ($added === false) {
+                \BCC\Core\Log\Logger::error(
+                    '[schema-collections-provisioning] failed to add a column',
+                    ['table' => $table, 'column' => $column, 'db_error' => $wpdb->last_error]
+                );
+                return;
+            }
+
+            $reVerified = bcc_onchain_probe_count(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+                  LIMIT 1",
+                [$table, $column]
+            );
+            if ($reVerified === null || $reVerified === 0) {
+                \BCC\Core\Log\Logger::error(
+                    '[schema-collections-provisioning] column still absent after ALTER',
+                    ['table' => $table, 'column' => $column]
+                );
+                return;
+            }
+        }
+
+        // ── Step 2: the composite queue index ───────────────────────────
+        $indexExists = bcc_onchain_probe_count(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = %s
+              LIMIT 1",
+            [$table, 'idx_provisioning_state_id']
+        );
+
+        if ($indexExists === null) {
+            \BCC\Core\Log\Logger::error(
+                '[schema-collections-provisioning] could not verify idx_provisioning_state_id; treating as UNVERIFIED, not absent',
+                ['table' => $table]
+            );
+            return;
+        }
+
+        if ($indexExists === 0) {
+            $addedKey = $wpdb->query(
+                "ALTER TABLE {$table} ADD KEY idx_provisioning_state_id (provisioning_state, id)"
+            );
+            if ($addedKey === false) {
+                \BCC\Core\Log\Logger::error(
+                    '[schema-collections-provisioning] failed to add idx_provisioning_state_id',
+                    ['table' => $table, 'db_error' => $wpdb->last_error]
+                );
+                return;
+            }
+
+            $keyReVerified = bcc_onchain_probe_count(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = %s
+                  LIMIT 1",
+                [$table, 'idx_provisioning_state_id']
+            );
+            if ($keyReVerified === null || $keyReVerified === 0) {
+                \BCC\Core\Log\Logger::error(
+                    '[schema-collections-provisioning] idx_provisioning_state_id still not present after ALTER',
+                    ['table' => $table]
+                );
+                return;
+            }
+        }
+
+        // ── Step 3: backfill existing communities ───────────────────────
+        bcc_onchain_backfill_collections_provisioning_state();
+    } finally {
+        \BCC\Core\DB\AdvisoryLock::release(BCC_TRUST_PROVISIONING_STATE_LOCK);
+    }
+}
+
+/**
+ * Mark every collection that ALREADY has a live holder community as
+ * `provisioned`. Everything else keeps the `'none'` column default.
+ *
+ * ── WHY EVERYTHING ELSE STAYS `none`, INCLUDING VERIFIED ROWS ───────────
+ * This is the whole point of PR 6. Pre-existing verification must NOT be
+ * retro-read as authorization: a verified collection that nobody asked for a
+ * community for has, by definition, no recorded request, and inventing one
+ * would reproduce the coupling this migration exists to break. The accepted
+ * consequence — stated rather than hidden — is that a verified-but-
+ * unprovisioned collection simply stops being auto-provisioned until an
+ * operator asks.
+ *
+ * ── WHY THE REQUESTER IS LEFT NULL ──────────────────────────────────────
+ * These communities predate the concept of a request. There is no
+ * administrator who authorized them, and writing a plausible one (the site
+ * owner, the lowest-id admin) would fabricate an authorization that never
+ * happened. {@see \BCC\Trust\Onchain\ValueObjects\ProvisioningState::fieldViolations()}
+ * exempts exactly this case and no other.
+ *
+ * ── WHY NOT `UPDATE ... JOIN ... LIMIT` ─────────────────────────────────
+ * MySQL silently ignores LIMIT on a multi-table UPDATE — the statement runs
+ * unbounded or, with some configurations, no-ops. Collecting ids in bounded
+ * batches and updating by primary key keeps the write genuinely bounded and
+ * the failure modes visible.
+ *
+ * @return bool true when the backfill completed and its postcondition held
+ */
+function bcc_onchain_backfill_collections_provisioning_state(): bool
+{
+    global $wpdb;
+
+    $table     = bcc_onchain_collections_table();
+    $batchSize = 200;
+    $afterPost = 0;
+    $marked    = 0;
+
+    // Ceiling: 200 * 500 = 100,000 gated communities, far above any
+    // plausible install, so a pathological loop cannot run forever.
+    for ($pass = 0; $pass < 500; $pass++) {
+        // Only a PUBLISHED peepso-group post carrying `_bcc_group_kind =
+        // 'holders'` counts as a live community. A draft or trashed group is
+        // not one, and neither is a hall or a delegator group.
+        /** @var list<object{post_id: string, collection_id: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT pm_coll.post_id AS post_id, pm_coll.meta_value AS collection_id
+               FROM {$wpdb->postmeta} pm_coll
+               INNER JOIN {$wpdb->postmeta} pm_kind
+                       ON pm_kind.post_id = pm_coll.post_id
+                      AND pm_kind.meta_key = %s
+                      AND pm_kind.meta_value = %s
+               INNER JOIN {$wpdb->posts} p
+                       ON p.ID = pm_coll.post_id
+                      AND p.post_type = %s
+                      AND p.post_status = %s
+              WHERE pm_coll.meta_key = %s
+                AND pm_coll.post_id > %d
+              ORDER BY pm_coll.post_id ASC
+              LIMIT %d",
+            '_bcc_group_kind',
+            'holders',
+            'peepso-group',
+            'publish',
+            '_bcc_gate_collection_id',
+            $afterPost,
+            $batchSize
+        ));
+
+        // get_results() returns [] both for "no rows" and for a failed
+        // query, so an empty batch alone is not proof of completion.
+        if ($rows === null || $wpdb->last_error !== '') {
+            \BCC\Core\Log\Logger::error(
+                '[schema-collections-provisioning] backfill read failed; aborting without writing',
+                ['table' => $table, 'db_error' => $wpdb->last_error, 'after_post' => $afterPost]
+            );
+            return false;
+        }
+
+        if ($rows === []) {
+            break;
+        }
+
+        foreach ($rows as $row) {
+            $afterPost    = max($afterPost, (int) $row->post_id);
+            $collectionId = (int) $row->collection_id;
+            if ($collectionId <= 0) {
+                // A gate pointing at nothing is an orphan. It is surfaced by
+                // the needs-attention tab, not repaired here.
+                continue;
+            }
+
+            // Guarded UPDATE: only a row still sitting on the default is
+            // touched, so a rerun cannot overwrite an operator's later state
+            // and a concurrent run cannot double-apply.
+            $written = $wpdb->query($wpdb->prepare(
+                "UPDATE {$table}
+                    SET provisioning_state = %s
+                  WHERE id = %d AND provisioning_state = %s",
+                \BCC\Trust\Onchain\ValueObjects\ProvisioningState::PROVISIONED,
+                $collectionId,
+                \BCC\Trust\Onchain\ValueObjects\ProvisioningState::NONE
+            ));
+
+            if ($written === false) {
+                \BCC\Core\Log\Logger::error(
+                    '[schema-collections-provisioning] backfill UPDATE failed; aborting',
+                    ['table' => $table, 'row_id' => $collectionId, 'db_error' => $wpdb->last_error]
+                );
+                return false;
+            }
+
+            $marked += (int) $written;
+        }
+    }
+
+    // ── Postcondition, by SHAPE not by count ────────────────────────────
+    // The invariant is a RELATIONSHIP: every collection marked `provisioned`
+    // must have a live community. Asserting "28" would be asserting a
+    // production census as a schema invariant, which stops being true the
+    // first time anyone adds a community. The relationship stays true.
+    $provisionedWithoutCommunity = bcc_onchain_probe_count(
+        "SELECT COUNT(*) FROM {$table} c
+          WHERE c.provisioning_state = %s
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM {$wpdb->postmeta} pm_coll
+                  INNER JOIN {$wpdb->postmeta} pm_kind
+                          ON pm_kind.post_id = pm_coll.post_id
+                         AND pm_kind.meta_key = %s
+                         AND pm_kind.meta_value = %s
+                  INNER JOIN {$wpdb->posts} p
+                          ON p.ID = pm_coll.post_id
+                         AND p.post_type = %s
+                         AND p.post_status = %s
+                 WHERE pm_coll.meta_key = %s
+                   AND pm_coll.meta_value = c.id
+            )",
+        [
+            \BCC\Trust\Onchain\ValueObjects\ProvisioningState::PROVISIONED,
+            '_bcc_group_kind',
+            'holders',
+            'peepso-group',
+            'publish',
+            '_bcc_gate_collection_id',
+        ]
+    );
+
+    if ($provisionedWithoutCommunity === null) {
+        \BCC\Core\Log\Logger::error(
+            '[schema-collections-provisioning] could not verify the backfill postcondition; treating as INCOMPLETE',
+            ['table' => $table]
+        );
+        return false;
+    }
+
+    if ($provisionedWithoutCommunity > 0) {
+        // Not necessarily this migration's doing — a community trashed
+        // between the walk and the check produces the same shape — but it is
+        // a contradictory state either way, and saying so beats silence.
+        \BCC\Core\Log\Logger::error(
+            '[schema-collections-provisioning] rows marked provisioned without a live community',
+            ['table' => $table, 'count' => $provisionedWithoutCommunity]
+        );
+        return false;
+    }
+
+    if ($marked > 0) {
+        \BCC\Core\Log\Logger::info(
+            '[schema-collections-provisioning] backfill complete',
+            ['marked_provisioned' => $marked]
+        );
+    }
+
+    return true;
+}
