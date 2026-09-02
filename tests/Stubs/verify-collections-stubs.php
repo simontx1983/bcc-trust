@@ -304,17 +304,30 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @var list<int> */
             public static array $withdrawals = [];
 
-            public static function readProvisioningRow(int $collectionId, bool $forUpdate = false): ?object
+            /**
+             * Makes the single-row read FAIL, the way a dropped connection
+             * or a locked table does. Distinct from "no such collection",
+             * which is what an empty `$rows` already models — the point of
+             * the flag is that the two must not be confusable.
+             */
+            public static bool $readRowUnavailable = false;
+
+            /** @return array{row: object|null, available: bool} */
+            public static function readProvisioningRow(int $collectionId, bool $forUpdate = false): array
             {
+                if (self::$readRowUnavailable) {
+                    return ['row' => null, 'available' => false];
+                }
+
                 $row = self::$rows[$collectionId] ?? null;
                 if ($row === null) {
-                    return null;
+                    return ['row' => null, 'available' => true];
                 }
 
                 $p = self::$provisioning[$collectionId]
                     ?? ['state' => 'none', 'at' => null, 'by' => null, 'code' => null];
 
-                return (object) [
+                return ['available' => true, 'row' => (object) [
                     'id'                        => (string) $collectionId,
                     'is_verified'               => (string) ((int) ($row->is_verified ?? 0)),
                     'canonical_identifier'      => $row->canonical_identifier ?? null,
@@ -324,8 +337,15 @@ namespace BCC\Trust\Onchain\Repositories {
                     'provisioning_requested_at' => $p['at'],
                     'provisioning_requested_by' => $p['by'] === null ? null : (string) $p['by'],
                     'provisioning_failure_code' => $p['code'],
-                ];
+                ]];
             }
+
+            /**
+             * Forces every guarded state write to lose its race, the way a
+             * concurrent writer moving the row first would. Exists so a test
+             * can prove a lost race is not reported as success.
+             */
+            public static bool $stateWriteRefuses = false;
 
             public static function setProvisioningState(
                 int $collectionId,
@@ -335,6 +355,10 @@ namespace BCC\Trust\Onchain\Repositories {
                 ?string $requestedAt = null,
                 ?string $failureCode = null
             ): bool {
+                if (self::$stateWriteRefuses) {
+                    return false;
+                }
+
                 $current = self::$provisioning[$collectionId]['state'] ?? 'none';
 
                 // Mirrors the real guarded UPDATE: a row that is not in the
@@ -378,22 +402,37 @@ namespace BCC\Trust\Onchain\Repositories {
                 return 1;
             }
 
-            /** @return list<object> */
+            /**
+             * Makes the QUEUE read fail. Seeded requests stay in
+             * `$provisioning`, so a test can prove the sweep did not simply
+             * find an empty queue — it never got to look at a queue that
+             * demonstrably had work in it.
+             */
+            public static bool $listRequestedUnavailable = false;
+
+            /** @return array{rows: list<object>, available: bool} */
             public static function listRequested(int $afterId = 0, int $limit = 50): array
             {
+                if (self::$listRequestedUnavailable) {
+                    return ['rows' => [], 'available' => false];
+                }
+
                 $out = [];
                 foreach (self::$provisioning as $id => $p) {
                     if ($p['state'] !== 'requested' || $id <= $afterId) {
                         continue;
                     }
-                    $row = self::readProvisioningRow((int) $id);
-                    if ($row !== null) {
-                        $out[] = $row;
+                    $read = self::readProvisioningRow((int) $id);
+                    if ($read['available'] && $read['row'] !== null) {
+                        $out[] = $read['row'];
                     }
                 }
                 usort($out, static fn($a, $b): int => (int) $a->id <=> (int) $b->id);
 
-                return array_slice($out, 0, max(1, min(200, $limit)));
+                return [
+                    'rows'      => array_slice($out, 0, max(1, min(200, $limit))),
+                    'available' => true,
+                ];
             }
 
             /**
@@ -434,8 +473,11 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$upsertCalls = [];
                 self::$findByChainContractReturnsNull = false;
                 self::$provisioning = [];
+                self::$stateWriteRefuses = false;
                 self::$stateWrites = [];
                 self::$withdrawals = [];
+                self::$readRowUnavailable = false;
+                self::$listRequestedUnavailable = false;
             }
         }
     }

@@ -338,6 +338,19 @@ final class VerifyCollectionsPage
     {
         AdminActionSupport::requireCapability();
 
+        // ⚠ The docblock below has always said this route is "kept as POST +
+        // PRG rather than converted to AJAX" BECAUSE it makes an outbound
+        // Cosmos LCD request and replay resistance matters. It never enforced
+        // that, so a GET carrying a valid nonce reached the provider — and a
+        // nonce that leaked through a referrer header, browser history or a
+        // server log became a replayable outbound request against somebody
+        // else's endpoint, one per `<img>` tag render.
+        //
+        // Read-only is not the same as free: the cost and the rate limit are
+        // the chain's, not ours. Checked before the id shape so a GET is
+        // refused on its METHOD (405) rather than on its arguments.
+        AdminActionSupport::requirePost();
+
         $collectionId = self::requireCollectionIdShape();
         AdminActionSupport::requireNonce(self::ACTION_TESTQUERY . '_' . $collectionId);
 
@@ -902,18 +915,34 @@ final class VerifyCollectionsPage
 
         $result = OnchainPlugin::instance()->gatedGroupProvisioningService()->provisionOne($collectionId);
 
-        if ($result['status'] === 'failed' || $result['status'] === 'skipped') {
-            // The service already wrote the durable `failed` state and its
-            // own checked audit row with the bounded failure code. This is
-            // the ADMIN-surface trace of the same event; it carries the code,
-            // never the message, so no free text becomes durable here either.
+        if ($result['status'] === 'failed'
+            || $result['status'] === 'skipped'
+            || $result['status'] === 'unconfirmed'
+        ) {
+            // ── WHAT THE SERVICE DID, AND WHAT THIS ROW IS ──────────────
+            // The service writes the durable `failed` state and its CHECKED
+            // audit row in ONE transaction, so either both exist or neither
+            // does. `failure_record` says which — and this admin-surface
+            // trace carries that verbatim rather than assuming the durable
+            // record landed.
+            //
+            // An earlier revision of this comment claimed the service "already
+            // wrote" a checked audit; at the time it wrote an UNCHECKED one
+            // after a separate state write, so a lost encode left a durable
+            // `failed` row with nothing behind it. The code now genuinely
+            // does what this comment says.
+            //
+            // It carries the bounded code, never the message, so no free text
+            // becomes durable here either.
             AdminActionSupport::audit(
                 'admin_vc_community_provision_failed',
                 'collection',
                 $collectionId,
                 [
-                    'status'       => (string) $result['status'],
-                    'failure_code' => (string) ($result['failure_code'] ?? 'none'),
+                    'status'         => (string) $result['status'],
+                    'failure_code'   => (string) ($result['failure_code'] ?? 'none'),
+                    'failure_record' => (string) ($result['failure_record'] ?? 'not_applicable'),
+                    'audit_degraded' => !empty($result['audit_degraded']) ? 'yes' : 'no',
                 ]
             );
             wp_send_json_error(['message' => $result['message']]);

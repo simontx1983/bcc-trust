@@ -267,6 +267,9 @@ add_action('plugins_loaded', 'bcc_trust_run_pending_migrations', 20, 0);
 
 // Onchain schema definitions — table-creation functions used by the
 // activation hook and by the content-hash-gated dbDelta re-run below.
+// The schema-version completion contract. Required FIRST so the gate
+// below can call it however the installers behave.
+require_once BCC_TRUST_PATH . 'includes/database/schema-completion.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-chains.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-wallets.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-validators.php';
@@ -370,8 +373,23 @@ require_once BCC_TRUST_PATH . 'includes/block-helpers.php';
 /**
  * Onchain table installer — called from activation and from the
  * content-hash schema-version hook when any schema-*.php file changes.
+ *
+ * ── WHY THIS NOW REPORTS COMPLETION ─────────────────────────────────────
+ * It returned void, so the caller stamped `bcc_trust_schema_version`
+ * unconditionally. A migration that bailed out — an unreadable probe, a
+ * refused ALTER, a backfill that could not verify its postcondition — was
+ * followed by a stamp saying the schema was current, and since the version
+ * is a CONTENT HASH of unchanged files, nothing would ever bump it again.
+ * The migration was resumable in principle and unreachable in practice.
+ *
+ * The return value is deliberately narrow: it reports the PR 6 provisioning
+ * migration only. Every other installer here keeps its existing void
+ * semantics and is untouched — retrofitting all of them is separate work
+ * with its own risk, and folding it in would bury this fix inside it.
+ *
+ * @return bool true when every migration that REPORTS completion completed
  */
-function bcc_onchain_ensure_schema(): void {
+function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_create_chains_table();
     bcc_onchain_create_wallet_links_table();
     bcc_onchain_create_validators_table();
@@ -387,7 +405,9 @@ function bcc_onchain_ensure_schema(): void {
     // canonical-identity migration because the backfill's postcondition
     // reasons about live gates, and a gate is only meaningful once identity
     // is settled. Idempotent — every step probes first.
-    bcc_onchain_add_collections_provisioning_state();
+    // Its return value is the ONLY completion signal this installer
+    // carries, and the schema-version stamp is gated on it.
+    $provisioningComplete = bcc_onchain_add_collections_provisioning_state();
     bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
@@ -442,6 +462,8 @@ function bcc_onchain_ensure_schema(): void {
     // Tables changed — drop any cached existence answers so the next
     // tableExists() call re-probes.
     \BCC\Trust\Core\Database\TableRegistry::flushExistenceCache();
+
+    return $provisioningComplete;
 }
 
 // Schema migration: re-run dbDelta when any schema file changes.
@@ -476,23 +498,29 @@ add_action('plugins_loaded', function (): void {
         if (function_exists('bcc_trust_create_tables')) {
             bcc_trust_create_tables();
         }
-        bcc_onchain_ensure_schema();
-        \BCC\Trust\Disputes\Repositories\DisputeRepository::install();
-        update_option('bcc_trust_schema_version', BCC_TRUST_SCHEMA_VERSION, false);
 
-        // Verify the write actually landed where the next request will
-        // read it. A poisoned persistent object cache makes update_option
-        // succeed while get_option keeps returning the old value — the
-        // exact failure mode that turns this gate into a per-request tax.
-        wp_cache_delete('bcc_trust_schema_version', 'options');
-        wp_cache_delete('alloptions', 'options');
-        $reread = get_option('bcc_trust_schema_version', '');
-        if ($reread !== BCC_TRUST_SCHEMA_VERSION && class_exists('\\BCC\\Core\\Log\\Logger')) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] schema version write did not stick — object cache likely stale', [
-                'reread'   => $reread,
-                'computed' => BCC_TRUST_SCHEMA_VERSION,
-            ]);
-        }
+        // ⚠ The stamp is CONDITIONAL now.
+        //
+        // It used to be unconditional, and `bcc_onchain_ensure_schema()`
+        // returned void — so a migration that bailed out was followed by a
+        // version saying the schema was current. Because the version is a
+        // content hash of files that had not changed, nothing would ever bump
+        // it again: the migration was resumable in principle and unreachable
+        // in practice.
+        //
+        // Declining to stamp costs one extra installer pass per request until
+        // the underlying problem clears. Every step is probe-guarded and
+        // idempotent, so that pass is cheap; stamping a version the schema has
+        // not reached is the expensive mistake, because it is silent and
+        // permanent.
+        $migrationsComplete = bcc_onchain_ensure_schema();
+
+        // Runs regardless: it is a separate installer with its own
+        // (unchanged) void contract, and skipping it because the onchain
+        // migration is mid-retry would be a new coupling.
+        \BCC\Trust\Disputes\Repositories\DisputeRepository::install();
+
+        bcc_trust_stamp_schema_version($migrationsComplete, BCC_TRUST_SCHEMA_VERSION);
     } finally {
         bcc_trust_release_schema_lock();
     }

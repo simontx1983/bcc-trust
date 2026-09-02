@@ -227,6 +227,58 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
         );
     }
 
+    /**
+     * BLOCKER 4: the read-only CW-721 probe is POST-only too.
+     *
+     * ── WHY A READ-ONLY ROUTE STILL NEEDS THE METHOD CHECK ──────────────
+     * The handler docblock has always said the probe is "kept as POST + PRG
+     * rather than converted to AJAX" precisely BECAUSE it makes an outbound
+     * Cosmos LCD request and replay resistance matters. It never enforced
+     * that. A GET carrying a valid nonce reached the provider — so a nonce
+     * that leaked through a referrer header, browser history or a server log
+     * became a replayable outbound request against a third party, and an
+     * `<img>` tag could fire one per page view.
+     *
+     * Read-only is not the same as free: the cost lands on someone else's
+     * endpoint, and the rate limit is theirs.
+     */
+    public function testTheCwProbeRefusesAGetEvenWithAValidNonce(): void
+    {
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        \BccAdminTestState::$validNonceAction =
+            VerifyCollectionsPage::ACTION_TESTQUERY . '_' . self::CID;
+        $_GET['collection_id']     = self::CID;
+        $_REQUEST['collection_id'] = self::CID;
+
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(self::CID);
+
+        try {
+            VerifyCollectionsPage::handleTestQueryPost();
+            $this->fail('Expected a 405 halt.');
+        } catch (\BccAdminDie $e) {
+            $this->assertSame(405, $e->status);
+        }
+
+        // Zero repository writes.
+        $this->assertNoDomainWork();
+
+        // Zero provider calls — the property the method check exists for.
+        $this->assertSame(
+            [],
+            \BCC\Trust\Onchain\Fetchers\CosmosFetcher::$probes,
+            'a GET must not reach the chain'
+        );
+        $this->assertSame(
+            0,
+            \BCC\Trust\Onchain\Factories\FetcherFactory::$madeCount,
+            'no fetcher may even be constructed'
+        );
+
+        // No success audit, and the nonce was never even consulted: the
+        // request is refused on its SHAPE, before its credentials.
+        $this->assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions());
+        $this->assertSame([], \BccAdminTestState::$nonceChecks);
+    }
     // ── Ordering: no domain work before CSRF validation ─────────────────
 
     public function testDeleteWithBadNonceNeverReachesTheRepository(): void

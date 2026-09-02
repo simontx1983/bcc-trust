@@ -496,7 +496,9 @@ final class CollectionStateTabsIntegrationTest extends TestCase
         $seen   = [];
         $cursor = 0;
         for ($pass = 0; $pass < 10; $pass++) {
-            $rows = CollectionRepository::listRequested($cursor, 3);
+            $queue = CollectionRepository::listRequested($cursor, 3);
+            self::assertTrue($queue['available'], 'the queue read must succeed against a live database');
+            $rows = $queue['rows'];
             if ($rows === []) {
                 break;
             }
@@ -527,8 +529,9 @@ final class CollectionStateTabsIntegrationTest extends TestCase
      */
     public function testTheQueueLimitIsClamped(): void
     {
-        $rows = CollectionRepository::listRequested(0, 100000);
+        $queue = CollectionRepository::listRequested(0, 100000);
 
-        self::assertLessThanOrEqual(200, count($rows));
+        self::assertTrue($queue['available']);
+        self::assertLessThanOrEqual(200, count($queue['rows']));
     }
 }

@@ -356,7 +356,14 @@ final class GatedGroupProvisioningIntentTest extends TestCase
     public function testAFailedCheckedAuditCompensatesTheGroupAway(): void
     {
         $this->seed(ProvisioningState::REQUESTED);
-        \BCC\Trust\Core\Security\AuditLogger::$failChecked = true;
+
+        // Aim the fault at the PROVISIONED audit alone. A blanket outage
+        // would also take out the compensation's audit and the failure
+        // transition's, and the run would end in the rollback path — which
+        // is a real behaviour, tested in ProvisioningAuditIntegrityTest, but
+        // not the one this test is about.
+        \BCC\Trust\Core\Security\AuditLogger::$failCheckedActions =
+            [GatedGroupProvisioningService::AUDIT_PROVISIONED];
 
         $result = $this->service->provisionOne(self::CID);
 
@@ -434,7 +441,11 @@ final class GatedGroupProvisioningIntentTest extends TestCase
     public function testCompensationIsAuditedWithBoundedEvidence(): void
     {
         $this->seed(ProvisioningState::REQUESTED);
-        \BCC\Trust\Core\Security\AuditLogger::$failChecked = true;
+
+        // Scoped, so the compensation's own audit can actually be written —
+        // which is the row this test exists to inspect.
+        \BCC\Trust\Core\Security\AuditLogger::$failCheckedActions =
+            [GatedGroupProvisioningService::AUDIT_PROVISIONED];
 
         $this->service->provisionOne(self::CID);
 

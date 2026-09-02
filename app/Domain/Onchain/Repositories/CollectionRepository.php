@@ -2324,7 +2324,7 @@ final class CollectionRepository
      *
      * @param int $afterId cursor; 0 starts at the beginning
      * @param int $limit   clamped to 1..200
-     * @return list<CollectionRequestedRow>
+     * @return array{rows: list<CollectionRequestedRow>, available: bool}
      */
     public static function listRequested(int $afterId = 0, int $limit = 50): array
     {
@@ -2352,7 +2352,35 @@ final class CollectionRepository
             $limit
         ));
 
-        return $rows ?: [];
+        // ⚠ `[]` IS NOT PROOF OF AN EMPTY QUEUE.
+        //
+        // `wpdb::get_results()` hands back `last_result` — an EMPTY ARRAY —
+        // for a FAILED query exactly as it does for a genuine no-rows result,
+        // and returns null only for an empty query string. The previous
+        // `return $rows ?: [];` therefore told the sweep "nothing to do" when
+        // the SELECT had never executed: the queue stopped draining, no error
+        // surfaced, and the run reported a clean zero. Same failure class as
+        // issue #225, one layer in — and worse here, because the caller's
+        // next move is to create communities.
+        //
+        // Read as its own condition rather than as an `||` operand: the WP
+        // stub gives `last_error` a `''` default that static analysis folds
+        // into a literal when it appears as a boolean operand.
+        $readFailed = $rows === null;
+        if (!$readFailed && $wpdb->last_error) {
+            $readFailed = true;
+        }
+
+        if ($readFailed) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] the provisioning queue could not be read; reporting UNAVAILABLE, not empty',
+                ['after_id' => $afterId, 'db_error' => $wpdb->last_error]
+            );
+
+            return ['rows' => [], 'available' => false];
+        }
+
+        return ['rows' => $rows ?: [], 'available' => true];
     }
 
     /**
@@ -2366,14 +2394,17 @@ final class CollectionRepository
      * `TransactionManager::run()`, and the caller that needs serialisation
      * is responsible for being in one.
      *
-     * @return CollectionProvisioningRow|null
+     * @return array{row: CollectionProvisioningRow|null, available: bool}
+     *         `available` is false ONLY when the read itself failed.
      */
-    public static function readProvisioningRow(int $collectionId, bool $forUpdate = false): ?object
+    public static function readProvisioningRow(int $collectionId, bool $forUpdate = false): array
     {
         global $wpdb;
 
         if ($collectionId <= 0) {
-            return null;
+            // A bad id is a substantive answer, not a fault: there is no such
+            // collection, and asking again will not change that.
+            return ['row' => null, 'available' => true];
         }
 
         $table  = self::table();
@@ -2382,8 +2413,8 @@ final class CollectionRepository
             $suffix = ' FOR UPDATE';
         }
 
-        /** @var CollectionProvisioningRow|null */
-        return $wpdb->get_row($wpdb->prepare(
+        /** @var CollectionProvisioningRow|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
             "SELECT id, is_verified, canonical_identifier, collection_name, chain_id,
                     provisioning_state, provisioning_requested_at,
                     provisioning_requested_by, provisioning_failure_code
@@ -2391,6 +2422,28 @@ final class CollectionRepository
               WHERE id = %d" . $suffix,
             $collectionId
         ));
+
+        // ⚠ A null from `get_row()` means BOTH "no such collection" AND "the
+        // query failed". Those are completely different answers: the first is
+        // substantive, the second is an infrastructure fault. Reporting a
+        // fault as "not found" lets a sweep quietly skip rows a flaky database
+        // refused to hand back — and lets a caller conclude things about a
+        // collection it never actually read.
+        $readFailed = false;
+        if ($wpdb->last_error) {
+            $readFailed = true;
+        }
+
+        if ($readFailed) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] a provisioning row could not be read; reporting UNAVAILABLE, not absent',
+                ['collection_id' => $collectionId, 'db_error' => $wpdb->last_error]
+            );
+
+            return ['row' => null, 'available' => false];
+        }
+
+        return ['row' => $row, 'available' => true];
     }
 
     /**
@@ -2450,20 +2503,72 @@ final class CollectionRepository
 
         $table = self::table();
 
+        // ── NULL means NULL ─────────────────────────────────────────────
+        //
+        // `wpdb::prepare()` cannot express SQL NULL: `%s` turns a PHP null
+        // into `''` and `%d` turns it into `0`. Both are VALUES. Binding the
+        // three nullable columns through `%s` — which this method did until
+        // the null-semantics tests caught it — stored an empty string where
+        // it meant "absent", and an empty string is not absent:
+        //
+        //   - `WHERE provisioning_failure_code IS NULL` silently misses every
+        //     healthy row, so an operator's own query lies to them;
+        //   - `provisioning_requested_by` is BIGINT UNSIGNED, so a null
+        //     through `%d` lands as the integer 0 — which reads as user zero,
+        //     not as "nobody";
+        //   - `ProvisioningState::fieldViolations()` treats `''` as absent, so
+        //     the row LOOKS consistent to PHP while being wrong in the
+        //     database. Nothing in the type system catches that.
+        //
+        // This file already documents the trap on `sqlStringOrNull()` (it cost
+        // #212 and #220). Those helpers are deliberately NOT used here: they
+        // return `$wpdb->prepare('%s', …)` output, which then has to be
+        // interpolated into a SECOND `prepare()`, and a `%` surviving in an
+        // already-escaped literal is re-read as a placeholder by the outer
+        // call. These values happen not to contain one — but "happens not to"
+        // is the kind of premise that rots.
+        //
+        // So: emit the literal `NULL` keyword, which is a compile-time
+        // constant of this code and never caller data, and keep a real
+        // placeholder for every non-null value. The compare-and-swap WHERE
+        // stays fully parameterised.
+        $sets = ['provisioning_state = %s'];
+        $args = [$to];
+
+        if ($requestedAt === null) {
+            $sets[] = 'provisioning_requested_at = NULL';
+        } else {
+            $sets[] = 'provisioning_requested_at = %s';
+            $args[] = $requestedAt;
+        }
+
+        if ($requestedBy === null) {
+            $sets[] = 'provisioning_requested_by = NULL';
+        } else {
+            $sets[] = 'provisioning_requested_by = %d';
+            $args[] = $requestedBy;
+        }
+
+        if ($failureCode === null) {
+            $sets[] = 'provisioning_failure_code = NULL';
+        } else {
+            $sets[] = 'provisioning_failure_code = %s';
+            $args[] = $failureCode;
+        }
+
+        // The guard the whole method exists for: naming the expected current
+        // state in the WHERE clause makes the DATABASE the arbiter of a race,
+        // so a caller working from a stale read is told it lost rather than
+        // overwriting the winner.
+        $args[] = $collectionId;
+        $args[] = $expectedFrom;
+
         $affected = $wpdb->query($wpdb->prepare(
             "UPDATE {$table}
-                SET provisioning_state        = %s,
-                    provisioning_requested_at = %s,
-                    provisioning_requested_by = %s,
-                    provisioning_failure_code = %s
+                SET " . implode(",\n                    ", $sets) . "
               WHERE id = %d
                 AND provisioning_state = %s",
-            $to,
-            $requestedAt,
-            $requestedBy,
-            $failureCode,
-            $collectionId,
-            $expectedFrom
+            ...$args
         ));
 
         if ($affected === false) {

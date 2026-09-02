@@ -510,15 +510,19 @@ if (!defined('BCC_TRUST_PROVISIONING_STATE_LOCK')) {
  * `is_verified`, creates no community, and cannot modify the legacy alias
  * rows beyond giving them the same `'none'` default every other row gets.
  */
-function bcc_onchain_add_collections_provisioning_state(): void
+function bcc_onchain_add_collections_provisioning_state(): bool
 {
     global $wpdb;
 
     $table = bcc_onchain_collections_table();
 
     if (!\BCC\Core\DB\AdvisoryLock::acquire(BCC_TRUST_PROVISIONING_STATE_LOCK, 0)) {
-        // Another request is doing this work right now. Not an error.
-        return;
+        // Another request is doing this work right now. Not an error — but
+        // not COMPLETE from this request's point of view either, and the
+        // caller uses this answer to decide whether to stamp the schema
+        // version. Reporting true here would let the loser of a race stamp
+        // a version the winner had not finished reaching.
+        return false;
     }
 
     try {
@@ -546,7 +550,7 @@ function bcc_onchain_add_collections_provisioning_state(): void
                     '[schema-collections-provisioning] could not determine whether a column exists; treating as UNVERIFIED, not absent',
                     ['table' => $table, 'column' => $column]
                 );
-                return;
+                return false;
             }
 
             if ($exists > 0) {
@@ -561,7 +565,7 @@ function bcc_onchain_add_collections_provisioning_state(): void
                     '[schema-collections-provisioning] failed to add a column',
                     ['table' => $table, 'column' => $column, 'db_error' => $wpdb->last_error]
                 );
-                return;
+                return false;
             }
 
             $reVerified = bcc_onchain_probe_count(
@@ -575,7 +579,7 @@ function bcc_onchain_add_collections_provisioning_state(): void
                     '[schema-collections-provisioning] column still absent after ALTER',
                     ['table' => $table, 'column' => $column]
                 );
-                return;
+                return false;
             }
         }
 
@@ -592,7 +596,7 @@ function bcc_onchain_add_collections_provisioning_state(): void
                 '[schema-collections-provisioning] could not verify idx_provisioning_state_id; treating as UNVERIFIED, not absent',
                 ['table' => $table]
             );
-            return;
+            return false;
         }
 
         if ($indexExists === 0) {
@@ -604,7 +608,7 @@ function bcc_onchain_add_collections_provisioning_state(): void
                     '[schema-collections-provisioning] failed to add idx_provisioning_state_id',
                     ['table' => $table, 'db_error' => $wpdb->last_error]
                 );
-                return;
+                return false;
             }
 
             $keyReVerified = bcc_onchain_probe_count(
@@ -618,12 +622,15 @@ function bcc_onchain_add_collections_provisioning_state(): void
                     '[schema-collections-provisioning] idx_provisioning_state_id still not present after ALTER',
                     ['table' => $table]
                 );
-                return;
+                return false;
             }
         }
 
         // ── Step 3: backfill existing communities ───────────────────────
-        bcc_onchain_backfill_collections_provisioning_state();
+        // The backfill's result IS the completion answer. A backfill that
+        // could not walk the table, or whose postcondition did not hold,
+        // leaves the schema in a shape the version must not claim.
+        return bcc_onchain_backfill_collections_provisioning_state();
     } finally {
         \BCC\Core\DB\AdvisoryLock::release(BCC_TRUST_PROVISIONING_STATE_LOCK);
     }

@@ -71,15 +71,49 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-import-type CollectionProvisioningRow from CollectionRepository
+ */
 final class GatedGroupProvisioningService {
 
     private const DEFAULT_MIN_BALANCE = 1;
     private const TITLE_PREFIX        = 'Holders: ';
 
-    /** Audit actions. Both fit VARCHAR(50). */
+    /** Audit actions. All three fit VARCHAR(50). */
     public const AUDIT_PROVISIONED  = 'admin_vc_community_provisioned';
     public const AUDIT_FAILED       = 'admin_vc_community_provision_failed';
     public const AUDIT_COMPENSATED  = 'admin_vc_provisioning_compensated';
+
+    /**
+     * Did the durable record of this outcome actually commit?
+     *
+     * ── WHY THIS IS THREE VALUES AND NOT A BOOL ─────────────────────────
+     * "The failure is on the record" and "the failure record could not be
+     * committed" call for different operator responses — the second is a
+     * data-loss window, the first is an ordinary refusal. A bool collapses
+     * them, and a bool also cannot say "there was nothing to record", which
+     * is the honest answer when the row was never `requested` in the first
+     * place (PeepSo absent, collection gone). Reporting that third case as
+     * "could not commit" would invent an incident.
+     */
+    public const RECORD_COMMITTED      = 'committed';
+    public const RECORD_UNCOMMITTED    = 'uncommitted';
+    public const RECORD_NOT_APPLICABLE = 'not_applicable';
+
+    /**
+     * Bounded operational errors — infrastructure faults, not collection
+     * outcomes.
+     *
+     * ── WHY THESE ARE NOT ProvisioningFailureCode VALUES ────────────────
+     * A `ProvisioningFailureCode` is a durable statement ABOUT A COLLECTION:
+     * it goes in the row and tells an operator what is wrong with that
+     * collection. "The database did not answer" is not a fact about any
+     * collection — attributing it to one would send someone to inspect a row
+     * that is perfectly fine, and would mark it `failed` for something it did
+     * not do. These stay in the run report and never touch a row.
+     */
+    public const ERROR_QUEUE_UNREADABLE = 'provisioning_queue_unreadable';
+    public const ERROR_ROW_UNREADABLE   = 'provisioning_row_unreadable';
 
     /**
      * Process collections with RECORDED INTENT, in bounded batches.
@@ -95,7 +129,12 @@ final class GatedGroupProvisioningService {
      * with no cursor, which meant the daily sweep re-read the same first 200
      * rows forever and anything past id-rank 200 was never reached.
      *
-     * @return array{created: int, skipped: int, failed: int, errors: list<string>}
+     * @return array{created: int, skipped: int, failed: int, errors: list<string>,
+     *               available: bool}
+     *         `available` is false when a provisioning read FAILED. It is
+     *         the difference between "the queue is empty" and "the queue
+     *         could not be asked", and the caller must not report the
+     *         second as a clean run.
      */
     public function processRequested(int $limit = 200): array {
         $created = 0;
@@ -106,7 +145,7 @@ final class GatedGroupProvisioningService {
         if (!class_exists('\\PeepSoGroup')) {
             $errors[] = 'PeepSoGroup class not available; PeepSo Groups inactive?';
             \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'peepso_absent');
-            return ['created' => 0, 'skipped' => 0, 'failed' => 0, 'errors' => $errors];
+            return ['created' => 0, 'skipped' => 0, 'failed' => 0, 'errors' => $errors, 'available' => true];
         }
 
         $limit     = max(1, min(200, $limit));
@@ -118,7 +157,39 @@ final class GatedGroupProvisioningService {
         // budget caps total work, so neither a stuck row nor a growing queue
         // can turn one cron tick into an unbounded run.
         while ($processed < $limit) {
-            $rows = CollectionRepository::listRequested($cursor, min($batchSize, $limit - $processed));
+            $queue = CollectionRepository::listRequested($cursor, min($batchSize, $limit - $processed));
+
+            // ⚠ A queue that could not be READ is not an empty queue.
+            //
+            // Breaking out here as if it were would report a clean zero for a
+            // sweep whose SELECT never executed. The run stops, says so, and
+            // makes no PeepSo call on the strength of an answer it never got.
+            if (!$queue['available']) {
+                $errors[] = self::ERROR_QUEUE_UNREADABLE;
+
+                // The repository logs the database's own complaint. This logs
+                // the OPERATIONAL consequence — a sweep abandoned part-way,
+                // with the work already done named so an operator can tell a
+                // partial run from a run that never started. Short-retention
+                // application log only; the durable record stays bounded, and
+                // no collection is named because none is implicated.
+                Logger::error('[bcc-trust] provisioning sweep ABANDONED — the request queue could not be read', [
+                    'error_code' => self::ERROR_QUEUE_UNREADABLE,
+                    'cursor'     => $cursor,
+                    'processed'  => $processed,
+                    'created'    => $created,
+                ]);
+
+                return [
+                    'created'   => $created,
+                    'skipped'   => $skipped,
+                    'failed'    => $failed,
+                    'errors'    => $errors,
+                    'available' => false,
+                ];
+            }
+
+            $rows = $queue['rows'];
             if ($rows === []) {
                 break;
             }
@@ -138,11 +209,27 @@ final class GatedGroupProvisioningService {
                         break;
                     case 'failed':
                         $failed++;
-                        // Bounded: the failure CODE, never the message.
+                        // Bounded: the failure CODE, never the message. The
+                        // record state rides along because "refused, and on
+                        // the record" and "refused, and the record did not
+                        // commit" are different operational situations.
                         $errors[] = sprintf(
-                            'collection %d: %s',
+                            'collection %d: %s (%s)',
                             (int) $row->id,
-                            (string) ($result['failure_code'] ?? 'unknown')
+                            (string) ($result['failure_code'] ?? 'unknown'),
+                            (string) ($result['failure_record'] ?? self::RECORD_NOT_APPLICABLE)
+                        );
+                        break;
+                    case 'unconfirmed':
+                        // A community exists but reconciling the row could not
+                        // be committed. Counted with the failures so the sweep
+                        // never reports it as clean, and the row stays
+                        // `requested` so the next tick retries it.
+                        $failed++;
+                        $errors[] = sprintf(
+                            'collection %d: reconciliation %s',
+                            (int) $row->id,
+                            self::RECORD_UNCOMMITTED
                         );
                         break;
                     default:
@@ -151,7 +238,7 @@ final class GatedGroupProvisioningService {
             }
         }
 
-        return ['created' => $created, 'skipped' => $skipped, 'failed' => $failed, 'errors' => $errors];
+        return ['created' => $created, 'skipped' => $skipped, 'failed' => $failed, 'errors' => $errors, 'available' => true];
     }
 
     /**
@@ -165,8 +252,15 @@ final class GatedGroupProvisioningService {
      * alone never provisions" true for every entry point at once, rather
      * than a property each caller has to remember to preserve.
      *
-     * @return array{status: string, group_id: int, message: string, failure_code?: string}
-     *         status ∈ {created, exists, skipped, failed}
+     * @return array{status: string, group_id: int, message: string,
+     *               error?: string, failure_code?: string|null,
+     *               failure_record: string,
+     *               failure_recorded: bool, audit_degraded: bool}
+     *         status ∈ {created, exists, skipped, failed, unconfirmed,
+     *         unavailable}. `unconfirmed` means a community exists but
+     *         recording that could not be committed — nothing was created or
+     *         removed. `unavailable` means the database did not answer: we
+     *         learned NOTHING about this collection, and said so.
      */
     public function provisionOne(int $collectionId): array {
         if (!class_exists('\\PeepSoGroup')) {
@@ -174,17 +268,46 @@ final class GatedGroupProvisioningService {
             return $this->fail($collectionId, ProvisioningFailureCode::PEEPSO_ABSENT, 'PeepSo Groups inactive.', 0);
         }
 
-        $row = CollectionRepository::readProvisioningRow($collectionId);
+        $read = CollectionRepository::readProvisioningRow($collectionId);
+
+        // ⚠ AN UNREADABLE ROW IS NOT AN ABSENT COLLECTION.
+        //
+        // Both used to arrive here as `null`. Reporting the fault as
+        // `skipped`/"Collection not found" tells an operator the row is gone
+        // when it is sitting there perfectly intact, and lets a sweep walk
+        // past every row a flaky database declined to hand back — silently,
+        // and counted as a clean pass. Nothing below this point may run: no
+        // PeepSo call, no state write, no audit row, because every one of
+        // them would be a conclusion drawn from an answer we never got.
+        if (!$read['available']) {
+            return [
+                'status'           => 'unavailable',
+                'group_id'         => 0,
+                'message'          => 'The provisioning row could not be read; no conclusion was drawn.',
+                'error'            => self::ERROR_ROW_UNREADABLE,
+                'failure_code'     => null,
+                'failure_record'   => self::RECORD_NOT_APPLICABLE,
+                'failure_recorded' => false,
+                'audit_degraded'   => false,
+            ];
+        }
+
+        $row = $read['row'];
         if ($row === null) {
-            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Collection not found.'];
+            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Collection not found.',
+                'failure_record' => self::RECORD_NOT_APPLICABLE,
+                'failure_recorded' => false, 'audit_degraded' => false];
         }
 
         // ── Gate 1: RECORDED INTENT ─────────────────────────────────────
         if ((string) $row->provisioning_state !== ProvisioningState::REQUESTED) {
             return [
-                'status'   => 'skipped',
-                'group_id' => 0,
-                'message'  => 'No community has been requested for this collection.',
+                'status'           => 'skipped',
+                'group_id'         => 0,
+                'message'          => 'No community has been requested for this collection.',
+                'failure_record'   => self::RECORD_NOT_APPLICABLE,
+                'failure_recorded' => false,
+                'audit_degraded'   => false,
             ];
         }
 
@@ -237,13 +360,14 @@ final class GatedGroupProvisioningService {
         // community and suppress a legitimate retry.
         $existing = GatedGroupRepository::findGroupForCollection($chainId, $canonical);
         if ($existing !== null) {
-            // Backfill semantics: the community exists, so the row should say
-            // so. Recording it is idempotent and closes the window where a
-            // crash between creation and the state write left them disagreeing.
-            $this->markProvisioned($collectionId, (int) $row->provisioning_requested_by ?: null,
-                (string) $row->provisioning_requested_at);
-
-            return ['status' => 'exists', 'group_id' => (int) $existing, 'message' => 'Community already exists.'];
+            return $this->reconcileExistingCommunity(
+                $collectionId,
+                (int) $existing,
+                $chainId,
+                $chainFamily,
+                $canonical,
+                $row
+            );
         }
 
         // ── Gate 5: the OWNER is the administrator who asked ────────────
@@ -337,7 +461,19 @@ final class GatedGroupProvisioningService {
                 }
 
                 $after = CollectionRepository::readProvisioningRow($collectionId);
-                if ($after === null || (string) $after->provisioning_state !== ProvisioningState::PROVISIONED) {
+
+                // An unconfirmable postcondition is not a confirmed one. This
+                // runs INSIDE the transaction, so throwing rolls the whole
+                // write back — which is the only honest response to "we could
+                // not check". Treating an unreadable re-read as a pass would
+                // commit a claim on the strength of a query that never ran.
+                if (!$after['available']) {
+                    throw new \RuntimeException('the postcondition re-read could not be performed');
+                }
+
+                $afterRow = $after['row'];
+                if ($afterRow === null
+                    || (string) $afterRow->provisioning_state !== ProvisioningState::PROVISIONED) {
                     throw new \RuntimeException('provisioning state did not survive its postcondition re-read');
                 }
 
@@ -356,10 +492,18 @@ final class GatedGroupProvisioningService {
             ]);
 
             $this->invalidateGroupCaches($groupId);
-            $this->compensate($groupId, $collectionId, $ownerId, $chainId);
+            $auditOk = $this->compensate($groupId, $collectionId, $ownerId, $chainId);
 
-            return $this->fail($collectionId, ProvisioningFailureCode::GATE_WRITE_REFUSED,
-                'Community creation was rolled back; the gate could not be configured.', 0);
+            return $this->fail(
+                $collectionId,
+                ProvisioningFailureCode::GATE_WRITE_REFUSED,
+                'Community creation was rolled back; the gate could not be configured.',
+                0,
+                // A compensation whose own record could not be committed is
+                // surfaced, not swallowed: the community is gone and nothing
+                // durable says why.
+                $auditOk === false
+            );
         }
 
         // Raw locked/meta writes do not maintain WP's meta cache for us.
@@ -373,7 +517,14 @@ final class GatedGroupProvisioningService {
 
         do_action('bcc_gated_group_provisioned', $groupId, $collectionId, $chainId, $canonical);
 
-        return ['status' => 'created', 'group_id' => $groupId, 'message' => 'Community created.'];
+        return [
+            'status'           => 'created',
+            'group_id'         => $groupId,
+            'message'          => 'Community created.',
+            'failure_record'   => self::RECORD_NOT_APPLICABLE,
+            'failure_recorded' => false,
+            'audit_degraded'   => false,
+        ];
     }
 
     /**
@@ -397,7 +548,7 @@ final class GatedGroupProvisioningService {
      * operator reading the trail knows an e-mail exists for a community that
      * does not.
      */
-    private function compensate(int $groupId, int $collectionId, int $ownerId, int $chainId): void
+    private function compensate(int $groupId, int $collectionId, int $ownerId, int $chainId): bool
     {
         $notes = [];
 
@@ -476,7 +627,26 @@ final class GatedGroupProvisioningService {
             $notifyOn = (bool) \PeepSo::get_option('groups_create_notify_admin', 0);
         }
 
-        AuditLogger::log(
+        // ── CHECKED, but NOT rollback-able ──────────────────────────────
+        //
+        // Every other state-changing PR 6 path uses `logChecked()` inside a
+        // transaction, so a lost record undoes the change. Compensation
+        // cannot do that: the PeepSo group is already deleted, the uploads
+        // directory is already removed, and no database rollback reaches
+        // either. Pretending otherwise would be the worse lie.
+        //
+        // So it is checked for its METADATA — the bounded residue markers are
+        // the whole value of this row — and a failure is SURFACED to the
+        // caller as an audit degradation rather than swallowed. The
+        // provisioning result carries `audit_degraded`, and the operator
+        // sees it. `logChecked()`'s own DegradationMetrics behaviour covers
+        // the subsystem-level signal; PR 6 adds no new event.
+        //
+        // ⚠ `notes` was the original key for the cleanup markers. It is one of
+        // AuditMeta's 22 free-text keys, so its VALUE would have been replaced
+        // by `{omitted, len}` — the markers would have been destroyed, not
+        // stored. Bounded facts need a key that is not on that list.
+        $auditId = AuditLogger::logChecked(
             self::AUDIT_COMPENSATED,
             $collectionId,
             [
@@ -487,88 +657,316 @@ final class GatedGroupProvisioningService {
                 'failure_code'       => ProvisioningFailureCode::GATE_WRITE_REFUSED,
                 // Bounded machine-readable residue markers, never prose.
                 'error_code'         => $residue === [] ? 'clean' : implode('|', $residue),
-                'notes'              => $notes === [] ? 'none' : implode('|', $notes),
+                'cleanup_markers'    => $notes === [] ? 'none' : implode('|', $notes),
                 'admin_email_sent'   => $notifyOn ? 'possible' : 'no',
             ],
             'collection',
             $ownerId
         );
+
+        if ($auditId === null) {
+            Logger::error(
+                '[bcc-trust] compensation completed but its checked audit could not be written; '
+                . 'the community was removed and there is no durable record of it',
+                ['collection_id' => $collectionId, 'group_id' => $groupId]
+            );
+
+            return false;
+        }
+
+        return true;
     }
 
 
     /**
-     * Record a failure durably, as a BOUNDED CODE.
+     * Record a failure durably, as a BOUNDED CODE, with a CHECKED audit.
      *
-     * The row keeps its requester and its request timestamp, so the failure
-     * stays attributable and a retry knows who authorized it.
+     * ── WHY THE TRANSITION AND ITS AUDIT ARE ONE TRANSACTION ────────────
+     * The first cut moved `requested -> failed` and then called the
+     * UNCHECKED `AuditLogger::log()`. That is exactly backwards for this
+     * path: a `failed` row is a durable statement about a person's request,
+     * and it is the state an operator is most likely to have to explain.
+     * A lost `$meta` encode or a failed insert left that statement standing
+     * with nothing behind it — no requester, no code, no time — precisely
+     * when the trail matters most.
      *
-     * @return array{status: string, group_id: int, message: string, failure_code: string}
+     * Now the state write and `logChecked()` commit together or not at all.
+     * If the record cannot be committed the collection stays `requested`,
+     * which is the honest outcome: as far as anything durable is concerned
+     * the attempt never happened, so the queue will try again.
+     *
+     * ── WHY THE CALLER IS TOLD WHICH ───────────────────────────────────
+     * "The failure is on the record" and "the failure record could not be
+     * committed" call for different operator responses, and collapsing them
+     * is how a data-loss window gets reported as an ordinary refusal. The
+     * result carries a bounded `failure_record` and a `failure_recorded`
+     * bool derived from it.
+     *
+     * The MESSAGE is returned for the operator's screen and logged. It is
+     * never persisted — only the bounded code is durable.
+     *
+     * @param bool $auditDegraded set by a compensation whose own checked
+     *        audit could not be written; surfaced, never swallowed.
+     * @return array{status: string, group_id: int, message: string,
+     *               failure_code: string, failure_record: string,
+     *               failure_recorded: bool, audit_degraded: bool}
      */
-    private function fail(int $collectionId, string $code, string $message, int $groupId): array
-    {
-        $row = CollectionRepository::readProvisioningRow($collectionId);
+    private function fail(
+        int $collectionId,
+        string $code,
+        string $message,
+        int $groupId,
+        bool $auditDegraded = false
+    ): array {
+        $record = self::RECORD_NOT_APPLICABLE;
+
+        $read = CollectionRepository::readProvisioningRow($collectionId);
+
+        // ⚠ NOT_APPLICABLE WOULD BE A LIE HERE.
+        //
+        // "There was nothing to record" and "we could not find out whether
+        // there was anything to record" are different answers, and only the
+        // first is `not_applicable`. Without the row we do not know the
+        // current state, so there is no state to compare-and-swap from and no
+        // requester to attribute — the write is impossible, not inapplicable.
+        // Report it as UNCOMMITTED and write nothing.
+        if (!$read['available']) {
+            Logger::error('[bcc-trust] the provisioning row could not be read; this refusal is NOT durably recorded', [
+                'collection_id' => $collectionId,
+                'failure_code'  => $code,
+                'error_code'    => self::ERROR_ROW_UNREADABLE,
+            ]);
+
+            return [
+                'status'           => 'failed',
+                'group_id'         => $groupId,
+                'message'          => $message,
+                'failure_code'     => $code,
+                'failure_record'   => self::RECORD_UNCOMMITTED,
+                'failure_recorded' => false,
+                'audit_degraded'   => $auditDegraded,
+            ];
+        }
+
+        $row = $read['row'];
 
         if ($row !== null && (string) $row->provisioning_state === ProvisioningState::REQUESTED) {
-            $moved = CollectionRepository::setProvisioningState(
-                $collectionId,
-                ProvisioningState::REQUESTED,
-                ProvisioningState::FAILED,
-                (int) $row->provisioning_requested_by ?: null,
-                $row->provisioning_requested_at !== null ? (string) $row->provisioning_requested_at : null,
-                $code
-            );
+            $requestedBy = (int) $row->provisioning_requested_by ?: null;
+            $requestedAt = $row->provisioning_requested_at !== null
+                ? (string) $row->provisioning_requested_at
+                : null;
+            $chainId     = (int) $row->chain_id;
 
-            if ($moved) {
-                AuditLogger::log(
-                    self::AUDIT_FAILED,
-                    $collectionId,
-                    [
-                        'collection_id'    => $collectionId,
-                        'chain_id'         => (int) $row->chain_id,
-                        'group_id'         => $groupId,
-                        'operator_user_id' => (int) $row->provisioning_requested_by,
-                        'previous_state'   => ProvisioningState::REQUESTED,
-                        'new_state'        => ProvisioningState::FAILED,
-                        'failure_code'     => $code,
-                    ],
-                    'collection',
-                    (int) $row->provisioning_requested_by ?: null
-                );
+            try {
+                TransactionManager::run(function () use (
+                    $collectionId, $code, $groupId, $chainId, $requestedBy, $requestedAt
+                ) {
+                    $moved = CollectionRepository::setProvisioningState(
+                        $collectionId,
+                        ProvisioningState::REQUESTED,
+                        ProvisioningState::FAILED,
+                        $requestedBy,
+                        $requestedAt,
+                        $code
+                    );
+
+                    if (!$moved) {
+                        // Either an illegal transition, a refused write, or a
+                        // race someone else won. None of them is a failure
+                        // this run may claim to have recorded.
+                        throw new \RuntimeException('provisioning state did not move to failed');
+                    }
+
+                    $auditId = AuditLogger::logChecked(
+                        self::AUDIT_FAILED,
+                        $collectionId,
+                        [
+                            'collection_id'    => $collectionId,
+                            'chain_id'         => $chainId,
+                            'group_id'         => $groupId,
+                            'operator_user_id' => (int) $requestedBy,
+                            'previous_state'   => ProvisioningState::REQUESTED,
+                            'new_state'        => ProvisioningState::FAILED,
+                            'failure_code'     => $code,
+                        ],
+                        'collection',
+                        $requestedBy
+                    );
+
+                    if ($auditId === null) {
+                        throw new \RuntimeException('checked audit write failed; rolling back the failure transition');
+                    }
+
+                    return ['ok' => true, 'audit_id' => $auditId];
+                });
+
+                $record = self::RECORD_COMMITTED;
+            } catch (\Throwable $e) {
+                // The state write is rolled back with the audit, so the row is
+                // still `requested`. Say so rather than reporting a durable
+                // failure that does not exist.
+                $record = self::RECORD_UNCOMMITTED;
+
+                Logger::error('[bcc-trust] failure transition rolled back; the refusal is NOT durably recorded', [
+                    'collection_id' => $collectionId,
+                    'failure_code'  => $code,
+                    'error'         => $e->getMessage(),
+                ]);
             }
         }
 
-        // The MESSAGE is returned for the operator's screen and logged; it is
-        // never persisted. Only the code is durable.
         Logger::warning('[bcc-trust] provisioning refused', [
-            'collection_id' => $collectionId,
-            'failure_code'  => $code,
+            'collection_id'  => $collectionId,
+            'failure_code'   => $code,
+            'failure_record' => $record,
         ]);
 
         return [
-            'status'       => 'failed',
-            'group_id'     => $groupId,
-            'message'      => $message,
-            'failure_code' => $code,
+            'status'           => 'failed',
+            'group_id'         => $groupId,
+            'message'          => $message,
+            'failure_code'     => $code,
+            'failure_record'   => $record,
+            'failure_recorded' => $record === self::RECORD_COMMITTED,
+            'audit_degraded'   => $auditDegraded,
         ];
     }
 
     /**
-     * Idempotently record that a community exists for this collection.
+     * A community already exists for this collection: reconcile the row to
+     * `provisioned`, with a checked audit, or claim nothing.
      *
-     * Used when a community is discovered during a retry. Preserves the
-     * requester so attribution survives.
+     * ── WHY THIS IS NOT A ONE-LINE BACKFILL ────────────────────────────
+     * The first cut called a fire-and-forget `markProvisioned()`, ignored
+     * whether the transition happened, wrote no audit, and returned `exists`
+     * regardless. That reported success for a lost race and for a refused
+     * write, and it left a state change with no record of who or when.
+     *
+     * Reconciliation IS a state change — the row moves `requested ->
+     * provisioned` and stops being a queue entry — so it gets the same
+     * treatment as any other: compare-and-swap, checked audit, postcondition
+     * re-read, all in one transaction.
+     *
+     * ── WHAT IT DELIBERATELY DOES NOT DO ───────────────────────────────
+     * It never deletes or modifies the pre-existing community. The community
+     * is the thing that is RIGHT here; only the row is behind. On any
+     * failure the row simply stays `requested` and the next sweep tries
+     * again, which is idempotent because the community is still found.
+     *
+     * @param CollectionProvisioningRow $row the provisioning row read at the
+     *        start of this run
+     * @return array{status: string, group_id: int, message: string,
+     *               failure_code: string|null, failure_record: string,
+     *               failure_recorded: bool, audit_degraded: bool}
      */
-    private function markProvisioned(int $collectionId, ?int $requestedBy, string $requestedAt): void
-    {
-        CollectionRepository::setProvisioningState(
-            $collectionId,
-            ProvisioningState::REQUESTED,
-            ProvisioningState::PROVISIONED,
-            $requestedBy,
-            $requestedAt !== '' ? $requestedAt : null,
-            null
-        );
+    private function reconcileExistingCommunity(
+        int $collectionId,
+        int $groupId,
+        int $chainId,
+        string $chainFamily,
+        string $canonical,
+        object $row
+    ): array {
+        $requestedBy = (int) $row->provisioning_requested_by ?: null;
+        $requestedAt = $row->provisioning_requested_at !== null
+            ? (string) $row->provisioning_requested_at
+            : null;
+
+        try {
+            TransactionManager::run(function () use (
+                $collectionId, $groupId, $chainId, $chainFamily, $canonical, $requestedBy, $requestedAt
+            ) {
+                $moved = CollectionRepository::setProvisioningState(
+                    $collectionId,
+                    ProvisioningState::REQUESTED,
+                    ProvisioningState::PROVISIONED,
+                    $requestedBy,
+                    $requestedAt,
+                    null
+                );
+
+                if (!$moved) {
+                    throw new \RuntimeException('provisioning state did not move from requested');
+                }
+
+                $auditId = AuditLogger::logChecked(
+                    self::AUDIT_PROVISIONED,
+                    $collectionId,
+                    [
+                        'collection_id'    => $collectionId,
+                        'chain_id'         => $chainId,
+                        'chain_family'     => $chainFamily,
+                        // The EXISTING group, not one this run created.
+                        'group_id'         => $groupId,
+                        'operator_user_id' => (int) $requestedBy,
+                        'previous_state'   => ProvisioningState::REQUESTED,
+                        'new_state'        => ProvisioningState::PROVISIONED,
+                    ],
+                    'collection',
+                    $requestedBy
+                );
+
+                if ($auditId === null) {
+                    throw new \RuntimeException('checked audit write failed; rolling back the reconciliation');
+                }
+
+                // ── Postconditions, re-read before commit ───────────────
+                $after = CollectionRepository::readProvisioningRow($collectionId);
+
+                // An unconfirmable postcondition is not a confirmed one. This
+                // runs INSIDE the transaction, so throwing rolls the whole
+                // write back — which is the only honest response to "we could
+                // not check". Treating an unreadable re-read as a pass would
+                // commit a claim on the strength of a query that never ran.
+                if (!$after['available']) {
+                    throw new \RuntimeException('the postcondition re-read could not be performed');
+                }
+
+                $afterRow = $after['row'];
+                if ($afterRow === null
+                    || (string) $afterRow->provisioning_state !== ProvisioningState::PROVISIONED) {
+                    throw new \RuntimeException('provisioning state did not survive its postcondition re-read');
+                }
+
+                $resolved = GatedGroupRepository::findGroupForCollection($chainId, $canonical);
+                if ($resolved !== $groupId) {
+                    throw new \RuntimeException('the collection no longer resolves to the community being reconciled');
+                }
+
+                return ['ok' => true, 'audit_id' => $auditId];
+            });
+        } catch (\Throwable $e) {
+            // Nothing was created and nothing is deleted — the community
+            // stands, the row stays `requested`, and the next sweep retries.
+            Logger::error('[bcc-trust] reconciliation of an existing community rolled back', [
+                'collection_id' => $collectionId,
+                'group_id'      => $groupId,
+                'error'         => $e->getMessage(),
+            ]);
+
+            return [
+                'status'           => 'unconfirmed',
+                'group_id'         => $groupId,
+                'message'          => 'A community already exists, but recording that could not be committed. '
+                    . 'Nothing was created or removed; this will be retried.',
+                'failure_code'     => null,
+                'failure_record'   => self::RECORD_UNCOMMITTED,
+                'failure_recorded' => false,
+                'audit_degraded'   => false,
+            ];
+        }
+
+        return [
+            'status'           => 'exists',
+            'group_id'         => $groupId,
+            'message'          => 'Community already exists.',
+            'failure_code'     => null,
+            'failure_record'   => self::RECORD_NOT_APPLICABLE,
+            'failure_recorded' => false,
+            'audit_degraded'   => false,
+        ];
     }
+
 
     /**
      * The community's owner is the administrator who asked for it.

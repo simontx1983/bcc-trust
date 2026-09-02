@@ -350,7 +350,7 @@ namespace BCC\Trust\Core\Security {
                 ?string $targetType = null,
                 ?int $userId = null
             ): ?int {
-                if (self::$failChecked) {
+                if (self::$failChecked || in_array($action, self::$failCheckedActions, true)) {
                     return null;
                 }
 
@@ -361,10 +361,30 @@ namespace BCC\Trust\Core\Security {
 
             public static bool $failChecked = false;
 
+            /**
+             * Fail only the NAMED audit actions.
+             *
+             * ── WHY A GLOBAL SWITCH IS NOT ENOUGH ───────────────────────
+             * Once PR 6 moved the failure transition and the compensation
+             * onto `logChecked()`, `$failChecked = true` stopped meaning
+             * "the audit for this step fails" and started meaning "every
+             * audit in the process fails". A test that wants to prove
+             * compensation removes the group then cannot observe it: the
+             * compensation's own audit fails too, so the run ends in the
+             * rollback path and the assertion is about a total audit
+             * outage instead. Both behaviours matter and both are tested —
+             * the outage in ProvisioningAuditIntegrityTest, the single-step
+             * failure here — but only if the fault can be aimed.
+             *
+             * @var list<string>
+             */
+            public static array $failCheckedActions = [];
+
             public static function reset(): void
             {
                 self::$rows = [];
                 self::$failChecked = false;
+                self::$failCheckedActions = [];
             }
 
             /** @return list<string> */

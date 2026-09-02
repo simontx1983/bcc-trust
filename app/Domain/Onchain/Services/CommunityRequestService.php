@@ -62,6 +62,19 @@ final class CommunityRequestService
     public const REFUSED_BAD_OPERATOR       = 'operator_unresolved';
 
     /**
+     * The database did not answer.
+     *
+     * ── WHY THIS IS NOT `collection_not_found` ──────────────────────────
+     * `not_found` is a statement ABOUT the collection: it is not there, and
+     * clicking again will not change that. An unreadable row is a statement
+     * about the infrastructure: the collection may be perfectly fine and the
+     * operator should retry. Collapsing the two sends someone hunting for a
+     * row that never went anywhere, and hides an outage behind a plausible
+     * business refusal — the failure class issue #225 describes.
+     */
+    public const REFUSED_UNAVAILABLE        = 'read_unavailable';
+
+    /**
      * Record an administrator's request for a holder community.
      *
      * Idempotent in both directions that matter: asking twice leaves one
@@ -90,7 +103,16 @@ final class CommunityRequestService
             return ['ok' => false, 'status' => 'refused', 'reason' => self::REFUSED_BAD_OPERATOR];
         }
 
-        $row = CollectionRepository::readProvisioningRow($collectionId);
+        $read = CollectionRepository::readProvisioningRow($collectionId);
+
+        // The read failed, so nothing below has been established. Refuse
+        // without writing state and without an audit row: an audit row here
+        // would durably assert something about a collection we never read.
+        if (!$read['available']) {
+            return ['ok' => false, 'status' => 'refused', 'reason' => self::REFUSED_UNAVAILABLE];
+        }
+
+        $row = $read['row'];
         if ($row === null) {
             return ['ok' => false, 'status' => 'refused', 'reason' => self::REFUSED_NOT_FOUND];
         }
@@ -210,7 +232,16 @@ final class CommunityRequestService
             return ['ok' => false, 'status' => 'refused', 'reason' => self::REFUSED_BAD_OPERATOR];
         }
 
-        $row = CollectionRepository::readProvisioningRow($collectionId);
+        $read = CollectionRepository::readProvisioningRow($collectionId);
+
+        // The read failed, so nothing below has been established. Refuse
+        // without writing state and without an audit row: an audit row here
+        // would durably assert something about a collection we never read.
+        if (!$read['available']) {
+            return ['ok' => false, 'status' => 'refused', 'reason' => self::REFUSED_UNAVAILABLE];
+        }
+
+        $row = $read['row'];
         if ($row === null) {
             return ['ok' => false, 'status' => 'refused', 'reason' => self::REFUSED_NOT_FOUND];
         }

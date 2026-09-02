@@ -52,8 +52,13 @@ if ! "$PHP" "${PHP_ARGS[@]}" vendor/bin/phpunit --no-coverage --filter Provision
     exit 2
 fi
 
-if [ -n "$(git status --porcelain -- app tests 2>/dev/null)" ]; then
-    echo "FATAL: working tree has uncommitted changes under app/ or tests/." >&2
+# `includes/` joined the list when the Blocker 5 controls landed: they plant
+# defects in the schema migration and the version-stamp gate, and `restore()`
+# reverts with `git checkout --`, which would silently wipe uncommitted work
+# there. It would also fail outright on an UNTRACKED file, leaving a planted
+# defect behind — the one outcome this script must never produce.
+if [ -n "$(git status --porcelain -- app tests includes 2>/dev/null)" ]; then
+    echo "FATAL: working tree has uncommitted changes under app/, tests/ or includes/." >&2
     echo "       This script edits those files; it will not risk reverting your work." >&2
     exit 2
 fi
@@ -243,6 +248,82 @@ control 'tabs: bounded-subset misclassification' \
                         ORDER BY post_id LIMIT 200
                    ) capped
                )"
+
+# ── Blocker 6: a failed read is not an empty queue ───────────────────────
+
+# 10. The original defect verbatim. `get_results()` hands back an empty
+#     array for a FAILED query exactly as it does for a genuine no-rows
+#     result, so collapsing the two makes a sweep whose SELECT never ran
+#     report a clean zero.
+control 'queue: read failure vs empty' \
+    'ProvisioningReadFailureTest' 'unit' \
+    'app/Domain/Onchain/Repositories/CollectionRepository.php' \
+    "        if (\$readFailed) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] the provisioning queue could not be read; reporting UNAVAILABLE, not empty',
+                ['after_id' => \$afterId, 'db_error' => \$wpdb->last_error]
+            );
+
+            return ['rows' => [], 'available' => false];
+        }" \
+    '        // mutant: a failed read is reported as an empty queue'
+
+# 11. The single-row twin. A fault reported as `available` lets a caller
+#     conclude "no such collection" from a query that never executed.
+control 'row: read failure vs not-found' \
+    'ProvisioningReadFailureTest' 'unit' \
+    'app/Domain/Onchain/Repositories/CollectionRepository.php' \
+    "            return ['row' => null, 'available' => false];" \
+    "            return ['row' => null, 'available' => true];"
+
+# 12. And the service boundary: even with an honest repository, a caller
+#     that folds `unavailable` back into `skipped` re-creates the defect —
+#     the sweep walks past every row a flaky database declined to return.
+control 'provision: unavailable is not skipped' \
+    'ProvisioningReadFailureTest' 'unit' \
+    'app/Domain/Onchain/Services/GatedGroupProvisioningService.php' \
+    "        if (!\$read['available']) {
+            return [
+                'status'           => 'unavailable'," \
+    "        if (false) {
+            return [
+                'status'           => 'skipped',"
+
+# ── Blocker 5: an unfinished migration must not be stamped ───────────────
+
+# 13. The defect itself: stamp unconditionally. The version is a content
+#     hash of files that have not changed, so once it is stamped nothing
+#     will ever bump it again and the migration is never retried.
+control 'schema: completion gates the stamp' \
+    'SchemaCompletionGateIntegrationTest' 'integration' \
+    'includes/database/schema-completion.php' \
+    '        if (!$migrationsComplete) {' \
+    '        if (false) {'
+
+# 14. A migration step that bails must SAY so. Returning true from the
+#     unverifiable-probe branch is the subtler half of the same bug: the
+#     gate above stays intact and is simply told the wrong answer.
+control 'schema: unverified probe reports false' \
+    'SchemaCompletionGateIntegrationTest' 'integration' \
+    'includes/database/schema-collections.php' \
+    "                    '[schema-collections-provisioning] could not determine whether a column exists; treating as UNVERIFIED, not absent',
+                    ['table' => \$table, 'column' => \$column]
+                );
+                return false;" \
+    "                    '[schema-collections-provisioning] could not determine whether a column exists; treating as UNVERIFIED, not absent',
+                    ['table' => \$table, 'column' => \$column]
+                );
+                return true;"
+
+# 15. The write-verification re-read. `update_option()` returning true is
+#     not proof `get_option()` will serve the new value — a stale object
+#     cache makes exactly that combination, and without the re-read the
+#     installer runs on every request forever with nothing reporting it.
+control 'schema: stamp write is verified' \
+    'SchemaCompletionGateIntegrationTest' 'integration' \
+    'includes/database/schema-completion.php' \
+    "        \$reread = get_option('bcc_trust_schema_version', '');" \
+    '        $reread = $computed;'
 
 echo
 echo "killed: $PASS   survivors/errors: $FAIL"
