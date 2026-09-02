@@ -57,6 +57,21 @@ fi
 # reverts with `git checkout --`, which would silently wipe uncommitted work
 # there. It would also fail outright on an UNTRACKED file, leaving a planted
 # defect behind — the one outcome this script must never produce.
+# ── Anchor 2: prove the INTEGRATION harness can run too ──────────────────
+# Added after a stopped local MySQL was found to turn every integration
+# control into a FALSE KILL: the bootstrap exits non-zero before running a
+# single test, the runner sees rc != 0, and reports "killed" for a mutant it
+# never planted meaningfully. That is the same "a guard that scanned nothing
+# is not a guard" failure the unit anchor above already guards against, and
+# it is worse here because it reads as a pass.
+if ! "$PHP" "${PHP_ARGS[@]}" vendor/bin/phpunit -c phpunit-integration.xml.dist \
+        --no-coverage --filter ProvisioningReadFailureIntegrationTest >/dev/null 2>&1; then
+    echo "FATAL: the integration anchor does not pass on a clean tree." >&2
+    echo "       Start the local database (BCC_TEST_DB_PORT, default 10005) and retry." >&2
+    echo "       Refusing to run: every integration control would report a false kill." >&2
+    exit 2
+fi
+
 if [ -n "$(git status --porcelain -- app tests includes 2>/dev/null)" ]; then
     echo "FATAL: working tree has uncommitted changes under app/, tests/ or includes/." >&2
     echo "       This script edits those files; it will not risk reverting your work." >&2
@@ -330,6 +345,34 @@ control 'schema: stamp write is verified' \
     'includes/database/schema-completion.php' \
     "        \$reread = get_option('bcc_trust_schema_version', '');" \
     '        $reread = $computed;'
+
+# ── The CONSUMER boundaries of `unavailable` ─────────────────────────────
+#
+# Controls 10–12 prove the producers are honest. These two prove the honesty
+# survives the callers — it did not, at first: `processRequested()` had no
+# `unavailable` case and fell into `default: $skipped++`, and
+# `ajax_provision_one()` matched no branch and fell through to
+# `wp_send_json_success()`. Both re-created the original defect one layer out,
+# which is exactly the kind of regression a producer-side control cannot see.
+
+# 16. Fold the batch case back into `default` (i.e. count it as skipped and
+#     keep sweeping). Renaming the label is the faithful mutation: the block
+#     stays present and syntactically valid, so what is being tested is that
+#     `unavailable` REACHES it — not merely that the code exists.
+control 'batch: unavailable is not skipped' \
+    'ProvisioningUnavailableConsumersTest' 'unit' \
+    'app/Domain/Onchain/Services/GatedGroupProvisioningService.php' \
+    "                    case 'unavailable':" \
+    "                    case '__mutant_never_matches__':"
+
+# 17. Remove the AJAX error branch, so `unavailable` falls through to
+#     `wp_send_json_success()` again — the operator is told a provisioning
+#     run worked when the database never answered.
+control 'ajax: unavailable is not success' \
+    'ProvisioningUnavailableConsumersTest' 'unit' \
+    'app/Domain/Onchain/Admin/VerifyCollectionsPage.php' \
+    "        if (\$result['status'] === 'unavailable') {" \
+    '        if (false) {'
 
 echo
 echo "killed: $PASS   survivors/errors: $FAIL"

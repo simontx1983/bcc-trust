@@ -312,22 +312,55 @@ namespace BCC\Trust\Onchain\Repositories {
              */
             public static bool $readRowUnavailable = false;
 
+            /**
+             * Arm the row-read fault only for ids ABOVE this one.
+             *
+             * Models a database that degrades PART-WAY through a sweep, which
+             * is the only way to test that counts for work already completed
+             * survive the abort. `$readRowUnavailable` alone fails the very
+             * first row, so a run under it can never have completed work to
+             * preserve.
+             */
+            public static int $readRowUnavailableAfter = 0;
+
             /** @return array{row: object|null, available: bool} */
             public static function readProvisioningRow(int $collectionId, bool $forUpdate = false): array
             {
-                if (self::$readRowUnavailable) {
+                if (self::$readRowUnavailable
+                    || (self::$readRowUnavailableAfter > 0 && $collectionId > self::$readRowUnavailableAfter)
+                ) {
                     return ['row' => null, 'available' => false];
                 }
 
+                return ['row' => self::buildProvisioningRow($collectionId), 'available' => true];
+            }
+
+            /**
+             * Shape a provisioning row without consulting any fault flag.
+             *
+             * ── WHY THIS IS SEPARATE ────────────────────────────────────
+             * `listRequested()` used to build its rows by calling
+             * `readProvisioningRow()`, which coupled two queries that are
+             * completely independent in production — the queue is one SELECT
+             * over the table, the row read is another SELECT by id. The
+             * coupling made one scenario UNREACHABLE in tests: the queue read
+             * succeeding and the per-row re-read then failing, which is the
+             * ordinary shape of a database that degrades mid-sweep. Setting
+             * the row-read fault also emptied the queue, so the sweep never
+             * reached the row and the bug in its `unavailable` handling could
+             * not be observed.
+             */
+            private static function buildProvisioningRow(int $collectionId): ?object
+            {
                 $row = self::$rows[$collectionId] ?? null;
                 if ($row === null) {
-                    return ['row' => null, 'available' => true];
+                    return null;
                 }
 
                 $p = self::$provisioning[$collectionId]
                     ?? ['state' => 'none', 'at' => null, 'by' => null, 'code' => null];
 
-                return ['available' => true, 'row' => (object) [
+                return (object) [
                     'id'                        => (string) $collectionId,
                     'is_verified'               => (string) ((int) ($row->is_verified ?? 0)),
                     'canonical_identifier'      => $row->canonical_identifier ?? null,
@@ -337,7 +370,7 @@ namespace BCC\Trust\Onchain\Repositories {
                     'provisioning_requested_at' => $p['at'],
                     'provisioning_requested_by' => $p['by'] === null ? null : (string) $p['by'],
                     'provisioning_failure_code' => $p['code'],
-                ]];
+                ];
             }
 
             /**
@@ -422,9 +455,12 @@ namespace BCC\Trust\Onchain\Repositories {
                     if ($p['state'] !== 'requested' || $id <= $afterId) {
                         continue;
                     }
-                    $read = self::readProvisioningRow((int) $id);
-                    if ($read['available'] && $read['row'] !== null) {
-                        $out[] = $read['row'];
+                    // Deliberately NOT readProvisioningRow(): the queue is its
+                    // own query and must stay readable when the per-row read
+                    // is not. See buildProvisioningRow().
+                    $built = self::buildProvisioningRow((int) $id);
+                    if ($built !== null) {
+                        $out[] = $built;
                     }
                 }
                 usort($out, static fn($a, $b): int => (int) $a->id <=> (int) $b->id);
@@ -477,6 +513,7 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$stateWrites = [];
                 self::$withdrawals = [];
                 self::$readRowUnavailable = false;
+                self::$readRowUnavailableAfter = 0;
                 self::$listRequestedUnavailable = false;
             }
         }

@@ -232,6 +232,52 @@ final class GatedGroupProvisioningService {
                             self::RECORD_UNCOMMITTED
                         );
                         break;
+                    case 'unavailable':
+                        // ⚠ NOT created, NOT skipped, NOT failed — and the
+                        // sweep stops here.
+                        //
+                        // `default: $skipped++` used to swallow this, which
+                        // reproduced the exact defect the producer side was
+                        // fixed for, one layer out: a row the database
+                        // declined to hand back was counted as "nothing to do
+                        // for this one" and the run went on to report
+                        // `available => true`. An honest repository is worth
+                        // nothing if its caller launders the answer.
+                        //
+                        // Continuing would be worse than stopping. The fault
+                        // is almost certainly not specific to this row, so
+                        // the next iterations would keep calling PeepSo on
+                        // rows whose state was equally unreadable — and the
+                        // cursor would advance past all of them, so the queue
+                        // would quietly lose them until someone re-requested.
+                        //
+                        // Counts for work ALREADY completed in this run are
+                        // preserved and returned: those communities really
+                        // were created, and discarding that would misreport a
+                        // partial run as a run that never started.
+                        $errors[] = self::ERROR_ROW_UNREADABLE;
+
+                        // The collection is deliberately NOT named. Nothing
+                        // is known to be wrong with it — the database did not
+                        // answer — and putting an id here would send an
+                        // operator to inspect a row that is fine. The
+                        // repository has already logged the id it could not
+                        // read, which is where a diagnostic belongs.
+                        Logger::error('[bcc-trust] provisioning sweep ABANDONED — a queued row could not be read', [
+                            'error_code' => self::ERROR_ROW_UNREADABLE,
+                            'processed'  => $processed,
+                            'created'    => $created,
+                            'skipped'    => $skipped,
+                            'failed'     => $failed,
+                        ]);
+
+                        return [
+                            'created'   => $created,
+                            'skipped'   => $skipped,
+                            'failed'    => $failed,
+                            'errors'    => $errors,
+                            'available' => false,
+                        ];
                     default:
                         $skipped++;
                 }

@@ -915,6 +915,31 @@ final class VerifyCollectionsPage
 
         $result = OnchainPlugin::instance()->gatedGroupProvisioningService()->provisionOne($collectionId);
 
+        // ── THE READ FAILED: NO CONCLUSION WAS REACHED ──────────────────
+        // Handled BEFORE the failed/skipped/unconfirmed block, and returning
+        // an error rather than success, because `unavailable` is not an
+        // outcome for this collection — it is the absence of one. The
+        // previous code matched neither branch and fell through to
+        // `wp_send_json_success()`, so an operator whose database had just
+        // declined to answer was told the action had worked.
+        //
+        // ⚠ AND NO DURABLE AUDIT ROW.
+        // `admin_vc_community_provision_failed` is a durable statement that
+        // provisioning was attempted and refused FOR THIS COLLECTION. The
+        // database read established nothing of the sort: no PeepSo call was
+        // made, no state was written, and the collection may be in perfect
+        // order. Writing that row would put a permanent, misleading claim in
+        // the activity log for an infrastructure hiccup — and it is the trail
+        // someone reads months later when asking why a community was refused.
+        // The fault belongs in the short-retention application log, which the
+        // repository already wrote.
+        if ($result['status'] === 'unavailable') {
+            wp_send_json_error([
+                'message' => 'The collection could not be read just now, so nothing was attempted. '
+                    . 'No community was created and no state was changed. Please try again.',
+            ]);
+        }
+
         if ($result['status'] === 'failed'
             || $result['status'] === 'skipped'
             || $result['status'] === 'unconfirmed'
