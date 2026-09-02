@@ -121,6 +121,64 @@ final class CosmwasmOneShotCliTest extends TestCase
     }
 
     /**
+     * A confirmed invocation with NO operator. Executing must refuse it.
+     *
+     * Without this, a mutation removing the `--user-id` guard SURVIVES —
+     * every other test supplies the flag, so nothing exercises its absence.
+     */
+    public function testExecutingWithoutAnOperatorIsRefused(): void
+    {
+        $this->arrange();
+
+        $code = $this->invoke([
+            'chain'   => (string) self::CHAIN,
+            'once'    => true,
+            'confirm' => self::TOKEN,
+        ]);
+
+        self::assertSame(
+            CosmwasmOneShotDiscoveryCommand::EXIT_INVALID_ARGS,
+            $code,
+            'a shell session has no WordPress user; the operator must be named'
+        );
+        self::assertStringContainsString('--user-id', \WP_CLI::output());
+        self::assertSame(
+            [],
+            \BCC\Trust\Onchain\Repositories\DiscoveryRunRepository::$rows,
+            'and no run may be recorded for an unauthorized invocation'
+        );
+    }
+
+    /**
+     * A pass that never started is NOT a completed scan.
+     *
+     * The ledger's STATUS is what an operator reads, so recording `succeeded`
+     * for a locked pass would be exactly the lie the executor's status split
+     * exists to prevent. Asserting the ROW — not only the exit code — is what
+     * lets the mutation control kill: the exit code is derived from the stop
+     * reason, which stays correct either way.
+     */
+    public function testALockedPassIsRecordedAsFailedInTheLedger(): void
+    {
+        $this->arrange();
+        $this->queueOneCleanCodePage();
+        \BCC\Core\DB\AdvisoryLock::$acquirable = false;
+
+        $this->invoke($this->executeArgs());
+
+        $rows = \BCC\Trust\Onchain\Repositories\DiscoveryRunRepository::$rows;
+        self::assertCount(1, $rows, 'the run is still recorded — it was genuinely requested');
+
+        $run = reset($rows);
+        self::assertSame('failed', $run['status'], 'a pass that never ran did not succeed');
+        self::assertSame(
+            \BCC\Trust\Onchain\Support\CosmwasmPassStopReason::LOCK_CONTENDED,
+            $run['stop_reason'],
+            'and the stop reason still says exactly why'
+        );
+    }
+
+    /**
      * The full, valid, EXECUTING invocation.
      *
      * PR 7A added `--user-id`: a discovery pass is now recorded in the run

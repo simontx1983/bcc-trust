@@ -215,15 +215,20 @@ control 'ledger: no market column' \
     "        collections_denied INT UNSIGNED NOT NULL DEFAULT 0,
         floor_price DECIMAL(20,8) DEFAULT NULL,"
 
-# 8. User id 0 is the ABSENCE of an identity. Accepting it attributes a scan
-#    to nobody.
-control 'service: user id 0 refused' \
+# 8. An unknown user is not an administrator.
+#
+#    ⚠ The `$operatorId <= 0` guard is NOT separately killable, and saying so
+#    is more useful than pretending otherwise: WordPress returns false from
+#    get_userdata(0) anyway, so a mutant weakening only that line changes no
+#    behaviour. Belt-and-braces is right to keep and dishonest to claim a test
+#    for, so this control targets the check that actually decides.
+control 'service: the operator must exist' \
     'DiscoveryRunServiceTest' 'unit' \
     'app/Domain/Onchain/Services/DiscoveryRunService.php' \
-    "        if (\$operatorId <= 0) {
+    "        if (get_userdata(\$operatorId) === false) {
             return null;
         }" \
-    "        if (\$operatorId < 0) {
+    "        if (false) {
             return null;
         }"
 
@@ -279,7 +284,7 @@ control 'executor: locked is not success' \
 # 14. The CLI pins INCREMENTAL so a backfill stays unreachable from a
 #     terminal. Removing the pin lets the server choose historical.
 control 'cli: incremental is pinned' \
-    'NftDiscoveryBoundaryTest' 'unit' \
+    'CosmwasmOneShotCliTest' 'unit' \
     'app/Domain/Onchain/CLI/CosmwasmOneShotDiscoveryCommand.php' \
     "            \\BCC\\Trust\\Onchain\\ValueObjects\\DiscoveryScanMode::INCREMENTAL" \
     "            null"

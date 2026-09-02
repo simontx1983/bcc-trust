@@ -422,7 +422,17 @@ final class DiscoveryRunLedgerIntegrationTest extends TestCase
         );
 
         // And one live run that must survive regardless of age.
+        //
+        // ⚠ It is given an OLD `finished_at` deliberately. A queued run has
+        // none, so the `finished_at IS NOT NULL` clause would spare it even
+        // if the `active_marker` guard were deleted — and the test would pass
+        // against broken code. Forcing an old finish date makes
+        // `active_marker` the ONLY thing protecting it, which is what the
+        // mutation control needs in order to kill.
         $active = $this->insert();
+        $GLOBALS['wpdb']->query(
+            "UPDATE `{$t}` SET finished_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 400 DAY) WHERE id = {$active['id']}"
+        );
 
         DiscoveryRunRepository::pruneTerminal(200);
 
