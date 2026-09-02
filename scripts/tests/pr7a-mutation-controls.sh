@@ -215,22 +215,26 @@ control 'ledger: no market column' \
     "        collections_denied INT UNSIGNED NOT NULL DEFAULT 0,
         floor_price DECIMAL(20,8) DEFAULT NULL,"
 
-# 8. An unknown user is not an administrator.
+# 8. DELIBERATELY ABSENT — and this note is the point.
 #
-#    ⚠ The `$operatorId <= 0` guard is NOT separately killable, and saying so
-#    is more useful than pretending otherwise: WordPress returns false from
-#    get_userdata(0) anyway, so a mutant weakening only that line changes no
-#    behaviour. Belt-and-braces is right to keep and dishonest to claim a test
-#    for, so this control targets the check that actually decides.
-control 'service: the operator must exist' \
-    'DiscoveryRunServiceTest' 'unit' \
-    'app/Domain/Onchain/Services/DiscoveryRunService.php' \
-    "        if (get_userdata(\$operatorId) === false) {
-            return null;
-        }" \
-    "        if (false) {
-            return null;
-        }"
+# `resolveOperator()` has three guards: `$operatorId <= 0`, the existence
+# check, and the capability check. Two of them are NOT individually killable,
+# and pretending otherwise would put a control here that can never fail:
+#
+#   - `<= 0` is redundant with the existence check, because WordPress returns
+#     false from `get_userdata(0)`.
+#   - the existence check is redundant with the capability check, because
+#     `user_can()` on an unknown id is false.
+#
+# Both were tried; both SURVIVED, which is the honest result rather than a
+# gap. Defence in depth is right to keep and wrong to claim a test for, so
+# the single control that CAN distinguish behaviour — the capability check
+# below, #9 — is the one that guards this method. Removing all three at once
+# would also kill, but a control that deletes an entire method proves only
+# that the method is called.
+#
+# ⚠ If a future change makes any of these three independently observable,
+# add its control here. Do not add one that cannot fail.
 
 # 9. The capability must be checked on the NAMED user, or a context with no
 #    current user satisfies an authorization check.
