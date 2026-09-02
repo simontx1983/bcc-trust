@@ -225,6 +225,28 @@ namespace BCC\Trust\Core\Security {
                 ];
             }
 
+            /**
+             * PR 7A: the CHECKED variant.
+             *
+             * This fake predates `logChecked()`, and its absence made every
+             * checked audit return null — so the ledger-backed CLI refused
+             * every run with `audit_uncommitted`. A fake that cannot
+             * succeed tests only the failure path.
+             *
+             * @param array<string, mixed> $meta
+             */
+            public static function logChecked(
+                string $action,
+                ?int $targetId = null,
+                array $meta = [],
+                ?string $targetType = null,
+                ?int $userId = null
+            ): ?int {
+                self::log($action, $targetId, $meta, $targetType, $userId);
+
+                return count(self::$entries);
+            }
+
             /** @return list<string> every action recorded, in order. */
             public static function actions(): array
             {
@@ -232,6 +254,230 @@ namespace BCC\Trust\Core\Security {
                     static fn(array $entry): string => $entry['action'],
                     self::$entries
                 );
+            }
+        }
+    }
+}
+
+// ── PR 7A: the run ledger the CLI now goes through ──────────────────────
+//
+// The command no longer calls the worker directly — every discovery pass is
+// recorded, so a CLI run is attributable and recoverable like any other.
+// These fakes give the unit suite the ledger surface without a database.
+
+namespace {
+    if (!function_exists('get_userdata')) {
+        /** @return object|false */
+        function get_userdata(int $userId)
+        {
+            // The CLI tests authorize one administrator: user 2.
+            return $userId === 2 ? (object) ['ID' => 2] : false;
+        }
+    }
+
+    if (!function_exists('user_can')) {
+        /** @param mixed $user */
+        function user_can($user, string $cap): bool
+        {
+            $id = is_object($user) ? (int) ($user->ID ?? 0) : (int) $user;
+
+            return $id === 2 && $cap === 'manage_options';
+        }
+    }
+
+    if (!function_exists('wp_generate_uuid4')) {
+        function wp_generate_uuid4(): string
+        {
+            return sprintf('%08x-0000-4000-8000-%012x', random_int(0, 0xffffffff), random_int(0, 0xffffffffffff));
+        }
+    }
+}
+
+namespace BCC\Core\Cron {
+    if (!class_exists(AsyncDispatcher::class, false)) {
+        final class AsyncDispatcher
+        {
+            /** @param list<mixed> $args */
+            public static function enqueueAsync(string $hook, array $args = [], string $group = ''): bool
+            {
+                // The CLI executes inline; dispatch is accepted and ignored.
+                return true;
+            }
+        }
+    }
+}
+
+namespace BCC\Trust\Core\Security {
+    if (!class_exists(TransactionManager::class, false)) {
+        final class TransactionManager
+        {
+            /**
+             * @param callable():mixed $callback
+             * @return mixed
+             */
+            public static function run(callable $callback)
+            {
+                return $callback();
+            }
+
+            public static function isInRunTransaction(): bool { return false; }
+        }
+    }
+}
+
+namespace BCC\Trust\Onchain\Repositories {
+    // ⚠ ChainCheckpointRepository is deliberately NOT faked here. The
+    // delegate below (cosmwasm-discovery-stubs.php) provides a far richer
+    // one, and because every fake in this tree is guarded by class_exists,
+    // whichever is declared FIRST wins — a thin stub here would silently
+    // shadow it and strip the methods the CLI tests rely on.
+
+    if (!class_exists(DiscoveryRunRepository::class, false)) {
+        /**
+         * Minimal in-memory ledger for the CLI tests.
+         *
+         * Enough to carry one run through request -> claim -> terminal, so
+         * the command's own behaviour (flags, confirmation, exit codes,
+         * summary) is what the tests observe. The ledger's own guarantees
+         * are proven against a real MySQL in
+         * DiscoveryRunLedgerIntegrationTest, not here.
+         */
+        final class DiscoveryRunRepository
+        {
+            public const LEASE_SECONDS        = 120;
+            public const MAX_ATTEMPTS         = 3;
+            public const PICKUP_GRACE_SECONDS = 900;
+            public const RETENTION_DAYS       = 90;
+
+            /** @var array<int, array<string, mixed>> */
+            public static array $rows = [];
+            public static int $nextId = 1;
+
+            public static function reset(): void
+            {
+                self::$rows = [];
+                self::$nextId = 1;
+            }
+
+            /** @return array{id: int, run_uuid: string}|null */
+            public static function insertQueued(
+                string $jobKind,
+                string $scanMode,
+                int $chainId,
+                int $requestedBy,
+                ?int $retryOfRunId = null
+            ): ?array {
+                foreach (self::$rows as $row) {
+                    if ($row['chain_id'] === $chainId && $row['active_marker'] !== null) {
+                        return null;
+                    }
+                }
+
+                $id   = self::$nextId++;
+                $uuid = wp_generate_uuid4();
+
+                self::$rows[$id] = [
+                    'id' => $id, 'run_uuid' => $uuid, 'job_kind' => $jobKind,
+                    'scan_mode' => $scanMode, 'chain_id' => $chainId,
+                    'status' => 'queued', 'active_marker' => 1,
+                    'requested_by' => $requestedBy, 'attempt_count' => 0,
+                    'retry_of_run_id' => $retryOfRunId, 'audit_degraded' => 0,
+                    'stop_reason' => null, 'error_code' => null, 'partial' => 0,
+                    'requests_used' => 0, 'pages_fetched' => 0, 'families_seen' => 0,
+                    'contracts_seen' => 0, 'collections_emitted' => 0,
+                    'collections_denied' => 0,
+                ];
+
+                return ['id' => $id, 'run_uuid' => $uuid];
+            }
+
+            public static function findActive(string $jobKind, int $chainId): ?object
+            {
+                foreach (self::$rows as $row) {
+                    if ($row['chain_id'] === $chainId && $row['active_marker'] !== null) {
+                        return (object) $row;
+                    }
+                }
+
+                return null;
+            }
+
+            public static function findById(int $runId): ?object
+            {
+                return isset(self::$rows[$runId]) ? (object) self::$rows[$runId] : null;
+            }
+
+            public static function claim(int $runId): ?string
+            {
+                if (($self = self::$rows[$runId] ?? null) === null || $self['status'] !== 'queued') {
+                    return null;
+                }
+
+                self::$rows[$runId]['status'] = 'running';
+                self::$rows[$runId]['attempt_count']++;
+
+                return 'lease-' . $runId;
+            }
+
+            /** @param array<string, int> $counts */
+            public static function markSucceeded(
+                int $runId,
+                string $leaseToken,
+                string $stopReason,
+                bool $partial,
+                array $counts = []
+            ): bool {
+                if (($self = self::$rows[$runId] ?? null) === null || $self['status'] !== 'running') {
+                    return false;
+                }
+
+                self::$rows[$runId] = array_merge(self::$rows[$runId], [
+                    'status' => 'succeeded', 'active_marker' => null,
+                    'stop_reason' => $stopReason, 'partial' => $partial ? 1 : 0,
+                ], array_map('intval', $counts));
+
+                return true;
+            }
+
+            public static function markFailed(
+                int $runId,
+                string $leaseToken,
+                string $errorCode,
+                ?string $stopReason = null
+            ): bool {
+                if (($self = self::$rows[$runId] ?? null) === null || $self['status'] !== 'running') {
+                    return false;
+                }
+
+                self::$rows[$runId]['status'] = 'failed';
+                self::$rows[$runId]['active_marker'] = null;
+                self::$rows[$runId]['error_code'] = $errorCode;
+                self::$rows[$runId]['stop_reason'] = $stopReason;
+
+                return true;
+            }
+
+            public static function markCancelled(int $runId): bool
+            {
+                if (($self = self::$rows[$runId] ?? null) === null || $self['status'] !== 'queued') {
+                    return false;
+                }
+
+                self::$rows[$runId]['status'] = 'cancelled';
+                self::$rows[$runId]['active_marker'] = null;
+
+                return true;
+            }
+
+            public static function markAuditDegraded(int $runId): bool
+            {
+                if (!isset(self::$rows[$runId])) {
+                    return false;
+                }
+
+                self::$rows[$runId]['audit_degraded'] = 1;
+
+                return true;
             }
         }
     }

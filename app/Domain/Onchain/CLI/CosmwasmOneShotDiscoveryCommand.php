@@ -255,7 +255,8 @@ if (!defined('ABSPATH')) {
  *     families_pending: int,
  *     contracts_total: int
  * }
- * @phpstan-type Invocation array{ok: true, chain_id: int, confirm: string|null}|array{ok: false, error: string}
+ * @phpstan-type Invocation array{ok: true, chain_id: int, confirm: string|null, user_id: int|null}|array{ok: false, error: string}
+ * @phpstan-import-type DiscoveryRunRow from \BCC\Trust\Onchain\Repositories\DiscoveryRunRepository
  */
 final class CosmwasmOneShotDiscoveryCommand
 {
@@ -316,7 +317,7 @@ final class CosmwasmOneShotDiscoveryCommand
      *
      * @var list<string>
      */
-    private const ALLOWED_FLAGS = ['chain', 'once', 'confirm'];
+    private const ALLOWED_FLAGS = ['chain', 'once', 'confirm', 'user-id'];
 
     /**
      * Run ONE supervised incremental CosmWasm discovery pass.
@@ -487,7 +488,7 @@ final class CosmwasmOneShotDiscoveryCommand
             \WP_CLI::log('');
             \WP_CLI::log('DRY RUN — no network request was made and nothing was written.');
             \WP_CLI::log(sprintf(
-                'To execute this pass: wp bcc-trust cosmwasm run --chain=%d --once --confirm=%s',
+                'To execute this pass: wp bcc-trust cosmwasm run --chain=%d --once --confirm=%s --user-id=<id>',
                 $chainId,
                 $expectedToken
             ));
@@ -507,21 +508,86 @@ final class CosmwasmOneShotDiscoveryCommand
             );
         }
 
-        // ── 6. EXECUTE — EXACTLY ONE PASS ───────────────────────────────
+        // ── 6. AUTHORIZE — A NAMED ADMINISTRATOR, OR NOTHING ────────────
+        // PR 7A: a shell action is never attributed to an arbitrary
+        // administrator, and there is NO non-ledger bypass. The pass goes
+        // through the same durable run ledger the admin surface uses, so a
+        // CLI run is attributable, recoverable and visible in one place.
+        $userId = $parsed['user_id'] ?? null;
+        if (!is_int($userId) || $userId <= 0) {
+            self::fail(
+                'Executing requires --user-id=<id> naming the administrator authorizing this pass. '
+                . 'A shell session has no WordPress user, and user id 0 is not an identity — it is '
+                . 'the absence of one. The named user must hold manage_options.',
+                self::EXIT_INVALID_ARGS
+            );
+        }
+
         $operator = self::operatorFingerprint();
         self::audit('cosmwasm_cli_pass_started', $chainId, $operator, $startedAt, null);
 
-        $budget = new CosmwasmTickBudget();
-        $report = new CosmwasmPassReport();
-
         \WP_CLI::log('');
+        \WP_CLI::log('Recording the run in the discovery ledger…');
+
+        $service = new \BCC\Trust\Onchain\Services\DiscoveryRunService();
+        // ⚠ INCREMENTAL IS PINNED HERE, DELIBERATELY.
+        // This command's contract is that the historical backfill "is NOT on
+        // that path and is not named anywhere in this file" — a test enforces
+        // it. Letting the ledger's server-chooses-mode rule pick would make a
+        // backfill reachable from the one surface documented as unable to
+        // reach it. The Scan button in PR 7 passes no mode and the server
+        // chooses; this command is stricter, as it is everywhere else.
+        $request = $service->request(
+            $chainId,
+            (int) $userId,
+            \BCC\Trust\Onchain\ValueObjects\DiscoveryJobKind::COSMWASM_DISCOVERY,
+            \BCC\Trust\Onchain\ValueObjects\DiscoveryScanMode::INCREMENTAL
+        );
+
+        if (($request['ok'] ?? false) !== true) {
+            $reason = (string) ($request['reason'] ?? 'refused');
+            self::fail(
+                sprintf(
+                    'The run was refused before anything was contacted: %s. '
+                    . 'No ledger row survives and no provider was called.',
+                    $reason
+                ),
+                self::EXIT_NOT_ELIGIBLE
+            );
+        }
+
+        $runId = (int) ($request['run_id'] ?? 0);
+        \WP_CLI::log(sprintf('Run %d recorded (%s).', $runId, (string) ($request['run_uuid'] ?? '')));
         \WP_CLI::log('Running ONE incremental discovery pass…');
 
-        $outcome = CosmwasmDiscoveryWorker::runSupervisedSingleChainPass($chainId, $budget, $report);
+        // Executed inline rather than left to cron: a human is watching this
+        // terminal. The ledger row is what makes the outcome durable whether
+        // or not this process survives to print a summary.
+        $execution  = \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::execute($runId);
+        $ledgerRun  = \BCC\Trust\Onchain\Repositories\DiscoveryRunRepository::findById($runId);
+
+        // ── The LEDGER is the source of truth for what happened ─────────
+        // The executor owns the budget and report the pass actually used, so
+        // a local pair here would print zeros beside a run that did work.
+        // The counts are read back from the row that was just written —
+        // which also means the summary an operator reads is exactly what the
+        // status endpoint will report, rather than a second account of it.
+        // Prefer the LIVE report and budget the executor just used: they carry
+        // the pass's error strings, which the ledger deliberately does not
+        // persist (free text is exactly what PR 5b removed from durable
+        // storage). The ledger-derived versions are the fallback for a run
+        // this process did not execute itself.
+        $budget = ($execution['budget'] ?? null) instanceof CosmwasmTickBudget
+            ? $execution['budget']
+            : self::budgetFromLedger($ledgerRun);
+        $report = ($execution['report'] ?? null) instanceof CosmwasmPassReport
+            ? $execution['report']
+            : self::reportFromLedger($ledgerRun);
+        $outcome = self::outcomeFromLedger($execution, $ledgerRun);
 
         $elapsed      = microtime(true) - $startedTs;
         $summaryAfter = CosmwasmDiscoveryService::chainSummary($chainId);
-        $stopReason   = self::stopReason($outcome, $budget);
+        $stopReason   = self::stopReasonFromLedger($ledgerRun, $outcome, $budget);
         $exitCode     = self::exitCodeFor($outcome, $stopReason);
 
         self::printSummary(self::buildSummary(
@@ -597,7 +663,7 @@ final class CosmwasmOneShotDiscoveryCommand
             return [
                 'ok'    => false,
                 'error' => 'Unknown flag(s): ' . implode(', ', $names)
-                    . '. Accepted: --chain=<id>, --once, --confirm=<token>.',
+                    . '. Accepted: --chain=<id>, --once, --confirm=<token>, --user-id=<id>.',
             ];
         }
 
@@ -648,7 +714,168 @@ final class CosmwasmOneShotDiscoveryCommand
             $confirm = $rawConfirm;
         }
 
-        return ['ok' => true, 'chain_id' => (int) $rawChain, 'confirm' => $confirm];
+        // ── PR 7A: the operator identity ────────────────────────────────
+        // Optional for a DRY RUN (validating a plan needs no authority), and
+        // REQUIRED to execute — enforced at the confirmation gate, not here,
+        // so `--confirm` without `--user-id` fails with a message about
+        // authorization rather than about argument shape.
+        //
+        // Same strict pattern as --chain: a cast would turn "0", " 12" and
+        // "12abc" into something plausible, and user id 0 is not an
+        // administrator identity — it is the absence of one.
+        $userId = null;
+        if (array_key_exists('user-id', $assoc)) {
+            $rawUser = $assoc['user-id'];
+            if (!is_string($rawUser)) {
+                return ['ok' => false, 'error' => '--user-id requires a value, e.g. --user-id=2.'];
+            }
+            if (preg_match('/^[1-9][0-9]{0,9}$/', $rawUser) !== 1) {
+                return [
+                    'ok'    => false,
+                    'error' => sprintf(
+                        '--user-id must be a single positive WordPress user id (got "%s"). '
+                        . 'User id 0 is not an administrator identity.',
+                        $rawUser
+                    ),
+                ];
+            }
+            $userId = (int) $rawUser;
+        }
+
+        return [
+            'ok'       => true,
+            'chain_id' => (int) $rawChain,
+            'confirm'  => $confirm,
+            'user_id'  => $userId,
+        ];
+    }
+
+    /**
+     * Map a ledger-backed execution onto the PASS_* vocabulary the summary,
+     * exit codes and audit trail already speak.
+     *
+     * PR 7A routes the CLI through the run ledger, so the worker's return
+     * value is no longer in scope here. Translating rather than inventing a
+     * second vocabulary keeps one meaning per token — an operator reading
+     * `locked` from the CLI and `locked` from wp-admin is reading the same
+     * fact.
+     *
+     * ⚠ An UNCONFIRMED terminal write maps to PASS_FAILED. We genuinely do
+     * not know whether the result landed, and "do not know" must never be
+     * printed as success.
+     *
+     * @param array{status: string, reason?: string, run_id: int} $execution
+     * @param DiscoveryRunRow|null $run the ledger row, re-read after execution
+     */
+    private static function outcomeFromLedger(array $execution, ?object $run): string
+    {
+        // The STOP REASON is the precise fact, so it decides first. The run's
+        // status says whether the pass completed; the stop reason says why it
+        // ended, and only it can distinguish a peer holding the chain lock
+        // from a chain that refused to prepare from a pass that threw.
+        $stopReason = $run !== null && is_string($run->stop_reason ?? null)
+            ? (string) $run->stop_reason
+            : '';
+
+        switch ($stopReason) {
+            case CosmwasmPassStopReason::LOCK_CONTENDED:
+                return CosmwasmDiscoveryWorker::PASS_LOCKED;
+            case CosmwasmPassStopReason::CHAIN_REFUSED_TO_PREPARE:
+                return CosmwasmDiscoveryWorker::PASS_SKIPPED;
+            case CosmwasmPassStopReason::EXECUTION_FAILED:
+                return CosmwasmDiscoveryWorker::PASS_FAILED;
+        }
+
+        $status = (string) ($execution['status'] ?? '');
+
+        if ($status === 'succeeded') {
+            return CosmwasmDiscoveryWorker::PASS_RAN;
+        }
+
+        if ($status === 'not_claimed') {
+            // Nobody could claim it — the ledger's equivalent of losing the
+            // per-chain advisory lock.
+            return CosmwasmDiscoveryWorker::PASS_LOCKED;
+        }
+
+        if ($run !== null && (string) $run->status === \BCC\Trust\Onchain\ValueObjects\DiscoveryRunStatus::SUCCEEDED) {
+            return CosmwasmDiscoveryWorker::PASS_RAN;
+        }
+
+        return CosmwasmDiscoveryWorker::PASS_FAILED;
+    }
+
+    /**
+     * Rebuild the pass report from the durable counts.
+     *
+     * The ledger stores what the pass did; this shapes it back into the
+     * struct the existing summary printer expects, so one set of numbers
+     * appears in the terminal, in the status endpoint and in the audit row.
+     */
+    /**
+     * Rebuild a budget whose `spent()` matches what the run actually used.
+     *
+     * The executor owns the budget the pass consumed; a fresh one here would
+     * print `requests.used = 0` beside a pass that made fifty calls. The
+     * ledger stores the count, so the budget is replayed to it — the summary
+     * an operator reads is then the same number the status endpoint serves,
+     * rather than a second, quieter account of the same run.
+     *
+     * @param DiscoveryRunRow|null $run
+     */
+    private static function budgetFromLedger(?object $run): CosmwasmTickBudget
+    {
+        $budget = new CosmwasmTickBudget();
+
+        if ($run === null) {
+            return $budget;
+        }
+
+        $used = max(0, (int) ($run->requests_used ?? 0));
+        for ($i = 0; $i < $used && !$budget->exhausted(); $i++) {
+            $budget->spend();
+        }
+
+        return $budget;
+    }
+
+    /** @param DiscoveryRunRow|null $run */
+    private static function reportFromLedger(?object $run): CosmwasmPassReport
+    {
+        $report = new CosmwasmPassReport();
+
+        if ($run === null) {
+            return $report;
+        }
+
+        $report->codePagesFetched   = (int) ($run->pages_fetched ?? 0);
+        $report->familiesClassified = (int) ($run->families_seen ?? 0);
+        $report->contractsClassified = (int) ($run->contracts_seen ?? 0);
+        $report->collectionsEmitted = (int) ($run->collections_emitted ?? 0);
+        $report->collectionsDenied  = (int) ($run->collections_denied ?? 0);
+
+        return $report;
+    }
+
+    /**
+     * Prefer the stop reason the executor actually recorded.
+     *
+     * Falls back to deriving one only when the ledger has none — a run that
+     * failed before it could write a terminal row. Re-deriving from a fresh
+     * empty budget would otherwise report `pass_completed` for a pass that
+     * never ran.
+     */
+    /** @param DiscoveryRunRow|null $run */
+    private static function stopReasonFromLedger(?object $run, string $outcome, CosmwasmTickBudget $budget): string
+    {
+        if ($run !== null) {
+            $stored = $run->stop_reason ?? null;
+            if (is_string($stored) && $stored !== '') {
+                return $stored;
+            }
+        }
+
+        return self::stopReason($outcome, $budget);
     }
 
     /**

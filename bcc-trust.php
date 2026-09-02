@@ -265,6 +265,34 @@ require_once BCC_TRUST_PATH . 'includes/database/migration-runner.php';
 // also defensively tolerant of WP passing one — see its signature.)
 add_action('plugins_loaded', 'bcc_trust_run_pending_migrations', 20, 0);
 
+// ── PR 7A: discovery run ledger ─────────────────────────────────────────
+//
+// Two hooks, deliberately different in kind:
+//
+//   • The EXECUTOR is a ONE-SHOT, fired by AsyncDispatcher only when a
+//     named administrator has already created a run. It is never
+//     scheduled recurrently, and nothing here can create a request.
+//   • The MAINTENANCE sweep is recurring, but it is maintenance: it
+//     re-dispatches existing runs, recovers expired leases and prunes
+//     history. It has no chain-selection logic, so it cannot become
+//     automatic discovery.
+add_action(
+    \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::HOOK,
+    static function ($runId = 0): void {
+        \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::execute((int) $runId);
+    },
+    10,
+    1
+);
+add_action(
+    \BCC\Trust\Onchain\Workers\DiscoveryRunMaintenance::HOOK,
+    static function (): void {
+        \BCC\Trust\Onchain\Workers\DiscoveryRunMaintenance::tick();
+    },
+    10,
+    0
+);
+
 // Onchain schema definitions — table-creation functions used by the
 // activation hook and by the content-hash-gated dbDelta re-run below.
 // The schema-version completion contract. Required FIRST so the gate
@@ -302,6 +330,10 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-chain-nft-capabilities.p
 // must NOT live on wp_bcc_onchain_collections.
 require_once BCC_TRUST_PATH . 'includes/database/schema-cosmwasm-code-families.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-cosmwasm-contracts.php';
+// PR 7A: the durable discovery-run ledger. Execution history for
+// administrator-requested scans — NOT a second progress table: it stores
+// counts of work done and never a cursor.
+require_once BCC_TRUST_PATH . 'includes/database/schema-discovery-runs.php';
 // V2 Phase 1b — Helius webhook replay protection (LRU)
 require_once BCC_TRUST_PATH . 'includes/database/schema-helius-seen-signatures.php';
 // V1.5 §D6 — crypto-blog composer chain-tag join + bcc_onchain_chains.color
@@ -452,6 +484,13 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_add_chains_nft_capability_columns();
     bcc_onchain_create_chain_nft_capabilities_table();
 
+    // PR 7A discovery-run ledger. Verified rather than assumed: its return
+    // value joins the completion signal below, so a dbDelta that silently
+    // skipped a column or the active-run unique index cannot be followed by
+    // a schema-version stamp claiming the schema is current.
+    bcc_onchain_create_discovery_runs_table();
+    $discoveryRunsComplete = bcc_onchain_verify_discovery_runs_schema();
+
     // Signals table is owned by SignalRepository — included here so its
     // column-type migrations run on version bump, not just on fresh
     // activation.
@@ -463,7 +502,10 @@ function bcc_onchain_ensure_schema(): bool {
     // tableExists() call re-probes.
     \BCC\Trust\Core\Database\TableRegistry::flushExistenceCache();
 
-    return $provisioningComplete;
+    // BOTH must be complete. The calls happen above and only their results
+    // are combined here — a migration must never be skipped because an
+    // earlier one failed.
+    return $provisioningComplete && $discoveryRunsComplete;
 }
 
 // Schema migration: re-run dbDelta when any schema file changes.
@@ -1794,6 +1836,10 @@ add_action('plugins_loaded', function (): void {
     // a capability check, POST-only, with a route-and-chain-scoped nonce.
     \BCC\Trust\Onchain\Admin\NftDiscoveryPage::register_actions();
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_ajax();
+    // PR 7A: read-only run status. No UI ships in this PR; the endpoint
+    // exists so the read model is exercised and proven before PR 7
+    // renders it.
+    \BCC\Trust\Onchain\Admin\DiscoveryRunStatusEndpoint::register();
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_actions();
     \BCC\Trust\Onchain\Admin\WebhooksPage::register_actions();
     \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_actions();

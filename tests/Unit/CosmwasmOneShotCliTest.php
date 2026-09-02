@@ -120,10 +120,22 @@ final class CosmwasmOneShotCliTest extends TestCase
         return 0;
     }
 
-    /** The full, valid, EXECUTING invocation. */
+    /**
+     * The full, valid, EXECUTING invocation.
+     *
+     * PR 7A added `--user-id`: a discovery pass is now recorded in the run
+     * ledger, and a ledger row names the administrator who authorized it. A
+     * shell session has no WordPress user, so the operator must say who they
+     * are. User 2 is the administrator the stubs authorize.
+     */
     private function executeArgs(): array
     {
-        return ['chain' => (string) self::CHAIN, 'once' => true, 'confirm' => self::TOKEN];
+        return [
+            'chain'   => (string) self::CHAIN,
+            'once'    => true,
+            'confirm' => self::TOKEN,
+            'user-id' => '2',
+        ];
     }
 
     /** @param array<string, mixed> $payload */
@@ -629,8 +641,26 @@ final class CosmwasmOneShotCliTest extends TestCase
             );
         }
 
-        // The one entry point it DOES use.
-        self::assertStringContainsString('runSupervisedSingleChainPass', $code);
+        // ── HOW THE INVARIANT IS ENFORCED NOW ───────────────────────────
+        // PR 7A routes the command through the durable run ledger, so it no
+        // longer names the pass method directly — the executor does. The
+        // guarantee therefore moved rather than weakened: the command PINS
+        // the scan mode to INCREMENTAL, and the executor only reaches
+        // `runBackfillForChain()` for a HISTORICAL run.
+        //
+        // Asserting the pin is a stronger check than the old string match:
+        // it verifies the mechanism that makes a backfill unreachable, not
+        // merely that one method name appears somewhere in the file.
+        self::assertStringContainsString(
+            'DiscoveryScanMode::INCREMENTAL',
+            $code,
+            'the command must pin the incremental mode, or the executor could run a backfill'
+        );
+        self::assertStringContainsString(
+            'DiscoveryRunExecutor::execute',
+            $code,
+            'and it must go through the ledger, not around it'
+        );
     }
 
     // ── (f) concurrency ─────────────────────────────────────────────────
@@ -726,9 +756,17 @@ final class CosmwasmOneShotCliTest extends TestCase
         $output = \WP_CLI::output();
         self::assertStringContainsString('"stop_reason": "execution_failed"', $output);
         self::assertStringContainsString('"exit_code": 6', $output);
-        // The throw is durable too: the outcome is in the audit action.
+        // The throw is durable too: the outcome is in the audit action —
+        // now recorded twice over, because PR 7A also writes the ledger's
+        // own terminal row. A failed run is as attributable as a successful
+        // one, which is the whole reason the ledger exists.
         self::assertSame(
-            ['cosmwasm_cli_pass_started', 'cosmwasm_cli_pass_failed'],
+            [
+                'cosmwasm_cli_pass_started',
+                'admin_discovery_run_requested',
+                'discovery_run_failed',
+                'cosmwasm_cli_pass_failed',
+            ],
             AuditLogger::actions()
         );
     }
@@ -844,12 +882,32 @@ final class CosmwasmOneShotCliTest extends TestCase
 
         $this->invoke($this->executeArgs());
 
+        // PR 7A: the pass now goes through the durable run ledger, so the
+        // trail carries the ledger's rows too — the authorization the
+        // administrator gave, and the terminal outcome the system recorded.
+        // That is the point of the ledger, not noise: a CLI run is now as
+        // attributable and recoverable as one started from wp-admin.
         self::assertSame(
-            ['cosmwasm_cli_pass_started', 'cosmwasm_cli_pass_ran'],
+            [
+                'cosmwasm_cli_pass_started',
+                'admin_discovery_run_requested',
+                'discovery_run_completed',
+                'cosmwasm_cli_pass_ran',
+            ],
             AuditLogger::actions(),
             'start and outcome are both durable, because the audit table stores the action and not the meta'
         );
-        foreach (AuditLogger::$entries as $entry) {
+
+        // The CLI's own two entries are still chain-scoped. The ledger's are
+        // deliberately scoped to the RUN — a run id is the thing you look up
+        // when asking "what happened on that scan?".
+        $cliEntries = array_values(array_filter(
+            AuditLogger::$entries,
+            static fn(array $e): bool => str_starts_with($e['action'], 'cosmwasm_cli_')
+        ));
+        self::assertCount(2, $cliEntries);
+
+        foreach ($cliEntries as $entry) {
             self::assertSame(self::CHAIN, $entry['target_id']);
             self::assertSame('chain', $entry['target_type']);
             $serialised = (string) json_encode($entry);
