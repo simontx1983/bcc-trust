@@ -91,24 +91,45 @@ final class GatedGroupRepository {
 
         global $wpdb;
 
+        // ⚠ PR 6: the post itself is now joined and filtered.
+        //
+        // This lookup used to match on post meta ALONE, which meant a
+        // trashed or draft group still counted as "a community exists".
+        // Two consequences, both bad in opposite directions: a collection
+        // whose community had been trashed was reported as provisioned and
+        // lost its "Request community" affordance; and compensation after a
+        // failed provisioning could not prove the group was gone, because a
+        // trashed group with surviving meta still answered this query.
+        //
+        // Only a PUBLISHED `peepso-group` is a live community. Every one of
+        // the 28 production gates is published, so the measured effect of
+        // the change is nil — but it is what makes "no live ungated
+        // community remains" a statement this code can actually verify.
+        // `listAllGatedGroupIds()` has always filtered this way; the two are
+        // now consistent.
         $row = $wpdb->get_var($wpdb->prepare(
             "SELECT pm_chain.post_id
                FROM {$wpdb->postmeta} pm_chain
           INNER JOIN {$wpdb->postmeta} pm_kind     ON pm_kind.post_id     = pm_chain.post_id
           INNER JOIN {$wpdb->postmeta} pm_contract ON pm_contract.post_id = pm_chain.post_id
+          INNER JOIN {$wpdb->posts}    p           ON p.ID                = pm_chain.post_id
               WHERE pm_chain.meta_key    = %s
                 AND pm_chain.meta_value  = %d
                 AND pm_kind.meta_key     = %s
                 AND pm_kind.meta_value   = %s
                 AND pm_contract.meta_key = %s
                 AND pm_contract.meta_value COLLATE utf8mb4_bin = %s
+                AND p.post_type          = %s
+                AND p.post_status        = %s
               LIMIT 1",
             self::META_CHAIN_ID,
             $chainId,
             self::META_KIND,
             self::KIND_HOLDERS,
             self::META_CONTRACT,
-            $contractCanonical
+            $contractCanonical,
+            'peepso-group',
+            'publish'
         ));
 
         return $row !== null ? (int) $row : null;
@@ -341,4 +362,82 @@ final class GatedGroupRepository {
 
         return true;
     }
+
+    /**
+     * What is LEFT of a group after a compensating delete.
+     *
+     * -- WHY THIS LIVES IN A REPOSITORY -----------------------------------
+     * It is three raw reads, and raw `$wpdb` belongs in a repository (arch
+     * guardrail 1). It sits HERE rather than in a new class because the gate
+     * meta it checks is this repository's own, and the caller needs one
+     * answer covering all three tables, not three lookups it has to combine.
+     *
+     * -- WHY IT RETURNS MARKERS AND NOT A BOOL ---------------------------
+     * A bare false says "something is wrong" and leaves an operator with
+     * nowhere to start. Each marker names WHICH postcondition failed, and
+     * distinguishes "the check could not be read" from "the thing is still
+     * there" -- an unreadable check is not proof of cleanliness, and
+     * reporting it as such is how a live ungated community would be recorded
+     * as removed.
+     *
+     * @return list<string> empty when the group is provably gone
+     */
+    public static function compensationResidue(int $groupId): array
+    {
+        global $wpdb;
+
+        if ($groupId <= 0) {
+            return ['invalid_group_id'];
+        }
+
+        $residue = [];
+
+        $post = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->posts} WHERE ID = %d",
+            $groupId
+        ));
+        if ($post === null) {
+            $residue[] = 'post_check_unreadable';
+        } elseif ((int) $post > 0) {
+            $residue[] = 'post_remains';
+        }
+
+        $meta = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->postmeta}
+              WHERE post_id = %d AND meta_key IN (%s, %s, %s, %s, %s)",
+            $groupId,
+            self::META_KIND,
+            self::META_CHAIN_ID,
+            self::META_CONTRACT,
+            self::META_MIN_BAL,
+            self::META_COLLECTION
+        ));
+        if ($meta === null) {
+            $residue[] = 'gate_meta_check_unreadable';
+        } elseif ((int) $meta > 0) {
+            $residue[] = 'gate_meta_remains';
+        }
+
+        // PeepSo's own delete cascade does NOT clean the membership row -- it
+        // leaves it for a later `deleteMembersForDeletedGroups()` maintenance
+        // sweep, which is an unbounded global DELETE. So this is checked
+        // explicitly rather than assumed. The table is guarded because PeepSo
+        // Groups may not be installed at all.
+        $membersTable = $wpdb->prefix . 'peepso_group_members';
+        $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $membersTable));
+        if (is_string($exists) && $exists !== '') {
+            $members = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM `{$membersTable}` WHERE gm_group_id = %d",
+                $groupId
+            ));
+            if ($members === null) {
+                $residue[] = 'member_check_unreadable';
+            } elseif ((int) $members > 0) {
+                $residue[] = 'members_remain';
+            }
+        }
+
+        return $residue;
+    }
+
 }

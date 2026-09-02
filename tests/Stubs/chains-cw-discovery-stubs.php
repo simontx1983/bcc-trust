@@ -68,6 +68,22 @@ namespace {
         }
     }
 
+    if (!function_exists('wp_create_nonce')) {
+        /**
+         * Returns a token that ENCODES its own action.
+         *
+         * The Add Collection form mints one nonce per selectable chain and
+         * hangs it on the `<option>`, so the property a render test has to be
+         * able to check is that each option carries a nonce scoped to ITS OWN
+         * chain. A stub returning a constant would make a form that shipped
+         * one shared nonce for every chain look identical to a correct one.
+         */
+        function wp_create_nonce(string $action = '-1'): string
+        {
+            return 'nonce:' . $action;
+        }
+    }
+
     if (!function_exists('wp_json_encode')) {
         /**
          * The confirmation text goes through

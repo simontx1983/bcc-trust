@@ -26,6 +26,62 @@ final class MysqliWpdb
     public int $rows_affected = 0;
     public string $last_error = '';
 
+    /**
+     * Every statement actually sent to the server.
+     *
+     * Exists so a test can assert an N+1 is ABSENT. Counting rows returned
+     * proves nothing about how many round trips produced them, and an
+     * admin list that issues one lookup per row still looks correct until
+     * the page is big enough to time out.
+     */
+    public int $queryCount = 0;
+
+    public function resetQueryCount(): void
+    {
+        $this->queryCount = 0;
+    }
+
+    /**
+     * Make every statement matching this regex fail, as the server would.
+     *
+     * ── WHY FAULT INJECTION AND NOT A MOCK ──────────────────────────────
+     * The migration's whole contract is what it does when a probe, an ALTER
+     * or a backfill read DOESN'T answer — and those branches are unreachable
+     * against a healthy database. A mock would let the test assert the
+     * branch it wrote rather than the branch the code takes: the point here
+     * is that the REAL function, running its REAL SQL against a REAL server,
+     * takes the fail-closed path when one specific statement breaks.
+     *
+     * A failed query returns exactly what mysqli returns — `false` — and
+     * `last_error` is set, so `bcc_onchain_probe_count()` sees `null` and
+     * cannot mistake it for a genuine zero.
+     */
+    public ?string $failQueriesMatching = null;
+
+    /** How many statements the injected fault has actually broken. */
+    public int $injectedFailures = 0;
+
+    public function clearFaultInjection(): void
+    {
+        $this->failQueriesMatching = null;
+        $this->injectedFailures    = 0;
+    }
+
+    private function shouldFail(string $sql): bool
+    {
+        if ($this->failQueriesMatching === null) {
+            return false;
+        }
+
+        if (preg_match($this->failQueriesMatching, $sql) !== 1) {
+            return false;
+        }
+
+        $this->injectedFailures++;
+
+        return true;
+    }
+
     // WP core table-name properties some repo SQL references.
     public string $options;
     public string $users;
@@ -171,6 +227,11 @@ final class MysqliWpdb
             $this->last_error = 'Empty query (prepare() returned an empty string).';
             return false;
         }
+        if ($this->shouldFail($sql)) {
+            $this->last_error = 'injected fault';
+            return false;
+        }
+        $this->queryCount++;
         $result = @$this->db->query($sql);
         if ($result === false) {
             $this->last_error = $this->db->error;
@@ -203,6 +264,18 @@ final class MysqliWpdb
             $this->last_error = 'Empty query (prepare() returned an empty string).';
             return [];
         }
+        if ($this->shouldFail($sql)) {
+            // ⚠ AN EMPTY ARRAY, NOT FALSE — and this is the failure class.
+            // `wpdb::get_results()` hands back `last_result` for a failed
+            // query exactly as it does for a genuine no-rows result, and
+            // returns null only for an empty query string. `last_error` is
+            // the ONLY thing that separates them, which is why every caller
+            // in PR 6 has to consult it. Returning false here would let a
+            // caller notice the failure by its type and never exercise that.
+            $this->last_error = 'injected fault';
+            return [];
+        }
+        $this->queryCount++;
         $res = @$this->db->query($sql);
         if ($res === false || $res === true) {
             if ($res === false) {
@@ -228,6 +301,18 @@ final class MysqliWpdb
     public function get_var(string $sql)
     {
         $this->last_error = '';
+        if ($this->shouldFail($sql)) {
+            // ⚠ NULL, NOT FALSE. Real `wpdb::get_var()` returns null for a
+            // failed query — it never returns false — and the difference is
+            // the whole point of the fault. `bcc_onchain_probe_count()` casts
+            // a non-null to int, so a `false` here becomes 0, and a probe
+            // that never ran reads as "the column is absent": exactly the
+            // conversion these tests exist to forbid. A double that cannot
+            // produce production's failure value tests nothing.
+            $this->last_error = 'injected fault';
+            return null;
+        }
+        $this->queryCount++;
         $res = @$this->db->query($sql);
         if ($res === false || $res === true) {
             if ($res === false) {

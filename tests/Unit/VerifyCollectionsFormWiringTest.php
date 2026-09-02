@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
+use BCC\Trust\Onchain\Services\CollectionStateClassifier;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -75,7 +76,14 @@ final class VerifyCollectionsFormWiringTest extends TestCase
         }
         echo '</tbody></table>';
         echo '</form>';
-        VerifyCollectionsPage::renderRowActionForms(self::ROWS, 2, 'cosmos', '', true, self::HIDDEN);
+        VerifyCollectionsPage::renderRowActionForms(
+            self::ROWS,
+            2,
+            'cosmos',
+            '',
+            CollectionStateClassifier::TAB_VERIFIED_WITH_COMMUNITY,
+            self::HIDDEN
+        );
         echo '</div>';
         $html = (string) ob_get_clean();
 
@@ -150,8 +158,9 @@ final class VerifyCollectionsFormWiringTest extends TestCase
             count(array_unique($ids)),
             'Duplicate form ids would cross-wire one row button to another row form.'
         );
-        // 3 rows × (delete + testquery + exactly one hide-or-unhide) = 9.
-        $this->assertCount(9, $ids);
+        // 3 rows x (delete + testquery + exactly one hide-or-unhide
+        // + exactly one PR 6 community-intent form) = 12.
+        $this->assertCount(12, $ids);
     }
 
     // ── VC-B1: Hide / Unhide wiring ─────────────────────────────────────

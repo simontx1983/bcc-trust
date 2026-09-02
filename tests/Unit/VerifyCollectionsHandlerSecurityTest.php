@@ -47,6 +47,15 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
 
         $_POST = [];
         $_GET  = [];
+
+        // PR 6: every mutation route on this page is POST-only now.
+        // `admin-post.php` dispatches on `$_REQUEST['action']` and
+        // `check_admin_referer()` reads `$_REQUEST['_wpnonce']`, so without
+        // `requirePost()` each route was reachable by GET with a valid nonce —
+        // i.e. from an <img> tag. The default here is POST so the existing
+        // cases keep testing what they were written to test; the GET refusal
+        // is pinned separately by testEveryMutationRouteRefusesGet().
+        $_SERVER['REQUEST_METHOD'] = 'POST';
     }
 
     // ── Nonce isolation: the core of this batch ─────────────────────────
@@ -57,8 +66,8 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
         return [
             'save'       => [VerifyCollectionsPage::ACTION_SAVE, 'handleSavePost'],
             'provision'  => [VerifyCollectionsPage::ACTION_PROVISION, 'handleProvisionPost'],
-            'add'        => [VerifyCollectionsPage::ACTION_ADD, 'handleAddCollectionPost'],
-            'add_cosmos' => [VerifyCollectionsPage::ACTION_ADD_COSMOS, 'handleAddCosmosPost'],
+            'request'    => [VerifyCollectionsPage::ACTION_REQUEST_COMMUNITY, 'handleRequestCommunityPost'],
+            'withdraw'   => [VerifyCollectionsPage::ACTION_WITHDRAW_REQUEST, 'handleWithdrawRequestPost'],
         ];
     }
 
@@ -82,7 +91,7 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
     {
         // Hold a nonce for a DIFFERENT VC-A route.
         $other = $action === VerifyCollectionsPage::ACTION_SAVE
-            ? VerifyCollectionsPage::ACTION_ADD
+            ? VerifyCollectionsPage::ACTION_REQUEST_COMMUNITY
             : VerifyCollectionsPage::ACTION_SAVE;
         \BccAdminTestState::$validNonceAction = $other;
         $_POST['collection_id'] = self::CID;
@@ -116,8 +125,8 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
         foreach ([
             VerifyCollectionsPage::ACTION_SAVE,
             VerifyCollectionsPage::ACTION_PROVISION,
-            VerifyCollectionsPage::ACTION_ADD,
-            VerifyCollectionsPage::ACTION_ADD_COSMOS,
+            VerifyCollectionsPage::ACTION_REQUEST_COMMUNITY,
+            VerifyCollectionsPage::ACTION_WITHDRAW_REQUEST,
             VerifyCollectionsPage::ACTION_DELETE . '_' . self::CID,
             VerifyCollectionsPage::ACTION_TESTQUERY . '_' . self::CID,
         ] as $vcaNonce) {
@@ -180,6 +189,96 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
         $this->assertSame([], \BccAdminTestState::$nonceChecks);
     }
 
+    /**
+     * PR 6: every mutation route this page retains or adds is POST-ONLY.
+     *
+     * ── WHY A NONCE IS NOT ENOUGH ───────────────────────────────────────
+     * `admin-post.php` dispatches on `$_REQUEST['action']`, and
+     * `check_admin_referer()` reads `$_REQUEST['_wpnonce']` — so a route
+     * with no method check is reachable by GET as long as the nonce is in
+     * the query string. A nonce leaks into referrer headers, browser
+     * history and server logs, and a GET-reachable mutation can be fired
+     * from an `<img>` tag. The method check is what makes that impossible
+     * regardless of how the nonce travelled.
+     *
+     * Asserted as a 405 BEFORE any nonce is checked, because the point is
+     * that the request is rejected on its shape, not on its credentials.
+     */
+    #[DataProvider('vcaRoutes')]
+    public function testEveryMutationRouteRefusesGet(string $action, string $method): void
+    {
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        \BccAdminTestState::$validNonceAction = $action;
+        $_GET['collection_id'] = self::CID;
+        $_REQUEST['collection_id'] = self::CID;
+
+        try {
+            VerifyCollectionsPage::$method();
+            $this->fail('Expected a 405 halt for ' . $action);
+        } catch (\BccAdminDie $e) {
+            $this->assertSame(405, $e->status, $action . ' must refuse a GET');
+        }
+
+        $this->assertNoDomainWork();
+        $this->assertSame(
+            [],
+            \BccAdminTestState::$nonceChecks,
+            'the method is checked before the nonce — a GET is refused on its shape'
+        );
+    }
+
+    /**
+     * BLOCKER 4: the read-only CW-721 probe is POST-only too.
+     *
+     * ── WHY A READ-ONLY ROUTE STILL NEEDS THE METHOD CHECK ──────────────
+     * The handler docblock has always said the probe is "kept as POST + PRG
+     * rather than converted to AJAX" precisely BECAUSE it makes an outbound
+     * Cosmos LCD request and replay resistance matters. It never enforced
+     * that. A GET carrying a valid nonce reached the provider — so a nonce
+     * that leaked through a referrer header, browser history or a server log
+     * became a replayable outbound request against a third party, and an
+     * `<img>` tag could fire one per page view.
+     *
+     * Read-only is not the same as free: the cost lands on someone else's
+     * endpoint, and the rate limit is theirs.
+     */
+    public function testTheCwProbeRefusesAGetEvenWithAValidNonce(): void
+    {
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        \BccAdminTestState::$validNonceAction =
+            VerifyCollectionsPage::ACTION_TESTQUERY . '_' . self::CID;
+        $_GET['collection_id']     = self::CID;
+        $_REQUEST['collection_id'] = self::CID;
+
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(self::CID);
+
+        try {
+            VerifyCollectionsPage::handleTestQueryPost();
+            $this->fail('Expected a 405 halt.');
+        } catch (\BccAdminDie $e) {
+            $this->assertSame(405, $e->status);
+        }
+
+        // Zero repository writes.
+        $this->assertNoDomainWork();
+
+        // Zero provider calls — the property the method check exists for.
+        $this->assertSame(
+            [],
+            \BCC\Trust\Onchain\Fetchers\CosmosFetcher::$probes,
+            'a GET must not reach the chain'
+        );
+        $this->assertSame(
+            0,
+            \BCC\Trust\Onchain\Factories\FetcherFactory::$madeCount,
+            'no fetcher may even be constructed'
+        );
+
+        // No success audit, and the nonce was never even consulted: the
+        // request is refused on its SHAPE, before its credentials.
+        $this->assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions());
+        $this->assertSame([], \BccAdminTestState::$nonceChecks);
+    }
     // ── Ordering: no domain work before CSRF validation ─────────────────
 
     public function testDeleteWithBadNonceNeverReachesTheRepository(): void
@@ -568,90 +667,6 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
         );
     }
 
-    /**
-     * The Cosmos add write reported rows, but the row cannot be read back
-     * through the table's uniqueness key. The handler must not fabricate a
-     * success record against a target it cannot name — and, above all, must
-     * not park the CHAIN id in a `collection` target, which would be
-     * indistinguishable from a real collection id in any later forensic query.
-     */
-    public function testCosmosUnresolvedUpsertAuditsTheChainAndWarnsTheOperator(): void
-    {
-        $chainId  = 9;
-        $contract = 'cosmos1unresolved';
-
-        \BCC\Trust\Onchain\Repositories\ChainRepository::reset();
-        \BCC\Trust\Onchain\Fetchers\CosmosFetcher::reset();
-        \BCC\Trust\Onchain\Factories\FetcherFactory::reset();
-
-        \BCC\Trust\Onchain\Repositories\ChainRepository::seed($chainId, 'cosmos', 'cosmos');
-
-        // The write reports success…
-        \BCC\Trust\Onchain\Repositories\CollectionRepository::$upsertWritten = 1;
-        // …but the row is not readable back afterwards.
-        \BCC\Trust\Onchain\Repositories\CollectionRepository::$findByChainContractReturnsNull = true;
-
-        $_POST['bcc_vc_add_chain_id'] = $chainId;
-        $_POST['bcc_vc_add_contract'] = $contract;
-        \BccAdminTestState::$validNonceAction = VerifyCollectionsPage::ACTION_ADD_COSMOS;
-
-        $redirect = null;
-        try {
-            VerifyCollectionsPage::handleAddCosmosPost();
-            $this->fail('The handler must terminate in a PRG redirect.');
-        } catch (\BccAdminRedirect $r) {
-            $redirect = $r;
-        }
-
-        // ── The write was attempted exactly once ────────────────────────
-        $calls = \BCC\Trust\Onchain\Repositories\CollectionRepository::$upsertCalls;
-        $this->assertCount(1, $calls, 'An unresolvable read-back must not trigger a retry write.');
-        $this->assertSame($contract, $calls[0]['rows'][0]['contract_address']);
-        $this->assertSame($chainId, $calls[0]['rows'][0]['chain_id']);
-
-        // ── Exactly one event, and it is the honest one ─────────────────
-        $this->assertSame(
-            ['admin_vc_cosmos_upsert_unresolved'],
-            \BCC\Trust\Core\Security\AuditLogger::actions(),
-            'No success event may be claimed for a row that could not be resolved.'
-        );
-        $row = \BCC\Trust\Core\Security\AuditLogger::$rows[0];
-        $this->assertSame('chain', $row['targetType']);
-        $this->assertSame($chainId, $row['targetId']);
-
-        // ── A chain id must never be stored as a collection target ──────
-        foreach (\BCC\Trust\Core\Security\AuditLogger::$rows as $r) {
-            $this->assertNotSame(
-                'collection',
-                $r['targetType'],
-                'No collection target may be written when no collection id is known.'
-            );
-        }
-
-        // ── The inconsistency is recorded for an engineer ───────────────
-        $errors = \BCC\Core\Log\Logger::ofLevel('error');
-        $this->assertCount(1, $errors);
-        $this->assertSame($chainId, $errors[0]['context']['chain_id']);
-        $this->assertSame($contract, $errors[0]['context']['contract']);
-        $this->assertSame(1, $errors[0]['context']['written']);
-
-        // ── The operator is warned, not congratulated ───────────────────
-        $notices = \BccTransientStore::$data['bcc_vc_notices_' . \BccAdminTestState::$userId] ?? [];
-        $this->assertCount(1, $notices);
-        $this->assertSame('warning', $notices[0]['type']);
-        $this->assertNotSame('success', $notices[0]['type']);
-        $this->assertStringContainsString($contract, (string) $notices[0]['message']);
-
-        // ── PRG: the destination cannot replay the write ────────────────
-        $this->assertSame('add_cosmos', $redirect->args['bcc_vc_done']);
-        foreach (['action', '_wpnonce', 'bcc_vc_add_contract', 'bcc_vc_add_chain_id'] as $key) {
-            $this->assertArrayNotHasKey(
-                $key,
-                $redirect->args,
-                "The redirect destination must not carry {$key}, or a refresh replays the upsert."
-            );
-        }
-    }
 
     // ── Helpers ─────────────────────────────────────────────────────────
 

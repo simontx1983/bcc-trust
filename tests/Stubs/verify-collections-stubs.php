@@ -26,6 +26,76 @@ namespace {
         }
     }
 
+    /**
+     * PR 6: the operator identity checks CommunityRequestService performs.
+     *
+     * It resolves the administrator by id and checks the capability on that
+     * NAMED user rather than via `current_user_can()`, because the same
+     * service runs from the cron where there is no current user. These stubs
+     * therefore have to answer for an id, not for an ambient session.
+     */
+    /**
+     * Records cache busts so a test can assert WHICH keys were dropped.
+     *
+     * `collection_counts_by_chain` must be dropped when a collection ROW is
+     * added (the per-chain census changed) and must NOT be dropped for a
+     * verification or provisioning change — that query counts rows per chain
+     * and reads neither field, so busting it there is pure cache churn.
+     */
+    if (!class_exists('BccObjectCacheSpy')) {
+        final class BccObjectCacheSpy
+        {
+            /** @var list<array{key: int|string, group: string}> */
+            public static array $deleted = [];
+
+            public static function reset(): void
+            {
+                self::$deleted = [];
+            }
+        }
+    }
+
+    if (!function_exists('wp_cache_delete')) {
+        /** @param int|string $key */
+        function wp_cache_delete($key, string $group = ''): bool
+        {
+            \BccObjectCacheSpy::$deleted[] = ['key' => $key, 'group' => $group];
+            return true;
+        }
+    }
+
+    if (!function_exists('clean_post_cache')) {
+        /** @param int|\WP_Post $post */
+        function clean_post_cache($post): void
+        {
+            \BccObjectCacheSpy::$deleted[] = ['key' => is_object($post) ? 0 : (int) $post, 'group' => 'posts'];
+        }
+    }
+
+    if (!function_exists('get_userdata')) {
+        function get_userdata(int $userId)
+        {
+            return \BccAdminTestState::$knownUserIds === null
+                || in_array($userId, \BccAdminTestState::$knownUserIds, true)
+                ? (object) ['ID' => $userId]
+                : false;
+        }
+    }
+
+    if (!function_exists('user_can')) {
+        function user_can($user, string $capability): bool
+        {
+            $id = is_object($user) ? (int) ($user->ID ?? 0) : (int) $user;
+
+            if (\BccAdminTestState::$capableUserIds === null) {
+                return $capability === 'manage_options';
+            }
+
+            return $capability === 'manage_options'
+                && in_array($id, \BccAdminTestState::$capableUserIds, true);
+        }
+    }
+
     if (!function_exists('esc_attr')) {
         function esc_attr(string $text): string
         {
@@ -219,6 +289,214 @@ namespace BCC\Trust\Onchain\Repositories {
                 ];
             }
 
+            // ── PR 6: provisioning intent ──────────────────────────────
+            //
+            // The fake tracks state PER COLLECTION so a test can assert the
+            // real invariants: that a withdrawal never reaches `provisioned`,
+            // and that an illegal transition is refused rather than written.
+
+            /** @var array<int, array{state: string, at: string|null, by: int|null, code: string|null}> */
+            public static array $provisioning = [];
+
+            /** @var list<array{id: int, from: string, to: string, by: int|null, at: string|null, code: string|null}> */
+            public static array $stateWrites = [];
+
+            /** @var list<int> */
+            public static array $withdrawals = [];
+
+            /**
+             * Makes the single-row read FAIL, the way a dropped connection
+             * or a locked table does. Distinct from "no such collection",
+             * which is what an empty `$rows` already models — the point of
+             * the flag is that the two must not be confusable.
+             */
+            public static bool $readRowUnavailable = false;
+
+            /**
+             * Arm the row-read fault only for ids ABOVE this one.
+             *
+             * Models a database that degrades PART-WAY through a sweep, which
+             * is the only way to test that counts for work already completed
+             * survive the abort. `$readRowUnavailable` alone fails the very
+             * first row, so a run under it can never have completed work to
+             * preserve.
+             */
+            public static int $readRowUnavailableAfter = 0;
+
+            /** @return array{row: object|null, available: bool} */
+            public static function readProvisioningRow(int $collectionId, bool $forUpdate = false): array
+            {
+                if (self::$readRowUnavailable
+                    || (self::$readRowUnavailableAfter > 0 && $collectionId > self::$readRowUnavailableAfter)
+                ) {
+                    return ['row' => null, 'available' => false];
+                }
+
+                return ['row' => self::buildProvisioningRow($collectionId), 'available' => true];
+            }
+
+            /**
+             * Shape a provisioning row without consulting any fault flag.
+             *
+             * ── WHY THIS IS SEPARATE ────────────────────────────────────
+             * `listRequested()` used to build its rows by calling
+             * `readProvisioningRow()`, which coupled two queries that are
+             * completely independent in production — the queue is one SELECT
+             * over the table, the row read is another SELECT by id. The
+             * coupling made one scenario UNREACHABLE in tests: the queue read
+             * succeeding and the per-row re-read then failing, which is the
+             * ordinary shape of a database that degrades mid-sweep. Setting
+             * the row-read fault also emptied the queue, so the sweep never
+             * reached the row and the bug in its `unavailable` handling could
+             * not be observed.
+             */
+            private static function buildProvisioningRow(int $collectionId): ?object
+            {
+                $row = self::$rows[$collectionId] ?? null;
+                if ($row === null) {
+                    return null;
+                }
+
+                $p = self::$provisioning[$collectionId]
+                    ?? ['state' => 'none', 'at' => null, 'by' => null, 'code' => null];
+
+                return (object) [
+                    'id'                        => (string) $collectionId,
+                    'is_verified'               => (string) ((int) ($row->is_verified ?? 0)),
+                    'canonical_identifier'      => $row->canonical_identifier ?? null,
+                    'collection_name'           => $row->collection_name ?? null,
+                    'chain_id'                  => (string) ((int) ($row->chain_id ?? 0)),
+                    'provisioning_state'        => $p['state'],
+                    'provisioning_requested_at' => $p['at'],
+                    'provisioning_requested_by' => $p['by'] === null ? null : (string) $p['by'],
+                    'provisioning_failure_code' => $p['code'],
+                ];
+            }
+
+            /**
+             * Forces every guarded state write to lose its race, the way a
+             * concurrent writer moving the row first would. Exists so a test
+             * can prove a lost race is not reported as success.
+             */
+            public static bool $stateWriteRefuses = false;
+
+            public static function setProvisioningState(
+                int $collectionId,
+                string $expectedFrom,
+                string $to,
+                ?int $requestedBy = null,
+                ?string $requestedAt = null,
+                ?string $failureCode = null
+            ): bool {
+                if (self::$stateWriteRefuses) {
+                    return false;
+                }
+
+                $current = self::$provisioning[$collectionId]['state'] ?? 'none';
+
+                // Mirrors the real guarded UPDATE: a row that is not in the
+                // expected state does not move, and the caller is told so.
+                if ($current !== $expectedFrom) {
+                    return false;
+                }
+
+                self::$provisioning[$collectionId] = [
+                    'state' => $to,
+                    'at'    => $requestedAt,
+                    'by'    => $requestedBy,
+                    'code'  => $failureCode,
+                ];
+                self::$stateWrites[] = [
+                    'id'   => $collectionId,
+                    'from' => $expectedFrom,
+                    'to'   => $to,
+                    'by'   => $requestedBy,
+                    'at'   => $requestedAt,
+                    'code' => $failureCode,
+                ];
+
+                return true;
+            }
+
+            public static function withdrawPendingProvisioning(int $collectionId): int
+            {
+                $current = self::$provisioning[$collectionId]['state'] ?? 'none';
+
+                // The real method's WHERE clause names only these two states,
+                // which is what makes `provisioned` unreachable from here.
+                if ($current !== 'requested' && $current !== 'failed') {
+                    return 0;
+                }
+
+                self::$provisioning[$collectionId] =
+                    ['state' => 'none', 'at' => null, 'by' => null, 'code' => null];
+                self::$withdrawals[] = $collectionId;
+
+                return 1;
+            }
+
+            /**
+             * Makes the QUEUE read fail. Seeded requests stay in
+             * `$provisioning`, so a test can prove the sweep did not simply
+             * find an empty queue — it never got to look at a queue that
+             * demonstrably had work in it.
+             */
+            public static bool $listRequestedUnavailable = false;
+
+            /** @return array{rows: list<object>, available: bool} */
+            public static function listRequested(int $afterId = 0, int $limit = 50): array
+            {
+                if (self::$listRequestedUnavailable) {
+                    return ['rows' => [], 'available' => false];
+                }
+
+                $out = [];
+                foreach (self::$provisioning as $id => $p) {
+                    if ($p['state'] !== 'requested' || $id <= $afterId) {
+                        continue;
+                    }
+                    // Deliberately NOT readProvisioningRow(): the queue is its
+                    // own query and must stay readable when the per-row read
+                    // is not. See buildProvisioningRow().
+                    $built = self::buildProvisioningRow((int) $id);
+                    if ($built !== null) {
+                        $out[] = $built;
+                    }
+                }
+                usort($out, static fn($a, $b): int => (int) $a->id <=> (int) $b->id);
+
+                return [
+                    'rows'      => array_slice($out, 0, max(1, min(200, $limit))),
+                    'available' => true,
+                ];
+            }
+
+            /**
+             * A mark the transaction fake can rewind every recorded write to.
+             *
+             * @return array<string, mixed>
+             */
+            public static function writeMark(): array
+            {
+                return [
+                    'bulk'         => count(self::$bulkCalls),
+                    'stateWrites'  => count(self::$stateWrites),
+                    'withdrawals'  => count(self::$withdrawals),
+                    'provisioning' => self::$provisioning,
+                ];
+            }
+
+            /** @param array<string, mixed> $mark */
+            public static function rewindTo(array $mark): void
+            {
+                self::$bulkCalls    = array_slice(self::$bulkCalls, 0, (int) $mark['bulk']);
+                self::$stateWrites  = array_slice(self::$stateWrites, 0, (int) $mark['stateWrites']);
+                self::$withdrawals  = array_slice(self::$withdrawals, 0, (int) $mark['withdrawals']);
+                /** @var array<int, array{state: string, at: string|null, by: int|null, code: string|null}> $prior */
+                $prior              = $mark['provisioning'];
+                self::$provisioning = $prior;
+            }
+
             public static function reset(): void
             {
                 self::$bulkCalls = [];
@@ -230,6 +508,13 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$upsertWritten = 1;
                 self::$upsertCalls = [];
                 self::$findByChainContractReturnsNull = false;
+                self::$provisioning = [];
+                self::$stateWriteRefuses = false;
+                self::$stateWrites = [];
+                self::$withdrawals = [];
+                self::$readRowUnavailable = false;
+                self::$readRowUnavailableAfter = 0;
+                self::$listRequestedUnavailable = false;
             }
         }
     }

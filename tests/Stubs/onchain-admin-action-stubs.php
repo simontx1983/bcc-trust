@@ -76,12 +76,35 @@ namespace {
             /** @var list<array{action: string, arg: string}> */
             public static array $nonceChecks = [];
 
+            /**
+             * PR 6 operator-identity control.
+             *
+             * `null` means "every id resolves" — the default, so existing
+             * tests are unaffected. A list makes `get_userdata()` return
+             * false for anything outside it, which is how a test exercises
+             * "the recorded administrator no longer exists".
+             *
+             * @var list<int>|null
+             */
+            public static ?array $knownUserIds = null;
+
+            /**
+             * Ids that hold `manage_options`. `null` means "everyone does".
+             * Kept separate from $knownUserIds because the two failures are
+             * different: a deleted account and a demoted one.
+             *
+             * @var list<int>|null
+             */
+            public static ?array $capableUserIds = null;
+
             public static function reset(): void
             {
                 self::$can = true;
                 self::$userId = 7;
                 self::$validNonceAction = null;
                 self::$nonceChecks = [];
+                self::$knownUserIds = null;
+                self::$capableUserIds = null;
             }
         }
     }
@@ -309,15 +332,123 @@ namespace BCC\Trust\Core\Security {
                 ];
             }
 
+            /**
+             * PR 6: the CHECKED variant. Returns the inserted row id, or
+             * null when the write could not be made.
+             *
+             * `$failChecked` exists so a test can prove the caller ROLLS BACK
+             * on a failed audit rather than reporting success — the property
+             * that makes an unattributable state change impossible. A fake
+             * that could only succeed would let that guard rot unnoticed.
+             *
+             * @param array<string, mixed> $meta
+             */
+            public static function logChecked(
+                string $action,
+                ?int $targetId = null,
+                array $meta = [],
+                ?string $targetType = null,
+                ?int $userId = null
+            ): ?int {
+                if (self::$failChecked || in_array($action, self::$failCheckedActions, true)) {
+                    return null;
+                }
+
+                self::log($action, $targetId, $meta, $targetType, $userId);
+
+                return count(self::$rows);
+            }
+
+            public static bool $failChecked = false;
+
+            /**
+             * Fail only the NAMED audit actions.
+             *
+             * ── WHY A GLOBAL SWITCH IS NOT ENOUGH ───────────────────────
+             * Once PR 6 moved the failure transition and the compensation
+             * onto `logChecked()`, `$failChecked = true` stopped meaning
+             * "the audit for this step fails" and started meaning "every
+             * audit in the process fails". A test that wants to prove
+             * compensation removes the group then cannot observe it: the
+             * compensation's own audit fails too, so the run ends in the
+             * rollback path and the assertion is about a total audit
+             * outage instead. Both behaviours matter and both are tested —
+             * the outage in ProvisioningAuditIntegrityTest, the single-step
+             * failure here — but only if the fault can be aimed.
+             *
+             * @var list<string>
+             */
+            public static array $failCheckedActions = [];
+
             public static function reset(): void
             {
                 self::$rows = [];
+                self::$failChecked = false;
+                self::$failCheckedActions = [];
             }
 
             /** @return list<string> */
             public static function actions(): array
             {
                 return array_map(static fn(array $r): string => $r['action'], self::$rows);
+            }
+        }
+    }
+
+    if (!class_exists(TransactionManager::class, false)) {
+        /**
+         * PR 6: a transaction fake that actually behaves like one.
+         *
+         * It runs the callback, and on a throw it REWINDS the fake
+         * repositories' recorded writes to the mark taken before the callback
+         * started. Without the rewind, a test asserting "a failed audit rolls
+         * the state change back" would pass against a fake that never rolled
+         * anything back — the mutation controls plant exactly that defect.
+         */
+        final class TransactionManager
+        {
+            public static int $runs = 0;
+            public static int $rollbacks = 0;
+
+            /** @param callable():mixed $callback */
+            public static function run(callable $callback, ?int $retryAttempts = null)
+            {
+                self::$runs++;
+
+                $auditMark = count(AuditLogger::$rows);
+                $repoMark  = \BCC\Trust\Onchain\Repositories\CollectionRepository::writeMark();
+
+                try {
+                    $result = $callback();
+                } catch (\Throwable $e) {
+                    self::$rollbacks++;
+                    AuditLogger::$rows = array_slice(AuditLogger::$rows, 0, $auditMark);
+                    \BCC\Trust\Onchain\Repositories\CollectionRepository::rewindTo($repoMark);
+                    throw $e;
+                }
+
+                // The real TransactionManager converts a bare `false` into an
+                // exception and rolls back; mirroring that here keeps the
+                // "never return false from a callback" contract testable.
+                if ($result === false) {
+                    self::$rollbacks++;
+                    AuditLogger::$rows = array_slice(AuditLogger::$rows, 0, $auditMark);
+                    \BCC\Trust\Onchain\Repositories\CollectionRepository::rewindTo($repoMark);
+                    throw new \Exception('Transaction callback returned false');
+                }
+
+                return $result;
+            }
+
+            public static function isInRunTransaction(): bool
+            {
+                return false;
+            }
+
+            public static function reset(): void
+            {
+                self::$runs = 0;
+                self::$rollbacks = 0;
             }
         }
     }

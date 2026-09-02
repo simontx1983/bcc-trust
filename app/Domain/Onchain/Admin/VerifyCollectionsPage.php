@@ -28,7 +28,11 @@ use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CollectionDemandService;
+use BCC\Trust\Onchain\Services\CollectionStateClassifier;
+use BCC\Trust\Onchain\Services\CommunityRequestService;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
+use BCC\Trust\Onchain\ValueObjects\ProvisioningFailureCode;
+use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -78,10 +82,39 @@ final class VerifyCollectionsPage
      */
     public const ACTION_SAVE       = 'bcc_vc_save';
     public const ACTION_PROVISION  = 'bcc_vc_provision';
-    public const ACTION_ADD        = 'bcc_vc_add_collection';
-    public const ACTION_ADD_COSMOS = 'bcc_vc_add_cosmos';
     public const ACTION_DELETE     = 'bcc_vc_delete';
     public const ACTION_TESTQUERY  = 'bcc_vc_testquery';
+
+    /**
+     * PR 6 per-row community intent.
+     *
+     * Request and Withdraw are two routes for the same reason Hide and
+     * Unhide are: a single "toggle" decides its direction from the state the
+     * page had at RENDER time, so a stale tab or a double-submit applies the
+     * opposite of what the operator is looking at. Here that would mean
+     * withdrawing a request by clicking a button labelled "Request".
+     *
+     * RETRY of a failed provisioning is ACTION_REQUEST_COMMUNITY, not a third
+     * route — `failed -> requested` is the same transition with the same
+     * guards, and a second mutation path is a second place for those guards
+     * to drift.
+     */
+    public const ACTION_REQUEST_COMMUNITY  = 'bcc_vc_request_community';
+    public const ACTION_WITHDRAW_REQUEST   = 'bcc_vc_withdraw_request';
+
+    /**
+     * RETIRED in PR 6: `bcc_vc_add_collection` and `bcc_vc_add_cosmos`.
+     *
+     * They were two divergent manual-intake forms on this page — one over
+     * every active chain with NO on-chain validation for EVM or Solana, one
+     * cosmos-only that always validated; one writing `source='manual'` via
+     * `addManual()`, the other writing a discovery-sourced row via
+     * `bulkUpsert()` so the "Manual" badge never appeared. Both are replaced
+     * by ONE chain-locked entry point in the NFT Discovery control plane
+     * ({@see \BCC\Trust\Onchain\Admin\NftDiscoveryPage}). Neither action is
+     * registered any more, so a stale bookmark or replayed form POST reaches
+     * no handler at all.
+     */
 
     /**
      * VC-B1 admin-post routes: per-row Hide / Unhide.
@@ -181,14 +214,20 @@ final class VerifyCollectionsPage
     {
         add_action('admin_post_' . self::ACTION_SAVE,       [__CLASS__, 'handleSavePost']);
         add_action('admin_post_' . self::ACTION_PROVISION,  [__CLASS__, 'handleProvisionPost']);
-        add_action('admin_post_' . self::ACTION_ADD,        [__CLASS__, 'handleAddCollectionPost']);
-        add_action('admin_post_' . self::ACTION_ADD_COSMOS, [__CLASS__, 'handleAddCosmosPost']);
         add_action('admin_post_' . self::ACTION_DELETE,     [__CLASS__, 'handleDeletePost']);
         add_action('admin_post_' . self::ACTION_TESTQUERY,  [__CLASS__, 'handleTestQueryPost']);
 
         // VC-B1.
         add_action('admin_post_' . self::ACTION_HIDE,       [__CLASS__, 'handleHidePost']);
         add_action('admin_post_' . self::ACTION_UNHIDE,     [__CLASS__, 'handleUnhidePost']);
+
+        // PR 6 community intent.
+        add_action('admin_post_' . self::ACTION_REQUEST_COMMUNITY, [__CLASS__, 'handleRequestCommunityPost']);
+        add_action('admin_post_' . self::ACTION_WITHDRAW_REQUEST,  [__CLASS__, 'handleWithdrawRequestPost']);
+
+        // NOT registered, deliberately: ACTION_ADD / ACTION_ADD_COSMOS. See
+        // the constant block above — Add Collection now lives in one
+        // chain-locked form on the NFT Discovery page.
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -207,6 +246,12 @@ final class VerifyCollectionsPage
     public static function handleSavePost(): void
     {
         AdminActionSupport::requireCapability();
+        // PR 6: every mutation route this PR retains or adds enforces POST.
+        // admin-post.php dispatches on $_REQUEST['action'] and
+        // check_admin_referer() reads $_REQUEST['_wpnonce'], so without this
+        // the route is reachable by GET with a valid nonce — which makes it
+        // reachable from an <img> tag.
+        AdminActionSupport::requirePost();
         AdminActionSupport::requireNonce(self::ACTION_SAVE, '_vc_save_nonce');
 
         self::finish(self::handleSave(), 'save');
@@ -227,30 +272,48 @@ final class VerifyCollectionsPage
     public static function handleProvisionPost(): void
     {
         AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
         AdminActionSupport::requireNonce(self::ACTION_PROVISION, '_vc_provision_nonce');
 
         self::finish(self::handleProvision(), 'provision');
     }
 
-    public static function handleAddCollectionPost(): void
+    /**
+     * Record an administrator's request for a holder community.
+     *
+     * Also the RETRY path for a failed provisioning — same route, same
+     * nonce, same guards.
+     */
+    public static function handleRequestCommunityPost(): void
     {
         AdminActionSupport::requireCapability();
-        AdminActionSupport::requireNonce(self::ACTION_ADD);
+        AdminActionSupport::requirePost();
 
-        self::finish(self::handleAddCollection(), 'add');
+        // Shape first: the nonce action is derived from the id, so it must be
+        // read before the nonce can be checked. Nothing touches the database
+        // until the nonce has proven the request authentic.
+        $collectionId = self::requireCollectionIdShape();
+        AdminActionSupport::requireNonce(self::ACTION_REQUEST_COMMUNITY . '_' . $collectionId);
+
+        self::finish(self::handleCommunityIntent($collectionId, true), 'request');
     }
 
-    public static function handleAddCosmosPost(): void
+    /** Withdraw a PENDING request. Never touches a provisioned community. */
+    public static function handleWithdrawRequestPost(): void
     {
         AdminActionSupport::requireCapability();
-        AdminActionSupport::requireNonce(self::ACTION_ADD_COSMOS);
+        AdminActionSupport::requirePost();
 
-        self::finish(self::handleAddCosmosCollection(), 'add_cosmos');
+        $collectionId = self::requireCollectionIdShape();
+        AdminActionSupport::requireNonce(self::ACTION_WITHDRAW_REQUEST . '_' . $collectionId);
+
+        self::finish(self::handleCommunityIntent($collectionId, false), 'withdraw');
     }
 
     public static function handleDeletePost(): void
     {
         AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
 
         // Shape first — the nonce action is derived from this id, so it has
         // to be read before the nonce can be checked. Nothing touches the
@@ -274,6 +337,19 @@ final class VerifyCollectionsPage
     public static function handleTestQueryPost(): void
     {
         AdminActionSupport::requireCapability();
+
+        // ⚠ The docblock below has always said this route is "kept as POST +
+        // PRG rather than converted to AJAX" BECAUSE it makes an outbound
+        // Cosmos LCD request and replay resistance matters. It never enforced
+        // that, so a GET carrying a valid nonce reached the provider — and a
+        // nonce that leaked through a referrer header, browser history or a
+        // server log became a replayable outbound request against somebody
+        // else's endpoint, one per `<img>` tag render.
+        //
+        // Read-only is not the same as free: the cost and the rate limit are
+        // the chain's, not ours. Checked before the id shape so a GET is
+        // refused on its METHOD (405) rather than on its arguments.
+        AdminActionSupport::requirePost();
 
         $collectionId = self::requireCollectionIdShape();
         AdminActionSupport::requireNonce(self::ACTION_TESTQUERY . '_' . $collectionId);
@@ -392,14 +468,16 @@ final class VerifyCollectionsPage
      *
      * @param list<int>          $rowIds
      * @param array<int, bool>   $hiddenById  row id => is currently hidden
+     * @param array<int, string> $intentById  row id => provisioning state
      */
     public static function renderRowActionForms(
         array $rowIds,
         int $page,
         string $chain,
         string $tokenStandard,
-        bool $isVerified,
-        array $hiddenById = []
+        string $tab,
+        array $hiddenById = [],
+        array $intentById = []
     ): void {
         foreach ($rowIds as $rowId) {
             $rowId = (int) $rowId;
@@ -420,23 +498,91 @@ final class VerifyCollectionsPage
                 <input type="hidden" name="action" value="<?php echo esc_attr($hideRoute); ?>">
                 <input type="hidden" name="collection_id" value="<?php echo $rowId; ?>">
                 <?php wp_nonce_field($hideRoute . '_' . $rowId); ?>
-                <?php self::renderReturnContext($page, $chain, $tokenStandard, $isVerified); ?>
+                <?php self::renderReturnContext($page, $chain, $tokenStandard, $tab); ?>
             </form><?php ?>
             <form id="vc-a-del-<?php echo $rowId; ?>" method="post"
                   action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:none;">
                 <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_DELETE); ?>">
                 <input type="hidden" name="collection_id" value="<?php echo $rowId; ?>">
                 <?php wp_nonce_field(self::ACTION_DELETE . '_' . $rowId); ?>
-                <?php self::renderReturnContext($page, $chain, $tokenStandard, $isVerified); ?>
+                <?php self::renderReturnContext($page, $chain, $tokenStandard, $tab); ?>
             </form>
             <form id="vc-a-test-<?php echo $rowId; ?>" method="post"
                   action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:none;">
                 <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_TESTQUERY); ?>">
                 <input type="hidden" name="collection_id" value="<?php echo $rowId; ?>">
                 <?php wp_nonce_field(self::ACTION_TESTQUERY . '_' . $rowId); ?>
-                <?php self::renderReturnContext($page, $chain, $tokenStandard, $isVerified); ?>
+                <?php self::renderReturnContext($page, $chain, $tokenStandard, $tab); ?>
             </form>
             <?php
+            // PR 6 community intent. Exactly ONE direction is rendered per
+            // row — the one the row is not already in — for the same reason
+            // Hide/Unhide are two routes: a toggle decides its direction from
+            // the state the page had at RENDER time, so a stale tab would
+            // withdraw a request through a button labelled "Request".
+            //
+            // `provisioned` renders NEITHER: there is nothing to request and
+            // nothing an operator may withdraw. That is not a rendering
+            // nicety — `withdraw` refuses `provisioned` at the service and at
+            // the repository too, so this is the third independent place the
+            // same rule holds.
+            $intent = (string) ($intentById[$rowId] ?? ProvisioningState::NONE);
+            if ($intent === ProvisioningState::NONE || $intent === ProvisioningState::FAILED) {
+                $intentRoute = self::ACTION_REQUEST_COMMUNITY;
+            } elseif ($intent === ProvisioningState::REQUESTED) {
+                $intentRoute = self::ACTION_WITHDRAW_REQUEST;
+            } else {
+                $intentRoute = '';
+            }
+
+            if ($intentRoute !== ''):
+            ?>
+            <form id="vc-intent-<?php echo $rowId; ?>" method="post"
+                  action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:none;">
+                <input type="hidden" name="action" value="<?php echo esc_attr($intentRoute); ?>">
+                <input type="hidden" name="collection_id" value="<?php echo $rowId; ?>">
+                <?php wp_nonce_field($intentRoute . '_' . $rowId); ?>
+                <?php self::renderReturnContext($page, $chain, $tokenStandard, $tab); ?>
+            </form>
+            <?php
+            endif;
+        }
+    }
+
+    /**
+     * The per-row community-intent button, as it appears inside the big form.
+     *
+     * Returns silently for a `provisioned` row: no button at all is the
+     * honest rendering, because neither action is available.
+     */
+    public static function renderIntentButton(int $rowId, string $intent): void
+    {
+        switch ($intent) {
+            case ProvisioningState::NONE:
+                ?>
+                <button type="submit" form="vc-intent-<?php echo (int) $rowId; ?>"
+                        class="button button-small button-primary">Request community</button>
+                <?php
+                break;
+
+            case ProvisioningState::FAILED:
+                ?>
+                <button type="submit" form="vc-intent-<?php echo (int) $rowId; ?>"
+                        class="button button-small">Retry request</button>
+                <?php
+                break;
+
+            case ProvisioningState::REQUESTED:
+                ?>
+                <button type="submit" form="vc-intent-<?php echo (int) $rowId; ?>"
+                        class="button button-small">Withdraw request</button>
+                <?php
+                break;
+
+            default:
+                // provisioned, or an unrecognised value. Render nothing
+                // rather than guessing an action.
+                break;
         }
     }
 
@@ -531,14 +677,43 @@ final class VerifyCollectionsPage
         int $page,
         string $chain,
         string $tokenStandard,
-        bool $isVerified
+        string $tab
     ): void {
         printf('<input type="hidden" name="paged" value="%d">', $page);
         printf('<input type="hidden" name="chain" value="%s">', esc_attr($chain));
         printf('<input type="hidden" name="token_standard" value="%s">', esc_attr($tokenStandard));
-        if ($isVerified) {
-            echo '<input type="hidden" name="vstate" value="verified">';
+        // PR 6: carries the four-state tab, not a verified/unverified flag.
+        // Re-resolved on the way out as well as the way in, so a hand-edited
+        // value cannot round-trip an unknown tab back into a URL.
+        printf('<input type="hidden" name="vstate" value="%s">', esc_attr(self::resolveTab($tab)));
+    }
+
+    /**
+     * Map any incoming `vstate` value onto exactly one of the four tabs.
+     *
+     * ── WHY LEGACY VALUES ARE MAPPED, NOT REJECTED ──────────────────────
+     * `vstate` was `verified` | anything-else before PR 6. Bookmarks, the
+     * operator's browser history and the PRG round trip all still carry
+     * those values. `verified` means the tab that now describes the same
+     * rows; everything unrecognised — including the old implicit
+     * "unverified" — collapses to the discovery queue, which is the default
+     * working view and was the old default too.
+     *
+     * Nothing unknown ever reaches the query builder: an unrecognised tab
+     * would otherwise have to be handled somewhere further in, and "somewhere
+     * further in" is where it would eventually mean "no filter at all".
+     */
+    private static function resolveTab(string $raw): string
+    {
+        if (CollectionStateClassifier::isTab($raw)) {
+            return $raw;
         }
+
+        if ($raw === 'verified') {
+            return CollectionStateClassifier::TAB_VERIFIED_WITH_COMMUNITY;
+        }
+
+        return CollectionStateClassifier::TAB_DISCOVERED_UNVERIFIED;
     }
 
     /**
@@ -659,17 +834,27 @@ final class VerifyCollectionsPage
             'nonce'
         );
 
-        if ($verify) {
-            $changed = CollectionRepository::setVerifiedBulk([$collectionId], []);
-        } else {
-            $changed = CollectionRepository::setVerifiedBulk([], [$collectionId]);
+        // PR 6: the AJAX toggle and the bulk save now share ONE writer, so
+        // the "unverify withdraws a pending request" rule cannot hold on one
+        // path and not the other. Writing straight to the repository here was
+        // exactly how that kind of divergence used to happen.
+        $result = OnchainPlugin::instance()->communityRequestService()->applyVerification(
+            $verify ? [$collectionId] : [],
+            $verify ? [] : [$collectionId],
+            get_current_user_id()
+        );
+
+        if (!$result['ok']) {
+            wp_send_json_error(['message' => 'The change was rolled back; nothing was saved.']);
         }
+
+        $changed = $result['changed'];
 
         AdminActionSupport::audit(
             $verify ? 'admin_vc_collection_verified' : 'admin_vc_collection_unverified',
             'collection',
             $collectionId,
-            ['changed' => $changed]
+            ['changed' => $changed, 'withdrawn' => $result['withdrawn']]
         );
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections toggle (ajax)', [
@@ -677,17 +862,41 @@ final class VerifyCollectionsPage
             'collection_id' => $collectionId,
             'verify'        => $verify,
             'changed'       => $changed,
+            'withdrawn'     => $result['withdrawn'],
             'operator'      => get_current_user_id(),
         ]);
 
+        $message = $verify
+            // Say plainly what verification now does and does not do — the
+            // whole point of PR 6 is that this click no longer creates a
+            // community, and an operator who believes otherwise will wait
+            // for one that never arrives.
+            ? 'Marked verified. Verification alone does not create a community — use "Request community".'
+            : 'Marked unverified.';
+
+        if (!$verify && $result['withdrawn'] > 0) {
+            $message .= ' A pending community request was withdrawn. An existing community would not have been removed.';
+        }
+
         wp_send_json_success([
             'verified' => $verify,
-            'message'  => $verify ? 'Marked verified.' : 'Marked unverified.',
+            'message'  => $message,
         ]);
     }
 
     /**
-     * AJAX: provision the holder community for one verified collection.
+     * AJAX: create the holder community for one collection that has a
+     * RECORDED REQUEST.
+     *
+     * ── PR 6: CONVERTED, NOT RETIRED ────────────────────────────────────
+     * This used to be "provision the community for one VERIFIED collection"
+     * — a second path by which verification alone produced a community. It
+     * is now a convenience for running the queue one row early: the intent
+     * gate lives inside `provisionOne()`, which refuses anything not in
+     * `requested`, so this route cannot bypass recorded intent however it is
+     * called. The button is only rendered for rows that are actually
+     * `requested`; reaching it any other way returns "no community has been
+     * requested" and writes nothing.
      */
     public static function ajax_provision_one(): void
     {
@@ -706,22 +915,63 @@ final class VerifyCollectionsPage
 
         $result = OnchainPlugin::instance()->gatedGroupProvisioningService()->provisionOne($collectionId);
 
-        if ($result['status'] === 'error' || $result['status'] === 'skipped') {
+        // ── THE READ FAILED: NO CONCLUSION WAS REACHED ──────────────────
+        // Handled BEFORE the failed/skipped/unconfirmed block, and returning
+        // an error rather than success, because `unavailable` is not an
+        // outcome for this collection — it is the absence of one. The
+        // previous code matched neither branch and fell through to
+        // `wp_send_json_success()`, so an operator whose database had just
+        // declined to answer was told the action had worked.
+        //
+        // ⚠ AND NO DURABLE AUDIT ROW.
+        // `admin_vc_community_provision_failed` is a durable statement that
+        // provisioning was attempted and refused FOR THIS COLLECTION. The
+        // database read established nothing of the sort: no PeepSo call was
+        // made, no state was written, and the collection may be in perfect
+        // order. Writing that row would put a permanent, misleading claim in
+        // the activity log for an infrastructure hiccup — and it is the trail
+        // someone reads months later when asking why a community was refused.
+        // The fault belongs in the short-retention application log, which the
+        // repository already wrote.
+        if ($result['status'] === 'unavailable') {
+            wp_send_json_error([
+                'message' => 'The collection could not be read just now, so nothing was attempted. '
+                    . 'No community was created and no state was changed. Please try again.',
+            ]);
+        }
+
+        if ($result['status'] === 'failed'
+            || $result['status'] === 'skipped'
+            || $result['status'] === 'unconfirmed'
+        ) {
+            // ── WHAT THE SERVICE DID, AND WHAT THIS ROW IS ──────────────
+            // The service writes the durable `failed` state and its CHECKED
+            // audit row in ONE transaction, so either both exist or neither
+            // does. `failure_record` says which — and this admin-surface
+            // trace carries that verbatim rather than assuming the durable
+            // record landed.
+            //
+            // An earlier revision of this comment claimed the service "already
+            // wrote" a checked audit; at the time it wrote an UNCHECKED one
+            // after a separate state write, so a lost encode left a durable
+            // `failed` row with nothing behind it. The code now genuinely
+            // does what this comment says.
+            //
+            // It carries the bounded code, never the message, so no free text
+            // becomes durable here either.
             AdminActionSupport::audit(
                 'admin_vc_community_provision_failed',
                 'collection',
                 $collectionId,
-                ['status' => (string) $result['status']]
+                [
+                    'status'         => (string) $result['status'],
+                    'failure_code'   => (string) ($result['failure_code'] ?? 'none'),
+                    'failure_record' => (string) ($result['failure_record'] ?? 'not_applicable'),
+                    'audit_degraded' => !empty($result['audit_degraded']) ? 'yes' : 'no',
+                ]
             );
             wp_send_json_error(['message' => $result['message']]);
         }
-
-        AdminActionSupport::audit(
-            'admin_vc_community_provisioned',
-            'collection',
-            $collectionId,
-            ['group_id' => (int) ($result['group_id'] ?? 0)]
-        );
 
         wp_send_json_success([
             'status'   => $result['status'],
@@ -759,23 +1009,31 @@ final class VerifyCollectionsPage
             $selectedTokenStandard = '';
         }
 
-        // Verified / Unverified sub-tab. Defaults to "unverified" — the
-        // operator's working queue (rows awaiting a decision). Any value
-        // other than "verified" collapses to "unverified".
-        $vstate    = isset($_GET['vstate']) && $_GET['vstate'] === 'verified' ? 'verified' : 'unverified';
-        $isVerified = $vstate === 'verified';
+        // PR 6: four collection-state tabs replace the Verified/Unverified
+        // pair. `vstate` is kept as the query parameter so existing bookmarks
+        // and the return-context round trip keep working; the two legacy
+        // values map onto the two tabs that mean the same thing.
+        //
+        // Defaults to the discovery queue — rows awaiting a decision — which
+        // is what "unverified" defaulted to before.
+        $vstate = isset($_GET['vstate']) ? sanitize_key((string) $_GET['vstate']) : '';
+        $vstate = self::resolveTab($vstate);
+
+        // Retained for the row renderer and the bulk-save form, both of which
+        // ask "is this the verified view?" to decide what to draw.
+        $isVerified = $vstate === CollectionStateClassifier::TAB_VERIFIED_WITH_COMMUNITY;
 
         $chainArg    = $selectedChain !== '' ? $selectedChain : null;
         $standardArg = $selectedTokenStandard !== '' ? $selectedTokenStandard : null;
 
-        $listing = CollectionRepository::listForAdminVerification(
+        $listing = CollectionRepository::listForAdminState(
+            $vstate,
             $page,
             // Same constant the bulk-save bound uses, so page size and the
             // accepted id count cannot drift apart.
             self::MAX_BULK_IDS,
             $chainArg,
-            $standardArg,
-            $isVerified
+            $standardArg
         );
 
         // Demand signals, strongest first:
@@ -802,11 +1060,27 @@ final class VerifyCollectionsPage
         // (not silently partial): SQL order is already a sane fallback
         // and a lying rank order is worse than none.
         $demandRanked = false;
-        if (!$isVerified && $listing['total'] > 0 && $listing['total'] <= 500) {
+        if ($vstate === CollectionStateClassifier::TAB_DISCOVERED_UNVERIFIED
+            && $listing['available']
+            && $listing['total'] > 0
+            && $listing['total'] <= 500
+        ) {
             $all = [];
             $chunkPages = (int) ceil($listing['total'] / 100);
             for ($p = 1; $p <= $chunkPages; $p++) {
-                $chunk = CollectionRepository::listForAdminVerification($p, 100, $chainArg, $standardArg, false);
+                $chunk = CollectionRepository::listForAdminState(
+                    CollectionStateClassifier::TAB_DISCOVERED_UNVERIFIED,
+                    $p,
+                    100,
+                    $chainArg,
+                    $standardArg
+                );
+                if (!$chunk['available']) {
+                    // A failed chunk read must not silently produce a
+                    // partial ranking presented as complete.
+                    $all = [];
+                    break;
+                }
                 foreach ($chunk['items'] as $chunkRow) {
                     $all[] = $chunkRow;
                 }
@@ -814,6 +1088,7 @@ final class VerifyCollectionsPage
                     break;
                 }
             }
+
             usort($all, static function (object $a, object $b) use ($demand, $signals): int {
                 $ka = CollectionDemandService::key((int) $a->chain_id, (string) $a->contract_address);
                 $kb = CollectionDemandService::key((int) $b->chain_id, (string) $b->contract_address);
@@ -840,11 +1115,19 @@ final class VerifyCollectionsPage
                 }
                 return (int) $b->id <=> (int) $a->id;
             });
-            $listing['items'] = array_slice($all, ($page - 1) * 50, 50);
-            $demandRanked     = true;
+            // `$all === []` means a chunk read failed above. Leaving the SQL
+            // ordering in place and NOT claiming `demandRanked` is the honest
+            // fallback; presenting a partial ranking as a complete one is the
+            // failure mode this guard exists for.
+            if ($all !== []) {
+                $listing['items'] = array_slice($all, ($page - 1) * 50, 50);
+                $demandRanked     = true;
+            }
         }
 
-        $stateCounts = CollectionRepository::countByVerification($chainArg, $standardArg);
+        $stateCountsResult = CollectionRepository::countsByState($chainArg, $standardArg);
+        $stateCounts       = $stateCountsResult['counts'];
+        $countsAvailable   = $stateCountsResult['available'];
 
         // CosmWasm scanner context for the rows about to render.
         //
@@ -930,11 +1213,14 @@ final class VerifyCollectionsPage
         <div class="wrap">
             <h1>Verify Collections</h1>
 
-            <p>Mark a collection as <strong>On-Chain Verified</strong> to give its
-            holders a closed <strong>community</strong>. Holders see "you qualify"
-            suggestions; joining is explicit (suggest-don't-auto-join). Communities
-            are created automatically once a day — use <em>Create Communities</em>
-            to do it now instead of waiting.</p>
+            <p><strong>Verification and community creation are two separate
+            decisions.</strong> Marking a collection <strong>On-Chain Verified</strong>
+            says its identity is sound — it does <em>not</em> create a community.
+            To create one, use <em>Request community</em> on the row; the daily
+            sweep creates requested communities, or use
+            <em>Process requested communities</em> to run it now. Holders see
+            "you qualify" suggestions; joining is explicit
+            (suggest-don't-auto-join).</p>
 
             <?php foreach ($notices as $notice): ?>
                 <div class="notice notice-<?php echo esc_attr($notice['type']); ?> is-dismissible">
@@ -945,7 +1231,7 @@ final class VerifyCollectionsPage
             <?php CosmwasmScannerPanel::render($scannerSummary); ?>
 
             <?php
-            // Verified / Unverified sub-tabs. Switching state resets
+            // Four collection-state sub-tabs. Switching state resets
             // pagination (paged=false) but preserves chain + token_standard
             // filters so the operator stays in the same scope.
             $tabBaseArgs = ['page' => self::PAGE_SLUG, 'paged' => false];
@@ -955,99 +1241,79 @@ final class VerifyCollectionsPage
             if ($selectedTokenStandard !== '') {
                 $tabBaseArgs['token_standard'] = $selectedTokenStandard;
             }
-            $unverifiedUrl = add_query_arg(
-                $tabBaseArgs + ['vstate' => false],
-                admin_url('admin.php')
-            );
-            $verifiedUrl = add_query_arg(
-                $tabBaseArgs + ['vstate' => 'verified'],
-                admin_url('admin.php')
-            );
             ?>
             <h2 class="nav-tab-wrapper" style="margin-bottom:16px;">
-                <a href="<?php echo esc_url($unverifiedUrl); ?>"
-                   class="nav-tab <?php echo $isVerified ? '' : 'nav-tab-active'; ?>">
-                    Unverified <span class="count">(<?php echo number_format_i18n($stateCounts['unverified']); ?>)</span>
-                </a>
-                <a href="<?php echo esc_url($verifiedUrl); ?>"
-                   class="nav-tab <?php echo $isVerified ? 'nav-tab-active' : ''; ?>">
-                    Verified <span class="count">(<?php echo number_format_i18n($stateCounts['verified']); ?>)</span>
-                </a>
+                <?php foreach (CollectionStateClassifier::tabs() as $tabKey):
+                    $tabUrl = add_query_arg(
+                        $tabBaseArgs + ['vstate' => $tabKey],
+                        admin_url('admin.php')
+                    );
+                    ?>
+                    <a href="<?php echo esc_url($tabUrl); ?>"
+                       class="nav-tab <?php echo $vstate === $tabKey ? 'nav-tab-active' : ''; ?>">
+                        <?php echo esc_html(CollectionStateClassifier::tabLabel($tabKey)); ?>
+                        <span class="count">(<?php
+                            // A count we could not compute is shown as "—",
+                            // never as 0. A zero that means "the query failed"
+                            // is how an operator concludes there is nothing to
+                            // do when there might be a great deal.
+                            echo $countsAvailable
+                                ? esc_html(number_format_i18n($stateCounts[$tabKey] ?? 0))
+                                : '&mdash;';
+                        ?>)</span>
+                    </a>
+                <?php endforeach; ?>
             </h2>
 
-            <?php if (!$isVerified && $demandRanked): ?>
+            <?php if (!$countsAvailable): ?>
+                <div class="notice notice-warning">
+                    <p>Tab counts could not be read, so they are shown as &mdash;.
+                    The rows below are still accurate for this tab.</p>
+                </div>
+            <?php endif; ?>
+
+            <?php if (!$listing['available']): ?>
+                <div class="notice notice-error">
+                    <p><strong>This tab could not be loaded.</strong> Nothing is shown
+                    rather than a partial or mislabelled list. See the bcc-trust error
+                    log.</p>
+                </div>
+            <?php endif; ?>
+
+            <?php if ($vstate === CollectionStateClassifier::TAB_NEEDS_ATTENTION): ?>
+                <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
+                    Rows that no other tab describes honestly: verified with no
+                    community, a request that has not been created yet, a failed
+                    creation, a community whose collection is no longer verified, or a
+                    community whose on-chain identity cannot be resolved.
+                </p>
+            <?php endif; ?>
+
+            <?php if ($vstate === CollectionStateClassifier::TAB_HIDDEN_BY_OPERATOR): ?>
+                <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
+                    Collections an operator has hidden with a platform-wide DENY rule.
+                    This records an operator decision — it is not a claim that the
+                    collection is a scam, and nothing in the database records one.
+                </p>
+            <?php endif; ?>
+
+            <?php if ($vstate === CollectionStateClassifier::TAB_DISCOVERED_UNVERIFIED && $demandRanked): ?>
                 <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
                     Queue ranked by <strong>Linked holders</strong> — collections that
                     real platform wallets hold sort first.
                 </p>
             <?php endif; ?>
 
-            <details style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;">
-                <summary style="cursor:pointer;font-weight:600;">Add a collection manually</summary>
-                <p style="color:#646970;margin:8px 0;">
-                    Onboard a collection that auto-discovery can't reach. Cosmos Hub
-                    collections auto-discover when a holder links a wallet (Stargaze
-                    marketplace rollup); this form covers everything else.
-                    Cosmos contracts are validated as
-                    CW-721 before saving; other chains are trusted as entered. The row
-                    is added <strong>unverified</strong> — verify it below to give its
-                    holders a community.
+            <div style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;">
+                <strong>Adding a collection has moved.</strong>
+                <p style="color:#646970;margin:6px 0 0 0;">
+                    Manual intake now lives in the NFT Discovery control plane, where the
+                    chain is selected explicitly and the form is bound to it. This page had
+                    two different add forms with different validation and different
+                    provenance labelling; they are now one.
+                    <a href="<?php echo esc_url(add_query_arg(['page' => 'bcc-onchain-nft-discovery'], admin_url('admin.php'))); ?>">Open NFT Discovery</a>
                 </p>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
-                    <?php wp_nonce_field(self::ACTION_ADD, '_wpnonce'); ?>
-                    <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_ADD); ?>">
-                    <?php self::renderReturnContext($page, $selectedChain, $selectedTokenStandard, $isVerified); ?>
-
-                    <label style="display:flex;flex-direction:column;font-size:12px;">
-                        Chain <span style="color:#d63638;">*</span>
-                        <select name="add_chain_id" required style="min-width:180px;">
-                            <option value="">— select chain —</option>
-                            <?php foreach ($availableChains as $chain): ?>
-                                <option value="<?php echo (int) $chain->id; ?>">
-                                    <?php echo esc_html((string) $chain->name); ?>
-                                    (<?php echo esc_html((string) $chain->chain_type); ?>)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-
-                    <label style="display:flex;flex-direction:column;font-size:12px;">
-                        Contract address <span style="color:#d63638;">*</span>
-                        <input type="text" name="add_contract_address" required
-                               placeholder="dungeon1… / 0x… / mint address"
-                               style="min-width:340px;font-family:monospace;">
-                    </label>
-
-                    <label style="display:flex;flex-direction:column;font-size:12px;">
-                        Collection name
-                        <input type="text" name="add_collection_name"
-                               placeholder="(auto-filled for Cosmos)" style="min-width:200px;">
-                    </label>
-
-                    <label style="display:flex;flex-direction:column;font-size:12px;">
-                        Token standard
-                        <select name="add_token_standard" style="min-width:120px;">
-                            <option value="">— auto / none —</option>
-                            <?php foreach (self::ADD_TOKEN_STANDARDS as $std): ?>
-                                <option value="<?php echo esc_attr($std); ?>"><?php echo esc_html($std); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-
-                    <label style="display:flex;flex-direction:column;font-size:12px;">
-                        Total supply
-                        <input type="number" name="add_total_supply" min="0" step="1"
-                               placeholder="optional" style="width:120px;">
-                    </label>
-
-                    <label style="display:flex;flex-direction:column;font-size:12px;">
-                        Image URL
-                        <input type="url" name="add_image_url" placeholder="optional" style="min-width:240px;">
-                    </label>
-
-                    <button type="submit" class="button button-primary">Add Collection</button>
-                </form>
-            </details>
+            </div>
 
             <?php if ($pillChains !== []): ?>
                 <div style="margin:0 0 10px 0;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
@@ -1062,9 +1328,7 @@ final class VerifyCollectionsPage
                     if ($selectedTokenStandard !== '') {
                         $allUrl = add_query_arg('token_standard', $selectedTokenStandard, $allUrl);
                     }
-                    if ($isVerified) {
-                        $allUrl = add_query_arg('vstate', 'verified', $allUrl);
-                    }
+                    $allUrl = add_query_arg('vstate', $vstate, $allUrl);
                     $allClass = $selectedChain === '' ? 'button button-primary' : 'button';
                     ?>
                     <a href="<?php echo esc_url($allUrl); ?>" class="<?php echo esc_attr($allClass); ?>">All</a>
@@ -1084,9 +1348,7 @@ final class VerifyCollectionsPage
                         if ($selectedTokenStandard !== '') {
                             $pillUrl = add_query_arg('token_standard', $selectedTokenStandard, $pillUrl);
                         }
-                        if ($isVerified) {
-                            $pillUrl = add_query_arg('vstate', 'verified', $pillUrl);
-                        }
+                        $pillUrl = add_query_arg('vstate', $vstate, $pillUrl);
                         $pillClass = $isActive ? 'button button-primary' : 'button';
                         ?>
                         <a href="<?php echo esc_url($pillUrl); ?>"
@@ -1098,45 +1360,10 @@ final class VerifyCollectionsPage
                 </div>
             <?php endif; ?>
 
-            <?php
-            $cosmosChains = array_values(array_filter(
-                $availableChains,
-                static fn($c) => (string) ($c->chain_type ?? '') === 'cosmos'
-            ));
-            if ($cosmosChains !== []):
-            ?>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0 0 12px 0;padding:8px 12px;background:#f6f7f7;border:1px solid #c3c4c7;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                    <?php wp_nonce_field(self::ACTION_ADD_COSMOS, '_wpnonce'); ?>
-                    <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_ADD_COSMOS); ?>">
-                    <?php self::renderReturnContext($page, $selectedChain, $selectedTokenStandard, $isVerified); ?>
-                    <strong style="margin-right:4px;">Add Cosmos collection:</strong>
-                    <label for="bcc-vc-add-chain" class="screen-reader-text">Chain</label>
-                    <select name="bcc_vc_add_chain_id" id="bcc-vc-add-chain" required>
-                        <?php foreach ($cosmosChains as $cosmosChain): ?>
-                            <option value="<?php echo (int) $cosmosChain->id; ?>">
-                                <?php echo esc_html((string) $cosmosChain->name); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                    <label for="bcc-vc-add-contract" class="screen-reader-text">CW-721 contract address</label>
-                    <input type="text"
-                           name="bcc_vc_add_contract"
-                           id="bcc-vc-add-contract"
-                           placeholder="CW-721 contract address (cosmos1… / inj1… / …)"
-                           style="flex:1;min-width:280px;font-family:monospace;font-size:12px;"
-                           required>
-                    <button type="submit" class="button">Add collection</button>
-                    <span style="color:#646970;font-size:11px;">
-                        Validates via <code>contract_info</code>. New row lands with <code>is_verified=0</code> — flip the checkbox below to enable provisioning.
-                    </span>
-                </form>
-            <?php endif; ?>
 
             <form method="get" action="" style="margin:0 0 12px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
                 <input type="hidden" name="page" value="<?php echo esc_attr(self::PAGE_SLUG); ?>">
-                <?php if ($isVerified): ?>
-                    <input type="hidden" name="vstate" value="verified">
-                <?php endif; ?>
+                <input type="hidden" name="vstate" value="<?php echo esc_attr($vstate); ?>">
                 <span>
                     <label for="bcc-vc-chain-filter" style="margin-right:6px;">
                         <strong>Chain:</strong>
@@ -1197,6 +1424,7 @@ final class VerifyCollectionsPage
             // form cannot be nested inside another.
             $vcRowForms   = [];
             $vcHiddenById = [];
+            $vcIntentById = [];
             ?>
             <form method="post" action="">
                 <?php wp_nonce_field(self::ACTION_SAVE, '_vc_save_nonce', false); ?>
@@ -1204,9 +1432,7 @@ final class VerifyCollectionsPage
                 <input type="hidden" name="paged" value="<?php echo (int) $page; ?>">
                 <input type="hidden" name="chain" value="<?php echo esc_attr($selectedChain); ?>">
                 <input type="hidden" name="token_standard" value="<?php echo esc_attr($selectedTokenStandard); ?>">
-                <?php if ($isVerified): ?>
-                    <input type="hidden" name="vstate" value="verified">
-                <?php endif; ?>
+                <input type="hidden" name="vstate" value="<?php echo esc_attr($vstate); ?>">
 
                 <p class="submit" style="margin:0 0 12px 0;">
                     <button type="submit"
@@ -1220,13 +1446,14 @@ final class VerifyCollectionsPage
                             formaction="<?php echo esc_url(admin_url('admin-post.php')); ?>"
                             class="button"
                             onclick="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral(
-                                "Create communities for collections that are ALREADY SAVED as verified?\n\n"
-                                . 'This no longer saves your tick boxes first — any unsaved changes on this page are '
-                                . 'ignored and will revert. Save Verification Changes first if you want new ticks included.'
+                                "Create the communities that have been REQUESTED?\n\n"
+                                . 'This processes only collections an administrator explicitly requested a community for. '
+                                . 'Verified collections with no recorded request are not touched — verification on its own '
+                                . 'no longer creates anything.'
                                 . "\n\n"
-                                . 'It creates a closed holder community per verified collection that does not have one. '
-                                . 'Existing communities are left untouched and no members are added.'
-                            )); ?>);">Create Communities</button>
+                                . 'This does not save your tick boxes first: any unsaved changes on this page are ignored '
+                                . 'and will revert. Existing communities are left untouched and no members are added.'
+                            )); ?>);">Process requested communities</button>
                 </p>
 
                 <table class="widefat striped">
@@ -1261,11 +1488,25 @@ final class VerifyCollectionsPage
                         <?php if ($listing['items'] === []): ?>
                             <tr>
                                 <td colspan="<?php echo (int) self::TABLE_COLSPAN; ?>"><em>
-                                    <?php if ($isVerified): ?>
-                                        No verified collections yet. Verify a collection in the Unverified tab to give its holders a community.
-                                    <?php else: ?>
-                                        No unverified collections. Add one above, or connect a wallet to populate this list.
-                                    <?php endif; ?>
+                                    <?php
+                                    // The empty state is per tab, and says nothing about
+                                    // rows in the OTHER tabs — "no collections" when three
+                                    // other tabs are full is how an operator concludes the
+                                    // page is broken.
+                                    switch ($vstate) {
+                                        case CollectionStateClassifier::TAB_VERIFIED_WITH_COMMUNITY:
+                                            echo 'No verified collections with a community yet. Verify a collection, then use Request community.';
+                                            break;
+                                        case CollectionStateClassifier::TAB_NEEDS_ATTENTION:
+                                            echo 'Nothing needs attention. Every collection is either healthy, hidden, or awaiting review.';
+                                            break;
+                                        case CollectionStateClassifier::TAB_HIDDEN_BY_OPERATOR:
+                                            echo 'No collections are hidden.';
+                                            break;
+                                        default:
+                                            echo 'No unverified collections. Add one from NFT Discovery, or connect a wallet to populate this list.';
+                                    }
+                                    ?>
                                 </em></td>
                             </tr>
                         <?php else: foreach ($listing['items'] as $row): ?>
@@ -1371,39 +1612,64 @@ final class VerifyCollectionsPage
                                 <td><?php echo number_format_i18n((int) ($row->unique_holders ?? 0)); ?></td>
                                 <td class="bcc-vc-community">
                                     <?php
-                                    // Reuse-join: collection (chain_id, contract) →
-                                    // PeepSo group post id → member count.
-                                    // Cell semantics:
-                                    //   unverified         → "—"               (no group possible)
-                                    //   verified, no group → "Create now" btn   (provision inline)
-                                    //   verified + group   → linked member count
-                                    // N+1 caveat: 50 collections × 2 queries per row.
-                                    // Acceptable on this admin-only page; revisit if
-                                    // perf bites or perPage grows materially.
-                                    if (!$rowVerified) {
-                                        echo '<span style="color:#999;">&mdash;</span>';
-                                    } else {
+                                    // PR 6: community existence is PROJECTED by
+                                    // listForAdminState(), so the old per-row
+                                    // findGroupForCollection() N+1 is gone — one
+                                    // page used to issue 50 of them.
+                                    //
+                                    // Cell semantics now follow the state machine,
+                                    // not verification:
+                                    //   community exists → linked member count
+                                    //   requested        → "awaiting creation"
+                                    //   failed           → the bounded failure reason
+                                    //   none             → what to do about it
+                                    $hasCommunity = (int) ($row->has_community ?? 0) === 1;
+                                    $rowState     = (string) ($row->provisioning_state ?? ProvisioningState::NONE);
+
+                                    if ($hasCommunity) {
                                         $groupId = GatedGroupRepository::findGroupForCollection(
                                             (int) $row->chain_id,
-                                            (string) $row->contract_address
+                                            (string) ($row->canonical_identifier ?? $row->contract_address)
                                         );
-                                        if ($groupId === null): ?>
-                                            <button type="button"
-                                                    class="button button-small bcc-vc-create-community"
-                                                    title="Create the closed holder community for this collection now, instead of waiting for the daily sweep.">
-                                                Create now
-                                            </button>
-                                        <?php else:
-                                            $count    = PeepSoGroupRepository::countGroupMembers($groupId);
+                                        if ($groupId !== null) {
+                                            $count     = PeepSoGroupRepository::countGroupMembers($groupId);
                                             $permalink = get_permalink($groupId);
-                                            if (is_string($permalink) && $permalink !== ''): ?>
-                                                <a href="<?php echo esc_url($permalink); ?>" target="_blank" rel="noopener">
-                                                    <?php echo number_format_i18n($count); ?> member<?php echo $count === 1 ? '' : 's'; ?>
-                                                </a>
-                                            <?php else:
-                                                echo number_format_i18n($count) . ' member' . ($count === 1 ? '' : 's');
-                                            endif;
-                                        endif;
+                                            $label     = number_format_i18n($count) . ' member' . ($count === 1 ? '' : 's');
+                                            if (is_string($permalink) && $permalink !== '') {
+                                                printf(
+                                                    '<a href="%s" target="_blank" rel="noopener">%s</a>',
+                                                    esc_url($permalink),
+                                                    esc_html($label)
+                                                );
+                                            } else {
+                                                echo esc_html($label);
+                                            }
+                                        } else {
+                                            // The set-based predicate found a community
+                                            // the canonical lookup cannot resolve. Say so
+                                            // rather than rendering "no community", which
+                                            // would invite creating a second one.
+                                            echo '<span style="color:#d63638;">community present, identity unresolved</span>';
+                                        }
+                                    } elseif ($rowState === ProvisioningState::REQUESTED) {
+                                        echo '<span style="color:#2271b1;">Requested &mdash; awaiting creation</span>';
+                                        ?>
+                                        <button type="button"
+                                                class="button button-small bcc-vc-create-community"
+                                                title="Create the requested community now, instead of waiting for the daily sweep.">
+                                            Create now
+                                        </button>
+                                        <?php
+                                    } elseif ($rowState === ProvisioningState::FAILED) {
+                                        $code = (string) ($row->provisioning_failure_code ?? '');
+                                        printf(
+                                            '<span style="color:#d63638;">Failed: %s</span>',
+                                            esc_html(ProvisioningFailureCode::label($code))
+                                        );
+                                    } elseif ($rowVerified) {
+                                        echo '<span style="color:#646970;">No community requested</span>';
+                                    } else {
+                                        echo '<span style="color:#999;">&mdash;</span>';
                                     }
                                     ?>
                                 </td>
@@ -1413,11 +1679,11 @@ final class VerifyCollectionsPage
                                     // DENY rule on the contract survives rediscovery
                                     // (delete doesn't: the next wallet link would land
                                     // the row again).
-                                    $rowRule = \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::getRule(
-                                        (int) $row->chain_id,
-                                        (string) $row->contract_address
-                                    );
-                                    $isHidden = $rowRule === \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::RULE_DENY;
+                                    // PR 6: projected by listForAdminState() using the
+                                    // SAME predicate the tabs classify on, so the badge
+                                    // and the tab can never disagree. It also removes the
+                                    // second per-row lookup on this page.
+                                    $isHidden = (int) ($row->is_hidden ?? 0) === 1;
                                     ?>
                                     <?php if ($isHidden): ?>
                                         <span style="display:inline-block;margin-bottom:4px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:#d63638;">HIDDEN</span>
@@ -1430,6 +1696,13 @@ final class VerifyCollectionsPage
                                     self::renderHideButton($rowId, $isHidden);
                                     $vcRowForms[$rowId]  = true;
                                     $vcHiddenById[$rowId] = $isHidden;
+
+                                    // PR 6: the community-intent affordance.
+                                    // Projected on the row by listForAdminState(),
+                                    // so this costs no query.
+                                    $rowIntent = (string) ($row->provisioning_state ?? ProvisioningState::NONE);
+                                    $vcIntentById[$rowId] = $rowIntent;
+                                    self::renderIntentButton($rowId, $rowIntent);
                                     ?>
                                     <button type="submit"
                                             form="vc-a-del-<?php echo $rowId; ?>"
@@ -1486,8 +1759,9 @@ final class VerifyCollectionsPage
                 $page,
                 $selectedChain,
                 $selectedTokenStandard,
-                $isVerified,
-                $vcHiddenById
+                $vstate,
+                $vcHiddenById,
+                $vcIntentById
             );
             ?>
 
@@ -1926,163 +2200,6 @@ final class VerifyCollectionsPage
         return $flag === null || $flag === $hide;
     }
 
-    /**
-     * Curated-admin path: insert a single Cosmos CW-721 collection by
-     * contract address. Validates via the existing `contract_info` probe
-     * (same one the per-row "Test CW-721" button uses) before writing.
-     * Lands with `is_verified=0`; admin still flips the checkbox to enable
-     * provisioning. Safe to re-submit an existing contract — `bulkUpsert`
-     * preserves `is_verified` on duplicates and only refreshes metadata.
-     *
-     * Safety valve for Cosmos chains without a registry contract identified
-     * (Kujira, Dungeon) and for non-Talis Injective collections that the
-     * Talis-whitelist auto-discovery wouldn't surface (e.g., DojoSwap mints,
-     * private-deploy CW-721s).
-     *
-     * @return list<array{type: string, message: string}>
-     */
-    private static function handleAddCosmosCollection(): array
-    {
-        $chainId  = isset($_POST['bcc_vc_add_chain_id']) ? (int) $_POST['bcc_vc_add_chain_id'] : 0;
-        $contract = isset($_POST['bcc_vc_add_contract'])
-            ? trim(sanitize_text_field((string) $_POST['bcc_vc_add_contract']))
-            : '';
-
-        if ($chainId <= 0 || $contract === '') {
-            return [['type' => 'error', 'message' => 'Add collection: chain and contract address are required.']];
-        }
-
-        $chain = ChainRepository::getById($chainId);
-        if ($chain === null) {
-            return [['type' => 'error', 'message' => 'Add collection: chain not found.']];
-        }
-
-        if ((string) $chain->chain_type !== 'cosmos') {
-            return [[
-                'type'    => 'error',
-                'message' => sprintf(
-                    'Add collection: %s is not a Cosmos chain. CW-721 validation only runs on cosmos-typed chains.',
-                    (string) $chain->slug
-                ),
-            ]];
-        }
-
-        if (!FetcherFactory::has_driver((string) $chain->chain_type)) {
-            return [['type' => 'error', 'message' => 'Add collection: no fetcher driver for ' . $chain->slug]];
-        }
-
-        $fetcher = FetcherFactory::make_for_chain($chain);
-        if (!($fetcher instanceof CosmosFetcher)) {
-            return [['type' => 'error', 'message' => 'Add collection: fetcher driver mismatch for ' . $chain->slug]];
-        }
-
-        $info = $fetcher->testCw721ContractInfo($contract);
-        if ($info === null) {
-            return [[
-                'type'    => 'error',
-                'message' => sprintf(
-                    'Add collection: contract_info FAILED on %s for %s. Confirm the address is a real CW-721 contract on this chain before retrying.',
-                    (string) $chain->slug,
-                    $contract
-                ),
-            ]];
-        }
-
-        $name = isset($info['name']) && is_string($info['name']) ? $info['name'] : null;
-
-        $written = CollectionRepository::bulkUpsert([[
-            'contract_address'   => $contract,
-            'chain_id'           => (int) $chain->id,
-            'collection_name'    => $name,
-            'token_standard'     => 'CW-721',
-            'total_supply'       => null,
-            'floor_price'        => null,
-            'floor_currency'     => null,
-            'unique_holders'     => null,
-            'total_volume'       => null,
-            'listed_percentage'  => null,
-            'royalty_percentage' => null,
-            'metadata_storage'   => null,
-            'image_url'          => null,
-        ]], 4 * HOUR_IN_SECONDS);
-
-        if ($written === 0) {
-            // No collection row exists yet, so the only truthful target is
-            // the chain. A `collection` target holding a chain id would be
-            // indistinguishable from a real collection id later.
-            AdminActionSupport::audit(
-                'admin_vc_cosmos_collection_add_failed',
-                'chain',
-                $chainId,
-                ['contract' => $contract]
-            );
-            return [['type' => 'error', 'message' => 'Add collection: upsert returned 0 rows. Check the bcc-trust error log.']];
-        }
-
-        // This handler previously wrote NO record of any kind — not even a
-        // file-log line — despite writing a collection row.
-        //
-        // The row is resolved through the table's own uniqueness key
-        // (chain_id, contract_address) so target_id is the ACTUAL collection
-        // id. Storing the chain id in a `collection` target would be a lie
-        // that silently corrupts any later forensic query.
-        //
-        // "upserted", not "added": bulkUpsert() returns an affected-row count,
-        // which cannot distinguish an insert from an update without widening
-        // the repository contract — so the event name claims only what is true.
-        $upsertedRow = CollectionRepository::findByChainContract($chainId, $contract);
-
-        if ($upsertedRow === null) {
-            // The write reported rows but the row is not readable back. Do not
-            // fabricate a success record against a target we cannot name.
-            \BCC\Core\Log\Logger::error('[bcc-trust] Verify Collections cosmos upsert unresolved', [
-                'action'   => 'verify_collections_add_cosmos_unresolved',
-                'chain_id' => $chainId,
-                'contract' => $contract,
-                'written'  => $written,
-                'operator' => get_current_user_id(),
-            ]);
-            AdminActionSupport::audit(
-                'admin_vc_cosmos_upsert_unresolved',
-                'chain',
-                $chainId,
-                ['contract' => $contract, 'written' => $written]
-            );
-
-            return [[
-                'type'    => 'warning',
-                'message' => sprintf(
-                    'Add collection: %s was written but could not be read back, so it is not confirmed. Reload and check before verifying it.',
-                    $contract
-                ),
-            ]];
-        }
-
-        AdminActionSupport::audit(
-            'admin_vc_cosmos_collection_upserted',
-            'collection',
-            (int) $upsertedRow->id,
-            ['chain_id' => $chainId, 'contract' => $contract]
-        );
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections add (cosmos)', [
-            'action'   => 'verify_collections_add_cosmos',
-            'chain_id' => $chainId,
-            'contract' => $contract,
-            'written'  => $written,
-            'operator' => get_current_user_id(),
-        ]);
-
-        return [[
-            'type'    => 'success',
-            'message' => sprintf(
-                'Added %s on %s (name="%s"). Flip the Verified checkbox below to enable provisioning.',
-                $contract,
-                (string) $chain->slug,
-                $name ?? '(missing)'
-            ),
-        ]];
-    }
 
     /**
      * V2 Phase 2: pre-verify CW-721 sanity check. Hits the contract's
@@ -2227,177 +2344,11 @@ final class VerifyCollectionsPage
         ]];
     }
 
-    /**
-     * Token standards offered in the Add Collection form. Operator-typed
-     * value is constrained to this set so a malformed standard can't slip
-     * into a row that downstream code branches on.
-     *
-     * @var list<string>
-     */
-    private const ADD_TOKEN_STANDARDS = ['CW-721', 'ERC-721', 'ERC-1155', 'SPL'];
+    // ADD_TOKEN_STANDARDS was removed with the Add Collection form it
+    // constrained. The consolidated form derives the standard from the
+    // family instead of asking an operator to type one, so there is no
+    // free-typed standard left to allowlist.
 
-    /**
-     * Operator-curated "Add Collection" handler. Inserts one collection
-     * row (chain + contract + metadata) so chains with no auto-discovery
-     * (e.g. a Cosmos Hub CW-721 — no public Hub indexer) can be onboarded.
-     *
-     * The row lands unverified — the operator still flips `is_verified`
-     * via the existing checkbox, which is what gates holdings queries and
-     * group provisioning. For Cosmos chains we validate the contract is a
-     * real CW-721 (and auto-fill the name) before inserting; other chain
-     * types are trusted as typed (no generic on-chain validator exists).
-     *
-     * @return list<array{type: string, message: string}>
-     */
-    private static function handleAddCollection(): array
-    {
-        $chainId  = isset($_POST['add_chain_id']) ? (int) $_POST['add_chain_id'] : 0;
-        $contract = isset($_POST['add_contract_address'])
-            ? trim(sanitize_text_field((string) $_POST['add_contract_address']))
-            : '';
-        $name     = isset($_POST['add_collection_name'])
-            ? trim(sanitize_text_field((string) $_POST['add_collection_name']))
-            : '';
-        $standard = isset($_POST['add_token_standard'])
-            ? sanitize_text_field((string) $_POST['add_token_standard'])
-            : '';
-        // Authoritative WordPress sanitiser, not a bare trim(). This value
-        // is stored and later served through the public collection payload,
-        // so an unsafe scheme must never reach the database. esc_url_raw()
-        // returns '' for javascript:, data: and malformed input.
-        $imageUrlRaw = isset($_POST['add_image_url'])
-            ? trim((string) wp_unslash($_POST['add_image_url']))
-            : '';
-        $imageUrl = $imageUrlRaw === '' ? '' : esc_url_raw($imageUrlRaw);
-        $imageUrlRejected = $imageUrlRaw !== '' && $imageUrl === '';
-        $supplyRaw = isset($_POST['add_total_supply'])
-            ? trim((string) $_POST['add_total_supply'])
-            : '';
-
-        if ($chainId <= 0 || $contract === '') {
-            return [['type' => 'error', 'message' => 'Add Collection: chain and contract address are required.']];
-        }
-
-        if ($standard !== '' && !in_array($standard, self::ADD_TOKEN_STANDARDS, true)) {
-            return [['type' => 'error', 'message' => 'Add Collection: unknown token standard.']];
-        }
-
-        // Reject rather than quietly drop. This is an INSERT, so there is no
-        // stored value to preserve — silently creating the row with a blank
-        // image would hide the operator's typo, and storing the raw string
-        // is what let an unsafe scheme reach the public payload before.
-        if ($imageUrlRejected) {
-            return [[
-                'type'    => 'error',
-                'message' => 'Add Collection: the image URL is not a valid http(s) URL, so nothing was added. Correct it or leave the field empty.',
-            ]];
-        }
-
-        $chain = ChainRepository::getById($chainId);
-        if ($chain === null) {
-            return [['type' => 'error', 'message' => 'Add Collection: chain not found.']];
-        }
-
-        $chainType = (string) $chain->chain_type;
-        $chainSlug = (string) $chain->slug;
-        $notices   = [];
-
-        // Cosmos: validate the contract is a real CW-721 before inserting,
-        // and auto-fill the collection name from contract_info when blank.
-        if ($chainType === 'cosmos') {
-            if (!FetcherFactory::has_driver($chainType)) {
-                return [['type' => 'error', 'message' => 'Add Collection: no fetcher driver for ' . $chainSlug]];
-            }
-
-            $fetcher = FetcherFactory::make_for_chain($chain);
-            if (!($fetcher instanceof CosmosFetcher)) {
-                return [['type' => 'error', 'message' => 'Add Collection: fetcher driver mismatch for ' . $chainSlug]];
-            }
-
-            $info = $fetcher->testCw721ContractInfo($contract);
-            if ($info === null) {
-                return [[
-                    'type'    => 'error',
-                    'message' => sprintf(
-                        'Add Collection: %s is not a reachable CW-721 contract on %s (contract_info failed). Not added. Check the address, or the bcc-trust error log for the LCD response.',
-                        $contract,
-                        $chainSlug
-                    ),
-                ]];
-            }
-
-            if ($name === '' && isset($info['name']) && is_string($info['name'])) {
-                $name = trim($info['name']);
-            }
-            if ($standard === '') {
-                $standard = 'CW-721';
-            }
-        } else {
-            $notices[] = [
-                'type'    => 'warning',
-                'message' => sprintf(
-                    'Add Collection: %s is a %s chain — no on-chain validation available, the contract was trusted as entered. Double-check the address before verifying.',
-                    $contract,
-                    $chainType
-                ),
-            ];
-        }
-
-        $data = [
-            'chain_id'         => $chainId,
-            'contract_address' => $contract,
-            'collection_name'  => $name !== '' ? $name : null,
-            'token_standard'   => $standard !== '' ? $standard : null,
-            'image_url'        => $imageUrl !== '' ? $imageUrl : null,
-            'total_supply'     => ($supplyRaw !== '' && ctype_digit($supplyRaw)) ? (int) $supplyRaw : null,
-        ];
-
-        $rowId = CollectionRepository::addManual($data);
-        if ($rowId === false) {
-            // Same rule as the Cosmos path: the insert failed, so there is
-            // no collection to point at — target the chain.
-            AdminActionSupport::audit(
-                'admin_vc_manual_collection_add_failed',
-                'chain',
-                $chainId,
-                ['contract' => $contract]
-            );
-            $notices[] = ['type' => 'error', 'message' => 'Add Collection: insert failed. See the bcc-trust error log.'];
-            return $notices;
-        }
-
-        // Distinct from the Cosmos insert: the durable table has no meta
-        // column, so "which flow created this row" has to live in the action
-        // name or it is not recoverable at all.
-        AdminActionSupport::audit(
-            'admin_vc_manual_collection_added',
-            'collection',
-            (int) $rowId,
-            ['chain_id' => $chainId, 'contract' => $contract, 'standard' => $standard]
-        );
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections add (manual)', [
-            'action'         => 'verify_collections_add_manual',
-            'row_id'         => (int) $rowId,
-            'chain_id'       => $chainId,
-            'chain_slug'     => $chainSlug,
-            'contract'       => $contract,
-            'token_standard' => $standard,
-            'operator'       => get_current_user_id(),
-        ]);
-
-        $notices[] = [
-            'type'    => 'success',
-            'message' => sprintf(
-                'Added "%s" (%s) on %s. It is unverified — review it below and check Verified to give its holders a community.',
-                $name !== '' ? $name : '(no name)',
-                $contract,
-                $chainSlug
-            ),
-        ];
-
-        return $notices;
-    }
 
     /**
      * @return list<array{type: string, message: string}>
@@ -2453,31 +2404,117 @@ final class VerifyCollectionsPage
             }
         }
 
-        $changed = CollectionRepository::setVerifiedBulk($verify, $unverify);
-
-        AdminActionSupport::audit(
-            'admin_vc_verification_saved',
-            'collection',
-            null,
-            ['verified' => count($verify), 'unverified' => count($unverify), 'changed' => $changed]
+        // PR 6: routed through the service, not straight to the repository.
+        // The verification write, the withdrawal of any pending request on a
+        // row being unverified, and the checked audit are ONE transaction —
+        // so this can no longer report "saved" while a withdrawal silently
+        // failed and left the daily sweep about to provision a community for
+        // a collection nobody verifies any more.
+        $result = OnchainPlugin::instance()->communityRequestService()->applyVerification(
+            $verify,
+            $unverify,
+            get_current_user_id()
         );
 
+        if (!$result['ok']) {
+            return [[
+                'type'    => 'error',
+                'message' => 'Verification changes were rolled back; nothing was saved. See the bcc-trust error log.',
+            ]];
+        }
+
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections save', [
-            'action'    => 'verify_collections_save',
-            'verified'  => count($verify),
+            'action'     => 'verify_collections_save',
+            'verified'   => count($verify),
             'unverified' => count($unverify),
-            'changed'   => $changed,
-            'operator'  => get_current_user_id(),
+            'changed'    => $result['changed'],
+            'withdrawn'  => $result['withdrawn'],
+            'operator'   => get_current_user_id(),
         ]);
 
-        return [[
-            'type'    => 'success',
-            'message' => sprintf(
-                'Verification flags saved (%d processed, %d actually changed).',
-                count($verify) + count($unverify),
-                $changed
-            ),
-        ]];
+        $message = sprintf(
+            'Verification flags saved (%d processed, %d actually changed).',
+            count($verify) + count($unverify),
+            $result['changed']
+        );
+
+        if ($result['withdrawn'] > 0) {
+            $message .= sprintf(
+                ' %d pending community request%s withdrawn. Existing communities were not affected.',
+                $result['withdrawn'],
+                $result['withdrawn'] === 1 ? '' : 's'
+            );
+        }
+
+        return [['type' => 'success', 'message' => $message]];
+    }
+
+    /**
+     * Record or withdraw a community request for one collection.
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function handleCommunityIntent(int $collectionId, bool $request): array
+    {
+        $service  = OnchainPlugin::instance()->communityRequestService();
+        $operator = get_current_user_id();
+
+        $result = $request
+            ? $service->request($collectionId, $operator)
+            : $service->withdraw($collectionId, $operator);
+
+        if (!$result['ok']) {
+            return [[
+                'type'    => 'error',
+                'message' => self::intentRefusalMessage((string) ($result['reason'] ?? '')),
+            ]];
+        }
+
+        switch ($result['status']) {
+            case 'requested':
+                return [['type' => 'success', 'message' =>
+                    'Community requested. The daily provisioning sweep will create it, or you can run "Process requested communities" now.']];
+            case 'already_requested':
+                return [['type' => 'info', 'message' => 'A community was already requested for this collection.']];
+            case 'exists':
+                return [['type' => 'info', 'message' => 'This collection already has a community.']];
+            case 'withdrawn':
+                return [['type' => 'success', 'message' => 'Community request withdrawn. Nothing was created or deleted.']];
+            case 'nothing_pending':
+                return [['type' => 'info', 'message' => 'There was no pending request to withdraw.']];
+            case 'provisioned':
+                return [['type' => 'info', 'message' =>
+                    'This collection already has a community. Withdrawing a request never removes one.']];
+            default:
+                return [['type' => 'info', 'message' => 'No change was made.']];
+        }
+    }
+
+    /**
+     * Bounded refusal reasons → operator copy.
+     *
+     * Never renders a raw reason token, and never a database or exception
+     * message: an unrecognised reason gets a generic sentence rather than
+     * being echoed.
+     */
+    private static function intentRefusalMessage(string $reason): string
+    {
+        switch ($reason) {
+            case CommunityRequestService::REFUSED_NOT_FOUND:
+                return 'That collection no longer exists.';
+            case CommunityRequestService::REFUSED_NOT_VERIFIED:
+                return 'Verify the collection first. Verification is required before a community can be requested — and on its own it no longer creates one.';
+            case CommunityRequestService::REFUSED_IDENTITY:
+                return 'This collection has no resolved on-chain identity, so a holder gate built on it could never be satisfied. No request was recorded.';
+            case CommunityRequestService::REFUSED_COMMUNITY_EXISTS:
+                return 'A community already exists for this collection.';
+            case CommunityRequestService::REFUSED_BAD_OPERATOR:
+                return 'Your administrator account could not be resolved for this action.';
+            case CommunityRequestService::REFUSED_ILLEGAL_TRANSITION:
+            case CommunityRequestService::REFUSED_WRITE_FAILED:
+            default:
+                return 'The request could not be recorded and nothing was changed. See the bcc-trust error log.';
+        }
     }
 
     /**
@@ -2486,10 +2523,14 @@ final class VerifyCollectionsPage
     private static function handleProvision(): array
     {
         // Deliberately does NOT call handleSave() any more — see
-        // handleProvisionPost(). Provisioning operates on persisted
-        // verified state only; a button must not quietly perform another
+        // handleProvisionPost(). A button must not quietly perform another
         // button's write.
-        $result = OnchainPlugin::instance()->gatedGroupProvisioningService()->provisionAll();
+        //
+        // PR 6: this is "process requested communities", not "provision every
+        // verified collection". It drains the queue of collections an
+        // administrator explicitly asked for; a verified collection with no
+        // recorded request is not in that queue and cannot be reached here.
+        $result = OnchainPlugin::instance()->gatedGroupProvisioningService()->processRequested();
 
         AdminActionSupport::audit(
             'admin_vc_communities_provisioned',
@@ -2498,6 +2539,7 @@ final class VerifyCollectionsPage
             [
                 'created' => (int) ($result['created'] ?? 0),
                 'skipped' => (int) ($result['skipped'] ?? 0),
+                'failed'  => (int) ($result['failed'] ?? 0),
                 'errors'  => count($result['errors'] ?? []),
             ]
         );
@@ -2506,14 +2548,16 @@ final class VerifyCollectionsPage
             'action'   => 'gated_group_provision_manual',
             'created'  => (int) ($result['created'] ?? 0),
             'skipped'  => (int) ($result['skipped'] ?? 0),
+            'failed'   => (int) ($result['failed'] ?? 0),
             'errors'   => count($result['errors'] ?? []),
             'operator' => get_current_user_id(),
         ]);
 
         $message = sprintf(
-            'Communities: %d created, %d skipped (already exist or missing metadata).',
-            $result['created'],
-            $result['skipped']
+            'Requested communities processed: %d created, %d already existed, %d failed.',
+            (int) ($result['created'] ?? 0),
+            (int) ($result['skipped'] ?? 0),
+            (int) ($result['failed'] ?? 0)
         );
         $errors = $result['errors'] ?? [];
 

@@ -42,6 +42,17 @@ final class OnchainPlugin
         return $this->nftGroupRevokeService ??= new \BCC\Trust\Onchain\Services\NftGroupRevokeService();
     }
 
+    private ?\BCC\Trust\Onchain\Services\CommunityRequestService $communityRequestService = null;
+
+    /**
+     * PR 6: the only writer of provisioning INTENT, and the only place a
+     * verification change and a pending-request withdrawal happen together.
+     */
+    public function communityRequestService(): \BCC\Trust\Onchain\Services\CommunityRequestService
+    {
+        return $this->communityRequestService ??= new \BCC\Trust\Onchain\Services\CommunityRequestService();
+    }
+
     private ?GatedGroupProvisioningService $gatedGroupProvisioningService = null;
     public function gatedGroupProvisioningService(): GatedGroupProvisioningService
     {

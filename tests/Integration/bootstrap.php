@@ -123,6 +123,17 @@ if (!function_exists('get_option')) {
     /** @param mixed $value */
     function update_option(string $key, $value, $autoload = null): bool
     {
+        // ── MODELLING A POISONED PERSISTENT OBJECT CACHE ────────────────
+        // When `__bcc_test_options_frozen` is set, the write REPORTS SUCCESS
+        // and the subsequent read still returns the old value. That is not a
+        // contrived shape: it is exactly what a stale `redis-cache` drop-in
+        // does to `update_option`/`get_option`, and it is the one failure
+        // mode a "did the write stick?" re-read exists to catch. Without a
+        // way to reproduce it, that re-read is untested code.
+        if (!empty($GLOBALS['__bcc_test_options_frozen'])) {
+            return true;
+        }
+
         $GLOBALS['__bcc_test_options'][$key] = $value;
         return true;
     }
@@ -562,6 +573,12 @@ bcc_onchain_create_validators_table();
 require_once dirname(__DIR__, 2) . '/includes/database/schema-collections.php';
 bcc_onchain_create_collections_table();
 
+// The schema-version completion gate. Lives in its own file precisely so it
+// can be required here — it used to be an anonymous `plugins_loaded` closure
+// in bcc-trust.php, where the rule deciding whether a failed migration is
+// ever retried could not be reached by a test at all.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-completion.php';
+
 require_once dirname(__DIR__, 2) . '/includes/database/schema-wallets.php';
 bcc_onchain_create_wallet_links_table();
 
@@ -670,3 +687,13 @@ bcc_onchain_create_chain_nft_capabilities_table();
 // (schema-collections.php is already required above — the migration lives
 // alongside the CREATE TABLE it amends.)
 bcc_onchain_add_collections_canonical_identifier();
+
+// PR 6 provisioning intent. Runs after the canonical-identity migration for
+// the same reason production does: its backfill reasons about live gates, and
+// a gate is only meaningful once identity is settled.
+//
+// Note this runs against a table that has just been created, so the backfill
+// marks nothing — which is correct, and is also why the migration's OWN
+// integration test re-runs it against seeded gates rather than relying on
+// this bootstrap pass to prove the backfill works.
+bcc_onchain_add_collections_provisioning_state();

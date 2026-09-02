@@ -624,9 +624,17 @@ final class VerifyCollectionsHideToggleTest extends TestCase
         self::assertStringContainsString("wp_nonce_field(self::ACTION_DELETE . '_' . \$rowId)", $source);
         self::assertStringContainsString("wp_nonce_field(self::ACTION_TESTQUERY . '_' . \$rowId)", $source);
 
-        // Add-collection forms: own action nonces.
-        self::assertStringContainsString("wp_nonce_field(self::ACTION_ADD, '_wpnonce')", $source);
-        self::assertStringContainsString("wp_nonce_field(self::ACTION_ADD_COSMOS, '_wpnonce')", $source);
+        // PR 6: the two Add Collection forms are RETIRED from this page,
+        // so their nonce fields must be gone rather than merely unused —
+        // a rendered form whose route is unregistered is a dead control that
+        // still looks live to an operator.
+        self::assertStringNotContainsString('ACTION_ADD_COSMOS,', $source);
+        self::assertStringNotContainsString("wp_nonce_field(self::ACTION_ADD,", $source);
+
+        // The two per-row community-intent controls replace them, and bind
+        // their nonce to the collection id the same way every other per-row
+        // control does.
+        self::assertStringContainsString("wp_nonce_field(\$intentRoute . '_' . \$rowId)", $source);
     }
 
     public function test_an_unknown_collection_id_is_refused_before_any_write(): void
