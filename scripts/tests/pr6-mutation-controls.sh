@@ -189,8 +189,8 @@ control 'provision: postcondition re-read' \
 control 'provision: compensation' \
     'GatedGroupProvisioningIntentTest' 'unit' \
     'app/Domain/Onchain/Services/GatedGroupProvisioningService.php' \
-    "            \$this->compensate(\$groupId, \$collectionId, \$ownerId, \$chainId);" \
-    '            // mutant: no compensation — the group is left behind'
+    "            \$auditOk = \$this->compensate(\$groupId, \$collectionId, \$ownerId, \$chainId);" \
+    '            $auditOk = true; // mutant: no compensation — the group is left behind'
 
 # 6. Accept a chain whose family does not match the tab the nonce was minted
 #    on. A Solana-tab nonce could then drive an add against a Cosmos chain.
@@ -255,8 +255,14 @@ control 'tabs: bounded-subset misclassification' \
 #     array for a FAILED query exactly as it does for a genuine no-rows
 #     result, so collapsing the two makes a sweep whose SELECT never ran
 #     report a clean zero.
+#
+#     ⚠ INTEGRATION, not unit — and this control is why the integration test
+#     exists. Aimed at the unit suite it SURVIVED: those tests drive the
+#     service through a repository fake, so the real repository line being
+#     mutated here never executes. The survivor was the suite admitting the
+#     line was uncovered.
 control 'queue: read failure vs empty' \
-    'ProvisioningReadFailureTest' 'unit' \
+    'ProvisioningReadFailureIntegrationTest' 'integration' \
     'app/Domain/Onchain/Repositories/CollectionRepository.php' \
     "        if (\$readFailed) {
             \BCC\Core\Log\Logger::error(
@@ -271,7 +277,7 @@ control 'queue: read failure vs empty' \
 # 11. The single-row twin. A fault reported as `available` lets a caller
 #     conclude "no such collection" from a query that never executed.
 control 'row: read failure vs not-found' \
-    'ProvisioningReadFailureTest' 'unit' \
+    'ProvisioningReadFailureIntegrationTest' 'integration' \
     'app/Domain/Onchain/Repositories/CollectionRepository.php' \
     "            return ['row' => null, 'available' => false];" \
     "            return ['row' => null, 'available' => true];"
