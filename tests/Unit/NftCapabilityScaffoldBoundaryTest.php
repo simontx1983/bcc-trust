@@ -513,6 +513,27 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
                 'app/Domain/Onchain/Services/ManualCollectionIntakeService.php',
                 'app/Domain/Onchain/Services/NftCapabilityEditor.php',
                 'app/Domain/Onchain/Services/NftDiscoveryControlPlaneSnapshot.php',
+                // ── PR 7.1 ADDS THE SIXTH, DELIBERATELY ─────────────────
+                // `DiscoveryReadiness` is the single readiness decision the
+                // panel, the request service and the executor all ask. It
+                // reads `bccNftSupportState()` FIRST, before the opt-in and
+                // before the canary allowlist, which is what makes "no
+                // capability row and no allowlist entry can make an
+                // unsupported chain scannable" true by construction.
+                //
+                // It belongs here for the same reason the editor and the
+                // intake service do: it is a control-plane decision object,
+                // not a worker. The alternative — letting each of the three
+                // callers read the support column itself — is the exact
+                // three-way drift this PR exists to remove.
+                //
+                // ⚠ AND IT IS WHY THE INVARIANT BELOW STILL HOLDS.
+                // DiscoveryRunExecutor is under /Workers/ and it DOES
+                // re-check readiness before provider work — but it asks
+                // THIS object, never the capability model, so no worker
+                // appears in this list. That indirection is the point, not
+                // a way around the rule.
+                'app/Domain/Onchain/Support/DiscoveryReadiness.php',
             ],
             self::filesContaining('NftChainCapability::'),
             'only the NFT discovery control plane and its editor may consult the capability model'
@@ -539,6 +560,12 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
                 // service reachable only from the NFT Discovery form — see
                 // testOnlyTheDiscoveryControlPlaneConsultsTheVerdict().
                 || str_contains($path, 'ManualCollectionIntakeService.php')
+                // PR 7.1: the one readiness decision the panel, the request
+                // service and the executor share. A control-plane decision
+                // object — see the sixth entry above. The worker reaches it,
+                // not the capability model, which is why /Workers/ still
+                // never appears in this list.
+                || str_contains($path, 'Support/DiscoveryReadiness.php')
                 || str_contains($path, 'Support/NftChainCapability.php');
 
             self::assertTrue(

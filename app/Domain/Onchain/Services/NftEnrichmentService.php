@@ -66,9 +66,28 @@ final class NftEnrichmentService
      */
     public static function register(): void
     {
-        if (!wp_next_scheduled(self::CRON_HOOK)) {
-            wp_schedule_event(time() + 90, self::CRON_INTERVAL, self::CRON_HOOK);
-        }
+        // ── PR 7.1: DELIBERATELY A NO-OP. DO NOT RESTORE THE SCHEDULE ───
+        //
+        // This method used to self-heal `bcc_nft_enrichment_tick` onto the
+        // schedule on every request. That loop selected EVERY active chain
+        // and called that chain's metadata provider for any row with a NULL
+        // `collection_name` — no capability gate, no per-chain opt-in, no
+        // administrator-created discovery run, and nothing in the PR 7A
+        // ledger. Under the operator-initiated discovery rule, cron may
+        // claim, continue, retry or recover work an administrator created;
+        // it may never choose a chain and invent it.
+        //
+        // ⚠ The body is emptied rather than the method deleted because it
+        // is the thing a future reader is most likely to "restore" from an
+        // older build. An empty method with this comment refuses that
+        // change explicitly; a missing method just looks like an omission.
+        // The hook now lives in cron-hooks.php's `cleanup_only` list and is
+        // cleared by the v2 migration entry in migration-runner.php.
+        //
+        // ⚠ NO REPLACEMENT CRON. Metadata retry belongs to an explicit
+        // administrator action or to an administrator-created discovery
+        // run. {@see runForChain()} is still callable for exactly that, and
+        // `findPendingEnrichment()` is deliberately NOT broadened.
     }
 
     /**

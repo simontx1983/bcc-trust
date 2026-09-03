@@ -63,14 +63,23 @@ final class DiscoveryScanMode
      *
      * @param object|null $checkpoint row from ChainCheckpointRepository::get()
      */
-    public static function forCheckpoint(?object $checkpoint): string
+    /**
+     * PURE. The same rule as {@see forCheckpoint()}, over the completion
+     * timestamp alone.
+     *
+     * ── WHY THE RULE IS FACTORED OUT ────────────────────────────────────
+     * PR 7.1 needs this decision in a caller that has NO checkpoint object:
+     * the admin panel already derives `backfill_completed_at` for every
+     * chain in ONE bounded read, and re-reading each chain's checkpoint to
+     * get an object back would undo that. Re-deriving "completed means
+     * incremental" at the call site would be a second copy of the one rule
+     * this class exists to own — including the zero-date case below, which
+     * is exactly the sort of detail a copy forgets.
+     *
+     * @param string|null $completedAt `cw_backfill_completed_at`, or null
+     */
+    public static function forCompletedAt(?string $completedAt): string
     {
-        if ($checkpoint === null) {
-            return self::HISTORICAL;
-        }
-
-        $completedAt = $checkpoint->cw_backfill_completed_at ?? null;
-
         if (!is_string($completedAt) || trim($completedAt) === '') {
             return self::HISTORICAL;
         }
@@ -82,5 +91,16 @@ final class DiscoveryScanMode
         }
 
         return self::INCREMENTAL;
+    }
+
+    public static function forCheckpoint(?object $checkpoint): string
+    {
+        if ($checkpoint === null) {
+            return self::HISTORICAL;
+        }
+
+        $completedAt = $checkpoint->cw_backfill_completed_at ?? null;
+
+        return self::forCompletedAt(is_string($completedAt) ? $completedAt : null);
     }
 }

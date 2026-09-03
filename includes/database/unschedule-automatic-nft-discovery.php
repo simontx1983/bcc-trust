@@ -95,6 +95,15 @@ if (!function_exists('bcc_trust_retired_discovery_hooks')) {
             'bcc_cosmwasm_daily_discovery',
             'bcc_cosmwasm_weekly_retry',
             'bcc_cosmwasm_metadata_refresh',
+            // PR 7.1. Not a discovery sweep, but the same rule and the same
+            // remedy: a recurring hook that picked chains on its own and
+            // called a provider without an administrator-created run.
+            //
+            // ⚠ Added to THIS list rather than given a migration of its own
+            // precisely because the list is the single place the migration
+            // and its tests both read. A second cleanup file would be a
+            // second thing to forget.
+            'bcc_nft_enrichment_tick',
         ];
     }
 }

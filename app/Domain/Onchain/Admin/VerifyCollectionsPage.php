@@ -32,7 +32,7 @@ use BCC\Trust\Onchain\Services\CollectionStateClassifier;
 use BCC\Trust\Onchain\Services\CommunityRequestService;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel;
-use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
+use BCC\Trust\Onchain\Support\DiscoveryReadiness;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningFailureCode;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
 
@@ -1233,23 +1233,66 @@ final class VerifyCollectionsPage
             <?php CosmwasmScannerPanel::render($scannerSummary); ?>
 
             <?php
-            // ── PR 7: the per-chain Scan control ────────────────────────
-            // One panel per CW-721-capable chain, rendered beneath the
-            // existing scanner summary rather than on a competing screen.
+            // ── PR 7 / 7.1: the per-chain Scan control ──────────────────
+            // One panel per chain BCC actually offers NFT discovery on,
+            // rendered beneath the existing scanner summary rather than on
+            // a competing screen.
             //
-            // ⚠ `$scannable` is a DISPLAY decision only. The real refusal is
-            // re-decided by DiscoveryRunService on every request, so a user
-            // who re-enables the button in their browser gets a bounded
-            // refusal rather than a scan. Scanning is disabled on every chain
-            // today, so every panel renders disabled with its reason.
-            foreach (ChainRepository::getActive('cosmos') as $scanChain) {
-                $enabled = ((int) ($scanChain->cosmwasm_nft_discovery_enabled ?? 0)) === 1;
+            // ⚠ PR 7.1 — THE SURFACE IS FILTERED BY PRODUCT SUPPORT.
+            // PR 7 rendered a panel for every active Cosmos chain, which
+            // put a Scan button on validator-only chains like Jackal and
+            // Osmosis. That is not a chain "waiting for a toggle": BCC does
+            // not offer NFT discovery there at all, and a disabled button
+            // is a standing invitation to ask why it cannot be enabled.
+            // `bcc_supports_nft_collections` is the owner-controlled answer
+            // and it decides whether the surface exists.
+            //
+            // ⚠ `$readiness` is a DISPLAY decision only. The real refusal is
+            // re-decided by DiscoveryRunService on every request AND by
+            // DiscoveryRunExecutor immediately before provider work, so a
+            // user who re-enables the button in their browser — or forges
+            // the POST outright — gets a bounded refusal, not a scan.
+            $scanChains = array_values(array_filter(
+                ChainRepository::getActive('cosmos'),
+                static fn(object $c): bool => DiscoveryReadiness::isNftDiscoverySurface($c)
+            ));
+
+            // ⚠ NO NEW QUERY. `$scannerSummary` was already built above and
+            // carries, per chain, the eligibility verdict and the backfill
+            // timestamp this decision needs — from ONE bounded checkpoint
+            // read. Re-reading each chain's checkpoint here would put a
+            // per-row query back on a page whose discipline is a fixed
+            // number of reads, which is why CosmwasmScannerPanelOwnershipTest
+            // forbids the checkpoint-repository import in this file.
+            $summaryByChain = [];
+            foreach (($scannerSummary['chains'] ?? []) as $summaryRow) {
+                if (isset($summaryRow['chain_id'])) {
+                    $summaryByChain[(int) $summaryRow['chain_id']] = $summaryRow;
+                }
+            }
+
+            foreach ($scanChains as $scanChain) {
+                $readiness = DiscoveryReadiness::forSummaryRow(
+                    $scanChain,
+                    $summaryByChain[(int) $scanChain->id] ?? []
+                );
 
                 DiscoveryScanPanel::render(
                     $scanChain,
-                    $enabled,
-                    $enabled ? '' : DiscoveryRunError::DISCOVERY_DISABLED
+                    $readiness['eligible'],
+                    $readiness['eligible'] ? '' : $readiness['reason']
                 );
+            }
+
+            if ($scanChains === []) {
+                // Honest empty state. Silence here would read as a broken
+                // page rather than as a deliberate product position.
+                echo '<p class="description" style="margin:12px 0 0;">'
+                    . esc_html__(
+                        'No chain currently has NFT collection support enabled, so there is nothing to scan. Support is enabled per chain from BCC System → NFT Discovery.',
+                        'bcc-trust'
+                    )
+                    . '</p>';
             }
             ?>
 

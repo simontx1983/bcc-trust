@@ -55,6 +55,11 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             'bcc_cosmwasm_daily_discovery',
             'bcc_cosmwasm_weekly_retry',
             'bcc_cosmwasm_metadata_refresh',
+            // PR 7.1. Not a discovery sweep, but retired under the same
+            // rule and by the same migration: a five-minute loop that
+            // selected every active chain and called that chain's metadata
+            // provider with no administrator-created run.
+            'bcc_nft_enrichment_tick',
         ];
 
         protected function setUp(): void
@@ -273,8 +278,7 @@ namespace BCC\Trust\Onchain\Tests\Unit {
                 'bcc_index_validators',
                 'bcc_refresh_collections',
                 'bcc_nft_eth_indexer_tick',
-                'bcc_nft_enrichment_tick',
-                'bcc_gated_group_provision',
+                                'bcc_gated_group_provision',
                 'bcc_trust_daily_cleanup',
             ] as $keep) {
                 \BccRetirementState::schedule($keep, [], 'hourly');
@@ -287,8 +291,7 @@ namespace BCC\Trust\Onchain\Tests\Unit {
                 'bcc_index_validators',
                 'bcc_refresh_collections',
                 'bcc_nft_eth_indexer_tick',
-                'bcc_nft_enrichment_tick',
-                'bcc_gated_group_provision',
+                                'bcc_gated_group_provision',
                 'bcc_trust_daily_cleanup',
             ] as $keep) {
                 self::assertNotFalse(\BccRetirementState::next($keep, []), "{$keep} must survive");

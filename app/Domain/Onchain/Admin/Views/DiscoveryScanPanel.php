@@ -56,6 +56,20 @@ final class DiscoveryScanPanel
         return [
             'discovery_disabled'         => 'Scanning has not been enabled for this chain.',
             'chain_unsupported'          => 'This chain does not support on-chain collection discovery.',
+
+            // ── PR 7.1: the blockers that used to be indistinguishable ──
+            // Each of these previously surfaced as "not ready to scan yet",
+            // which told an operator nothing about what to change. The
+            // wording names the switch and, where an operator can act, says
+            // where. Nothing here echoes a constant name or a file path: an
+            // operator does not edit wp-config from this screen, and a
+            // reason line is not the place to teach them to.
+            'not_opted_in'               => 'Scanning has not been switched on for this chain yet.',
+            'paused'                     => 'Scanning is paused for this chain.',
+            'allowlist_excluded'         => 'This chain is outside the current scanning rollout.',
+            'nft_discovery_unsupported'  => 'BCC does not offer NFT collection discovery on this chain.',
+            'discovery_globally_disabled' => 'On-chain discovery is switched off for this environment.',
+            'historical_backfill_disabled' => 'The first full scan of a chain is switched off for this environment.',
             'chain_not_ready'            => 'This chain is not ready to scan yet.',
             'chain_unknown'              => 'That chain could not be found.',
             'already_active'             => 'A scan is already running for this chain.',

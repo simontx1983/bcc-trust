@@ -28,6 +28,7 @@ use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmPassStopReason;
 use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\DiscoveryReadiness;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryJobKind;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryScanMode;
@@ -106,6 +107,51 @@ final class DiscoveryRunExecutor
         if (!class_exists('\\BCC\\Trust\\Onchain\\Workers\\CosmwasmDiscoveryWorker')) {
             self::terminalFailure($runId, $token, DiscoveryRunError::CHAIN_NOT_READY, $chainId, 0);
             return ['status' => 'failed', 'reason' => DiscoveryRunError::CHAIN_NOT_READY, 'run_id' => $runId];
+        }
+
+        // ── PR 7.1: RE-ASK READINESS, IMMEDIATELY BEFORE PROVIDER WORK ──
+        //
+        // The request gate ran when the operator pressed the button. Between
+        // then and now a deploy may have changed wp-config, an administrator
+        // may have withdrawn product support or the opt-in, or the canary
+        // allowlist may have narrowed. Configuration is not frozen onto the
+        // run, so it must be re-read at the last possible moment.
+        //
+        // ⚠ WHY THIS IS NOT REDUNDANT WITH THE WORKER'S OWN GATE.
+        // `runBackfillForChain()` does check `backfillEnabled()` — and
+        // returns PASS_SKIPPED, which arrives here as the generic
+        // CHAIN_NOT_READY / `chain_refused_to_prepare` pair. That pair is
+        // also what a pause, an open breaker and a missing driver produce,
+        // so the operator learns only that something refused, never which
+        // switch. Asking here lets the ledger record the ACTUAL blocker.
+        //
+        // The mode is taken from the ROW, not recomputed: a checkpoint that
+        // completed while this run sat queued must not silently re-judge it
+        // against a different switch than the one it was approved under.
+        $readiness = DiscoveryReadiness::forExecution($chainId, $scanMode);
+
+        if (!$readiness['eligible']) {
+            Logger::warning('[bcc-trust] discovery run refused at execution time; configuration changed after queueing', [
+                'run_id'     => $runId,
+                'chain_id'   => $chainId,
+                'scan_mode'  => $scanMode,
+                'error_code' => $readiness['reason'],
+            ]);
+
+            // ⚠ ZERO PROVIDER CALLS. This returns before the budget, the
+            // fetcher and the worker exist, so there is nothing to abort
+            // mid-flight and no request to un-send.
+            //
+            // This is a confirmed terminal FAILURE carrying the specific
+            // code — never a success, and never "0 collections found".
+            // Nothing was looked at, so nothing was found.
+            self::terminalFailure($runId, $token, $readiness['reason'], $chainId, (int) $run->attempt_count);
+
+            return [
+                'status' => 'failed',
+                'reason' => $readiness['reason'],
+                'run_id' => $runId,
+            ];
         }
 
         $budget = new CosmwasmTickBudget();

@@ -269,20 +269,35 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static function reset(): void { self::$chains = []; }
 
+            /**
+             * @param int|null $supportsNft PR 7.1 — the product-support
+             *        switch `bcc_supports_nft_collections`. Defaults to 1 so
+             *        pre-7.1 tests keep exercising what they were written
+             *        for. NULL seeds a row where the COLUMN IS ABSENT, which
+             *        is what a pre-migration install looks like and must
+             *        read as "not supported", never as "supported".
+             */
             public static function seed(
                 int $id,
                 string $slug,
                 string $type = 'cosmos',
                 int $active = 1,
-                int $discoveryEnabled = 1
+                int $discoveryEnabled = 1,
+                ?int $supportsNft = 1
             ): void {
-                self::$chains[$id] = (object) [
+                $row = [
                     'id'                             => $id,
                     'slug'                           => $slug,
                     'chain_type'                     => $type,
                     'is_active'                      => (string) $active,
                     'cosmwasm_nft_discovery_enabled' => (string) $discoveryEnabled,
                 ];
+
+                if ($supportsNft !== null) {
+                    $row['bcc_supports_nft_collections'] = (string) $supportsNft;
+                }
+
+                self::$chains[$id] = (object) $row;
             }
 
             public static function getById(int $id): ?object
