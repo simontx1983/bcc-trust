@@ -321,9 +321,26 @@ final class NftDiscoveryBoundaryTest extends TestCase
             [
                 'app/Domain/Onchain/Admin/NftDiscoveryPage.php',
                 'app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php',
+                'app/Domain/Onchain/Workers/DiscoveryRunExecutor.php',
             ],
             $callers,
-            'only the admin page starts a backfill; the worker declares it'
+            'the admin page and the ledger executor start a backfill; the worker declares it'
+        );
+
+        // ── WHY THE EXECUTOR IS ALLOWED HERE, AND STILL BOUNDED ─────────
+        // PR 7A added it deliberately: a HISTORICAL run is a backfill, and
+        // the executor is what performs one. The bound did not move, it
+        // relocated — the executor reaches this method only for a run whose
+        // `scan_mode` is historical, and a run only exists because a NAMED
+        // administrator asked for it through DiscoveryRunService.
+        //
+        // The supervised CLI is deliberately NOT on this list: it pins
+        // INCREMENTAL precisely so a backfill stays unreachable from a
+        // terminal, which CosmwasmOneShotCliTest enforces separately.
+        self::assertStringNotContainsString(
+            'runBackfillForChain(',
+            self::code('app/Domain/Onchain/CLI/CosmwasmOneShotDiscoveryCommand.php'),
+            'the supervised CLI must never reach a backfill'
         );
     }
 

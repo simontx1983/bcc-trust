@@ -471,7 +471,15 @@ final class CosmwasmCliPreflightAccuracyTest extends TestCase
 
         $command = new CosmwasmOneShotDiscoveryCommand();
         try {
-            $command->run([], ['chain' => (string) self::CHAIN, 'once' => true, 'confirm' => self::TOKEN]);
+            $command->run([], [
+                'chain'   => (string) self::CHAIN,
+                'once'    => true,
+                'confirm' => self::TOKEN,
+                // PR 7A: executing records a ledger run, and a run names
+                // the administrator who authorized it. User 2 is the
+                // administrator the stubs authorize.
+                'user-id' => '2',
+            ]);
         } catch (\BccTestCliHalt $halt) {
             self::fail('expected a clean pass, got exit ' . $halt->exitCode . ': ' . \WP_CLI::output());
         }
@@ -516,7 +524,15 @@ final class CosmwasmCliPreflightAccuracyTest extends TestCase
 
         $command = new CosmwasmOneShotDiscoveryCommand();
         try {
-            $command->run([], ['chain' => (string) self::CHAIN, 'once' => true, 'confirm' => self::TOKEN]);
+            $command->run([], [
+                'chain'   => (string) self::CHAIN,
+                'once'    => true,
+                'confirm' => self::TOKEN,
+                // PR 7A: executing records a ledger run, and a run names
+                // the administrator who authorized it. User 2 is the
+                // administrator the stubs authorize.
+                'user-id' => '2',
+            ]);
         } catch (\BccTestCliHalt $halt) {
             self::fail('expected a clean pass, got exit ' . $halt->exitCode . ': ' . \WP_CLI::output());
         }

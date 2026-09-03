@@ -57,6 +57,11 @@ return [
         'bcc_helius_dedupe_sweep'               => ['interval' => 'bcc_five_minutes',             'description' => 'Helius signature replay LRU eviction'],
         'bcc_helius_subscription_reconcile'     => ['interval' => 'twicedaily',                   'description' => 'Helius subscription address-list reconcile (covers dropped subscribe/unsubscribe)'],
         'bcc_nft_enrichment_tick'               => ['interval' => 'bcc_five_minutes',             'description' => 'NFT metadata backfill (name + image_url)'],
+        // PR 7A. MAINTENANCE, NOT DISCOVERY. It re-dispatches runs an
+        // administrator already requested, recovers expired leases and
+        // prunes terminal history. It has NO chain-selection logic, so it
+        // cannot become recurring automatic scanning.
+        'bcc_discovery_run_maintenance'         => ['interval' => 'bcc_five_minutes',             'description' => 'discovery run ledger maintenance (re-dispatch, lease recovery, retention)'],
         'bcc_watch_batch_sweep'                 => ['interval' => 'bcc_minute',                   'description' => 'WatchBatchAggregator sweep (WatchBatchAggregator::SWEEP_HOOK / ::SWEEP_INTERVAL)'],
         // Disputes domain
         'bcc_disputes_auto_resolve'             => ['interval' => 'daily',                        'description' => 'dispute auto-resolve sweep'],

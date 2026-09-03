@@ -600,6 +600,12 @@ require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-code-fami
 bcc_onchain_create_cosmwasm_code_families_table();
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-contracts.php';
+
+// PR 7A discovery-run ledger. Required here so the integration suite can
+// exercise the real table — uq_active, the claim compare-and-swap and the
+// lease reaper are all database behaviour that a double cannot prove.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-discovery-runs.php';
+bcc_onchain_create_discovery_runs_table();
 bcc_onchain_create_cosmwasm_contracts_table();
 
 // ── Stubs the validator-message-queue worker/repo need ──────────────────────
