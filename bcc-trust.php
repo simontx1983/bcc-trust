@@ -975,14 +975,33 @@ add_action('bcc_helius_subscription_reconcile', static function (): void {
     }
 });
 
-// V2 Phase 1c: NFT metadata enrichment cron handler. Per-batch + per-
-// chain tick walks rows where enriched_at IS NULL and backfills name,
-// image_url, metadata_uri, collection_name via the per-chain fetcher's
-// metadata API.
-add_action(
-    \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK,
-    [\BCC\Trust\Onchain\Services\NftEnrichmentService::class, 'runAllChains']
-);
+// ── PR 7.1: THE NFT ENRICHMENT TICK IS RETIRED ──────────────────────────
+//
+// `bcc_nft_enrichment_tick` ran every five minutes, and its handler
+// `NftEnrichmentService::runAllChains()` iterated EVERY active chain and
+// called that chain's metadata provider for any row whose
+// `collection_name` was NULL. No capability gate, no per-chain opt-in, no
+// discovery-run row, nothing in the PR 7A ledger — and entirely
+// independent of BCC_COSMWASM_DISCOVERY_ENABLED.
+//
+// ⚠ IT WAS ONLY DORMANT BY DATA, NOT BY DESIGN. A 2026-09-03 audit found
+// zero pending rows on staging and production, so it woke every five
+// minutes and did nothing. But an administrator-requested discovery scan
+// emits `'collection_name' => $name` and that name is NULL whenever a
+// CW-721's `contract_info` carries none — so the first scan that found an
+// unnamed contract would have handed this loop provider work, on a chain
+// CRON chose, minutes after the operator's single authorised action.
+//
+// The owner rule is that only an explicit administrator action may create
+// discovery work; cron may claim, continue, retry or recover work an
+// administrator created, but it may never choose a chain and invent it.
+// A free-running five-minute loop that selects every active chain cannot
+// satisfy that rule, so the schedule and the handler both go.
+//
+// The SERVICE is deliberately left in place — see the class docblock. Its
+// removal is a separate decision with its own caller inventory, and future
+// metadata retry belongs to an explicit administrator action or to an
+// administrator-created discovery run, not to a new cron.
 
 // V2 Phase 1 hardening: self-heal cron registration.
 //
@@ -1014,7 +1033,13 @@ add_action(
 // deactivation hook (`bcc_trust_deactivate`).
 add_action('plugins_loaded', static function (): void {
     \BCC\Trust\Onchain\Workers\NftEthIndexerWorker::register();
-    \BCC\Trust\Onchain\Services\NftEnrichmentService::register();
+    // ⚠ PR 7.1: NftEnrichmentService::register() is NOT called here any
+    // more, and must not be re-added. Self-healing a retired hook would
+    // silently restore the free-running five-minute provider loop on the
+    // very next request — the same failure shape as the CW-721 discovery
+    // sweeps retired in PR 1. `bcc_nft_enrichment_tick` is now in the
+    // cleanup-only list and is cleared by
+    // includes/database/unschedule-automatic-nft-discovery.php.
     // NOTHING SCHEDULES CW-721 DISCOVERY, AND NOTHING MAY.
     // CosmwasmDiscoveryWorker deliberately has no register() and owns no
     // cron hooks: chain-wide discovery is operator-initiated, one named
@@ -2322,16 +2347,11 @@ function bcc_trust_activate() {
         wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_helius_subscription_reconcile');
     }
 
-    // V2 Phase 1c: NFT enrichment scheduler. Backfills name +
-    // image_url + collection_name on freshly-indexed rows so the
-    // gallery's read-path swap doesn't render thumbnail-less rows.
-    // 5-min cadence — enrichment is not time-sensitive (worst-case a
-    // newly-minted NFT shows up in the V1 transient gallery first,
-    // then renders from the persistent table on the next page load
-    // after enrichment lands).
-    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK)) {
-        wp_schedule_event(time() + 90, 'bcc_five_minutes', \BCC\Trust\Onchain\Services\NftEnrichmentService::CRON_HOOK);
-    }
+    // ⚠ PR 7.1: the V2 Phase 1c NFT enrichment scheduler is RETIRED and
+    // is deliberately NOT scheduled here. It selected every active chain
+    // and called providers without an administrator-created run. Do not
+    // restore this block; activation is the other half of the self-heal
+    // pair, so re-adding either one alone still resurrects the loop.
 
     // §C3 watch-batch sweep — activation fast path + legacy hook drain.
     // Mirrors the plugins_loaded self-heal in Plugin::registerAsyncJobs:

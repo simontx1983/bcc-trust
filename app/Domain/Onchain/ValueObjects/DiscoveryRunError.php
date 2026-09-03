@@ -62,6 +62,40 @@ final class DiscoveryRunError
     /** `cosmwasm_nft_discovery_enabled` is off, or unreadable. */
     public const DISCOVERY_DISABLED = 'discovery_disabled';
 
+    // ── PR 7.1: the three blockers nothing could previously name ────────
+    //
+    // Before these existed, every one of them surfaced as the generic
+    // CHAIN_NOT_READY / `chain_refused_to_prepare` pair — the SAME pair a
+    // pause, an open circuit breaker and a missing driver produce. The run
+    // was recorded honestly as `failed` (PR 7A never called it a success),
+    // but an operator could not tell a config switch from an empty chain,
+    // and "this chain has no NFTs" was the cheapest wrong conclusion
+    // available. Naming the blocker is the fix.
+
+    /**
+     * PRODUCT DECISION: `wp_bcc_chains.bcc_supports_nft_collections` is 0
+     * or unreadable — BCC does not currently offer NFT discovery here.
+     *
+     * ⚠ Distinct from {@see CHAIN_UNSUPPORTED}, which means the chain
+     * FAMILY has no driver, and from {@see DISCOVERY_DISABLED}, which
+     * means an operator has not opted this chain in. This one says the
+     * product does not cover the chain at all, and no operator setting
+     * reachable from the scan screen changes it.
+     */
+    public const NFT_DISCOVERY_UNSUPPORTED = 'nft_discovery_unsupported';
+
+    /** `BCC_COSMWASM_DISCOVERY_ENABLED` is false or undefined. */
+    public const DISCOVERY_GLOBALLY_DISABLED = 'discovery_globally_disabled';
+
+    /**
+     * `BCC_COSMWASM_BACKFILL_ENABLED` is false or undefined, and the
+     * server selected the historical walk.
+     *
+     * A chain that has never been scanned always resolves to historical,
+     * so on a fresh chain this is the switch that actually decides.
+     */
+    public const HISTORICAL_BACKFILL_DISABLED = 'historical_backfill_disabled';
+
     /** A run for this chain and job kind is already active. */
     public const ALREADY_ACTIVE = 'already_active';
 

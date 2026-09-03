@@ -56,7 +56,10 @@ return [
         'bcc_nft_eth_indexer_tick'              => ['interval' => 'bcc_one_minute',               'description' => 'NFT EVM indexer per-chain tick'],
         'bcc_helius_dedupe_sweep'               => ['interval' => 'bcc_five_minutes',             'description' => 'Helius signature replay LRU eviction'],
         'bcc_helius_subscription_reconcile'     => ['interval' => 'twicedaily',                   'description' => 'Helius subscription address-list reconcile (covers dropped subscribe/unsubscribe)'],
-        'bcc_nft_enrichment_tick'               => ['interval' => 'bcc_five_minutes',             'description' => 'NFT metadata backfill (name + image_url)'],
+        // ⚠ `bcc_nft_enrichment_tick` was here until PR 7.1. It is now in
+        // `cleanup_only` below: a five-minute loop that selected every
+        // active chain and called providers with no administrator-created
+        // run cannot coexist with the operator-initiated discovery rule.
         // PR 7A. MAINTENANCE, NOT DISCOVERY. It re-dispatches runs an
         // administrator already requested, recovers expired leases and
         // prunes terminal history. It has NO chain-selection logic, so it
@@ -104,6 +107,14 @@ return [
         'bcc_cosmwasm_daily_discovery',
         'bcc_cosmwasm_weekly_retry',
         'bcc_cosmwasm_metadata_refresh',
+        // PR 7.1 (2026-09-03). Retired for the SAME reason as the five
+        // above, found by the audit that cleared them: it ran every five
+        // minutes, iterated every active chain and called that chain's
+        // metadata provider, with no capability gate, no per-chain opt-in
+        // and no discovery-run row. It was dormant only because no row had
+        // a NULL `collection_name` — a condition the first successful scan
+        // would have ended.
+        'bcc_nft_enrichment_tick',
         // Scale-hardening / legacy drains still worth clearing on long-lived installs.
         'bcc_pull_batch_sweep',
         // Retired hooks (kept for uninstall hygiene on installs that scheduled them pre-retirement).

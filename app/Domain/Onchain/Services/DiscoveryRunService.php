@@ -27,11 +27,8 @@ namespace BCC\Trust\Onchain\Services;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\TransactionManager;
-use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
-use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
-use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
+use BCC\Trust\Onchain\Support\DiscoveryReadiness;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryJobKind;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunStatus;
@@ -97,18 +94,23 @@ final class DiscoveryRunService
             return $this->refuse(DiscoveryRunError::OPERATOR_UNRESOLVED);
         }
 
-        // ── Gate: chain, driver, explicit discovery capability ──────────
+        // ── Gate: product support, environment, driver, opt-in, active ──
         // Refused here means NO ROW IS CREATED and NO PROVIDER IS TOUCHED.
         // Queueing a run that the executor is guaranteed to refuse would
         // manufacture a failed run on a schedule and tell the operator
         // their request was accepted when it never could be.
-        $gate = $this->chainIsScannable($chainId);
-        if ($gate !== null) {
-            return $this->refuse($gate);
+        //
+        // ⚠ PR 7.1: the readiness decision also returns the mode it judged
+        // against. Recomputing the mode after the gate would reopen the gap
+        // this closes — a checkpoint completing between the two reads would
+        // queue an INCREMENTAL run that was approved as HISTORICAL, against
+        // a backfill switch that was never consulted for it.
+        $readiness = $this->chainReadiness($chainId, $forceScanMode);
+        if (!$readiness['eligible']) {
+            return $this->refuse($readiness['reason']);
         }
 
-        $scanMode = $forceScanMode
-            ?? DiscoveryScanMode::forCheckpoint(ChainCheckpointRepository::get($chainId));
+        $scanMode = $readiness['scan_mode'];
 
         return $this->createRun($chainId, $operator, $jobKind, $scanMode, null, self::AUDIT_REQUESTED);
     }
@@ -153,14 +155,15 @@ final class DiscoveryRunService
             return $this->refuse(DiscoveryRunError::UNSUPPORTED_REQUEST);
         }
 
-        // Re-gated, not trusted from the original: capability may have been
-        // switched off since, and a retry is a fresh authorization.
-        $gate = $this->chainIsScannable($chainId);
-        if ($gate !== null) {
-            return $this->refuse($gate);
+        // Re-gated, not trusted from the original: product support, the
+        // environment switches and the per-chain opt-in may all have
+        // changed since, and a retry is a fresh authorization.
+        $readiness = $this->chainReadiness($chainId);
+        if (!$readiness['eligible']) {
+            return $this->refuse($readiness['reason']);
         }
 
-        $scanMode = DiscoveryScanMode::forCheckpoint(ChainCheckpointRepository::get($chainId));
+        $scanMode = $readiness['scan_mode'];
 
         return $this->createRun($chainId, $operator, $jobKind, $scanMode, (int) $original->id, self::AUDIT_RETRIED);
     }
@@ -372,64 +375,34 @@ final class DiscoveryRunService
     }
 
     /**
-     * The chain must exist, be active, be a family we can discover, and
-     * carry an EXPLICIT discovery opt-in.
+     * May this chain be scanned right now, and if not, exactly why?
      *
-     * @return string|null a bounded refusal code, or null when scannable
+     * ── PR 7.1: ONE AUTHORITY, ASKED HERE TOO ───────────────────────────
+     * This method used to answer with its own subset of the rules: chain
+     * shape, then {@see CosmwasmScanEligibility::verdict()}. It knew
+     * nothing about NFT product support and nothing about the environment
+     * master switches — so it accepted requests the executor was then
+     * guaranteed to refuse, which is precisely the "manufacture a failed
+     * run and tell the operator it was accepted" outcome the comment at
+     * the call site warns about.
+     *
+     * ⚠ It also collapsed every per-chain refusal into DISCOVERY_DISABLED.
+     * A paused chain, a chain outside the canary allowlist and a chain
+     * nobody opted in all produced one word, so the operator-facing reason
+     * could not name the blocker.
+     *
+     * {@see DiscoveryReadiness} now owns the order and the combination;
+     * this method just asks it and passes the mode it selected back to the
+     * caller so the request and the run row cannot disagree about which
+     * walk was authorised.
+     *
+     * @param string|null $forcedScanMode pinned by a supervised CLI caller only
+     *
+     * @return array{reason: string, eligible: bool, scan_mode: string}
      */
-    private function chainIsScannable(int $chainId): ?string
+    private function chainReadiness(int $chainId, ?string $forcedScanMode = null): array
     {
-        if ($chainId <= 0) {
-            return DiscoveryRunError::CHAIN_UNKNOWN;
-        }
-
-        $chain = ChainRepository::getById($chainId);
-        if ($chain === null) {
-            return DiscoveryRunError::CHAIN_UNKNOWN;
-        }
-
-        if ((int) ($chain->is_active ?? 0) !== 1) {
-            return DiscoveryRunError::CHAIN_UNKNOWN;
-        }
-
-        // Only Cosmos has a CW-721 enumeration driver today.
-        if ((string) ($chain->chain_type ?? '') !== 'cosmos') {
-            return DiscoveryRunError::CHAIN_UNSUPPORTED;
-        }
-
-        // ── §11: REUSE THE CANONICAL VERDICT, DO NOT RE-DERIVE IT ───────
-        // An earlier draft read `cosmwasm_nft_discovery_enabled` directly
-        // here. That was a second implementation of a rule that already has
-        // one home, and it disagreed with the scanner the moment a chain was
-        // paused or excluded by the allowlist — two copies of one rule,
-        // written to agree, drifting anyway.
-        //
-        // `verdict()` is PURE: it takes the state, the opt-in and the
-        // allowlist as parameters, so reusing it costs one checkpoint read
-        // the caller mostly already has.
-        //
-        // ⚠ `isScannable()` is an identity test against ELIGIBLE, so an
-        // unknown verdict — a newer build, an unreadable column, a
-        // partially-populated row — is NOT scannable. Failing closed here
-        // costs a refused request; failing open would start a scan on a
-        // chain nobody opted in.
-        $checkpoint = ChainCheckpointRepository::get($chainId);
-        $optedIn    = array_key_exists('cosmwasm_nft_discovery_enabled', (array) $chain)
-            ? ((int) $chain->cosmwasm_nft_discovery_enabled === 1)
-            : null;
-
-        $verdict = CosmwasmScanEligibility::verdict(
-            $chainId,
-            $checkpoint !== null ? (string) ($checkpoint->cw_discovery_state ?? '') : null,
-            $optedIn,
-            CosmwasmDiscoveryGate::chainAllowlist()
-        );
-
-        if (!CosmwasmScanEligibility::isScannable($verdict)) {
-            return DiscoveryRunError::DISCOVERY_DISABLED;
-        }
-
-        return null;
+        return DiscoveryReadiness::forRequest($chainId, $forcedScanMode);
     }
 
     /**

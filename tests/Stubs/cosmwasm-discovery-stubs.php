@@ -1358,12 +1358,21 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$swallowWrites  = false;
             }
 
+            /**
+             * @param int|null $supportsNft PR 7.1 — `bcc_supports_nft_collections`,
+             *        the owner-controlled product-support switch. Defaults
+             *        to 1 so pre-7.1 tests keep exercising what they were
+             *        written for. NULL omits the property entirely, which is
+             *        what a pre-migration install looks like and must read
+             *        as NOT supported.
+             */
             public static function seed(
                 int $id,
                 string $slug,
                 string $rest = 'https://lcd.example',
                 string $type = 'cosmos',
-                int $cosmwasmNftDiscoveryEnabled = 1
+                int $cosmwasmNftDiscoveryEnabled = 1,
+                ?int $supportsNft = 1
             ): void {
                 self::$chains[$id] = (object) [
                     'id'                             => $id,
@@ -1380,6 +1389,10 @@ namespace BCC\Trust\Onchain\Repositories {
                     'description'                    => 'About ' . $slug . '.',
                     'cosmwasm_nft_discovery_enabled' => (string) $cosmwasmNftDiscoveryEnabled,
                 ];
+
+                if ($supportsNft !== null) {
+                    self::$chains[$id]->bcc_supports_nft_collections = (string) $supportsNft;
+                }
             }
 
             /**

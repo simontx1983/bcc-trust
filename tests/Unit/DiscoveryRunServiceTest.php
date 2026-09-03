@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Services\DiscoveryRunService;
+use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryJobKind;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryScanMode;
@@ -31,6 +32,23 @@ final class DiscoveryRunServiceTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/discovery-run-stubs.php';
+
+        // ── PR 7.1: the environment master switches ─────────────────────
+        // These tests are about the SERVICE — authorization, the ledger,
+        // the audit, the race — not about the environment gate. Defined ON
+        // here so each one keeps exercising what it was written for.
+        //
+        // ⚠ The OFF cases are deliberately NOT expressed by trying to
+        // redefine these (a constant cannot be undefined). They live in
+        // DiscoveryRunReadinessGateTest, which runs in its own process and
+        // defines them per test method — the pattern
+        // CosmwasmChainEligibilityTest already uses.
+        if (!defined('BCC_COSMWASM_DISCOVERY_ENABLED')) {
+            define('BCC_COSMWASM_DISCOVERY_ENABLED', true);
+        }
+        if (!defined('BCC_COSMWASM_BACKFILL_ENABLED')) {
+            define('BCC_COSMWASM_BACKFILL_ENABLED', true);
+        }
 
         \BccDiscoveryTestState::reset();
         \BCC\Core\Log\Logger::reset();
@@ -106,7 +124,11 @@ final class DiscoveryRunServiceTest extends TestCase
         $result = $this->service->request(self::CHAIN, self::OPERATOR);
 
         self::assertFalse($result['ok']);
-        self::assertSame(DiscoveryRunError::DISCOVERY_DISABLED, $result['reason']);
+        // PR 7.1: the refusal NAMES the blocker. This used to be the
+        // catch-all `discovery_disabled`, which a paused chain, an
+        // allowlist exclusion and a missing opt-in all produced — leaving
+        // the operator no way to tell which one to change.
+        self::assertSame(CosmwasmScanEligibility::NOT_OPTED_IN, $result['reason']);
         self::assertSame([], \BCC\Trust\Onchain\Repositories\DiscoveryRunRepository::$rows);
         self::assertSame([], \BccDiscoveryTestState::$dispatched);
     }
@@ -365,7 +387,7 @@ final class DiscoveryRunServiceTest extends TestCase
         $retry = $this->service->retry((int) $run['run_id'], self::OPERATOR);
 
         self::assertFalse($retry['ok']);
-        self::assertSame(DiscoveryRunError::DISCOVERY_DISABLED, $retry['reason']);
+        self::assertSame(CosmwasmScanEligibility::NOT_OPTED_IN, $retry['reason']);
     }
 
     // ── No market data ──────────────────────────────────────────────────

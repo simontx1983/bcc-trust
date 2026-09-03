@@ -179,6 +179,28 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_automatic_nft_discovery_unscheduled',
                 'callback'    => 'bcc_trust_unschedule_automatic_nft_discovery',
             ],
+            // PR 7.1 adds `bcc_nft_enrichment_tick` to
+            // bcc_trust_retired_discovery_hooks().
+            //
+            // ⚠ A SECOND ENTRY IS REQUIRED, NOT OPTIONAL. v1's done_option
+            // is already set on every install that ran it — measured
+            // 2026-09-03 on staging AND production — and this runner skips
+            // any migration whose done_option exists. Extending the hook
+            // list WITHOUT a fresh done_option would clear the new hook on
+            // new installs only, and leave the live five-minute event
+            // running forever on exactly the installs that have it. The
+            // header of this file says as much: "a new migration would also
+            // point at a fresh done_option".
+            //
+            // Same callback on purpose. It clears every hook in the shared
+            // list and proves the postcondition for all six, so re-running
+            // it is both the correct action and a no-op for the five that
+            // are already gone.
+            [
+                'id'          => 'unschedule_automatic_nft_discovery_v2',
+                'done_option' => 'bcc_trust_nft_enrichment_tick_unscheduled',
+                'callback'    => 'bcc_trust_unschedule_automatic_nft_discovery',
+            ],
         ];
     }
 
