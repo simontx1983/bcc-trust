@@ -32,6 +32,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Workers;
 
+use BCC\Core\Cron\AsyncDispatcher;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
 
@@ -41,8 +42,21 @@ if (!defined('ABSPATH')) {
 
 final class DiscoveryRunMaintenance
 {
-    /** Recurring hook, registered in includes/cron-hooks.php. */
+    /**
+     * Recurring hook.
+     *
+     * ⚠ `includes/cron-hooks.php` DECLARES this hook; it does not schedule it.
+     * That file is read by `bcc_trust_deactivate()` (the clear-list) and by the
+     * `bcc_expected_cron_hooks` drift detector — neither calls
+     * `wp_schedule_event`. PR 7A shipped with the declaration and a bare
+     * `add_action` and nothing else, so the handler was wired to an event that
+     * never existed: the drift detector reported it MISSING forever and the
+     * sweep never ran. `register()` below is what actually schedules it.
+     */
     public const HOOK = 'bcc_discovery_run_maintenance';
+
+    /** Existing shared interval — see CronService::addCronIntervals. */
+    public const INTERVAL = 'bcc_five_minutes';
 
     /** Runs re-dispatched per tick. */
     private const DISPATCH_LIMIT = 20;
@@ -52,6 +66,44 @@ final class DiscoveryRunMaintenance
 
     /** Terminal rows pruned per tick. */
     private const PRUNE_BATCH = 200;
+
+    /**
+     * Wire the handler AND schedule the recurring event.
+     *
+     * Called from the `plugins_loaded` self-heal block in bcc-trust.php, the
+     * same shape as ValidatorMsgQueueWorker::register() — so a hook added by
+     * an update schedules itself on the next request without a reactivation.
+     *
+     * Idempotent on both halves:
+     *   • `add_action` with this array callback yields a stable WordPress
+     *     callback id, so repeating it replaces rather than appends.
+     *   • `AsyncDispatcher::registerRecurring()` returns false and schedules
+     *     nothing when `wp_next_scheduled()` already reports an event.
+     *
+     * This schedules MAINTENANCE, not discovery. `tick()` has no
+     * chain-selection logic and cannot create a run, so scheduling it can
+     * never amount to unattended scanning — the property the CW-721 comment
+     * in bcc-trust.php protects.
+     */
+    public static function register(): void
+    {
+        add_action(self::HOOK, [self::class, 'handleSweep'], 10, 0);
+        AsyncDispatcher::registerRecurring(self::HOOK, self::INTERVAL);
+    }
+
+    /**
+     * The cron entry point — same `handleX` shape as ValidatorMsgQueueWorker.
+     *
+     * Exists because `tick()` returns its counts for callers and tests, while
+     * a WordPress action callback must return nothing. Binding `tick` directly
+     * is what PHPStan flags as `return.void`, and swallowing the value behind
+     * an anonymous closure instead would cost the stable callback id that
+     * makes repeated registration idempotent.
+     */
+    public static function handleSweep(): void
+    {
+        self::tick();
+    }
 
     /**
      * One maintenance tick.

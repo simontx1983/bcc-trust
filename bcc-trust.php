@@ -276,6 +276,11 @@ add_action('plugins_loaded', 'bcc_trust_run_pending_migrations', 20, 0);
 //     re-dispatches existing runs, recovers expired leases and prunes
 //     history. It has no chain-selection logic, so it cannot become
 //     automatic discovery.
+//
+// Only the EXECUTOR is wired here. The maintenance sweep needs an actual
+// scheduled event, not just a handler, so its wiring lives in
+// DiscoveryRunMaintenance::register() and is invoked from the plugins_loaded
+// self-heal block below — see the note on DiscoveryRunMaintenance::HOOK.
 add_action(
     \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::HOOK,
     static function ($runId = 0): void {
@@ -283,14 +288,6 @@ add_action(
     },
     10,
     1
-);
-add_action(
-    \BCC\Trust\Onchain\Workers\DiscoveryRunMaintenance::HOOK,
-    static function (): void {
-        \BCC\Trust\Onchain\Workers\DiscoveryRunMaintenance::tick();
-    },
-    10,
-    0
 );
 
 // Onchain schema definitions — table-creation functions used by the
@@ -1018,6 +1015,21 @@ add_action('plugins_loaded', static function (): void {
     // self-healing shape: registering from plugins_loaded means a hook
     // added by an update schedules itself without a reactivation.
     \BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker::register();
+
+    // PR 7A discovery-run ledger maintenance. MAINTENANCE, NOT DISCOVERY:
+    // tick() re-dispatches runs an administrator already requested, recovers
+    // expired leases and prunes terminal history. It owns no chain-selection
+    // logic and cannot create a run, so this is not the unattended scanning
+    // the CW-721 note above forbids.
+    //
+    // It belongs here rather than beside the executor's add_action because a
+    // handler without a scheduled event is inert: PR 7A declared the hook in
+    // includes/cron-hooks.php and wired the callback, but nothing ever called
+    // wp_schedule_event, so the sweep never ran and the drift detector
+    // reported it permanently MISSING. The reaper is the only thing that
+    // returns an expired lease, so an unscheduled sweep would let one crashed
+    // run hold `uq_active` and block that (job_kind, chain) forever.
+    \BCC\Trust\Onchain\Workers\DiscoveryRunMaintenance::register();
 
     // Helius dedupe sweep has no host service class (its handler is the
     // inline closure above) so its schedule is inlined here. Same shape
