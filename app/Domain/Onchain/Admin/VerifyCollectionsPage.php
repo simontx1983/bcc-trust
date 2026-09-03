@@ -31,6 +31,8 @@ use BCC\Trust\Onchain\Services\CollectionDemandService;
 use BCC\Trust\Onchain\Services\CollectionStateClassifier;
 use BCC\Trust\Onchain\Services\CommunityRequestService;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
+use BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel;
+use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningFailureCode;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
 
@@ -1229,6 +1231,27 @@ final class VerifyCollectionsPage
             <?php endforeach; ?>
 
             <?php CosmwasmScannerPanel::render($scannerSummary); ?>
+
+            <?php
+            // ── PR 7: the per-chain Scan control ────────────────────────
+            // One panel per CW-721-capable chain, rendered beneath the
+            // existing scanner summary rather than on a competing screen.
+            //
+            // ⚠ `$scannable` is a DISPLAY decision only. The real refusal is
+            // re-decided by DiscoveryRunService on every request, so a user
+            // who re-enables the button in their browser gets a bounded
+            // refusal rather than a scan. Scanning is disabled on every chain
+            // today, so every panel renders disabled with its reason.
+            foreach (ChainRepository::getActive('cosmos') as $scanChain) {
+                $enabled = ((int) ($scanChain->cosmwasm_nft_discovery_enabled ?? 0)) === 1;
+
+                DiscoveryScanPanel::render(
+                    $scanChain,
+                    $enabled,
+                    $enabled ? '' : DiscoveryRunError::DISCOVERY_DISABLED
+                );
+            }
+            ?>
 
             <?php
             // Four collection-state sub-tabs. Switching state resets

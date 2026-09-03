@@ -811,3 +811,252 @@ function bcc_onchain_backfill_collections_provisioning_state(): bool
 
     return true;
 }
+
+
+/*
+|--------------------------------------------------------------------------
+| PR 7 — COMMUNITY-FOCUSED COLLECTION METADATA
+|--------------------------------------------------------------------------
+|
+| ⚠ CO-LOCATED IN THIS FILE ON PURPOSE, for the same reason PR 5a's migration
+| is. The umbrella `scripts/schema-drift-guard.php` treats the FIRST
+| glob-ordered file that declares a table as the authority on its whole index
+| set. `schema-collections-community-metadata.php` sorts BEFORE
+| `schema-collections.php` ('-' < '.'), so a separate file would become that
+| authority and the eight indexes declared above would read as undeclared live
+| drift — exactly the failure the header of this file already records.
+|
+| Adds four bounded scalar columns and runs two normalizations. No provenance
+| table: one value per collection per field, and a join table for that is a
+| second source of truth waiting to drift from the first.
+|
+| ⚠ NOTHING HERE STORES MARKET DATA. Collection SIZE is allowed because it
+| describes the collection; price, currency, volume, listings, sales and
+| royalties are not, and this is the boundary where that becomes physical.
+|
+*/
+
+/** Advisory-lock key. Shared with nothing else. */
+if (!defined('BCC_TRUST_COMMUNITY_METADATA_LOCK')) {
+    define('BCC_TRUST_COMMUNITY_METADATA_LOCK', 'bcc_trust_mig_collection_community_metadata_v1');
+}
+
+/**
+ * Column definitions, in the order they are added.
+ *
+ * Declared once so the migration and its verifier cannot disagree — a
+ * verifier with its own copy of the list is a verifier that passes while the
+ * migration adds something else.
+ *
+ * @return array<string, string> column name => DDL fragment
+ */
+function bcc_onchain_community_metadata_columns(): array
+{
+    return [
+        // Display only, bounded, nullable. Absence is normal.
+        'collection_symbol'        => "VARCHAR(32) DEFAULT NULL",
+        // The blockchain collection description. TEXT because 2000 chars of
+        // multi-byte text exceeds a VARCHAR key-length budget, and this column
+        // is never indexed.
+        'chain_description'        => "TEXT DEFAULT NULL",
+        // Approval state. NOT NULL with a safe default so a row that predates
+        // the column reads as "nothing imported" rather than as unknown.
+        'chain_description_state'  => "VARCHAR(16) NOT NULL DEFAULT 'none'",
+        // Which provider claimed the description, for operator review.
+        'chain_description_source' => "VARCHAR(32) DEFAULT NULL",
+        // One administrator-approved research URL. NULL until approved.
+        'marketplace_url'          => "VARCHAR(500) DEFAULT NULL",
+    ];
+}
+
+/**
+ * Add the PR 7 columns and run the two normalizations.
+ *
+ * Safe to call on every request that bumps the schema version.
+ */
+function bcc_onchain_add_collections_community_metadata(): void
+{
+    global $wpdb;
+
+    $table = bcc_onchain_collections_table();
+
+    // Two requests racing here would both see "column absent" and both ALTER;
+    // the loser errors. The shared schema lock lets losers proceed
+    // un-migrated, so this migration needs its own.
+    if (!\BCC\Core\DB\AdvisoryLock::acquire(BCC_TRUST_COMMUNITY_METADATA_LOCK, 0)) {
+        // Not an error: another request is doing this work right now.
+        return;
+    }
+
+    try {
+        // ── Step 1: columns ─────────────────────────────────────────────
+        foreach (bcc_onchain_community_metadata_columns() as $column => $ddl) {
+            $exists = bcc_onchain_probe_count(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+                  LIMIT 1",
+                [$table, $column]
+            );
+
+            // ⚠ FAIL CLOSED. A probe that could not run is NOT evidence the
+            // column is absent, and ALTERing on an unreadable probe is how a
+            // migration corrupts a table it could not inspect.
+            if ($exists === null) {
+                \BCC\Core\Log\Logger::error(
+                    '[bcc-trust] PR7 metadata migration: column probe failed; skipping',
+                    ['table' => $table, 'column' => $column]
+                );
+                return;
+            }
+
+            if ($exists > 0) {
+                continue;
+            }
+
+            // ⚠ `wpdb::query()` returns 0 for a SUCCESSFUL DDL statement.
+            // Only `=== false` is failure; `!$result` would treat every
+            // successful ALTER as a failure.
+            $result = $wpdb->query("ALTER TABLE {$table} ADD COLUMN {$column} {$ddl}");
+            if ($result === false) {
+                \BCC\Core\Log\Logger::error(
+                    '[bcc-trust] PR7 metadata migration: ALTER failed',
+                    ['table' => $table, 'column' => $column, 'error' => $wpdb->last_error]
+                );
+                return;
+            }
+        }
+
+        // ── Step 2: empty image strings become the NULL they always meant ──
+        bcc_onchain_normalize_empty_collection_images();
+
+        // ── Step 3: retire fabricated market values ─────────────────────
+        bcc_onchain_null_out_retired_market_values();
+    } finally {
+        \BCC\Core\DB\AdvisoryLock::release(BCC_TRUST_COMMUNITY_METADATA_LOCK);
+    }
+}
+
+/**
+ * `image_url = ''` → SQL NULL.
+ *
+ * ── WHY THIS IS NECESSARY AT ALL ────────────────────────────────────────
+ * The enrichment writer fills a missing image with `COALESCE(image_url, %s)`,
+ * which replaces NULL and leaves `''` exactly as it was. 119 production
+ * Cosmos rows hold `''`, so those rows can never receive an image no matter
+ * how many times anything runs. Normalizing them is what makes the column
+ * fillable again — it is not cosmetic.
+ *
+ * ── SCOPE ───────────────────────────────────────────────────────────────
+ * `WHERE image_url = ''` and nothing else. A row with a real URL is not
+ * matched; a row already NULL is not matched. Re-running finds zero rows,
+ * which is what makes it idempotent rather than merely repeatable.
+ *
+ * @return int|null rows changed, or null when the write failed.
+ */
+function bcc_onchain_normalize_empty_collection_images(): ?int
+{
+    global $wpdb;
+
+    $table = bcc_onchain_collections_table();
+
+    $result = $wpdb->query("UPDATE {$table} SET image_url = NULL WHERE image_url = ''");
+
+    if ($result === false) {
+        \BCC\Core\Log\Logger::error(
+            '[bcc-trust] PR7: empty-image normalization failed',
+            ['table' => $table, 'error' => $wpdb->last_error]
+        );
+        return null;
+    }
+
+    return (int) $result;
+}
+
+/**
+ * Fabricated market values → SQL NULL.
+ *
+ * ── WHAT IS BEING RETIRED ───────────────────────────────────────────────
+ * ⚠ BCC is never about price. The market columns remain PHYSICALLY present
+ * for now because callers outside this repository still select them and a
+ * caller-safe DROP has not been proven — but nothing may keep asserting a
+ * value nobody measured.
+ *
+ * The clearest case is `floor_currency = 'SOL'`, which SolanaFetcher wrote as
+ * a hardcoded constant next to a NULL price. It never described a market; it
+ * described a chain, and it made an empty column look populated.
+ *
+ * ── SCOPE, AND WHY IT IS SAFE TO RERUN ──────────────────────────────────
+ * Each statement matches only rows where the column is currently NOT NULL, so
+ * a second run matches nothing. Nothing else on the row is read or written —
+ * verification, provisioning, gates and canonical identity are untouched.
+ *
+ * @return array<string, int|null> column => rows changed (null = write failed)
+ */
+function bcc_onchain_null_out_retired_market_values(): array
+{
+    global $wpdb;
+
+    $table  = bcc_onchain_collections_table();
+    $result = [];
+
+    foreach (['floor_price', 'floor_currency', 'total_volume', 'listed_percentage', 'royalty_percentage'] as $column) {
+        // The column may legitimately not exist on a fresh install that ran a
+        // future schema; probe rather than assume.
+        $exists = bcc_onchain_probe_count(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+              LIMIT 1",
+            [$table, $column]
+        );
+
+        if ($exists === null || $exists === 0) {
+            $result[$column] = null;
+            continue;
+        }
+
+        $changed = $wpdb->query("UPDATE {$table} SET {$column} = NULL WHERE {$column} IS NOT NULL");
+
+        if ($changed === false) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] PR7: market-value retirement failed',
+                ['table' => $table, 'column' => $column, 'error' => $wpdb->last_error]
+            );
+            $result[$column] = null;
+            continue;
+        }
+
+        $result[$column] = (int) $changed;
+    }
+
+    return $result;
+}
+
+/**
+ * Report completion to the schema-version stamp gate.
+ *
+ * ⚠ Verified rather than assumed. A dbDelta/ALTER that silently skipped a
+ * column must NOT be followed by a version stamp claiming the schema is
+ * current — the stamp is what stops the migration ever being retried.
+ *
+ * Returns false when a probe cannot run: an unreadable schema is not a
+ * complete one.
+ */
+function bcc_onchain_verify_collections_community_metadata(): bool
+{
+    $table = bcc_onchain_collections_table();
+
+    foreach (array_keys(bcc_onchain_community_metadata_columns()) as $column) {
+        $exists = bcc_onchain_probe_count(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+              LIMIT 1",
+            [$table, $column]
+        );
+
+        if ($exists === null || $exists < 1) {
+            return false;
+        }
+    }
+
+    return true;
+}

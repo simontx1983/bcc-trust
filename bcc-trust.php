@@ -488,6 +488,14 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_create_discovery_runs_table();
     $discoveryRunsComplete = bcc_onchain_verify_discovery_runs_schema();
 
+    // PR 7 community-focused collection metadata: four bounded scalar columns
+    // plus the empty-image and retired-market normalizations. Verified for the
+    // same reason as the ledger above — a silently skipped ALTER must not be
+    // followed by a stamp claiming the schema is current, because the stamp is
+    // what stops the migration ever being retried.
+    bcc_onchain_add_collections_community_metadata();
+    $communityMetadataComplete = bcc_onchain_verify_collections_community_metadata();
+
     // Signals table is owned by SignalRepository — included here so its
     // column-type migrations run on version bump, not just on fresh
     // activation.
@@ -502,7 +510,10 @@ function bcc_onchain_ensure_schema(): bool {
     // BOTH must be complete. The calls happen above and only their results
     // are combined here — a migration must never be skipped because an
     // earlier one failed.
-    return $provisioningComplete && $discoveryRunsComplete;
+    // ALL must be complete. Every call happens above and only the results are
+    // combined here — a migration must never be skipped because an earlier one
+    // failed.
+    return $provisioningComplete && $discoveryRunsComplete && $communityMetadataComplete;
 }
 
 // Schema migration: re-run dbDelta when any schema file changes.
@@ -1852,6 +1863,11 @@ add_action('plugins_loaded', function (): void {
     // exists so the read model is exercised and proven before PR 7
     // renders it.
     \BCC\Trust\Onchain\Admin\DiscoveryRunStatusEndpoint::register();
+
+    // PR 7: the administrator "Scan On-Chain for Easy Discovery" actions.
+    // A thin POST/nonce/capability shell over the PR 7A ledger — it owns no
+    // discovery logic, contacts no provider, and never chooses a scan mode.
+    \BCC\Trust\Onchain\Admin\DiscoveryScanActions::register();
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_actions();
     \BCC\Trust\Onchain\Admin\WebhooksPage::register_actions();
     \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_actions();

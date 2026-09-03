@@ -831,6 +831,9 @@ final class CosmwasmDiscoveryService
         }
 
         $rows = [];
+
+        /** @var array<string, string> $pendingDescriptions contract => sanitized description */
+        $pendingDescriptions = [];
         foreach ($candidates as $row) {
             if ($budget->exhausted()) {
                 break;
@@ -864,10 +867,27 @@ final class CosmwasmDiscoveryService
                 continue;
             }
 
+            // ── ⚠ PR 7: CAPTURED FROM THE RESPONSE ALREADY FETCHED ──────
+            // `$info` is the return of the single `fetchContractInfo()` call
+            // above. Symbol, description and image were already in it and
+            // were being discarded; keeping them costs ZERO extra provider
+            // requests, which is the condition this capture had to meet.
+            //
+            // They describe the EXACT contract queried, so they are
+            // collection-level by construction — never sampled from a member
+            // token, never matched by name similarity.
+            //
+            // ⚠ `total_supply` stays NULL. `num_tokens` is probed by
+            // CosmwasmClassifier during CLASSIFICATION, but that runs per
+            // code family, discards the count, and is a different pass — so
+            // reading a size here would mean a NEW request per contract.
+            // "Do not add provider requests merely to enrich metadata" wins;
+            // an unknown size stays unknown rather than becoming a guess.
             $rows[] = [
                 'contract_address'   => $contract,
                 'chain_id'           => $chainId,
                 'collection_name'    => $name,
+                'collection_symbol'  => $info['symbol'] ?? null,
                 'token_standard'     => 'CW-721',
                 'total_supply'       => null,
                 'floor_price'        => null,
@@ -877,8 +897,15 @@ final class CosmwasmDiscoveryService
                 'listed_percentage'  => null,
                 'royalty_percentage' => null,
                 'metadata_storage'   => null,
-                'image_url'          => null,
+                'image_url'          => $info['image_url'] ?? null,
             ];
+
+            // The description is imported SEPARATELY, after the upsert, so it
+            // lands as `pending` review rather than as a public field. It is
+            // untrusted evidence written by a contract author.
+            if (($info['description'] ?? null) !== null) {
+                $pendingDescriptions[$contract] = (string) $info['description'];
+            }
         }
 
         if ($rows === []) {
@@ -888,7 +915,26 @@ final class CosmwasmDiscoveryService
         CollectionRepository::bulkUpsert($rows, 4 * HOUR_IN_SECONDS);
 
         foreach ($rows as $row) {
-            CosmwasmContractRepository::markCollectionRowWritten($chainId, (string) $row['contract_address']);
+            $contractAddress = (string) $row['contract_address'];
+
+            // ⚠ PR 7: the imported description lands as PENDING review, never
+            // as public text. It is resolved AFTER the upsert because the row
+            // id only exists once the upsert has run, and it is deliberately
+            // best-effort: a description that cannot be stored must not fail
+            // the discovery pass that produced a perfectly good collection.
+            if (isset($pendingDescriptions[$contractAddress])) {
+                $existing     = CollectionRepository::findByChainContract($chainId, $contractAddress);
+                $collectionId = $existing !== null ? (int) $existing->id : 0;
+                if ($collectionId > 0) {
+                    CollectionRepository::importChainDescription(
+                        $collectionId,
+                        $pendingDescriptions[$contractAddress],
+                        'cosmwasm'
+                    );
+                }
+            }
+
+            CosmwasmContractRepository::markCollectionRowWritten($chainId, $contractAddress);
             $result['emitted']++;
         }
 

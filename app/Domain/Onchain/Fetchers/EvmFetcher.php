@@ -15,6 +15,7 @@ use BCC\Trust\Onchain\Services\V1FetchFailureTracker;
 use BCC\Trust\Onchain\Support\AlchemyEndpoint;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
+use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 
 /**
  * EVM Chain Fetcher
@@ -886,27 +887,38 @@ class EvmFetcher implements FetcherInterface
             }
         }
 
-        $floorPrice = isset($openSea['floorPrice']) && is_numeric($openSea['floorPrice'])
-            ? (float) $openSea['floorPrice']
-            : null;
-        $imageUrl   = isset($openSea['imageUrl']) && is_string($openSea['imageUrl']) && $openSea['imageUrl'] !== ''
-            ? $openSea['imageUrl']
-            : null;
+        // ── ⚠ PR 7: MARKET DATA DIES AT THIS BOUNDARY ───────────────────
+        // `openSeaMetadata` carries floorPrice and friends. They are stripped
+        // from the payload here rather than merely left unread, so nothing
+        // downstream can reach them even by accident. This costs no request:
+        // it is the SAME `getContractMetadata` response already fetched.
+        $openSea = CollectionMetadataRules::stripMarketFields($openSea);
 
-        $totalSupply = isset($row['totalSupply']) && is_string($row['totalSupply']) && $row['totalSupply'] !== ''
-            ? $row['totalSupply']
-            : null;
+        $imageUrl = CollectionMetadataRules::sanitizeImageUrl($openSea['imageUrl'] ?? null);
+
+        // Collection SIZE — validated, never cast. `totalSupply` arrives as a
+        // decimal string; `(int)` on "1e5" or "-1" would invent a number.
+        $totalSupply = CollectionMetadataRules::validateTotalSupply($row['totalSupply'] ?? null)['value'];
+
+        // Symbol is display-only and never an identity.
+        $symbol = CollectionMetadataRules::sanitizeSymbol($row['symbol'] ?? null);
 
         return [
             'contract_address'   => $contractAddr,
             'collection_name'    => $collectionName,
+            'collection_symbol'  => $symbol,
             'chain_id'           => $chainId,
             'token_standard'     => $tokenStandard,
             'total_supply'       => $totalSupply,
-            'floor_price'        => $floorPrice,
-            'floor_currency'     => $native,
+            // ⚠ Every market key is explicitly null and must stay that way.
+            // `$native` used to be written as `floor_currency`; a chain's
+            // native token is not a market observation.
+            'floor_price'        => null,
+            'floor_currency'     => null,
             'total_volume'       => null,
-            'unique_holders'     => null, // requires getOwnersForContract (480 CU/contract) — out of scope for this fetch
+            // getOwnersForContract (480 CU/contract) is NOT called — a holder
+            // count is not worth an extra provider request, and PR 7 adds none.
+            'unique_holders'     => null,
             'listed_percentage'  => null,
             'royalty_percentage' => null,
             'metadata_storage'   => null,
@@ -960,12 +972,14 @@ class EvmFetcher implements FetcherInterface
      * null — discovery rows for those chains stay un-enriched until a
      * dedicated fetcher is added.
      *
+     * ⚠ PR 7: `floor_price` and `floor_currency` are GONE from this shape.
+     * Nothing populates them, and `applyEnrichment()` no longer reads them.
+     *
      * @return array{
      *     collection_name: ?string,
+     *     collection_symbol: ?string,
      *     image_url: ?string,
      *     total_supply: ?int,
-     *     floor_price: ?float,
-     *     floor_currency: ?string,
      *     token_standard: ?string
      * }|null
      */
@@ -1041,15 +1055,15 @@ class EvmFetcher implements FetcherInterface
         $os = isset($json['openSeaMetadata']) && is_array($json['openSeaMetadata'])
             ? $json['openSeaMetadata']
             : [];
-        $imageUrl   = is_string($os['imageUrl'] ?? null) && $os['imageUrl'] !== ''
-            ? $os['imageUrl']
-            : null;
-        $floorPrice = isset($os['floorPrice']) && is_numeric($os['floorPrice'])
-            ? (float) $os['floorPrice']
-            : null;
-        $collName   = is_string($os['collectionName'] ?? null) && $os['collectionName'] !== ''
-            ? $os['collectionName']
-            : $name;
+
+        // ⚠ PR 7: strip the market keys before anything reads this array.
+        // `openSeaMetadata` is where floorPrice, volume and listing counts
+        // arrive; removing them here means a later edit cannot casually
+        // re-expose one. No extra request — same response, fewer fields kept.
+        $os = CollectionMetadataRules::stripMarketFields($os);
+
+        $imageUrl = CollectionMetadataRules::sanitizeImageUrl($os['imageUrl'] ?? null);
+        $collName = CollectionMetadataRules::sanitizeName($os['collectionName'] ?? null) ?? $name;
 
         // Normalize Alchemy's tokenType (e.g. "ERC721", "ERC1155", "NOT_A_CONTRACT")
         // to the codebase's hyphenated form used in wp_bcc_onchain_collections.
@@ -1060,17 +1074,15 @@ class EvmFetcher implements FetcherInterface
             $standardOut = 'ERC-1155';
         }
 
-        $native = is_string($this->chain->native_token ?? null) && $this->chain->native_token !== ''
-            ? (string) $this->chain->native_token
-            : 'ETH';
-
         return [
-            'collection_name' => $collName,
-            'image_url'       => $imageUrl,
-            'total_supply'    => $supply,
-            'floor_price'     => $floorPrice,
-            'floor_currency'  => $floorPrice !== null ? $native : null,
-            'token_standard'  => $standardOut,
+            'collection_name'   => $collName,
+            'collection_symbol' => CollectionMetadataRules::sanitizeSymbol($json['symbol'] ?? null),
+            'image_url'         => $imageUrl,
+            'total_supply'      => $supply,
+            'token_standard'    => $standardOut,
+            // ⚠ No `floor_price` / `floor_currency`. The chain's native token
+            // was previously emitted as a currency whenever a price existed;
+            // both are gone, and applyEnrichment no longer reads either.
         ];
     }
 

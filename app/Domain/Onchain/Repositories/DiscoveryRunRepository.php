@@ -244,6 +244,45 @@ final class DiscoveryRunRepository
         return $row;
     }
 
+    /**
+     * Resolve a run by its PUBLIC handle.
+     *
+     * ── WHY THIS EXISTS ─────────────────────────────────────────────────
+     * `run_uuid` is the opaque handle the read model exposes; the integer id
+     * is internal and deliberately never leaves the backend. An admin form
+     * that has to name a run — Withdraw, Retry — therefore carries the uuid,
+     * and something has to turn it back into a row.
+     *
+     * ⚠ Resolving the uuid is NOT an authorization decision. This returns the
+     * row to anyone who asks; `DiscoveryRunService` still re-checks the
+     * operator and the state transition. The uuid is a NAME, not a capability
+     * — treating "knows the uuid" as "may cancel it" would be exactly the
+     * mistake the lease token is designed to avoid.
+     *
+     * @return DiscoveryRunRow|null
+     */
+    public static function findByUuid(string $uuid): ?object
+    {
+        global $wpdb;
+
+        // A UUID is fixed-length and bounded. Refusing anything else keeps a
+        // long or malformed value from ever reaching the query.
+        if ($uuid === '' || strlen($uuid) !== 36 || preg_match('/^[0-9a-f-]{36}$/i', $uuid) !== 1) {
+            return null;
+        }
+
+        $table   = self::table();
+        $columns = self::COLUMNS;
+
+        /** @var DiscoveryRunRow|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT {$columns} FROM {$table} WHERE run_uuid = %s LIMIT 1",
+            $uuid
+        ));
+
+        return $row;
+    }
+
     // ── Claiming ────────────────────────────────────────────────────────
 
     /**

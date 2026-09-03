@@ -165,6 +165,30 @@ final class LegacyAliasRouteCompatibilityTest extends TestCase
      * The service never calls the insensitive lookup (pinned by
      * testTheLegacyLookupHasNoProductionCallers), so a duplicate check can
      * never silently resolve through an alias.
+     *
+     * ── PR 7: A THIRD CALLER, AND ITS ASSESSMENT ────────────────────────
+     * `CosmwasmDiscoveryService::emitCollections()` now resolves the row id
+     * of a collection it has JUST upserted, so an imported blockchain
+     * description can be attached to it.
+     *
+     * Legacy-alias exposure, assessed: NONE.
+     *
+     *  1. It is CW-721/Cosmos. The 91 unresolved aliases are Solana rows, so
+     *     they are not on this path at all.
+     *  2. The lookup is by the exact contract address the same method wrote a
+     *     few lines earlier — not by a name, a symbol or a similarity match.
+     *  3. A MISS is harmless and fails closed: `$collectionId` stays 0, the
+     *     description is simply not imported, and nothing is created,
+     *     verified, provisioned or mutated. There is no "create if missing"
+     *     branch.
+     *  4. It cannot write `canonical_identifier`. The only column it can
+     *     reach afterwards is `chain_description*`, via
+     *     `importChainDescription()`, which touches nothing else — proved by
+     *     the whole-row fingerprint in ChainDescriptionSeparationTest.
+     *
+     * So the worst case of an alias mismatch is an unattached description on
+     * a collection an administrator has not reviewed yet, which is exactly
+     * the state that collection was already in.
      */
     public function testTheStrictLookupCallerInventoryIsUnchanged(): void
     {
@@ -178,6 +202,7 @@ final class LegacyAliasRouteCompatibilityTest extends TestCase
 
         self::assertSame(
             [
+                'app/Domain/Onchain/Services/CosmwasmDiscoveryService.php',
                 'app/Domain/Onchain/Services/ManualCollectionIntakeService.php',
                 'app/Domain/Onchain/Services/NftPieceViewModelBuilder.php',
             ],
