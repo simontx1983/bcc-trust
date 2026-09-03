@@ -12,6 +12,7 @@ use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\Support\SolanaEndpoints;
+use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 
 /**
  * Solana Chain Fetcher
@@ -715,14 +716,32 @@ class SolanaFetcher implements FetcherInterface
                     }
                 }
 
+                // ── ⚠ PR 7: NO MARKET DATA, AND NO SIZE FROM SAMPLING ────
+                // `floor_currency` used to be the hardcoded literal 'SOL'. It
+                // was never an observation — it described the chain, and it
+                // made an empty column look populated. Every market key is
+                // now explicitly null and the retirement migration clears the
+                // rows that already carry the old constant.
+                //
+                // `total_supply` stays NULL on Solana by design: the only way
+                // to count it here is to paginate every asset in the
+                // collection, which is an unbounded provider loop. An unknown
+                // count is unknown; it is not zero and it is not a guess.
+                //
+                // ⚠ Name/symbol come from `$collMeta` — the COLLECTION-level
+                // grouping metadata — never from an arbitrary member token.
+                // `$asset->content->metadata` describes ONE NFT, so using it
+                // for the collection would let a single deviant token rename
+                // the whole collection. The fallback is deliberately absent.
                 $collections[$key] = [
                     'contract_address'   => $collectionAddr,
-                    'collection_name'    => $collMeta->name ?? $asset->content->metadata->name ?? null,
+                    'collection_name'    => CollectionMetadataRules::sanitizeName($collMeta->name ?? null),
+                    'collection_symbol'  => CollectionMetadataRules::sanitizeSymbol($collMeta->symbol ?? null),
                     'chain_id'           => $chainId,
                     'token_standard'     => 'Metaplex',
                     'total_supply'       => null,
                     'floor_price'        => null,
-                    'floor_currency'     => 'SOL',
+                    'floor_currency'     => null,
                     'total_volume'       => null,
                     'unique_holders'     => null,
                     'listed_percentage'  => null,
@@ -730,10 +749,6 @@ class SolanaFetcher implements FetcherInterface
                     'metadata_storage'   => null,
                     '_count'             => 0,
                 ];
-
-                if (isset($asset->royalty->percent)) {
-                    $collections[$key]['royalty_percentage'] = round((float) $asset->royalty->percent * 100, 2);
-                }
 
                 $uri = $asset->content->json_uri ?? '';
                 if (str_contains($uri, 'arweave.net')) {

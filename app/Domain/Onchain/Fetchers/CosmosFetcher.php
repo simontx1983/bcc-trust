@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 
 /**
  * Cosmos Chain Fetcher
@@ -1014,7 +1015,7 @@ class CosmosFetcher implements FetcherInterface
      * principle, though it's rare). Returns null on transport failure
      * WITHOUT caching so a flaky LCD doesn't poison the window.
      *
-     * @return array{name: ?string, symbol: ?string}|null
+     * @return array{name: ?string, symbol: ?string, description: ?string, image_url: ?string}|null
      */
     public function fetchContractInfo(string $contract): ?array
     {
@@ -1022,12 +1023,18 @@ class CosmosFetcher implements FetcherInterface
             return null;
         }
 
-        $chainId  = (int) $this->chain->id;
-        $cacheKey = sprintf('cw721_contract_info_%d_%s', $chainId, strtolower($contract));
+        $chainId = (int) $this->chain->id;
+
+        // ⚠ Cache key version bumped with the PR 7 shape. The old key stored
+        // `['name','symbol']` and the guard below only tested those two, so a
+        // pre-PR-7 entry would satisfy it and return a row with no
+        // description or image — a stale shape that reads as "this collection
+        // has none" rather than as "not fetched yet".
+        $cacheKey = sprintf('cw721_contract_info_v2_%d_%s', $chainId, strtolower($contract));
 
         $cached = wp_cache_get($cacheKey, 'bcc_onchain');
-        if (is_array($cached) && array_key_exists('name', $cached) && array_key_exists('symbol', $cached)) {
-            /** @var array{name: ?string, symbol: ?string} $cached */
+        if (is_array($cached) && array_key_exists('name', $cached) && array_key_exists('description', $cached)) {
+            /** @var array{name: ?string, symbol: ?string, description: ?string, image_url: ?string} $cached */
             return $cached;
         }
 
@@ -1037,15 +1044,38 @@ class CosmosFetcher implements FetcherInterface
             return null;
         }
 
-        $name = is_string($data['name'] ?? null) && $data['name'] !== ''
-            ? (string) $data['name']
-            : null;
-        $symbol = is_string($data['symbol'] ?? null) && $data['symbol'] !== ''
-            ? (string) $data['symbol']
-            : null;
+        // ── ⚠ PR 7: NO ADDITIONAL PROVIDER REQUEST ──────────────────────
+        // Everything below comes out of the response already fetched above.
+        // `cw721CollectionInfoQuery` tries `contract_info` first and falls
+        // back to `get_collection_info_and_extension`; the extension variant
+        // is the one that carries a description and an image, and only some
+        // CW-721s implement it. Absence is NORMAL and is not a reason to ask
+        // again — there is no second query here and none may be added.
+        //
+        // The values describe the EXACT contract queried, so they are
+        // collection-level by construction — never sampled from a member
+        // token and never matched by name similarity.
+        $name = CollectionMetadataRules::sanitizeName($data['name'] ?? null);
+        $symbol = CollectionMetadataRules::sanitizeSymbol($data['symbol'] ?? null);
 
-        $out = ['name' => $name, 'symbol' => $symbol];
+        // The extension nests its fields; `contract_info` simply has neither.
+        $extension = is_array($data['extension'] ?? null) ? $data['extension'] : [];
+
+        $description = CollectionMetadataRules::sanitizeDescription(
+            $data['description'] ?? ($extension['description'] ?? null)
+        );
+        $imageUrl = CollectionMetadataRules::sanitizeImageUrl(
+            $data['image'] ?? ($extension['image'] ?? null)
+        );
+
+        $out = [
+            'name'        => $name,
+            'symbol'      => $symbol,
+            'description' => $description,
+            'image_url'   => $imageUrl,
+        ];
         wp_cache_set($cacheKey, $out, 'bcc_onchain', HOUR_IN_SECONDS);
+
         return $out;
     }
 

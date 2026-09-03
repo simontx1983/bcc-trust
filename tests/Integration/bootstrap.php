@@ -703,3 +703,11 @@ bcc_onchain_add_collections_canonical_identifier();
 // integration test re-runs it against seeded gates rather than relying on
 // this bootstrap pass to prove the backfill works.
 bcc_onchain_add_collections_provisioning_state();
+
+// PR 7 community metadata: four bounded columns plus the empty-image and
+// retired-market normalizations. Same note as above — this pass runs against a
+// freshly created table, so the normalizations match nothing here. Their OWN
+// integration test seeds the production shapes (`image_url = ''`, a hardcoded
+// `floor_currency = 'SOL'`) and re-runs them, because a normalization proved
+// only against an empty table is proved against nothing.
+bcc_onchain_add_collections_community_metadata();

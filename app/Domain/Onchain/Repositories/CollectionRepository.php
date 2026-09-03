@@ -7,6 +7,8 @@ use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\Services\CollectionStateClassifier;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\Support\NftCollectionIdentity;
+use BCC\Trust\Onchain\ValueObjects\ChainDescriptionState;
+use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
 
 if (!defined('ABSPATH')) {
@@ -1962,26 +1964,43 @@ final class CollectionRepository
      *   no future enrichment can wipe it. Defends against partial
      *   Alchemy responses that return e.g. `name=null` mid-incident.
      *
-     *   MARKET fields (`floor_price`, `floor_currency`, `total_supply`)
-     *   — overwrite when the input is non-null, leave alone when null.
-     *   These genuinely move (a floor of 0.05 ETH today may be 0.5 ETH
-     *   tomorrow); preserve-once would silently freeze stale data.
-     *   Symmetric with `bulkUpsert`'s `VALUES(floor_price)` semantics.
+     *   MOVING fields (`total_supply`) — overwrite when the input is a
+     *   VALIDATED non-null, leave alone when absent. A collection genuinely
+     *   mints and burns, so preserve-once would freeze a stale count.
      *
-     *   In both cases a null input field is omitted from the SET list,
-     *   so a partial response can't wipe a previously-good column —
-     *   the divergence is only in what happens when both old AND new
-     *   values are non-null (preserve old vs. take new).
+     *   In both cases an absent input is omitted from the SET list, so a
+     *   partial response can't wipe a previously-good column — the
+     *   divergence is only in what happens when both old AND new values
+     *   are present (preserve old vs. take new).
+     *
+     * ── ⚠ PR 7: NO MARKET FIELD IS WRITTEN HERE ANY MORE ────────────────
+     * `floor_price` and `floor_currency` used to be accepted and written by
+     * this method. They are now DROPPED at this boundary: a caller that
+     * still passes them writes nothing. BCC is a community and trust
+     * platform — a price, currency, volume, listing or sale may not be
+     * persisted. Collection SIZE stays, because it describes the collection
+     * rather than its market performance.
+     *
+     * ── ⚠ AND ABSENCE IS `''` AS WELL AS NULL ───────────────────────────
+     * Every incoming value passes through
+     * {@see CollectionMetadataRules::absentToNull()} first. The live table
+     * holds 119 Cosmos rows whose `image_url` is `''`, and
+     * `COALESCE(image_url, %s)` can never replace an empty string — so an
+     * incoming `''` must not be stored as one either, or the row becomes
+     * unfillable all over again.
+     *
+     * `total_supply` is VALIDATED rather than cast: `is_numeric()` accepts
+     * `"12.5"`, `"1e5"` and `-1`, and `(int)` turns all three into a
+     * plausible-looking number.
      *
      * `fetched_at` is unconditionally bumped so the admin "last refresh"
      * column reflects the attempt even when no individual column changed.
      *
      * @param array{
      *     collection_name?: ?string,
+     *     collection_symbol?: ?string,
      *     image_url?: ?string,
-     *     total_supply?: ?int,
-     *     floor_price?: ?float,
-     *     floor_currency?: ?string,
+     *     total_supply?: int|string|null,
      *     token_standard?: ?string
      * } $fields
      */
@@ -1991,24 +2010,20 @@ final class CollectionRepository
             return false;
         }
 
-        $name      = isset($fields['collection_name']) && is_string($fields['collection_name']) && $fields['collection_name'] !== ''
-            ? $fields['collection_name']
-            : null;
-        $image     = isset($fields['image_url']) && is_string($fields['image_url']) && $fields['image_url'] !== ''
-            ? $fields['image_url']
-            : null;
-        $supply    = isset($fields['total_supply']) && is_numeric($fields['total_supply'])
-            ? (int) $fields['total_supply']
-            : null;
-        $floor     = isset($fields['floor_price']) && is_numeric($fields['floor_price'])
-            ? (float) $fields['floor_price']
-            : null;
-        $currency  = isset($fields['floor_currency']) && is_string($fields['floor_currency']) && $fields['floor_currency'] !== ''
-            ? $fields['floor_currency']
-            : null;
-        $standard  = isset($fields['token_standard']) && is_string($fields['token_standard']) && $fields['token_standard'] !== ''
-            ? $fields['token_standard']
-            : null;
+        // ⚠ Sanitized, not merely type-checked. These values come from chain
+        // metadata a contract author controls, so markup and control
+        // characters must not reach a column an admin page renders.
+        $name     = CollectionMetadataRules::sanitizeName($fields['collection_name'] ?? null);
+        $symbol   = CollectionMetadataRules::sanitizeSymbol($fields['collection_symbol'] ?? null);
+        $image    = CollectionMetadataRules::sanitizeImageUrl($fields['image_url'] ?? null);
+        $standard = CollectionMetadataRules::sanitizeText($fields['token_standard'] ?? null, 20);
+
+        // Validated, never cast. An invalid or unavailable answer is omitted
+        // from the SET list below, so the previously confirmed value stands.
+        $supply = CollectionMetadataRules::validateTotalSupply($fields['total_supply'] ?? null)['value'];
+
+        // ⚠ `floor_price` / `floor_currency` are deliberately NOT read. A
+        // caller that still passes them writes nothing — that is the point.
 
         global $wpdb;
         $table = self::table();
@@ -2034,18 +2049,17 @@ final class CollectionRepository
             $params[]     = $standard;
         }
 
-        // Market fields (refresh when fresh data arrives).
+        if ($symbol !== null) {
+            $setClauses[] = 'collection_symbol = COALESCE(collection_symbol, %s)';
+            $params[]     = $symbol;
+        }
+
+        // Collection SIZE moves legitimately — a collection mints and burns —
+        // so it refreshes rather than preserving. An absent or invalid input
+        // was already excluded above, so this cannot blank a confirmed count.
         if ($supply !== null) {
             $setClauses[] = 'total_supply = %d';
             $params[]     = $supply;
-        }
-        if ($floor !== null) {
-            $setClauses[] = 'floor_price = %f';
-            $params[]     = $floor;
-        }
-        if ($currency !== null) {
-            $setClauses[] = 'floor_currency = %s';
-            $params[]     = $currency;
         }
 
         // Always bump fetched_at — the "we tried" signal that survives
@@ -2059,6 +2073,148 @@ final class CollectionRepository
         $result = $wpdb->query($wpdb->prepare($sql, $params));
 
         return $result !== false;
+    }
+
+    // ── PR 7: the blockchain collection description ─────────────────────
+
+    /**
+     * Store an imported BLOCKCHAIN COLLECTION description as PENDING review.
+     *
+     * ── THIS IS NOT COMMUNITY ABOUT ─────────────────────────────────────
+     * ⚠ BCC keeps two descriptions and they are not interchangeable. This one
+     * describes the NFT collection and lives on the collection row. Community
+     * About is the PeepSo community biography, lives on the group, and is
+     * written by community managers. Nothing in this method can reach it —
+     * there is no group id in scope, by construction.
+     *
+     * ── IMPORTED TEXT IS NEVER PUBLIC ON ARRIVAL ────────────────────────
+     * A contract author controls this string. It lands as `pending` and stays
+     * out of every public serializer until an administrator approves it. If
+     * the text CHANGES, the state resets to `pending` even when the previous
+     * text was approved — otherwise new, unread text would inherit the
+     * approval of text somebody else read.
+     *
+     * Re-importing the SAME text is a no-op on the state, so a rejected
+     * description is not re-queued on every scan.
+     *
+     * @param string $source bounded provider label, e.g. 'cosmwasm', 'evm'.
+     */
+    public static function importChainDescription(int $collectionId, mixed $rawDescription, string $source): bool
+    {
+        if ($collectionId <= 0) {
+            return false;
+        }
+
+        $description = CollectionMetadataRules::sanitizeDescription($rawDescription);
+        if ($description === null) {
+            // Absence is normal and is NOT a reason to clear an existing
+            // description or reset its review state.
+            return false;
+        }
+
+        $sourceLabel = CollectionMetadataRules::sanitizeText($source, 32) ?? 'unknown';
+
+        global $wpdb;
+        $table = self::table();
+
+        $current = $wpdb->get_row($wpdb->prepare(
+            "SELECT chain_description, chain_description_state FROM {$table} WHERE id = %d",
+            $collectionId
+        ));
+
+        if ($current === null) {
+            return false;
+        }
+
+        $existing = CollectionMetadataRules::absentToNull($current->chain_description ?? null);
+        if ($existing === $description) {
+            // Byte-identical: nothing to review that has not been reviewed.
+            return true;
+        }
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET chain_description = %s,
+                    chain_description_state = %s,
+                    chain_description_source = %s
+              WHERE id = %d",
+            $description,
+            ChainDescriptionState::PENDING,
+            $sourceLabel,
+            $collectionId
+        ));
+
+        return $result !== false;
+    }
+
+    /**
+     * Move an imported description between review states.
+     *
+     * The transition is validated against {@see ChainDescriptionState} and
+     * guarded by the CURRENT state in the WHERE clause, so two administrators
+     * acting at once cannot both "win" — the second matches zero rows and is
+     * reported as not applied rather than as success.
+     *
+     * ⚠ Returns false when nothing was updated. The caller's checked audit
+     * depends on that: an authorization change that did not happen must never
+     * be recorded as one that did.
+     */
+    public static function setChainDescriptionState(int $collectionId, string $from, string $to): bool
+    {
+        if ($collectionId <= 0) {
+            return false;
+        }
+
+        if (!ChainDescriptionState::isValid($from) || !ChainDescriptionState::isValid($to)) {
+            return false;
+        }
+
+        if (!ChainDescriptionState::canTransition($from, $to)) {
+            return false;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        // Compare-and-swap on the state the caller believed it was acting on.
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET chain_description_state = %s
+              WHERE id = %d AND chain_description_state = %s",
+            $to,
+            $collectionId,
+            $from
+        ));
+
+        // ⚠ `query()` returns 0 for "matched nothing" and false for a failed
+        // statement. Both mean the transition did not happen.
+        return is_int($result) && $result > 0;
+    }
+
+    /**
+     * The approved description, or null.
+     *
+     * The ONLY reader a public serializer may use. It filters on the state in
+     * SQL rather than returning the text and trusting the caller to check —
+     * a caller that forgets is how unapproved text gets published.
+     */
+    public static function findApprovedChainDescription(int $collectionId): ?string
+    {
+        if ($collectionId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $value = $wpdb->get_var($wpdb->prepare(
+            "SELECT chain_description FROM {$table}
+              WHERE id = %d AND chain_description_state = %s",
+            $collectionId,
+            ChainDescriptionState::APPROVED
+        ));
+
+        return is_string($value) && $value !== '' ? $value : null;
     }
 
     // ── PR 6: collection-state tabs and provisioning intent ─────────────
