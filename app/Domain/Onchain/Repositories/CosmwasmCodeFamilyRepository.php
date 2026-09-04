@@ -709,9 +709,142 @@ final class CosmwasmCodeFamilyRepository
         }
 
         global $wpdb;
+
+        $total = $wpdb->get_var(self::pendingClassificationCountSql($chainId, $classifierVersion));
+        self::guardRead(__FUNCTION__);
+
+        return (int) $total;
+    }
+
+    /**
+     * The SAME count, FAIL-CLOSED, for an operator surface.
+     *
+     * ── WHY A SECOND ENTRY POINT AND NOT A FLAG ─────────────────────────
+     * The two callers want opposite things from a failed read, and both are
+     * right:
+     *
+     *   the WORKER  — an exception would turn a logged degradation into a
+     *                 fatal mid-tick, and "no work this tick, retry next"
+     *                 is a safe reading of an empty queue.
+     *   an OPERATOR — `0` is an ANSWER. It renders as "nothing left to
+     *                 scan", which is one short step from "this chain has
+     *                 no NFT collections". A read that did not run must
+     *                 never produce that sentence.
+     *
+     * ⚠ THIS IS THE FAIL-OPEN THE COSMOS HUB CANARY MADE VISIBLE. On
+     * 2026-09-04 a successful bounded pass left 732 of 737 families
+     * unexamined; had the progress read failed at that moment, the surface
+     * would have said 0 remaining and completed the sentence for the
+     * operator. {@see countsByChainAndClassification()} already made this
+     * exact choice for the panel's other aggregates.
+     *
+     * The predicate is NOT restated — both entry points call
+     * {@see pendingClassificationCountSql()}, so the operator's "N
+     * remaining" cannot drift from what the worker will actually pick up.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function countPendingClassificationOrThrow(int $chainId, int $classifierVersion): int
+    {
+        if ($chainId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+
+        $total = $wpdb->get_var(self::pendingClassificationCountSql($chainId, $classifierVersion));
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return (int) $total;
+    }
+
+    /**
+     * Total families on a chain, FAIL-CLOSED.
+     *
+     * The denominator of "5 of 737". A zero denominator after a failed read
+     * would render as "0 of 0 families checked", which reads as a finished
+     * scan of an empty chain.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function countForChainOrThrow(int $chainId): int
+    {
+        if ($chainId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
         $table = self::table();
 
         $total = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE chain_id = %d",
+            $chainId
+        ));
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return (int) $total;
+    }
+
+    /**
+     * Families settled as CONFIRMED (and PROBABLE) CW-721, FAIL-CLOSED.
+     *
+     * `probable_cw721` is counted alongside `confirmed_cw721` because the
+     * pending predicate above already treats it as settled — it is excluded
+     * from the queue. A surface that counted only CONFIRMED would report
+     * families as neither remaining nor found, and the three numbers would
+     * not reconcile.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function countCollectionFamiliesOrThrow(int $chainId): int
+    {
+        if ($chainId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $total = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE chain_id = %d AND classification IN (%s, %s)",
+            $chainId,
+            CosmwasmClassifier::CONFIRMED,
+            CosmwasmClassifier::PROBABLE
+        ));
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return (int) $total;
+    }
+
+    /**
+     * PRIVATE. The one pending-classification predicate, as prepared SQL.
+     *
+     * ── IT BUILDS, IT DOES NOT READ ─────────────────────────────────────
+     * Returning the query rather than the count is deliberate: a helper
+     * that ran `get_var()` itself would be a `$wpdb` read with no guard of
+     * its own, relying on each caller to remember one.
+     * `RepositoryReadGuardCoverageTest` refuses that shape, and it is right
+     * to — the next caller is the one that forgets. So the read and its
+     * guard stay together in each public method, and only the PREDICATE is
+     * shared.
+     *
+     * Mirrors {@see findPendingClassification()} exactly — same exclusions,
+     * same retry ceiling, same classifier-version term — so the number an
+     * operator reads is the number of rows the worker would actually claim.
+     *
+     * ⚠ `classified_at IS NULL` is what makes a DEFAULT `inconclusive` row
+     * count as remaining. A family created by enumeration starts life as
+     * `inconclusive` with a NULL reason and a NULL `classified_at`: that is
+     * "not looked at yet", not a verdict. Treating it as settled is the
+     * single mistake that turns 732 unexamined families into a finished
+     * scan.
+     */
+    private static function pendingClassificationCountSql(int $chainId, int $classifierVersion): string
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return (string) $wpdb->prepare(
             "SELECT COUNT(*)
                FROM {$table}
               WHERE chain_id = %d
@@ -724,10 +857,7 @@ final class CosmwasmCodeFamilyRepository
             CosmwasmClassifier::PROBABLE,
             CosmwasmClassifier::MAX_RETRIES,
             $classifierVersion
-        ));
-        self::guardRead(__FUNCTION__);
-
-        return (int) $total;
+        );
     }
 
     /**

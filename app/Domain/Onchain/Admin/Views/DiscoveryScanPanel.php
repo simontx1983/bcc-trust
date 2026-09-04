@@ -33,6 +33,7 @@ namespace BCC\Trust\Onchain\Admin\Views;
 use BCC\Trust\Onchain\Admin\AdminActionSupport;
 use BCC\Trust\Onchain\Admin\DiscoveryScanActions;
 use BCC\Trust\Onchain\Services\DiscoveryRunStatusReader;
+use BCC\Trust\Onchain\Services\DiscoveryScanProgress;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunStatus;
 
 if (!defined('ABSPATH')) {
@@ -133,6 +134,17 @@ final class DiscoveryScanPanel
         }
 
         self::renderCurrent($status);
+
+        // ── PR 7.2: chain-scan completeness, kept apart from pass outcome ──
+        //
+        // ⚠ `renderCurrent()` above describes ONE RUN — "Finished", a stop
+        // reason, its counts. The Cosmos Hub canary proved that is not
+        // enough on its own: a run that was genuinely `succeeded` /
+        // `partial = 0` / `pass_completed` with 0 collections had examined
+        // 5 of 737 families, and every word available to describe it
+        // pointed at a finished scan. This line is the other half of the
+        // sentence, derived from the family queue rather than the run row.
+        self::renderProgress($chainId);
         self::renderHistory($status);
         self::renderControl($chainId, $chainName, $scannable, $whyNot, $status);
 
@@ -288,6 +300,39 @@ final class DiscoveryScanPanel
     }
 
     /**
+     * CHAIN-SCAN COMPLETENESS — the half the run row cannot express.
+     *
+     * ⚠ Read-only, and deliberately so: this renders on every page load and
+     * on every status poll. It creates no run, writes no checkpoint and
+     * records no audit row.
+     */
+    private static function renderProgress(int $chainId): void
+    {
+        $progress = DiscoveryScanProgress::forChain($chainId);
+
+        printf(
+            '<p class="bcc-scan-progress description">%s</p>',
+            esc_html(DiscoveryScanProgress::summarySentence($progress))
+        );
+
+        // The bounded counts, only when they are actually known. Printing
+        // "0 of 0" after a failed read would be the same lie in numbers
+        // that the sentence above refuses to tell in words.
+        if (($progress['ok'] ?? false) === true && $progress['total_families'] !== null) {
+            printf(
+                '<p class="description" style="margin-top:2px;">%s</p>',
+                esc_html(sprintf(
+                    /* translators: 1: checked, 2: total, 3: collection families */
+                    __('%1$s of %2$s contract families checked · %3$s NFT collection families confirmed so far', 'bcc-trust'),
+                    number_format_i18n((int) $progress['classified_families']),
+                    number_format_i18n((int) $progress['total_families']),
+                    number_format_i18n((int) $progress['collection_families'])
+                ))
+            );
+        }
+    }
+
+    /**
      * The control itself.
      *
      * @param array<string, mixed> $status
@@ -301,6 +346,12 @@ final class DiscoveryScanPanel
     ): void {
         $current  = is_array($status['current'] ?? null) ? $status['current'] : null;
         $hasActive = $current !== null;
+
+        // ⚠ The button LABEL is a claim about what pressing it does. When
+        // classification work remains, the next pass RESUMES from the
+        // pending queue — enumeration is not restarted — so the honest word
+        // is "Continue", not "Start over".
+        $progress = DiscoveryScanProgress::forChain($chainId);
 
         if (!$scannable) {
             // ⚠ Disabled, WITH the reason. A greyed-out button that does not
@@ -344,12 +395,18 @@ final class DiscoveryScanPanel
             . 'onclick="this.disabled=true;this.form.submit();" '
             . 'aria-label="%s">%s</button></p>',
             esc_attr(sprintf(
-                /* translators: %s: chain name */
-                __('Scan %s on-chain for easy discovery', 'bcc-trust'),
+                /* translators: 1: action label, 2: chain name */
+                __('%1$s — %2$s', 'bcc-trust'),
+                DiscoveryScanProgress::actionLabel($progress),
                 $chainName
             )),
-            esc_html__('Scan On-Chain for Easy Discovery', 'bcc-trust')
+            esc_html(DiscoveryScanProgress::actionLabel($progress))
         );
+
+        $hint = DiscoveryScanProgress::actionHint($progress);
+        if ($hint !== '') {
+            printf('<p class="description" style="margin-top:-6px;">%s</p>', esc_html($hint));
+        }
 
         printf(
             '<p class="description">%s</p>',
