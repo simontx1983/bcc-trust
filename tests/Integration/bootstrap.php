@@ -145,6 +145,39 @@ if (!function_exists('get_option')) {
         }
         return true;
     }
+    // ── PR 7.2: the i18n surface an operator-facing service reaches for ──
+    //
+    // `DiscoveryScanProgress` builds the sentence that tells an operator
+    // whether a chain scan is finished, so its wording is under test — and
+    // wording goes through WordPress's translation functions. These are
+    // identity/format shims, not translations: the integration harness has
+    // no text domain and none is wanted, the assertions are about WHICH
+    // sentence is chosen.
+    if (!function_exists('__')) {
+        function __(string $text, string $domain = 'default'): string
+        {
+            return $text;
+        }
+    }
+    if (!function_exists('_n')) {
+        function _n(string $single, string $plural, int $number, string $domain = 'default'): string
+        {
+            return $number === 1 ? $single : $plural;
+        }
+    }
+    if (!function_exists('number_format_i18n')) {
+        function number_format_i18n(float $number, int $decimals = 0): string
+        {
+            return number_format($number, $decimals);
+        }
+    }
+    if (!function_exists('esc_html')) {
+        function esc_html(string $text): string
+        {
+            return htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+        }
+    }
+
     function sanitize_text_field(string $s): string
     {
         return trim((string) preg_replace('/[\r\n\t]+/', ' ', $s));
