@@ -211,6 +211,65 @@ if (!function_exists('absint')) {
     }
 }
 
+// ── Admin-view shims ────────────────────────────────────────────────────
+//
+// Enough of WP's escaping and admin-form helpers for an ADMIN VIEW to be
+// rendered under the integration harness. Added for
+// DiscoveryScanPanelControlIntegrationTest, which exists because the panel's
+// control branch had NO render coverage at all: PR 7.2 verified
+// DiscoveryScanProgress::actionLabel() as a pure function, and the label it
+// returned never reached the screen. Asserting on a view's real output is
+// the only thing that would have caught that.
+//
+// ⚠ These deliberately mirror WP's ESCAPING BEHAVIOUR, not just its
+// signatures. A shim that returned its input unchanged would let an
+// escaping regression pass here and fail in production.
+if (!function_exists('esc_html__')) {
+    function esc_html__(string $text, string $domain = 'default'): string
+    {
+        return htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+    }
+}
+
+if (!function_exists('esc_attr')) {
+    function esc_attr(string $text): string
+    {
+        return htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+    }
+}
+
+if (!function_exists('esc_url')) {
+    function esc_url(string $url): string
+    {
+        return htmlspecialchars(esc_url_raw($url), ENT_QUOTES, 'UTF-8');
+    }
+}
+
+if (!function_exists('admin_url')) {
+    function admin_url(string $path = ''): string
+    {
+        return 'https://example.test/wp-admin/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('wp_nonce_field')) {
+    /**
+     * ⚠ Emits a field whose NAME matches WP's, so a test can assert the
+     * form carries a nonce. It is not a real nonce and proves nothing about
+     * nonce verification — that is DiscoveryScanActions' own coverage.
+     */
+    function wp_nonce_field(string $action = '-1', string $name = '_wpnonce', bool $referer = true, bool $display = true): string
+    {
+        $field = '<input type="hidden" name="' . esc_attr($name) . '" value="test-nonce-' . md5($action) . '">';
+
+        if ($display) {
+            echo $field;
+        }
+
+        return $field;
+    }
+}
+
 // Plugin config constants (vote weights, fraud thresholds, cleanup horizons,
 // tiers, scoring) some repos read in their constructor. The aggregator is a
 // pure set of define()s.
