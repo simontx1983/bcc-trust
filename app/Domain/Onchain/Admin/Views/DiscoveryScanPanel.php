@@ -344,8 +344,30 @@ final class DiscoveryScanPanel
         string $whyNot,
         array $status
     ): void {
-        $current  = is_array($status['current'] ?? null) ? $status['current'] : null;
-        $hasActive = $current !== null;
+        $current = is_array($status['current'] ?? null) ? $status['current'] : null;
+
+        // ⚠ `current` IS NOT "a run in flight". DiscoveryRunStatusReader
+        // deliberately falls back to the MOST RECENT run once none is
+        // active, so a finished pass does not read as "your scan vanished" —
+        // its own comment says exactly that. Treating the presence of that
+        // row as liveness is how a `succeeded` run from days ago disabled
+        // this button under the words "A scan is already running", and it is
+        // the same mistake PR 7.2 fixed one paragraph higher: a completed
+        // pass described as something it is not.
+        //
+        // ⚠ It also made `Continue scan` UNREACHABLE. The label below lives
+        // past this branch, so once a chain had ever been scanned the panel
+        // could never offer to continue — the exact state the canary left.
+        //
+        // Liveness is the run's STATUS, and `DiscoveryRunStatus::isTerminal()`
+        // is already the authority DiscoveryRunService and this reader's own
+        // `retry_allowed` write against. `retry_allowed` is deliberately NOT
+        // reused: it excludes `cancelled`, which is terminal and must offer a
+        // fresh scan. An unknown status reads as NON-terminal, so a token
+        // from a newer build keeps the button disabled rather than opening a
+        // second run beside a possibly-live one.
+        $hasActive = $current !== null
+            && !DiscoveryRunStatus::isTerminal((string) ($current['status'] ?? ''));
 
         // ⚠ The button LABEL is a claim about what pressing it does. When
         // classification work remains, the next pass RESUMES from the
