@@ -65,7 +65,7 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
             'eligible_now'         => 377,
             'delayed_families'     => 0,
             'exhausted_families'   => 0,
-            'negative_families'    => 360,
+            'negative_families'    => 105,
             'scan_complete'        => DiscoveryScanProgress::NO,
             'more_work_available'  => DiscoveryScanProgress::YES,
             'reason'               => '',
