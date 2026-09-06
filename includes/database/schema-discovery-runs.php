@@ -14,6 +14,19 @@
  * position. The moment a column here could tell a worker where to restart,
  * it has become a parallel progress table.
  *
+ * ⚠ `chunks_used` (PR 7.3) OBEYS THAT RULE. It counts chunks already spent by
+ * one administrator-authorized session, so a ceiling can be enforced. It
+ * cannot tell a worker where to resume — that answer still comes only from
+ * the checkpoint's `cw_*` columns and the code-family queue. Removing it
+ * would lose a bound, never a position.
+ *
+ * ⚠ IT IS NOT `attempt_count`, AND THE TWO MUST NOT BE MERGED. `attempt_count`
+ * means "database claims made against the CURRENT chunk" and is capped at
+ * {@see \BCC\Trust\Onchain\Repositories\DiscoveryRunRepository::MAX_ATTEMPTS}
+ * by the claim's own WHERE clause — overloading it as a chunk counter would
+ * silently cap every session at three chunks and then fail the run with
+ * `max_attempts_exhausted`.
+ *
  * ── WHY IT MIRRORS wp_bcc_validator_msg_queue ───────────────────────────
  * That table already solves this exact problem in production: closed status
  * vocabulary, `lease_token` + `lease_expires_at`, `attempt_count` +
@@ -83,6 +96,7 @@ function bcc_onchain_create_discovery_runs_table(): void {
         lease_expires_at DATETIME DEFAULT NULL,
         heartbeat_at DATETIME DEFAULT NULL,
         attempt_count SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+        chunks_used SMALLINT UNSIGNED NOT NULL DEFAULT 0,
         next_retry_at DATETIME DEFAULT NULL,
         retry_of_run_id BIGINT UNSIGNED DEFAULT NULL,
         stop_reason VARCHAR(40) DEFAULT NULL,
@@ -170,7 +184,7 @@ function bcc_onchain_verify_discovery_runs_schema(): bool {
             'id', 'run_uuid', 'job_kind', 'scan_mode', 'chain_id', 'status',
             'active_marker', 'requested_by', 'requested_at', 'started_at',
             'finished_at', 'lease_token', 'lease_expires_at', 'heartbeat_at',
-            'attempt_count', 'next_retry_at', 'retry_of_run_id', 'stop_reason',
+            'attempt_count', 'chunks_used', 'next_retry_at', 'retry_of_run_id', 'stop_reason',
             'error_code', 'partial', 'audit_degraded', 'requests_used',
             'pages_fetched', 'families_seen', 'contracts_seen',
             'collections_emitted', 'collections_denied', 'updated_at',

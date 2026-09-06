@@ -196,4 +196,90 @@ final class DiscoveryScanProgressTest extends TestCase
         self::assertSame(DiscoveryScanProgress::NO, $p['scan_complete']);
         self::assertGreaterThan(0, $p['remaining_families']);
     }
+    // ── (7) UNRESOLVED IS NOT COMPLETE, AND NOT A NEGATIVE ──────────────
+
+    /**
+     * A retry-exhausted family gets the session-finished sentence, never the
+     * final zero.
+     *
+     * â  THE PURE HALF OF THE PR 7.3 GATE. `remaining` excludes
+     * `retry_count >= MAX_RETRIES`, so a chain whose only outstanding work is
+     * exhausted reports `remaining = 0` â which used to satisfy the
+     * completion rule and print "All N were checked. No supported NFT
+     * collections were confirmed." over a family nobody ever resolved.
+     */
+    public function testAnExhaustedFamilyGetsTheSessionFinishedSentence(): void
+    {
+        $p = self::canary();
+        $p['total_families']      = 10;
+        $p['classified_families'] = 10;
+        $p['remaining_families']  = 0;
+        $p['eligible_now']        = 0;
+        $p['delayed_families']    = 0;
+        $p['exhausted_families']  = 2;
+        $p['scan_complete']       = DiscoveryScanProgress::NO;
+        $p['more_work_available'] = DiscoveryScanProgress::NO;
+
+        $s = DiscoveryScanProgress::summarySentence($p);
+
+        self::assertStringContainsString('Scan session finished.', $s);
+        self::assertStringContainsString('2 families could not be resolved', $s);
+        self::assertStringContainsString('still unknown', $s);
+
+        // The three claims it must never make.
+        self::assertStringNotContainsString('Scan complete', $s);
+        self::assertStringNotContainsString('No supported NFT collections were confirmed', $s);
+        self::assertStringNotContainsString('still need review', $s);
+    }
+
+    /** Singular reads correctly â one family, not "1 families". */
+    public function testOneUnresolvedFamilyReadsAsSingular(): void
+    {
+        $p = self::canary();
+        $p['total_families']      = 10;
+        $p['classified_families'] = 10;
+        $p['remaining_families']  = 0;
+        $p['eligible_now']        = 0;
+        $p['delayed_families']    = 0;
+        $p['exhausted_families']  = 1;
+        $p['scan_complete']       = DiscoveryScanProgress::NO;
+
+        $s = DiscoveryScanProgress::summarySentence($p);
+
+        self::assertStringContainsString('1 family could not be resolved', $s);
+        self::assertStringNotContainsString('1 families', $s);
+    }
+
+    /**
+     * With work still claimable the ordinary incomplete sentence wins.
+     *
+     * â  The session-finished branch must not swallow the normal
+     * "N still need review" case just because some family is also exhausted.
+     */
+    public function testClaimableWorkStillGetsTheReviewSentence(): void
+    {
+        $p = self::canary();
+        $p['eligible_now']       = 700;
+        $p['delayed_families']   = 0;
+        $p['exhausted_families'] = 3;
+
+        $s = DiscoveryScanProgress::summarySentence($p);
+
+        self::assertStringContainsString('732 families still need review', $s);
+        self::assertStringNotContainsString('Scan session finished', $s);
+    }
+
+    /** Delayed work also keeps the review sentence â it has a future. */
+    public function testDelayedWorkKeepsTheReviewSentence(): void
+    {
+        $p = self::canary();
+        $p['eligible_now']       = 0;
+        $p['delayed_families']   = 732;
+        $p['exhausted_families'] = 1;
+
+        $s = DiscoveryScanProgress::summarySentence($p);
+
+        self::assertStringContainsString('still need review', $s);
+        self::assertStringNotContainsString('Scan session finished', $s);
+    }
 }

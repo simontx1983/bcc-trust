@@ -38,11 +38,16 @@ namespace {
             /** Makes enqueueAsync() report a soft failure. */
             public static bool $dispatchAccepts = true;
 
+            /** PR 7.3 — the timestamps continuations were scheduled for. */
+            /** @var list<int> */
+            public static array $scheduledAt = [];
+
             public static function reset(): void
             {
                 self::$users = [];
                 self::$dispatched = [];
                 self::$dispatchAccepts = true;
+                self::$scheduledAt = [];
             }
 
             public static function seedAdmin(int $id): void
@@ -149,6 +154,26 @@ namespace BCC\Core\Cron {
                 \BccDiscoveryTestState::$dispatched[] = [$hook, $args];
 
                 return true;
+            }
+
+            /**
+             * PR 7.3 — a delayed continuation of an ALREADY AUTHORIZED run.
+             *
+             * ⚠ RECORDED IN THE SAME LIST as enqueueAsync, on purpose. Every
+             * "no automatic run creation" test counts dispatches; if
+             * continuations went to a separate list they would be invisible
+             * to exactly the assertions that exist to bound them.
+             *
+             * @param array<mixed> $args
+             */
+            public static function scheduleSingle(int $timestamp, string $hook, array $args = [], string $group = ''): void
+            {
+                if (!\BccDiscoveryTestState::$dispatchAccepts) {
+                    return;
+                }
+
+                \BccDiscoveryTestState::$dispatched[] = [$hook, $args];
+                \BccDiscoveryTestState::$scheduledAt[] = $timestamp;
             }
         }
     }

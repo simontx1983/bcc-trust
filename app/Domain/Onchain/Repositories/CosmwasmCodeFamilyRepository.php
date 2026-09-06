@@ -759,6 +759,123 @@ final class CosmwasmCodeFamilyRepository
     }
 
     /**
+     * Pending families a chunk could claim RIGHT NOW. Fail-closed.
+     *
+     * ── WHY THIS IS NOT `countPendingClassificationOrThrow()` (PR 7.3) ──
+     * The operator's "remaining" and the worker's "claimable" are different
+     * questions, and a session that confuses them busy-loops. A family whose
+     * last fetch FAILED keeps `classified_at IS NULL` — so it is still
+     * remaining — but carries a future `next_attempt_at`, so
+     * {@see findPendingClassification()} will not return it. Scheduling a
+     * chunk on the strength of "remaining > 0" would run an empty pass,
+     * find nothing claimable, and schedule another.
+     *
+     * This adds exactly the one term `findPendingClassification()` has and
+     * the count did not, so the session's decision matches what the next
+     * chunk will actually get.
+     */
+    public static function countEligibleNowOrThrow(int $chainId, int $classifierVersion): int
+    {
+        if ($chainId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $sql = $wpdb->prepare(
+            "SELECT COUNT(*)
+               FROM {$table}
+              WHERE chain_id = %d
+                AND classification NOT IN (%s, %s, %s)
+                AND retry_count < %d
+                AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
+                AND (classified_at IS NULL OR classifier_version < %d)",
+            $chainId,
+            CosmwasmClassifier::NOT_CW721,
+            CosmwasmClassifier::CONFIRMED,
+            CosmwasmClassifier::PROBABLE,
+            CosmwasmClassifier::MAX_RETRIES,
+            gmdate('Y-m-d H:i:s'),
+            $classifierVersion
+        );
+
+        $total = $wpdb->get_var($sql);
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return (int) $total;
+    }
+
+    /**
+     * Families whose retries are EXHAUSTED. Fail-closed.
+     *
+     * ⚠ EXHAUSTED IS NOT A NEGATIVE VERDICT, and the panel must never let an
+     * operator read it as one. These rows kept a non-terminal classification
+     * — `temporarily_unreachable` or `inconclusive` — and simply stopped
+     * being swept once `retry_count` reached
+     * {@see CosmwasmClassifier::MAX_RETRIES}. "We could not find out" and
+     * "this is not an NFT collection" are different facts, and the schema
+     * stores them the same way: only this count separates them.
+     */
+    /**
+     * Families with a TERMINAL NEGATIVE verdict. Fail-closed.
+     *
+     * ⚠ THE COUNTERPART TO {@see countRetryExhaustedOrThrow()}, and the pair
+     * only means something together. `not_cw721` is a real answer reached by
+     * probing; an exhausted family has NO answer. The schema stores both as a
+     * classification string, so these two counts are what keep "this is not
+     * an NFT collection" and "we could not find out" apart in the read model.
+     */
+    public static function countNegativeFamiliesOrThrow(int $chainId): int
+    {
+        if ($chainId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $sql = $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE chain_id = %d AND classification = %s",
+            $chainId,
+            CosmwasmClassifier::NOT_CW721
+        );
+
+        $total = $wpdb->get_var($sql);
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return (int) $total;
+    }
+
+    public static function countRetryExhaustedOrThrow(int $chainId): int
+    {
+        if ($chainId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $sql = $wpdb->prepare(
+            "SELECT COUNT(*)
+               FROM {$table}
+              WHERE chain_id = %d
+                AND classification NOT IN (%s, %s, %s)
+                AND retry_count >= %d",
+            $chainId,
+            CosmwasmClassifier::NOT_CW721,
+            CosmwasmClassifier::CONFIRMED,
+            CosmwasmClassifier::PROBABLE,
+            CosmwasmClassifier::MAX_RETRIES
+        );
+
+        $total = $wpdb->get_var($sql);
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return (int) $total;
+    }
+
+    /**
      * Total families on a chain, FAIL-CLOSED.
      *
      * The denominator of "5 of 737". A zero denominator after a failed read

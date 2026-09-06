@@ -363,6 +363,86 @@ namespace BCC\Trust\Onchain\Repositories {
                 return count(self::findPendingClassification($chainId, 1000, $classifierVersion));
             }
 
+            // ── PR 7.2 / 7.3 fail-closed reads ──────────────────────────
+            //
+            // DiscoveryScanProgress::forChain() calls all five, and the
+            // executor now calls forChain() between chunks — so a stub
+            // missing any of them fatals every CLI and executor test with
+            // "call to undefined method" rather than failing an assertion.
+            public static function countForChainOrThrow(int $chainId): int
+            {
+                return self::countForChain($chainId);
+            }
+
+            public static function countPendingClassificationOrThrow(int $chainId, int $classifierVersion): int
+            {
+                return self::countPendingClassification($chainId, $classifierVersion);
+            }
+
+            public static function countCollectionFamiliesOrThrow(int $chainId): int
+            {
+                $n = 0;
+                foreach ((self::$families[$chainId] ?? []) as $row) {
+                    if (in_array((string) $row->classification, ['confirmed_cw721', 'probable_cw721'], true)) {
+                        $n++;
+                    }
+                }
+
+                return $n;
+            }
+
+            /**
+             * ⚠ MIRRORS THE REAL `next_attempt_at` TERM, not just the name.
+             * `findPendingClassification()` in this stub already honours
+             * `next_attempt_at`, so delegating to it keeps the stub's
+             * "eligible now" genuinely narrower than its "remaining" —
+             * which is the whole distinction PR 7.3 depends on. A stub that
+             * returned the pending count here would make the busy-loop test
+             * pass without the production guard.
+             */
+            public static function countEligibleNowOrThrow(int $chainId, int $classifierVersion): int
+            {
+                $now = gmdate('Y-m-d H:i:s');
+                $n   = 0;
+
+                foreach (self::findPendingClassification($chainId, 1000, $classifierVersion) as $row) {
+                    $next = $row->next_attempt_at ?? null;
+                    if (!is_string($next) || $next === '' || $next <= $now) {
+                        $n++;
+                    }
+                }
+
+                return $n;
+            }
+
+            public static function countNegativeFamiliesOrThrow(int $chainId): int
+            {
+                $n = 0;
+                foreach ((self::$families[$chainId] ?? []) as $row) {
+                    if ((string) $row->classification === 'not_cw721') {
+                        $n++;
+                    }
+                }
+
+                return $n;
+            }
+
+            public static function countRetryExhaustedOrThrow(int $chainId): int
+            {
+                $n = 0;
+                foreach ((self::$families[$chainId] ?? []) as $row) {
+                    $classification = (string) $row->classification;
+                    if (in_array($classification, ['not_cw721', 'confirmed_cw721', 'probable_cw721'], true)) {
+                        continue;
+                    }
+                    if ((int) ($row->retry_count ?? 0) >= 6) {
+                        $n++;
+                    }
+                }
+
+                return $n;
+            }
+
             /** @return list<object> */
             public static function findDueForMetadataCheck(int $chainId, string $cutoff, int $limit): array
             {

@@ -193,7 +193,13 @@ final class DiscoveryScanPanelControlIntegrationTest extends TestCase
         // falls back to the most recent run precisely so a finished pass
         // does not vanish from the screen, and this asserts that context
         // survives beside the new progress line.
-        self::assertStringContainsString('<strong>Finished</strong>', $html);
+        // ⚠ `Pass finished`, NOT `Finished` (PR 7.3). The standalone word was
+        // the largest text on the panel and read as a statement about the
+        // CHAIN while 732 families were still queued. The heading is now
+        // derived from the SAME `scan_complete` answer as the sentence below
+        // it, so the two cannot disagree.
+        self::assertStringContainsString('<strong>Pass finished</strong>', $html);
+        self::assertStringNotContainsString('<strong>Finished</strong>', $html);
         self::assertStringContainsString('Last successful scan:', $html);
 
         // Enabled, and a real request form rather than a dead button.

@@ -34,6 +34,7 @@ use BCC\Trust\Onchain\Admin\AdminActionSupport;
 use BCC\Trust\Onchain\Admin\DiscoveryScanActions;
 use BCC\Trust\Onchain\Services\DiscoveryRunStatusReader;
 use BCC\Trust\Onchain\Services\DiscoveryScanProgress;
+use BCC\Trust\Onchain\Services\DiscoveryScanSession;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunStatus;
 
 if (!defined('ABSPATH')) {
@@ -87,12 +88,37 @@ final class DiscoveryScanPanel
     }
 
     /** Operator-facing wording for each run state. */
-    public static function statusCopy(string $status): string
-    {
+    public static function statusCopy(
+        string $status,
+        string $scanComplete = DiscoveryScanProgress::UNKNOWN,
+        bool $sessionActive = false,
+        bool $sessionStop = false
+    ): string {
+        // ── ⚠ THE STANDALONE WORD `Finished` IS BANNED WHILE WORK REMAINS ──
+        //
+        // It is the largest text in the panel and the first thing an operator
+        // reads. On 2026-09-04 it sat above a correct sentence saying 730
+        // families still needed review, and the pair reads as "the scan is
+        // over". The detailed line does contradict it, but a heading that
+        // needs its own correction two lines down is a bad heading.
+        //
+        // `scan_complete` is the authority — the SAME derived answer the
+        // progress sentence uses — so the heading and the sentence can never
+        // disagree.
+        if ($status === DiscoveryRunStatus::SUCCEEDED && $scanComplete !== DiscoveryScanProgress::YES) {
+            return $sessionStop ? 'Session finished' : 'Pass finished';
+        }
+
+        // A queued run that has already done work is not "waiting to start" —
+        // it is mid-session, between two protected batches.
+        if ($status === DiscoveryRunStatus::QUEUED && $sessionActive) {
+            return 'Scanning in batches';
+        }
+
         return match ($status) {
             DiscoveryRunStatus::QUEUED    => 'Waiting to start',
             DiscoveryRunStatus::RUNNING   => 'Scanning now',
-            DiscoveryRunStatus::SUCCEEDED => 'Finished',
+            DiscoveryRunStatus::SUCCEEDED => 'Scan complete',
             DiscoveryRunStatus::FAILED    => 'Did not finish',
             DiscoveryRunStatus::CANCELLED => 'Withdrawn',
             default                       => 'Unknown',
@@ -133,7 +159,14 @@ final class DiscoveryScanPanel
             return;
         }
 
-        self::renderCurrent($status);
+        // ⚠ READ ONCE, PASS DOWN. The heading, the progress sentence, the
+        // session outcome and the control all have to agree, and the only
+        // way to guarantee that is for all four to read the same snapshot.
+        // Calling forChain() per section would also put four identical
+        // queries on one page render.
+        $progress = DiscoveryScanProgress::forChain($chainId);
+
+        self::renderCurrent($status, $progress);
 
         // ── PR 7.2: chain-scan completeness, kept apart from pass outcome ──
         //
@@ -144,15 +177,22 @@ final class DiscoveryScanPanel
         // 5 of 737 families, and every word available to describe it
         // pointed at a finished scan. This line is the other half of the
         // sentence, derived from the family queue rather than the run row.
-        self::renderProgress($chainId);
+        self::renderProgress($progress);
+
+        $current = is_array($status['current'] ?? null) ? $status['current'] : [];
+        self::renderSessionOutcome($current, $progress);
+
         self::renderHistory($status);
-        self::renderControl($chainId, $chainName, $scannable, $whyNot, $status);
+        self::renderControl($chainId, $chainName, $scannable, $whyNot, $status, $progress);
 
         echo '</div>';
     }
 
-    /** @param array<string, mixed> $status */
-    private static function renderCurrent(array $status): void
+    /**
+     * @param array<string, mixed> $status
+     * @param array<string, mixed> $progress
+     */
+    private static function renderCurrent(array $status, array $progress): void
     {
         $current = is_array($status['current'] ?? null) ? $status['current'] : null;
 
@@ -163,7 +203,12 @@ final class DiscoveryScanPanel
 
         $state = (string) ($current['status'] ?? '');
 
-        echo '<p><strong>' . esc_html(self::statusCopy($state)) . '</strong>';
+        echo '<p><strong>' . esc_html(self::statusCopy(
+            $state,
+            (string) ($progress['scan_complete'] ?? DiscoveryScanProgress::UNKNOWN),
+            ($current['session_active'] ?? false) === true,
+            ($current['session_stop'] ?? false) === true
+        )) . '</strong>';
 
         // ⚠ pickup_overdue is INFORMATION, not a failure. A queued run on an
         // install whose cron is disabled or externally driven is waiting, not
@@ -177,6 +222,7 @@ final class DiscoveryScanPanel
 
         echo '</p>';
 
+        self::renderSession($current);
         self::renderCounts($current);
     }
 
@@ -208,8 +254,15 @@ final class DiscoveryScanPanel
         echo '<ul style="margin:4px 0 8px 18px;">';
 
         if ($state === DiscoveryRunStatus::SUCCEEDED && $emitted === 0) {
+            // ⚠ SCOPED TO THE PASS, EXPLICITLY (PR 7.3).
+            // The old wording was "Checked successfully — nothing new was
+            // found", which sat directly under the word "Finished" and read
+            // as a statement about the CHAIN. On 2026-09-04 that pair
+            // appeared while 730 families had never been looked at. Naming
+            // the pass is the whole fix: it is true, and it cannot be read
+            // as "this chain has no NFT collections".
             echo '<li>' . esc_html__(
-                'Checked successfully — nothing new was found. That is a normal result, not an error.',
+                'This pass completed successfully. It did not confirm a new NFT collection.',
                 'bcc-trust'
             ) . '</li>';
         } else {
@@ -306,10 +359,9 @@ final class DiscoveryScanPanel
      * on every status poll. It creates no run, writes no checkpoint and
      * records no audit row.
      */
-    private static function renderProgress(int $chainId): void
+    /** @param array<string, mixed> $progress a {@see DiscoveryScanProgress::forChain()} snapshot */
+    private static function renderProgress(array $progress): void
     {
-        $progress = DiscoveryScanProgress::forChain($chainId);
-
         printf(
             '<p class="bcc-scan-progress description">%s</p>',
             esc_html(DiscoveryScanProgress::summarySentence($progress))
@@ -329,20 +381,127 @@ final class DiscoveryScanPanel
                     number_format_i18n((int) $progress['collection_families'])
                 ))
             );
+
+            // ⚠ DELAYED AND EXHAUSTED ARE NAMED SEPARATELY, AND NEITHER IS A
+            // NEGATIVE VERDICT. "We could not reach it" and "this is not an
+            // NFT collection" are different facts that the classification
+            // column stores identically; if the panel does not separate them,
+            // nothing does.
+            $delayed   = (int) ($progress['delayed_families'] ?? 0);
+            $exhausted = (int) ($progress['exhausted_families'] ?? 0);
+
+            if ($delayed > 0 || $exhausted > 0) {
+                $parts = [];
+
+                if ($delayed > 0) {
+                    $parts[] = sprintf(
+                        /* translators: %s: number of families */
+                        _n(
+                            '%s family is waiting to be retried later',
+                            '%s families are waiting to be retried later',
+                            $delayed,
+                            'bcc-trust'
+                        ),
+                        number_format_i18n($delayed)
+                    );
+                }
+
+                if ($exhausted > 0) {
+                    $parts[] = sprintf(
+                        /* translators: %s: number of families */
+                        _n(
+                            '%s family could not be resolved after repeated attempts — that is unresolved, not a negative result',
+                            '%s families could not be resolved after repeated attempts — that is unresolved, not a negative result',
+                            $exhausted,
+                            'bcc-trust'
+                        ),
+                        number_format_i18n($exhausted)
+                    );
+                }
+
+                printf(
+                    '<p class="description" style="margin-top:2px;">%s</p>',
+                    esc_html(implode(' · ', $parts))
+                );
+            }
         }
+    }
+
+    /**
+     * What an administrator-authorized multi-chunk session is doing.
+     *
+     * ⚠ NO COMPLETION-TIME PROMISE. The number of chunks left is known; how
+     * long a chunk takes is not, because it depends on a public LCD proxy.
+     * Saying "about four minutes remaining" would be a guess presented as a
+     * fact, and the first slow chunk would make it a wrong one.
+     *
+     * @param array<string, mixed> $current
+     */
+    private static function renderSession(array $current): void
+    {
+        $chunksUsed = (int) ($current['chunks_used'] ?? 0);
+        $maxChunks  = (int) ($current['max_chunks'] ?? DiscoveryScanSession::MAX_CHUNKS);
+
+        if (($current['session_active'] ?? false) !== true) {
+            return;
+        }
+
+        echo '<p class="description">';
+        echo esc_html__(
+            'An administrator started this scan. It continues on its own in small protected batches, and stops by itself.',
+            'bcc-trust'
+        );
+        echo '</p>';
+
+        printf(
+            '<p class="description" style="margin-top:2px;">%s</p>',
+            esc_html(sprintf(
+                /* translators: 1: batches done, 2: batches authorised */
+                __('Batch %1$s of up to %2$s in this session.', 'bcc-trust'),
+                number_format_i18n($chunksUsed),
+                number_format_i18n($maxChunks)
+            ))
+        );
+    }
+
+    /**
+     * Why a session stopped, when it stopped short of finishing the chain.
+     *
+     * @param array<string, mixed> $current
+     * @param array<string, mixed> $progress
+     */
+    private static function renderSessionOutcome(array $current, array $progress): void
+    {
+        if ((string) ($current['status'] ?? '') !== DiscoveryRunStatus::SUCCEEDED) {
+            return;
+        }
+
+        if (($progress['scan_complete'] ?? '') === DiscoveryScanProgress::YES) {
+            return;
+        }
+
+        $sentence = DiscoveryScanSession::stopSentence((string) ($current['stop_reason'] ?? ''));
+
+        if ($sentence === '') {
+            return;
+        }
+
+        printf('<p class="description">%s</p>', esc_html($sentence));
     }
 
     /**
      * The control itself.
      *
      * @param array<string, mixed> $status
+     * @param array<string, mixed> $progress a {@see DiscoveryScanProgress::forChain()} snapshot
      */
     private static function renderControl(
         int $chainId,
         string $chainName,
         bool $scannable,
         string $whyNot,
-        array $status
+        array $status,
+        array $progress
     ): void {
         $current = is_array($status['current'] ?? null) ? $status['current'] : null;
 
@@ -372,8 +531,9 @@ final class DiscoveryScanPanel
         // ⚠ The button LABEL is a claim about what pressing it does. When
         // classification work remains, the next pass RESUMES from the
         // pending queue — enumeration is not restarted — so the honest word
-        // is "Continue", not "Start over".
-        $progress = DiscoveryScanProgress::forChain($chainId);
+        // is "Continue", not "Start over". `$progress` is the snapshot
+        // render() already read, so the label cannot disagree with the
+        // sentence above it.
 
         if (!$scannable) {
             // ⚠ Disabled, WITH the reason. A greyed-out button that does not
@@ -391,10 +551,20 @@ final class DiscoveryScanPanel
         }
 
         if ($hasActive) {
+            // ⚠ A SESSION BETWEEN BATCHES IS NOT "already running" IN THE
+            // SENSE AN OPERATOR HEARS IT. It is queued, it will resume by
+            // itself, and it can be stopped — so it gets its own sentence
+            // and the Stop control below, rather than the flat refusal that
+            // is correct for a chunk actually mid-flight.
             printf(
                 '<p><button type="button" class="button" disabled aria-disabled="true">%s</button> <span class="description">%s</span></p>',
                 esc_html__('Scan On-Chain for Easy Discovery', 'bcc-trust'),
-                esc_html__('A scan is already running for this chain.', 'bcc-trust')
+                ($current['session_active'] ?? false) === true
+                    ? esc_html__(
+                        'This scan is continuing in batches. It will stop on its own; you can stop it now with the button below.',
+                        'bcc-trust'
+                    )
+                    : esc_html__('A scan is already running for this chain.', 'bcc-trust')
             );
 
             self::renderCancel($chainId, $current);
@@ -454,12 +624,44 @@ final class DiscoveryScanPanel
         // knowing a uuid is a NAME, never a capability.
         $runUuid = (string) ($current['run_uuid'] ?? '');
 
-        // ⚠ Withdraw is offered ONLY while the run has not started. A running
-        // scan cannot be un-run, and a button implying otherwise would be a
-        // lie about what the system can do.
+        // ⚠ Withdraw is offered ONLY while the run is QUEUED. A chunk that is
+        // mid-flight cannot be un-run, and a button implying otherwise would
+        // be a lie about what the system can do.
+        //
+        // ── PR 7.3: THIS IS ALSO HOW A SESSION IS CANCELLED ─────────────
+        // Between chunks a session sits in exactly this state — `queued`
+        // with a `next_retry_at` — so the existing withdraw action already
+        // covers it and no new action was needed. `markCancelled()` clears
+        // `active_marker`, and the Action Scheduler action that fires later
+        // finds a row that is no longer `queued`, fails its claim, and
+        // returns before any provider call. Work already committed stays
+        // committed; only the NEXT chunk is prevented.
+        //
+        // The only thing that had to change is the wording: "it has not
+        // started yet" is false once batches have run.
         if ($state !== DiscoveryRunStatus::QUEUED || $runUuid === '') {
             return;
         }
+
+        $sessionActive = ($current['session_active'] ?? false) === true;
+        $chunksUsed    = (int) ($current['chunks_used'] ?? 0);
+
+        $confirm = $sessionActive
+            ? sprintf(
+                /* translators: %s: number of batches already completed */
+                _n(
+                    'Stop this scan? %s batch has already finished and its results are kept.',
+                    'Stop this scan? %s batches have already finished and their results are kept.',
+                    $chunksUsed,
+                    'bcc-trust'
+                ),
+                number_format_i18n($chunksUsed)
+            )
+            : __('Withdraw this queued scan? It has not started yet.', 'bcc-trust');
+
+        $label = $sessionActive
+            ? __('Stop this scan', 'bcc-trust')
+            : __('Withdraw this scan', 'bcc-trust');
 
         $action = DiscoveryScanActions::ACTION_CANCEL;
 
@@ -471,10 +673,8 @@ final class DiscoveryScanPanel
 
         printf(
             '<p><button type="submit" class="button" onclick="return confirm(%s);">%s</button></p>',
-            AdminActionSupport::confirmLiteral(
-                __('Withdraw this queued scan? It has not started yet.', 'bcc-trust')
-            ),
-            esc_html__('Withdraw this scan', 'bcc-trust')
+            AdminActionSupport::confirmLiteral($confirm),
+            esc_html($label)
         );
 
         echo '</form>';

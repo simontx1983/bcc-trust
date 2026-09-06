@@ -563,7 +563,12 @@ final class CosmwasmOneShotDiscoveryCommand
         // Executed inline rather than left to cron: a human is watching this
         // terminal. The ledger row is what makes the outcome durable whether
         // or not this process survives to print a summary.
-        $execution  = \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::execute($runId);
+        // ⚠ `false` = DO NOT START A SESSION. This command runs EXACTLY ONE
+        // pass per invocation — the banner above promises it and
+        // `testItRunsExactlyOnePassPerInvocation` enforces it. A multi-chunk
+        // session would queue work this process will never see, on a
+        // terminal an operator is watching for a single result.
+        $execution  = \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::execute($runId, false);
         $ledgerRun  = \BCC\Trust\Onchain\Repositories\DiscoveryRunRepository::findById($runId);
 
         // ── The LEDGER is the source of truth for what happened ─────────

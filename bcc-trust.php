@@ -255,6 +255,11 @@ require_once BCC_TRUST_PATH . 'includes/database/cleanup-cw721-scan-options.php'
 // discovery is operator-initiated now; these events survive in
 // wp_options.cron on any install that already scheduled them.
 require_once BCC_TRUST_PATH . 'includes/database/unschedule-automatic-nft-discovery.php';
+// PR 7.3 — adds bcc_discovery_runs.chunks_used to installs that already have
+// the table. Fresh installs get it from the CREATE TABLE; staging and
+// production both predate it, and a session ceiling cannot be enforced
+// without somewhere durable to count chunks.
+require_once BCC_TRUST_PATH . 'includes/database/add-discovery-run-chunks-used.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
