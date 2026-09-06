@@ -33,6 +33,7 @@ use BCC\Trust\Onchain\ValueObjects\DiscoveryJobKind;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunStatus;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryScanMode;
+use BCC\Trust\Onchain\ValueObjects\DiscoverySessionTotals;
 use BCC\Trust\Onchain\Workers\DiscoveryRunExecutor;
 
 if (!defined('ABSPATH')) {
@@ -195,16 +196,40 @@ final class DiscoveryRunService
                     throw new \RuntimeException('cancel lost its compare-and-swap');
                 }
 
+                // ── ⚠ PR 7.4: A WITHDRAWN SESSION STILL DID ITS WORK ────
+                //
+                // Cancel is only offered on a QUEUED run, which for a session
+                // means BETWEEN chunks — so the row already holds however many
+                // chunks and provider requests the operator paid for. Auditing
+                // the withdrawal without them made a 12-chunk session look
+                // identical to one cancelled before it started.
+                //
+                // ⚠ RE-READ AFTER the state change, never before: `$run` was
+                // fetched while the row still said `queued`, and an audit that
+                // reported the pre-cancel status would be describing a row
+                // that no longer exists. Same authority as the executor's
+                // terminal paths.
+                //
+                // ⚠ AND NOTHING IS INVENTED. If the re-read cannot be
+                // confirmed, the cancellation is audited with its own bounded
+                // facts alone. A withdrawal must never carry a chunk that was
+                // not persisted.
+                $totals = DiscoverySessionTotals::fromPersistedRow(
+                    DiscoveryRunRepository::findById($runId)
+                );
+
+                $meta = [
+                    'run_uuid'         => (string) $run->run_uuid,
+                    'job_kind'         => (string) $run->job_kind,
+                    'chain_id'         => (int) $run->chain_id,
+                    'previous_status'  => DiscoveryRunStatus::QUEUED,
+                    'operator_user_id' => $operator,
+                ];
+
                 $auditId = AuditLogger::logChecked(
                     self::AUDIT_CANCELLED,
                     $runId,
-                    [
-                        'run_uuid'         => (string) $run->run_uuid,
-                        'job_kind'         => (string) $run->job_kind,
-                        'chain_id'         => (int) $run->chain_id,
-                        'previous_status'  => DiscoveryRunStatus::QUEUED,
-                        'operator_user_id' => $operator,
-                    ],
+                    $totals === null ? $meta : $meta + $totals->toAuditMeta(),
                     'discovery_run',
                     $operator
                 );

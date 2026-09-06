@@ -168,6 +168,19 @@ final class DiscoveryScanPanel
 
         self::renderCurrent($status, $progress);
 
+        // ── ⚠ THE ONE SESSION-SCOPED NUMBER ON THIS SCREEN (PR 7.4) ──────
+        //
+        // `$progress` is derived from the family queue and describes the
+        // CHAIN — it cannot attribute anything to a session. The run ledger
+        // can: `collections_emitted` accumulates across every chunk of the
+        // session, because both `markSucceeded()` and `releaseForNextChunk()`
+        // write `col = col + n`.
+        //
+        // ⚠ NULL WHEN THERE IS NO RUN TO SPEAK FOR. A chain that has never
+        // been scanned must not be told "this session added no new collection
+        // record" — there was no session. Do not coalesce this to 0.
+        $sessionEmitted = self::sessionEmitted($status);
+
         // ── PR 7.2: chain-scan completeness, kept apart from pass outcome ──
         //
         // ⚠ `renderCurrent()` above describes ONE RUN — "Finished", a stop
@@ -177,7 +190,7 @@ final class DiscoveryScanPanel
         // 5 of 737 families, and every word available to describe it
         // pointed at a finished scan. This line is the other half of the
         // sentence, derived from the family queue rather than the run row.
-        self::renderProgress($progress);
+        self::renderProgress($progress, $sessionEmitted);
 
         $current = is_array($status['current'] ?? null) ? $status['current'] : [];
         self::renderSessionOutcome($current, $progress);
@@ -186,6 +199,38 @@ final class DiscoveryScanPanel
         self::renderControl($chainId, $chainName, $scannable, $whyNot, $status, $progress);
 
         echo '</div>';
+    }
+
+    /**
+     * The session's cumulative collection-record count, or null.
+     *
+     * ⚠ THE READ MODEL NESTS COUNTS UNDER `counts`, and reading them off the
+     * top level yields 0 for everything — which here would not be a wrong
+     * number but a wrong SENTENCE, silently turning "we cannot say" into
+     * "your session added nothing".
+     *
+     * ⚠ `current` is the ACTIVE run, or — deliberately, per
+     * {@see DiscoveryRunStatusReader} — the most recent one when none is
+     * active. Either way it is the session an operator is looking at, which
+     * is exactly the one the summary should speak for.
+     *
+     * @param array<string, mixed> $status a {@see DiscoveryRunStatusReader::forChain()} snapshot
+     */
+    private static function sessionEmitted(array $status): ?int
+    {
+        $current = is_array($status['current'] ?? null) ? $status['current'] : null;
+
+        if ($current === null) {
+            return null;
+        }
+
+        $counts = is_array($current['counts'] ?? null) ? $current['counts'] : null;
+
+        if ($counts === null || !isset($counts['collections_emitted'])) {
+            return null;
+        }
+
+        return max(0, (int) $counts['collections_emitted']);
     }
 
     /**
@@ -253,17 +298,33 @@ final class DiscoveryScanPanel
 
         echo '<ul style="margin:4px 0 8px 18px;">';
 
+        // ⚠ ONE CHUNK IS A PASS; MANY CHUNKS ARE A SESSION (PR 7.4). These
+        // counts are cumulative across every chunk the row recorded, so
+        // calling a 25-chunk run "this pass" understates what the numbers
+        // cover — and it is the same conflation that made the terminal audit
+        // row report the last chunk as though it were the whole session.
+        $chunks = max(0, (int) ($run['chunks_used'] ?? 0));
+
         if ($state === DiscoveryRunStatus::SUCCEEDED && $emitted === 0) {
-            // ⚠ SCOPED TO THE PASS, EXPLICITLY (PR 7.3).
+            // ⚠ SCOPED TO THE PASS OR SESSION, EXPLICITLY (PR 7.3).
             // The old wording was "Checked successfully — nothing new was
             // found", which sat directly under the word "Finished" and read
             // as a statement about the CHAIN. On 2026-09-04 that pair
             // appeared while 730 families had never been looked at. Naming
-            // the pass is the whole fix: it is true, and it cannot be read
-            // as "this chain has no NFT collections".
-            echo '<li>' . esc_html__(
-                'This pass completed successfully. It did not confirm a new NFT collection.',
-                'bcc-trust'
+            // the unit of work is the whole fix: it is true, and it cannot be
+            // read as "this chain has no NFT collections".
+            //
+            // ⚠ "ADD A RECORD", NOT "CONFIRM A COLLECTION" (PR 7.4). This
+            // branch is chosen on `collections_emitted === 0`, which proves
+            // no ROW was stored and proves nothing at all about whether a
+            // family was CONFIRMED — emission is separately bounded, so a
+            // family confirmed in the last chunk can have its row written
+            // later. The run ledger has no confirmed-family counter, so the
+            // only honest sentence here is the one about records.
+            echo '<li>' . esc_html(
+                $chunks > 1
+                    ? __('This session completed successfully. It did not add a new collection record.', 'bcc-trust')
+                    : __('This pass completed successfully. It did not add a new collection record.', 'bcc-trust')
             ) . '</li>';
         } else {
             printf(
@@ -359,12 +420,15 @@ final class DiscoveryScanPanel
      * on every status poll. It creates no run, writes no checkpoint and
      * records no audit row.
      */
-    /** @param array<string, mixed> $progress a {@see DiscoveryScanProgress::forChain()} snapshot */
-    private static function renderProgress(array $progress): void
+    /**
+     * @param array<string, mixed> $progress       a {@see DiscoveryScanProgress::forChain()} snapshot
+     * @param int|null             $sessionEmitted see {@see sessionEmitted()} — null means "no session to speak for"
+     */
+    private static function renderProgress(array $progress, ?int $sessionEmitted = null): void
     {
         printf(
             '<p class="bcc-scan-progress description">%s</p>',
-            esc_html(DiscoveryScanProgress::summarySentence($progress))
+            esc_html(DiscoveryScanProgress::summarySentence($progress, $sessionEmitted))
         );
 
         // The bounded counts, only when they are actually known. Printing
