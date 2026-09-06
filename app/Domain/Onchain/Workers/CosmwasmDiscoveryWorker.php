@@ -474,6 +474,68 @@ final class CosmwasmDiscoveryWorker
         //     broken on cosmoshub, juno, osmosis and injective (a
         //     non-zero offset returns an empty 200 — see
         //     CosmosFetcher::listCodeFamilies). Do not reintroduce it.
+        //
+        // ── ⚠ PR 7.3: BACKLOG FIRST, AND WHY THE STAGES ARE NOT REORDERED ──
+        //
+        // The 2026-09-04 continuation canary spent part of its budget
+        // enumerating five NEW code ids while 730 known families had never
+        // been looked at. Remaining work went 732 → 730: the tail read was
+        // adding work almost as fast as classification retired it.
+        //
+        // The fix is a GUARD, not a reordering. Moving stage (a) after (c)
+        // would change what the historical backfill and the supervised CLI
+        // do, and stage (a) owns two things the later stages depend on: the
+        // `cw_max_code_id` watermark advance, and the `unsupported chain`
+        // detection that aborts the pass. Both must keep happening in the
+        // same place. So the stage stays exactly where it is and is simply
+        // SKIPPED while immediately-claimable family work exists.
+        //
+        // ⚠ FAMILIES ONLY, NOT CONTRACTS. A family is what the tail read
+        // creates, so a family backlog is the thing the tail directly
+        // competes with. Contract classification is downstream of families
+        // that are ALREADY confirmed, and deferring the tail for it would
+        // stall discovery behind work the tail never caused.
+        //
+        // Consequences, deliberately accepted:
+        //   - during a catch-up session the tail read runs only on the chunk
+        //     that finally empties the family queue, so new code ids arrive
+        //     at the END of the backlog rather than continuously;
+        //   - incremental discovery is NOT suppressed — a chain whose queue
+        //     is empty behaves exactly as before, which is the steady state
+        //     the daily sweep was designed for;
+        //   - a chain that grows faster than it can be classified cannot
+        //     produce an endless session, because the session ceiling in
+        //     DiscoveryScanSession stops it regardless of what this returns.
+        //
+        // ⚠ FAIL-OPEN ON PURPOSE. If the backlog count cannot be read, the
+        // tail read RUNS. An unreadable count must not silently disable
+        // incremental discovery — the old behaviour is the safe default.
+        $backlog = null;
+        try {
+            $backlog = CosmwasmCodeFamilyRepository::countEligibleNowOrThrow(
+                $chainId,
+                CosmwasmClassifier::VERSION
+            );
+        } catch (\Throwable $e) {
+            $backlog = null;
+        }
+
+        if ($backlog !== null && $backlog > 0) {
+            // ⚠ NOT `$report->addError()`. A deliberate skip is not a fault,
+            // and recording it as one would set `partial` on a healthy pass
+            // AND trip DiscoveryScanSession's provider-failure rule, ending
+            // every catch-up session on its first chunk — the exact opposite
+            // of what this guard is for.
+            \BCC\Core\Log\Logger::info('[CosmwasmDiscoveryWorker] code tail deferred; classification backlog first', [
+                'chain_id' => $chainId,
+                'backlog'  => $backlog,
+            ]);
+
+            self::classifyAndEnumerate($chainId, $fetcher, $budget, $report);
+
+            return;
+        }
+
         $checkpoint = ChainCheckpointRepository::get($chainId);
         $watermark  = $checkpoint !== null ? (int) $checkpoint->cw_max_code_id : 0;
 

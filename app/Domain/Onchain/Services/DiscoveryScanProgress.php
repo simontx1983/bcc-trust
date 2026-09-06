@@ -81,6 +81,9 @@ final class DiscoveryScanProgress
      *     classified_families: int|null,
      *     remaining_families: int|null,
      *     collection_families: int|null,
+     *     eligible_now: int|null,
+     *     delayed_families: int|null,
+     *     exhausted_families: int|null,
      *     scan_complete: string,
      *     more_work_available: string,
      *     reason: string
@@ -97,6 +100,9 @@ final class DiscoveryScanProgress
                 'classified_families'  => null,
                 'remaining_families'   => null,
                 'collection_families'  => null,
+                'eligible_now'         => null,
+                'delayed_families'     => null,
+                'exhausted_families'   => null,
                 'scan_complete'        => self::UNKNOWN,
                 'more_work_available'  => self::UNKNOWN,
                 'reason'               => $reason,
@@ -136,6 +142,19 @@ final class DiscoveryScanProgress
                 CosmwasmClassifier::VERSION
             );
             $collections = CosmwasmCodeFamilyRepository::countCollectionFamiliesOrThrow($chainId);
+
+            // ── PR 7.3: what a chunk could actually claim right now ─────
+            //
+            // ⚠ `remaining` and `eligibleNow` are NOT the same number, and a
+            // session that used the first would busy-loop. A family whose
+            // last fetch failed is still remaining but carries a future
+            // `next_attempt_at`. Both are read here so the panel and the
+            // session decision come from one place.
+            $eligibleNow = CosmwasmCodeFamilyRepository::countEligibleNowOrThrow(
+                $chainId,
+                CosmwasmClassifier::VERSION
+            );
+            $exhausted = CosmwasmCodeFamilyRepository::countRetryExhaustedOrThrow($chainId);
         } catch (RepositoryReadFailure $e) {
             // ⚠ NOT zero, NOT complete. The read did not run, so the only
             // honest answer is that we do not know — and a surface that
@@ -166,6 +185,14 @@ final class DiscoveryScanProgress
             'classified_families'  => $classified,
             'remaining_families'   => $remaining,
             'collection_families'  => $collections,
+            // What the NEXT chunk could claim without waiting.
+            'eligible_now'         => $eligibleNow,
+            // Remaining, but not claimable yet — a failed fetch's backoff.
+            // ⚠ Never reported as complete and never as a negative verdict.
+            'delayed_families'     => max(0, $remaining - $eligibleNow),
+            // Remaining forever unless an operator requeues or the classifier
+            // version moves. "We could not find out", NOT "not an NFT".
+            'exhausted_families'   => $exhausted,
             'scan_complete'        => $scanComplete,
             // More administrator-requested work is available exactly when
             // the queue is non-empty. This is what the Continue button is

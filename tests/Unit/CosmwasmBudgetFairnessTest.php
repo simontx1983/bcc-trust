@@ -276,12 +276,24 @@ final class CosmwasmBudgetFairnessTest extends TestCase
 
     // ── (1) the defect, and the exact per-stage split ────────────────────
 
-    /** THE REGRESSION TEST, with the whole execution trace pinned. */
+    /**
+     * THE REGRESSION TEST, with the whole execution trace pinned.
+     *
+     * ⚠ `code_listing` IS NO LONGER REQUIRED HERE, AND THAT IS THE POINT OF
+     * PR 7.3. This fixture seeds a SATURATED family queue, which is exactly
+     * the state the backlog-first guard defers the code tail in: spending
+     * requests discovering new code ids while hundreds of known families
+     * have never been looked at is what made the Cosmos Hub backlog shrink
+     * by two families in a whole pass.
+     *
+     * The stage is skipped, not removed — {@see testTheCodeTailRunsOnceTheBacklogIsEmpty}
+     * covers the other half, and every other assertion below is unchanged,
+     * which is the evidence that only the tail moved.
+     */
     public function testASaturatedFamilyQueueCannotStarveEmission(): void
     {
         $this->seedSaturated();
         $this->require(
-            'code_listing',
             'contract_listing:' . self::CONFIRMED_CODE,
             'smart:contract_info:' . $this->sample()
         );
@@ -299,7 +311,13 @@ final class CosmwasmBudgetFairnessTest extends TestCase
 
         // The exact split, request for request.
         $kinds = $this->seenByKind();
-        self::assertSame(1, $kinds['code_listing'], 'stage a: one code page');
+
+        // ⚠ ZERO CODE PAGES, DELIBERATELY (PR 7.3). The backlog-first guard
+        // defers stage (a) while pending classification exists, so the whole
+        // ceiling goes to the work that actually retires the queue. This
+        // assertion is the guard's own regression test from the budget side:
+        // if the tail ever runs again on a saturated queue, this fails.
+        self::assertSame(0, $kinds['code_listing'] ?? 0, 'stage a: deferred while a backlog exists');
         self::assertSame(self::BUDGET, $out['spent'], 'the pass used the whole ceiling');
         self::assertSame(0, $out['remaining']);
         self::assertSame(count($this->seen), $out['spent'], 'one budget counted every request');

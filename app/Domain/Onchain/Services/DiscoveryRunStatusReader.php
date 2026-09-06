@@ -27,6 +27,7 @@ namespace BCC\Trust\Onchain\Services;
 
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
+use BCC\Trust\Onchain\Services\DiscoveryScanSession;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryJobKind;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunStatus;
 
@@ -103,6 +104,19 @@ final class DiscoveryRunStatusReader
             'finished_at'    => self::utc($row->finished_at ?? null),
             'attempt_count'  => $attempts,
             'max_attempts'   => DiscoveryRunRepository::MAX_ATTEMPTS,
+            // ── PR 7.3 session shape ────────────────────────────────────
+            //
+            // ⚠ `chunks_used` IS NOT `attempt_count`. Attempts are claims
+            // against the current chunk and reset when a chunk succeeds;
+            // chunks only ever go up. The panel shows the second and must
+            // never show the first as progress.
+            'chunks_used'    => max(0, (int) ($row->chunks_used ?? 0)),
+            'max_chunks'     => DiscoveryScanSession::MAX_CHUNKS,
+            // True only between chunks of a live session: a queued run that
+            // has already done work. A first-ever queued run has none.
+            'session_active' => $status === DiscoveryRunStatus::QUEUED
+                && (int) ($row->chunks_used ?? 0) > 0,
+            'session_stop'   => DiscoveryScanSession::isSessionStop((string) ($row->stop_reason ?? '')),
             'stop_reason'    => self::nullableString($row->stop_reason ?? null),
             'error_code'     => self::nullableString($row->error_code ?? null),
             'partial'        => (int) $row->partial === 1,

@@ -297,11 +297,30 @@ namespace BCC\Core\Cron {
     if (!class_exists(AsyncDispatcher::class, false)) {
         final class AsyncDispatcher
         {
+            /** @var list<array{hook: string, args: array<mixed>, ts: int}> */
+            public static array $scheduled = [];
+
             /** @param list<mixed> $args */
             public static function enqueueAsync(string $hook, array $args = [], string $group = ''): bool
             {
                 // The CLI executes inline; dispatch is accepted and ignored.
                 return true;
+            }
+
+            /**
+             * PR 7.3 — recorded, never executed.
+             *
+             * ⚠ RECORDED, not swallowed. The supervised CLI must run EXACTLY
+             * ONE pass per invocation, and a session continuation that
+             * scheduled a chunk here would break that contract silently if
+             * the stub simply returned. Keeping the list lets a test assert
+             * the CLI path schedules nothing.
+             *
+             * @param array<mixed> $args
+             */
+            public static function scheduleSingle(int $timestamp, string $hook, array $args = [], string $group = ''): void
+            {
+                self::$scheduled[] = ['hook' => $hook, 'args' => $args, 'ts' => $timestamp];
             }
         }
     }
@@ -431,10 +450,56 @@ namespace BCC\Trust\Onchain\Repositories {
                     return false;
                 }
 
-                self::$rows[$runId] = array_merge(self::$rows[$runId], [
+                // ⚠ ACCUMULATES, like the real one (PR 7.3). A stub that
+                // overwrote would hide a dropped-count regression across
+                // chunks — the exact bug the cumulative-count test exists
+                // to catch.
+                $row = array_merge(self::$rows[$runId], [
                     'status' => 'succeeded', 'active_marker' => null,
                     'stop_reason' => $stopReason, 'partial' => $partial ? 1 : 0,
-                ], array_map('intval', $counts));
+                ]);
+                $row['chunks_used'] = (int) ($row['chunks_used'] ?? 0) + 1;
+                foreach ($counts as $k => $v) {
+                    $row[$k] = (int) ($row[$k] ?? 0) + (int) $v;
+                }
+                self::$rows[$runId] = $row;
+
+                return true;
+            }
+
+            /**
+             * PR 7.3 — release the row for the session's next chunk.
+             *
+             * ⚠ `active_marker` STAYS SET, exactly as in production: the
+             * session is still the one authorized run for this chain. A stub
+             * that cleared it would let a "no second run" test pass while
+             * production allowed one.
+             */
+            public static function releaseForNextChunk(
+                int $runId,
+                string $leaseToken,
+                array $counts,
+                int $delaySeconds
+            ): bool {
+                $row = self::$rows[$runId] ?? null;
+                if ($row === null || ($row['status'] ?? '') !== 'running') {
+                    return false;
+                }
+                if (($row['lease_token'] ?? null) !== null && $row['lease_token'] !== $leaseToken) {
+                    return false;
+                }
+
+                $row['status']        = 'queued';
+                $row['lease_token']   = null;
+                $row['attempt_count'] = 0;
+                $row['chunks_used']   = (int) ($row['chunks_used'] ?? 0) + 1;
+                $row['next_retry_at'] = gmdate('Y-m-d H:i:s', time() + max(1, $delaySeconds));
+
+                foreach ($counts as $k => $v) {
+                    $row[$k] = (int) ($row[$k] ?? 0) + (int) $v;
+                }
+
+                self::$rows[$runId] = $row;
 
                 return true;
             }

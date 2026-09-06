@@ -201,6 +201,19 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_nft_enrichment_tick_unscheduled',
                 'callback'    => 'bcc_trust_unschedule_automatic_nft_discovery',
             ],
+            // PR 7.3 — bcc_discovery_runs.chunks_used, the durable chunk
+            // counter that bounds one administrator-authorized session.
+            //
+            // Fresh installs get it from the CREATE TABLE; every install that
+            // already has the table needs the explicit ALTER. Fail-closed:
+            // COMPLETE only once INFORMATION_SCHEMA confirms the column, so a
+            // failed or unreadable ALTER retries on the next boot rather than
+            // leaving the executor writing to a column that is not there.
+            [
+                'id'          => 'add_discovery_run_chunks_used_v1',
+                'done_option' => 'bcc_trust_discovery_run_chunks_used_added',
+                'callback'    => 'bcc_trust_add_discovery_run_chunks_used',
+            ],
         ];
     }
 

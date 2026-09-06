@@ -45,6 +45,7 @@ if (!defined('ABSPATH')) {
  *     lease_expires_at: string|null,
  *     heartbeat_at: string|null,
  *     attempt_count: string,
+ *     chunks_used: string,
  *     next_retry_at: string|null,
  *     retry_of_run_id: string|null,
  *     stop_reason: string|null,
@@ -92,7 +93,7 @@ final class DiscoveryRunRepository
      */
     private const COLUMNS = 'id, run_uuid, job_kind, scan_mode, chain_id, status, active_marker,
         requested_by, requested_at, started_at, finished_at, lease_expires_at, heartbeat_at,
-        attempt_count, next_retry_at, retry_of_run_id, stop_reason, error_code, partial,
+        attempt_count, chunks_used, next_retry_at, retry_of_run_id, stop_reason, error_code, partial,
         audit_degraded, requests_used, pages_fetched, families_seen, contracts_seen,
         collections_emitted, collections_denied, updated_at';
 
@@ -381,6 +382,14 @@ final class DiscoveryRunRepository
      * the reaper return it, which is the only safe response to "we do not
      * know whether the result landed".
      *
+     * ⚠ THE COUNTS ACCUMULATE, THEY DO NOT OVERWRITE (PR 7.3).
+     * `$counts` is ONE CHUNK's telemetry, and a session may be many chunks;
+     * the row must end up carrying the session total. For a single-chunk run
+     * the result is byte-identical to the old assignment, because every
+     * counter starts at 0 and a retry creates a NEW row rather than reusing
+     * this one. `chunks_used` is incremented here for the same reason: the
+     * final chunk is a chunk.
+     *
      * @param array{requests_used?: int, pages_fetched?: int, families_seen?: int,
      *              contracts_seen?: int, collections_emitted?: int,
      *              collections_denied?: int} $counts
@@ -411,17 +420,106 @@ final class DiscoveryRunRepository
                     stop_reason = %s,
                     error_code = NULL,
                     partial = %d,
-                    requests_used = %d,
-                    pages_fetched = %d,
-                    families_seen = %d,
-                    contracts_seen = %d,
-                    collections_emitted = %d,
-                    collections_denied = %d,
+                    chunks_used = chunks_used + 1,
+                    requests_used = requests_used + %d,
+                    pages_fetched = pages_fetched + %d,
+                    families_seen = families_seen + %d,
+                    contracts_seen = contracts_seen + %d,
+                    collections_emitted = collections_emitted + %d,
+                    collections_denied = collections_denied + %d,
                     updated_at = UTC_TIMESTAMP()
               WHERE id = %d AND lease_token = %s AND status = %s",
             DiscoveryRunStatus::SUCCEEDED,
             substr($stopReason, 0, 40),
             $partial ? 1 : 0,
+            max(0, (int) ($counts['requests_used'] ?? 0)),
+            max(0, (int) ($counts['pages_fetched'] ?? 0)),
+            max(0, (int) ($counts['families_seen'] ?? 0)),
+            max(0, (int) ($counts['contracts_seen'] ?? 0)),
+            max(0, (int) ($counts['collections_emitted'] ?? 0)),
+            max(0, (int) ($counts['collections_denied'] ?? 0)),
+            $runId,
+            $leaseToken,
+            DiscoveryRunStatus::RUNNING
+        ));
+
+        return $wpdb->rows_affected === 1;
+    }
+
+    /**
+     * running -> queued, for the NEXT CHUNK OF THE SAME SESSION (PR 7.3).
+     *
+     * This is the one write that makes a multi-chunk session possible, and
+     * every clause in it is load-bearing.
+     *
+     * ⚠ `active_marker` IS DELIBERATELY LEFT SET. The session is still the
+     * one authorized run for this (job kind, chain): `uq_active` must keep
+     * refusing a second one while chunks are still coming. This method is
+     * therefore NOT a terminalization and must never be treated as one.
+     *
+     * ⚠ `attempt_count` IS RESET, AND THAT IS THE POINT. `attempt_count`
+     * counts database claims against the CURRENT chunk, and `claim()` refuses
+     * at {@see MAX_ATTEMPTS}. A completed chunk is proof the worker is alive,
+     * so the next chunk starts with a fresh attempt budget — otherwise every
+     * session would die at three chunks with `max_attempts_exhausted`. The
+     * three-attempt protection still applies WITHIN a chunk: a worker that
+     * dies mid-chunk lets the lease expire, the reaper requeues without
+     * bumping the counter, and three claims still terminalize it.
+     *
+     * The session's own bound is {@see \BCC\Trust\Onchain\Services\DiscoveryScanSession::MAX_CHUNKS},
+     * enforced against `chunks_used`, which this method increments and
+     * NOTHING ever decrements. That monotonic counter is what makes an
+     * endless chunk loop impossible even if every other guard were wrong.
+     *
+     * ⚠ COUNTS ACCUMULATE. The row must carry the session total, not the last
+     * chunk's slice.
+     *
+     * ⚠ `next_retry_at` IS THE POLITENESS DELAY, and it doubles as the gate
+     * `claim()` and `findDispatchable()` already honour — so an Action
+     * Scheduler action that fires early simply fails to claim and returns,
+     * rather than running the next chunk back to back.
+     *
+     * Same confirmation contract as the terminal writes: false means the
+     * release was not confirmed, and the caller must not schedule anything.
+     *
+     * @param array{requests_used?: int, pages_fetched?: int, families_seen?: int,
+     *              contracts_seen?: int, collections_emitted?: int,
+     *              collections_denied?: int} $counts
+     */
+    public static function releaseForNextChunk(
+        int $runId,
+        string $leaseToken,
+        array $counts,
+        int $delaySeconds
+    ): bool {
+        global $wpdb;
+
+        if ($runId <= 0 || $leaseToken === '') {
+            return false;
+        }
+
+        $table = self::table();
+        $delay = max(1, min(3600, $delaySeconds));
+
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET status = %s,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    heartbeat_at = UTC_TIMESTAMP(),
+                    attempt_count = 0,
+                    chunks_used = chunks_used + 1,
+                    next_retry_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL %d SECOND),
+                    requests_used = requests_used + %d,
+                    pages_fetched = pages_fetched + %d,
+                    families_seen = families_seen + %d,
+                    contracts_seen = contracts_seen + %d,
+                    collections_emitted = collections_emitted + %d,
+                    collections_denied = collections_denied + %d,
+                    updated_at = UTC_TIMESTAMP()
+              WHERE id = %d AND lease_token = %s AND status = %s",
+            DiscoveryRunStatus::QUEUED,
+            $delay,
             max(0, (int) ($counts['requests_used'] ?? 0)),
             max(0, (int) ($counts['pages_fetched'] ?? 0)),
             max(0, (int) ($counts['families_seen'] ?? 0)),

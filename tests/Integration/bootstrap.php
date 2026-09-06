@@ -252,6 +252,37 @@ if (!function_exists('admin_url')) {
     }
 }
 
+// ── Cron / async-dispatch shims ─────────────────────────────────────────
+//
+// bcc-core's AsyncDispatcher falls back to `wp_schedule_single_event()` when
+// Action Scheduler is absent, which it is here. Without these the discovery
+// MAINTENANCE SWEEP fatals the moment it tries to re-dispatch a run — and
+// the test that proves the sweep can never CREATE a run has to be able to
+// run the sweep.
+//
+// ⚠ RECORDED, NOT SWALLOWED. A shim that returned true and forgot would let
+// "nothing was dispatched" pass vacuously. `$GLOBALS['bcc_scheduled']` is
+// the list a test asserts on.
+if (!isset($GLOBALS['bcc_scheduled'])) {
+    $GLOBALS['bcc_scheduled'] = [];
+}
+
+if (!function_exists('wp_schedule_single_event')) {
+    /** @param array<int, mixed> $args */
+    function wp_schedule_single_event(int $timestamp, string $hook, array $args = [], bool $wpError = false): bool
+    {
+        $GLOBALS['bcc_scheduled'][] = ['hook' => $hook, 'args' => $args, 'ts' => $timestamp];
+
+        return true;
+    }
+}
+
+// ⚠ NO `wp_next_scheduled()` SHIM HERE, DELIBERATELY.
+// DiscoveryMaintenanceCronIntegrationTest defines its own cron functions over
+// a real `wp_options` cron array, and a bootstrap-level definition wins on
+// load order — which silently broke four of its tests. A shim that only ONE
+// test needs does not belong in the shared bootstrap; this file provides the
+// single function bcc-core's AsyncDispatcher falls back to, and nothing more.
 if (!function_exists('wp_nonce_field')) {
     /**
      * ⚠ Emits a field whose NAME matches WP's, so a test can assert the
