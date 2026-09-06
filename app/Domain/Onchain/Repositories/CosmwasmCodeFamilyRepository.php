@@ -817,6 +817,36 @@ final class CosmwasmCodeFamilyRepository
      * "this is not an NFT collection" are different facts, and the schema
      * stores them the same way: only this count separates them.
      */
+    /**
+     * Families with a TERMINAL NEGATIVE verdict. Fail-closed.
+     *
+     * ⚠ THE COUNTERPART TO {@see countRetryExhaustedOrThrow()}, and the pair
+     * only means something together. `not_cw721` is a real answer reached by
+     * probing; an exhausted family has NO answer. The schema stores both as a
+     * classification string, so these two counts are what keep "this is not
+     * an NFT collection" and "we could not find out" apart in the read model.
+     */
+    public static function countNegativeFamiliesOrThrow(int $chainId): int
+    {
+        if ($chainId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $sql = $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE chain_id = %d AND classification = %s",
+            $chainId,
+            CosmwasmClassifier::NOT_CW721
+        );
+
+        $total = $wpdb->get_var($sql);
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return (int) $total;
+    }
+
     public static function countRetryExhaustedOrThrow(int $chainId): int
     {
         if ($chainId <= 0) {

@@ -84,6 +84,7 @@ final class DiscoveryScanProgress
      *     eligible_now: int|null,
      *     delayed_families: int|null,
      *     exhausted_families: int|null,
+     *     negative_families: int|null,
      *     scan_complete: string,
      *     more_work_available: string,
      *     reason: string
@@ -103,6 +104,7 @@ final class DiscoveryScanProgress
                 'eligible_now'         => null,
                 'delayed_families'     => null,
                 'exhausted_families'   => null,
+                'negative_families'    => null,
                 'scan_complete'        => self::UNKNOWN,
                 'more_work_available'  => self::UNKNOWN,
                 'reason'               => $reason,
@@ -155,6 +157,20 @@ final class DiscoveryScanProgress
                 CosmwasmClassifier::VERSION
             );
             $exhausted = CosmwasmCodeFamilyRepository::countRetryExhaustedOrThrow($chainId);
+
+            // ⚠ THE FIVE OUTCOMES MUST STAY DISTINCT IN THE READ MODEL, and
+            // the classification column alone cannot keep them apart:
+            //
+            //   confirmed / probable CW-721  → collection_families
+            //   confirmed NEGATIVE           → negative_families  (terminal)
+            //   temporarily delayed          → delayed_families   (backoff)
+            //   retry-exhausted UNRESOLVED   → exhausted_families (no answer)
+            //   unreadable                   → ok = false / UNKNOWN
+            //
+            // `not_cw721` and a six-times-unreachable family are stored the
+            // same way apart from `retry_count`. If this read model does not
+            // separate them, nothing downstream can.
+            $negative = CosmwasmCodeFamilyRepository::countNegativeFamiliesOrThrow($chainId);
         } catch (RepositoryReadFailure $e) {
             // ⚠ NOT zero, NOT complete. The read did not run, so the only
             // honest answer is that we do not know — and a surface that
@@ -172,8 +188,21 @@ final class DiscoveryScanProgress
         // the run row: not from `succeeded`, not from `partial = 0`, not
         // from `pass_completed`, not from zero collections emitted, not
         // from the checkpoint saying `backfilled`.
+        // ⚠ THREE conditions since PR 7.3, not two. `remaining` counts what a
+        // pass could CLAIM, and its predicate excludes `retry_count >=
+        // MAX_RETRIES` — so a family that gave up after six attempts leaves
+        // the queue WITHOUT ever being resolved. With only such families
+        // left, `remaining` reached 0, `scan_complete` said YES, and the
+        // panel said:
+        //
+        //   "Scan complete. All 10 contract families were checked.
+        //    No supported NFT collections were confirmed."
+        //
+        // Both halves false. It was checked six times and we still do not
+        // know, which is not the same as knowing there is nothing there.
+        // Completion means every family reached a RESOLUTION.
         $scanComplete = self::NO;
-        if ($enumerationComplete === self::YES && $remaining === 0) {
+        if ($enumerationComplete === self::YES && $remaining === 0 && $exhausted === 0) {
             $scanComplete = self::YES;
         }
 
@@ -193,6 +222,8 @@ final class DiscoveryScanProgress
             // Remaining forever unless an operator requeues or the classifier
             // version moves. "We could not find out", NOT "not an NFT".
             'exhausted_families'   => $exhausted,
+            // A terminal NEGATIVE — a real verdict, unlike an exhausted family.
+            'negative_families'    => $negative,
             'scan_complete'        => $scanComplete,
             // More administrator-requested work is available exactly when
             // the queue is non-empty. This is what the Continue button is
@@ -255,6 +286,40 @@ final class DiscoveryScanProgress
                 /* translators: %s: number of contract families */
                 __('Scan complete. All %s contract families were checked. No supported NFT collections were confirmed.', 'bcc-trust'),
                 number_format_i18n($total)
+            );
+        }
+
+        // ── ⚠ FINISHED, BUT NOT COMPLETE (PR 7.3) ───────────────────────
+        //
+        // Everything that CAN be attempted has been, and some families still
+        // have no answer. This is a real, common resting state — a node that
+        // was unreachable six times over four weeks leaves exactly this —
+        // and it is neither of the other two sentences:
+        //
+        //   NOT "Scan complete … no supported NFT collections were
+        //       confirmed", which claims a final answer we do not have;
+        //   NOT "N families still need review", which invites a Continue
+        //       that would find nothing to claim.
+        //
+        // So it says what is true: the work stopped, and N families are
+        // UNRESOLVED. `unresolved` is the word on purpose — an unreachable
+        // family is not a negative verdict, and `not_cw721` is terminal.
+        $exhausted = (int) ($progress['exhausted_families'] ?? 0);
+        $eligible  = (int) ($progress['eligible_now'] ?? 0);
+        $delayed   = (int) ($progress['delayed_families'] ?? 0);
+
+        if ($exhausted > 0 && $eligible === 0 && $delayed === 0) {
+            return sprintf(
+                /* translators: 1: families checked, 2: total families, 3: unresolved families */
+                _n(
+                    'Scan session finished. Checked %1$s of %2$s contract families. %3$s family could not be resolved and is still unknown — that is not a result of "no NFT collection".',
+                    'Scan session finished. Checked %1$s of %2$s contract families. %3$s families could not be resolved and are still unknown — that is not a result of "no NFT collection".',
+                    $exhausted,
+                    'bcc-trust'
+                ),
+                number_format_i18n($checked),
+                number_format_i18n($total),
+                number_format_i18n($exhausted)
             );
         }
 

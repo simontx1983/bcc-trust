@@ -415,6 +415,18 @@ namespace BCC\Trust\Onchain\Repositories {
                 return $n;
             }
 
+            public static function countNegativeFamiliesOrThrow(int $chainId): int
+            {
+                $n = 0;
+                foreach ((self::$families[$chainId] ?? []) as $row) {
+                    if ((string) $row->classification === 'not_cw721') {
+                        $n++;
+                    }
+                }
+
+                return $n;
+            }
+
             public static function countRetryExhaustedOrThrow(int $chainId): int
             {
                 $n = 0;

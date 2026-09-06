@@ -30,7 +30,7 @@ PY="${PYTHON_BIN:-python}"
 MUTATE="scripts/tests/mutate.py"
 
 UNIT_FILTER='DiscoveryScanSessionTest|DiscoverySessionExecutorTest|CosmwasmBudgetFairnessTest|CosmwasmOneShotCliTest'
-INT_FILTER='DiscoverySessionLedgerIntegrationTest|DiscoverySessionPanelIntegrationTest|DiscoveryScanProgressIntegrationTest|DiscoveryScanPanelControlIntegrationTest'
+INT_FILTER='DiscoveryUnresolvedFamiliesIntegrationTest|DiscoverySessionLedgerIntegrationTest|DiscoverySessionPanelIntegrationTest|DiscoveryScanProgressIntegrationTest|DiscoveryScanPanelControlIntegrationTest'
 
 SESSION='app/Domain/Onchain/Services/DiscoveryScanSession.php'
 EXECUTOR='app/Domain/Onchain/Workers/DiscoveryRunExecutor.php'
@@ -353,7 +353,7 @@ control "maintenance creates a run of its own" both "$MAINT" "$N" "$R"
 
 # ── ⚠ (12) SCAN COMPLETION WHILE WORK REMAINS ───────────────────────────
 N=$(frag <<'EOF'
-        if ($enumerationComplete === self::YES && $remaining === 0) {
+        if ($enumerationComplete === self::YES && $remaining === 0 && $exhausted === 0) {
             $scanComplete = self::YES;
         }
 EOF
@@ -439,6 +439,56 @@ R=$(frag <<'EOF'
 EOF
 )
 control "a continuation is scheduled without confirming the release" unit "$EXECUTOR" "$N" "$R"
+
+# ── ⚠ (18) AN UNRESOLVED FAMILY DECLARES THE SCAN COMPLETE ──────────────
+#
+# THE EXHAUSTED-RESULT GATE. `remaining` excludes `retry_count >= MAX_RETRIES`,
+# so with only exhausted families left it reads 0 — and without the third
+# condition the panel says "Scan complete. All N contract families were
+# checked. No supported NFT collections were confirmed" over a family nobody
+# ever resolved. Measured on real MySQL before the fix.
+N=$(frag <<'EOF'
+        if ($enumerationComplete === self::YES && $remaining === 0 && $exhausted === 0) {
+EOF
+)
+R=$(frag <<'EOF'
+        if ($enumerationComplete === self::YES && $remaining === 0) {
+EOF
+)
+control "an unresolved family still declares the scan complete" both "$PROGRESS" "$N" "$R"
+
+# ── ⚠ (19) THE SESSION-FINISHED SENTENCE REMOVED ────────────────────────
+#
+# Falling through to "N families still need review" would invite a Continue
+# that can claim nothing.
+N=$(frag <<'EOF'
+        if ($exhausted > 0 && $eligible === 0 && $delayed === 0) {
+EOF
+)
+R=$(frag <<'EOF'
+        if (false) {
+EOF
+)
+control "the unresolved sentence is removed" both "$PROGRESS" "$N" "$R"
+
+# ── ⚠ (20) EXHAUSTED COLLAPSED INTO THE NEGATIVE VERDICT ────────────────
+#
+# Counting `not_cw721` as exhausted (or the reverse) makes "we could not find
+# out" and "this is not an NFT collection" the same number. The schema stores
+# them almost identically; only these two counts keep them apart.
+N=$(frag <<'EOF'
+              WHERE chain_id = %d
+                AND classification NOT IN (%s, %s, %s)
+                AND retry_count >= %d",
+EOF
+)
+R=$(frag <<'EOF'
+              WHERE chain_id = %d
+                AND classification IN (%s, %s, %s)
+                AND retry_count >= %d",
+EOF
+)
+control "exhausted is collapsed into the terminal negatives" int "$FAMILIES" "$N" "$R"
 
 echo
 echo "── result ─────────────────────────────────────────────────────────"
