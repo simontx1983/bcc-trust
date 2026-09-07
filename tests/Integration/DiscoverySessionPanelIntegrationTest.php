@@ -186,7 +186,7 @@ final class DiscoverySessionPanelIntegrationTest extends TestCase
         self::assertStringContainsString('<strong>Pass finished</strong>', $html);
         self::assertStringNotContainsString('<strong>Finished</strong>', $html);
         self::assertStringNotContainsString('<strong>Scan complete</strong>', $html);
-        self::assertStringContainsString('732 still need review', $html);
+        self::assertStringContainsString('732 still need scanning', $html);
         self::assertStringContainsString('>Continue scan</button>', $html);
     }
 
@@ -285,14 +285,14 @@ final class DiscoverySessionPanelIntegrationTest extends TestCase
         self::assertSame(742, $progress['total_families'], 'precondition');
         self::assertSame(365, $progress['classified_families'], 'precondition');
         self::assertSame(377, $progress['remaining_families'], 'precondition');
-        self::assertSame(5, $progress['collection_families'], 'precondition');
+        self::assertSame(5, $progress['confirmed_families'], 'precondition');
 
         $html = $this->render();
 
         // (7)(8)(9) the three facts, each from its own authority.
         self::assertStringContainsString('This session added 2 new collection records.', $html);
-        self::assertStringContainsString('Overall, 5 NFT collection families are confirmed so far.', $html);
-        self::assertStringContainsString('Checked 365 of 742 contract families; 377 still need review.', $html);
+        self::assertStringContainsString('5 NFT collection families confirmed.', $html);
+        self::assertStringContainsString('Checked 365 of 742 contract families; 377 still need scanning.', $html);
 
         // (10) and the sentence that contradicted all three is gone.
         self::assertStringNotContainsString('No NFT collections were confirmed in this pass', $html);
@@ -348,7 +348,7 @@ final class DiscoverySessionPanelIntegrationTest extends TestCase
         $html = $this->render();
 
         self::assertStringContainsString('This session added no new collection record.', $html);
-        self::assertStringContainsString('Overall, 5 NFT collection families are confirmed so far.', $html);
+        self::assertStringContainsString('5 NFT collection families confirmed.', $html);
 
         // ⚠ NOT A WORD ABOUT CONFIRMATION. Five families are confirmed on
         // this chain; a sentence saying the session confirmed nothing would

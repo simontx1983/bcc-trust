@@ -117,7 +117,7 @@ final class DiscoveryProgressFailClosedIntegrationTest extends TestCase
         self::assertNull($p['total_families']);
         self::assertNull($p['remaining_families']);
         self::assertNull($p['classified_families']);
-        self::assertNull($p['collection_families']);
+        self::assertNull($p['confirmed_families']);
 
         // ⚠ NOT complete, and NOT "no more work".
         self::assertSame(DiscoveryScanProgress::UNKNOWN, $p['scan_complete']);

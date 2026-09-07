@@ -40,7 +40,8 @@ final class DiscoveryScanProgressTest extends TestCase
             'total_families'       => 737,
             'classified_families'  => 5,
             'remaining_families'   => 732,
-            'collection_families'  => 0,
+            'confirmed_families'   => 0,
+            'probable_families'    => 0,
             'scan_complete'        => DiscoveryScanProgress::NO,
             'more_work_available'  => DiscoveryScanProgress::YES,
             'reason'               => '',
@@ -55,7 +56,7 @@ final class DiscoveryScanProgressTest extends TestCase
 
         self::assertStringContainsString('5 of 737', $s);
         self::assertStringContainsString('732', $s);
-        self::assertStringContainsString('still need review', $s);
+        self::assertStringContainsString('still need scanning', $s);
     }
 
     /**
@@ -78,7 +79,7 @@ final class DiscoveryScanProgressTest extends TestCase
         // pass" wording, which was scoped correctly but contradicted the
         // panel around it the moment a session actually found something.
         self::assertStringContainsString('No NFT collection family is confirmed on this chain yet', $s);
-        self::assertStringContainsString('732 still need review', $s);
+        self::assertStringContainsString('732 still need scanning', $s);
     }
 
     public function testTheActionSaysContinueRatherThanStartOver(): void
@@ -105,7 +106,7 @@ final class DiscoveryScanProgressTest extends TestCase
         self::assertStringContainsString('Scan complete', $s);
         self::assertStringContainsString('All 737 contract families were checked', $s);
         self::assertStringContainsString('No supported NFT collections were confirmed', $s);
-        self::assertStringNotContainsString('still need review', $s);
+        self::assertStringNotContainsString('still need scanning', $s);
 
         // And the button stops offering more work.
         self::assertNotSame('Continue scan', DiscoveryScanProgress::actionLabel($done));
@@ -118,13 +119,13 @@ final class DiscoveryScanProgressTest extends TestCase
         $done = self::canary();
         $done['classified_families'] = 737;
         $done['remaining_families']  = 0;
-        $done['collection_families'] = 3;
+        $done['confirmed_families'] = 3;
         $done['scan_complete']       = DiscoveryScanProgress::YES;
         $done['more_work_available'] = DiscoveryScanProgress::NO;
 
         $s = DiscoveryScanProgress::summarySentence($done);
 
-        self::assertStringContainsString('Scan complete', $s);
+        self::assertStringContainsString('Scanning complete', $s);
         self::assertStringNotContainsString('No supported NFT collections were confirmed', $s);
     }
 
@@ -195,7 +196,7 @@ final class DiscoveryScanProgressTest extends TestCase
         $p = self::canary();
 
         self::assertSame(DiscoveryScanProgress::YES, $p['enumeration_complete']);
-        self::assertSame(0, $p['collection_families']);
+        self::assertSame(0, $p['confirmed_families']);
         self::assertSame(DiscoveryScanProgress::NO, $p['scan_complete']);
         self::assertGreaterThan(0, $p['remaining_families']);
     }
@@ -232,7 +233,7 @@ final class DiscoveryScanProgressTest extends TestCase
         // The three claims it must never make.
         self::assertStringNotContainsString('Scan complete', $s);
         self::assertStringNotContainsString('No supported NFT collections were confirmed', $s);
-        self::assertStringNotContainsString('still need review', $s);
+        self::assertStringNotContainsString('still need scanning', $s);
     }
 
     /** Singular reads correctly â one family, not "1 families". */
@@ -257,7 +258,7 @@ final class DiscoveryScanProgressTest extends TestCase
      * With work still claimable the ordinary incomplete sentence wins.
      *
      * â  The session-finished branch must not swallow the normal
-     * "N still need review" case just because some family is also exhausted.
+     * "N still need scanning" case just because some family is also exhausted.
      */
     public function testClaimableWorkStillGetsTheReviewSentence(): void
     {
@@ -268,7 +269,7 @@ final class DiscoveryScanProgressTest extends TestCase
 
         $s = DiscoveryScanProgress::summarySentence($p);
 
-        self::assertStringContainsString('732 still need review', $s);
+        self::assertStringContainsString('732 still need scanning', $s);
         self::assertStringNotContainsString('Scan session finished', $s);
     }
 
@@ -282,7 +283,7 @@ final class DiscoveryScanProgressTest extends TestCase
 
         $s = DiscoveryScanProgress::summarySentence($p);
 
-        self::assertStringContainsString('still need review', $s);
+        self::assertStringContainsString('still need scanning', $s);
         self::assertStringNotContainsString('Scan session finished', $s);
     }
 }

@@ -1008,7 +1008,9 @@ final class CosmwasmOneShotCliTest extends TestCase
             // The budget wording is pinned in detail by
             // CosmwasmCliPreflightAccuracyTest; these two are here so that
             // "the preflight was printed at all" keeps covering them.
-            'request budget    : 50 LOGICAL requests',
+            // ⚠ 25 since PR 7.5 — the canonical ceiling halved after run 5
+            // opened the provider's circuit breaker at 772 requests.
+            'request budget    : 25 LOGICAL requests',
             'runtime deadline  : 20s — COOPERATIVE',
             'dailyChainStep',
             'emitCollections',

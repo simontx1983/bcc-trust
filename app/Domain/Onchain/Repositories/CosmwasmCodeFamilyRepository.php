@@ -903,17 +903,60 @@ final class CosmwasmCodeFamilyRepository
     }
 
     /**
-     * Families settled as CONFIRMED (and PROBABLE) CW-721, FAIL-CLOSED.
+     * Families the scanner CONFIRMED as CW-721, FAIL-CLOSED.
      *
-     * `probable_cw721` is counted alongside `confirmed_cw721` because the
-     * pending predicate above already treats it as settled — it is excluded
-     * from the queue. A surface that counted only CONFIRMED would report
-     * families as neither remaining nor found, and the three numbers would
-     * not reconcile.
+     * ── ⚠ CONFIRMED ONLY. PROBABLE IS A DIFFERENT ANSWER (PR 7.5) ───────
+     * This replaced `countCollectionFamiliesOrThrow()`, which counted
+     * CONFIRMED **and** PROBABLE and was rendered by the panel as
+     * "N NFT collection families are confirmed so far". On 2026-09-07 Cosmos
+     * Hub held 12 confirmed and 1 probable and the panel said **13
+     * confirmed**. That is false: `probable_cw721` means the evidence points
+     * at CW-721 but an administrator still has to look.
+     *
+     * The combined method is gone rather than deprecated. A method whose
+     * name says "collection families" while its body says "confirmed OR
+     * probable" is exactly the ambiguity that produced the wrong sentence,
+     * and leaving it in place invites the next caller to print it as
+     * confirmed too. Callers that genuinely want the candidate total add the
+     * two counts and say "candidates".
+     *
+     * The three numbers still reconcile: the pending predicate excludes both
+     * CONFIRMED and PROBABLE, so a probable family is neither remaining nor
+     * confirmed — it is {@see countProbableFamiliesOrThrow()}, reported in
+     * its own right.
      *
      * @throws RepositoryReadFailure when the read did not run
      */
-    public static function countCollectionFamiliesOrThrow(int $chainId): int
+    public static function countConfirmedFamiliesOrThrow(int $chainId): int
+    {
+        return self::countByClassificationOrThrow($chainId, CosmwasmClassifier::CONFIRMED, __FUNCTION__);
+    }
+
+    /**
+     * Families classified PROBABLE CW-721 — awaiting administrator review.
+     *
+     * ⚠ NOT CONFIRMED, AND NEVER FOLDED INTO A CONFIRMED COUNT. Probable is
+     * settled for the SCANNER (the pending predicate excludes it, so it is
+     * not rescanned routinely) and unsettled for a HUMAN. Those are two
+     * different kinds of "done" and the operator needs both.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function countProbableFamiliesOrThrow(int $chainId): int
+    {
+        return self::countByClassificationOrThrow($chainId, CosmwasmClassifier::PROBABLE, __FUNCTION__);
+    }
+
+    /**
+     * PRIVATE. One classification, counted fail-closed.
+     *
+     * ⚠ THE GUARD NAMES THE PUBLIC CALLER, not this helper — an operator
+     * reading a failure needs to know which count could not be read, and
+     * `countByClassificationOrThrow` would name none of them.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    private static function countByClassificationOrThrow(int $chainId, string $classification, string $caller): int
     {
         if ($chainId <= 0) {
             return 0;
@@ -923,12 +966,11 @@ final class CosmwasmCodeFamilyRepository
         $table = self::table();
 
         $total = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table} WHERE chain_id = %d AND classification IN (%s, %s)",
+            "SELECT COUNT(*) FROM {$table} WHERE chain_id = %d AND classification = %s",
             $chainId,
-            CosmwasmClassifier::CONFIRMED,
-            CosmwasmClassifier::PROBABLE
+            $classification
         ));
-        self::guardReadOrThrow(__FUNCTION__);
+        self::guardReadOrThrow($caller);
 
         return (int) $total;
     }

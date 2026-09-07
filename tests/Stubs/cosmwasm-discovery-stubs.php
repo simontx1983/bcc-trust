@@ -379,11 +379,26 @@ namespace BCC\Trust\Onchain\Repositories {
                 return self::countPendingClassification($chainId, $classifierVersion);
             }
 
-            public static function countCollectionFamiliesOrThrow(int $chainId): int
+            /**
+             * ⚠ CONFIRMED ONLY (PR 7.5). The double must not fold probable in
+             * either — a stub that combined them would let a mutation that
+             * re-combines the production counts pass unnoticed.
+             */
+            public static function countConfirmedFamiliesOrThrow(int $chainId): int
+            {
+                return self::countClassification($chainId, 'confirmed_cw721');
+            }
+
+            public static function countProbableFamiliesOrThrow(int $chainId): int
+            {
+                return self::countClassification($chainId, 'probable_cw721');
+            }
+
+            private static function countClassification(int $chainId, string $classification): int
             {
                 $n = 0;
                 foreach ((self::$families[$chainId] ?? []) as $row) {
-                    if (in_array((string) $row->classification, ['confirmed_cw721', 'probable_cw721'], true)) {
+                    if ((string) $row->classification === $classification) {
                         $n++;
                     }
                 }

@@ -52,9 +52,17 @@ final class DiscoverySessionAuditTotalsTest extends TestCase
     private const CHAIN    = 17;
     private const OPERATOR = 2;
 
-    /** The totals a session had already accumulated before its last chunk. */
+    /**
+     * The totals a session had already accumulated before its last chunk.
+     *
+     * ⚠ MUST STAY UNDER {@see DiscoveryScanSession::MAX_REQUESTS} (625 since
+     * PR 7.5). The original 900 was fine against the old 1,250 ceiling; under
+     * the new one it left `chunkRequestAllowance()` returning 0, so the final
+     * chunk spent nothing and two tests failed for a fixture reason rather
+     * than a behavioural one.
+     */
     private const CARRIED = [
-        'requests_used'       => 900,
+        'requests_used'       => 400,
         'pages_fetched'       => 30,
         'families_seen'       => 300,
         'contracts_seen'      => 1000,

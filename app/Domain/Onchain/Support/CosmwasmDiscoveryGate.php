@@ -173,8 +173,23 @@ final class CosmwasmDiscoveryGate
      */
     public const MAX_RUNTIME_SECONDS = 20;
 
-    /** Requests per invocation when the override constant is undefined. */
-    public const DEFAULT_REQUEST_BUDGET = 50;
+    /**
+     * Requests per invocation when the override constant is undefined.
+     *
+     * ── ⚠ 25, NOT 50 — SET BY A LIVE BREAKER TRIP (PR 7.5) ──────────────
+     * The 2026-09-07 Cosmos Hub session (run 5) spent 772 requests across
+     * 16 chunks in 970 s against the public LCD at `rest.cosmos.directory`,
+     * and the circuit breaker opened. The breaker did its job and the
+     * session ended honestly — but a pace that trips a breaker is a pace
+     * that is too fast for a shared public endpoint we do not own.
+     *
+     * Halving the per-chunk budget and quadrupling the gap between chunks
+     * (see {@see \BCC\Trust\Onchain\Services\DiscoveryScanSession::CHUNK_DELAY_SECONDS})
+     * takes the sustained rate from roughly 3.2 requests/second to about
+     * 0.3 — an order of magnitude gentler on a provider that is doing us a
+     * favour.
+     */
+    public const DEFAULT_REQUEST_BUDGET = 25;
 
     /** Hard ceiling on the override, so a typo cannot uncap the worker. */
     private const MAX_REQUEST_BUDGET = 500;
@@ -184,9 +199,15 @@ final class CosmwasmDiscoveryGate
      *
      * Overridable via BCC_COSMWASM_REQUEST_BUDGET. Unlike the enable
      * gates this one has a safe default (an absent budget means the
-     * documented 50, not "unlimited") — the fail-closed rule is about
+     * documented 25, not "unlimited") — the fail-closed rule is about
      * whether work happens at all, and a budget constant cannot switch
      * work on.
+     *
+     * ⚠ THIS IS A PER-CHUNK CEILING AND NOTHING MORE. It cannot uncap a
+     * SESSION: {@see \BCC\Trust\Onchain\Services\DiscoveryScanSession::chunkRequestAllowance()}
+     * hands each chunk only what the session's own 625-request ceiling has
+     * left, so an operator who sets this to 500 gets one large chunk and a
+     * session that still stops at 625 — never 25 × 500.
      */
     public static function requestBudget(): int
     {

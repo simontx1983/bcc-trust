@@ -221,7 +221,7 @@ final class DiscoveryScanPanelControlIntegrationTest extends TestCase
         $html = $this->render();
 
         self::assertStringContainsString('Checked 5 of 737 contract families', $html);
-        self::assertStringContainsString('732 still need review', $html);
+        self::assertStringContainsString('732 still need scanning', $html);
         self::assertStringContainsString('>Continue scan</button>', $html);
 
         // The four sentences that must never appear over this state.
@@ -404,7 +404,7 @@ final class DiscoveryScanPanelControlIntegrationTest extends TestCase
         $html = $this->render();
 
         self::assertStringNotContainsString('Continue scan', $html);
-        self::assertStringNotContainsString('still need review', $html);
+        self::assertStringNotContainsString('still need scanning', $html);
     }
 
     // ── (5) AN INELIGIBLE CHAIN IS STILL REFUSED ────────────────────────

@@ -80,7 +80,8 @@ final class DiscoveryScanProgress
      *     total_families: int|null,
      *     classified_families: int|null,
      *     remaining_families: int|null,
-     *     collection_families: int|null,
+     *     confirmed_families: int|null,
+     *     probable_families: int|null,
      *     eligible_now: int|null,
      *     delayed_families: int|null,
      *     exhausted_families: int|null,
@@ -100,7 +101,8 @@ final class DiscoveryScanProgress
                 'total_families'       => null,
                 'classified_families'  => null,
                 'remaining_families'   => null,
-                'collection_families'  => null,
+                'confirmed_families'   => null,
+                'probable_families'    => null,
                 'eligible_now'         => null,
                 'delayed_families'     => null,
                 'exhausted_families'   => null,
@@ -143,7 +145,12 @@ final class DiscoveryScanProgress
                 $chainId,
                 CosmwasmClassifier::VERSION
             );
-            $collections = CosmwasmCodeFamilyRepository::countCollectionFamiliesOrThrow($chainId);
+            // ⚠ TWO READS, TWO ANSWERS (PR 7.5). One combined count was
+            // rendered as "N … confirmed so far" and reported Cosmos Hub's
+            // 12 confirmed + 1 probable as 13 CONFIRMED. Probable means an
+            // administrator still has to look; it is never confirmed.
+            $confirmed = CosmwasmCodeFamilyRepository::countConfirmedFamiliesOrThrow($chainId);
+            $probable  = CosmwasmCodeFamilyRepository::countProbableFamiliesOrThrow($chainId);
 
             // ── PR 7.3: what a chunk could actually claim right now ─────
             //
@@ -161,7 +168,8 @@ final class DiscoveryScanProgress
             // ⚠ THE FIVE OUTCOMES MUST STAY DISTINCT IN THE READ MODEL, and
             // the classification column alone cannot keep them apart:
             //
-            //   confirmed / probable CW-721  → collection_families
+            //   CONFIRMED CW-721             → confirmed_families
+            //   PROBABLE  CW-721             → probable_families (needs a human)
             //   confirmed NEGATIVE           → negative_families  (terminal)
             //   temporarily delayed          → delayed_families   (backoff)
             //   retry-exhausted UNRESOLVED   → exhausted_families (no answer)
@@ -213,7 +221,11 @@ final class DiscoveryScanProgress
             'total_families'       => $total,
             'classified_families'  => $classified,
             'remaining_families'   => $remaining,
-            'collection_families'  => $collections,
+            'confirmed_families'   => $confirmed,
+            // ⚠ SETTLED FOR THE SCANNER, UNSETTLED FOR A HUMAN. Excluded
+            // from `remaining_families` (the pending predicate skips it) and
+            // never added to `confirmed_families`.
+            'probable_families'    => $probable,
             // What the NEXT chunk could claim without waiting.
             'eligible_now'         => $eligibleNow,
             // Remaining, but not claimable yet — a failed fetch's backoff.
@@ -277,35 +289,40 @@ final class DiscoveryScanProgress
         $total     = (int) ($progress['total_families'] ?? 0);
         $checked   = (int) ($progress['classified_families'] ?? 0);
         $remaining = (int) ($progress['remaining_families'] ?? 0);
-        $found     = (int) ($progress['collection_families'] ?? 0);
+        // ⚠ TWO NUMBERS, NEVER ADDED TOGETHER (PR 7.5). `confirmed` is what
+        // the scanner proved; `probable` is what it wants a human to look at.
+        // The combined count printed Cosmos Hub's 12 + 1 as "13 confirmed".
+        $confirmed = (int) ($progress['confirmed_families'] ?? 0);
+        $probable  = (int) ($progress['probable_families'] ?? 0);
 
         if (($progress['scan_complete'] ?? self::NO) === self::YES) {
-            if ($found > 0) {
-                // ⚠ The session prefix belongs on the COMPLETE branch too.
-                // "All 742 families were checked, 5 confirmed" is a statement
-                // about the chain across every session that ever ran; without
-                // the prefix an operator cannot tell whether the click they
-                // just made contributed any of it.
+            if ($confirmed > 0 || $probable > 0) {
+                // ⚠ SCANNER-complete, which is not the same as SETTLED.
+                // A chain can finish scanning with probable candidates still
+                // waiting on an administrator, so the heading says scanning
+                // is done and the clauses say what is and is not decided.
+                // The session prefix belongs here too: without it an operator
+                // cannot tell whether the click they just made contributed.
                 return self::addedSentence($sessionEmitted) . sprintf(
-                    /* translators: 1: families checked, 2: collection families found */
+                    /* translators: %s: number of contract families */
                     _n(
-                        'Scan complete. All %1$s contract family was checked.',
-                        'Scan complete. All %1$s contract families were checked.',
+                        'Scanning complete. All %s contract family was checked.',
+                        'Scanning complete. All %s contract families were checked.',
                         $total,
                         'bcc-trust'
-                    ) . ' ' . sprintf(
-                        _n('%2$s NFT collection family was confirmed.', '%2$s NFT collection families were confirmed.', $found, 'bcc-trust'),
-                        number_format_i18n($total),
-                        number_format_i18n($found)
                     ),
-                    number_format_i18n($total),
-                    number_format_i18n($found)
-                );
+                    number_format_i18n($total)
+                ) . self::confirmedClause($confirmed) . self::probableClause($probable);
             }
 
-            // ⚠ THE ONLY PLACE A FINAL ZERO MAY BE SAID, and only because
-            // `scan_complete` proved ALL THREE conditions above.
-            // ⚠ `$found === 0` here, so `addedSentence()` can only ever
+            // ⚠ THE ONLY PLACE A FINAL ZERO MAY BE SAID, and it now needs SIX
+            // proofs, not three: enumeration complete, nothing remaining,
+            // nothing delayed (implied — `delayed = remaining - eligible`, and
+            // remaining is 0), nothing exhausted, **zero confirmed and zero
+            // probable**. A probable candidate is evidence of a collection; a
+            // chain holding one has emphatically not proved there is nothing
+            // here, and this branch is unreachable while one exists.
+            // ⚠ Both counts are 0 here, so `addedSentence()` can only ever
             // contribute the "added no new collection record" form — a row
             // cannot be emitted from a family that was never confirmed.
             return self::addedSentence($sessionEmitted) . sprintf(
@@ -338,6 +355,9 @@ final class DiscoveryScanProgress
             // ⚠ The session's own result belongs here too (PR 7.4). A session
             // that emitted two collections and then ran out of resolvable
             // families used to have that erased by the unresolved sentence.
+            // ⚠ …and so do the confirmed/probable clauses (PR 7.5): a chain
+            // whose only outstanding work is unresolvable can still hold
+            // confirmed collections and candidates awaiting review.
             return self::addedSentence($sessionEmitted) . sprintf(
                 /* translators: 1: families checked, 2: total families, 3: unresolved families */
                 _n(
@@ -349,7 +369,7 @@ final class DiscoveryScanProgress
                 number_format_i18n($checked),
                 number_format_i18n($total),
                 number_format_i18n($exhausted)
-            );
+            ) . self::confirmedClause($confirmed) . self::probableClause($probable);
         }
 
         // ── ⚠ INCOMPLETE, AND THE THREE FACTS ARE DIFFERENT FACTS ───────
@@ -360,41 +380,38 @@ final class DiscoveryScanProgress
         // on 2026-09-06 it printed beside "Found 2 new collection(s)" and
         // "5 NFT collection families confirmed so far".
         //
-        // Three separate numbers, never collapsed:
+        // FOUR separate numbers, never collapsed (PR 7.5 split the last two):
         //
         //   $sessionEmitted — collection ROWS this session added, from the
         //                     run ledger's cumulative `collections_emitted`;
-        //   $found          — collection FAMILIES confirmed overall, derived
-        //                     from the chain's own classification state;
-        //   $remaining      — families still to review.
+        //   $confirmed      — families the scanner PROVED are CW-721;
+        //   $probable       — families that look like CW-721 and need a HUMAN;
+        //   $remaining      — families the SCANNER still has to work on.
         //
-        // ⚠ A CONFIRMED FAMILY IS NOT AN EMITTED ROW. The live session
+        // ⚠ A CONFIRMED FAMILY IS NOT AN EMITTED ROW. The 2026-09-06 session
         // confirmed FIVE families and emitted TWO rows, because emission is
-        // its own bounded stage. Calling all five "saved collections" would
-        // be exactly the overstatement this method exists to prevent.
+        // its own bounded stage.
+        // ⚠ AND A PROBABLE FAMILY IS NOT A CONFIRMED ONE. On 2026-09-07 the
+        // chain held 12 confirmed and 1 probable and this method's ancestor
+        // said "13 … are confirmed so far".
         $tail = sprintf(
-            /* translators: 1: families checked, 2: total families, 3: families remaining */
-            __('Checked %1$s of %2$s contract families; %3$s still need review.', 'bcc-trust'),
+            /* translators: 1: families checked, 2: total families, 3: families still needing scanner work */
+            __('Checked %1$s of %2$s contract families; %3$s still need scanning.', 'bcc-trust'),
             number_format_i18n($checked),
             number_format_i18n($total),
             number_format_i18n($remaining)
         );
 
-        // (a) The chain has confirmed families. Report the overall figure —
-        //     preceded, when we know it, by what THIS session contributed.
-        //     ⚠ Both, never one: an operator reading "5 confirmed" needs to
-        //     know their click produced 2 of them, and an operator reading
-        //     "2 added" needs to know the chain now stands at 5.
-        if ($found > 0) {
-            return self::addedSentence($sessionEmitted) . sprintf(
-                /* translators: %s: collection families confirmed overall */
-                _n(
-                    'Overall, %s NFT collection family is confirmed so far.',
-                    'Overall, %s NFT collection families are confirmed so far.',
-                    $found,
-                    'bcc-trust'
-                ),
-                number_format_i18n($found)
+        // (a) The chain has confirmed collections, probable candidates, or
+        //     both. Report each in its own clause, preceded — when we know it
+        //     — by what THIS session contributed.
+        //     ⚠ Never one number for two questions: an operator reading
+        //     "12 confirmed" needs to know their click produced 6 rows, and
+        //     needs to know separately that 1 family is still theirs to judge.
+        if ($confirmed > 0 || $probable > 0) {
+            return rtrim(
+                self::addedSentence($sessionEmitted)
+                . ltrim(self::confirmedClause($confirmed) . self::probableClause($probable))
             ) . ' ' . $tail;
         }
 
@@ -417,6 +434,67 @@ final class DiscoveryScanProgress
         return self::addedSentence($sessionEmitted)
             . __('No NFT collection family is confirmed on this chain yet.', 'bcc-trust')
             . ' ' . $tail;
+    }
+
+    /**
+     * PURE. What the scanner PROVED, or an empty string.
+     *
+     * ⚠ "CONFIRMED" IS RESERVED FOR `confirmed_cw721` AND NOTHING ELSE.
+     * Not probable, not "confirmed or probable", not a candidate total. The
+     * whole point of PR 7.5 is that this word has one referent.
+     *
+     * Returns with a LEADING space when non-empty, so callers concatenate it
+     * after a sentence without deciding about punctuation.
+     */
+    private static function confirmedClause(int $confirmed): string
+    {
+        if ($confirmed <= 0) {
+            return '';
+        }
+
+        return ' ' . sprintf(
+            /* translators: %s: NFT collection families the scanner confirmed */
+            _n(
+                '%s NFT collection family confirmed.',
+                '%s NFT collection families confirmed.',
+                $confirmed,
+                'bcc-trust'
+            ),
+            number_format_i18n($confirmed)
+        );
+    }
+
+    /**
+     * PURE. What still needs a HUMAN, or an empty string.
+     *
+     * ── ⚠ THIS CLAUSE IS THE POINT OF PR 7.5 ────────────────────────────
+     * A probable family is real evidence that a collection exists AND an
+     * open question. Folding it into the confirmed count overstates what BCC
+     * knows; dropping it entirely hides work an administrator owns. It gets
+     * its own sentence, in its own words.
+     *
+     * "possible" and "needs administrator review" are the operator-facing
+     * vocabulary. ⚠ "Confirmed", "verified" and "supported collection" are
+     * NEVER acceptable for a probable family.
+     *
+     * Returns with a LEADING space when non-empty.
+     */
+    private static function probableClause(int $probable): string
+    {
+        if ($probable <= 0) {
+            return '';
+        }
+
+        return ' ' . sprintf(
+            /* translators: %s: probable NFT collection families awaiting review */
+            _n(
+                '%s possible NFT collection family needs administrator review.',
+                '%s possible NFT collection families need administrator review.',
+                $probable,
+                'bcc-trust'
+            ),
+            number_format_i18n($probable)
+        );
     }
 
     /**

@@ -27,58 +27,86 @@ use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
  *   run 2 `d948e894…` incremental — 48 requests, 16 s,  7 classified,
  *                                   5 new code ids, 104 contracts
  *
- * A chunk settles about SEVEN families. With 730 remaining that is roughly
- * 104 administrator clicks to finish one chain. One click that authorizes
- * {@see MAX_CHUNKS} chunks turns that into four or five.
+ * A chunk settled about seven families at the ORIGINAL 50-request budget. One
+ * click that authorizes {@see MAX_CHUNKS} chunks replaces roughly a hundred.
+ *
+ * ── ⚠ THE PACE THOSE CANARIES IMPLIED WAS TOO FAST (PR 7.5) ─────────────
+ * Run 5 on 2026-09-07 ran the full session shape for the first time — 16
+ * chunks, 772 requests, 970 s — and the public LCD's circuit breaker OPENED.
+ * The breaker behaved correctly and the run ended honestly, but a pace that
+ * trips a breaker on an endpoint we do not own is not a pace to keep. So the
+ * numbers below are deliberately gentler than the canaries suggested:
+ * 25 requests per chunk (was 50), 60 s between chunks (was 15), 625 per
+ * session (was 1250). Fewer families per click, and a provider that stays
+ * willing to answer.
  *
  * ── WHAT IS *NOT* RELAXED ───────────────────────────────────────────────
- * The per-chunk ceilings are untouched: {@see CosmwasmDiscoveryGate::requestBudget()}
- * and {@see CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS} still bound every
- * chunk exactly as they bounded every single-pass run. Making one chunk
- * bigger would just move the problem into a PHP process Hostinger will kill;
- * many small recoverable chunks is the whole point.
+ * The per-chunk RUNTIME ceiling is untouched:
+ * {@see CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS} still bounds every chunk
+ * exactly as it bounded every single-pass run. Making one chunk bigger would
+ * just move the problem into a PHP process Hostinger will kill; many small
+ * recoverable chunks is the whole point.
  */
 final class DiscoveryScanSession
 {
     /**
      * Chunks one administrator click may authorize.
      *
-     * 25 × ~7 families ≈ 175 families per click, so Cosmos Hub's 730-family
-     * backlog needs four or five sessions instead of ~104. Deliberately not
-     * larger: a session should finish in minutes and be easy to reason about
-     * when something goes wrong halfway through.
+     * ⚠ HELD AT 25 WHILE THE PACE HALVED (PR 7.5). Raising the chunk count
+     * to recover the families-per-click the 50-request budget delivered would
+     * hand back exactly the request volume that opened the breaker. A click
+     * now settles fewer families; that is the intended trade.
+     *
+     * Deliberately not larger: a session should finish in tens of minutes and
+     * be easy to reason about when something goes wrong halfway through.
      */
     public const MAX_CHUNKS = 25;
 
     /**
      * Cumulative provider requests across the whole session.
      *
-     * 25 chunks × the 50-request default ceiling. Enforced against the run's
-     * own accumulated `requests_used`, so a chunk that somehow spent more
-     * than its budget still cannot push the session past this.
+     * ── ⚠ 625, NOT 1250 — SET BY A LIVE BREAKER TRIP (PR 7.5) ───────────
+     * Run 5 on 2026-09-07 spent 772 requests in 970 s and the public LCD's
+     * circuit breaker opened. 625 is 25 chunks × the new 25-request default,
+     * and it sits deliberately BELOW the 772 that provoked a trip.
+     *
+     * Enforced against the run's own accumulated `requests_used`, so a chunk
+     * that somehow spent more than its budget still cannot push the session
+     * past this — and {@see chunkRequestAllowance()} additionally hands each
+     * chunk only the remainder, so an operator's larger per-chunk override
+     * cannot walk the session past 625 either.
      *
      * ⚠ `requests_used` is SMALLINT UNSIGNED (max 65535). This ceiling is two
      * orders of magnitude below that, so the column cannot wrap.
      */
-    public const MAX_REQUESTS = 1250;
+    public const MAX_REQUESTS = 625;
 
     /**
      * Wall-clock age of the session, measured from `requested_at`.
      *
-     * 25 chunks at ~16 s plus a 15 s gap each is about 13 minutes. An hour
-     * leaves generous room for Action Scheduler jitter while still bounding
-     * a session whose chunks have stopped being picked up.
+     * ⚠ UNCHANGED AT AN HOUR, AND NOW THE BINDING CEILING IN PRACTICE.
+     * 25 chunks at ~16 s plus a 60 s gap each is about 32 minutes — still
+     * comfortably inside the hour, but no longer the ~13 minutes the 15 s
+     * gap implied. The hour keeps bounding a session whose chunks have
+     * stopped being picked up.
      */
     public const MAX_AGE_SECONDS = 3600;
 
     /**
      * Gap between chunks.
      *
-     * At 48 requests per ~16 s chunk plus this gap, the session averages
-     * roughly 1.5 requests per second against a free public LCD proxy, and
-     * never runs two discovery PHP processes back to back on shared hosting.
+     * ── ⚠ 60 s, NOT 15 s — SET BY A LIVE BREAKER TRIP (PR 7.5) ──────────
+     * At 25 requests per ~16 s chunk plus this gap the session averages
+     * about 0.3 requests per second against a free public LCD proxy we do
+     * not own, down from roughly 1.5. Run 5's pace opened the breaker; this
+     * is the pace chosen so it should not.
+     *
+     * ⚠ THE GAP IS A SCHEDULED DELAY, NEVER A `sleep()`. The PHP process
+     * ends and Action Scheduler brings the next chunk back — sleeping would
+     * hold a worker slot open on shared hosting for a minute at a time and
+     * would be killed by `max_execution_time` long before the gap elapsed.
      */
-    public const CHUNK_DELAY_SECONDS = 15;
+    public const CHUNK_DELAY_SECONDS = 60;
 
     /**
      * Chunks reporting pass-level provider errors before the session stops.
@@ -288,6 +316,38 @@ final class DiscoveryScanSession
             'requests' => CosmwasmDiscoveryGate::requestBudget(),
             'seconds'  => CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS,
         ];
+    }
+
+    /**
+     * PURE. How many requests THIS chunk may spend, given what the session
+     * has already spent.
+     *
+     * ── ⚠ WHY THE PER-CHUNK OVERRIDE CANNOT UNCAP A SESSION ─────────────
+     * `BCC_COSMWASM_REQUEST_BUDGET` is an operator escape hatch capped at
+     * 500. Without this clamp, 25 chunks at 500 would authorize 12,500
+     * requests — twenty times the session ceiling — because {@see decide()}
+     * only stops the session AFTER a chunk has already spent its budget.
+     * The ceiling would still "win" eventually, but only after an overshoot
+     * as large as one whole chunk.
+     *
+     * Handing each chunk `min(per-chunk budget, what the session has left)`
+     * makes {@see MAX_REQUESTS} a real ceiling rather than a trailing one.
+     *
+     * ⚠ NEGATIVE AND ABSURD INPUTS CLAMP TO ZERO, NEVER WRAP. `$used` comes
+     * from a SMALLINT UNSIGNED column, but a corrupt or fabricated value
+     * must not produce a negative allowance that a caller would read as
+     * "unlimited". Zero means "the session is spent" — and `decide()` will
+     * already have stopped it, so this is the belt to that braces.
+     */
+    public static function chunkRequestAllowance(int $used): int
+    {
+        $remaining = self::MAX_REQUESTS - max(0, $used);
+
+        if ($remaining <= 0) {
+            return 0;
+        }
+
+        return min(CosmwasmDiscoveryGate::requestBudget(), $remaining);
     }
 
     /**

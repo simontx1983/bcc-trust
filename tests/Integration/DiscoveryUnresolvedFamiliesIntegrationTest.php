@@ -163,7 +163,7 @@ final class DiscoveryUnresolvedFamiliesIntegrationTest extends TestCase
         self::assertSame(0, $p['eligible_now'], 'no immediately eligible work');
         self::assertSame(0, $p['delayed_families'], 'no delayed work');
         self::assertSame(1, $p['exhausted_families'], 'exactly one unresolved family');
-        self::assertSame(0, $p['collection_families'], 'no CW-721 confirmed');
+        self::assertSame(0, $p['confirmed_families'], 'no CW-721 confirmed');
         self::assertSame(0, $p['remaining_families'], 'nothing claimable — this is why it looked complete');
 
         // ⚠ THE ASSERTION THE FIX EXISTS FOR.
@@ -182,7 +182,7 @@ final class DiscoveryUnresolvedFamiliesIntegrationTest extends TestCase
         $p = DiscoveryScanProgress::forChain(self::CHAIN);
 
         self::assertSame(8, $p['negative_families'], 'confirmed negative');
-        self::assertSame(0, $p['collection_families'], 'confirmed / probable CW-721');
+        self::assertSame(0, $p['confirmed_families'], 'confirmed / probable CW-721');
         self::assertSame(0, $p['delayed_families'], 'temporarily delayed');
         self::assertSame(2, $p['exhausted_families'], 'retry-exhausted unresolved');
         self::assertTrue($p['ok'], 'and a readable progress read');

@@ -176,7 +176,20 @@ final class DiscoveryRunExecutor
             ];
         }
 
-        $budget = new CosmwasmTickBudget();
+        // ── ⚠ THE SESSION'S REMAINDER, NOT JUST THE PER-CHUNK BUDGET ────
+        //
+        // `new CosmwasmTickBudget()` takes the gate's per-chunk ceiling,
+        // which an operator can raise to 500. Twenty-five such chunks would
+        // authorize 12,500 requests against a provider whose breaker already
+        // opened at 772 (run 5, 2026-09-07). Asking the session what it has
+        // LEFT makes `MAX_REQUESTS` a real ceiling instead of one the
+        // session only notices after overshooting by a whole chunk.
+        //
+        // For a first chunk this is exactly the per-chunk budget: the
+        // allowance is `min(budget, 625 - 0)`.
+        $budget = new CosmwasmTickBudget(
+            DiscoveryScanSession::chunkRequestAllowance((int) ($run->requests_used ?? 0))
+        );
         $report = new CosmwasmPassReport();
 
         try {

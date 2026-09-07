@@ -62,7 +62,12 @@ namespace BCC\Trust\Onchain\Repositories {
                 return 0;
             }
 
-            public static function countCollectionFamiliesOrThrow(int $chainId): int
+            public static function countConfirmedFamiliesOrThrow(int $chainId): int
+            {
+                return 0;
+            }
+
+            public static function countProbableFamiliesOrThrow(int $chainId): int
             {
                 return 0;
             }
