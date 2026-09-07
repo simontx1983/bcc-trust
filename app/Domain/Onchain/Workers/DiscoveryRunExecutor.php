@@ -34,6 +34,7 @@ use BCC\Trust\Onchain\Support\DiscoveryReadiness;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryJobKind;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunStatus;
+use BCC\Trust\Onchain\ValueObjects\DiscoverySessionTotals;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryScanMode;
 
 if (!defined('ABSPATH')) {
@@ -301,13 +302,44 @@ final class DiscoveryRunExecutor
 
         $ran = $outcome === CosmwasmDiscoveryWorker::PASS_RAN;
 
-        self::auditTerminal($runId, $ran ? self::AUDIT_COMPLETED : self::AUDIT_FAILED, [
-            'run_uuid'    => (string) $run->run_uuid,
-            'chain_id'    => $chainId,
-            'scan_mode'   => $scanMode,
-            'stop_reason' => $stopReason,
-            'partial'     => $partial ? 1 : 0,
-        ] + $counts);
+        // ── ⚠ PR 7.4: THE AUDIT REPORTS THE SESSION, NOT THE LAST CHUNK ──
+        //
+        // `$counts` is ONE CHUNK's telemetry. The accumulation happens in
+        // SQL — `releaseForNextChunk()` and `markSucceeded()` both write
+        // `col = col + %d` — so the cumulative totals exist only in the row,
+        // and only once the terminal write above is CONFIRMED.
+        //
+        // Handing `$counts` to the audit is what made the 2026-09-06 Cosmos
+        // Hub session record `41 / 9 / 0` against a ledger row that
+        // correctly said `1136 / 371 / 2`. The ledger was right; the
+        // permanent record an operator reads back was wrong.
+        //
+        // So the totals are RE-READ from the persisted row rather than
+        // recomputed here. An audit row must never claim a cumulative value
+        // that was not successfully stored, and reading it back is the only
+        // way to be sure of that.
+        $totals = DiscoverySessionTotals::fromPersistedRow(
+            DiscoveryRunRepository::findById($runId)
+        );
+
+        if ($totals === null) {
+            // ⚠ NEVER FABRICATE. We cannot confirm what was persisted, so we
+            // write no totals at all and take the EXISTING terminal-audit
+            // degradation path — the same one a failed audit write takes.
+            // The committed provider work stands: an audit problem has never
+            // rolled back a terminal result and does not start now.
+            Logger::error('[bcc-trust] discovery session totals could not be confirmed; auditing degraded rather than guessing', [
+                'run_id'   => $runId,
+                'chain_id' => $chainId,
+            ]);
+            DiscoveryRunRepository::markAuditDegraded($runId);
+        } else {
+            self::auditTerminal(
+                $runId,
+                $ran ? self::AUDIT_COMPLETED : self::AUDIT_FAILED,
+                $totals->toAuditMeta()
+            );
+        }
 
         // The caller is told which branch ran. Reporting 'succeeded' for a
         // pass that never started is exactly the lie the status split above
@@ -503,11 +535,45 @@ final class DiscoveryRunExecutor
             return;
         }
 
-        self::auditTerminal($runId, self::AUDIT_FAILED, [
+        // ── ⚠ PR 7.4: A REFUSED SESSION STILL DID WORK ──────────────────
+        //
+        // This path is reached when readiness is withdrawn between chunks,
+        // or a pass throws. Either way the SESSION may already have run
+        // twenty chunks, and those totals are in the row. Recording only
+        // `chain_id / error_code / attempt_count` left an operator with no
+        // account of what the session achieved before it was refused.
+        //
+        // Same authority as the success path: re-read the persisted row
+        // after the confirmed terminal write, never recompute.
+        $totals = DiscoverySessionTotals::fromPersistedRow(
+            DiscoveryRunRepository::findById($runId)
+        );
+
+        $meta = [
             'chain_id'      => $chainId,
             'error_code'    => $errorCode,
             'attempt_count' => $attempt,
-        ]);
+        ];
+
+        if ($totals === null) {
+            // Cannot confirm what was persisted → audit the bounded facts we
+            // do hold, and mark the run degraded rather than invent totals.
+            Logger::error('[bcc-trust] discovery session totals could not be confirmed on the failure path', [
+                'run_id'   => $runId,
+                'chain_id' => $chainId,
+            ]);
+            DiscoveryRunRepository::markAuditDegraded($runId);
+            self::auditTerminal($runId, self::AUDIT_FAILED, $meta);
+
+            return;
+        }
+
+        // `error_code` and `attempt_count` are this refusal's own facts, so
+        // they win over anything the totals carry for the same key. The
+        // ledger's `stop_reason` is NOT overwritten with the error code: a
+        // session that ran twenty chunks and was then refused has both a real
+        // stop reason and a real error, and collapsing them would hide one.
+        self::auditTerminal($runId, self::AUDIT_FAILED, $meta + $totals->toAuditMeta());
     }
 
     /**

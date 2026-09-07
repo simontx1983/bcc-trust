@@ -242,9 +242,27 @@ final class DiscoveryScanProgress
      * completion rule means a future edit to the rule cannot leave the
      * wording behind — and it makes them testable without rendering a page.
      *
-     * @param array<string, mixed> $progress a {@see forChain()} result
+     * ── ⚠ TWO SOURCES, BECAUSE THEY ARE TWO DIFFERENT FACTS (PR 7.4) ────
+     * `$progress` is derived from the FAMILY QUEUE and describes the CHAIN:
+     * how much has been classified, how much is confirmed, how much is left.
+     * It knows nothing about which session did the work, and it never will —
+     * a chain total cannot be attributed to one run.
+     *
+     * `$sessionEmitted` is the run ledger's cumulative `collections_emitted`
+     * for the session being described. It is the only number here that is
+     * scoped to a session, and it must be PASSED IN, because this method
+     * queries nothing.
+     *
+     * ⚠ NULL IS NOT ZERO. Null means "no session to speak about, or its
+     * totals are unknown" — the sentence then says nothing about a session
+     * rather than asserting it added none. Callers must not coalesce.
+     *
+     * @param array<string, mixed> $progress       a {@see forChain()} result
+     * @param int|null             $sessionEmitted cumulative collection rows
+     *                                             emitted by the session being
+     *                                             described, or null if unknown
      */
-    public static function summarySentence(array $progress): string
+    public static function summarySentence(array $progress, ?int $sessionEmitted = null): string
     {
         if (($progress['ok'] ?? false) !== true || ($progress['scan_complete'] ?? self::UNKNOWN) === self::UNKNOWN) {
             // ⚠ No completion conclusion, and no internal detail. The
@@ -263,7 +281,12 @@ final class DiscoveryScanProgress
 
         if (($progress['scan_complete'] ?? self::NO) === self::YES) {
             if ($found > 0) {
-                return sprintf(
+                // ⚠ The session prefix belongs on the COMPLETE branch too.
+                // "All 742 families were checked, 5 confirmed" is a statement
+                // about the chain across every session that ever ran; without
+                // the prefix an operator cannot tell whether the click they
+                // just made contributed any of it.
+                return self::addedSentence($sessionEmitted) . sprintf(
                     /* translators: 1: families checked, 2: collection families found */
                     _n(
                         'Scan complete. All %1$s contract family was checked.',
@@ -281,8 +304,11 @@ final class DiscoveryScanProgress
             }
 
             // ⚠ THE ONLY PLACE A FINAL ZERO MAY BE SAID, and only because
-            // `scan_complete` proved BOTH conditions above.
-            return sprintf(
+            // `scan_complete` proved ALL THREE conditions above.
+            // ⚠ `$found === 0` here, so `addedSentence()` can only ever
+            // contribute the "added no new collection record" form — a row
+            // cannot be emitted from a family that was never confirmed.
+            return self::addedSentence($sessionEmitted) . sprintf(
                 /* translators: %s: number of contract families */
                 __('Scan complete. All %s contract families were checked. No supported NFT collections were confirmed.', 'bcc-trust'),
                 number_format_i18n($total)
@@ -309,7 +335,10 @@ final class DiscoveryScanProgress
         $delayed   = (int) ($progress['delayed_families'] ?? 0);
 
         if ($exhausted > 0 && $eligible === 0 && $delayed === 0) {
-            return sprintf(
+            // ⚠ The session's own result belongs here too (PR 7.4). A session
+            // that emitted two collections and then ran out of resolvable
+            // families used to have that erased by the unresolved sentence.
+            return self::addedSentence($sessionEmitted) . sprintf(
                 /* translators: 1: families checked, 2: total families, 3: unresolved families */
                 _n(
                     'Scan session finished. Checked %1$s of %2$s contract families. %3$s family could not be resolved and is still unknown — that is not a result of "no NFT collection".',
@@ -323,17 +352,112 @@ final class DiscoveryScanProgress
             );
         }
 
-        // ⚠ INCOMPLETE. "No NFT collections were confirmed IN THIS PASS" —
-        // scoped to the pass, never to the chain. Saying the chain has none
-        // while 732 families are unexamined is the sentence this class was
-        // written to make impossible.
-        return sprintf(
+        // ── ⚠ INCOMPLETE, AND THE THREE FACTS ARE DIFFERENT FACTS ───────
+        //
+        // This branch used to end with a hardcoded "No NFT collections were
+        // confirmed in this pass." It was true for as long as discovery
+        // found nothing, and became a contradiction the moment it worked:
+        // on 2026-09-06 it printed beside "Found 2 new collection(s)" and
+        // "5 NFT collection families confirmed so far".
+        //
+        // Three separate numbers, never collapsed:
+        //
+        //   $sessionEmitted — collection ROWS this session added, from the
+        //                     run ledger's cumulative `collections_emitted`;
+        //   $found          — collection FAMILIES confirmed overall, derived
+        //                     from the chain's own classification state;
+        //   $remaining      — families still to review.
+        //
+        // ⚠ A CONFIRMED FAMILY IS NOT AN EMITTED ROW. The live session
+        // confirmed FIVE families and emitted TWO rows, because emission is
+        // its own bounded stage. Calling all five "saved collections" would
+        // be exactly the overstatement this method exists to prevent.
+        $tail = sprintf(
             /* translators: 1: families checked, 2: total families, 3: families remaining */
-            __('Pass completed. Checked %1$s of %2$s contract families. No NFT collections were confirmed in this pass. %3$s families still need review.', 'bcc-trust'),
+            __('Checked %1$s of %2$s contract families; %3$s still need review.', 'bcc-trust'),
             number_format_i18n($checked),
             number_format_i18n($total),
             number_format_i18n($remaining)
         );
+
+        // (a) The chain has confirmed families. Report the overall figure —
+        //     preceded, when we know it, by what THIS session contributed.
+        //     ⚠ Both, never one: an operator reading "5 confirmed" needs to
+        //     know their click produced 2 of them, and an operator reading
+        //     "2 added" needs to know the chain now stands at 5.
+        if ($found > 0) {
+            return self::addedSentence($sessionEmitted) . sprintf(
+                /* translators: %s: collection families confirmed overall */
+                _n(
+                    'Overall, %s NFT collection family is confirmed so far.',
+                    'Overall, %s NFT collection families are confirmed so far.',
+                    $found,
+                    'bcc-trust'
+                ),
+                number_format_i18n($found)
+            ) . ' ' . $tail;
+        }
+
+        // (b) The session ran, added nothing, and nothing is confirmed on the
+        //     chain either.
+        //     ⚠ SCOPED TO THE SESSION, AND ONLY THE SESSION. "This session
+        //     did not confirm" is the strongest true statement available: the
+        //     tail immediately says how many families were never examined, so
+        //     nothing here can be read as "this chain has no NFT collections".
+        //     One sentence, not two — `addedSentence()`'s zero form would say
+        //     the same thing twice.
+        if ($sessionEmitted === 0) {
+            return __('This session did not confirm a new NFT collection.', 'bcc-trust') . ' ' . $tail;
+        }
+
+        // (c) No session to speak for — or, vanishingly rarely, a session that
+        //     emitted rows whose families are no longer classified as
+        //     collections (a reclassification after emission). Report the
+        //     chain honestly and never on the session's behalf.
+        return self::addedSentence($sessionEmitted)
+            . __('No NFT collection family is confirmed on this chain yet.', 'bcc-trust')
+            . ' ' . $tail;
+    }
+
+    /**
+     * PURE. The session-scoped half of the summary, or an empty string.
+     *
+     * ── ⚠ NULL, ZERO AND N ARE THREE DIFFERENT ANSWERS ──────────────────
+     * null → we have no session totals to speak for, so the sentence says
+     *        nothing about a session. Silence, not a claim of zero.
+     * 0    → the session ran and added no collection record. Worth saying:
+     *        it is the difference between "your click did nothing" and "we
+     *        cannot tell you what your click did".
+     * N    → the session added N records.
+     *
+     * ⚠ THIS COUNTS EMITTED ROWS, NOT CONFIRMED FAMILIES. The 2026-09-06
+     * session confirmed 5 CW-721 families and emitted 2 collection records,
+     * because emission is its own separately bounded stage. Wording that
+     * blurs them would overstate what is actually stored.
+     *
+     * Returns with a trailing space when non-empty, so callers concatenate
+     * without deciding about punctuation.
+     */
+    private static function addedSentence(?int $sessionEmitted): string
+    {
+        if ($sessionEmitted === null) {
+            return '';
+        }
+
+        if ($sessionEmitted <= 0) {
+            return __('This session added no new collection record.', 'bcc-trust') . ' ';
+        }
+
+        return sprintf(
+            /* translators: %s: collection records added during this session */
+            _n(
+                'This session added %s new collection record.',
+                'This session added %s new collection records.',
+                $sessionEmitted,
+                'bcc-trust'
+            ),
+            number_format_i18n($sessionEmitted)
+        ) . ' ';
     }
 
     /**

@@ -372,10 +372,23 @@ namespace BCC\Trust\Onchain\Repositories {
             public static array $rows = [];
             public static int $nextId = 1;
 
+            /**
+             * Make the POST-TERMINAL re-read fail, and only that read.
+             *
+             * ⚠ PR 7.4 asks what happens when a terminal write is confirmed
+             * but the row cannot be read back: the audit must degrade rather
+             * than invent totals. A blanket `findById() === null` cannot
+             * express that — the executor reads the same row at claim time,
+             * and killing that read never reaches the branch under test.
+             * Hiding the row only once it is terminal is exactly the window.
+             */
+            public static bool $hideTerminalRow = false;
+
             public static function reset(): void
             {
                 self::$rows = [];
                 self::$nextId = 1;
+                self::$hideTerminalRow = false;
             }
 
             /** @return array{id: int, run_uuid: string}|null */
@@ -423,7 +436,19 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static function findById(int $runId): ?object
             {
-                return isset(self::$rows[$runId]) ? (object) self::$rows[$runId] : null;
+                $row = self::$rows[$runId] ?? null;
+
+                if ($row === null) {
+                    return null;
+                }
+
+                if (self::$hideTerminalRow
+                    && in_array((string) ($row['status'] ?? ''), ['succeeded', 'failed', 'cancelled'], true)
+                ) {
+                    return null;
+                }
+
+                return (object) $row;
             }
 
             public static function claim(int $runId): ?string

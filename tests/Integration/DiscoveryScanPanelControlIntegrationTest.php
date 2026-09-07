@@ -221,7 +221,7 @@ final class DiscoveryScanPanelControlIntegrationTest extends TestCase
         $html = $this->render();
 
         self::assertStringContainsString('Checked 5 of 737 contract families', $html);
-        self::assertStringContainsString('732 families still need review', $html);
+        self::assertStringContainsString('732 still need review', $html);
         self::assertStringContainsString('>Continue scan</button>', $html);
 
         // The four sentences that must never appear over this state.

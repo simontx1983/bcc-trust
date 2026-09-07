@@ -53,7 +53,6 @@ final class DiscoveryScanProgressTest extends TestCase
     {
         $s = DiscoveryScanProgress::summarySentence(self::canary());
 
-        self::assertStringContainsString('Pass completed', $s);
         self::assertStringContainsString('5 of 737', $s);
         self::assertStringContainsString('732', $s);
         self::assertStringContainsString('still need review', $s);
@@ -74,8 +73,12 @@ final class DiscoveryScanProgressTest extends TestCase
         self::assertStringNotContainsString('No supported NFT collections were confirmed', $s);
         self::assertStringNotContainsString('All 737', $s);
 
-        // The zero it DOES report is scoped to the pass, explicitly.
-        self::assertStringContainsString('in this pass', $s);
+        // ⚠ The zero it DOES report is qualified — "yet", beside the count of
+        // families nobody has looked at. PR 7.4 replaced the old "in this
+        // pass" wording, which was scoped correctly but contradicted the
+        // panel around it the moment a session actually found something.
+        self::assertStringContainsString('No NFT collection family is confirmed on this chain yet', $s);
+        self::assertStringContainsString('732 still need review', $s);
     }
 
     public function testTheActionSaysContinueRatherThanStartOver(): void
@@ -265,7 +268,7 @@ final class DiscoveryScanProgressTest extends TestCase
 
         $s = DiscoveryScanProgress::summarySentence($p);
 
-        self::assertStringContainsString('732 families still need review', $s);
+        self::assertStringContainsString('732 still need review', $s);
         self::assertStringNotContainsString('Scan session finished', $s);
     }
 
