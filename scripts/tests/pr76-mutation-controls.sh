@@ -200,6 +200,25 @@ control "prepareChain stops reporting the circuit refusal" "$WORKER" \
   "CircuitOpenReasonTest|BreakerStopsProviderWorkTest" \
   "s = s.replace(\"            \$refusal = self::PASS_CIRCUIT_OPEN;\", \"            \$refusal = null;\")"
 
+# ── 14. Status reader: the old `time() - 0` arithmetic comes back ───────
+#
+# ⚠ THE DEFECT THIS AMENDMENT FIXES. `getAllStatus()` computed its own
+# elapsed time, so `opened_at = 0` made it report HALF-OPEN — one probe is
+# allowed through — while the worker was refusing every request.
+control "getAllStatus recomputes its own elapsed time" "$BREAKER" \
+  "BreakerReaderAgreementTest" \
+  "s = s.replace(\"\$status = self::phaseHyphenated(self::phaseFor(\$state, \$now));\", \"\$status = \$failures >= self::FAILURE_THRESHOLD ? ((time() - \$openedAt) >= self::COOLDOWN_SECONDS ? 'half-open' : 'open') : 'closed';\")"
+
+# ── 15. The same regression in the other status reader ──────────────────
+control "getStaleChains recomputes its own elapsed time" "$BREAKER" \
+  "BreakerReaderAgreementTest" \
+  "s = s.replace(\"\$circuitStatus = strtoupper(\n                self::phaseHyphenated(self::phaseFor(self::getState(\$id), \$now))\n            );\", \"\$cb = self::getState(\$id); \$f = (int) (\$cb['failures'] ?? 0); \$o = (int) (\$cb['opened_at'] ?? 0); \$circuitStatus = \$f >= self::FAILURE_THRESHOLD ? ((time() - \$o) >= self::COOLDOWN_SECONDS ? 'HALF-OPEN' : 'OPEN') : 'CLOSED';\")"
+
+# ── 16. The shared helper stops guarding the zero timestamp ─────────────
+control "phaseFor drops the opened_at <= 0 guard" "$BREAKER" \
+  "BreakerReaderAgreementTest|BreakerLifecycleTest" \
+  "s = s.replace(\"        if (\$openedAt <= 0) {\n            return self::PHASE_OPEN; // Tripped, but no cooldown has started.\n        }\n\", \"\")"
+
 # ── 13. Retry accounting: the multiplier changes ────────────────────────
 control "retry accounting changed (max retries 3 -> 0)" "$RETRY" \
   "BreakerRetryAccountingTest" \
