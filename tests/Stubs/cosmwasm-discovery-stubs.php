@@ -1239,6 +1239,39 @@ namespace BCC\Trust\Onchain\Repositories {
                 return true;
             }
 
+            /**
+             * PR 7.6 — records ONLY the bounded enumeration-failure token.
+             *
+             * Mirrors production: it validates the token and touches one
+             * column, so it can neither change the discovery state nor
+             * accept provider prose.
+             */
+            /**
+             * Every accepted enumeration-failure code, in order.
+             *
+             * ⚠ ASSERT ON THIS, NOT ONLY ON THE COLUMN. Later stages of the
+             * same pass legitimately clear `cw_last_error` on a subsequent
+             * success, so reading the column at the end cannot distinguish
+             * "never recorded" from "recorded then superseded". The call
+             * log can.
+             *
+             * @var list<string>
+             */
+            public static array $enumerationFailures = [];
+
+            public static function recordCwEnumerationFailure(int $chainId, string $code): bool
+            {
+                if ($chainId <= 0
+                    || !\BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure::isValid($code)) {
+                    return false;
+                }
+                self::ensureExists($chainId);
+                self::$enumerationFailures[]         = $code;
+                self::$rows[$chainId]->cw_last_error = $code;
+
+                return true;
+            }
+
             /** @var list<array{chain_id: int, max: int}> */
             public static array $watermarkAdvances = [];
 
@@ -1842,6 +1875,7 @@ namespace BCC\Trust\Core\Security {
 
             public static function reset(): void
             {
+                self::$enumerationFailures = [];
                 self::$rows = [];
             }
 

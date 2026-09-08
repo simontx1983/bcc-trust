@@ -2448,8 +2448,20 @@ class NftDiscoveryPage
                 return 'Another pass already held this chain\'s lock, so this one did nothing. '
                     . 'Nothing was changed.';
             case CosmwasmPassStopReason::CHAIN_REFUSED_TO_PREPARE:
-                return 'The chain refused to prepare — paused, measured unsupported, circuit breaker '
-                    . 'open, or no CosmWasm driver. Nothing was contacted.';
+                return 'The chain refused to prepare — paused, measured unsupported, or no CosmWasm '
+                    . 'driver. Nothing was contacted.';
+            case CosmwasmPassStopReason::PROVIDER_CIRCUIT_OPEN:
+                // Three facts, in the order an operator needs them: what
+                // happened, what it did NOT mean, and what to do. The last
+                // one matters most — the instinct here is to press Continue
+                // again, and that only burns a chunk against a pause that
+                // has to elapse on its own.
+                return 'The connection to the chain node was paused for safety after repeated '
+                    . 'failures, so this session stopped early. Nothing was contacted, and no '
+                    . 'collection family was marked as "not an NFT collection" because of it — '
+                    . 'unfinished families are still waiting. Please wait a few minutes before '
+                    . 'scanning again rather than pressing Continue repeatedly; the pause clears '
+                    . 'on its own.';
             case CosmwasmPassStopReason::EXECUTION_FAILED:
                 return 'The pass failed. The reason is recorded on the chain\'s checkpoint row and in '
                     . 'the bcc-trust log.';

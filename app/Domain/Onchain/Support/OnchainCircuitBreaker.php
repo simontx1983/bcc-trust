@@ -102,6 +102,58 @@ final class OnchainCircuitBreaker
         return true; // Still in cooldown → OPEN
     }
 
+    /** The breaker is passing traffic. */
+    public const PHASE_CLOSED = 'closed';
+
+    /** Tripped, still inside its cooldown. */
+    public const PHASE_OPEN = 'open';
+
+    /** Tripped, cooldown elapsed — one probe may be admitted. */
+    public const PHASE_HALF_OPEN = 'half_open';
+
+    /**
+     * READ-ONLY lifecycle phase for a chain.
+     *
+     * ⚠ THE REASON THIS IS NOT `isOpen()`. {@see isOpen()} has a SIDE
+     * EFFECT: in the half-open window it claims a cluster-wide advisory
+     * lock, and the caller that wins it is expected to go and make a
+     * request. Anything that merely wants to LOOK — a test asserting the
+     * lifecycle, an operator surface describing the pause — must not
+     * consume the probe slot to do it, or the observation itself becomes
+     * the probe and a real worker is turned away.
+     *
+     * Pure with respect to breaker state: reads, never writes, never locks.
+     */
+    public static function phase(int $chainId): string
+    {
+        $state = self::getState($chainId);
+        if ($state === null) {
+            return self::PHASE_CLOSED;
+        }
+
+        $failures = (int) ($state['failures'] ?? 0);
+        $openedAt = (int) ($state['opened_at'] ?? 0);
+
+        if ($failures < self::FAILURE_THRESHOLD) {
+            return self::PHASE_CLOSED;
+        }
+
+        // ⚠ MIRRORS {@see isOpen()} EXACTLY, INCLUDING THIS BRANCH. With the
+        // threshold met but no timestamp, `isOpen()` falls through to its
+        // final `return true`. Reporting CLOSED here instead would give the
+        // codebase two answers to one question — the drift that has already
+        // cost this project a dashboard that reported a healthy scanner
+        // scanning nothing. A missing timestamp cannot start a cooldown, so
+        // the honest reading is OPEN.
+        if ($openedAt <= 0) {
+            return self::PHASE_OPEN;
+        }
+
+        return (time() - $openedAt) >= self::COOLDOWN_SECONDS
+            ? self::PHASE_HALF_OPEN
+            : self::PHASE_OPEN;
+    }
+
     /**
      * Release the probe lock for a chain. Idempotent — safe to call even
      * when this session does not currently hold the lock. Intended for
@@ -225,14 +277,40 @@ final class OnchainCircuitBreaker
         // bans from providers.
         $counterOption = self::counterOptionName($chainId);
 
+        // ── ⚠ THE COUNTER ONLY MEANS SOMETHING WHILE ITS STATE EXISTS ────
+        //
+        // Two stores, two lifetimes: `$failures` comes from the option
+        // `_bcc_cb_counter_<id>`, which has NO expiry, while `opened_at`
+        // lives in the {@see CACHE_TTL} state struct. When the struct
+        // expires (or a cache flush drops it) the option survives — and
+        // the counter it holds is a tally of failures inside a window that
+        // no longer exists.
+        //
+        // The 2026-09-08 audit found chain 18 (THORChain) sitting at 3022
+        // on production beside a transient that had expired four days
+        // earlier. Under the old code the next single failure would have
+        // read 3023, seen `opened_at === 0`, and tripped the breaker
+        // instantly on ONE failure — an unexplained outage attributable to
+        // nothing in the logs. "Consecutive failures" is only a meaningful
+        // phrase relative to a live window, so when the window is gone the
+        // count starts again.
+        //
+        // ⚠ THIS IS A RECONCILIATION, NOT A RESET. It runs only on the
+        // failure path, only when the state is genuinely absent, and it
+        // still records the failure in hand — the very next line counts it
+        // as 1. An open breaker whose state is intact is never touched.
+        $priorState = self::getState($chainId);
+        if ($priorState === null) {
+            OnchainCircuitBreakerRepository::deleteCounter($counterOption);
+        }
+
         $incremented = OnchainCircuitBreakerRepository::incrementFailureCounter($counterOption);
 
         if ($incremented === null) {
             // DB error — fall back to read-modify-write of the state
             // struct so we at least record SOMETHING. Still better than
             // silently dropping the failure signal.
-            $state    = self::getState($chainId) ?? ['failures' => 0, 'opened_at' => 0];
-            $failures = (int) ($state['failures'] ?? 0) + 1;
+            $failures = (int) ($priorState['failures'] ?? 0) + 1;
         } else {
             // Atomic counter value (1 on fresh insert, the new count
             // otherwise; the repository already handles the insert_id
@@ -240,8 +318,10 @@ final class OnchainCircuitBreaker
             $failures = $incremented;
         }
 
-        $state    = self::getState($chainId) ?? ['failures' => 0, 'opened_at' => 0];
-        $openedAt = (int) ($state['opened_at'] ?? 0);
+        // Read from the SAME snapshot the reconciliation decided on. A
+        // second `getState()` here could observe a concurrent writer and
+        // resurrect the stale `opened_at` this method just invalidated.
+        $openedAt = (int) ($priorState['opened_at'] ?? 0);
 
         // Restamp opened_at on:
         //   1. Initial threshold breach ($openedAt === 0), AND

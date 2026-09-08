@@ -24,6 +24,36 @@ if (!defined('ABSPATH')) {
 final class ApiRetry
 {
     // ── Defaults ────────────────────────────────────────────────────────────
+    /**
+     * ── ⚠ RETRY ACCOUNTING IS PER ATTEMPT, DELIBERATELY, FOR NOW ─────────
+     *
+     * One failing logical request calls
+     * {@see OnchainCircuitBreaker::recordFailure()} up to FOUR times — the
+     * initial attempt plus three retries — against a threshold of five. Two
+     * failing requests therefore open the breaker. That is not a bug that
+     * crept in; it is what this constant means, and the 2026-09-08 audit
+     * measured it exactly: chain 8 opened on a counter of 8, which is 2 x 4,
+     * inside a 23-second window.
+     *
+     * ── WHY PR 7.6 DID NOT CHANGE IT ────────────────────────────────────
+     * One-failure-per-exhausted-operation is the more defensible semantic,
+     * and it is written down as the recommendation. But this breaker is
+     * keyed by chain id ALONE and is shared by four independent callers —
+     * CosmWasm discovery, {@see \BCC\Trust\Onchain\Services\NftEnrichmentService},
+     * {@see \BCC\Trust\Onchain\Services\ChainRefreshService} and
+     * {@see \BCC\Trust\Onchain\Workers\NftEthIndexerWorker}. Dividing the
+     * effective failure count by four would quietly quadruple how long each
+     * of those keeps hammering a failing provider before it backs off, and
+     * PR 7.6 gathered evidence about exactly ONE of them.
+     *
+     * Changing a shared safety threshold for three services whose failure
+     * profiles nobody has measured, inside a PR about Cosmos classification,
+     * is how an unrelated outage gets introduced by a fix. So the behaviour
+     * is UNCHANGED and now PINNED by tests
+     * ({@see \BCC\Trust\Onchain\Tests\Unit\BreakerRetryAccountingTest}) so
+     * it can never drift silently, and the change is written up as its own
+     * scoped follow-up with per-service evidence as its entry price.
+     */
     const DEFAULT_MAX_RETRIES   = 3;
     const DEFAULT_BACKOFF_BASE  = 2;      // seconds
     const DEFAULT_BACKOFF_MAX   = 30;     // seconds

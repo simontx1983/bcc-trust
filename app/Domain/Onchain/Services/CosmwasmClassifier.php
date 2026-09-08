@@ -128,6 +128,40 @@ final class CosmwasmClassifier
     public const INCONCLUSIVE = 'inconclusive';
     public const UNREACHABLE  = 'temporarily_unreachable';
 
+    // ── Reason tokens that name WHY a verdict is unresolved ──────────────
+    //
+    // ⚠ A REASON IS AN ATTRIBUTION, AND A WRONG ATTRIBUTION IS A LIE ABOUT
+    // SOMEBODY ELSE'S SYSTEM. The 2026-09-08 audit found 82 Cosmos Hub
+    // contracts across 65 families recorded as `node_unreachable` when the
+    // node had answered every time. Their probes were, verbatim,
+    // `num_tokens:query_unsupported, contract_info:query_unsupported,
+    // get_collection_info_and_extension:http_4xx` — two decisive refusals
+    // from a working contract plus one ambiguous response. Re-querying one
+    // of them directly returned a clean `unknown variant` rejection on the
+    // configured endpoint AND on an independent one, and its own stored
+    // `last_error` was that rejection. It is an ordinary minter, not an
+    // unreachable node. Blaming the provider there sent an operator to
+    // investigate an endpoint that was healthy.
+    //
+    // The verdict stays UNREACHABLE — the evidence really is incomplete and
+    // the work really must be retried — but the reason no longer names a
+    // cause the evidence does not support.
+
+    /** Decisive refusals plus ambiguity that is NOT the node's fault. */
+    public const REASON_MIXED_EVIDENCE_AMBIGUOUS = 'mixed_evidence_probe_ambiguous';
+
+    /** A partial answer whose remainder is ambiguous, not node-caused. */
+    public const REASON_PARTIAL_EVIDENCE_AMBIGUOUS = 'partial_evidence_probe_ambiguous';
+
+    /** Genuine node/transport fault. Unchanged meaning. */
+    public const REASON_NODE_UNREACHABLE = 'node_unreachable';
+
+    /** A partial answer whose remainder failed on the node. Unchanged. */
+    public const REASON_PARTIAL_NODE_UNREACHABLE = 'partial_evidence_node_unreachable';
+
+    /** Every probe decisively refused. Unchanged. */
+    public const REASON_NO_CW721_QUERIES = 'no_cw721_queries';
+
     /**
      * Bump when the probe set or the decision rules change.
      *
@@ -351,6 +385,63 @@ final class CosmwasmClassifier
     }
 
     /**
+     * PURE. Is this kind EVIDENCE THAT THE NODE ITSELF FAILED?
+     *
+     * The narrower half of {@see isTransientFault()}. Both kinds here mean
+     * the request did not reach a working contract:
+     *   - KIND_NODE_ERROR — the node said so (`rpc error`, `Querier system
+     *     error`, `panicked`, `out of gas`, …);
+     *   - KIND_TRANSPORT  — it never answered at all.
+     *
+     * ⚠ KIND_HTTP_4XX AND KIND_MALFORMED ARE DELIBERATELY ABSENT. They are
+     * still transient — we genuinely do not know what that probe meant, so
+     * the work stays retryable — but "we could not read this answer" is not
+     * the same claim as "the node is down", and only the second one accuses
+     * the provider. Keeping them out of this predicate is the whole fix.
+     */
+    public static function isNodeCausedFault(string $kind): bool
+    {
+        return $kind === self::KIND_NODE_ERROR || $kind === self::KIND_TRANSPORT;
+    }
+
+    /**
+     * PURE. Did any probe fail in a way that blames the node?
+     *
+     * @param list<array{probe: string, ok: bool, kind: string, excerpt: string}> $outcomes
+     */
+    private static function anyNodeCausedFault(array $outcomes): bool
+    {
+        foreach ($outcomes as $o) {
+            if (!$o['ok'] && self::isNodeCausedFault($o['kind'])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * PURE. Did at least one probe get a DECISIVE refusal from the contract?
+     *
+     * Guards the mixed-evidence reason so it can only be used where there
+     * really is decisive evidence to be mixed with. Without this, a contract
+     * whose every probe was ambiguous would inherit a reason claiming
+     * decisive refusals it never produced.
+     *
+     * @param list<array{probe: string, ok: bool, kind: string, excerpt: string}> $outcomes
+     */
+    private static function anyDecisiveRefusal(array $outcomes): bool
+    {
+        foreach ($outcomes as $o) {
+            if (!$o['ok'] && $o['kind'] === self::KIND_QUERY_UNSUPPORTED) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * PURE. Single-line, control-char-free, length-capped excerpt of an
      * upstream message. This is the ONLY form of an upstream error we
      * ever persist — raw LCD bodies are never stored, and nothing longer
@@ -440,14 +531,49 @@ final class CosmwasmClassifier
             return self::verdict(self::PROBABLE, 'info_only', $okProbes, $failedProbes, $firstError);
         }
 
+        // ── Who caused the indecision? ──────────────────────────────────
+        //
+        // Both branches below stay UNREACHABLE and stay retryable. The only
+        // thing that changes is WHOM the reason names, and that is not
+        // cosmetic: `node_unreachable` sends an operator to investigate a
+        // provider. It must therefore be reserved for evidence that the
+        // provider actually failed.
+        $nodeCaused = self::anyNodeCausedFault($outcomes);
+
         // 3b. Half an answer with the remainder UNKNOWN — do not guess.
         if (($numTokensOk || $infoOk) && $anyIndecisive) {
-            return self::verdict(self::UNREACHABLE, 'partial_evidence_node_unreachable', $okProbes, $failedProbes, $firstError);
+            return self::verdict(
+                self::UNREACHABLE,
+                $nodeCaused
+                    ? self::REASON_PARTIAL_NODE_UNREACHABLE
+                    : self::REASON_PARTIAL_EVIDENCE_AMBIGUOUS,
+                $okProbes,
+                $failedProbes,
+                $firstError
+            );
         }
 
-        // 4. Node/transport noise anywhere → retryable, NEVER terminal.
+        // 4. Indecision anywhere → retryable, NEVER terminal.
+        //
+        // ⚠ THE AMBIGUOUS BRANCH IS NOT A WEAKER `not_cw721`. Decisive
+        // refusals plus one unreadable probe is still incomplete evidence:
+        // the unread probe is exactly the one that could have said "yes".
+        // Promoting it to a negative would manufacture a terminal verdict
+        // out of a response nobody could read, so the verdict stays
+        // UNREACHABLE and the family stays in the queue. All that changes
+        // is that we stop calling a healthy node unreachable.
         if ($anyIndecisive) {
-            return self::verdict(self::UNREACHABLE, 'node_unreachable', $okProbes, $failedProbes, $firstError);
+            $ambiguousOnly = !$nodeCaused && self::anyDecisiveRefusal($outcomes);
+
+            return self::verdict(
+                self::UNREACHABLE,
+                $ambiguousOnly
+                    ? self::REASON_MIXED_EVIDENCE_AMBIGUOUS
+                    : self::REASON_NODE_UNREACHABLE,
+                $okProbes,
+                $failedProbes,
+                $firstError
+            );
         }
 
         // 5. Every probe decisively refused → this is not a CW-721.

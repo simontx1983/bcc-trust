@@ -16,6 +16,7 @@ use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
 use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
+use BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -272,9 +273,9 @@ final class CosmwasmDiscoveryWorker
         CosmwasmTickBudget $budget,
         ?CosmwasmPassReport $report = null
     ): string {
-        $context = self::prepareChain($chainId);
+        $context = self::prepareChain($chainId, $refusal);
         if ($context === null) {
-            return self::PASS_SKIPPED;
+            return $refusal ?? self::PASS_SKIPPED;
         }
         $fetcher    = $context['fetcher'];
         $checkpoint = $context['checkpoint'];
@@ -349,11 +350,21 @@ final class CosmwasmDiscoveryWorker
 
                     // Merely unreachable: keep the cursor, record why,
                     // retry next tick. The state is NOT settled.
+                    //
+                    // ⚠ A BOUNDED CODE, NOT THE PROVIDER'S SENTENCE. This
+                    // used to persist `sanitizeExcerpt($page['message'])`,
+                    // which is upstream prose: sanitized, but still chosen
+                    // by a remote party and rendered to an administrator.
+                    // The two structured facts BCC already owns say the
+                    // same thing without ever reading the text.
                     OnchainCircuitBreaker::recordFailure($chainId);
                     ChainCheckpointRepository::setCwDiscoveryState(
                         $chainId,
                         ChainCheckpointRepository::CW_STATE_BACKFILLING,
-                        CosmwasmClassifier::sanitizeExcerpt($page['message'])
+                        CosmwasmEnumerationFailure::fromResult(
+                            (string) $page['error_kind'],
+                            (int) $page['http_code']
+                        )
                     );
 
                     $report?->addError(
@@ -560,7 +571,24 @@ final class CosmwasmDiscoveryWorker
                 return;
             }
             // Transport/node failure — retried next pass, nothing settled.
+            //
+            // ⚠ THIS PATH RECORDED NOTHING BEFORE PR 7.6, AND IT IS THE ONE
+            // THAT MATTERED. It increments the breaker — four times per
+            // failing request, once per exhausted retry — but wrote no
+            // durable trace at all. When the chain-8 circuit opened on
+            // 2026-09-08 after eight consecutive failures in 23 seconds,
+            // `cw_last_error` was NULL, so the audit could not establish
+            // what had failed and had to report the HTTP status as unknown.
+            // A bounded code costs one column write and makes the next
+            // occurrence answerable without a live probe.
             OnchainCircuitBreaker::recordFailure($chainId);
+            ChainCheckpointRepository::recordCwEnumerationFailure(
+                $chainId,
+                CosmwasmEnumerationFailure::fromResult(
+                    (string) $tail['error_kind'],
+                    (int) $tail['http_code']
+                )
+            );
         } elseif ($tail['reached_watermark']) {
             // AUTHORITATIVE: the walk actually met the watermark (or the
             // chain has nothing more), so the contiguous high-water mark
@@ -721,8 +749,24 @@ final class CosmwasmDiscoveryWorker
     /** A concurrent holder has the per-chain advisory lock. Nothing ran. */
     public const PASS_LOCKED = 'locked';
 
-    /** {@see prepareChain()} refused: paused, unsupported, breaker open, no driver. */
+    /** {@see prepareChain()} refused: paused, unsupported, or no driver. */
     public const PASS_SKIPPED = 'skipped';
+
+    /**
+     * {@see prepareChain()} refused because the PROVIDER CIRCUIT IS OPEN.
+     *
+     * ⚠ SPLIT OUT OF {@see PASS_SKIPPED} BY THE 2026-09-08 AUDIT. Runs 5
+     * and 6 both ended as `chain_refused_to_prepare`, which is also what a
+     * paused chain, an unsupported chain and a missing driver produce. An
+     * operator reading it could not tell "we paused ourselves for a few
+     * minutes to protect a struggling provider" from "this chain is
+     * misconfigured" — and the cheapest wrong conclusion available was to
+     * press Continue again, which does nothing but burn a chunk.
+     *
+     * This outcome is TEMPORARY and self-clearing by construction. It is
+     * never a statement about the chain's configuration or its contracts.
+     */
+    public const PASS_CIRCUIT_OPEN = 'circuit_open';
 
     /** The step threw. Recorded on the row; the throw does not escape. */
     public const PASS_FAILED = 'failed';
@@ -760,9 +804,9 @@ final class CosmwasmDiscoveryWorker
         try {
             ChainCheckpointRepository::ensureExists($chainId);
 
-            $context = self::prepareChain($chainId);
+            $context = self::prepareChain($chainId, $refusal);
             if ($context === null) {
-                return self::PASS_SKIPPED;
+                return $refusal ?? self::PASS_SKIPPED;
             }
             $step($chainId, $context['fetcher'], $budget);
 
@@ -901,8 +945,12 @@ final class CosmwasmDiscoveryWorker
      *
      * @return array{fetcher: CosmosFetcher, checkpoint: CheckpointRow}|null
      */
-    private static function prepareChain(int $chainId): ?array
+    private static function prepareChain(int $chainId, ?string &$refusal = null): ?array
     {
+        // ⚠ ALWAYS RESET. A caller reusing one variable across two calls
+        // must not inherit the previous refusal and report a stale cause.
+        $refusal = null;
+
         ChainCheckpointRepository::ensureExists($chainId);
 
         $checkpoint = ChainCheckpointRepository::get($chainId);
@@ -919,6 +967,10 @@ final class CosmwasmDiscoveryWorker
         }
 
         if (OnchainCircuitBreaker::isOpen($chainId)) {
+            // The ONE refusal that is temporary, self-clearing, and about
+            // the provider rather than the chain's configuration.
+            $refusal = self::PASS_CIRCUIT_OPEN;
+
             return null;
         }
 
