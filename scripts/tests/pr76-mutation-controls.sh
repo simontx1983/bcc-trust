@@ -33,13 +33,25 @@ BROKEN=0
 declare -a SURVIVOR_NAMES=()
 declare -a BROKEN_NAMES=()
 
-restore () { git checkout -- "$1"; }
+# ⚠ RESTORE FROM A SNAPSHOT, NEVER FROM GIT.
+#
+# This function used to be `git checkout -- "$1"`, which restores from HEAD
+# and therefore DELETES every uncommitted edit in the files it touches. Run
+# against a work-in-progress tree it silently reverted the entire feature
+# mid-run while printing cheerful "killed" lines for guarantees whose code
+# was no longer there. Snapshot the bytes, mutate, put the bytes back.
+SNAPDIR="$(mktemp -d)"
+trap 'rm -rf "$SNAPDIR"' EXIT
+
+snapshot () { mkdir -p "$SNAPDIR/$(dirname "$1")"; cp "$1" "$SNAPDIR/$1"; }
+restore  () { cp "$SNAPDIR/$1" "$1"; }
 
 # control <name> <file> <filter> <python-mutation>
 control () {
   local name="$1" file="$2" filter="$3" mutation="$4"
   local before after
 
+  snapshot "$file"
   before="$(md5sum "$file" | cut -d' ' -f1)"
   python - "$file" <<PY
 import io, sys
@@ -58,6 +70,53 @@ PY
   fi
 
   if "$PHPUNIT" --filter "$filter" >/dev/null 2>&1; then
+    echo "  SURVIVED $name — the suite stayed green with the guarantee broken"
+    SURVIVED=$((SURVIVED+1)); SURVIVOR_NAMES+=("$name")
+  else
+    echo "  killed   $name"
+    KILLED=$((KILLED+1))
+  fi
+  restore "$file"
+}
+
+# Same contract as control(), but runs the REAL-MySQL suite.
+#
+# Needs BCC_INT_PHP (a php binary with mysqli) plus the BCC_TEST_DB_* env
+# the integration bootstrap reads. Without them the control is reported as
+# SKIPPED and counted separately — never as killed, and never as survived.
+SKIPPED=0
+declare -a SKIPPED_NAMES=()
+
+control_integration () {
+  local name="$1" file="$2" filter="$3" mutation="$4"
+  local before after
+
+  if [ -z "${BCC_INT_PHP:-}" ]; then
+    echo "  SKIPPED  $name — no BCC_INT_PHP; the integration suite did not run"
+    SKIPPED=$((SKIPPED+1)); SKIPPED_NAMES+=("$name")
+    return
+  fi
+
+  snapshot "$file"
+  before="$(md5sum "$file" | cut -d' ' -f1)"
+  python - "$file" <<PYMUT
+import io, sys
+p = sys.argv[1]
+s = io.open(p, encoding='utf-8').read()
+${mutation}
+io.open(p, 'w', encoding='utf-8', newline='').write(s)
+PYMUT
+  after="$(md5sum "$file" | cut -d' ' -f1)"
+
+  if [ "$before" = "$after" ]; then
+    echo "  BROKEN   $name — the mutation changed NO bytes; it tested nothing"
+    BROKEN=$((BROKEN+1)); BROKEN_NAMES+=("$name")
+    restore "$file"
+    return
+  fi
+
+  if "$BCC_INT_PHP" vendor/phpunit/phpunit/phpunit -c phpunit-integration.xml.dist \
+       --filter "$filter" >/dev/null 2>&1; then
     echo "  SURVIVED $name — the suite stayed green with the guarantee broken"
     SURVIVED=$((SURVIVED+1)); SURVIVOR_NAMES+=("$name")
   else
@@ -95,17 +154,20 @@ control "http_4xx and malformed become node-caused faults" "$CLASSIFIER" \
 
 # ── 4. Fetcher: a recognised contract rejection blamed on the provider ──
 control "recognised unknown-variant 500 treated as a provider failure" "$FETCHER" \
-  "CosmwasmSmartQueryRetryTest|ApiRetryApplicationErrorTest" \
+  "SmartQueryOptInWiringTest|CosmwasmSmartQueryRetryTest|ApiRetryApplicationErrorTest" \
   "s = s.replace(\"        if (\$smartQuery) {\", \"        if (false) {\")"
 
 # ── 5. Telemetry: the enumeration failure code is dropped ───────────────
 control "enumeration telemetry dropped on the tail path" "$WORKER" \
-  "EnumerationTelemetryTest|MixedEvidencePersistenceIntegrationTest" \
+  "SmartQueryOptInWiringTest|EnumerationTelemetryTest" \
   "s = s.replace(\"            ChainCheckpointRepository::recordCwEnumerationFailure(\", \"            false && ChainCheckpointRepository::recordCwEnumerationFailure(\")"
 
 # ── 6. Telemetry: a raw provider body is persisted instead of a token ───
-control "raw provider prose persisted into cw_last_error" "$CHECKPOINT" \
-  "MixedEvidencePersistenceIntegrationTest|EnumerationTelemetryTest" \
+# ⚠ INTEGRATION-ONLY. The guard lives in the repository and is proven by a
+# real write, so running this control against the unit config would report a
+# SURVIVOR that is really an un-run test.
+control_integration "raw provider prose persisted into cw_last_error" "$CHECKPOINT" \
+  "MixedEvidencePersistenceIntegrationTest" \
   "s = s.replace(\"        if (\$chainId <= 0 || !CosmwasmEnumerationFailure::isValid(\$code)) {\n            return false;\n        }\", \"        if (\$chainId <= 0) {\n            return false;\n        }\")"
 
 # ── 7. Breaker: the threshold is raised out of reach ────────────────────
@@ -144,7 +206,7 @@ control "retry accounting changed (max retries 3 -> 0)" "$RETRY" \
   "s = s.replace(\"const DEFAULT_MAX_RETRIES   = 3;\", \"const DEFAULT_MAX_RETRIES   = 0;\")"
 
 echo "────────────────────────────────────────────────────────"
-echo "killed=${KILLED}  survived=${SURVIVED}  broken=${BROKEN}"
+echo "killed=${KILLED}  survived=${SURVIVED}  broken=${BROKEN}  skipped=${SKIPPED}"
 if [ "${#SURVIVOR_NAMES[@]}" -gt 0 ]; then
   echo "SURVIVORS (unasserted guarantees):"
   printf '  - %s\n' "${SURVIVOR_NAMES[@]}"
@@ -154,5 +216,10 @@ if [ "${#BROKEN_NAMES[@]}" -gt 0 ]; then
   printf '  - %s\n' "${BROKEN_NAMES[@]}"
 fi
 
-# Fail on anything that is not a clean kill.
-[ "$SURVIVED" -eq 0 ] && [ "$BROKEN" -eq 0 ]
+if [ "${#SKIPPED_NAMES[@]}" -gt 0 ]; then
+  echo "SKIPPED (not run — reported as skipped, never as killed):"
+  printf '  - %s\n' "${SKIPPED_NAMES[@]}"
+fi
+
+# Fail on anything that is not a clean kill. A skip is not a pass either.
+[ "$SURVIVED" -eq 0 ] && [ "$BROKEN" -eq 0 ] && [ "$SKIPPED" -eq 0 ]
