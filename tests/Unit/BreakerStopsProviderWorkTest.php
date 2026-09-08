@@ -93,7 +93,17 @@ final class BreakerStopsProviderWorkTest extends TestCase
 
         $outcome = $this->pass();
 
-        self::assertSame(CosmwasmDiscoveryWorker::PASS_SKIPPED, $outcome);
+        // PR 7.6 split this out of PASS_SKIPPED. The stop is unchanged — no
+        // provider request is made either way — but the outcome now names
+        // the breaker instead of sharing a token with a paused or
+        // misconfigured chain, so asserting the SPECIFIC value is strictly
+        // stronger than the generic one this used to check.
+        self::assertSame(CosmwasmDiscoveryWorker::PASS_CIRCUIT_OPEN, $outcome);
+        self::assertNotSame(
+            CosmwasmDiscoveryWorker::PASS_SKIPPED,
+            $outcome,
+            'a breaker stop must be distinguishable from a configuration refusal'
+        );
         self::assertSame([], ApiRetry::$calls, 'an open breaker must make no provider request');
     }
 
@@ -146,7 +156,7 @@ final class BreakerStopsProviderWorkTest extends TestCase
         OnchainCircuitBreaker::$open = true;
 
         for ($attempt = 1; $attempt <= 3; $attempt++) {
-            self::assertSame(CosmwasmDiscoveryWorker::PASS_SKIPPED, $this->pass(), "attempt {$attempt}");
+            self::assertSame(CosmwasmDiscoveryWorker::PASS_CIRCUIT_OPEN, $this->pass(), "attempt {$attempt}");
         }
 
         self::assertSame([], ApiRetry::$calls, 'three refusals, zero provider requests');

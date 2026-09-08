@@ -239,6 +239,36 @@ namespace BCC\Trust\Onchain\Repositories {
                 return self::CW_STATE_IDLE;
             }
 
+            /**
+             * PR 7.6 — bounded enumeration-failure telemetry.
+             *
+             * @var list<array{chain_id: int, code: string}>
+             */
+            public static array $enumerationFailures = [];
+
+            public static function setCwDiscoveryState(int $chainId, string $state, ?string $error = null): bool
+            {
+                self::$rows[$chainId] ??= (object) ['chain_id' => $chainId];
+                self::$rows[$chainId]->cw_discovery_state = $state;
+                self::$rows[$chainId]->cw_last_error      = $error;
+
+                return true;
+            }
+
+            /** Validates exactly as production does, so a test cannot store prose. */
+            public static function recordCwEnumerationFailure(int $chainId, string $code): bool
+            {
+                if ($chainId <= 0
+                    || !\BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure::isValid($code)) {
+                    return false;
+                }
+                self::$enumerationFailures[] = ['chain_id' => $chainId, 'code' => $code];
+                self::$rows[$chainId] ??= (object) ['chain_id' => $chainId];
+                self::$rows[$chainId]->cw_last_error = $code;
+
+                return true;
+            }
+
             /** @param array<string, mixed> $overrides */
             public static function seed(int $chainId, string $state = self::CW_STATE_IDLE, array $overrides = []): void
             {
@@ -334,6 +364,20 @@ namespace BCC\Trust\Onchain\Workers {
             public const PASS_LOCKED  = 'locked';
             public const PASS_SKIPPED = 'skipped';
             public const PASS_FAILED  = 'failed';
+
+            /**
+             * PR 7.6. ⚠ REQUIRED EVEN THOUGH THIS FAKE NEVER RETURNS IT.
+             *
+             * `CosmwasmPassStopReason` is NOT faked in this family, so the
+             * REAL one runs against this fake worker and reads
+             * `PASS_CIRCUIT_OPEN` in `forOutcome()`. Omitting it here raises
+             * an undefined-constant Error that the admin handler catches as
+             * a generic failure — every outcome in this suite silently
+             * became 'error'. A fake that shadows a production class owes it
+             * the whole surface its collaborators touch, not just the parts
+             * the fake itself uses.
+             */
+            public const PASS_CIRCUIT_OPEN = 'circuit_open';
 
             public static int $passes = 0;
 

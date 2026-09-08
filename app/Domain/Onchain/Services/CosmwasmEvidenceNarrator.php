@@ -167,6 +167,14 @@ final class CosmwasmEvidenceNarrator
             case 'partial_evidence_node_unreachable':
                 return 'Part of the check succeeded and the rest failed on the node side. A half-answer is not treated as a verdict, so it will be tried again.';
 
+            // ⚠ These two must NOT mention the node. That is the point of
+            // them: the contract answered, one reply just could not be read.
+            case 'mixed_evidence_probe_ambiguous':
+                return 'The contract refused the CW-721 queries it understood, but one reply could not be read. That is not enough to rule it out, so it will be tried again.';
+
+            case 'partial_evidence_probe_ambiguous':
+                return 'Part of the check succeeded and one reply could not be read. A half-answer is not treated as a verdict, so it will be tried again.';
+
             case 'contract_not_found':
                 return 'No contract answered at this address.';
 

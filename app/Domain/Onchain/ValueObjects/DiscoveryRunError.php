@@ -51,6 +51,22 @@ final class DiscoveryRunError
     /** PeepSo/driver prerequisites vanished between request and execution. */
     public const CHAIN_NOT_READY = 'chain_not_ready';
 
+    /**
+     * The provider circuit opened mid-session. TEMPORARY, not a defect.
+     *
+     * ⚠ THIS IS NOT A CHAIN-CONFIGURATION ERROR, AND MUST NEVER BE READ AS
+     * ONE. Nothing about the chain, its opt-in, its driver or its contracts
+     * changed. BCC paused itself to protect a provider that had just failed
+     * repeatedly, and the pause clears on its own. Pairing it with
+     * {@see CHAIN_NOT_READY} — as every open-breaker run did before PR 7.6 —
+     * told the operator to go and fix a configuration that was correct.
+     *
+     * ⚠ NO UNRESOLVED FAMILY IS NEGATIVE BECAUSE OF THIS. A circuit-open
+     * stop ends a session early; it never converts an unfinished family
+     * into `not_cw721`.
+     */
+    public const PROVIDER_CIRCUIT_OPEN = 'provider_circuit_open';
+
     // ── Refusals: no row is created, nothing is contacted ───────────────
 
     /** No such chain, or it is inactive. */

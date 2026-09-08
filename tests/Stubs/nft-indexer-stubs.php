@@ -301,6 +301,7 @@ namespace BCC\Trust\Onchain\Support {
             {
                 self::$queue          = [];
                 self::$calls          = [];
+                self::$optionKeys     = [];
                 self::$responder      = null;
                 self::$batchResponses = [];
                 self::$batchCalls     = [];
@@ -359,9 +360,28 @@ namespace BCC\Trust\Onchain\Support {
              */
             public static $responder = null;
 
+            /**
+             * The OPTION KEYS each call was given, in order.
+             *
+             * ⚠ KEYS, NOT VALUES. `application_error` is a closure; storing
+             * it would make the recording unserialisable and tempt a test to
+             * invoke it, which would test the predicate instead of the
+             * WIRING. The only question here is whether the fetcher actually
+             * handed the option over on this call.
+             *
+             * PR 7.6 added this because a mutation survived: setting
+             * `if ($smartQuery)` to `if (false)` disabled the opt-in while
+             * leaving every source-text occurrence of 'application_error'
+             * in place, so the existing source-counting test stayed green.
+             *
+             * @var list<list<string>>
+             */
+            public static array $optionKeys = [];
+
             public static function get(string $url, array $args = [], array $options = [])
             {
-                self::$calls[] = ['url' => $url, 'body' => ''];
+                self::$calls[]      = ['url' => $url, 'body' => ''];
+                self::$optionKeys[] = array_keys($options);
 
                 if (self::$responder !== null) {
                     return (self::$responder)($url);

@@ -802,6 +802,8 @@ final class CosmwasmOneShotDiscoveryCommand
                 return CosmwasmDiscoveryWorker::PASS_LOCKED;
             case CosmwasmPassStopReason::CHAIN_REFUSED_TO_PREPARE:
                 return CosmwasmDiscoveryWorker::PASS_SKIPPED;
+            case CosmwasmPassStopReason::PROVIDER_CIRCUIT_OPEN:
+                return CosmwasmDiscoveryWorker::PASS_CIRCUIT_OPEN;
             case CosmwasmPassStopReason::EXECUTION_FAILED:
                 return CosmwasmDiscoveryWorker::PASS_FAILED;
         }
@@ -1222,7 +1224,16 @@ final class CosmwasmOneShotDiscoveryCommand
         if ($outcome === CosmwasmDiscoveryWorker::PASS_LOCKED) {
             return self::EXIT_LOCK_CONTENDED;
         }
-        if ($outcome === CosmwasmDiscoveryWorker::PASS_FAILED || $outcome === CosmwasmDiscoveryWorker::PASS_SKIPPED) {
+        // ⚠ PASS_CIRCUIT_OPEN KEEPS PASS_SKIPPED'S EXIT CODE ON PURPOSE.
+        // PR 7.6 split the two so the ledger and the panel can tell an
+        // operator WHY the pass did nothing, but the CLI's exit codes are a
+        // scripting contract: cron wrappers and CI already branch on 6 for
+        // "the pass did no work". Minting a seventh code here would change
+        // that contract for callers who never asked, to express a
+        // distinction they already get from the stop reason in the output.
+        if ($outcome === CosmwasmDiscoveryWorker::PASS_FAILED
+            || $outcome === CosmwasmDiscoveryWorker::PASS_SKIPPED
+            || $outcome === CosmwasmDiscoveryWorker::PASS_CIRCUIT_OPEN) {
             return self::EXIT_EXECUTION_FAILED;
         }
         if ($stopReason === 'runtime_deadline_reached' || $stopReason === 'request_budget_exhausted') {

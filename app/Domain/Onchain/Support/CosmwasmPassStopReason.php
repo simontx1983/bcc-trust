@@ -48,8 +48,20 @@ final class CosmwasmPassStopReason
     /** A concurrent holder had the per-chain advisory lock. Nothing ran. */
     public const LOCK_CONTENDED = 'lock_contended';
 
-    /** The chain refused to prepare: paused, unsupported, breaker open, no driver. */
+    /** The chain refused to prepare: paused, unsupported, or no driver. */
     public const CHAIN_REFUSED_TO_PREPARE = 'chain_refused_to_prepare';
+
+    /**
+     * The provider circuit is open — a temporary, self-clearing pause.
+     *
+     * ⚠ SPLIT OUT OF {@see CHAIN_REFUSED_TO_PREPARE} BY THE 2026-09-08
+     * AUDIT. Both staging sessions that ended on an open breaker reported
+     * the generic token, so the ledger, the panel and the CLI all told an
+     * operator the chain "refused to prepare" — indistinguishable from a
+     * paused or misconfigured chain, and the natural response was to press
+     * Continue again into a breaker that had 300 seconds left to run.
+     */
+    public const PROVIDER_CIRCUIT_OPEN = 'provider_circuit_open';
 
     /** The pass threw. */
     public const EXECUTION_FAILED = 'execution_failed';
@@ -72,6 +84,9 @@ final class CosmwasmPassStopReason
     {
         if ($outcome === CosmwasmDiscoveryWorker::PASS_LOCKED) {
             return self::LOCK_CONTENDED;
+        }
+        if ($outcome === CosmwasmDiscoveryWorker::PASS_CIRCUIT_OPEN) {
+            return self::PROVIDER_CIRCUIT_OPEN;
         }
         if ($outcome === CosmwasmDiscoveryWorker::PASS_SKIPPED) {
             return self::CHAIN_REFUSED_TO_PREPARE;

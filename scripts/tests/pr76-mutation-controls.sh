@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+#
+# PR 7.6 mutation controls.
+#
+# Each control breaks ONE guarantee in executable code and asserts the suite
+# goes red. A control that leaves the suite green is a SURVIVOR: the
+# guarantee is unasserted, and the "passing" test that was supposed to cover
+# it proves nothing.
+#
+# ⚠ EVERY MUTATION PROVES IT CHANGED CODE. A sed that silently matches
+# nothing produces a green run that looks like a killed mutant but tested an
+# unmodified tree. Each control diffs the file before and after and reports
+# BROKEN if the bytes did not move. BROKEN is never counted as killed.
+#
+# ⚠ MUTATIONS ARE APPLIED TO COMMENT-STRIPPED-EQUIVALENT TARGETS ONLY.
+# Every pattern below targets a line of real code; none of them can be
+# satisfied by matching a docblock, because a docblock edit changes bytes
+# without changing behaviour and would produce a false BROKEN-vs-killed
+# reading.
+#
+# Usage: bash scripts/tests/pr76-mutation-controls.sh
+set -uo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 2
+ROOT="$(pwd)"
+
+PHPUNIT="vendor/bin/phpunit"
+[ -x "$PHPUNIT" ] || { echo "FATAL: phpunit not installed"; exit 2; }
+
+KILLED=0
+SURVIVED=0
+BROKEN=0
+declare -a SURVIVOR_NAMES=()
+declare -a BROKEN_NAMES=()
+
+# ⚠ RESTORE FROM A SNAPSHOT, NEVER FROM GIT.
+#
+# This function used to be `git checkout -- "$1"`, which restores from HEAD
+# and therefore DELETES every uncommitted edit in the files it touches. Run
+# against a work-in-progress tree it silently reverted the entire feature
+# mid-run while printing cheerful "killed" lines for guarantees whose code
+# was no longer there. Snapshot the bytes, mutate, put the bytes back.
+SNAPDIR="$(mktemp -d)"
+trap 'rm -rf "$SNAPDIR"' EXIT
+
+snapshot () { mkdir -p "$SNAPDIR/$(dirname "$1")"; cp "$1" "$SNAPDIR/$1"; }
+restore  () { cp "$SNAPDIR/$1" "$1"; }
+
+# control <name> <file> <filter> <python-mutation>
+control () {
+  local name="$1" file="$2" filter="$3" mutation="$4"
+  local before after
+
+  snapshot "$file"
+  before="$(md5sum "$file" | cut -d' ' -f1)"
+  python - "$file" <<PY
+import io, sys
+p = sys.argv[1]
+s = io.open(p, encoding='utf-8').read()
+${mutation}
+io.open(p, 'w', encoding='utf-8', newline='').write(s)
+PY
+  after="$(md5sum "$file" | cut -d' ' -f1)"
+
+  if [ "$before" = "$after" ]; then
+    echo "  BROKEN   $name — the mutation changed NO bytes; it tested nothing"
+    BROKEN=$((BROKEN+1)); BROKEN_NAMES+=("$name")
+    restore "$file"
+    return
+  fi
+
+  if "$PHPUNIT" --filter "$filter" >/dev/null 2>&1; then
+    echo "  SURVIVED $name — the suite stayed green with the guarantee broken"
+    SURVIVED=$((SURVIVED+1)); SURVIVOR_NAMES+=("$name")
+  else
+    echo "  killed   $name"
+    KILLED=$((KILLED+1))
+  fi
+  restore "$file"
+}
+
+# Same contract as control(), but runs the REAL-MySQL suite.
+#
+# Needs BCC_INT_PHP (a php binary with mysqli) plus the BCC_TEST_DB_* env
+# the integration bootstrap reads. Without them the control is reported as
+# SKIPPED and counted separately — never as killed, and never as survived.
+SKIPPED=0
+declare -a SKIPPED_NAMES=()
+
+control_integration () {
+  local name="$1" file="$2" filter="$3" mutation="$4"
+  local before after
+
+  if [ -z "${BCC_INT_PHP:-}" ]; then
+    echo "  SKIPPED  $name — no BCC_INT_PHP; the integration suite did not run"
+    SKIPPED=$((SKIPPED+1)); SKIPPED_NAMES+=("$name")
+    return
+  fi
+
+  snapshot "$file"
+  before="$(md5sum "$file" | cut -d' ' -f1)"
+  python - "$file" <<PYMUT
+import io, sys
+p = sys.argv[1]
+s = io.open(p, encoding='utf-8').read()
+${mutation}
+io.open(p, 'w', encoding='utf-8', newline='').write(s)
+PYMUT
+  after="$(md5sum "$file" | cut -d' ' -f1)"
+
+  if [ "$before" = "$after" ]; then
+    echo "  BROKEN   $name — the mutation changed NO bytes; it tested nothing"
+    BROKEN=$((BROKEN+1)); BROKEN_NAMES+=("$name")
+    restore "$file"
+    return
+  fi
+
+  if "$BCC_INT_PHP" vendor/phpunit/phpunit/phpunit -c phpunit-integration.xml.dist \
+       --filter "$filter" >/dev/null 2>&1; then
+    echo "  SURVIVED $name — the suite stayed green with the guarantee broken"
+    SURVIVED=$((SURVIVED+1)); SURVIVOR_NAMES+=("$name")
+  else
+    echo "  killed   $name"
+    KILLED=$((KILLED+1))
+  fi
+  restore "$file"
+}
+
+CLASSIFIER="app/Domain/Onchain/Services/CosmwasmClassifier.php"
+BREAKER="app/Domain/Onchain/Support/OnchainCircuitBreaker.php"
+WORKER="app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php"
+STOPREASON="app/Domain/Onchain/Support/CosmwasmPassStopReason.php"
+RETRY="app/Domain/Onchain/Support/ApiRetry.php"
+CHECKPOINT="app/Domain/Onchain/Repositories/ChainCheckpointRepository.php"
+FETCHER="app/Domain/Onchain/Fetchers/CosmosFetcher.php"
+
+echo "PR 7.6 mutation controls"
+echo "────────────────────────────────────────────────────────"
+
+# ── 1. Classification: ambiguity blamed on the node again ───────────────
+control "ambiguous evidence restored to node_unreachable" "$CLASSIFIER" \
+  "MixedEvidenceClassificationTest|MixedEvidencePersistenceIntegrationTest" \
+  "s = s.replace(\"\$ambiguousOnly = !\$nodeCaused && self::anyDecisiveRefusal(\$outcomes);\", \"\$ambiguousOnly = false;\")"
+
+# ── 2. Classification: mixed evidence promoted to a terminal negative ───
+control "mixed evidence converted to not_cw721" "$CLASSIFIER" \
+  "MixedEvidenceClassificationTest" \
+  "s = s.replace(\"                \$ambiguousOnly\n                    ? self::REASON_MIXED_EVIDENCE_AMBIGUOUS\n                    : self::REASON_NODE_UNREACHABLE,\", \"                self::REASON_NODE_UNREACHABLE,\")"
+
+# ── 3. Classification: 4xx/malformed treated as a node fault ────────────
+control "http_4xx and malformed become node-caused faults" "$CLASSIFIER" \
+  "MixedEvidenceClassificationTest" \
+  "s = s.replace(\"return \$kind === self::KIND_NODE_ERROR || \$kind === self::KIND_TRANSPORT;\", \"return self::isTransientFault(\$kind);\")"
+
+# ── 4. Fetcher: a recognised contract rejection blamed on the provider ──
+control "recognised unknown-variant 500 treated as a provider failure" "$FETCHER" \
+  "SmartQueryOptInWiringTest|CosmwasmSmartQueryRetryTest|ApiRetryApplicationErrorTest" \
+  "s = s.replace(\"        if (\$smartQuery) {\", \"        if (false) {\")"
+
+# ── 5. Telemetry: the enumeration failure code is dropped ───────────────
+control "enumeration telemetry dropped on the tail path" "$WORKER" \
+  "SmartQueryOptInWiringTest|EnumerationTelemetryTest" \
+  "s = s.replace(\"            ChainCheckpointRepository::recordCwEnumerationFailure(\", \"            false && ChainCheckpointRepository::recordCwEnumerationFailure(\")"
+
+# ── 6. Telemetry: a raw provider body is persisted instead of a token ───
+# ⚠ INTEGRATION-ONLY. The guard lives in the repository and is proven by a
+# real write, so running this control against the unit config would report a
+# SURVIVOR that is really an un-run test.
+control_integration "raw provider prose persisted into cw_last_error" "$CHECKPOINT" \
+  "MixedEvidencePersistenceIntegrationTest" \
+  "s = s.replace(\"        if (\$chainId <= 0 || !CosmwasmEnumerationFailure::isValid(\$code)) {\n            return false;\n        }\", \"        if (\$chainId <= 0) {\n            return false;\n        }\")"
+
+# ── 7. Breaker: the threshold is raised out of reach ────────────────────
+control "failure threshold 5 becomes 50" "$BREAKER" \
+  "BreakerLifecycleTest" \
+  "s = s.replace(\"const FAILURE_THRESHOLD = 5;\", \"const FAILURE_THRESHOLD = 50;\")"
+
+# ── 8. Breaker: a success no longer clears the durable counter ──────────
+control "success stops resetting the failure counter" "$BREAKER" \
+  "BreakerLifecycleTest" \
+  "s = s.replace(\"        OnchainCircuitBreakerRepository::deleteCounter(self::counterOptionName(\$chainId));\n\n        // Release the probe lock\", \"        // deleteCounter removed by mutation\n\n        // Release the probe lock\")"
+
+# ── 9. Breaker: a stale counter is trusted again ────────────────────────
+control "stale counter reopens the breaker instantly" "$BREAKER" \
+  "BreakerLifecycleTest" \
+  "s = s.replace(\"        \$priorState = self::getState(\$chainId);\n        if (\$priorState === null) {\n            OnchainCircuitBreakerRepository::deleteCounter(\$counterOption);\n        }\", \"        \$priorState = self::getState(\$chainId);\")"
+
+# ── 10. Breaker: the half-open probe lock is bypassed ───────────────────
+control "half-open admits every caller (lock bypassed)" "$BREAKER" \
+  "BreakerLifecycleTest" \
+  "s = s.replace(\"if (\\\\BCC\\\\Core\\\\DB\\\\AdvisoryLock::acquire(self::PROBE_LOCK_PREFIX . \$chainId, 0)) {\", \"if (true) {\")"
+
+# ── 11. Operator truth: the circuit reason collapses back ───────────────
+control "circuit-open collapses back to chain_refused_to_prepare" "$STOPREASON" \
+  "CircuitOpenReasonTest|CosmwasmOneShotCliTest" \
+  "s = s.replace(\"            return self::PROVIDER_CIRCUIT_OPEN;\", \"            return self::CHAIN_REFUSED_TO_PREPARE;\")"
+
+# ── 12. Worker: the breaker refusal stops being distinguishable ─────────
+control "prepareChain stops reporting the circuit refusal" "$WORKER" \
+  "CircuitOpenReasonTest|BreakerStopsProviderWorkTest" \
+  "s = s.replace(\"            \$refusal = self::PASS_CIRCUIT_OPEN;\", \"            \$refusal = null;\")"
+
+# ── 14. Status reader: the old `time() - 0` arithmetic comes back ───────
+#
+# ⚠ THE DEFECT THIS AMENDMENT FIXES. `getAllStatus()` computed its own
+# elapsed time, so `opened_at = 0` made it report HALF-OPEN — one probe is
+# allowed through — while the worker was refusing every request.
+control "getAllStatus recomputes its own elapsed time" "$BREAKER" \
+  "BreakerReaderAgreementTest" \
+  "s = s.replace(\"\$status = self::phaseHyphenated(self::phaseFor(\$state, \$now));\", \"\$status = \$failures >= self::FAILURE_THRESHOLD ? ((time() - \$openedAt) >= self::COOLDOWN_SECONDS ? 'half-open' : 'open') : 'closed';\")"
+
+# ── 15. The same regression in the other status reader ──────────────────
+control "getStaleChains recomputes its own elapsed time" "$BREAKER" \
+  "BreakerReaderAgreementTest" \
+  "s = s.replace(\"\$circuitStatus = strtoupper(\n                self::phaseHyphenated(self::phaseFor(self::getState(\$id), \$now))\n            );\", \"\$cb = self::getState(\$id); \$f = (int) (\$cb['failures'] ?? 0); \$o = (int) (\$cb['opened_at'] ?? 0); \$circuitStatus = \$f >= self::FAILURE_THRESHOLD ? ((time() - \$o) >= self::COOLDOWN_SECONDS ? 'HALF-OPEN' : 'OPEN') : 'CLOSED';\")"
+
+# ── 16. The shared helper stops guarding the zero timestamp ─────────────
+control "phaseFor drops the opened_at <= 0 guard" "$BREAKER" \
+  "BreakerReaderAgreementTest|BreakerLifecycleTest" \
+  "s = s.replace(\"        if (\$openedAt <= 0) {\n            return self::PHASE_OPEN; // Tripped, but no cooldown has started.\n        }\n\", \"\")"
+
+# ── 13. Retry accounting: the multiplier changes ────────────────────────
+control "retry accounting changed (max retries 3 -> 0)" "$RETRY" \
+  "BreakerRetryAccountingTest" \
+  "s = s.replace(\"const DEFAULT_MAX_RETRIES   = 3;\", \"const DEFAULT_MAX_RETRIES   = 0;\")"
+
+echo "────────────────────────────────────────────────────────"
+echo "killed=${KILLED}  survived=${SURVIVED}  broken=${BROKEN}  skipped=${SKIPPED}"
+if [ "${#SURVIVOR_NAMES[@]}" -gt 0 ]; then
+  echo "SURVIVORS (unasserted guarantees):"
+  printf '  - %s\n' "${SURVIVOR_NAMES[@]}"
+fi
+if [ "${#BROKEN_NAMES[@]}" -gt 0 ]; then
+  echo "BROKEN (mutation changed no code — NOT counted as killed):"
+  printf '  - %s\n' "${BROKEN_NAMES[@]}"
+fi
+
+if [ "${#SKIPPED_NAMES[@]}" -gt 0 ]; then
+  echo "SKIPPED (not run — reported as skipped, never as killed):"
+  printf '  - %s\n' "${SKIPPED_NAMES[@]}"
+fi
+
+# Fail on anything that is not a clean kill. A skip is not a pass either.
+[ "$SURVIVED" -eq 0 ] && [ "$BROKEN" -eq 0 ] && [ "$SKIPPED" -eq 0 ]

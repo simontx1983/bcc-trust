@@ -4,6 +4,7 @@ namespace BCC\Trust\Onchain\Repositories;
 
 use BCC\Core\DB\DB;
 use BCC\Core\Log\Logger;
+use BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -548,6 +549,44 @@ final class ChainCheckpointRepository
      * `$error` is capped at 255 chars — the same convention
      * {@see recordFailure()} uses. Raw LCD bodies are never stored.
      */
+    /**
+     * Record WHY the last CosmWasm ENUMERATION attempt failed, and nothing else.
+     *
+     * ── WHY THIS IS NOT `setCwDiscoveryState()` ─────────────────────────
+     * The code-tail path has no settled state to write. It must not guess
+     * one: passing the row's current state back in requires reading a
+     * checkpoint that may be null, and inventing a state there would let a
+     * transport blip silently move a chain between `backfilling` and
+     * `backfilled`. This method touches ONE column, so it cannot.
+     *
+     * ⚠ THE TOKEN IS VALIDATED, NOT TRUSTED. Only a member of
+     * {@see CosmwasmEnumerationFailure::codes()} is ever written, so no
+     * caller — present or future — can route a provider sentence, an
+     * exception message or a URL into this column by passing it here.
+     *
+     * Cleared on the next successful enumeration by
+     * {@see recordCwBackfillProgress()} and {@see advanceCwCodeWatermark()},
+     * both of which already set `cw_last_error = NULL`.
+     */
+    public static function recordCwEnumerationFailure(int $chainId, string $code): bool
+    {
+        if ($chainId <= 0 || !CosmwasmEnumerationFailure::isValid($code)) {
+            return false;
+        }
+
+        global $wpdb;
+
+        $updated = $wpdb->update(
+            self::table(),
+            ['cw_last_error' => $code],
+            ['chain_id' => $chainId],
+            ['%s'],
+            ['%d']
+        );
+
+        return is_int($updated) && $updated >= 0;
+    }
+
     public static function setCwDiscoveryState(int $chainId, string $state, ?string $error = null): bool
     {
         if ($chainId <= 0 || !in_array($state, self::cwStates(), true)) {

@@ -202,6 +202,16 @@ namespace BCC\Trust\Onchain\Support {
          */
         final class OnchainCircuitBreaker
         {
+            /**
+             * Mirrors production so a test can express "enough failures to
+             * open it" as arithmetic rather than as the literal 8.
+             *
+             * ⚠ THIS COPY CANNOT DRIFT UNNOTICED: BreakerLifecycleTest runs
+             * the REAL breaker and asserts its threshold is 5, so a change
+             * there without a change here fails that file.
+             */
+            public const FAILURE_THRESHOLD = 5;
+
             public static bool $open = false;
             /** @var list<int> */
             public static array $successChains = [];

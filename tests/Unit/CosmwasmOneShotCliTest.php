@@ -783,7 +783,15 @@ final class CosmwasmOneShotCliTest extends TestCase
         );
         self::assertSame([self::CHAIN], ChainCheckpointRepository::$discoveryTouches);
         self::assertSame([], ApiRetry::$calls, 'a chain that refused to prepare made no request');
-        self::assertStringContainsString('"stop_reason": "chain_refused_to_prepare"', \WP_CLI::output());
+        // PR 7.6: an open breaker now reports its own stop reason instead of
+        // sharing the generic refusal with paused/unsupported/no-driver. The
+        // exit code is deliberately unchanged (6) — see exitCodeFor().
+        self::assertStringContainsString('"stop_reason": "provider_circuit_open"', \WP_CLI::output());
+        self::assertStringNotContainsString(
+            '"stop_reason": "chain_refused_to_prepare"',
+            \WP_CLI::output(),
+            'a breaker pause must not be reported as a configuration refusal'
+        );
 
         // ── 2. the pass THROWS, with the lock held ──────────────────────
         \WP_CLI::reset();
