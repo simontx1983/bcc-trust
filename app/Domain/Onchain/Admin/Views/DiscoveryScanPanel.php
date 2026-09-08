@@ -435,16 +435,33 @@ final class DiscoveryScanPanel
         // "0 of 0" after a failed read would be the same lie in numbers
         // that the sentence above refuses to tell in words.
         if (($progress['ok'] ?? false) === true && $progress['total_families'] !== null) {
-            printf(
-                '<p class="description" style="margin-top:2px;">%s</p>',
-                esc_html(sprintf(
-                    /* translators: 1: checked, 2: total, 3: collection families */
-                    __('%1$s of %2$s contract families checked · %3$s NFT collection families confirmed so far', 'bcc-trust'),
-                    number_format_i18n((int) $progress['classified_families']),
-                    number_format_i18n((int) $progress['total_families']),
-                    number_format_i18n((int) $progress['collection_families'])
-                ))
+            // ⚠ CONFIRMED AND PROBABLE ARE TWO CHIPS, NOT ONE (PR 7.5).
+            // This line used to print `collection_families` — confirmed PLUS
+            // probable — under the word "confirmed", and on 2026-09-07 it
+            // reported Cosmos Hub's 12 + 1 as "13 … confirmed so far".
+            $line = sprintf(
+                /* translators: 1: families checked, 2: total families, 3: confirmed collection families */
+                __('%1$s of %2$s contract families checked · %3$s NFT collection families confirmed so far', 'bcc-trust'),
+                number_format_i18n((int) $progress['classified_families']),
+                number_format_i18n((int) $progress['total_families']),
+                number_format_i18n((int) ($progress['confirmed_families'] ?? 0))
             );
+
+            $probable = (int) ($progress['probable_families'] ?? 0);
+            if ($probable > 0) {
+                $line .= ' · ' . sprintf(
+                    /* translators: %s: probable families awaiting administrator review */
+                    _n(
+                        '%s possible collection family needs your review',
+                        '%s possible collection families need your review',
+                        $probable,
+                        'bcc-trust'
+                    ),
+                    number_format_i18n($probable)
+                );
+            }
+
+            printf('<p class="description" style="margin-top:2px;">%s</p>', esc_html($line));
 
             // ⚠ DELAYED AND EXHAUSTED ARE NAMED SEPARATELY, AND NEITHER IS A
             // NEGATIVE VERDICT. "We could not reach it" and "this is not an

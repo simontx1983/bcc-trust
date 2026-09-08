@@ -106,10 +106,18 @@ if (!defined('ABSPATH')) {
  * CLI-specific budget and no second budget system: a supervised run is
  * bounded by the canonical ceilings, which is the entire point of running
  * it. An earlier draft of this file described a temporary
- * 25-request canary limit (`BCC_COSMWASM_REQUEST_BUDGET=25`). That limit
- * was NOT adopted — the canonical ceiling is what runs.
+ * 25-request canary limit (`BCC_COSMWASM_REQUEST_BUDGET=25`) as the thing
+ * that would run. That OVERRIDE was NOT adopted — the canonical ceiling is
+ * what runs, then and now.
  *
- *   REQUESTS — {@see CosmwasmDiscoveryGate::DEFAULT_REQUEST_BUDGET}: 50
+ * ⚠ THE CANONICAL CEILING IS ITSELF 25 SINCE PR 7.5, AND THAT IS NOT THE
+ * REVIVAL OF THE REJECTED LIMIT. The old proposal was a CLI-only override
+ * dressed up as policy; this is the canonical default for every caller,
+ * lowered from 50 because run 5 on 2026-09-07 spent 772 requests against
+ * the public Cosmos Hub LCD and opened its circuit breaker. Same number,
+ * different thing: one was a local exception, this is the rule.
+ *
+ *   REQUESTS — {@see CosmwasmDiscoveryGate::DEFAULT_REQUEST_BUDGET}: 25
  *   LOGICAL requests per invocation (`BCC_COSMWASM_REQUEST_BUDGET`
  *   overrides it within 1..500). For this command per-invocation and
  *   per-chain are the same number, because it builds one
@@ -197,8 +205,15 @@ if (!defined('ABSPATH')) {
  * CONTRACT ROWS ARE BULK-INSERTED AND ARE NOT REQUEST-BOUNDED. One
  * contracts page returns up to `CosmosFetcher::CW721_PAGE_SIZE` = 100
  * addresses and ALL of them are inventoried for that single request.
- * Conservative worst case for a 50-request pass: ~1,700 contract rows.
- * That is expected; bulk inserts at that size are not a concern.
+ * Conservative worst case for a 25-request pass: ~850 contract rows (PR 7.5
+ * halved the default budget from 50). That is expected; bulk inserts at that
+ * size are not a concern.
+ *
+ * ⚠ THIS COMMAND RUNS EXACTLY ONE PASS, INLINE, AND HOSTS NO SESSION. It
+ * calls `DiscoveryRunExecutor::execute($runId, false)`, so the session
+ * ceilings and the 60 s inter-chunk delay never apply here: there is no
+ * second chunk to delay. Its only bounds are the per-pass request budget and
+ * {@see \BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS}.
  *
  * So the expected first-pass shape is `code_families.inserted` up to 100,
  * `code_families.classified` between 5 and 25, `contracts.inserted`

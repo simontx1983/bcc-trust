@@ -61,7 +61,8 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
             'total_families'       => 742,
             'classified_families'  => 365,
             'remaining_families'   => 377,
-            'collection_families'  => 5,
+            'confirmed_families'   => 5,
+            'probable_families'    => 0,
             'eligible_now'         => 377,
             'delayed_families'     => 0,
             'exhausted_families'   => 0,
@@ -84,8 +85,8 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
 
         self::assertSame(
             'This session added 2 new collection records. '
-            . 'Overall, 5 NFT collection families are confirmed so far. '
-            . 'Checked 365 of 742 contract families; 377 still need review.',
+            . '5 NFT collection families confirmed. '
+            . 'Checked 365 of 742 contract families; 377 still need scanning.',
             $s
         );
     }
@@ -114,7 +115,7 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
         self::assertStringContainsString('added 2 new collection records', $s);
         self::assertStringNotContainsString('added 5', $s);
         self::assertStringNotContainsString('5 new collection', $s);
-        self::assertStringContainsString('5 NFT collection families are confirmed', $s);
+        self::assertStringContainsString('5 NFT collection families confirmed', $s);
     }
 
     /** Work remains, so the exact counts and the Continue offer stay. */
@@ -122,7 +123,7 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
     {
         $p = self::live();
 
-        self::assertStringContainsString('377 still need review', DiscoveryScanProgress::summarySentence($p, 2));
+        self::assertStringContainsString('377 still need scanning', DiscoveryScanProgress::summarySentence($p, 2));
         self::assertSame('Continue scan', DiscoveryScanProgress::actionLabel($p));
     }
 
@@ -138,8 +139,8 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
 
         self::assertSame(
             'This session added no new collection record. '
-            . 'Overall, 5 NFT collection families are confirmed so far. '
-            . 'Checked 365 of 742 contract families; 377 still need review.',
+            . '5 NFT collection families confirmed. '
+            . 'Checked 365 of 742 contract families; 377 still need scanning.',
             $s
         );
     }
@@ -156,12 +157,12 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
     public function testAConfirmedFamilyWithDeferredEmissionIsDistinguished(): void
     {
         $p = self::live();
-        $p['collection_families'] = 1;
+        $p['confirmed_families'] = 1;
 
         $s = DiscoveryScanProgress::summarySentence($p, 0);
 
         self::assertStringContainsString('added no new collection record', $s);
-        self::assertStringContainsString('1 NFT collection family is confirmed so far', $s);
+        self::assertStringContainsString('1 NFT collection family confirmed', $s);
 
         // Not a single phrasing that would imply a stored record.
         self::assertStringNotContainsString('added 1', $s);
@@ -179,13 +180,13 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
     public function testZeroEmittedAndZeroConfirmedIsScopedToTheSession(): void
     {
         $p = self::live();
-        $p['collection_families'] = 0;
+        $p['confirmed_families'] = 0;
 
         $s = DiscoveryScanProgress::summarySentence($p, 0);
 
         self::assertSame(
             'This session did not confirm a new NFT collection. '
-            . 'Checked 365 of 742 contract families; 377 still need review.',
+            . 'Checked 365 of 742 contract families; 377 still need scanning.',
             $s
         );
 
@@ -202,13 +203,13 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
     public function testNoSessionMeansNoSessionClaim(): void
     {
         $p = self::live();
-        $p['collection_families'] = 0;
+        $p['confirmed_families'] = 0;
 
         $s = DiscoveryScanProgress::summarySentence($p);
 
         self::assertStringNotContainsString('This session', $s);
         self::assertStringContainsString('No NFT collection family is confirmed on this chain yet.', $s);
-        self::assertStringContainsString('377 still need review', $s);
+        self::assertStringContainsString('377 still need scanning', $s);
     }
 
     // ── (14) SINGULAR AND PLURAL ────────────────────────────────────────
@@ -221,7 +222,7 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
     public function testSingularAndPluralWording(int $emitted, int $confirmed, string $expected): void
     {
         $p = self::live();
-        $p['collection_families'] = $confirmed;
+        $p['confirmed_families'] = $confirmed;
 
         self::assertStringContainsString($expected, DiscoveryScanProgress::summarySentence($p, $emitted));
     }
@@ -232,8 +233,8 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
         return [
             'one record added'      => [1, 5, 'This session added 1 new collection record.'],
             'two records added'     => [2, 5, 'This session added 2 new collection records.'],
-            'one family confirmed'  => [1, 1, 'Overall, 1 NFT collection family is confirmed so far.'],
-            'two families confirmed' => [1, 2, 'Overall, 2 NFT collection families are confirmed so far.'],
+            'one family confirmed'  => [1, 1, '1 NFT collection family confirmed.'],
+            'two families confirmed' => [1, 2, '2 NFT collection families confirmed.'],
             'thousands are grouped'  => [1200, 2000, 'This session added 1,200 new collection records.'],
         ];
     }
@@ -242,7 +243,7 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
     public function testSingularNeverRendersAPluralForm(): void
     {
         $p = self::live();
-        $p['collection_families'] = 1;
+        $p['confirmed_families'] = 1;
 
         $s = DiscoveryScanProgress::summarySentence($p, 1);
 
@@ -263,7 +264,8 @@ final class DiscoverySessionSummaryWordingTest extends TestCase
         $p['classified_families']  = 742;
         $p['remaining_families']   = 0;
         $p['eligible_now']         = 0;
-        $p['collection_families']  = 0;
+        $p['confirmed_families']   = 0;
+        $p['probable_families']    = 0;
         $p['exhausted_families']   = 0;
         $p['scan_complete']        = DiscoveryScanProgress::YES;
         $p['more_work_available']  = DiscoveryScanProgress::NO;

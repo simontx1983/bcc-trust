@@ -127,7 +127,7 @@ final class DiscoveryScanProgressIntegrationTest extends TestCase
         self::assertTrue($p['ok']);
         self::assertSame(DiscoveryScanProgress::YES, $p['enumeration_complete']);
         self::assertSame(737, $p['total_families']);
-        self::assertSame(0, $p['collection_families'], 'no confirmed CW-721');
+        self::assertSame(0, $p['confirmed_families'], 'no confirmed CW-721');
 
         // ⚠ THE ASSERTION THE WHOLE PR EXISTS FOR.
         self::assertSame(
@@ -243,7 +243,7 @@ final class DiscoveryScanProgressIntegrationTest extends TestCase
         self::assertSame(DiscoveryScanProgress::YES, $p['scan_complete']);
         self::assertSame(0, $p['remaining_families']);
         self::assertSame(4, $p['classified_families']);
-        self::assertSame(0, $p['collection_families']);
+        self::assertSame(0, $p['confirmed_families']);
         self::assertSame(DiscoveryScanProgress::NO, $p['more_work_available']);
 
         $sentence = DiscoveryScanProgress::summarySentence($p);
@@ -260,7 +260,7 @@ final class DiscoveryScanProgressIntegrationTest extends TestCase
 
         $p = DiscoveryScanProgress::forChain(self::CHAIN);
 
-        self::assertSame(1, $p['collection_families']);
+        self::assertSame(1, $p['confirmed_families']);
         self::assertSame(5, $p['remaining_families']);
         self::assertSame(DiscoveryScanProgress::NO, $p['scan_complete']);
         self::assertStringNotContainsString('Scan complete', DiscoveryScanProgress::summarySentence($p));

@@ -164,8 +164,13 @@ final class CosmwasmCliPreflightAccuracyTest extends TestCase
      */
     public function testTheEnforcedBudgetsAreUnchanged(): void
     {
-        self::assertSame(50, CosmwasmDiscoveryGate::DEFAULT_REQUEST_BUDGET, 'canonical request ceiling');
-        self::assertSame(50, CosmwasmDiscoveryGate::requestBudget(), 'resolved ceiling with no override');
+        // ⚠ 25 SINCE PR 7.5, DELIBERATELY. Run 5 (2026-09-07) spent 772
+        // requests against the public Cosmos Hub LCD and opened its circuit
+        // breaker; the canonical per-chunk ceiling halved in response.
+        self::assertSame(25, CosmwasmDiscoveryGate::DEFAULT_REQUEST_BUDGET, 'canonical request ceiling');
+        self::assertSame(25, CosmwasmDiscoveryGate::requestBudget(), 'resolved ceiling with no override');
+
+        // Everything else is genuinely unchanged by PR 7.5.
         self::assertSame(20, CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS, 'wall clock');
         self::assertSame(100, CosmwasmDiscoveryGate::CODE_PAGE_SIZE, 'code page size');
         self::assertSame(5, CosmwasmDiscoveryGate::CODE_TAIL_MAX_PAGES, 'code tail pages');
@@ -173,10 +178,10 @@ final class CosmwasmCliPreflightAccuracyTest extends TestCase
         self::assertSame(3, CosmwasmDiscoveryGate::FAMILY_SAMPLE_SIZE, 'samples per family');
     }
 
-    /** The budget object the command builds really does start at 50. */
-    public function testTheDefaultTickBudgetIsTheCanonicalFifty(): void
+    /** The budget object the command builds really does start at the canonical ceiling. */
+    public function testTheDefaultTickBudgetIsTheCanonicalCeiling(): void
     {
-        self::assertSame(50, (new CosmwasmTickBudget())->remaining());
+        self::assertSame(25, (new CosmwasmTickBudget())->remaining());
         self::assertSame(0, (new CosmwasmTickBudget())->spent());
     }
 
@@ -297,36 +302,54 @@ final class CosmwasmCliPreflightAccuracyTest extends TestCase
 
     // ── (3) what the operator is actually told ──────────────────────────
 
-    public function testThePreflightStatesTheCanonicalFiftyRequestCeiling(): void
+    public function testThePreflightStatesTheCanonicalRequestCeiling(): void
     {
         $this->arrange();
         $out = $this->preflight();
 
-        self::assertStringContainsString('50 LOGICAL requests', $out);
+        self::assertStringContainsString('25 LOGICAL requests', $out);
         self::assertStringContainsString('canonical scanner ceiling, not a canary-only limit', $out);
     }
 
     /**
-     * THE RETIRED 25 MUST NOT COME BACK AS A PRINTED NUMBER.
+     * ⚠ THE PRINTED BUDGET IS THE ENFORCED ONE — WHATEVER IT IS.
      *
-     * The docblock is allowed — required, even — to record that a
-     * 25-request canary limit was proposed and rejected. What it may never
-     * do again is tell an operator that 25 is what will run. So the
-     * assertion is on the OUTPUT, and it is deliberately narrow: "25"
-     * legitimately appears in the printed family cap.
+     * ── WHY THIS TEST CHANGED SHAPE IN PR 7.5 ───────────────────────────
+     * It used to assert the literal absence of "25", because a 25-request
+     * CLI-only override had been proposed, rejected, and then left behind in
+     * the docs where an operator could read it as the budget. The defect was
+     * never the number — it was the preflight printing a number the code did
+     * not enforce.
+     *
+     * PR 7.5 lowered the CANONICAL default to 25 on entirely different
+     * evidence (run 5 opened the provider's circuit breaker at 772
+     * requests). Keeping the old literal assertion would now forbid the
+     * truth. So the assertion is on the INVARIANT the original test was
+     * really protecting: the operator is told exactly what the gate
+     * enforces, and never a stale literal.
      */
-    public function testTheRetiredTwentyFiveRequestLimitIsNeverPresentedAsTheBudget(): void
+    public function testThePrintedBudgetIsAlwaysTheEnforcedBudget(): void
     {
         $this->arrange();
         $out = $this->preflight();
 
-        self::assertStringNotContainsString('25 LOGICAL requests', $out);
-        self::assertStringNotContainsString('25 requests', $out);
-        self::assertStringNotContainsString('BCC_COSMWASM_REQUEST_BUDGET=25', $out);
+        $enforced = CosmwasmDiscoveryGate::requestBudget();
+        self::assertStringContainsString("{$enforced} LOGICAL requests", $out);
 
-        // …and the source records the retraction rather than deleting it.
+        // No OTHER budget figure may appear as the request budget.
+        foreach ([50, 100, 500] as $stale) {
+            if ($stale === $enforced) {
+                continue;
+            }
+            self::assertStringNotContainsString("{$stale} LOGICAL requests", $out, "stale budget {$stale} printed");
+        }
+
+        // …and the source still records the retraction of the rejected
+        // CLI-only override, rather than quietly deleting the history now
+        // that the canonical ceiling happens to share its number.
         $doc = $this->sourceOf('app/Domain/Onchain/CLI/CosmwasmOneShotDiscoveryCommand.php');
         self::assertStringContainsString('was NOT adopted', $doc);
+        self::assertStringContainsString('REVIVAL OF THE REJECTED LIMIT', $doc);
     }
 
     public function testThePreflightSaysRetriesAreNotChargedSeparately(): void
