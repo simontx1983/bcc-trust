@@ -201,6 +201,19 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_nft_enrichment_tick_unscheduled',
                 'callback'    => 'bcc_trust_unschedule_automatic_nft_discovery',
             ],
+            // Clears the retired `bcc_hall_provision` schedule. Its own
+            // done_option and its own callback: the hook list is unrelated to
+            // the discovery hooks, so folding it into
+            // bcc_trust_retired_discovery_hooks() would have coupled two
+            // retirements that share nothing but a mechanism — and would have
+            // needed a v3 done_option anyway, since v1/v2 are already set on
+            // every install that ran them. Fail-closed: COMPLETE only once
+            // wp_next_scheduled() proves the event is gone.
+            [
+                'id'          => 'unschedule_hall_provision_v1',
+                'done_option' => 'bcc_trust_hall_provision_unscheduled',
+                'callback'    => 'bcc_trust_unschedule_hall_provision',
+            ],
             // PR 7.3 — bcc_discovery_runs.chunks_used, the durable chunk
             // counter that bounds one administrator-authorized session.
             //

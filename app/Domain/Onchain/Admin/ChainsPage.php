@@ -6,8 +6,11 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\HallRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
+use BCC\Trust\Onchain\Services\HallProvisioningService;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 
 /**
@@ -52,6 +55,16 @@ class ChainsPage
     /** admin-post action for the Identity editor (Batch 1: PRG). */
     public const ACTION_IDENTITY_SAVE = 'bcc_chain_identity_save';
 
+    /**
+     * admin-post action for per-chain Hall creation.
+     *
+     * A Hall is an official, administrator-created, chain-connected public
+     * group. There is no automatic creator any more — no cron, no activation
+     * hook, no self-heal, no bulk sweep — so this action is the ONLY path by
+     * which a Hall comes into existence.
+     */
+    public const ACTION_HALL_CREATE = 'bcc_chain_hall_create';
+
     public static function register_ajax(): void
     {
         add_action('wp_ajax_bcc_chain_refresh', [self::class, 'ajax_refresh']);
@@ -66,6 +79,7 @@ class ChainsPage
     public static function register_actions(): void
     {
         add_action('admin_post_' . self::ACTION_IDENTITY_SAVE, [self::class, 'handle_identity_save']);
+        add_action('admin_post_' . self::ACTION_HALL_CREATE,   [self::class, 'handle_hall_create']);
 
         // The six CosmWasm discovery routes that used to be registered here
         // now live on NftDiscoveryPage, along with the sub-tab they served.
@@ -219,7 +233,7 @@ class ChainsPage
         // removed, falling back to Validators is the right failure: an
         // unknown sub-tab must not render a blank page.
         $activeTab = sanitize_key($_GET['subtab'] ?? 'validators');
-        if (!in_array($activeTab, ['validators', 'identity'], true)) {
+        if (!in_array($activeTab, ['validators', 'identity', 'halls'], true)) {
             $activeTab = 'validators';
         }
         ?>
@@ -229,6 +243,13 @@ class ChainsPage
             <?php if ($notice !== null): ?>
                 <div class="notice notice-<?php echo esc_attr($notice['type']); ?> is-dismissible">
                     <p><?php echo esc_html($notice['message']); ?></p>
+                </div>
+            <?php endif; ?>
+
+            <?php $hallNotice = self::halls_notice_from_query(); ?>
+            <?php if ($hallNotice !== null): ?>
+                <div class="notice notice-<?php echo esc_attr($hallNotice['type']); ?> is-dismissible">
+                    <p><?php echo esc_html($hallNotice['message']); ?></p>
                 </div>
             <?php endif; ?>
 
@@ -245,10 +266,16 @@ class ChainsPage
                    class="nav-tab <?php echo $activeTab === 'identity' ? 'nav-tab-active' : ''; ?>">
                     Identity
                 </a>
+                <a href="<?php echo esc_url(add_query_arg('subtab', 'halls')); ?>"
+                   class="nav-tab <?php echo $activeTab === 'halls' ? 'nav-tab-active' : ''; ?>">
+                    Halls
+                </a>
             </nav>
 
             <?php if ($activeTab === 'validators'): ?>
                 <?php self::render_validators_tab($chains, $valCountMap); ?>
+            <?php elseif ($activeTab === 'halls'): ?>
+                <?php self::render_halls_tab($chains); ?>
             <?php else: ?>
                 <?php self::render_identity_tab($chains); ?>
             <?php endif; ?>
@@ -443,6 +470,244 @@ class ChainsPage
         );
 
         self::redirect_identity($fieldErrors !== [] ? 'partial' : 'ok', $chainId);
+    }
+
+    // ── Halls ───────────────────────────────────────────────────────────────
+
+    /**
+     * Per-chain Hall control.
+     *
+     * READ-ONLY about absence. A chain without a Hall says so and offers the
+     * button; nothing here repairs, backfills or creates anything on render.
+     * That is the whole point of retiring the sweep — a page load must never
+     * be a write.
+     *
+     * @param list<ChainRow> $chains
+     */
+    private static function render_halls_tab(array $chains): void
+    {
+        $chainIds = [];
+        foreach ($chains as $chain) {
+            $chainIds[] = (int) $chain->id;
+        }
+
+        // One bounded query for every chain, rather than N lookups.
+        $halls = HallRepository::findHallsForChains($chainIds);
+        ?>
+        <p>
+            A <strong>Hall</strong> is an official, administrator-created public group
+            connected to exactly one chain. A chain has zero or one Hall.
+        </p>
+        <p class="description" style="max-width:820px;">
+            Halls are never created automatically — adding a chain does not create one,
+            and no scheduled job does either. Creating a Hall publishes a public, open
+            group that anyone can join, and assigns it to the platform's first
+            administrator account. It cannot be undone from this screen.
+        </p>
+
+        <table class="widefat striped" style="max-width:1100px;">
+            <caption class="screen-reader-text">Chains and their Halls</caption>
+            <thead>
+                <tr>
+                    <th scope="col">Chain</th>
+                    <th scope="col">Hall</th>
+                    <th scope="col">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($chains as $chain):
+                $cid       = (int) $chain->id;
+                $chainName = (string) $chain->name;
+                $groupId   = $halls[$cid] ?? 0;
+                $incomplete = $groupId > 0 && HallRepository::isOwnerIncomplete($groupId);
+                $editLink  = $groupId > 0 ? get_edit_post_link($groupId) : null;
+                $confirm   = sprintf(
+                    'Create the %s Hall? This publishes a public, open group that anyone can join. It cannot be undone from this screen.',
+                    $chainName
+                );
+            ?>
+                <tr>
+                    <th scope="row" style="width:220px;">
+                        <strong><?php echo esc_html($chainName); ?></strong><br>
+                        <code><?php echo esc_html((string) $chain->slug); ?></code>
+                    </th>
+                    <td>
+                        <?php if ($groupId === 0): ?>
+                            <span>This chain does not have a Hall.</span>
+                        <?php else: ?>
+                            <span>Hall #<?php echo (int) $groupId; ?></span>
+                            <?php if ($incomplete): ?>
+                                <br>
+                                <strong
+                                    id="bcc-hall-warn-<?php echo (int) $cid; ?>"
+                                    style="color:#b32d2e;"
+                                >
+                                    Ownership incomplete — this Hall is not owned by the
+                                    canonical administrator account. Use Repair ownership.
+                                </strong>
+                            <?php endif; ?>
+                        <?php endif; ?>
+                    </td>
+                    <td style="width:260px;">
+                        <?php if ($groupId === 0 || $incomplete): ?>
+                            <form method="post"
+                                  action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+                                  style="margin:0;"
+                                  onsubmit="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral($confirm)); ?>);">
+                                <input type="hidden" name="action"
+                                       value="<?php echo esc_attr(self::ACTION_HALL_CREATE); ?>">
+                                <input type="hidden" name="chain_id"
+                                       value="<?php echo esc_attr((string) $cid); ?>">
+                                <?php wp_nonce_field(self::ACTION_HALL_CREATE . '_' . $cid); ?>
+                                <button type="submit"
+                                        class="button <?php echo $incomplete ? '' : 'button-primary'; ?>"
+                                        <?php if ($incomplete): ?>
+                                            aria-describedby="bcc-hall-warn-<?php echo (int) $cid; ?>"
+                                        <?php endif; ?>>
+                                    <?php echo $incomplete ? 'Repair ownership' : 'Create Chain Hall'; ?>
+                                </button>
+                            </form>
+                        <?php elseif (is_string($editLink) && $editLink !== ''): ?>
+                            <a class="button" href="<?php echo esc_url($editLink); ?>">
+                                View Hall<span class="screen-reader-text"> for <?php echo esc_html($chainName); ?></span>
+                            </a>
+                        <?php else: ?>
+                            <span>View Hall (#<?php echo (int) $groupId; ?>)</span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            <?php if ($chains === []): ?>
+                <tr><td colspan="3">No chains are registered.</td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
+        <?php
+    }
+
+    /**
+     * Create the Hall for ONE named chain.
+     *
+     * Gate order matches the canonical admin handler
+     * ({@see Views\NftSpamContractsView::handleAdd()}): capability, method,
+     * cheap validation, then the per-chain nonce — so a malformed request
+     * never reaches a nonce action built from its own input — then the
+     * authoritative repository, then the service.
+     */
+    public static function handle_hall_create(): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
+
+        $chainId = isset($_POST['chain_id']) ? (int) $_POST['chain_id'] : 0;
+        if ($chainId <= 0) {
+            self::redirect_halls('invalid_chain');
+        }
+
+        // Bound to THIS chain: a nonce minted for chain 7 cannot create
+        // chain 8's Hall.
+        AdminActionSupport::requireNonce(self::ACTION_HALL_CREATE . '_' . $chainId);
+
+        // A positive integer is not by itself a valid target.
+        if (ChainRepository::getById($chainId) === null) {
+            self::redirect_halls('invalid_chain');
+        }
+
+        try {
+            $result = OnchainPlugin::instance()->hallProvisioningService()->provisionOne($chainId);
+        } catch (\Throwable $e) {
+            $correlationId = AdminActionSupport::failure(
+                $e,
+                HallProvisioningService::AUDIT_FAILED,
+                'chain',
+                $chainId
+            );
+            self::redirect_halls('exception', $chainId, $correlationId);
+        }
+
+        switch ((string) $result['status']) {
+            case 'created':
+                self::redirect_halls('created', $chainId);
+                // no break — redirect() is `never`.
+            case 'exists':
+                self::redirect_halls('exists', $chainId);
+                // no break
+            case 'incomplete':
+                self::redirect_halls('incomplete', $chainId);
+                // no break
+            case 'skipped':
+                self::redirect_halls('refused', $chainId);
+                // no break
+            default:
+                self::redirect_halls('failed', $chainId);
+        }
+    }
+
+    /** PRG terminator back to the Halls sub-tab. */
+    private static function redirect_halls(string $result, int $chainId = 0, string $ref = ''): never
+    {
+        $args = [
+            'page'      => self::PAGE_SLUG,
+            'subtab'    => 'halls',
+            'bcc_hall'  => $result,
+        ];
+        if ($chainId > 0) {
+            $args['bcc_chain'] = $chainId;
+        }
+        if ($ref !== '') {
+            $args['bcc_ref'] = $ref;
+        }
+
+        AdminActionSupport::redirect($args);
+    }
+
+    /**
+     * Rebuild the Halls notice from the PRG args.
+     *
+     * The message text is looked up HERE, server-side. Only an opaque result
+     * key and an optional correlation id travel in the URL, so no upstream
+     * error text can be reflected onto the page.
+     *
+     * @return array{type: string, message: string}|null
+     */
+    private static function halls_notice_from_query(): ?array
+    {
+        $result = isset($_GET['bcc_hall']) ? sanitize_key((string) $_GET['bcc_hall']) : '';
+        if ($result === '') {
+            return null;
+        }
+
+        switch ($result) {
+            case 'created':
+                return ['type' => 'success', 'message' => __('Hall created.', 'bcc-trust')];
+            case 'exists':
+                return ['type' => 'info', 'message' => __('This chain already has a Hall — nothing was created.', 'bcc-trust')];
+            case 'incomplete':
+                return [
+                    'type'    => 'error',
+                    'message' => __(
+                        'The Hall exists, but its ownership could not be set. It is flagged for repair — use Repair ownership to try again.',
+                        'bcc-trust'
+                    ),
+                ];
+            case 'invalid_chain':
+                return ['type' => 'error', 'message' => __('Invalid chain — nothing was created.', 'bcc-trust')];
+            case 'refused':
+                return [
+                    'type'    => 'error',
+                    'message' => __('This chain cannot have a Hall yet — check that it has a display name.', 'bcc-trust'),
+                ];
+            case 'failed':
+                return [
+                    'type'    => 'error',
+                    'message' => __('The Hall could not be created. The reason is in the bcc-trust log.', 'bcc-trust'),
+                ];
+            case 'exception':
+                $ref = isset($_GET['bcc_ref']) ? sanitize_text_field((string) $_GET['bcc_ref']) : '';
+                return ['type' => 'error', 'message' => AdminActionSupport::failureMessage($ref)];
+            default:
+                return null;
+        }
     }
 
     /**

@@ -228,9 +228,24 @@ final class ChainsNftDiscoveryTabTest extends TestCase
         $this->assertStringNotContainsString('SUBTAB_NFT_DISCOVERY', $source);
         $this->assertStringNotContainsString("add_query_arg('subtab', self::SUBTAB", $source);
         $this->assertStringNotContainsString('render_nft_discovery_tab', $source);
+
+        // The ALLOWLIST is what makes an unknown sub-tab fall back rather than
+        // render blank, so pin it exactly — a new tab is a deliberate act and
+        // should have to say so here.
+        //
+        // `halls` joined it when Halls became administrator-created: the
+        // per-chain "Create Chain Hall" control lives on this page.
+        // `nft-discovery` must never be in it — NftDiscoveryPage owns that
+        // surface and redirects the legacy URL on admin_init.
         $this->assertStringContainsString(
-            "in_array(\$activeTab, ['validators', 'identity'], true)",
+            "in_array(\$activeTab, ['validators', 'identity', 'halls'], true)",
             $source
+        );
+
+        $this->assertMatchesRegularExpression(
+            "/in_array\\(\\\$activeTab, \\[(?:(?!nft-discovery).)*\\], true\\)/",
+            $source,
+            'nft-discovery must not be an accepted sub-tab'
         );
     }
 
