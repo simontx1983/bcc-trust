@@ -57,11 +57,46 @@ namespace {
             /** Make the guarded UPDATE report success but change nothing. */
             public static bool $writeSilentlyNoOps = false;
 
+            /** Same, but scoped to ONE group — so a multi-Hall run can have
+             *  one Hall succeed and another fail. */
+            public static ?int $writeSilentlyNoOpsForGroup = null;
+
             /** Make the guarded UPDATE also clobber another member's row. */
             public static bool $writeCorruptsNeighbour = false;
 
             /** Force the artifact directory to look unwritable. */
             public static bool $artifactDirUnwritable = false;
+
+            /**
+             * Override the affected-row count the guarded UPDATE reports,
+             * WITHOUT changing what it actually does. Isolates the
+             * "affected !== 1" check from the postconditions that would
+             * otherwise also catch a bad write.
+             */
+            public static ?int $writeReportsAffected = null;
+
+            /** Write lands, but on the wrong user id. Isolates the owner re-read. */
+            public static int $writeLandsOnUser = 0;
+
+            /**
+             * Write ADDS a correct owner row and demotes the orphan to
+             * 'member' instead of moving it. Owner re-read passes; only the
+             * "no orphan remains" check can fire.
+             */
+            public static bool $writeLeavesOrphanBehind = false;
+
+            /** Mutate the ledger AFTER planning, before the locked re-check. */
+            public static $mutateBeforeApply = null;
+
+            /**
+             * Fires on the Nth unlocked read. The backup reads each group
+             * twice — once to build the payload, once to verify it against
+             * live rows — so mutating on the second read makes the saved
+             * snapshot stale, which is exactly what the guard must catch.
+             */
+            public static ?int $mutateOnReadNumber = null;
+            public static $mutateOnReadFn = null;
+            public static int $readCount = 0;
 
             public static int $nextGmId = 9000;
 
@@ -72,8 +107,16 @@ namespace {
                 self::$admins = [1, 2, 4]; self::$capable = null; self::$suspended = [];
                 self::$postMeta = [];
                 self::$writeSilentlyNoOps = false;
+                self::$writeSilentlyNoOpsForGroup = null;
                 self::$writeCorruptsNeighbour = false;
                 self::$artifactDirUnwritable = false;
+                self::$writeReportsAffected = null;
+                self::$writeLandsOnUser = 0;
+                self::$writeLeavesOrphanBehind = false;
+                self::$mutateBeforeApply = null;
+                self::$mutateOnReadNumber = null;
+                self::$mutateOnReadFn = null;
+                self::$readCount = 0;
                 self::$nextGmId = 9000;
             }
 
@@ -256,12 +299,24 @@ namespace BCC\Trust\Onchain\Repositories {
                 if (!\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
                     throw new \RuntimeException('lockMembershipRows outside a transaction');
                 }
+                if (\HallRepairTestState::$mutateBeforeApply !== null) {
+                    $fn = \HallRepairTestState::$mutateBeforeApply;
+                    \HallRepairTestState::$mutateBeforeApply = null;   // once
+                    $fn($groupId);
+                }
                 return self::readMembershipRows($groupId);
             }
 
             /** @return list<object> */
             public static function readMembershipRows(int $groupId): array
             {
+                \HallRepairTestState::$readCount++;
+                if (\HallRepairTestState::$mutateOnReadNumber === \HallRepairTestState::$readCount
+                    && \HallRepairTestState::$mutateOnReadFn !== null) {
+                    $fn = \HallRepairTestState::$mutateOnReadFn;
+                    $fn($groupId);
+                }
+
                 $rows = \HallRepairTestState::$rows[$groupId] ?? [];
                 usort($rows, static fn(array $a, array $b): int => $a['gm_id'] <=> $b['gm_id']);
                 return array_map(
@@ -277,14 +332,34 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static function repointOwnerRow(int $rowId, int $groupId, int $from, int $to, string $status): int
             {
-                if (\HallRepairTestState::$writeSilentlyNoOps) {
+                if (\HallRepairTestState::$writeSilentlyNoOps
+                    || \HallRepairTestState::$writeSilentlyNoOpsForGroup === $groupId) {
                     return 1;   // claims success, changes nothing
                 }
+
+                if (\HallRepairTestState::$writeLeavesOrphanBehind) {
+                    // A correct owner row appears, but the orphan is merely
+                    // demoted rather than moved.
+                    foreach (\HallRepairTestState::$rows[$groupId] as $i => $r) {
+                        if ($r['gm_id'] === $rowId) {
+                            \HallRepairTestState::$rows[$groupId][$i]['gm_user_status'] = 'member';
+                        }
+                    }
+                    \HallRepairTestState::$rows[$groupId][] = [
+                        'gm_id' => \HallRepairTestState::$nextGmId++,
+                        'gm_user_id' => $to, 'gm_user_status' => 'member_owner',
+                    ];
+                    return 1;
+                }
+
+                $landsOn = \HallRepairTestState::$writeLandsOnUser !== 0
+                    ? \HallRepairTestState::$writeLandsOnUser
+                    : $to;
 
                 $hit = 0;
                 foreach (\HallRepairTestState::$rows[$groupId] ?? [] as $i => $r) {
                     if ($r['gm_id'] === $rowId && $r['gm_user_id'] === $from && $r['gm_user_status'] === $status) {
-                        \HallRepairTestState::$rows[$groupId][$i]['gm_user_id'] = $to;
+                        \HallRepairTestState::$rows[$groupId][$i]['gm_user_id'] = $landsOn;
                         $hit++;
                     }
                 }
@@ -296,6 +371,10 @@ namespace BCC\Trust\Onchain\Repositories {
                             break;
                         }
                     }
+                }
+
+                if (\HallRepairTestState::$writeReportsAffected !== null) {
+                    return \HallRepairTestState::$writeReportsAffected;
                 }
 
                 return $hit;

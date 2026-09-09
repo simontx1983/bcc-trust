@@ -203,6 +203,16 @@ final class HallOwnershipRepairCommandTest extends TestCase
         self::assertNotSame($staging, $production);
         self::assertStringContainsString('STAGING', $staging);
         self::assertStringContainsString('PRODUCTION', $production);
+
+        // ⚠ THE DIGEST ITSELF must differ, not merely the human-readable
+        // prefix. Comparing whole strings would pass even if the environment
+        // were dropped from the hash — and then a token whose prefix an
+        // operator hand-edited would be accepted.
+        self::assertNotSame(
+            substr($staging, strrpos($staging, '-') + 1),
+            substr($production, strrpos($production, '-') + 1),
+            'the environment must feed the hash, not just the label'
+        );
     }
 
     /**

@@ -260,7 +260,7 @@ final class HallOwnershipRepairService
      * not protecting anything.
      *
      * @param  array<string, list<string>> $meta
-     * @param  list<object>                $rows
+     * @param  list<object{gm_id: string, gm_user_id: string, gm_user_status: string}> $rows
      * @return array{eligible: bool, result: string, detail: string, row_id: int}
      */
     private function assertEligible(int $groupId, int $ownerId, array $meta, array $rows): array

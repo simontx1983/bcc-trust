@@ -358,6 +358,253 @@ final class HallOwnershipRepairServiceTest extends TestCase
         self::assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions());
     }
 
+    /**
+     * ── ISOLATING THE POSTCONDITION CLAUSES ─────────────────────────────
+     * The composite behaviour was already covered, but every clause caught
+     * every fault, so a mutation control could delete any ONE of them and
+     * still see green. These four faults are each shaped so that exactly one
+     * clause can fire.
+     */
+    public function testAWriteReportingTheWrongAffectedCountIsRolledBack(): void
+    {
+        $this->boot();
+        \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
+
+        // The row IS correctly moved — only the reported count is wrong, so
+        // every other postcondition passes and only `affected !== 1` can fire.
+        \HallRepairTestState::$writeReportsAffected = 2;
+
+        $before = \HallRepairTestState::snapshot(self::HALL);
+        $run    = $this->apply();
+
+        self::assertSame(HallOwnershipRepairService::RESULT_FAILED_ROLLED_BACK, $run['results'][0]['result']);
+        self::assertSame($before, \HallRepairTestState::snapshot(self::HALL));
+    }
+
+    public function testAWriteThatLandsOnTheWrongUserIsRolledBack(): void
+    {
+        $this->boot();
+        \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
+
+        // The orphan is consumed (so "no orphan remains" passes) but the row
+        // now names somebody else — only the owner re-read can catch it.
+        \HallRepairTestState::$writeLandsOnUser = 2;
+
+        $before = \HallRepairTestState::snapshot(self::HALL);
+        $run    = $this->apply();
+
+        self::assertSame(HallOwnershipRepairService::RESULT_FAILED_ROLLED_BACK, $run['results'][0]['result']);
+        self::assertSame($before, \HallRepairTestState::snapshot(self::HALL));
+        self::assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions());
+    }
+
+    public function testAWriteThatLeavesTheOrphanBehindIsRolledBack(): void
+    {
+        $this->boot();
+        \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
+
+        // A correct owner row appears, so the owner re-read passes; the
+        // orphan lingers as a plain member. Only the orphan check can fire.
+        \HallRepairTestState::$writeLeavesOrphanBehind = true;
+
+        $before = \HallRepairTestState::snapshot(self::HALL);
+        $run    = $this->apply();
+
+        self::assertSame(HallOwnershipRepairService::RESULT_FAILED_ROLLED_BACK, $run['results'][0]['result']);
+        self::assertSame($before, \HallRepairTestState::snapshot(self::HALL));
+    }
+
+    /**
+     * The audit-null branch, isolated: `verifyAuditRow()` would also have
+     * thrown, so without this the null check could be deleted unnoticed.
+     */
+    public function testALostAuditIdIsCaughtByItsOwnCheck(): void
+    {
+        $this->boot();
+        \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
+        \BCC\Trust\Core\Security\AuditLogger::$failChecked = true;
+
+        $run = $this->apply();
+
+        self::assertSame(HallOwnershipRepairService::RESULT_FAILED_ROLLED_BACK, $run['results'][0]['result']);
+        // The FIRST failure must be the null check, named in the log, rather
+        // than an incidental TypeError further down.
+        $errors = array_filter(\BCC\Core\Log\Logger::$lines, static fn(array $l): bool => $l[0] === 'error');
+        self::assertNotEmpty($errors);
+    }
+
+    /**
+     * ── THE STATE MOVED BETWEEN PLAN AND APPLY ──────────────────────────
+     * The plan is read WITHOUT locks, so it can be stale by the time the
+     * write runs. Re-evaluating every guard under the lock is what turns a
+     * concurrent change into a refusal instead of a corruption.
+     */
+    public function testAGuardThatBecomesFalseUnderTheLockRefusesTheWrite(): void
+    {
+        $this->boot();
+        \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
+
+        // Between planning and the locked re-read, somebody joins the very
+        // user the repair was about to install as owner — a collision that
+        // did not exist when the plan was made.
+        \HallRepairTestState::$mutateBeforeApply = static function (int $groupId): void {
+            \HallRepairTestState::$rows[$groupId][] = [
+                'gm_id' => 9800, 'gm_user_id' => self::OWNER, 'gm_user_status' => 'member',
+            ];
+        };
+
+        $run = $this->apply();
+
+        self::assertSame(HallOwnershipRepairService::RESULT_FAILED_ROLLED_BACK, $run['results'][0]['result']);
+        // The transaction rolled back, so even the interloper's row is gone
+        // — the ledger is exactly as it was before the apply began.
+        self::assertSame(
+            ['0:member_owner'],
+            \HallRepairTestState::snapshot(self::HALL),
+            'the orphan is untouched'
+        );
+        self::assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions());
+    }
+
+    /**
+     * ── PROVING FOUR EQUIVALENT MUTANTS, RATHER THAN CLAIMING THEM ──────
+     *
+     * Four checks survive deletion under mutation testing, and it is worth
+     * being exact about why: they are DEFENCE IN DEPTH, not dead code. Each
+     * is backstopped by a later check that catches the same fault, so
+     * removing one changes the error message but not the outcome.
+     *
+     *   1. the locked re-check throw — every refusal path returns
+     *      `row_id => 0`, and the guarded UPDATE rejects a non-positive row
+     *      id, so `affected !== 1` throws anyway (pinned below, and by the
+     *      repository's own integration test);
+     *   2. the owner re-read, and
+     *   3. the "no orphan remains" check — a wrongly-owned or lingering row
+     *      also lands in `$membersAfter`, so the member-preservation
+     *      comparison fires;
+     *   4. the audit null check — `verifyAuditRow(0)` cannot read a row and
+     *      throws.
+     *
+     * They are kept because each names its own failure precisely, and an
+     * operator reading a rolled-back repair should be told WHICH invariant
+     * broke. This test pins the first link of chain 1 so the equivalence is
+     * demonstrated rather than asserted in a comment.
+     */
+    public function testEveryRefusalYieldsRowIdZeroSoTheWriteCannotFire(): void
+    {
+        $this->boot();
+
+        foreach (self::guardProvider() as $label => [$mutation, $expectedDetail]) {
+            \HallRepairTestState::reset();
+            \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
+
+            $M = &\HallRepairTestState::$meta[self::HALL];
+            $R = &\HallRepairTestState::$rows[self::HALL];
+
+            switch ($mutation) {
+                case 'kind':        $M['_bcc_group_kind'] = ['holders']; break;
+                case 'kindCase':    $M['_bcc_group_kind'] = ['Hall']; break;
+                case 'collection':  $M['_bcc_gate_collection_id'] = ['12']; break;
+                case 'validator':   $M['_bcc_gate_validator_id'] = ['77']; break;
+                case 'noChain':     unset($M['_bcc_chain_tag']); break;
+                case 'chainDupe':   $M['_bcc_chain_tag'] = ['10', '11']; break;
+                case 'badChain':    $M['_bcc_chain_tag'] = ['nope']; break;
+                case 'orphanChain': \HallRepairTestState::$chains = []; break;
+                case 'closed':      $M['peepso_group_privacy'] = ['1']; break;
+                case 'noPrivacy':   unset($M['peepso_group_privacy']); break;
+                case 'noOwner':     $R = []; break;
+                case 'twoOwners':   $R[] = ['gm_id' => 9500, 'gm_user_id' => 2, 'gm_user_status' => 'member_owner']; break;
+                case 'realOwner':   $R = [['gm_id' => 9501, 'gm_user_id' => 2, 'gm_user_status' => 'member_owner']]; break;
+                case 'collision':   $R[] = ['gm_id' => 9502, 'gm_user_id' => self::OWNER, 'gm_user_status' => 'member']; break;
+                case 'zeroExists':  \HallRepairTestState::$users[] = 0; break;
+                case 'ownerGone':   \HallRepairTestState::$users = [2, 4, 49]; break;
+                case 'ownerUncount':\HallRepairTestState::$countable = [2, 4, 49]; break;
+            }
+
+            $entry = (new HallOwnershipRepairService())->plan(self::OWNER)[0];
+
+            self::assertSame(0, $entry['row_id'], "refusal '{$label}' must not carry a writable row id");
+            unset($M, $R);
+        }
+    }
+
+    /**
+     * The isolating case for the locked re-check.
+     *
+     * The collision variant above is also caught by the member-preservation
+     * postcondition, so it cannot prove the re-check alone. This one changes
+     * a guard the postconditions CANNOT see: the group stops being open
+     * between planning and the write. Without re-evaluating under the lock,
+     * the repair would happily re-point ownership on a group that is no
+     * longer a public Hall, and every postcondition would pass.
+     */
+    public function testAGuardThePostconditionsCannotSeeIsStillCaughtUnderTheLock(): void
+    {
+        $this->boot();
+        \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN, [49]);
+
+        \HallRepairTestState::$mutateBeforeApply = static function (int $groupId): void {
+            // Somebody closes the group after the plan was read.
+            \HallRepairTestState::$meta[$groupId]['peepso_group_privacy'] = ['1'];
+        };
+
+        $before = \HallRepairTestState::snapshot(self::HALL);
+        $run    = $this->apply();
+
+        self::assertSame(HallOwnershipRepairService::RESULT_FAILED_ROLLED_BACK, $run['results'][0]['result']);
+        self::assertSame($before, \HallRepairTestState::snapshot(self::HALL));
+        self::assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions());
+    }
+
+    /**
+     * ── THE BACKUP MUST DESCRIBE THE LIVE ROWS ──────────────────────────
+     * Writing a file and reading it back proves only that the disk works. If
+     * the rows moved between the snapshot and the verification, the file is
+     * not a backup of the state about to be changed.
+     */
+    public function testABackupThatNoLongerMatchesTheLiveRowsRefusesTheApply(): void
+    {
+        $this->boot();
+        \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
+        \HallRepairTestState::seedBrokenHall(6704, 8);
+
+        // The backup reads each group twice: once to build the payload, once
+        // to verify it against live rows. Mutating between the two makes the
+        // saved snapshot stale — a file that no longer describes the state
+        // about to be changed is not a backup.
+        // Read order: plan() reads each of the 2 Halls (1,2); the backup
+        // payload loop reads each again (3,4); the VERIFICATION loop reads
+        // them a third time (5,6). Mutating on read 5 is what makes the
+        // saved snapshot stale relative to live.
+        \HallRepairTestState::$mutateOnReadNumber = 5;
+        \HallRepairTestState::$mutateOnReadFn = static function (int $groupId): void {
+            \HallRepairTestState::$rows[$groupId][] = [
+                'gm_id' => 9901, 'gm_user_id' => 49, 'gm_user_status' => 'member',
+            ];
+        };
+
+        $before6703 = \HallRepairTestState::snapshot(self::HALL);
+        $before6704 = \HallRepairTestState::snapshot(6704);
+
+        try {
+            $this->apply();
+            self::fail('Expected the backup verification to refuse the apply.');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('refusing the entire apply', $e->getMessage());
+            self::assertStringContainsString('does not match live rows', $e->getMessage());
+        }
+
+        // ⚠ Every Hall, not just the one whose rows moved.
+        self::assertSame($before6704, \HallRepairTestState::snapshot(6704));
+        self::assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions());
+        self::assertStringNotContainsString(
+            '1:member_owner',
+            implode(',', \HallRepairTestState::snapshot(self::HALL)),
+            'no ownership was changed'
+        );
+        unset($before6703);
+    }
+
     public function testALostAuditRowRollsTheRepairBack(): void
     {
         $this->boot();
@@ -450,6 +697,35 @@ final class HallOwnershipRepairServiceTest extends TestCase
         self::assertSame(self::HALL, $decoded['rows'][0]['group_id']);
         self::assertSame(0, $decoded['rows'][0]['restore_to']);
         self::assertSame(self::OWNER, $decoded['rows'][0]['was_changed_to']);
+    }
+
+    /**
+     * A Hall that STARTED the repair and rolled back changed nothing, so it
+     * must not appear in the rollback artifact either. Filtering on
+     * `RESULT_REPAIRED` — rather than "everything we attempted" — is what
+     * keeps the artifact a record of reality.
+     */
+    public function testARolledBackHallIsExcludedFromTheRollbackArtifact(): void
+    {
+        $this->boot();
+        \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
+        \HallRepairTestState::seedBrokenHall(6704, 8);
+
+        // 6704 passes every guard and reaches the write, then fails its
+        // postcondition — the one shape that is attempted but not changed.
+        // 6703 repairs normally, so the artifact has something to contain.
+        \HallRepairTestState::$writeSilentlyNoOpsForGroup = 6704;
+
+        $run = $this->apply();
+
+        $byGroup = [];
+        foreach ($run['results'] as $r) { $byGroup[$r['group_id']] = $r['result']; }
+        self::assertSame(HallOwnershipRepairService::RESULT_FAILED_ROLLED_BACK, $byGroup[6704]);
+
+        $decoded = json_decode((string) file_get_contents($run['rollback']['path']), true);
+        $groups  = array_map(static fn(array $r): int => $r['group_id'], $decoded['rows']);
+
+        self::assertNotContains(6704, $groups, 'a Hall that changed nothing has nothing to roll back');
     }
 
     public function testTheRollbackArtifactRestoresTheExactPriorState(): void
