@@ -218,40 +218,103 @@ class SettingsPage
     }
 
     /**
-     * RPC / circuit-breaker state per chain. Phase 1a renders the
-     * existing CircuitBreaker state read-only; per-breaker reset
-     * controls land in Phase 1c.
+     * RPC / circuit-breaker state per chain. READ-ONLY, and read-only in the
+     * strong sense: rendering this page changes nothing.
+     *
+     * ── ⚠ WHY THIS DOES NOT CALL isOpen() ───────────────────────────────
+     * `isOpen()` HAS A SIDE EFFECT. In the HALF-OPEN window it atomically
+     * claims a cluster-wide advisory lock, and the caller that wins it is
+     * expected to go and make a request. This page used to call it ONCE PER
+     * CHAIN, so an administrator opening this tab could claim the single
+     * probe slot for EVERY chain at once — turning away the worker that had
+     * been waiting for the cooldown to elapse, and doing it invisibly,
+     * because looking at a status page is the last thing anyone suspects.
+     *
+     * {@see OnchainCircuitBreaker::phase()} exists precisely so observing is
+     * not probing. {@see OnchainCircuitBreaker::getAllStatus()} is its bulk
+     * form: it routes through the same shared phase calculation, takes ONE
+     * clock for the whole sweep so two chains cannot straddle the cooldown
+     * boundary mid-render, and acquires no lock.
+     *
+     * ⚠ ONE CALL FOR ALL CHAINS, not one per row — the previous shape made
+     * the damage proportional to the number of chains.
      */
     private static function render_rpc_breakers_tab(): void
     {
-        $chains = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive();
+        $chains   = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive();
+        $chainIds = array_map(static fn(object $c): int => (int) $c->id, $chains);
+
+        // Pure read. No lock, no probe, no write, no provider request.
+        $status = $chainIds === []
+            ? []
+            : \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::getAllStatus($chainIds);
+
+        $stateLabels = [
+            'closed'    => 'CLOSED',
+            'open'      => 'OPEN / cooldown',
+            // ⚠ HALF-OPEN IS NOT RECOVERY. The cooldown elapsing only means
+            // one cautious attempt is permitted; the provider has proved
+            // nothing until that attempt succeeds. Run 8 sat half-open for
+            // ~100 minutes without recovering.
+            'half-open' => 'HALF-OPEN',
+        ];
         ?>
         <h2>Per-Chain Circuit Breakers</h2>
-        <p>State of <code>BCC\Trust\Onchain\Support\OnchainCircuitBreaker</code> per chain. CLOSED = traffic flows; OPEN = blocked for the cooldown window; HALF-OPEN = one probe in flight.</p>
-        <table class="widefat striped" style="max-width:700px">
+        <p>State of <code>BCC\Trust\Onchain\Support\OnchainCircuitBreaker</code> per chain. CLOSED = traffic flows; OPEN = blocked for the cooldown window; HALF-OPEN = cooldown complete; one cautious probe may be attempted.</p>
+        <p><small>This page only observes. Viewing it never consumes a probe attempt and never changes breaker state.</small></p>
+        <table class="widefat striped" style="max-width:900px">
             <thead>
-                <tr><th>Chain</th><th>State</th><th>Failures</th><th>Cooldown ends</th></tr>
+                <tr><th>Chain</th><th>State</th><th>Failures</th><th>Cooldown ends</th><th>Last failure reason</th><th>Request type</th></tr>
             </thead>
             <tbody>
                 <?php if ($chains === []): ?>
-                    <tr><td colspan="4"><em>No active chains.</em></td></tr>
+                    <tr><td colspan="6"><em>No active chains.</em></td></tr>
                 <?php else: ?>
                     <?php foreach ($chains as $chain):
-                        $cid = (int) $chain->id;
-                        $isOpen = \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::isOpen($cid);
-                        $stateLabel = $isOpen ? 'OPEN / cooldown' : 'CLOSED';
+                        $cid  = (int) $chain->id;
+                        $row  = $status[$cid] ?? null;
+                        $ph   = is_array($row) ? (string) ($row['status'] ?? 'closed') : 'closed';
+                        $fail = is_array($row) ? (int) ($row['failures'] ?? 0) : 0;
+                        $open = is_array($row) ? (int) ($row['opened_at'] ?? 0) : 0;
+
+                        $stateLabel = $stateLabels[$ph] ?? 'CLOSED';
+
+                        // Only meaningful while a cooldown is actually running.
+                        $cooldownEnds = ($ph === 'open' && $open > 0)
+                            ? gmdate('Y-m-d H:i:s', $open + \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::COOLDOWN_SECONDS) . 'Z'
+                            : '—';
+
+                        // ⚠ LABELS, NEVER TOKENS — and "Not recorded" for a
+                        // legacy row or a domain-level charge, which is
+                        // neither a success nor a provider fault.
+                        $reasonLabel = \BCC\Trust\Onchain\ValueObjects\ProviderFailureKind::label(
+                            is_array($row) && isset($row['kind']) && is_string($row['kind']) ? $row['kind'] : null
+                        );
+                        $classLabel = \BCC\Trust\Onchain\ValueObjects\ProviderRequestClass::label(
+                            is_array($row) && isset($row['request_class']) && is_string($row['request_class'])
+                                ? $row['request_class']
+                                : null
+                        );
+
+                        // A chain that never failed has nothing to explain.
+                        if ($fail === 0) {
+                            $reasonLabel = '—';
+                            $classLabel  = '—';
+                        }
                     ?>
                     <tr>
                         <td><strong><?php echo esc_html((string) $chain->slug); ?></strong></td>
                         <td><?php echo esc_html($stateLabel); ?></td>
-                        <td>—</td>
-                        <td>—</td>
+                        <td><?php echo (int) $fail; ?></td>
+                        <td><?php echo esc_html($cooldownEnds); ?></td>
+                        <td><?php echo esc_html($reasonLabel); ?></td>
+                        <td><?php echo esc_html($classLabel); ?></td>
                     </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>
             </tbody>
         </table>
-        <p><small>Detailed failure counters + manual reset controls land with Phase 1c.</small></p>
+        <p><small>“Not recorded” means no bounded reason was stored — an older record, or a failure raised by domain logic rather than by a provider response. It is not a success, and it is not evidence the provider misbehaved. Manual reset controls land with Phase 1c.</small></p>
         <?php
     }
 

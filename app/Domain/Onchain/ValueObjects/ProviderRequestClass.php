@@ -63,6 +63,34 @@ final class ProviderRequestClass
         return in_array($class, self::all(), true);
     }
 
+    /** Shown when no bounded request class exists. */
+    public const NOT_RECORDED_LABEL = 'Not recorded';
+
+    /**
+     * What an ADMINISTRATOR is shown for a stored value.
+     *
+     * ⚠ Same contract as {@see ProviderFailureKind::label()}: the raw value
+     * is never rendered, and null or unrecognised means "not recorded" rather
+     * than a guess. Legacy records and domain-level charges both land here.
+     */
+    public static function label(?string $class): string
+    {
+        if ($class === null || !self::isValid($class)) {
+            return self::NOT_RECORDED_LABEL;
+        }
+
+        switch ($class) {
+            case self::SMART_QUERY:
+                return 'Smart contract query';
+            case self::STANDARD_REQUEST:
+                return 'Standard provider request';
+            case self::BATCH_REQUEST:
+                return 'Batch provider request';
+            default:
+                return self::NOT_RECORDED_LABEL;
+        }
+    }
+
     /**
      * PURE. Classify a single request from the retry OPTIONS alone.
      *

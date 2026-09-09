@@ -147,6 +147,43 @@ final class ProviderFailureKind
         }
     }
 
+    /**
+     * What an ADMINISTRATOR is shown for a stored token.
+     *
+     * ⚠ THE TOKEN IS NEVER RENDERED. `http_5xx` is an internal identifier;
+     * an operator surface with an established human-readable boundary — and
+     * the breaker table is one, it already prints "CLOSED" rather than a
+     * state constant — must show wording, not vocabulary.
+     *
+     * ⚠ NULL AND UNKNOWN BOTH MEAN "NOT RECORDED", NEVER "no failure" and
+     * never provider blame. A record written before PR 7.8 has no attribution
+     * at all, and the eight domain-level charge sites deliberately record
+     * none; presenting either as a healthy provider, or as a specific
+     * provider fault, would be a fabricated diagnosis. An unrecognised value
+     * takes the same path, so a corrupted store cannot echo its contents into
+     * an admin page.
+     */
+    public static function label(?string $kind): string
+    {
+        if ($kind === null || !self::isValid($kind)) {
+            return self::NOT_RECORDED_LABEL;
+        }
+
+        switch ($kind) {
+            case self::RATE_LIMITED:
+                return 'Provider rate limit';
+            case self::HTTP_5XX:
+                return 'Provider server error';
+            case self::TRANSPORT:
+                return 'Network connection failure';
+            default:
+                return self::NOT_RECORDED_LABEL;
+        }
+    }
+
+    /** Shown when no bounded attribution exists — not a failure, not a success. */
+    public const NOT_RECORDED_LABEL = 'Not recorded';
+
     /** The longest token, for any caller sizing a bounded store. */
     public static function maxLength(): int
     {

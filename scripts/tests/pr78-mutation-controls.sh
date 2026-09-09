@@ -117,18 +117,20 @@ BREAKER="app/Domain/Onchain/Support/OnchainCircuitBreaker.php"
 RETRY="app/Domain/Onchain/Support/ApiRetry.php"
 KIND="app/Domain/Onchain/ValueObjects/ProviderFailureKind.php"
 CLASSVO="app/Domain/Onchain/ValueObjects/ProviderRequestClass.php"
+SETTINGS="app/Domain/Onchain/Admin/SettingsPage.php"
 
 UNIT="BreakerAttributionTest|BreakerLifecycleTest|BreakerRetryAccountingTest|ApiRetryApplicationErrorTest"
+ADMIN="BreakerAdminObservationTest"
 
 # ⚠ THE TREE MUST BE CLEAN BEFORE THE FIRST MUTATION, or the snapshot itself
 # captures someone else's edit and "restored byte-identical" means nothing.
-if [ -n "$(git status --porcelain -- "$BREAKER" "$RETRY" "$KIND" "$CLASSVO")" ]; then
+if [ -n "$(git status --porcelain -- "$BREAKER" "$RETRY" "$KIND" "$CLASSVO" "$SETTINGS")" ]; then
   echo "FATAL: mutated files are already dirty. Commit or restore them first —"
   echo "       a snapshot of an edited tree cannot prove anything."
   exit 2
 fi
 
-snapshot_all "$BREAKER" "$RETRY" "$KIND" "$CLASSVO"
+snapshot_all "$BREAKER" "$RETRY" "$KIND" "$CLASSVO" "$SETTINGS"
 
 echo "PR 7.8 mutation controls"
 echo "────────────────────────────────────────────────────────"
@@ -215,10 +217,25 @@ control "shared token renamed, drifting from the enumeration vocabulary" "$KIND"
 control "getAllStatus recomputes its own phase again" "$BREAKER" "$UNIT" \
   "s = s.replace(\"            \$status = self::phaseHyphenated(self::phaseFor(\$state, \$now));\", \"            \$status = (\$now - \$openedAt) >= self::COOLDOWN_SECONDS ? 'half-open' : 'open';\")"
 
+# ── 17-19. STATUS PAGES MUST NOT CONSUME THE HALF-OPEN PROBE ────────────
+#
+# `isOpen()` claims the probe lock in the half-open window. A status page
+# that calls it steals the slot from the worker waiting for it — invisibly,
+# because nobody suspects a dashboard of causing an outage.
+control "admin page reverts to isOpen()" "$SETTINGS" "$ADMIN" \
+  "s = s.replace(\"        \$status = \$chainIds === []\n            ? []\n            : \\\\BCC\\\\Trust\\\\Onchain\\\\Support\\\\OnchainCircuitBreaker::getAllStatus(\$chainIds);\", \"        \$status = [];\n        foreach (\$chainIds as \$__c) { \\\\BCC\\\\Trust\\\\Onchain\\\\Support\\\\OnchainCircuitBreaker::isOpen(\$__c); }\")"
+
+control "admin page renders the raw token instead of a label" "$SETTINGS" "$ADMIN" \
+  "s = s.replace(\"                        \$reasonLabel = \\\\BCC\\\\Trust\\\\Onchain\\\\ValueObjects\\\\ProviderFailureKind::label(\", \"                        \$reasonLabel = (string) (\")"
+
+# The probe must admit exactly ONE claimant.
+control "half-open admits every claimant (probe lock bypassed)" "$BREAKER" "$ADMIN|$UNIT" \
+  "s = s.replace(\"        if (\\\\BCC\\\\Core\\\\DB\\\\AdvisoryLock::acquire(self::PROBE_LOCK_PREFIX . \$chainId, 0)) {\n            return false; // We own the probe → allow the request through.\n        }\", \"        if (true) {\n            return false;\n        }\")"
+
 echo "────────────────────────────────────────────────────────"
 echo "killed=$KILLED survived=$SURVIVED broken=$BROKEN skipped=$SKIPPED"
 
-DIRTY="$(git diff --name-only -- "$BREAKER" "$RETRY" "$KIND" "$CLASSVO")"
+DIRTY="$(git diff --name-only -- "$BREAKER" "$RETRY" "$KIND" "$CLASSVO" "$SETTINGS")"
 if [ -n "$DIRTY" ]; then
   echo "FATAL: files not restored to their pre-run bytes:"; echo "$DIRTY"; exit 2
 fi
