@@ -1153,6 +1153,15 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$watermarkAdvances = [];
                 self::$backfillRestarts  = [];
                 self::$failGetAll        = false;
+                // ⚠ THESE TWO LOGS LIVED IN THE WRONG CLASS. PR 7.6 put
+                // `$enumerationFailures = []` into AuditLogger::reset(),
+                // which does not declare it — a latent
+                // "access to undeclared static property" that only stayed
+                // quiet because the tests calling AuditLogger::reset() load
+                // a different stub file. It belongs here, beside the log it
+                // clears.
+                self::$enumerationFailures = [];
+                self::$enumerationClears   = [];
             }
 
             /** @return list<string> */
@@ -1268,6 +1277,29 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::ensureExists($chainId);
                 self::$enumerationFailures[]         = $code;
                 self::$rows[$chainId]->cw_last_error = $code;
+
+                return true;
+            }
+
+            /**
+             * PR 7.7 — every chain id whose telemetry was cleared, in order.
+             *
+             * ⚠ SEPARATE FROM THE COLUMN, for the mirror of the reason
+             * `$enumerationFailures` is: reading a NULL column cannot tell
+             * "cleared by a success" from "never written".
+             *
+             * @var list<int>
+             */
+            public static array $enumerationClears = [];
+
+            public static function clearCwEnumerationFailure(int $chainId): bool
+            {
+                if ($chainId <= 0) {
+                    return false;
+                }
+                self::ensureExists($chainId);
+                self::$enumerationClears[]           = $chainId;
+                self::$rows[$chainId]->cw_last_error = null;
 
                 return true;
             }
@@ -1875,7 +1907,6 @@ namespace BCC\Trust\Core\Security {
 
             public static function reset(): void
             {
-                self::$enumerationFailures = [];
                 self::$rows = [];
             }
 

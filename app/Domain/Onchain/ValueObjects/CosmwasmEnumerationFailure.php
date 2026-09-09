@@ -117,6 +117,65 @@ final class CosmwasmEnumerationFailure
     }
 
     /**
+     * PURE. Is this failed enumeration read the PROVIDER's fault?
+     *
+     * ── WHY A GATE EXISTS AT ALL ────────────────────────────────────────
+     * `fromResult()` will name ANY outcome, including outcomes that are
+     * not faults. Recording one of those would put a chain into a visibly
+     * degraded state for an answer the node was entitled to give, and an
+     * operator would go looking for a provider problem that is not there.
+     * So naming and recording are two decisions, and this is the second.
+     *
+     * ── WHAT IS DELIBERATELY EXCLUDED ───────────────────────────────────
+     *   - **A non-429 4xx.** {@see ApiRetry::request()} does not retry it
+     *     and does not charge the breaker, calling it "code bug, not
+     *     provider load" — the Stargaze unpadded-base64 regression burned
+     *     50 calls in seconds and blocked legitimate traffic. A 404 for a
+     *     code id that does not exist is an ANSWER.
+     *   - **A local guard that never left the process.** `listContracts-
+     *     ForCodeId(0)` returns `ok=false, http_code=0, not_found` without
+     *     making a request; blaming a provider we never contacted would be
+     *     a fabricated diagnosis.
+     *   - **A contract's own refusal.** `query_unsupported` is the smart-
+     *     query vocabulary and belongs to classification, never here.
+     *
+     * ── WHAT IS INCLUDED, AND WHICH OF THOSE CHARGE THE BREAKER ─────────
+     * The first three are exactly the cases {@see ApiRetry::request()}
+     * charges {@see OnchainCircuitBreaker::recordFailure()} for, so this
+     * predicate is a SUPERSET of the breaker rule and cannot miss a
+     * breaker-charging enumeration failure — the blind spot the
+     * 2026-09-09 Cosmos Hub canary found. `ContractListTelemetryTest`
+     * drives the real transport and pins that superset relation, so the
+     * two cannot drift apart the way four breaker readers once did.
+     *
+     *   | outcome                         | token               | charges |
+     *   |---------------------------------|---------------------|---------|
+     *   | HTTP 429                        | rate_limited        | yes     |
+     *   | HTTP >= 500                     | http_5xx            | yes     |
+     *   | wire failure (WP_Error)         | transport           | yes     |
+     *   | HTTP 200, unreadable body       | malformed_json      | no      |
+     *
+     * The last one is included and is not a contradiction: a 2xx carrying
+     * a body we cannot parse is a node answering garbage, which is neither
+     * a contract rejection nor supported 4xx behaviour. It does not charge
+     * the breaker (`ApiRetry` saw 2xx and recorded a SUCCESS), and leaving
+     * it unrecorded would reopen this same blind spot in a second shape:
+     * a scan that stalls while `cw_last_error` stays NULL.
+     */
+    public static function isProviderFault(string $errorKind, int $httpCode): bool
+    {
+        if ($httpCode === 429 || $httpCode >= 500) {
+            return true;
+        }
+
+        if ($httpCode === 0 && $errorKind === CosmwasmClassifier::KIND_TRANSPORT) {
+            return true;
+        }
+
+        return $httpCode === 200 && $errorKind === CosmwasmClassifier::KIND_MALFORMED;
+    }
+
+    /**
      * PURE. One short, operator-facing sentence for a bounded token.
      *
      * Never interpolates upstream text: the token is the whole input.
