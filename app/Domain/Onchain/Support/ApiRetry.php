@@ -17,6 +17,9 @@
 
 namespace BCC\Trust\Onchain\Support;
 
+use BCC\Trust\Onchain\ValueObjects\ProviderFailureKind;
+use BCC\Trust\Onchain\ValueObjects\ProviderRequestClass;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -108,6 +111,13 @@ final class ApiRetry
         $isApplicationError = isset($options['application_error']) && is_callable($options['application_error'])
             ? $options['application_error']
             : null;
+
+        // ⚠ DERIVED FROM OPTIONS, NEVER FROM THE URL. The only signal read is
+        // whether the caller opted into application-error handling, which
+        // already distinguishes a question addressed to a CONTRACT from one
+        // addressed to a NODE. No host, path, query or address is involved,
+        // so nothing identifying can reach durable state through it.
+        $requestClass = ProviderRequestClass::fromOptions($options);
 
         // Circuit breaker: check before attempting
         if ($chainId > 0 && OnchainCircuitBreaker::isOpen($chainId)) {
@@ -217,7 +227,11 @@ final class ApiRetry
                     ));
 
                     if ($chainId > 0) {
-                        OnchainCircuitBreaker::recordFailure($chainId);
+                        OnchainCircuitBreaker::recordFailure(
+                            $chainId,
+                            ProviderFailureKind::RATE_LIMITED,
+                            $requestClass
+                        );
                     }
 
                     // Do NOT sleep — return immediately and let the caller
@@ -248,7 +262,11 @@ final class ApiRetry
                     ));
 
                     if ($chainId > 0) {
-                        OnchainCircuitBreaker::recordFailure($chainId);
+                        OnchainCircuitBreaker::recordFailure(
+                            $chainId,
+                            ProviderFailureKind::HTTP_5XX,
+                            $requestClass
+                        );
                     }
 
                     // Retryable: exhaust attempts before returning the failure.
@@ -290,7 +308,11 @@ final class ApiRetry
             ));
 
             if ($chainId > 0) {
-                OnchainCircuitBreaker::recordFailure($chainId);
+                OnchainCircuitBreaker::recordFailure(
+                    $chainId,
+                    ProviderFailureKind::TRANSPORT,
+                    $requestClass
+                );
             }
 
             // Retryable: exhaust attempts before returning the failure.
@@ -464,7 +486,14 @@ final class ApiRetry
                         $label,
                         count($urls)
                     ));
-                    OnchainCircuitBreaker::recordFailure($chainId);
+                    // Every URL came back a WP_Error, so this is a wire
+                    // failure by construction — and it charges ONCE for the
+                    // whole batch, not once per URL.
+                    OnchainCircuitBreaker::recordFailure(
+                        $chainId,
+                        ProviderFailureKind::TRANSPORT,
+                        ProviderRequestClass::BATCH_REQUEST
+                    );
                 }
             }
 
