@@ -50,7 +50,12 @@ return [
         'bcc_onchain_daily_refresh'             => ['interval' => 'daily',                        'description' => 'onchain holdings refresh sweep'],
         'bcc_onchain_retry_bonus'               => ['interval' => 'hourly',                       'description' => 'onchain bonus-application retry'],
         'bcc_gated_group_provision'             => ['interval' => 'daily',                        'description' => 'holder-group + delegator-community provisioning (PeepSo write surface)'],
-        'bcc_hall_provision'                    => ['interval' => 'daily',                        'description' => 'one-open-Hall-per-chain provisioning (PeepSo write surface)'],
+        // ⚠ `bcc_hall_provision` was here until Halls became
+        // administrator-created. It swept the active chain registry daily and
+        // created a public open group for every chain that lacked one, so
+        // adding a chain published a public space within ~24h with nobody
+        // deciding it should exist. It is now in `cleanup_only` below; a Hall
+        // is created one named chain at a time from ChainsPage.
         'bcc_gated_group_reconcile_sweep'       => ['interval' => 'twicedaily',                   'description' => 'holder-group reconcile sweep'],
         'bcc_gated_group_revoke_sweep'          => ['interval' => 'twicedaily',                   'description' => 'holder-group + delegator-community revoke re-verification sweeps'],
         'bcc_nft_eth_indexer_tick'              => ['interval' => 'bcc_one_minute',               'description' => 'NFT EVM indexer per-chain tick'],
@@ -115,6 +120,21 @@ return [
         // a NULL `collection_name` — a condition the first successful scan
         // would have ended.
         'bcc_nft_enrichment_tick',
+        // Retired when Halls became administrator-created. Same shape of
+        // problem as the discovery hooks above: it enumerated every active
+        // chain on a timer and created a PUBLIC group per chain, so the act
+        // of registering a chain — not any decision to open a space —
+        // published one. Creation is now explicit and per-chain
+        // (ChainsPage::ACTION_HALL_CREATE), gated on manage_options, a
+        // per-chain nonce and POST.
+        //
+        // Listed here rather than merely deleted from `recurring` because
+        // installs that ran an earlier build still carry the event in
+        // `wp_options.cron`, and removing the registration does not remove
+        // the event. Deactivation clears it from here;
+        // includes/database/unschedule-hall-provision.php clears it on
+        // installs that are never deactivated.
+        'bcc_hall_provision',
         // Scale-hardening / legacy drains still worth clearing on long-lived installs.
         'bcc_pull_batch_sweep',
         // Retired hooks (kept for uninstall hygiene on installs that scheduled them pre-retirement).

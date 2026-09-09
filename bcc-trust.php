@@ -255,6 +255,11 @@ require_once BCC_TRUST_PATH . 'includes/database/cleanup-cw721-scan-options.php'
 // discovery is operator-initiated now; these events survive in
 // wp_options.cron on any install that already scheduled them.
 require_once BCC_TRUST_PATH . 'includes/database/unschedule-automatic-nft-discovery.php';
+// One-shot removal of the retired `bcc_hall_provision` schedule. Halls are
+// administrator-created now, one named chain at a time; the daily sweep that
+// created a public group for every chain has no handler any more, but the
+// event survives in wp_options.cron on any install that scheduled it.
+require_once BCC_TRUST_PATH . 'includes/database/unschedule-hall-provision.php';
 // PR 7.3 — adds bcc_discovery_runs.chunks_used to installs that already have
 // the table. Fresh installs get it from the CREATE TABLE; staging and
 // production both predate it, and a session ceiling cannot be enforced
@@ -721,18 +726,17 @@ add_action('bcc_gated_group_provision', function () {
     }
 });
 
-// Halls — daily provisioning sweep. Iterates the active chain registry
-// and creates one OPEN PeepSo group ("{Chain} Hall") per chain that
-// doesn't have one yet. Idempotent — re-running creates no duplicates.
-add_action('bcc_hall_provision', function () {
-    $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
-        ->hallProvisioningService()
-        ->provisionAll();
-
-    if ($result['created'] > 0 || !empty($result['errors'])) {
-        \BCC\Core\Log\Logger::info('[bcc-trust] Hall provisioning sweep', $result);
-    }
-});
+// Halls — NO AUTOMATIC PROVISIONING. `bcc_hall_provision` used to sweep the
+// active chain registry daily and create a public group for every chain that
+// lacked one, which meant adding a chain published a public space within ~24h
+// with nobody deciding it should exist. A Hall is an official,
+// administrator-created space: it is created one named chain at a time from
+// ChainsPage (`ACTION_HALL_CREATE`), behind manage_options, a per-chain nonce
+// and a POST check. There is no handler here, no activation schedule and no
+// self-heal registration; the hook is listed in `includes/cron-hooks.php`
+// under `cleanup_only`, and
+// includes/database/unschedule-hall-provision.php clears the event from
+// installs that already carry it.
 
 // Validator/delegator communities — provision on the platform-facing
 // claim event. `bcc_page_claimed` fires only after claim verification
@@ -1142,9 +1146,6 @@ add_action('plugins_loaded', static function (): void {
     // additive; mirrors the activation-side schedule exactly.
     if (!wp_next_scheduled('bcc_gated_group_provision')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_gated_group_provision');
-    }
-    if (!wp_next_scheduled('bcc_hall_provision')) {
-        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_hall_provision');
     }
     if (!wp_next_scheduled('bcc_gated_group_reconcile_sweep')) {
         wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
@@ -2266,9 +2267,6 @@ function bcc_trust_activate() {
     }
     if (!wp_next_scheduled('bcc_gated_group_provision')) {
         wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_gated_group_provision');
-    }
-    if (!wp_next_scheduled('bcc_hall_provision')) {
-        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'bcc_hall_provision');
     }
     if (!wp_next_scheduled('bcc_gated_group_reconcile_sweep')) {
         // Twicedaily × 20 users per tick = 40 users/day capacity, well

@@ -53,7 +53,6 @@ final class HolderGroupsPage
     private const NONCE_SWEEP      = 'bcc_holder_groups_run_sweep';
     private const NONCE_USER       = 'bcc_holder_groups_reconcile_user';
     private const NONCE_VALIDATOR  = 'bcc_validator_groups_provision';
-    private const NONCE_HALL       = 'bcc_hall_groups_provision';
 
     public static function register_page(): void
     {
@@ -72,7 +71,11 @@ final class HolderGroupsPage
         add_action('admin_post_bcc_holder_groups_run_sweep',       [self::class, 'handle_run_sweep']);
         add_action('admin_post_bcc_holder_groups_reconcile_user',  [self::class, 'handle_reconcile_user']);
         add_action('admin_post_bcc_validator_groups_provision',    [self::class, 'handle_provision_validator_groups']);
-        add_action('admin_post_bcc_hall_groups_provision',         [self::class, 'handle_provision_halls']);
+        // `admin_post_bcc_hall_groups_provision` is deliberately GONE. It ran
+        // provisionAll() across every active chain, and it had no POST gate —
+        // admin-post.php dispatches from $_REQUEST, so a GET carrying a valid
+        // nonce created Halls. Hall creation is now per-chain and explicit on
+        // ChainsPage::ACTION_HALL_CREATE.
     }
 
     // ────────────────────────────────────────────────────────────
@@ -84,6 +87,10 @@ final class HolderGroupsPage
         if (!current_user_can('manage_options')) {
             wp_die(esc_html__('Unauthorized.'));
         }
+        // admin-post.php dispatches admin_post_{action} from $_REQUEST, and
+        // check_admin_referer() reads it from there too — so without this a
+        // GET carrying a valid nonce reached the mutation.
+        AdminActionSupport::requirePost();
         check_admin_referer(self::NONCE_SWEEP);
 
         $userIds = get_users([
@@ -130,6 +137,10 @@ final class HolderGroupsPage
         if (!current_user_can('manage_options')) {
             wp_die(esc_html__('Unauthorized.'));
         }
+        // admin-post.php dispatches admin_post_{action} from $_REQUEST, and
+        // check_admin_referer() reads it from there too — so without this a
+        // GET carrying a valid nonce reached the mutation.
+        AdminActionSupport::requirePost();
         check_admin_referer(self::NONCE_USER);
 
         $userId = isset($_POST['user_id']) ? (int) $_POST['user_id'] : 0;
@@ -191,6 +202,10 @@ final class HolderGroupsPage
         if (!current_user_can('manage_options')) {
             wp_die(esc_html__('Unauthorized.'));
         }
+        // admin-post.php dispatches admin_post_{action} from $_REQUEST, and
+        // check_admin_referer() reads it from there too — so without this a
+        // GET carrying a valid nonce reached the mutation.
+        AdminActionSupport::requirePost();
         check_admin_referer(self::NONCE_VALIDATOR);
 
         $result = OnchainPlugin::instance()
@@ -207,44 +222,6 @@ final class HolderGroupsPage
         wp_safe_redirect(add_query_arg([
             'page'    => self::PAGE_SLUG,
             'op'      => 'validator',
-            'created' => (int) $result['created'],
-            'skipped' => (int) $result['skipped'],
-            'errors'  => count($result['errors']),
-        ], admin_url('admin.php')));
-        exit;
-    }
-
-    /**
-     * Run the Hall provisioning sweep now — the manual twin of the daily
-     * `bcc_hall_provision` tick.
-     *
-     * PeepSo write-surface posture: this introduces NO new
-     * PeepSoGroupWriter::join call site. Provisioning CREATES groups
-     * (PeepSoGroup constructor, which assigns the first admin as
-     * member_owner); it never lands a third party as a member. Membership
-     * is a member action gated by HallsService.
-     */
-    public static function handle_provision_halls(): void
-    {
-        if (!current_user_can('manage_options')) {
-            wp_die(esc_html__('Unauthorized.'));
-        }
-        check_admin_referer(self::NONCE_HALL);
-
-        $result = OnchainPlugin::instance()
-            ->hallProvisioningService()
-            ->provisionAll();
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] Hall provisioning (manual)', [
-            'created'  => $result['created'],
-            'skipped'  => $result['skipped'],
-            'errors'   => count($result['errors']),
-            'operator' => get_current_user_id(),
-        ]);
-
-        wp_safe_redirect(add_query_arg([
-            'page'    => self::PAGE_SLUG,
-            'op'      => 'hall',
             'created' => (int) $result['created'],
             'skipped' => (int) $result['skipped'],
             'errors'  => count($result['errors']),
@@ -468,31 +445,45 @@ final class HolderGroupsPage
         echo '</form>';
     }
 
+    /**
+     * Halls are READ-ONLY here.
+     *
+     * The bulk "Provision Halls now" control was removed when automatic Hall
+     * creation was retired: a Hall is an official, administrator-created
+     * space, and creating them en masse is the same implicit mass-creation
+     * the daily sweep was retired for. Creation is per-chain and explicit,
+     * on Chains ▸ Halls. This section only reports the count and points
+     * there — it writes nothing.
+     */
     private static function renderHalls(): void
     {
         $hallCount = count(
             \BCC\Trust\Onchain\Repositories\HallRepository::listAllHallIds()
         );
 
+        $hallsUrl = add_query_arg(
+            ['page' => ChainsPage::PAGE_SLUG, 'subtab' => 'halls'],
+            admin_url('admin.php')
+        );
+
         echo '<hr style="margin:32px 0;">';
         echo '<h2>Halls</h2>';
-        echo '<p style="color:#666;">One <strong>open</strong> union Hall per active chain '
-            . '(e.g. "Cosmos Hall"), owned by the first admin. Provisioning runs on the daily '
-            . '<code>bcc_hall_provision</code> tick; this button backfills any missing Halls now. '
-            . 'It never adds members — a Hall is joinable by anyone via the members-facing floor.</p>';
+        echo '<p style="color:#666;">An <strong>open</strong> Hall connected to exactly one '
+            . 'chain (e.g. "Cosmos Hall"). Halls are never created automatically — an '
+            . 'administrator creates each one explicitly, per chain. A Hall never adds '
+            . 'members: joining is a member action gated by HallsService.</p>';
 
         echo '<table class="widefat striped" style="max-width:560px;"><tbody>';
         printf(
-            '<tr><th style="width:280px;">Halls provisioned</th><td>%s</td></tr>',
+            '<tr><th style="width:280px;">Halls created</th><td>%s</td></tr>',
             esc_html(number_format($hallCount))
         );
         echo '</tbody></table>';
 
-        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:12px;">';
-        echo '<input type="hidden" name="action" value="bcc_hall_groups_provision">';
-        wp_nonce_field(self::NONCE_HALL);
-        echo '<button type="submit" class="button">Provision Halls now</button>';
-        echo '</form>';
+        printf(
+            '<p style="margin-top:12px;"><a class="button" href="%s">Manage Halls on Chains</a></p>',
+            esc_url($hallsUrl)
+        );
     }
 
     // ────────────────────────────────────────────────────────────
