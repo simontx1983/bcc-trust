@@ -587,6 +587,45 @@ final class ChainCheckpointRepository
         return is_int($updated) && $updated >= 0;
     }
 
+    /**
+     * Clear the enumeration-failure token after a CONFIRMED successful
+     * enumeration read, and change nothing else.
+     *
+     * ── WHY THIS IS NOT `recordCwCodeProgress()` ────────────────────────
+     * Those two clear `cw_last_error` as part of writing the CODE walk's
+     * cursor, watermark and state machine. The CONTRACT listing owns none
+     * of that — its progress lives on the family row
+     * ({@see CosmwasmCodeFamilyRepository::recordEnumerationProgress()}) —
+     * so it has no such write to clear the column from. Reusing one of
+     * theirs would let a successful contract page move the code walk's
+     * state machine, which is precisely the kind of silent coupling
+     * {@see recordCwEnumerationFailure()} was kept narrow to avoid.
+     *
+     * ⚠ THE COLUMN IS "LAST", AND LAST-WRITER-WINS IS THE DESIGN. Any
+     * successful enumeration read clears it, exactly as documented on
+     * {@see recordCwEnumerationFailure()}; a test that must distinguish
+     * "never recorded" from "recorded then superseded" asserts on the call
+     * log, not on the column.
+     */
+    public static function clearCwEnumerationFailure(int $chainId): bool
+    {
+        if ($chainId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+
+        $updated = $wpdb->update(
+            self::table(),
+            ['cw_last_error' => null],
+            ['chain_id' => $chainId],
+            ['%s'],
+            ['%d']
+        );
+
+        return is_int($updated) && $updated >= 0;
+    }
+
     public static function setCwDiscoveryState(int $chainId, string $state, ?string $error = null): bool
     {
         if ($chainId <= 0 || !in_array($state, self::cwStates(), true)) {

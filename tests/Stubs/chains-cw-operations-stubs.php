@@ -269,6 +269,22 @@ namespace BCC\Trust\Onchain\Repositories {
                 return true;
             }
 
+            /** @var list<int> */
+            public static array $enumerationClears = [];
+
+            /** PR 7.7 — the success half of the same one-column contract. */
+            public static function clearCwEnumerationFailure(int $chainId): bool
+            {
+                if ($chainId <= 0) {
+                    return false;
+                }
+                self::$enumerationClears[] = $chainId;
+                self::$rows[$chainId] ??= (object) ['chain_id' => $chainId];
+                self::$rows[$chainId]->cw_last_error = null;
+
+                return true;
+            }
+
             /** @param array<string, mixed> $overrides */
             public static function seed(int $chainId, string $state = self::CW_STATE_IDLE, array $overrides = []): void
             {

@@ -9,6 +9,7 @@ use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -329,7 +330,7 @@ final class CosmwasmDiscoveryService
         }
 
         $budget->spend();
-        $page = $fetcher->listContractsForCodeId($codeId, null, false);
+        $page = self::contractsPage($chainId, $fetcher, $codeId, null, false);
 
         if (!$page['ok']) {
             // The NODE failed, which says nothing about the family. Record
@@ -499,7 +500,7 @@ final class CosmwasmDiscoveryService
         }
 
         $budget->spend();
-        $page = $fetcher->listContractsForCodeId($codeId, $cursor, false);
+        $page = self::contractsPage($chainId, $fetcher, $codeId, $cursor, false);
 
         if (!$page['ok']) {
             if ($cursor !== null) {
@@ -617,7 +618,7 @@ final class CosmwasmDiscoveryService
             }
 
             $budget->spend();
-            $response = $fetcher->listContractsForCodeId($codeId, $pageKey, $pageKey === null);
+            $response = self::contractsPage($chainId, $fetcher, $codeId, $pageKey, $pageKey === null);
 
             if (!$response['ok']) {
                 return $result;
@@ -1039,6 +1040,85 @@ final class CosmwasmDiscoveryService
     public static function isUnsupportedChainError(string $errorKind, int $httpCode): bool
     {
         return $httpCode === 501 || $errorKind === 'not_implemented';
+    }
+
+    /**
+     * THE CONTRACT-LISTING SEAM — every read of
+     * `/cosmwasm/wasm/v1/code/{id}/contracts` goes through here.
+     *
+     * ── WHY A SEAM AND NOT THREE CALL SITES ─────────────────────────────
+     * There are three: the classification sample, the forward walk, and
+     * the reverse tail. They charge the SAME chain-wide breaker through
+     * the same transport, so telemetry attached to one of them and not the
+     * others would leave a gap shaped exactly like the one this closes —
+     * and the next reader would have to prove, again, which of three
+     * places had been instrumented. One seam is one answer.
+     *
+     * ── WHAT THE 2026-09-09 STAGING CANARY MEASURED ─────────────────────
+     * Chain 8's breaker opened after EIGHT failures in a ten-second window
+     * (two requests × four charges, `ApiRetry::DEFAULT_MAX_RETRIES = 3`
+     * against a threshold of five) and `cw_last_error` was NULL, because
+     * PR 7.6 instrumented the two CODE-listing paths and this CONTRACT-
+     * listing path had no hook at all. The failing requests had to be
+     * identified by elimination and their HTTP status reported as unknown.
+     *
+     * ⚠ TELEMETRY ONLY — THIS ADDS NO BREAKER CHARGE. `ApiRetry::request()`
+     * already calls `recordFailure()` from inside the transport for every
+     * qualifying outcome. Adding another charge here would make one failing
+     * contract page cost more than it costs today, silently retuning a
+     * threshold shared by discovery, enrichment, chain refresh and the EVM
+     * indexer. Retry accounting is measured, not adjusted, by this change.
+     *
+     * ⚠ 501 IS **NOT** EXCLUDED HERE, THOUGH IT IS ON THE CODE PATH. There,
+     * {@see isUnsupportedChainError()} turns "this chain has no wasm module"
+     * into the durable `CW_STATE_UNSUPPORTED` and the token would fight that
+     * state machine. Here there is no state machine to fight — and a 501 is
+     * a 5xx, so `ApiRetry` charges the breaker four times for it. Excluding
+     * it would leave a breaker-charging failure with `cw_last_error` NULL,
+     * which is precisely the defect this seam exists to remove. The case is
+     * near-unreachable anyway (a family only exists because the code listing
+     * already succeeded on the same wasm module), so recording it costs
+     * nothing and guarantees the invariant has no exception:
+     * **every outcome that charges the breaker leaves a token.**
+     *
+     * @return array{contracts: list<string>, next_key: string|null, ok: bool, http_code: int, error_kind: string, message_excerpt: string}
+     */
+    private static function contractsPage(
+        int $chainId,
+        CosmosFetcher $fetcher,
+        int $codeId,
+        ?string $startKey,
+        bool $reverse
+    ): array {
+        $page = $fetcher->listContractsForCodeId($codeId, $startKey, $reverse);
+
+        $errorKind = (string) $page['error_kind'];
+        $httpCode  = (int) $page['http_code'];
+
+        if ($page['ok']) {
+            // A CONFIRMED successful enumeration read. The column means
+            // "the last enumeration outcome", so a success retires the
+            // previous token rather than leaving a chain permanently
+            // flagged by a fault it has since recovered from.
+            ChainCheckpointRepository::clearCwEnumerationFailure($chainId);
+
+            return $page;
+        }
+
+        if (!CosmwasmEnumerationFailure::isProviderFault($errorKind, $httpCode)) {
+            return $page;
+        }
+
+        // ⚠ ONLY THE TWO STRUCTURED FACTS CROSS THIS LINE. `message_excerpt`
+        // is sanitized, bounded, and STILL upstream prose chosen by a remote
+        // party; it is deliberately not passed, so no provider body, URL,
+        // header or exception text can reach the column even by accident.
+        ChainCheckpointRepository::recordCwEnumerationFailure(
+            $chainId,
+            CosmwasmEnumerationFailure::fromResult($errorKind, $httpCode)
+        );
+
+        return $page;
     }
 
     /**

@@ -301,4 +301,71 @@ final class MixedEvidencePersistenceIntegrationTest extends TestCase
             ChainCheckpointRepository::recordCwEnumerationFailure(-5, CosmwasmEnumerationFailure::TRANSPORT)
         );
     }
+
+    // ── PR 7.7: the contract-listing half of the same one-column contract ─
+
+    /**
+     * The CONTRACT listing needs its own clear, because it has no state
+     * machine to piggyback on.
+     *
+     * Before PR 7.7 the only writes that cleared `cw_last_error` belonged to
+     * the CODE walk ({@see ChainCheckpointRepository::recordCwCodeProgress()}
+     * and {@see ChainCheckpointRepository::advanceCwCodeWatermark()}), both
+     * of which also move a cursor, a watermark and a state. A successful
+     * contract page owns none of those, so a chain that had recovered stayed
+     * visibly degraded until some unrelated code read happened to run.
+     */
+    public function testAClearRetiresTheTokenAndTouchesNothingElse(): void
+    {
+        ChainCheckpointRepository::ensureExists(self::CHAIN);
+        ChainCheckpointRepository::recordCwCodeProgress(self::CHAIN, 'opaque-cursor', 4242, false);
+        ChainCheckpointRepository::recordCwEnumerationFailure(self::CHAIN, CosmwasmEnumerationFailure::HTTP_5XX);
+
+        $before = ChainCheckpointRepository::get(self::CHAIN);
+        self::assertNotNull($before);
+        self::assertSame(
+            CosmwasmEnumerationFailure::HTTP_5XX,
+            (string) $before->cw_last_error,
+            'anti-vacuity: the column must start dirty'
+        );
+
+        self::assertTrue(ChainCheckpointRepository::clearCwEnumerationFailure(self::CHAIN));
+
+        $after = ChainCheckpointRepository::get(self::CHAIN);
+        self::assertNotNull($after);
+        self::assertNull($after->cw_last_error);
+
+        // ⚠ ONE COLUMN. A clear that also nudged the state machine could let
+        // a transport blip move a chain between `backfilling` and
+        // `backfilled` — the exact coupling `recordCwEnumerationFailure()`
+        // was kept narrow to prevent.
+        self::assertSame((string) $before->cw_discovery_state, (string) $after->cw_discovery_state);
+        self::assertSame((string) $before->cw_code_cursor, (string) $after->cw_code_cursor);
+        self::assertSame((int) $before->cw_max_code_id, (int) $after->cw_max_code_id);
+        self::assertSame(
+            (string) $before->cw_last_discovery_at,
+            (string) $after->cw_last_discovery_at,
+            'a clear is not a discovery event and must not restamp the clock'
+        );
+    }
+
+    /** Clearing an already-clean row is a no-op, not a failure. */
+    public function testClearingATwiceCleanRowIsIdempotent(): void
+    {
+        ChainCheckpointRepository::ensureExists(self::CHAIN);
+
+        self::assertTrue(ChainCheckpointRepository::clearCwEnumerationFailure(self::CHAIN));
+        self::assertTrue(ChainCheckpointRepository::clearCwEnumerationFailure(self::CHAIN));
+
+        $row = ChainCheckpointRepository::get(self::CHAIN);
+        self::assertNotNull($row);
+        self::assertNull($row->cw_last_error);
+    }
+
+    /** The clear refuses an invalid chain id exactly as the write does. */
+    public function testAnInvalidChainIdIsRefusedByTheClearToo(): void
+    {
+        self::assertFalse(ChainCheckpointRepository::clearCwEnumerationFailure(0));
+        self::assertFalse(ChainCheckpointRepository::clearCwEnumerationFailure(-5));
+    }
 }
