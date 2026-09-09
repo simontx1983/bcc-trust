@@ -660,8 +660,12 @@ namespace BCC\Trust\Onchain\Support {
                 self::$successChains[] = $chainId;
             }
 
-            public static function recordFailure(int $chainId): void
-            {
+            /** PR 7.8 — accepts the attribution ApiRetry now supplies. */
+            public static function recordFailure(
+                int $chainId,
+                ?string $kind = null,
+                ?string $requestClass = null
+            ): void {
                 self::$failureChains[] = $chainId;
             }
         }

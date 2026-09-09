@@ -226,6 +226,7 @@ namespace BCC\Trust\Onchain\Support {
                 self::$successChains = [];
                 self::$failureChains = [];
                 self::$probeReleases = [];
+                self::$failures      = [];
             }
 
             public static function isOpen(int $chainId): bool
@@ -238,9 +239,30 @@ namespace BCC\Trust\Onchain\Support {
                 self::$successChains[] = $chainId;
             }
 
-            public static function recordFailure(int $chainId): void
-            {
+            /**
+             * PR 7.8 — records the ATTRIBUTION it was handed, not just the id.
+             *
+             * ⚠ A FAKE OWES A SHADOWED CLASS THE WHOLE SURFACE ITS
+             * COLLABORATORS USE. `ApiRetry` now passes a kind and a request
+             * class; a two-argument-short fake would fatal on an
+             * ArgumentCountError that the caller catches as a generic
+             * failure, turning every outcome in this suite into 'error'.
+             *
+             * @var list<array{chain_id: int, kind: string|null, request_class: string|null}>
+             */
+            public static array $failures = [];
+
+            public static function recordFailure(
+                int $chainId,
+                ?string $kind = null,
+                ?string $requestClass = null
+            ): void {
                 self::$failureChains[] = $chainId;
+                self::$failures[]      = [
+                    'chain_id'      => $chainId,
+                    'kind'          => $kind,
+                    'request_class' => $requestClass,
+                ];
             }
 
             public static function releaseProbe(int $chainId): void

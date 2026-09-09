@@ -32,6 +32,8 @@
 namespace BCC\Trust\Onchain\Support;
 
 use BCC\Trust\Onchain\Repositories\OnchainCircuitBreakerRepository;
+use BCC\Trust\Onchain\ValueObjects\ProviderFailureKind;
+use BCC\Trust\Onchain\ValueObjects\ProviderRequestClass;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -214,10 +216,18 @@ final class OnchainCircuitBreaker
         $state = self::getState($chainId);
 
         // Only write if there was a non-zero failure count to clear
+        //
+        // ⚠ THE ATTRIBUTION IS CLEARED WITH THE COUNTER AND THE OPEN STATE,
+        // in the same write. Leaving `kind` behind would let a recovered
+        // chain keep displaying the reason it was last broken — the same
+        // class of lie as a stale counter outliving its window, which is what
+        // stranded chain 18 at 3022 failures beside an expired transient.
         if ($state !== null && (int) ($state['failures'] ?? 0) > 0) {
             self::setState($chainId, [
-                'failures'  => 0,
-                'opened_at' => 0,
+                'failures'      => 0,
+                'opened_at'     => 0,
+                'kind'          => null,
+                'request_class' => null,
             ]);
         }
 
@@ -302,9 +312,42 @@ final class OnchainCircuitBreaker
     /**
      * Record a failed API call for a chain.
      * Increments failure counter. If threshold reached, records opened_at.
+     *
+     * ── ⚠ THE ATTRIBUTION PARAMETERS ARE OPTIONAL, AND THAT IS THE POINT ──
+     * Twelve executable call sites charge this breaker. FOUR are inside
+     * {@see ApiRetry}, where a wire outcome exists and can be named. The
+     * other EIGHT are domain judgements — an empty validator index, a caught
+     * exception, `eth_blockNumber` returning 0 — which have no HTTP status
+     * and no transport error to name.
+     *
+     * Forcing one of the three tokens onto those eight would be the
+     * fabricated diagnosis this whole effort exists to remove, so they pass
+     * nothing and the attribution stays absent. `null` is the honest answer
+     * to "which wire outcome was this?" when there was no wire outcome.
+     *
+     * ⚠ SOURCE-COMPATIBLE BY CONSTRUCTION: every existing caller compiles and
+     * behaves exactly as before, and a record written without attribution is
+     * indistinguishable from one written by the previous version.
+     *
+     * @param string|null $kind         a {@see ProviderFailureKind} token, or null
+     * @param string|null $requestClass a {@see ProviderRequestClass} value, or null
      */
-    public static function recordFailure(int $chainId): void
-    {
+    public static function recordFailure(
+        int $chainId,
+        ?string $kind = null,
+        ?string $requestClass = null
+    ): void {
+        // ⚠ VALIDATED, NOT TRUSTED — the same discipline
+        // ChainCheckpointRepository::recordCwEnumerationFailure() uses. No
+        // caller, present or future, can route a provider sentence, an
+        // exception message or a URL into durable state through here.
+        if ($kind !== null && !ProviderFailureKind::isValid($kind)) {
+            $kind = null;
+        }
+        if ($requestClass !== null && !ProviderRequestClass::isValid($requestClass)) {
+            $requestClass = null;
+        }
+
         // Atomic DB-backed counter via INSERT … ON DUPLICATE KEY UPDATE
         // — closes the get→compute→set lost-update race. The earlier
         // implementation used wp_cache_incr which is non-atomic on
@@ -396,17 +439,46 @@ final class OnchainCircuitBreaker
             }
         }
 
+        // ⚠ THE ATTRIBUTION DESCRIBES THE MOST RECENT CHARGE, and is carried
+        // forward when this charge could not name itself. Without the
+        // carry-forward, one unattributed domain charge arriving after four
+        // named transport charges would erase the only explanation the
+        // operator had for a breaker that is still open for the same reason.
+        $priorKind  = $priorState['kind'] ?? null;
+        $priorClass = $priorState['request_class'] ?? null;
+
         self::setState($chainId, [
-            'failures'  => $failures,
-            'opened_at' => $openedAt,
+            'failures'      => $failures,
+            'opened_at'     => $openedAt,
+            'kind'          => $kind ?? $priorKind,
+            'request_class' => $requestClass ?? $priorClass,
         ]);
+    }
+
+    /**
+     * Why the breaker last charged, as bounded tokens — never prose.
+     *
+     * Returns nulls for a chain with no state, and for any record written
+     * before attribution existed. An operator surface must treat a null as
+     * "not recorded", never as "no failure".
+     *
+     * @return array{kind: string|null, request_class: string|null}
+     */
+    public static function attribution(int $chainId): array
+    {
+        $state = self::getState($chainId);
+
+        return [
+            'kind'          => $state['kind'] ?? null,
+            'request_class' => $state['request_class'] ?? null,
+        ];
     }
 
     /**
      * Get circuit breaker status for all active chains (admin dashboard).
      *
      * @param int[] $chainIds
-     * @return array<int, array{failures: int, opened_at: int, status: string}>
+     * @return array<int, array{failures: int, opened_at: int, status: string, kind: string|null, request_class: string|null}>
      */
     public static function getAllStatus(array $chainIds): array
     {
@@ -429,10 +501,16 @@ final class OnchainCircuitBreaker
             // was refusing every request.
             $status = self::phaseHyphenated(self::phaseFor($state, $now));
 
+            // ⚠ BOUNDED TOKENS ONLY, and null when nothing was recorded — a
+            // pre-attribution record and a domain-level charge both read as
+            // null here, which a surface must render as "not recorded"
+            // rather than as "no failure".
             $result[(int) $id] = [
-                'failures'  => $failures,
-                'opened_at' => $openedAt,
-                'status'    => $status,
+                'failures'      => $failures,
+                'opened_at'     => $openedAt,
+                'status'        => $status,
+                'kind'          => $state['kind'] ?? null,
+                'request_class' => $state['request_class'] ?? null,
             ];
         }
         return $result;
@@ -468,9 +546,29 @@ final class OnchainCircuitBreaker
             return null;
         }
 
+        // ⚠ THE TWO LIFECYCLE FIELDS ARE STILL REQUIRED; THE ATTRIBUTION IS
+        // NOT. A record written before attribution existed has neither key,
+        // reads back as null for both, and drives exactly the behaviour it
+        // drove before — the phase calculation above never consults them.
+        //
+        // ⚠ RE-VALIDATED ON THE WAY OUT, not merely on the way in. The state
+        // lives in an object cache and a transient, both of which other code
+        // can write; a value that is not a member of the closed vocabulary is
+        // dropped rather than returned to a renderer.
+        $kind = isset($value['kind']) && is_string($value['kind'])
+            && ProviderFailureKind::isValid($value['kind'])
+                ? $value['kind']
+                : null;
+        $requestClass = isset($value['request_class']) && is_string($value['request_class'])
+            && ProviderRequestClass::isValid($value['request_class'])
+                ? $value['request_class']
+                : null;
+
         return [
-            'failures'  => (int) $value['failures'],
-            'opened_at' => (int) $value['opened_at'],
+            'failures'      => (int) $value['failures'],
+            'opened_at'     => (int) $value['opened_at'],
+            'kind'          => $kind,
+            'request_class' => $requestClass,
         ];
     }
 
