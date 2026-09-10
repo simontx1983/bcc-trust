@@ -469,10 +469,23 @@ final class HallOwnershipRepairServiceTest extends TestCase
     /**
      * ── PROVING FOUR EQUIVALENT MUTANTS, RATHER THAN CLAIMING THEM ──────
      *
-     * Four checks survive deletion under mutation testing, and it is worth
-     * being exact about why: they are DEFENCE IN DEPTH, not dead code. Each
-     * is backstopped by a later check that catches the same fault, so
-     * removing one changes the error message but not the outcome.
+     * Mutation result: 33 controls, 29 killed, 4 EQUIVALENT. The four are
+     * classified out of the kill denominator rather than counted as killed
+     * — 29/29 actionable controls die.
+     *
+     * ⚠ An earlier pass reported "26 killed, 7 explained". That was wrong
+     * twice over, and the correction is worth recording. Three of those
+     * seven — the two `repointOwnerRow()` WHERE predicates and the PeepSo
+     * member-count JOIN — were never SKIPPED-but-fine, they were simply
+     * never RUN: the runner filtered the unit suite, where this repository
+     * is faked, so the only tests that can discriminate them (the real-MySQL
+     * integration suite) never executed. Run against unit AND integration
+     * they all die. A control that was not executed is a skipped control,
+     * not an explained one.
+     *
+     * The remaining four are DEFENCE IN DEPTH, not dead code. Each is
+     * backstopped by a later check that catches the same fault, so removing
+     * one changes the error message but not the outcome.
      *
      *   1. the locked re-check throw — every refusal path returns
      *      `row_id => 0`, and the guarded UPDATE rejects a non-positive row
