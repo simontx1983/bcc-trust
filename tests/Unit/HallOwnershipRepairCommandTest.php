@@ -163,99 +163,21 @@ final class HallOwnershipRepairCommandTest extends TestCase
 
     // ── The confirmation token ───────────────────────────────────────────
 
-    /** @return list<array<string, mixed>> */
-    private static function planOf(array ...$rows): array
-    {
-        $out = [];
-        foreach ($rows as $r) {
-            $out[] = [
-                'group_id' => $r[0],
-                'chain_id' => $r[1],
-                'row_id'   => $r[2],
-                'result'   => $r[3] ?? HallOwnershipRepairService::RESULT_WOULD_REPAIR,
-                'detail'   => '',
-            ];
-        }
-        return $out;
-    }
-
-    public function testTheTokenIsStableForTheSameEnvironmentAndPlan(): void
-    {
-        $plan = self::planOf([6703, 10, 9001], [6704, 8, 9002]);
-
-        self::assertSame(
-            HallOwnershipRepairCommand::confirmationToken('production', $plan),
-            HallOwnershipRepairCommand::confirmationToken('production', $plan)
-        );
-    }
-
     /**
-     * ⚠ THE PROPERTY THAT MATTERS: a token read off staging's dry run must
-     * not apply on production.
+     * ⚠ MOVED, DELIBERATELY.
+     *
+     * These cases used to build plan entries with a local `planOf()` helper.
+     * That proved `confirmationToken()` hashes its argument well; it proved
+     * nothing about the argument the planner actually supplies. When
+     * `planOne()` returned `row_id => 0` for every Hall, the
+     * "token bound to planned rows" case still passed — and a live staging
+     * dry run printed `row 0` against all 21 Halls with a token that bound
+     * only to (group, chain).
+     *
+     * The token is now exercised end-to-end, real planner into real token
+     * generator, in {@see HallOwnershipRepairPlanTokenTest}. Nothing here
+     * constructs a plan by hand any more.
      */
-    public function testTheTokenIsBoundToTheEnvironment(): void
-    {
-        $plan = self::planOf([6703, 10, 9001]);
-
-        $staging    = HallOwnershipRepairCommand::confirmationToken('staging', $plan);
-        $production = HallOwnershipRepairCommand::confirmationToken('production', $plan);
-
-        self::assertNotSame($staging, $production);
-        self::assertStringContainsString('STAGING', $staging);
-        self::assertStringContainsString('PRODUCTION', $production);
-
-        // ⚠ THE DIGEST ITSELF must differ, not merely the human-readable
-        // prefix. Comparing whole strings would pass even if the environment
-        // were dropped from the hash — and then a token whose prefix an
-        // operator hand-edited would be accepted.
-        self::assertNotSame(
-            substr($staging, strrpos($staging, '-') + 1),
-            substr($production, strrpos($production, '-') + 1),
-            'the environment must feed the hash, not just the label'
-        );
-    }
-
-    /**
-     * And a token minted before the data moved must stop matching, so an
-     * operator cannot apply a plan they never read.
-     */
-    public function testTheTokenIsBoundToThePlannedRows(): void
-    {
-        $a = HallOwnershipRepairCommand::confirmationToken('staging', self::planOf([6703, 10, 9001]));
-        $b = HallOwnershipRepairCommand::confirmationToken('staging', self::planOf([6703, 10, 9001], [6704, 8, 9002]));
-        $c = HallOwnershipRepairCommand::confirmationToken('staging', self::planOf([6703, 10, 9999]));
-
-        self::assertNotSame($a, $b, 'an extra Hall changes the token');
-        self::assertNotSame($a, $c, 'a different row id changes the token');
-    }
-
-    /**
-     * Only rows that would actually be repaired feed the token — otherwise
-     * an unrelated refusal elsewhere would invalidate a correct token and
-     * train operators to re-read tokens they should have questioned.
-     */
-    public function testRefusedRowsDoNotContributeToTheToken(): void
-    {
-        $clean = self::planOf([6703, 10, 9001]);
-        $noisy = self::planOf(
-            [6703, 10, 9001],
-            [6704, 8, 0, HallOwnershipRepairService::RESULT_REFUSED_PRECONDITION],
-            [6705, 9, 0, HallOwnershipRepairService::RESULT_ALREADY_CORRECT],
-        );
-
-        self::assertSame(
-            HallOwnershipRepairCommand::confirmationToken('staging', $clean),
-            HallOwnershipRepairCommand::confirmationToken('staging', $noisy)
-        );
-    }
-
-    public function testAnEmptyPlanStillMintsAnEnvironmentBoundToken(): void
-    {
-        $token = HallOwnershipRepairCommand::confirmationToken('staging', []);
-
-        self::assertStringStartsWith('HALL-OWNER-STAGING-', $token);
-        self::assertNotSame($token, HallOwnershipRepairCommand::confirmationToken('production', []));
-    }
 
     // ── The command is the ONLY entry point ──────────────────────────────
 
@@ -294,6 +216,47 @@ final class HallOwnershipRepairCommandTest extends TestCase
             ],
             $callers,
             'only the CLI command may reach the repair service'
+        );
+    }
+
+    /**
+     * ⚠ A STRUCTURAL ASSERTION, AND IT SAYS SO.
+     *
+     * `repair()` terminates through `WP_CLI::halt()`, so it is not
+     * unit-exercisable without a WP-CLI harness — the same limitation the
+     * sibling `SolanaGateIdentityRepairCommand` test lives with. That leaves
+     * one behaviour unguarded that matters: the dry run must obtain its plan
+     * from `run(false, …)`, which applies the integrity gate, rather than
+     * from `plan()`, which does not.
+     *
+     * A source-text assertion cannot see a behavioural bypass, and this one
+     * is not pretending otherwise. It pins the single call that carries the
+     * gate, so reverting it fails here instead of silently shipping a dry
+     * run that tokenises an incoherent plan.
+     */
+    public function testTheDryRunObtainsItsPlanThroughTheIntegrityGatedPath(): void
+    {
+        $src = (string) file_get_contents(
+            dirname(__DIR__, 2) . '/app/Domain/Onchain/CLI/HallOwnershipRepairCommand.php'
+        );
+
+        $code = '';
+        foreach (token_get_all($src) as $t) {
+            if (is_array($t) && in_array($t[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                continue;
+            }
+            $code .= is_array($t) ? $t[1] : $t;
+        }
+
+        self::assertStringContainsString(
+            '$service->run(false,',
+            $code,
+            'the dry run must go through run(), which asserts plan integrity'
+        );
+        self::assertSame(
+            0,
+            preg_match_all('/\$service->plan\(/', $code),
+            'the command must not call plan() directly — that path skips the integrity gate'
         );
     }
 

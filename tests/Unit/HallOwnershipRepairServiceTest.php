@@ -61,6 +61,41 @@ final class HallOwnershipRepairServiceTest extends TestCase
         parent::tearDown();
     }
 
+    /**
+     * The single place a guard mutation is expressed.
+     *
+     * Two tests drive the same provider, and when each kept its own copy of
+     * this switch they could — and did — drift: one copy silently failed to
+     * apply a mutation and the assertion still passed, because the value it
+     * checked was constant. One implementation, both callers.
+     */
+    private static function applyGuardMutation(string $mutation): void
+    {
+        $g = self::HALL;
+
+        switch ($mutation) {
+            case 'kind':        \HallRepairTestState::$meta[$g]['_bcc_group_kind'] = ['holders']; break;
+            case 'kindCase':    \HallRepairTestState::$meta[$g]['_bcc_group_kind'] = ['Hall']; break;
+            case 'kindDupe':    \HallRepairTestState::$meta[$g]['_bcc_group_kind'] = ['hall', 'hall']; break;
+            case 'collection':  \HallRepairTestState::$meta[$g]['_bcc_gate_collection_id'] = ['12']; break;
+            case 'validator':   \HallRepairTestState::$meta[$g]['_bcc_gate_validator_id'] = ['77']; break;
+            case 'noChain':     unset(\HallRepairTestState::$meta[$g]['_bcc_chain_tag']); break;
+            case 'chainDupe':   \HallRepairTestState::$meta[$g]['_bcc_chain_tag'] = ['10', '11']; break;
+            case 'badChain':    \HallRepairTestState::$meta[$g]['_bcc_chain_tag'] = ['nope']; break;
+            case 'orphanChain': \HallRepairTestState::$chains = []; break;
+            case 'closed':      \HallRepairTestState::$meta[$g]['peepso_group_privacy'] = ['1']; break;
+            case 'noPrivacy':   unset(\HallRepairTestState::$meta[$g]['peepso_group_privacy']); break;
+            case 'noOwner':     \HallRepairTestState::$rows[$g] = []; break;
+            case 'twoOwners':   \HallRepairTestState::$rows[$g][] = ['gm_id' => 9500, 'gm_user_id' => 2, 'gm_user_status' => 'member_owner']; break;
+            case 'realOwner':   \HallRepairTestState::$rows[$g] = [['gm_id' => 9501, 'gm_user_id' => 2, 'gm_user_status' => 'member_owner']]; break;
+            case 'collision':   \HallRepairTestState::$rows[$g][] = ['gm_id' => 9502, 'gm_user_id' => self::OWNER, 'gm_user_status' => 'member']; break;
+            case 'zeroExists':  \HallRepairTestState::$users[] = 0; break;
+            case 'ownerGone':   \HallRepairTestState::$users = [2, 4, 49]; break;
+            case 'ownerUncount':\HallRepairTestState::$countable = [2, 4, 49]; break;
+            default:            throw new \LogicException('unknown mutation: ' . $mutation);
+        }
+    }
+
     /** @return array<string, mixed> the single plan entry */
     private function planOne(): array
     {
@@ -257,30 +292,7 @@ final class HallOwnershipRepairServiceTest extends TestCase
     {
         $this->boot();
         \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
-
-        $M = &\HallRepairTestState::$meta[self::HALL];
-        $R = &\HallRepairTestState::$rows[self::HALL];
-
-        switch ($mutation) {
-            case 'kind':        $M['_bcc_group_kind'] = ['holders']; break;
-            case 'kindCase':    $M['_bcc_group_kind'] = ['Hall']; break;
-            case 'kindDupe':    $M['_bcc_group_kind'] = ['hall', 'hall']; break;
-            case 'collection':  $M['_bcc_gate_collection_id'] = ['12']; break;
-            case 'validator':   $M['_bcc_gate_validator_id'] = ['77']; break;
-            case 'noChain':     unset($M['_bcc_chain_tag']); break;
-            case 'chainDupe':   $M['_bcc_chain_tag'] = ['10', '11']; break;
-            case 'badChain':    $M['_bcc_chain_tag'] = ['nope']; break;
-            case 'orphanChain': \HallRepairTestState::$chains = []; break;
-            case 'closed':      $M['peepso_group_privacy'] = ['1']; break;
-            case 'noPrivacy':   unset($M['peepso_group_privacy']); break;
-            case 'noOwner':     $R = []; break;
-            case 'twoOwners':   $R[] = ['gm_id' => 9500, 'gm_user_id' => 2, 'gm_user_status' => 'member_owner']; break;
-            case 'realOwner':   $R = [['gm_id' => 9501, 'gm_user_id' => 2, 'gm_user_status' => 'member_owner']]; break;
-            case 'collision':   $R[] = ['gm_id' => 9502, 'gm_user_id' => self::OWNER, 'gm_user_status' => 'member']; break;
-            case 'zeroExists':  \HallRepairTestState::$users[] = 0; break;
-            case 'ownerGone':   \HallRepairTestState::$users = [2, 4, 49]; break;
-            case 'ownerUncount':\HallRepairTestState::$countable = [2, 4, 49]; break;
-        }
+        self::applyGuardMutation($mutation);
 
         $before = \HallRepairTestState::snapshot(self::HALL);
         $entry  = $this->planOne();
@@ -510,34 +522,20 @@ final class HallOwnershipRepairServiceTest extends TestCase
         foreach (self::guardProvider() as $label => [$mutation, $expectedDetail]) {
             \HallRepairTestState::reset();
             \HallRepairTestState::seedBrokenHall(self::HALL, self::CHAIN);
-
-            $M = &\HallRepairTestState::$meta[self::HALL];
-            $R = &\HallRepairTestState::$rows[self::HALL];
-
-            switch ($mutation) {
-                case 'kind':        $M['_bcc_group_kind'] = ['holders']; break;
-                case 'kindCase':    $M['_bcc_group_kind'] = ['Hall']; break;
-                case 'collection':  $M['_bcc_gate_collection_id'] = ['12']; break;
-                case 'validator':   $M['_bcc_gate_validator_id'] = ['77']; break;
-                case 'noChain':     unset($M['_bcc_chain_tag']); break;
-                case 'chainDupe':   $M['_bcc_chain_tag'] = ['10', '11']; break;
-                case 'badChain':    $M['_bcc_chain_tag'] = ['nope']; break;
-                case 'orphanChain': \HallRepairTestState::$chains = []; break;
-                case 'closed':      $M['peepso_group_privacy'] = ['1']; break;
-                case 'noPrivacy':   unset($M['peepso_group_privacy']); break;
-                case 'noOwner':     $R = []; break;
-                case 'twoOwners':   $R[] = ['gm_id' => 9500, 'gm_user_id' => 2, 'gm_user_status' => 'member_owner']; break;
-                case 'realOwner':   $R = [['gm_id' => 9501, 'gm_user_id' => 2, 'gm_user_status' => 'member_owner']]; break;
-                case 'collision':   $R[] = ['gm_id' => 9502, 'gm_user_id' => self::OWNER, 'gm_user_status' => 'member']; break;
-                case 'zeroExists':  \HallRepairTestState::$users[] = 0; break;
-                case 'ownerGone':   \HallRepairTestState::$users = [2, 4, 49]; break;
-                case 'ownerUncount':\HallRepairTestState::$countable = [2, 4, 49]; break;
-            }
+            self::applyGuardMutation($mutation);
 
             $entry = (new HallOwnershipRepairService())->plan(self::OWNER)[0];
 
+            // ⚠ Assert the mutation actually TOOK first. Until the planner
+            // stopped returning row_id 0 for everything, this loop passed
+            // even when a mutation silently failed to apply — the assertion
+            // below was true for the unmutated Hall too.
+            self::assertSame(
+                $expectedDetail,
+                $entry['detail'],
+                "mutation '{$mutation}' did not produce its refusal"
+            );
             self::assertSame(0, $entry['row_id'], "refusal '{$label}' must not carry a writable row id");
-            unset($M, $R);
         }
     }
 

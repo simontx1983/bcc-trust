@@ -12,6 +12,7 @@ use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\Bech32;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
+use BCC\Trust\Onchain\ValueObjects\DelegatorCount;
 
 /**
  * Cosmos Chain Fetcher
@@ -143,11 +144,9 @@ class CosmosFetcher implements FetcherInterface
             $val = $response['validator'];
         }
 
-        $delegations = $this->lcdGet("/cosmos/staking/v1beta1/validators/{$valoper}/delegations", [
-            'pagination.limit'       => 1,
-            'pagination.count_total' => 'true',
-        ]);
-        $delegator_count = (int) ($delegations['pagination']['total'] ?? 0);
+        // No existing row on the initial fetch, so an unlearnable count stays
+        // NULL ("unknown") rather than becoming a fabricated 0.
+        $delegator_count = $this->fetchDelegatorCount($valoper, null);
 
         $uptime            = $this->fetchUptime($val);
         $voting_power_rank = $this->fetchVotingPowerRank($valoper);
@@ -264,14 +263,17 @@ class CosmosFetcher implements FetcherInterface
         // Treat 0 as "never fetched" — active validators always have >= 1 delegator (self).
         $delegatorsStale    = $previousDelegators === null || (int) $previousDelegators === 0 || $rowAge >= $delegatorsTtl;
 
+        $previousDelegatorCount = $previousDelegators === null
+            ? null
+            : DelegatorCount::parseTotal($previousDelegators);
+
         if ($delegatorsStale) {
-            $delegations = $this->lcdGet("/cosmos/staking/v1beta1/validators/{$valoper}/delegations", [
-                'pagination.limit'       => 1,
-                'pagination.count_total' => 'true',
-            ]);
-            $delegator_count = (int) ($delegations['pagination']['total'] ?? 0);
+            // ⚠ On ANY unusable answer this returns the PREVIOUS value, so a
+            // refused or failed request re-persists exactly what was already
+            // stored instead of overwriting it with 0.
+            $delegator_count = $this->fetchDelegatorCount($valoper, $previousDelegatorCount);
         } else {
-            $delegator_count = (int) $previousDelegators;
+            $delegator_count = $previousDelegatorCount;
         }
 
         // ── Uptime: skip if fetched < 18–30h ago ────────────────────────
@@ -306,6 +308,42 @@ class CosmosFetcher implements FetcherInterface
             'jailed_count'             => $jailed_count,
             'voting_power_rank'        => $voting_power_rank,
         ];
+    }
+
+    /**
+     * How many delegators does this validator have — or keep what we had.
+     *
+     * ⚠ THIS USES {@see lcdGetResult()}, NOT {@see lcdGet()}, AND THAT IS THE
+     * WHOLE POINT. `lcdGet()` folds a transport error, a 429, a 4xx refusal, a
+     * 5xx and unparseable JSON all into `null`, which is indistinguishable
+     * from a body that simply carried no total — and the old `?? 0` then
+     * turned every one of them into "this validator has zero delegators".
+     * The structured seam reports `ok = false` for exactly those cases, so a
+     * failure returns the previous value instead of inventing one.
+     *
+     * ⚠ NO `application_error` CALLBACK IS PASSED. A 5xx on a staking read is
+     * a genuine provider fault, so it keeps its retries and charges the
+     * breaker as `http_5xx` / `standard_request` exactly as before. Failing
+     * safe on the VALUE must never make the provider's failure invisible.
+     *
+     * @param  int|null $previous the count already persisted, if any.
+     * @return int|null           >= 0 when learned; `$previous` when not.
+     */
+    private function fetchDelegatorCount(string $valoper, ?int $previous): ?int
+    {
+        $result = $this->lcdGetResult("/cosmos/staking/v1beta1/validators/{$valoper}/delegations", [
+            'pagination.limit'       => 1,
+            'pagination.count_total' => 'true',
+        ]);
+
+        if (!$result['ok']) {
+            return $previous;
+        }
+
+        return DelegatorCount::resolve(
+            DelegatorCount::fromDelegationsResponse($result['data']),
+            $previous
+        );
     }
 
     /**

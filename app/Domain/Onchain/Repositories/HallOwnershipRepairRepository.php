@@ -212,6 +212,53 @@ final class HallOwnershipRepairRepository
     }
 
     /**
+     * The member count PeepSo would compute IF one row were re-pointed.
+     *
+     * ── WHY THIS IS NOT `current + 1` ───────────────────────────────────
+     * The arithmetic shortcut is correct today — the eligibility guards
+     * already prove the incoming owner holds no row in this group and is
+     * PeepSo-countable, so exactly one row joins the countable set. But it
+     * encodes PeepSo's rule a SECOND time, in a different form, in a place
+     * nobody would think to update. Re-running the real query with the one
+     * row substituted keeps a single expression of that rule: if PeepSo's
+     * exclusion list ever changes, the dry run's prediction and the apply's
+     * measurement move together instead of silently diverging.
+     *
+     * The substitution is in the JOIN KEY, not a WHERE clause: the count
+     * hinges on which `peepso_users` row is reachable, so pretending the
+     * membership row already names `$newUserId` is exactly the right shape.
+     *
+     * ⚠ `$rowId` need not exist and `$newUserId` need not be countable — a
+     * caller asking "what would happen" is entitled to an honest answer of
+     * "no change".
+     */
+    public static function computePeepSoMemberCountAsIf(int $groupId, int $rowId, int $newUserId): int
+    {
+        if ($groupId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::membersTable();
+        $users = $wpdb->prefix . 'peepso_users';
+
+        $count = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(m.gm_user_id)
+               FROM {$table} m
+          LEFT JOIN {$users} f
+                 ON f.usr_id = CASE WHEN m.gm_id = %d THEN %d ELSE m.gm_user_id END
+              WHERE m.gm_group_id = %d
+                AND m.gm_user_status LIKE 'member%'
+                AND f.usr_role NOT IN ('register', 'ban', 'verified')",
+            $rowId,
+            $newUserId,
+            $groupId
+        ));
+
+        return (int) $count;
+    }
+
+    /**
      * Does this user id exist in wp_users? Asked directly, because the whole
      * finding is that the recorded owner does not.
      */

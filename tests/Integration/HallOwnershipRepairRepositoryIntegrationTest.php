@@ -259,6 +259,95 @@ final class HallOwnershipRepairRepositoryIntegrationTest extends TestCase
         self::assertSame(1, Repo::computePeepSoMemberCount(self::GROUP));
     }
 
+    // ── The PREDICTED count, and that it matches the measured one ────────
+
+    /**
+     * ⚠ THE PROPERTY THAT MAKES THE DRY RUN HONEST.
+     *
+     * The prediction an operator authorises must be the number the apply
+     * will actually produce. Proven the only way that means anything:
+     * predict, then really repoint, then measure — and require the two to
+     * agree. `current + 1` would pass this one case and drift the moment
+     * PeepSo's exclusion rule changed.
+     */
+    public function testThePredictedCountEqualsTheCountMeasuredAfterARealRepoint(): void
+    {
+        $this->insertRow(100, 0, 'member_owner');
+        $this->insertRow(101, 49, 'member');
+        $this->insertPeepSoUser(1, 'admin');
+        $this->insertPeepSoUser(49, 'member');
+
+        $predicted = Repo::computePeepSoMemberCountAsIf(self::GROUP, 100, 1);
+
+        $this->inTransaction(fn(): int => Repo::repointOwnerRow(100, self::GROUP, 0, 1, 'member_owner'));
+        $measured = Repo::computePeepSoMemberCount(self::GROUP);
+
+        self::assertSame($measured, $predicted, 'the dry run promised a number the apply did not produce');
+        self::assertSame(2, $measured);
+    }
+
+    /** The orphan is uncountable, so the prediction is a genuine rise. */
+    public function testPredictingTheOrphanRepointRaisesTheCount(): void
+    {
+        $this->insertRow(100, 0, 'member_owner');
+        $this->insertPeepSoUser(1, 'admin');
+
+        self::assertSame(0, Repo::computePeepSoMemberCount(self::GROUP), 'user 0 is not countable');
+        self::assertSame(1, Repo::computePeepSoMemberCountAsIf(self::GROUP, 100, 1));
+    }
+
+    /**
+     * Substituting a user PeepSo excludes must NOT raise the prediction —
+     * the arithmetic shortcut would have reported a rise regardless.
+     */
+    public function testPredictingARepointToAnExcludedRoleDoesNotRaiseTheCount(): void
+    {
+        $this->insertRow(100, 0, 'member_owner');
+        $this->insertPeepSoUser(5, 'ban');
+
+        self::assertSame(0, Repo::computePeepSoMemberCountAsIf(self::GROUP, 100, 5));
+    }
+
+    public function testPredictingARepointToAUserWithNoPeepSoRowDoesNotRaiseTheCount(): void
+    {
+        $this->insertRow(100, 0, 'member_owner');
+        // user 8 has no peepso_users row at all — NULL NOT IN (…) is NULL.
+
+        self::assertSame(0, Repo::computePeepSoMemberCountAsIf(self::GROUP, 100, 8));
+    }
+
+    public function testTheSubstitutionOnlyAffectsTheNamedRow(): void
+    {
+        $this->insertRow(100, 0, 'member_owner');
+        $this->insertRow(101, 49, 'member');
+        $this->insertPeepSoUser(1, 'admin');
+        $this->insertPeepSoUser(49, 'member');
+
+        // Substituting a row id that is NOT in this group changes nothing.
+        self::assertSame(
+            Repo::computePeepSoMemberCount(self::GROUP),
+            Repo::computePeepSoMemberCountAsIf(self::GROUP, 999999, 1)
+        );
+    }
+
+    public function testTheSubstitutionRespectsNonMemberStatuses(): void
+    {
+        $this->insertRow(100, 0, 'pending_user');   // not a 'member%' status
+        $this->insertPeepSoUser(1, 'admin');
+
+        self::assertSame(0, Repo::computePeepSoMemberCountAsIf(self::GROUP, 100, 1));
+    }
+
+    public function testPredictionIsGroupScoped(): void
+    {
+        $this->insertRow(100, 0, 'member_owner');
+        $this->insertRow(200, 0, 'member_owner', 7777);
+        $this->insertPeepSoUser(1, 'admin');
+
+        self::assertSame(1, Repo::computePeepSoMemberCountAsIf(self::GROUP, 100, 1));
+        self::assertSame(0, Repo::computePeepSoMemberCountAsIf(self::GROUP, 200, 1), 'another group\'s row');
+    }
+
     // ── The lock assertion ───────────────────────────────────────────────
 
     /**

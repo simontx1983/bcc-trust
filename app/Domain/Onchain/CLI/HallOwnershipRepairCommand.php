@@ -121,7 +121,22 @@ final class HallOwnershipRepairCommand
         }
 
         $service = new HallOwnershipRepairService();
-        $plan    = $service->plan($ownerId);
+
+        // ── ONE integrity gate, not two ─────────────────────────────────
+        // The dry run goes through `run(false, …)` rather than calling
+        // `plan()` directly, so the plan an operator reads passes exactly
+        // the same coherence check as the plan an apply would act on. An
+        // earlier revision called `assertPlanIntegrity()` here as well;
+        // that second call site was redundant, and redundant gates rot —
+        // a mutation control could delete either one and the other hid it.
+        try {
+            $plan = $service->run(false, $ownerId, 0, $runId, sys_get_temp_dir())['results'];
+        } catch (\Throwable $e) {
+            self::fail(
+                'Refusing to report or tokenise an incoherent plan: ' . $e->getMessage(),
+                self::EXIT_FAILED
+            );
+        }
 
         $expectedToken = self::confirmationToken($env, $plan);
 
@@ -228,15 +243,42 @@ final class HallOwnershipRepairCommand
     public static function confirmationToken(string $env, array $plan): string
     {
         $rows = [];
+
         foreach ($plan as $entry) {
             if (($entry['result'] ?? '') !== HallOwnershipRepairService::RESULT_WOULD_REPAIR) {
                 continue;
             }
-            $rows[] = (int) $entry['group_id'] . ':' . (int) $entry['chain_id'] . ':' . (int) $entry['row_id'];
-        }
-        sort($rows);
 
-        $digest = hash('sha256', $env . '|' . count($rows) . '|' . implode(',', $rows));
+            // ── THE COMPLETE CANONICAL ROW ──────────────────────────────
+            // Every field the repair would act on. An earlier version
+            // hashed only (group, chain, row) — and because the planner was
+            // returning row_id 0 for everything, that reduced in practice
+            // to (group, chain). A token has to change when ANY part of
+            // what it authorises changes, including which user the row
+            // currently names and which it would name next.
+            $rows[] = [
+                (int) ($entry['group_id'] ?? 0),
+                (int) ($entry['row_id'] ?? 0),
+                (int) ($entry['chain_id'] ?? 0),
+                (int) ($entry['current_owner_id'] ?? -1),
+                (int) ($entry['proposed_owner_id'] ?? -1),
+                (string) ($entry['status'] ?? ''),
+            ];
+        }
+
+        // Sorted on the TUPLE, not on a formatted string: a string sort
+        // orders "10" before "9", so the digest would depend on how ids
+        // happen to render rather than on the plan itself.
+        usort($rows, static function (array $a, array $b): int {
+            return [$a[0], $a[1]] <=> [$b[0], $b[1]];
+        });
+
+        $canonical = [];
+        foreach ($rows as $r) {
+            $canonical[] = implode(':', $r);
+        }
+
+        $digest = hash('sha256', $env . '|' . count($canonical) . '|' . implode(',', $canonical));
 
         return 'HALL-OWNER-' . strtoupper($env) . '-' . substr($digest, 0, 16);
     }
@@ -398,18 +440,47 @@ final class HallOwnershipRepairCommand
         \WP_CLI::log('────────────────────────────────────────────────────────────');
     }
 
-    /** @param list<array<string, mixed>> $plan */
+    /**
+     * Per-Hall plan, with everything an operator needs to authorise it.
+     *
+     * Numeric ids and the chain slug ONLY. No name, email, username or any
+     * other profile field is read here or anywhere upstream of it.
+     *
+     * @param list<array<string, mixed>> $plan
+     */
     private static function printPlan(array $plan): void
     {
         \WP_CLI::log('');
+        \WP_CLI::log(sprintf(
+            '  %-7s %-6s %-16s %-9s %-13s %-13s %s',
+            'HALL', 'CHAIN', 'SLUG', 'ROW', 'OWNER', 'MEMBERS', 'RESULT'
+        ));
+
         foreach ($plan as $p) {
+            $owner = ($p['current_owner_id'] ?? null) !== null && ($p['proposed_owner_id'] ?? null) !== null
+                ? sprintf('%d -> %d', (int) $p['current_owner_id'], (int) $p['proposed_owner_id'])
+                : '-';
+
+            // After an apply the entry also carries the MEASURED counts;
+            // prefer those over the plan's prediction so the same table can
+            // report both phases without claiming a prediction was a result.
+            $from = $p['members_count_before']  ?? $p['members_count_current']  ?? null;
+            $to   = $p['members_count_after']   ?? $p['members_count_proposed'] ?? null;
+
+            $members = ($from !== null && $to !== null)
+                ? sprintf('%d -> %d', (int) $from, (int) $to)
+                : '-';
+
             \WP_CLI::log(sprintf(
-                '  hall %-6d chain %-5d row %-8d %-22s %s',
+                '  %-7d %-6d %-16s %-9d %-13s %-13s %s%s',
                 (int) $p['group_id'],
                 (int) $p['chain_id'],
+                (string) ($p['chain_slug'] ?? '?'),
                 (int) ($p['row_id'] ?? 0),
+                $owner,
+                $members,
                 (string) $p['result'],
-                ((string) ($p['detail'] ?? '')) !== '' ? '(' . (string) $p['detail'] . ')' : ''
+                ((string) ($p['detail'] ?? '')) !== '' ? '  (' . (string) $p['detail'] . ')' : ''
             ));
         }
     }
