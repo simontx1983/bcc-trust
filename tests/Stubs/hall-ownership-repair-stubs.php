@@ -85,6 +85,17 @@ namespace {
              */
             public static bool $writeLeavesOrphanBehind = false;
 
+            /**
+             * Forces computePeepSoMemberCountAsIf() to return a sentinel.
+             *
+             * Within the eligible set, `current + 1` and the real prediction
+             * are arithmetically EQUAL — the guards guarantee it — so no
+             * amount of seeded data can tell the two implementations apart.
+             * This seam can: only a planner that actually calls the AsIf
+             * method sees the sentinel.
+             */
+            public static ?int $forcedAsIfCount = null;
+
             /** Mutate the ledger AFTER planning, before the locked re-check. */
             public static $mutateBeforeApply = null;
 
@@ -114,6 +125,7 @@ namespace {
                 self::$writeLandsOnUser = 0;
                 self::$writeLeavesOrphanBehind = false;
                 self::$mutateBeforeApply = null;
+                self::$forcedAsIfCount = null;
                 self::$mutateOnReadNumber = null;
                 self::$mutateOnReadFn = null;
                 self::$readCount = 0;
@@ -386,6 +398,28 @@ namespace BCC\Trust\Onchain\Repositories {
                 foreach (\HallRepairTestState::$rows[$groupId] ?? [] as $r) {
                     if (str_starts_with($r['gm_user_status'], 'member')
                         && in_array($r['gm_user_id'], \HallRepairTestState::$countable, true)) {
+                        $n++;
+                    }
+                }
+                return $n;
+            }
+
+            /**
+             * PeepSo's rule with ONE row substituted — the same predicate as
+             * computePeepSoMemberCount(), so a test cannot pass by having the
+             * two fakes disagree in a way the real SQL would not.
+             */
+            public static function computePeepSoMemberCountAsIf(int $groupId, int $rowId, int $newUserId): int
+            {
+                if (\HallRepairTestState::$forcedAsIfCount !== null) {
+                    return \HallRepairTestState::$forcedAsIfCount;
+                }
+
+                $n = 0;
+                foreach (\HallRepairTestState::$rows[$groupId] ?? [] as $r) {
+                    $uid = $r['gm_id'] === $rowId ? $newUserId : $r['gm_user_id'];
+                    if (str_starts_with($r['gm_user_status'], 'member')
+                        && in_array($uid, \HallRepairTestState::$countable, true)) {
                         $n++;
                     }
                 }
