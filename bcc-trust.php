@@ -2197,6 +2197,19 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust gate-identity',
         \BCC\Trust\Onchain\CLI\SolanaGateIdentityRepairCommand::class
     );
+    // The orphaned Hall `member_owner` rows left by the retired
+    // `bcc_hall_provision` cron: PeepSo's create() owns
+    // get_current_user_id(), which is 0 under cron. THIS IS ITS ONLY ENTRY
+    // POINT — no migration entry, no activation hook, no cron hook, no REST
+    // route, no admin-post handler and no AJAX action reaches it. It writes
+    // PeepSo's membership graph, so it runs when a named administrator runs
+    // it and watches the output. Dry run by default; mutation needs --apply
+    // + the exact --confirm token (bound to BCC_ENV and the planned rows)
+    // + an explicit --user-id holding manage_options.
+    \WP_CLI::add_command(
+        'bcc-trust hall-ownership',
+        \BCC\Trust\Onchain\CLI\HallOwnershipRepairCommand::class
+    );
 }
 
 /*
