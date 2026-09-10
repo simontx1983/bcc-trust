@@ -89,6 +89,10 @@ final class HallOwnershipRepairService
     {
         $plan = $this->plan($ownerId);
 
+        // Before the plan is printed, tokenised or acted on. A corrupt plan
+        // is not a per-Hall problem to route around.
+        $this->assertPlanIntegrity($plan);
+
         if (!$apply) {
             return ['results' => $plan, 'backup' => null, 'rollback' => null];
         }
@@ -222,34 +226,127 @@ final class HallOwnershipRepairService
         return $out;
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * ⚠ NO ARRAY UNION ANYWHERE IN HERE.
+     *
+     * This method used to build a `$base` array and return `$base + [...]`.
+     * PHP's `+` keeps the LEFT operand for duplicate keys, so
+     * `$base['row_id'] = 0` silently won and EVERY plan entry reported
+     * `row_id => 0` — visible on a live staging dry run as `row 0` against
+     * all 21 Halls. Two things rode on that: the operator could not see
+     * which ledger row would change, and the confirmation token (which
+     * hashes `row_id`) bound only to `(group, chain)` rather than to the
+     * specific rows.
+     *
+     * Both branches now build one explicit literal with the same keys, so a
+     * caller never has to ask whether a field is present.
+     *
+     * @return array<string, mixed>
+     */
     private function planOne(int $groupId, int $ownerId): array
     {
-        $meta  = Repo::readMarkerMeta($groupId);
-        $rows  = Repo::readMembershipRows($groupId);
-        $check = $this->assertEligible($groupId, $ownerId, $meta, $rows);
+        $meta = Repo::readMarkerMeta($groupId);
+        $rows = Repo::readMembershipRows($groupId);
 
         $chainId = isset($meta[HallRepository::META_CHAIN_TAG][0])
             ? (int) $meta[HallRepository::META_CHAIN_TAG][0]
             : 0;
 
-        $base = [
-            'group_id' => $groupId,
-            'chain_id' => $chainId,
-            'row_id'   => 0,
-            'members_count_before' => null,
-            'members_count_after'  => null,
-        ];
+        // Resolved ONCE and handed to the guard, so the plan can name the
+        // chain in its output without a second lookup.
+        $chain     = $chainId > 0 ? ChainRepository::getById($chainId) : null;
+        $chainSlug = is_object($chain) && isset($chain->slug) ? (string) $chain->slug : null;
+
+        $check = $this->assertEligible($groupId, $ownerId, $meta, $rows, $chain);
 
         if ($check['eligible'] !== true) {
-            return $base + ['result' => $check['result'], 'detail' => $check['detail']];
+            return [
+                'group_id'              => $groupId,
+                'chain_id'              => $chainId,
+                'chain_slug'            => $chainSlug,
+                'row_id'                => 0,
+                'current_owner_id'      => null,
+                'proposed_owner_id'     => null,
+                'status'                => null,
+                'members_count_current' => null,
+                'members_count_proposed'=> null,
+                'result'                => $check['result'],
+                'detail'                => $check['detail'],
+            ];
         }
 
-        return $base + [
-            'result' => self::RESULT_WOULD_REPAIR,
-            'detail' => '',
-            'row_id' => $check['row_id'],
+        $rowId = (int) $check['row_id'];
+
+        return [
+            'group_id'              => $groupId,
+            'chain_id'              => $chainId,
+            'chain_slug'            => $chainSlug,
+            'row_id'                => $rowId,
+            'current_owner_id'      => Repo::ORPHAN_USER_ID,
+            'proposed_owner_id'     => $ownerId,
+            'status'                => Repo::OWNER_STATUS,
+            'members_count_current' => Repo::computePeepSoMemberCount($groupId),
+            // Predicted with PeepSo's OWN rule, one row substituted — not
+            // `current + 1`. See computePeepSoMemberCountAsIf().
+            'members_count_proposed'=> Repo::computePeepSoMemberCountAsIf($groupId, $rowId, $ownerId),
+            'result'                => self::RESULT_WOULD_REPAIR,
+            'detail'                => '',
         ];
+    }
+
+    /**
+     * The plan must be internally coherent before ANY of it is shown or
+     * acted on.
+     *
+     * ── WHY THIS IS A HARD FAILURE, NOT A PER-HALL REFUSAL ──────────────
+     * A `would_repair` entry with a missing, zero, negative or non-integer
+     * row id means the planner does not know which ledger row it is talking
+     * about. A duplicate row id means two Halls claim the SAME row. Neither
+     * is a fact about one Hall that the others can be trusted around — it
+     * is evidence the plan itself is wrong, so the whole run stops.
+     *
+     * It runs on the DRY RUN too. A corrupt plan must not even be printed
+     * as though it were sound: the dry run is what an operator reads before
+     * authorising, and a confirmation token minted from a broken plan is
+     * worse than no token.
+     *
+     * @param list<array<string, mixed>> $plan
+     * @throws \RuntimeException
+     */
+    public function assertPlanIntegrity(array $plan): void
+    {
+        $seen = [];
+
+        foreach ($plan as $entry) {
+            if (($entry['result'] ?? '') !== self::RESULT_WOULD_REPAIR) {
+                continue;
+            }
+
+            $groupId = (int) ($entry['group_id'] ?? 0);
+
+            if (!array_key_exists('row_id', $entry)) {
+                throw new \RuntimeException('plan integrity: group ' . $groupId . ' has no row_id');
+            }
+
+            $rowId = $entry['row_id'];
+
+            // Not `(int) $rowId`: a lax cast is how "abc" and null become 0
+            // and a broken plan starts looking merely empty.
+            if (!is_int($rowId)) {
+                throw new \RuntimeException('plan integrity: group ' . $groupId . ' has a non-integer row_id');
+            }
+            if ($rowId <= 0) {
+                throw new \RuntimeException('plan integrity: group ' . $groupId . ' has a non-positive row_id');
+            }
+            if (isset($seen[$rowId])) {
+                throw new \RuntimeException(
+                    'plan integrity: row_id ' . $rowId . ' is claimed by groups '
+                    . $seen[$rowId] . ' and ' . $groupId
+                );
+            }
+
+            $seen[$rowId] = $groupId;
+        }
     }
 
     /**
@@ -261,9 +358,12 @@ final class HallOwnershipRepairService
      *
      * @param  array<string, list<string>> $meta
      * @param  list<object{gm_id: string, gm_user_id: string, gm_user_status: string}> $rows
+     * @param  object|null $chain the already-resolved chain row, or null when
+     *         the tag names no chain. Passed in rather than re-queried so the
+     *         planner and the guard cannot disagree about which chain this is.
      * @return array{eligible: bool, result: string, detail: string, row_id: int}
      */
-    private function assertEligible(int $groupId, int $ownerId, array $meta, array $rows): array
+    private function assertEligible(int $groupId, int $ownerId, array $meta, array $rows, ?object $chain = null): array
     {
         $no = static fn(string $detail): array => [
             'eligible' => false,
@@ -290,7 +390,7 @@ final class HallOwnershipRepairService
         if (count($tags) !== 1)                { return $no('chain_tag_not_single'); }
         $chainId = (int) $tags[0];
         if ($chainId <= 0)                     { return $no('chain_tag_not_numeric'); }
-        if (ChainRepository::getById($chainId) === null) { return $no('chain_not_found'); }
+        if ($chain === null)                   { return $no('chain_not_found'); }
 
         // ── 4. Published, open, and actually a group post ───────────────
         $privacy = $meta['peepso_group_privacy'] ?? [];
@@ -413,7 +513,12 @@ final class HallOwnershipRepairService
         // ── EVERY GUARD, RE-EVALUATED UNDER THE LOCK ────────────────────
         // The plan was read without locks and may be stale. Re-checking is
         // what makes a concurrent change a refusal rather than a corruption.
-        $check = $this->assertEligible($groupId, $ownerId, $meta, $rows);
+        $lockedChainId = isset($meta[HallRepository::META_CHAIN_TAG][0])
+            ? (int) $meta[HallRepository::META_CHAIN_TAG][0]
+            : 0;
+        $lockedChain = $lockedChainId > 0 ? ChainRepository::getById($lockedChainId) : null;
+
+        $check = $this->assertEligible($groupId, $ownerId, $meta, $rows, $lockedChain);
         if ($check['eligible'] !== true) {
             throw new \RuntimeException('precondition changed under lock: ' . $check['detail']);
         }
