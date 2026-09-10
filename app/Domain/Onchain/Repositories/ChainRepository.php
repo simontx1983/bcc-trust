@@ -417,6 +417,44 @@ final class ChainRepository
     }
 
     /**
+     * Repoint a chain's REST endpoint. ONE COLUMN, ONE ROW.
+     *
+     * ⚠ THE ONLY WRITE PATH FOR `rest_url`, and it exists solely for the
+     * audited administrator transition — there was previously NO way to
+     * change this column through the application at all, which is why the
+     * switch has to be built rather than merely gated.
+     *
+     * Touches nothing else: an operator moving a provider must not be able to
+     * disturb chain identity, the discovery opt-in or `is_active`, the same
+     * discipline {@see updateIdentity()} follows. Busts the chains cache in
+     * the same call so the scanner's eligibility read cannot keep contacting
+     * the previous host for up to the whole TTL.
+     *
+     * Validation of WHICH urls are acceptable belongs to
+     * {@see \BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy}; a
+     * repository enforces shape, not policy.
+     */
+    public static function updateRestUrl(int $chainId, string $restUrl): bool
+    {
+        if ($chainId <= 0 || trim($restUrl) === '') {
+            return false;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table} SET rest_url = %s WHERE id = %d LIMIT 1",
+            $restUrl,
+            $chainId
+        ));
+
+        self::clearCache();
+
+        return $result !== false;
+    }
+
+    /**
      * Turn the per-chain CosmWasm NFT-discovery opt-in on or off.
      *
      * THE ONLY WRITE PATH for `cosmwasm_nft_discovery_enabled`, and it

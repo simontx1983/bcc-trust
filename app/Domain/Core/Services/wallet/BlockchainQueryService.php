@@ -20,6 +20,7 @@
 namespace BCC\Trust\Core\Services\wallet;
 
 use BCC\Core\Http\SafeHttpClient;
+use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
 use WP_Error;
 
 if (!defined('ABSPATH')) {
@@ -297,7 +298,23 @@ class BlockchainQueryService {
             return new WP_Error('missing_host', 'Cosmos REST URL has no host.');
         }
 
-        $allowed = apply_filters('bcc_trust_allowed_cosmos_hosts', self::ALLOWED_COSMOS_HOSTS);
+        // ⚠ ONE SOURCE OF TRUTH WITH DISCOVERY. This list used to be a
+        // hard-coded three-host constant that never consulted the chain
+        // registry, while discovery read `wp_bcc_chains.rest_url` and
+        // validated nothing at all. An operator could therefore repoint a
+        // chain and have discovery follow it while holdings refused the same
+        // host — two subsystems disagreeing about which providers are
+        // legitimate, with no way to notice. Every host approved by
+        // {@see CosmosEndpointPolicy} is admitted here too.
+        //
+        // The legacy constant is UNIONED, not replaced: it also covers
+        // ungoverned Cosmos chains, and dropping it would turn this hardening
+        // into an outage for anything the policy does not yet describe.
+        $allowed = array_values(array_unique(array_merge(
+            self::ALLOWED_COSMOS_HOSTS,
+            CosmosEndpointPolicy::approvedHosts()
+        )));
+        $allowed = apply_filters('bcc_trust_allowed_cosmos_hosts', $allowed);
 
         if (!in_array($host, $allowed, true)) {
             \BCC\Core\Log\Logger::error(sprintf('BCC Trust: Blocked Cosmos REST request to disallowed host: %s', $host));

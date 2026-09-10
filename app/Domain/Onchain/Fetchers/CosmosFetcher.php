@@ -11,6 +11,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\Bech32;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
+use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
 
 /**
  * Cosmos Chain Fetcher
@@ -31,6 +32,9 @@ class CosmosFetcher implements FetcherInterface
     /** @var ChainRow */
     private object $chain;
     private string $rest_url;
+
+    /** Complete normalized endpoint identity, or null when not governed. */
+    private ?string $endpoint_fp = null;
     private int    $decimals;
     private int $timeout = 15;
 
@@ -42,13 +46,48 @@ class CosmosFetcher implements FetcherInterface
      */
     private static array $validatorListCache = [];
 
-    /** @param ChainRow $chain */
+    /**
+     * @param ChainRow $chain
+     *
+     * ⚠ THERE IS NO REST-TO-RPC FALLBACK, AND THERE MUST NOT BE ONE.
+     * This used to read `$chain->rest_url ?? $chain->rpc_url`. Those two
+     * columns hold DIFFERENT PROTOCOLS: `rest_url` is a Cosmos LCD/REST
+     * endpoint, `rpc_url` is Tendermint JSON-RPC. On chain 8 they are
+     * `rest.cosmos.directory` and `rpc.cosmos.directory` respectively, so a
+     * missing `rest_url` silently pointed every `/cosmwasm/...` path at a
+     * server that has never implemented them — producing 404/501-shaped
+     * noise indistinguishable from "this chain has no wasm module", which is
+     * a TERMINAL classification. A substitution that changes the protocol is
+     * not a fallback; it is a wrong answer delivered confidently.
+     *
+     * An empty `rest_url` now yields an empty base, and {@see lcdGetResult()}
+     * refuses to issue the request rather than building a relative URL.
+     */
     public function __construct(object $chain)
     {
         $this->chain    = $chain;
-        $rest           = $chain->rest_url ?? $chain->rpc_url;
-        $this->rest_url = rtrim($rest ?? '', '/');
+        $this->rest_url = rtrim((string) ($chain->rest_url ?? ''), '/');
         $this->decimals = (int) ($chain->decimals ?? 6);
+
+        // Computed ONCE here because this is the only place that holds both
+        // halves of the identity — the slug (which fixes the expected
+        // network) and the endpoint URL. Null for an ungoverned chain or an
+        // unusable URL, in which case charges are recorded exactly as before.
+        $this->endpoint_fp = CosmosEndpointPolicy::fingerprint(
+            (string) ($chain->slug ?? ''),
+            $this->rest_url
+        );
+    }
+
+    /**
+     * Is this fetcher pointed at anything at all?
+     *
+     * Callers that need to distinguish "no endpoint configured" from "the
+     * endpoint failed" ask here; the request paths fail closed on their own.
+     */
+    public function hasEndpoint(): bool
+    {
+        return $this->rest_url !== '';
     }
 
     /** @return ChainRow */
@@ -2021,14 +2060,38 @@ class CosmosFetcher implements FetcherInterface
         $classifier = \BCC\Trust\Onchain\Services\CosmwasmClassifier::class;
         $chainId    = (int) ($this->chain->id ?? 0);
 
+        // ⚠ FAIL CLOSED ON A MISSING ENDPOINT. With the rest-to-rpc fallback
+        // gone, an unconfigured chain leaves this empty — and `'' . $path`
+        // would be a RELATIVE url that `wp_remote_get` resolves against
+        // nothing, producing a transport error that reads like a provider
+        // outage and charges the breaker for our own misconfiguration.
+        // Reported as a transport-class failure with no request made, so
+        // nothing is contacted and nothing is blamed on a provider.
+        if ($this->rest_url === '') {
+            \BCC\Core\Log\Logger::error(
+                '[Cosmos Fetcher] no rest_url configured for chain ' . $chainId . '; refusing ' . $path
+            );
+
+            return [
+                'ok'              => false,
+                'data'            => null,
+                'http_code'       => 0,
+                'error_kind'      => $classifier::KIND_TRANSPORT,
+                'message_excerpt' => 'no endpoint configured for this chain',
+            ];
+        }
+
         $url = $this->rest_url . $path;
         if (!empty($params)) {
             $url .= '?' . http_build_query($params);
         }
 
         $retryOptions = [
-            'label'    => 'Cosmos LCD ' . $path,
-            'chain_id' => $chainId,
+            'label'       => 'Cosmos LCD ' . $path,
+            'chain_id'    => $chainId,
+            // So a breaker charge records WHICH endpoint earned it, and the
+            // next provider is never described by the last one's failures.
+            'endpoint_fp' => $this->endpoint_fp,
         ];
 
         // ONLY smart queries may reinterpret a 5xx. A code listing or a
@@ -2253,8 +2316,9 @@ class CosmosFetcher implements FetcherInterface
                 'headers' => ['Accept' => 'application/json'],
             ],
             [
-                'label'    => 'Cosmos LCD batch',
-                'chain_id' => $chainId,
+                'label'       => 'Cosmos LCD batch',
+                'chain_id'    => $chainId,
+                'endpoint_fp' => $this->endpoint_fp,
             ]
         );
 

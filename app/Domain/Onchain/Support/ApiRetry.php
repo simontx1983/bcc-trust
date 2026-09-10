@@ -118,6 +118,12 @@ final class ApiRetry
         // addressed to a NODE. No host, path, query or address is involved,
         // so nothing identifying can reach durable state through it.
         $requestClass = ProviderRequestClass::fromOptions($options);
+        // Opaque marker for WHERE this charge was earned. Supplied by the
+        // caller that knows the chain slug and endpoint; the retry loop
+        // never interprets it.
+        $endpointFp   = isset($options['endpoint_fp']) && is_string($options['endpoint_fp'])
+            ? $options['endpoint_fp']
+            : null;
 
         // Circuit breaker: check before attempting
         if ($chainId > 0 && OnchainCircuitBreaker::isOpen($chainId)) {
@@ -230,7 +236,8 @@ final class ApiRetry
                         OnchainCircuitBreaker::recordFailure(
                             $chainId,
                             ProviderFailureKind::RATE_LIMITED,
-                            $requestClass
+                            $requestClass,
+                            $endpointFp
                         );
                     }
 
@@ -265,7 +272,8 @@ final class ApiRetry
                         OnchainCircuitBreaker::recordFailure(
                             $chainId,
                             ProviderFailureKind::HTTP_5XX,
-                            $requestClass
+                            $requestClass,
+                            $endpointFp
                         );
                     }
 
@@ -311,7 +319,8 @@ final class ApiRetry
                 OnchainCircuitBreaker::recordFailure(
                     $chainId,
                     ProviderFailureKind::TRANSPORT,
-                    $requestClass
+                    $requestClass,
+                    $endpointFp
                 );
             }
 
@@ -458,6 +467,10 @@ final class ApiRetry
 
         // Circuit breaker: check ONCE before the whole batch (mirrors the
         // single-request guard at the top of request()).
+        $endpointFp = isset($options['endpoint_fp']) && is_string($options['endpoint_fp'])
+            ? $options['endpoint_fp']
+            : null;
+
         if ($chainId > 0 && OnchainCircuitBreaker::isOpen($chainId)) {
             self::log("BLOCKED by circuit breaker: {$label} (chain {$chainId}, {" . count($urls) . '} urls)');
             $err = new \WP_Error('circuit_breaker_open', "Circuit breaker open for chain {$chainId}");
@@ -492,7 +505,8 @@ final class ApiRetry
                     OnchainCircuitBreaker::recordFailure(
                         $chainId,
                         ProviderFailureKind::TRANSPORT,
-                        ProviderRequestClass::BATCH_REQUEST
+                        ProviderRequestClass::BATCH_REQUEST,
+                        $endpointFp
                     );
                 }
             }

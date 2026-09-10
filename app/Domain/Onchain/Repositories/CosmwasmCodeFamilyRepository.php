@@ -427,6 +427,101 @@ final class CosmwasmCodeFamilyRepository
     }
 
     /**
+     * How many families on this chain still hold an endpoint-minted cursor.
+     *
+     * Counted at EXECUTION TIME, never assumed. The staging plan expected two
+     * rows when it was reviewed; hard-coding that number would turn a changed
+     * world into a silent partial migration.
+     */
+    public static function countOpenContractCursors(int $chainId): int
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $total = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table}
+              WHERE chain_id = %d
+                AND contracts_cursor IS NOT NULL
+                AND contracts_cursor <> ''",
+            $chainId
+        ));
+        // ⚠ A FAILED COUNT MUST NOT READ AS ZERO. This number is the
+        // post-write proof that no cursor survived the transition; a query
+        // error returning null would cast to 0 and report a clean migration
+        // that never happened.
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return (int) $total;
+    }
+
+    /**
+     * The code ids currently carrying a cursor, ascending.
+     *
+     * Used to build the plan digest an operator confirms, so the rows cleared
+     * are provably the rows reviewed.
+     *
+     * @return list<int>
+     */
+    public static function openContractCursorCodeIds(int $chainId): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $ids = $wpdb->get_col($wpdb->prepare(
+            "SELECT code_id FROM {$table}
+              WHERE chain_id = %d
+                AND contracts_cursor IS NOT NULL
+                AND contracts_cursor <> ''
+              ORDER BY code_id ASC",
+            $chainId
+        ));
+        // ⚠ These ids go into the confirmation digest an operator approves.
+        // An empty list from a FAILED read would produce a digest describing
+        // "nothing to clear" and the transition would silently do nothing.
+        self::guardReadOrThrow(__FUNCTION__);
+
+        return array_values(array_map('intval', is_array($ids) ? $ids : []));
+    }
+
+    /**
+     * Drop every endpoint-minted contract cursor on this chain.
+     *
+     * ⚠ TOUCHES EXACTLY TWO COLUMNS. `classification`,
+     * `classification_reason`, `probes_ok`, `probes_failed`,
+     * `classifier_version`, `checksum`, `sample_contract`, `retry_count`,
+     * `next_attempt_at`, `contracts_enumerated` and `metadata_checked_at` are
+     * all left alone: an endpoint change invalidates a PAGINATION POSITION,
+     * not a verdict, and re-deriving settled classifications would requeue
+     * hundreds of families and discard evidence that cost real requests.
+     *
+     * `enumeration_complete` is reset to 0 only for rows that had a cursor —
+     * a cursor means the walk was mid-flight, so it must resume from the
+     * start. Rows already complete keep their completion.
+     *
+     * Idempotent: re-running matches zero rows. Safe because every contract
+     * write is idempotent under `uk_chain_contract`.
+     *
+     * @return int rows affected, or -1 on a database error.
+     */
+    public static function clearContractCursors(int $chainId): int
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+                SET contracts_cursor = NULL,
+                    enumeration_complete = 0
+              WHERE chain_id = %d
+                AND contracts_cursor IS NOT NULL
+                AND contracts_cursor <> ''",
+            $chainId
+        ));
+
+        return $result === false ? -1 : (int) $result;
+    }
+
+    /**
      * Advance (or close) a family's contract-enumeration cursor.
      *
      * `$cursor === null && $complete === true` is the normal drain; a
