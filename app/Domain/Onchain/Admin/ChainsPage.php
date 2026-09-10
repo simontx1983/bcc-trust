@@ -8,6 +8,7 @@ if (!defined('ABSPATH')) {
 
 use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Services\CosmosEndpointTransition;
 use BCC\Trust\Onchain\Repositories\HallRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Services\HallProvisioningService;
@@ -65,6 +66,16 @@ class ChainsPage
      */
     public const ACTION_HALL_CREATE = 'bcc_chain_hall_create';
 
+    /**
+     * admin-post action for the audited Cosmos endpoint switch.
+     *
+     * ⚠ THE ONLY WAY THE ENDPOINT MOVES. Deliberately not a migration, not an
+     * activation hook and not a cron task: a provider change must happen at a
+     * moment a person chose, on an environment they chose, against a plan
+     * they read. See {@see CosmosEndpointTransition}.
+     */
+    public const ACTION_ENDPOINT_SWITCH = 'bcc_chain_endpoint_switch';
+
     public static function register_ajax(): void
     {
         add_action('wp_ajax_bcc_chain_refresh', [self::class, 'ajax_refresh']);
@@ -80,6 +91,7 @@ class ChainsPage
     {
         add_action('admin_post_' . self::ACTION_IDENTITY_SAVE, [self::class, 'handle_identity_save']);
         add_action('admin_post_' . self::ACTION_HALL_CREATE,   [self::class, 'handle_hall_create']);
+        add_action('admin_post_' . self::ACTION_ENDPOINT_SWITCH, [self::class, 'handle_endpoint_switch']);
 
         // The six CosmWasm discovery routes that used to be registered here
         // now live on NftDiscoveryPage, along with the sub-tab they served.
@@ -790,6 +802,70 @@ class ChainsPage
             </span>
         </div>
         <?php
+    }
+
+    /**
+     * Move a governed Cosmos chain to a different APPROVED endpoint.
+     *
+     * Every gate the brief asked for, in order:
+     *   capability → POST → scoped nonce → confirmation digest → verified
+     *   destination → single-column write → post-write re-read → cursor
+     *   clear → post-clear proof → audit row.
+     *
+     * ⚠ THE DIGEST IS THE CONFIRMATION. It is computed from the state the
+     * operator was SHOWN — the endpoints, the exact code ids holding a
+     * cursor, and whether the code cursor was set. {@see
+     * CosmosEndpointTransition::execute()} recomputes it against live state
+     * and refuses on any difference, so a plan reviewed ten minutes ago
+     * cannot execute against a world that moved. Nothing is hard-coded: the
+     * rows cleared are the rows identified at execution time.
+     *
+     * ⚠ NOTHING HERE TOUCHES PRODUCTION BY ITSELF. This is a button. It runs
+     * where an administrator presses it and nowhere else.
+     */
+    public static function handle_endpoint_switch(): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
+        AdminActionSupport::requireNonce(self::ACTION_ENDPOINT_SWITCH, 'bcc_chain_endpoint_nonce');
+
+        $chainId = (int) ($_POST['chain_id'] ?? 0);
+        if ($chainId <= 0 || ChainRepository::getById($chainId) === null) {
+            self::redirect_endpoint('invalid_chain');
+        }
+
+        $targetRaw = isset($_POST['target_url']) ? wp_unslash($_POST['target_url']) : '';
+        $digestRaw = isset($_POST['plan_digest']) ? wp_unslash($_POST['plan_digest']) : '';
+        $target    = is_string($targetRaw) ? esc_url_raw(trim($targetRaw)) : '';
+        $digest    = is_string($digestRaw) ? trim($digestRaw) : '';
+
+        if ($target === '' || $digest === '') {
+            self::redirect_endpoint('missing_input', $chainId);
+        }
+
+        $result = CosmosEndpointTransition::execute(
+            $chainId,
+            $target,
+            $digest,
+            get_current_user_id()
+        );
+
+        self::redirect_endpoint($result['ok'] ? 'switched' : $result['reason'], $chainId);
+    }
+
+    /** @return never */
+    private static function redirect_endpoint(string $result, int $chainId = 0): never
+    {
+        $args = [
+            'page'         => self::PAGE_SLUG,
+            'subtab'       => 'identity',
+            'bcc_endpoint' => $result,
+        ];
+        if ($chainId > 0) {
+            $args['bcc_chain'] = $chainId;
+        }
+
+        AdminActionSupport::redirect($args);
     }
 
     /**

@@ -93,6 +93,19 @@ final class CosmwasmScanEligibility
     public const UNKNOWN = 'unknown';
 
     /**
+     * The chain is otherwise ready, but its endpoint has not proven itself to
+     * be an approved host serving the expected network.
+     *
+     * ⚠ THIS IS A REFUSAL, NOT A WARNING. It is reported through the SAME
+     * vocabulary as every other reason a scan may not run, so
+     * {@see isScannable()} excludes it automatically and every admin surface
+     * that already renders eligibility renders it with no new UI. Adding a
+     * parallel gate beside this enum would be the second source of truth this
+     * model exists to avoid.
+     */
+    public const ENDPOINT_UNVERIFIED = 'endpoint_unverified';
+
+    /**
      * PURE. The verdict for one chain.
      *
      * ── THE FIVE CONDITIONS ─────────────────────────────────────────────
@@ -143,13 +156,20 @@ final class CosmwasmScanEligibility
      * @param  string|null    $cwDiscoveryState null = no checkpoint row yet
      * @param  bool|null      $optedIn          null = the opt-in column is absent from the projection
      * @param  list<int>|null $allowlist        null = BCC_COSMWASM_CHAIN_ALLOWLIST is undefined
-     * @return string one of the six verdict constants on this class
+     * @param  bool|null      $endpointVerified TRUE when the chain's endpoint
+     *         has been proven approved and on the expected network; FALSE when
+     *         a governed chain failed that proof; NULL when the chain is not
+     *         governed by endpoint policy, which leaves behaviour exactly as it
+     *         was. Optional and last, so every existing caller stays
+     *         source-compatible and keeps its previous result.
+     * @return string one of the verdict constants on this class
      */
     public static function verdict(
         int $chainId,
         ?string $cwDiscoveryState,
         ?bool $optedIn,
-        ?array $allowlist
+        ?array $allowlist,
+        ?bool $endpointVerified = null
     ): string {
         if ($cwDiscoveryState === ChainCheckpointRepository::CW_STATE_UNSUPPORTED) {
             return self::UNSUPPORTED;
@@ -165,6 +185,14 @@ final class CosmwasmScanEligibility
         }
         if ($allowlist !== null && !in_array($chainId, $allowlist, true)) {
             return self::ALLOWLIST_EXCLUDED;
+        }
+
+        // Checked LAST on purpose. A chain that is not opted in, is paused or
+        // is allowlist-excluded should say so — those are the answers an
+        // operator can act on. Endpoint verification only decides the case
+        // where everything else already says "go".
+        if ($endpointVerified === false) {
+            return self::ENDPOINT_UNVERIFIED;
         }
 
         return self::ELIGIBLE;

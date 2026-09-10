@@ -32,6 +32,7 @@
 namespace BCC\Trust\Onchain\Support;
 
 use BCC\Trust\Onchain\Repositories\OnchainCircuitBreakerRepository;
+use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
 use BCC\Trust\Onchain\ValueObjects\ProviderFailureKind;
 use BCC\Trust\Onchain\ValueObjects\ProviderRequestClass;
 
@@ -223,11 +224,17 @@ final class OnchainCircuitBreaker
         // class of lie as a stale counter outliving its window, which is what
         // stranded chain 18 at 3022 failures beside an expired transient.
         if ($state !== null && (int) ($state['failures'] ?? 0) > 0) {
+            // ⚠ The fingerprint is cleared WITH the counter and the
+            // attribution. A recovered chain holds no story about which
+            // endpoint broke it, so leaving the marker behind would let a
+            // later charge be judged "foreign" against a provider that is no
+            // longer described by anything.
             self::setState($chainId, [
                 'failures'      => 0,
                 'opened_at'     => 0,
                 'kind'          => null,
                 'request_class' => null,
+                'endpoint_fp'   => null,
             ]);
         }
 
@@ -332,11 +339,25 @@ final class OnchainCircuitBreaker
      * @param string|null $kind         a {@see ProviderFailureKind} token, or null
      * @param string|null $requestClass a {@see ProviderRequestClass} value, or null
      */
+    /**
+     * @param string|null $endpointFp the COMPLETE normalized endpoint identity
+     *        this charge was earned against ({@see CosmosEndpointPolicy::fingerprint()}
+     *        — scheme, host, effective port, base path and expected network).
+     *        Optional and last, so all twelve existing callers stay
+     *        source-compatible. Stored opaquely: the breaker serves nine
+     *        chains and five subsystems and deliberately knows nothing about
+     *        Cosmos endpoints beyond "this string identifies where the failure
+     *        came from".
+     */
     public static function recordFailure(
         int $chainId,
         ?string $kind = null,
-        ?string $requestClass = null
+        ?string $requestClass = null,
+        ?string $endpointFp = null
     ): void {
+        if ($endpointFp !== null && !CosmosEndpointPolicy::isFingerprint($endpointFp)) {
+            $endpointFp = null;
+        }
         // ⚠ VALIDATED, NOT TRUSTED — the same discipline
         // ChainCheckpointRepository::recordCwEnumerationFailure() uses. No
         // caller, present or future, can route a provider sentence, an
@@ -446,12 +467,22 @@ final class OnchainCircuitBreaker
         // operator had for a breaker that is still open for the same reason.
         $priorKind  = $priorState['kind'] ?? null;
         $priorClass = $priorState['request_class'] ?? null;
+        $priorFp    = $priorState['endpoint_fp'] ?? null;
+
+        // ⚠ A CHARGE FROM A DIFFERENT ENDPOINT DOES NOT INHERIT THE OLD ONE'S
+        // STORY. When this charge names an endpoint and the stored state was
+        // recorded against a different one, the carry-forward is dropped:
+        // otherwise the first failure after a provider switch would be
+        // described using the previous provider's kind and request class, and
+        // the admin page would blame a host that had never served a request.
+        $foreign = $endpointFp !== null && $priorFp !== null && $endpointFp !== $priorFp;
 
         self::setState($chainId, [
             'failures'      => $failures,
             'opened_at'     => $openedAt,
-            'kind'          => $kind ?? $priorKind,
-            'request_class' => $requestClass ?? $priorClass,
+            'kind'          => $kind ?? ($foreign ? null : $priorKind),
+            'request_class' => $requestClass ?? ($foreign ? null : $priorClass),
+            'endpoint_fp'   => $endpointFp ?? $priorFp,
         ]);
     }
 
@@ -464,13 +495,31 @@ final class OnchainCircuitBreaker
      *
      * @return array{kind: string|null, request_class: string|null}
      */
-    public static function attribution(int $chainId): array
+    /**
+     * @param string|null $expectedFp when supplied, attribution recorded
+     *        against a DIFFERENT endpoint is withheld rather than shown.
+     *
+     * ⚠ SILENCE, NOT A GUESS. A caller that knows which endpoint the chain is
+     * pointed at now must never be told "Provider server error" about a host
+     * that has not served a single request — that is a fabricated diagnosis,
+     * the exact class of lie PR 7.8 removed. `stale` says the state predates
+     * the current endpoint so a surface can render "not recorded for this
+     * endpoint" instead of inventing one.
+     *
+     * @return array{kind: string|null, request_class: string|null, endpoint_fp: string|null, stale: bool}
+     */
+    public static function attribution(int $chainId, ?string $expectedFp = null): array
     {
         $state = self::getState($chainId);
+        $storedFp = $state['endpoint_fp'] ?? null;
+
+        $stale = $expectedFp !== null && $storedFp !== null && $storedFp !== $expectedFp;
 
         return [
-            'kind'          => $state['kind'] ?? null,
-            'request_class' => $state['request_class'] ?? null,
+            'kind'          => $stale ? null : ($state['kind'] ?? null),
+            'request_class' => $stale ? null : ($state['request_class'] ?? null),
+            'endpoint_fp'   => $storedFp,
+            'stale'         => $stale,
         ];
     }
 
@@ -511,6 +560,7 @@ final class OnchainCircuitBreaker
                 'status'        => $status,
                 'kind'          => $state['kind'] ?? null,
                 'request_class' => $state['request_class'] ?? null,
+                'endpoint_fp'   => $state['endpoint_fp'] ?? null,
             ];
         }
         return $result;
@@ -519,7 +569,14 @@ final class OnchainCircuitBreaker
     // ── Storage ─────────────────────────────────────────────────────────────
 
     /**
-     * @return array{failures: int, opened_at: int}|null
+     * @return array{failures: int, opened_at: int, kind: string|null,
+     *     request_class: string|null, endpoint_fp: string|null}|null
+     *
+     * The three optional fields are RE-VALIDATED here on the way out, not
+     * merely on the way in: this state lives in a wp_cache entry plus a
+     * transient, both writable by other code. A record written before any
+     * of them existed reads back as null for each and behaves exactly as
+     * it did before they were added.
      *
      * NOTE: when the cached value is present but malformed (schema drift,
      * mid-deploy legacy keys, cache layer corruption) we return null which
@@ -563,12 +620,22 @@ final class OnchainCircuitBreaker
             && ProviderRequestClass::isValid($value['request_class'])
                 ? $value['request_class']
                 : null;
+        // ⚠ Re-validated on the way out like the other two, and for the same
+        // reason: the store is a wp_cache entry plus a transient that other
+        // code can write. A value that is not fingerprint-shaped is dropped
+        // rather than compared — a malformed marker must never accidentally
+        // MATCH a real endpoint and launder the old provider's attribution.
+        $endpointFp = isset($value['endpoint_fp']) && is_string($value['endpoint_fp'])
+            && CosmosEndpointPolicy::isFingerprint($value['endpoint_fp'])
+                ? $value['endpoint_fp']
+                : null;
 
         return [
             'failures'      => (int) $value['failures'],
             'opened_at'     => (int) $value['opened_at'],
             'kind'          => $kind,
             'request_class' => $requestClass,
+            'endpoint_fp'   => $endpointFp,
         ];
     }
 
