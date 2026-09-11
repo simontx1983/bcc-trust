@@ -100,7 +100,12 @@ if (!defined('ABSPATH')) {
  */
 final class CosmwasmDiscoveryWorker
 {
-    private const ADVISORY_LOCK_PREFIX = 'bcc_cosmwasm_chain_';
+    /**
+     * PUBLIC because {@see \BCC\Trust\Onchain\Services\CosmosEndpointTransition}
+     * must take the SAME lock before clearing cursors. One constant, so the
+     * two lock names cannot drift apart and silently stop excluding each other.
+     */
+    public const ADVISORY_LOCK_PREFIX = 'bcc_cosmwasm_chain_';
 
     /**
      * The per-chain operator opt-in column, as it appears in the
