@@ -209,6 +209,45 @@ final class OnchainCircuitBreaker
     }
 
     /**
+     * Forget everything the breaker knows about a chain's PREVIOUS endpoint.
+     *
+     * Called by the audited endpoint switch after the chain row has moved, so
+     * the new provider starts from a clean slate instead of inheriting a
+     * counter, an open state or an attribution earned by a host it replaced.
+     *
+     * ⚠ DELIBERATELY NOT {@see recordSuccess()}. That method would clear the
+     * same three things — and then write `bcc_onchain_last_success_<id>` =
+     * now, recording a successful fetch that never happened. That timestamp is
+     * read by the stale-chain detector and shown to operators; faking it would
+     * make a chain look freshly healthy at the exact moment nobody has
+     * contacted its new endpoint yet. Forgetting is not succeeding.
+     *
+     * Clears, together, so no reader can see a half-cleared record:
+     *   - the open-state struct (object cache + transient),
+     *   - the atomic failure counter,
+     *   - the half-open probe lock.
+     *
+     * @return bool whether anything was actually cleared — lets the caller
+     *              record "breaker_cleared" as a fact rather than an intention.
+     */
+    public static function forgetForEndpointChange(int $chainId): bool
+    {
+        if ($chainId <= 0) {
+            return false;
+        }
+
+        $hadState = self::getState($chainId) !== null;
+        $hadCounter = get_option(self::counterOptionName($chainId), null) !== null;
+
+        wp_cache_delete('cb_' . $chainId, self::CACHE_GROUP);
+        delete_transient('bcc_cb_' . $chainId);
+        OnchainCircuitBreakerRepository::deleteCounter(self::counterOptionName($chainId));
+        self::releaseProbe($chainId);
+
+        return $hadState || $hadCounter;
+    }
+
+    /**
      * Record a successful API call for a chain.
      * Resets the failure counter — circuit returns to CLOSED.
      */

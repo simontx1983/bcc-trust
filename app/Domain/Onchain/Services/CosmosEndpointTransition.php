@@ -153,9 +153,42 @@ final class CosmosEndpointTransition
      * first and checking second would leave the chain pointed at an unproven
      * host if the check failed.
      *
+     * ⚠ THE WHOLE OPERATION RUNS UNDER THE DISCOVERY WORKER'S OWN LOCK.
+     * {@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker} takes the
+     * non-blocking advisory lock `bcc_cosmwasm_chain_<id>` before it writes
+     * any cursor. Holding the SAME lock here means the plan is recomputed,
+     * compared with the reviewed digest, and acted on while no worker can add
+     * or advance a cursor underneath it — without it, a cursor written between
+     * the digest check and the clear would be wiped unreviewed or left behind
+     * to be misread by the new endpoint. Contended → refuse, never wait: an
+     * operator can simply press the button again once the pass finishes.
+     *
      * @return array{ok: bool, reason: string, cleared_families: int, code_cursor_cleared: bool, verified_network: string|null}
      */
     public static function execute(
+        int $chainId,
+        string $targetUrl,
+        string $confirmedDigest,
+        int $actorId
+    ): array {
+        $lock = \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::ADVISORY_LOCK_PREFIX . $chainId;
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lock, 0)) {
+            return self::result(false, 'lock_contended');
+        }
+
+        try {
+            return self::executeLocked($chainId, $targetUrl, $confirmedDigest, $actorId);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /**
+     * The body of {@see execute()}. Callable ONLY with the worker lock held.
+     *
+     * @return array{ok: bool, reason: string, cleared_families: int, code_cursor_cleared: bool, verified_network: string|null}
+     */
+    private static function executeLocked(
         int $chainId,
         string $targetUrl,
         string $confirmedDigest,
@@ -216,7 +249,28 @@ final class CosmosEndpointTransition
             return self::result(false, 'cursors_remain');
         }
 
-        self::audit($chainId, $plan, $verification['network'], $cleared, $codeCursorCleared, $actorId);
+        // ⚠ The breaker is chain-keyed, so its counter, open state and
+        // attribution were all earned by the endpoint just replaced. Left in
+        // place they would keep counting toward opening the breaker on the NEW
+        // provider, and the admin page would describe a host that has not yet
+        // served one request. Cleared AFTER the row moved and the cursors were
+        // proven gone, so a refusal earlier in this method leaves it intact.
+        $breakerCleared = \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::forgetForEndpointChange($chainId);
+
+        // The complete normalized identity the chain now answers to — scheme,
+        // host, effective port, base path and expected network.
+        $endpointFp = CosmosEndpointPolicy::fingerprint($plan['slug'], (string) $plan['to']);
+
+        self::audit(
+            $chainId,
+            $plan,
+            $verification['network'],
+            $cleared,
+            $codeCursorCleared,
+            $actorId,
+            $endpointFp,
+            $breakerCleared
+        );
 
         return [
             'ok'                  => true,
@@ -240,7 +294,9 @@ final class CosmosEndpointTransition
         ?string $network,
         int $cleared,
         bool $codeCursorCleared,
-        int $actorId
+        int $actorId,
+        ?string $endpointFp,
+        bool $breakerCleared
     ): void {
         \BCC\Trust\Onchain\Admin\AdminActionSupport::audit(
             self::AUDIT_ACTION,
@@ -256,6 +312,11 @@ final class CosmosEndpointTransition
                 'watermark_kept'      => $plan['watermark'],
                 'digest'              => $plan['digest'],
                 'actor'               => $actorId,
+                // Bounded, non-secret: a 16-hex hash of the normalized
+                // identity. Lets a later reader prove WHICH endpoint the chain
+                // was moved to without storing anything a provider returned.
+                'endpoint_fp'         => $endpointFp,
+                'breaker_cleared'     => $breakerCleared,
             ]
         );
     }
