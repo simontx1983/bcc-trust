@@ -156,7 +156,8 @@ final class CosmwasmDiscoveryWorker
     //   enumerateFamilyTail()   up to CONTRACT_TAIL_MAX_PAGES = 3
     //   enumerateFamilyPage()   exactly one spend, no loop    = 1
     //   classifyContract()      one spend of count(outcomes)  = 3
-    //   emitCollections()       one spend per candidate       = 1
+    //   emitCollections()       one spend per METADATA REQUEST,
+    //                           up to two per candidate       = 2
     //
     // NOTE the asymmetry: the TAIL walks up to 3 pages, the PAGE walks
     // exactly one. They are different stages and cost different amounts.
@@ -175,7 +176,19 @@ final class CosmwasmDiscoveryWorker
     // the source of every downstream row. Starving it would starve
     // everything.
 
-    /** Emission: one candidate. */
+    /**
+     * Emission: one metadata REQUEST.
+     *
+     * ⚠ DELIBERATELY STILL 1, NOT 2, NOW THAT A CANDIDATE COSTS UP TO TWO.
+     * The floor exists so the last stage is never starved outright. Reserving
+     * two would take a request away from classification on every pass to
+     * guarantee a fallback that most candidates never need — the classic
+     * variant answers for every CONFIRMED contract, which is the bulk of the
+     * queue. With one unit left, emission asks the classic variant and, if
+     * that is refused, {@see \BCC\Trust\Onchain\Services\CosmwasmDiscoveryService::emitCollections()}
+     * declines the second request and leaves the candidate queued: a deferral,
+     * not a partial write, and never a budget overrun.
+     */
     private const RESERVE_EMIT = 1;
 
     /** After enumeration: one contract classification + one emission. */

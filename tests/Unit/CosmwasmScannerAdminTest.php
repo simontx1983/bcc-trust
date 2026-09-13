@@ -144,6 +144,7 @@ final class CosmwasmScannerAdminTest extends TestCase
             'contracts_by_classification' => [],
             'candidates'                  => 0,
             'candidates_awaiting_emit'    => 0,
+            'candidates_held_for_review'  => 0,
         ], $overrides);
     }
 
@@ -180,6 +181,7 @@ final class CosmwasmScannerAdminTest extends TestCase
                 'denied'                   => 5,
                 'candidates'               => 61,
                 'candidates_awaiting_emit' => 7,
+                'candidates_held_for_review' => 0,
                 'by_classification'        => [CosmwasmClassifier::CONFIRMED => 61],
             ],
             self::NOW

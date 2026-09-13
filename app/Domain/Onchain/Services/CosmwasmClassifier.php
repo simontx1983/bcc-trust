@@ -163,6 +163,17 @@ final class CosmwasmClassifier
     public const REASON_NO_CW721_QUERIES = 'no_cw721_queries';
 
     /**
+     * Counts tokens, refuses BOTH collection-metadata variants.
+     *
+     * ⚠ PROMOTED FROM A LITERAL, VALUE UNCHANGED (2026-09-13). The string is
+     * exactly what has always been written, so no stored row changes meaning
+     * and `VERSION` does not move. It became a constant because a SECOND
+     * reader now depends on it — {@see awaitsMetadataReview()} — and a rule
+     * shared by the writer and a reader must not be two string literals.
+     */
+    public const REASON_NUM_TOKENS_ONLY = 'num_tokens_only';
+
+    /**
      * Bump when the probe set or the decision rules change.
      *
      * A bump does NOT sweep the whole inventory: only the classifications
@@ -306,6 +317,42 @@ final class CosmwasmClassifier
     public static function isCw721(string $classification): bool
     {
         return $classification === self::CONFIRMED || $classification === self::PROBABLE;
+    }
+
+    /**
+     * PURE. Does this row's PERSISTED verdict already say that automatic
+     * emission cannot complete it, so an administrator has to look?
+     *
+     * ── WHAT THIS ANSWERS, AND WHY IT IS ONE FUNCTION ───────────────────
+     * `probable_cw721` + {@see REASON_NUM_TOKENS_ONLY} is the verdict this
+     * classifier writes for "it counts tokens, and it DECISIVELY refused both
+     * collection-metadata variants" (branch 2 of {@see classify()}). Emission
+     * needs exactly those two fields: a collection row needs a name, the only
+     * two queries that can supply one have already answered "not supported",
+     * and nothing about that changes on a retry — the refusal is the
+     * contract's, not the provider's.
+     *
+     * Before this existed, such a row sat at the HEAD of the emit queue
+     * (ordered by id) and every pass asked both refused variants again,
+     * which is how staging opened chain 8's breaker on run after run.
+     *
+     * ⚠ IT READS THE VERDICT, NOT THE EVIDENCE STRING. `probes_failed` is
+     * narration: it is capped at 128 characters by
+     * {@see joinCapped()}, so a longer probe set silently truncates and a
+     * token-matching reader would change its mind for a reason that has
+     * nothing to do with the contract. The verdict columns cannot truncate.
+     *
+     * ⚠ `info_only` IS DELIBERATELY NOT HELD. That probable verdict means an
+     * info variant ANSWERED (it was `num_tokens` that refused), so emission
+     * can still resolve a name and must keep trying.
+     *
+     * This decides nothing about the row's own state: a held contract stays
+     * `probable_cw721`, stays un-denied, stays unwritten, and stays visible
+     * as a candidate. It is withheld from the AUTOMATIC queue only.
+     */
+    public static function awaitsMetadataReview(string $classification, ?string $reason): bool
+    {
+        return $classification === self::PROBABLE && $reason === self::REASON_NUM_TOKENS_ONLY;
     }
 
     // ── Error discrimination ────────────────────────────────────────────
@@ -521,7 +568,7 @@ final class CosmwasmClassifier
         // 2. Counts tokens, refuses BOTH info variants (decisively). A
         //    CW-721 with a non-standard/absent collection-info variant.
         if ($numTokensOk && $infoDecisivelyUnsupported) {
-            return self::verdict(self::PROBABLE, 'num_tokens_only', $okProbes, $failedProbes, $firstError);
+            return self::verdict(self::PROBABLE, self::REASON_NUM_TOKENS_ONLY, $okProbes, $failedProbes, $firstError);
         }
 
         // 3. Names itself but decisively cannot count tokens. Could be a

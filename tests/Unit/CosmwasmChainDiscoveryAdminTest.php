@@ -1017,6 +1017,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
                 'contracts_inspected'      => 0,
                 'candidates'               => 0,
                 'candidates_awaiting_emit' => 0,
+                'candidates_held_for_review' => 0,
                 'denied'                   => 0,
             ],
             'issues'               => [],

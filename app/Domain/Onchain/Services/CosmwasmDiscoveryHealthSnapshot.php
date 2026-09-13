@@ -85,7 +85,8 @@ if (!defined('ABSPATH')) {
  *     contracts_denied: int,
  *     contracts_by_classification: array<string, int>,
  *     candidates: int,
- *     candidates_awaiting_emit: int
+ *     candidates_awaiting_emit: int,
+ *     candidates_held_for_review: int
  * }
  */
 final class CosmwasmDiscoveryHealthSnapshot
@@ -300,6 +301,7 @@ final class CosmwasmDiscoveryHealthSnapshot
      *         contracts_inspected: int,
      *         candidates: int,
      *         candidates_awaiting_emit: int,
+     *         candidates_held_for_review: int,
      *         denied: int
      *     }|null,
      *     issues: list<string>
@@ -367,6 +369,7 @@ final class CosmwasmDiscoveryHealthSnapshot
             'contracts_inspected'      => 0,
             'candidates'               => 0,
             'candidates_awaiting_emit' => 0,
+            'candidates_held_for_review' => 0,
             'denied'                   => 0,
         ];
 
@@ -411,6 +414,7 @@ final class CosmwasmDiscoveryHealthSnapshot
             $totals['contracts_inspected']      += $row['contracts_inspected'];
             $totals['candidates']               += $row['candidates'];
             $totals['candidates_awaiting_emit'] += $row['candidates_awaiting_emit'];
+            $totals['candidates_held_for_review'] += $row['candidates_held_for_review'];
             $totals['denied']                   += $row['contracts_denied'];
         }
 
@@ -516,7 +520,7 @@ final class CosmwasmDiscoveryHealthSnapshot
      *
      * @param  CheckpointRow|null           $checkpoint
      * @param  array<string, int>           $familyCounts
-     * @param  array{total: int, inspected: int, denied: int, candidates: int, candidates_awaiting_emit: int, by_classification: array<string, int>}|null $contractStats
+     * @param  array{total: int, inspected: int, denied: int, candidates: int, candidates_awaiting_emit: int, candidates_held_for_review: int, by_classification: array<string, int>}|null $contractStats
      * @param  bool|null                    $discoveryOptedIn null = the opt-in column is absent from the projection
      * @param  list<int>|null               $allowlist        null = BCC_COSMWASM_CHAIN_ALLOWLIST is undefined
      * @return ChainPanelRow
@@ -566,6 +570,7 @@ final class CosmwasmDiscoveryHealthSnapshot
             'denied'                   => 0,
             'candidates'               => 0,
             'candidates_awaiting_emit' => 0,
+            'candidates_held_for_review' => 0,
             'by_classification'        => [],
         ];
 
@@ -623,6 +628,7 @@ final class CosmwasmDiscoveryHealthSnapshot
             'contracts_by_classification' => $stats['by_classification'],
             'candidates'                  => $stats['candidates'],
             'candidates_awaiting_emit'    => $stats['candidates_awaiting_emit'],
+            'candidates_held_for_review'  => $stats['candidates_held_for_review'],
         ];
     }
 

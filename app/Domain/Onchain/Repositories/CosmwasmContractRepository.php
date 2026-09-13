@@ -681,12 +681,20 @@ final class CosmwasmContractRepository
      *
      * @throws RepositoryReadFailure when the read did not run
      *
+     * `classification_reason` joined the GROUP BY so the aggregate can tell
+     * apart the two unwritten-candidate populations: the ones the automatic
+     * emit pass will attempt, and the ones it will never attempt because
+     * their own verdict says both metadata variants were refused. One more
+     * grouping column on the same indexed aggregate, and the two counts it
+     * produces are disjoint.
+     *
      * @return array<int, array{
      *     total: int,
      *     inspected: int,
      *     denied: int,
      *     candidates: int,
      *     candidates_awaiting_emit: int,
+     *     candidates_held_for_review: int,
      *     by_classification: array<string, int>
      * }>
      */
@@ -695,16 +703,17 @@ final class CosmwasmContractRepository
         global $wpdb;
         $table = self::table();
 
-        /** @var list<object{chain_id: string, classification: string, denied: string, collection_row_written: string, total: string, inspected: string|null}>|null $rows */
+        /** @var list<object{chain_id: string, classification: string, classification_reason: string|null, denied: string, collection_row_written: string, total: string, inspected: string|null}>|null $rows */
         $rows = $wpdb->get_results(
             "SELECT chain_id,
                     classification,
+                    classification_reason,
                     denied,
                     collection_row_written,
                     COUNT(*) AS total,
                     SUM(classified_at IS NOT NULL) AS inspected
                FROM {$table}
-              GROUP BY chain_id, classification, denied, collection_row_written"
+              GROUP BY chain_id, classification, classification_reason, denied, collection_row_written"
         );
         self::guardReadOrThrow(__FUNCTION__);
 
@@ -718,11 +727,13 @@ final class CosmwasmContractRepository
                     'denied'                   => 0,
                     'candidates'               => 0,
                     'candidates_awaiting_emit' => 0,
+                    'candidates_held_for_review' => 0,
                     'by_classification'        => self::zeroedClassificationMap(),
                 ];
             }
 
             $classification = (string) $row->classification;
+            $reason         = $row->classification_reason === null ? null : (string) $row->classification_reason;
             $denied         = (int) $row->denied === 1;
             $written        = (int) $row->collection_row_written === 1;
             $total          = (int) $row->total;
@@ -745,7 +756,20 @@ final class CosmwasmContractRepository
             if (!$denied && CosmwasmClassifier::isCw721($classification)) {
                 $out[$chainId]['candidates'] += $total;
                 if (!$written) {
-                    $out[$chainId]['candidates_awaiting_emit'] += $total;
+                    // ⚠ THE TWO ARE DISJOINT ON PURPOSE. "Awaiting emit" is
+                    // read as "the scanner will get to these", so a row the
+                    // automatic pass will NEVER attempt must not be counted
+                    // there — that is what made the hold invisible in the
+                    // first design. A held row is still a candidate and still
+                    // unwritten; it is simply waiting on a person, and it is
+                    // counted where it can be seen. The decision comes from
+                    // the ONE predicate the emit pass also asks, never from a
+                    // second copy of the rule.
+                    if (CosmwasmClassifier::awaitsMetadataReview($classification, $reason)) {
+                        $out[$chainId]['candidates_held_for_review'] += $total;
+                    } else {
+                        $out[$chainId]['candidates_awaiting_emit'] += $total;
+                    }
                 }
             }
         }

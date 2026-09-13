@@ -896,6 +896,7 @@ namespace BCC\Trust\Onchain\Repositories {
              *     denied: int,
              *     candidates: int,
              *     candidates_awaiting_emit: int,
+             *     candidates_held_for_review: int,
              *     by_classification: array<string, int>
              * }>
              */
@@ -913,6 +914,7 @@ namespace BCC\Trust\Onchain\Repositories {
                                 'denied'                   => 0,
                                 'candidates'               => 0,
                                 'candidates_awaiting_emit' => 0,
+                                'candidates_held_for_review' => 0,
                                 'by_classification'        => [],
                             ];
                         }
@@ -933,7 +935,17 @@ namespace BCC\Trust\Onchain\Repositories {
                         if (!$denied && \BCC\Trust\Onchain\Services\CosmwasmClassifier::isCw721($classification)) {
                             $out[$chainId]['candidates']++;
                             if ((int) $row->collection_row_written !== 1) {
-                                $out[$chainId]['candidates_awaiting_emit']++;
+                                // Mirrors the real aggregate's disjoint split by
+                                // asking the REAL predicate, never a copy of it.
+                                $heldReason = $row->classification_reason ?? null;
+                                if (\BCC\Trust\Onchain\Services\CosmwasmClassifier::awaitsMetadataReview(
+                                    $classification,
+                                    $heldReason === null ? null : (string) $heldReason
+                                )) {
+                                    $out[$chainId]['candidates_held_for_review']++;
+                                } else {
+                                    $out[$chainId]['candidates_awaiting_emit']++;
+                                }
                             }
                         }
                     }
