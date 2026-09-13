@@ -169,6 +169,21 @@ if (!function_exists('wp_remote_get')) {
     }
 }
 
+if (!function_exists('wp_json_encode')) {
+    /**
+     * The smart-query path builds its base64 payload with `wp_json_encode()`,
+     * so driving those queries over the scripted wire needs it. WordPress's
+     * version differs only in flag defaults, which this encoding does not use.
+     *
+     * @param mixed $data
+     * @return string|false
+     */
+    function wp_json_encode($data, int $options = 0, int $depth = 512)
+    {
+        return json_encode($data, $options, $depth);
+    }
+}
+
 if (!function_exists('wp_remote_retrieve_response_code')) {
     function wp_remote_retrieve_response_code($response)
     {

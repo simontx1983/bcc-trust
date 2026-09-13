@@ -1037,24 +1037,61 @@ class CosmosFetcher implements FetcherInterface
      * `contract_info` outright with an unknown-variant error. Both shapes
      * carry top-level `name` / `symbol`, so callers parse one envelope.
      *
-     * The LCD returns the unknown-variant error as a non-200, which
-     * `wasmSmartQuery` folds into null — indistinguishable from a
-     * transport failure. The fallback therefore fires on ANY null; on a
-     * genuinely dead LCD the second call just fails the same way (and the
-     * per-chain CircuitBreaker absorbs the doubled failure count).
+     * ── WHY THIS USES THE ERROR-AWARE SEAM (2026-09-13) ─────────────────
+     * This pair used to go through {@see wasmSmartQuery()}, which supplies
+     * NO `application_error` callback. The LCD returns a contract's
+     * unknown-variant refusal as a **5xx**, so that path could not tell
+     * "the contract does not implement this query" from "the node broke":
+     * {@see ApiRetry::request()} retried each refusal three times and
+     * charged the breaker FOUR times for it. A CW-721 implementing neither
+     * variant therefore cost **8 charges against a threshold of 5** and
+     * opened the chain's breaker every single pass.
      *
+     * That was measured, not theorised: staging run 10 (2026-09-11) opened
+     * chain 8's breaker 10 s after its last success with
+     * `http_5xx / standard_request`, and a direct two-request diagnostic on
+     * 2026-09-12 got **HTTP 500, grpc code 2, "Error parsing into type"**
+     * from BOTH variants — the contract answering, not the provider failing.
+     *
+     * {@see wasmSmartQueryResult()} already owns that distinction (it is the
+     * one call site that opts in, and it delegates the decision to
+     * {@see CosmwasmClassifier::errorKindFromMessage()}), so the pair now
+     * routes through it: a refusal costs ONE request and ZERO charges, while
+     * a genuine 5xx / 429 / transport failure keeps its retry and its charge
+     * exactly as before. No new predicate was added; the existing authority
+     * is reused.
+     *
+     * ⚠ THE FALLBACK STILL FIRES ON ANY UNSUCCESSFUL FIRST VARIANT, a node
+     * fault included. That is deliberate: it keeps the charge arithmetic for
+     * a genuinely broken node identical to today's, and the second variant is
+     * the only other place the answer can come from.
+     *
+     * @param  callable():bool|null $authorizeRequest Consulted immediately
+     *         BEFORE each wire request. Returning false means "the caller's
+     *         request budget is out": the pair stops and asks for nothing, so
+     *         a metered caller can never exceed its budget mid-pair. Null —
+     *         every non-discovery caller — is unmetered, exactly as before.
      * @return array<string, mixed>|null
      */
-    private function cw721CollectionInfoQuery(string $contractAddress): ?array
+    private function cw721CollectionInfoQuery(string $contractAddress, ?callable $authorizeRequest = null): ?array
     {
-        $data = $this->wasmSmartQuery($contractAddress, ['contract_info' => new \stdClass()]);
-        if ($data !== null) {
-            return $data;
+        $variants = [
+            \BCC\Trust\Onchain\Services\CosmwasmClassifier::PROBE_CONTRACT_INFO,
+            \BCC\Trust\Onchain\Services\CosmwasmClassifier::PROBE_COLLECTION_INFO,
+        ];
+
+        foreach ($variants as $variant) {
+            if ($authorizeRequest !== null && !$authorizeRequest()) {
+                return null;
+            }
+
+            $result = $this->wasmSmartQueryResult($contractAddress, [$variant => new \stdClass()]);
+            if ($result['ok'] && is_array($result['data'])) {
+                return $result['data'];
+            }
         }
-        return $this->wasmSmartQuery(
-            $contractAddress,
-            ['get_collection_info_and_extension' => new \stdClass()]
-        );
+
+        return null;
     }
 
     /**
@@ -1092,9 +1129,14 @@ class CosmosFetcher implements FetcherInterface
      * principle, though it's rare). Returns null on transport failure
      * WITHOUT caching so a flaky LCD doesn't poison the window.
      *
+     * @param  callable():bool|null $authorizeRequest Passed straight to
+     *         {@see cw721CollectionInfoQuery()}: consulted before EACH of the
+     *         up-to-two metadata requests so a metered caller (discovery
+     *         emission) charges its budget per request and can stop between
+     *         them. A cache hit asks for nothing and therefore costs nothing.
      * @return array{name: ?string, symbol: ?string, description: ?string, image_url: ?string}|null
      */
-    public function fetchContractInfo(string $contract): ?array
+    public function fetchContractInfo(string $contract, ?callable $authorizeRequest = null): ?array
     {
         if ($contract === '') {
             return null;
@@ -1115,7 +1157,7 @@ class CosmosFetcher implements FetcherInterface
             return $cached;
         }
 
-        $data = $this->cw721CollectionInfoQuery($contract);
+        $data = $this->cw721CollectionInfoQuery($contract, $authorizeRequest);
         if ($data === null) {
             // Don't cache transport failures.
             return null;

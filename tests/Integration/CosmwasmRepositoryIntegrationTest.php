@@ -465,6 +465,59 @@ final class CosmwasmRepositoryIntegrationTest extends TestCase
         self::assertSame(2, CosmwasmContractRepository::countForChain(self::CHAIN_ID));
     }
 
+    /**
+     * The inventory aggregate must split unwritten candidates into the two
+     * DISJOINT populations, against a real GROUP BY.
+     *
+     * `probable_cw721` + `num_tokens_only` means the contract decisively
+     * refused both collection-metadata variants, so the automatic emit pass
+     * will never complete it — counting it as "awaiting emit" would tell an
+     * operator the scanner is going to get to it. It is a candidate, it is
+     * unwritten, and it is waiting on a person: a third number, not a lie in
+     * the second one. The PHP half of this split is one call to
+     * {@see CosmwasmClassifier::awaitsMetadataReview()}; this test pins the
+     * SQL half — that `classification_reason` survives the GROUP BY.
+     */
+    public function testInventorySplitsHeldForReviewOutOfAwaitingEmit(): void
+    {
+        CosmwasmContractRepository::recordDiscovered(self::CHAIN_ID, 434, [
+            ['contract_address' => self::CONTRACT_A, 'denied' => false],
+            ['contract_address' => self::CONTRACT_B, 'denied' => false],
+        ]);
+        CosmwasmContractRepository::recordClassification(
+            self::CHAIN_ID,
+            self::CONTRACT_A,
+            $this->verdict(CosmwasmClassifier::CONFIRMED),
+            0
+        );
+        // The poison-pill shape, written exactly as the classifier writes it.
+        $held                   = $this->verdict(CosmwasmClassifier::PROBABLE);
+        $held['reason']         = CosmwasmClassifier::REASON_NUM_TOKENS_ONLY;
+        CosmwasmContractRepository::recordClassification(self::CHAIN_ID, self::CONTRACT_B, $held, 0);
+        $this->assertNoDbError('recordClassification');
+
+        $inventory = CosmwasmContractRepository::inventoryByChain();
+        $this->assertNoDbError('inventoryByChain');
+        self::assertArrayHasKey(self::CHAIN_ID, $inventory, 'anti-vacuity: the chain must be in the aggregate');
+        $row = $inventory[self::CHAIN_ID];
+
+        self::assertSame(2, $row['candidates'], 'both are CW-721 candidates');
+        self::assertSame(1, $row['candidates_awaiting_emit'], 'only the confirmed one is actually queued');
+        self::assertSame(1, $row['candidates_held_for_review'], 'the refused-metadata one is held, and visible');
+        self::assertSame(
+            $row['candidates'],
+            $row['candidates_awaiting_emit'] + $row['candidates_held_for_review'],
+            'the two populations are disjoint and together account for every unwritten candidate'
+        );
+
+        // Writing the confirmed row empties the queue without touching the hold.
+        CosmwasmContractRepository::markCollectionRowWritten(self::CHAIN_ID, self::CONTRACT_A);
+        $this->assertNoDbError('markCollectionRowWritten');
+        $after = CosmwasmContractRepository::inventoryByChain()[self::CHAIN_ID];
+        self::assertSame(0, $after['candidates_awaiting_emit']);
+        self::assertSame(1, $after['candidates_held_for_review'], 'still held, still counted');
+    }
+
     public function testContractRetryBackoffIsPersistedAndHonoured(): void
     {
         CosmwasmContractRepository::recordDiscovered(self::CHAIN_ID, 434, [

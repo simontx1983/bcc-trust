@@ -806,7 +806,14 @@ final class CosmwasmDiscoveryService
      *     provisioning service — discovery cannot verify, and it cannot
      *     provision.
      *
-     * @return array{emitted: int, denied: int, skipped_known: int}
+     *   - HELD FOR REVIEW. A candidate whose persisted verdict already says
+     *     both collection-metadata variants were decisively refused is
+     *     skipped without asking for anything. It keeps its classification
+     *     and its place in the inventory; what it loses is the ability to
+     *     block the queue head forever and to re-charge the breaker every
+     *     pass. See {@see CosmwasmClassifier::awaitsMetadataReview()}.
+     *
+     * @return array{emitted: int, denied: int, skipped_known: int, held_for_review: int}
      */
     public static function emitCollections(
         int $chainId,
@@ -814,7 +821,7 @@ final class CosmwasmDiscoveryService
         CosmwasmTickBudget $budget,
         int $limit
     ): array {
-        $result = ['emitted' => 0, 'denied' => 0, 'skipped_known' => 0];
+        $result = ['emitted' => 0, 'denied' => 0, 'skipped_known' => 0, 'held_for_review' => 0];
 
         $candidates = CosmwasmContractRepository::findEmittable($chainId, $limit);
         if ($candidates === []) {
@@ -850,8 +857,42 @@ final class CosmwasmDiscoveryService
                 continue;
             }
 
-            $budget->spend();
-            $info = $fetcher->fetchContractInfo($contract);
+            // ── THE HOLD. Checked BEFORE any request is authorized ───────
+            // This row's own verdict already says both metadata variants were
+            // decisively refused, so the two requests below cannot produce a
+            // name — they would only re-earn the breaker charges that opened
+            // chain 8 on every pass. It stays probable_cw721, un-denied and
+            // unwritten; it is withheld from the AUTOMATIC queue and counted
+            // for an administrator instead. One authority decides this:
+            // {@see CosmwasmClassifier::awaitsMetadataReview()}.
+            if (CosmwasmClassifier::awaitsMetadataReview(
+                (string) $row->classification,
+                $row->classification_reason === null ? null : (string) $row->classification_reason
+            )) {
+                $result['held_for_review']++;
+                continue;
+            }
+
+            // ── ONE SPEND PER ACTUAL REQUEST, CHARGED BEFORE IT IS MADE ──
+            // `fetchContractInfo()` asks for up to TWO variants (classic
+            // `contract_info`, then the cw721-v0.19+ one), and a single spend
+            // for the pair under-counted the budget by one request per
+            // candidate. The authorizer is consulted before each, so:
+            //   - both requests are counted separately;
+            //   - with ONE unit left the first is made and the second is
+            //     refused, leaving the candidate queued for the next pass
+            //     rather than overrunning the budget;
+            //   - a cache hit costs nothing, because nothing is asked.
+            $authorizeRequest = static function () use ($budget): bool {
+                if (!$budget->canSpend(1)) {
+                    return false;
+                }
+                $budget->spend();
+
+                return true;
+            };
+
+            $info = $fetcher->fetchContractInfo($contract, $authorizeRequest);
             $name = is_array($info) && is_string($info['name'] ?? null) ? (string) $info['name'] : null;
 
             // Live re-check WITH the name: rule table first (DENY wins,

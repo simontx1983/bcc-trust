@@ -223,9 +223,21 @@ final class CosmwasmEmissionUnderBacklogIntegrationTest extends TestCase
             'id' => self::CHAIN, 'slug' => 'testchain', 'chain_type' => 'cosmos',
             'rest_url' => 'https://lcd.example', 'rpc_url' => '', 'is_active' => 1, 'decimals' => 6,
         ]) extends \BCC\Trust\Onchain\Fetchers\CosmosFetcher {
-            /** @return array<string, mixed>|null */
-            public function fetchContractInfo(string $contract): ?array
+            /**
+             * ⚠ THE AUTHORIZER IS HONOURED, not ignored. Emission charges its
+             * budget per metadata REQUEST through this callback, so a fixture
+             * that skipped it would model a free read and quietly invalidate
+             * every budget number downstream of it. One answer, one request.
+             *
+             * @param  callable():bool|null $authorizeRequest
+             * @return array<string, mixed>|null
+             */
+            public function fetchContractInfo(string $contract, ?callable $authorizeRequest = null): ?array
             {
+                if ($authorizeRequest !== null && !$authorizeRequest()) {
+                    return null;
+                }
+
                 return ['name' => 'Fixture Collection', 'symbol' => 'FIX'];
             }
         };
