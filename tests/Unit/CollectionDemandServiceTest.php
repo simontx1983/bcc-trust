@@ -4,35 +4,34 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
-use BCC\Trust\Onchain\Services\CollectionDemandService;
+use BCC\Trust\Onchain\Services\CollectionDemandService as D;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Pins the demand-map contract: distinct linked wallets per
- * (chain, contract), merged from the holdings index (EVM/SOL) and the
- * Stargaze marketplace rollups (Cosmos Hub).
+ * Pins the demand-map contract after the render-time Stargaze fan-out was
+ * removed: counts come from BCC's own holdings index ONLY, and every state
+ * the page renders is truthful.
  *
- * Invariants under test:
- *   - EVM counts pass through from the holdings aggregate.
- *   - Cosmos counts = number of DISTINCT wallets whose rollup contains
- *     the contract; an unreadable wallet contributes nothing (floor
- *     semantics, never an inflated count).
- *   - Composite keys are chain-scoped and case-insensitive on contract.
+ *   - EVM/SOL counts pass through from the index, keyed case-insensitively.
+ *   - Cosmos (any non-indexed chain type) is NOT CALCULATED — never zero,
+ *     even if the index somehow held a row for it.
+ *   - A FAILED index read is UNAVAILABLE for every indexed row.
+ *   - A TRUNCATED read is unavailable for every indexed row WITHOUT a count,
+ *     while positive counts still show.
+ *   - Only a complete, successful read may say NONE INDEXED.
+ *   - The service contacts nothing and caches nothing.
  *
- * Isolation: resolver-stubs pattern — the REAL CollectionDemandService
- * + StargazeMarketplaceApi run against stubbed repositories/transport.
+ * The external surface is asserted, not assumed: ApiRetry's call log and
+ * the object cache are checked empty after every call.
  */
-#[CoversClass(CollectionDemandService::class)]
+#[CoversClass(D::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class CollectionDemandServiceTest extends TestCase
 {
-    private const WALLET_A = 'cosmos15y38ehvexp6275ptmm4jj3qdds379nk02heclj';
-    private const WALLET_B = 'cosmos15y38ehvexp6275ptmm4jj3qdds379nk02heclk';
-
     protected function setUp(): void
     {
         parent::setUp();
@@ -40,93 +39,165 @@ final class CollectionDemandServiceTest extends TestCase
         \BCC\Trust\Onchain\Support\ApiRetry::reset();
         \BCC\Core\Log\Logger::reset();
         \BccTestObjectCache::reset();
-        \BCC\Trust\Onchain\Repositories\ChainRepository::reset();
-        \BCC\Trust\Onchain\Repositories\WalletRepository::reset();
         \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::reset();
     }
 
-    private static function contract(int $i): string
+    protected function tearDown(): void
     {
-        // '1' isn't in the bech32 data alphabet — map it out.
-        return 'cosmos1' . str_pad(strtr((string) $i, ['1' => 'z']), 58, 'q', STR_PAD_LEFT);
+        // Every test, whatever it asserts, must leave no outbound trace and
+        // nothing cached — INCLUDING the failure paths, where caching an
+        // incomplete answer is exactly how "unavailable" would harden into a
+        // stale zero.
+        self::assertSame([], \BCC\Trust\Onchain\Support\ApiRetry::$calls, 'the demand service must make no request');
+        self::assertSame([], \BCC\Trust\Onchain\Support\ApiRetry::$batchCalls, 'nor any batch request');
+        self::assertSame([], \BccTestObjectCache::$writes, 'and must cache nothing, whatever the outcome');
+        parent::tearDown();
     }
 
-    /** @param array<string, mixed> $payload */
-    private function queueJson(array $payload): void
+    /** @param list<array{0: int, 1: string, 2: int}> $rows [chain_id, contract, wallets] */
+    private function index(array $rows): void
     {
-        \BCC\Trust\Onchain\Support\ApiRetry::$queue[] = [
-            'body' => (string) json_encode($payload),
-        ];
+        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::$walletCounts = array_map(
+            static fn(array $r): object => (object) ['chain_id' => (string) $r[0], 'contract_address' => $r[1], 'wallets' => (string) $r[2]],
+            $rows
+        );
     }
 
-    private function setUpCosmosChain(): void
+    public function testIndexCountsPassThroughKeyedCaseInsensitively(): void
     {
-        \BCC\Trust\Onchain\Repositories\ChainRepository::$chain = (object) [
-            'id'         => 8,
-            'slug'       => 'cosmos',
-            'chain_type' => 'cosmos',
-        ];
+        $this->index([[1, '0xABC', 4]]);
+
+        $demand = D::linkedHolderCounts();
+
+        self::assertTrue($demand['available']);
+        self::assertTrue($demand['complete']);
+        self::assertSame(4, $demand['counts'][D::key(1, '0xabc')]);
+        self::assertSame(['state' => D::STATE_COUNTED, 'count' => 4], D::rowState($demand, 'evm', 1, '0xAbC'));
     }
 
-    public function testHoldingsIndexCountsPassThrough(): void
+    public function testACompleteReadWithNoEntryIsNoneIndexedNotZero(): void
     {
-        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::$walletCounts = [
-            (object) ['chain_id' => '1', 'contract_address' => '0xABC', 'wallets' => '4'],
-        ];
+        $this->index([[1, '0xabc', 2]]);
 
-        $map = CollectionDemandService::linkedHolderCounts(true);
+        $cell = D::rowState(D::linkedHolderCounts(), 'evm', 1, '0xdef');
 
-        self::assertSame(4, $map[CollectionDemandService::key(1, '0xabc')]);
+        self::assertSame(D::STATE_NONE_INDEXED, $cell['state']);
+        self::assertNull($cell['count'], 'no numeral is produced for "none indexed"');
     }
 
-    public function testCosmosRollupsCountDistinctWallets(): void
+    /**
+     * ⚠ THE FAILURE THIS FILE EXISTS FOR. A failed index read used to become
+     * `[]` inside the repository and render as "nobody holds anything".
+     */
+    public function testAFailedIndexReadIsUnavailableNeverZero(): void
     {
-        $this->setUpCosmosChain();
-        \BCC\Trust\Onchain\Repositories\WalletRepository::$chainAddresses = [self::WALLET_A, self::WALLET_B];
+        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::$readFails = true;
 
-        // Wallet A holds contract 1 + 2; wallet B holds contract 1 only.
-        $this->queueJson(['total' => 2, 'collections' => [
-            ['contractAddress' => self::contract(1), 'ownedTokensCount' => 3],
-            ['contractAddress' => self::contract(2), 'ownedTokensCount' => 1],
-        ]]);
-        $this->queueJson(['total' => 1, 'collections' => [
-            ['contractAddress' => self::contract(1), 'ownedTokensCount' => 9],
-        ]]);
+        $demand = D::linkedHolderCounts();
 
-        $map = CollectionDemandService::linkedHolderCounts(true);
-
-        self::assertSame(2, $map[CollectionDemandService::key(8, self::contract(1))]);
-        self::assertSame(1, $map[CollectionDemandService::key(8, self::contract(2))]);
+        self::assertFalse($demand['available']);
+        self::assertFalse($demand['complete']);
+        self::assertSame([], $demand['counts']);
+        foreach (['evm', 'solana'] as $type) {
+            $cell = D::rowState($demand, $type, 1, '0xabc');
+            self::assertSame(D::STATE_UNAVAILABLE, $cell['state'], $type);
+            self::assertNull($cell['count'], $type);
+        }
     }
 
-    public function testUnreadableWalletContributesNothing(): void
+    /**
+     * One row more than the limit comes back, so the service KNOWS the tail
+     * was cut. Counted rows still show; rows past the cut are unknown.
+     */
+    public function testATruncatedReadMakesMissingRowsUnavailableButKeepsCounts(): void
     {
-        $this->setUpCosmosChain();
-        \BCC\Trust\Onchain\Repositories\WalletRepository::$chainAddresses = [self::WALLET_A, self::WALLET_B];
+        $rows = [];
+        for ($i = 0; $i < 501; $i++) {
+            $rows[] = [1, sprintf('0x%040x', $i + 1), 501 - $i];
+        }
+        $this->index($rows);
 
-        $this->queueJson(['total' => 1, 'collections' => [
-            ['contractAddress' => self::contract(1), 'ownedTokensCount' => 1],
-        ]]);
-        \BCC\Trust\Onchain\Support\ApiRetry::$queue[] = new \WP_Error('down'); // wallet B unreadable
+        $demand = D::linkedHolderCounts();
 
-        $map = CollectionDemandService::linkedHolderCounts(true);
+        self::assertTrue($demand['available']);
+        self::assertFalse($demand['complete'], '501 rows for a 500 limit is a truncated result');
+        self::assertCount(500, $demand['counts'], 'the extra probe row is not kept');
+        self::assertSame(501, \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::$lastLimit);
 
-        // Floor semantics: count reflects only the readable wallet.
-        self::assertSame(1, $map[CollectionDemandService::key(8, self::contract(1))]);
+        self::assertSame(D::STATE_COUNTED, D::rowState($demand, 'evm', 1, sprintf('0x%040x', 1))['state']);
+        self::assertSame(D::STATE_UNAVAILABLE, D::rowState($demand, 'evm', 1, '0xnotinthetop500')['state']);
     }
 
-    public function testMapIsCachedBetweenCalls(): void
+    public function testExactlyTheLimitIsStillComplete(): void
     {
-        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::$walletCounts = [
-            (object) ['chain_id' => '1', 'contract_address' => '0xabc', 'wallets' => '2'],
-        ];
+        $rows = [];
+        for ($i = 0; $i < 500; $i++) {
+            $rows[] = [1, sprintf('0x%040x', $i + 1), 1];
+        }
+        $this->index($rows);
 
-        $first = CollectionDemandService::linkedHolderCounts(true);
+        self::assertTrue(D::linkedHolderCounts()['complete']);
+    }
 
-        // Mutate the source — the cached map must win without $force.
-        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::$walletCounts = [];
-        $second = CollectionDemandService::linkedHolderCounts();
+    /**
+     * ⚠ COSMOS IS NOT CALCULATED, WHATEVER THE INDEX SAYS. The index is not
+     * written for Cosmos, and a stray row must not quietly turn an unmeasured
+     * chain into a measured one.
+     */
+    public function testANonIndexedChainTypeIsNotCalculatedEvenWithAnIndexRow(): void
+    {
+        $this->index([[8, 'cosmos1contract', 7]]);
 
-        self::assertSame($first, $second);
+        $cell = D::rowState(D::linkedHolderCounts(), 'cosmos', 8, 'cosmos1contract');
+
+        self::assertSame(['state' => D::STATE_NOT_CALCULATED, 'count' => null], $cell);
+    }
+
+    public function testNonIndexedChainTypesAreNotCalculatedEvenWhenTheReadFailed(): void
+    {
+        \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::$readFails = true;
+
+        foreach (['cosmos', 'thorchain', 'polkadot', 'near', 'utxo', ''] as $type) {
+            self::assertSame(D::STATE_NOT_CALCULATED, D::rowState(D::linkedHolderCounts(), $type, 8, 'x')['state'], $type);
+        }
+    }
+
+    public function testTheIndexedChainTypesArePinned(): void
+    {
+        // Changing this list changes which chains may show a count at all;
+        // it must be a decision with a writer behind it, not a drive-by.
+        self::assertSame(['evm', 'solana'], D::INDEXED_CHAIN_TYPES);
+    }
+
+    public function testRowsReportingZeroWalletsAreNotCounted(): void
+    {
+        $this->index([[1, '0xabc', 0]]);
+
+        self::assertSame([], D::linkedHolderCounts()['counts']);
+    }
+
+    /**
+     * No side effects: nothing is written to the object cache — there is no
+     * outbound call left for a cache to amortise, and a cached map is a thing
+     * that could go stale behind the page's back.
+     */
+    public function testTheServiceWritesNoCache(): void
+    {
+        $this->index([[1, '0xabc', 3]]);
+
+        D::linkedHolderCounts();
+
+        self::assertFalse(wp_cache_get('collection_demand_map_v1', 'bcc_onchain'), 'the old map cache is gone');
+        self::assertSame([], \BccTestObjectCache::$writes, 'no object-cache write of any kind');
+    }
+
+    /** And every call reads fresh — a changed index is seen immediately. */
+    public function testEveryCallReadsFresh(): void
+    {
+        $this->index([[1, '0xabc', 2]]);
+        self::assertSame(2, D::linkedHolderCounts()['counts'][D::key(1, '0xabc')]);
+
+        $this->index([[1, '0xabc', 5]]);
+        self::assertSame(5, D::linkedHolderCounts()['counts'][D::key(1, '0xabc')]);
     }
 }

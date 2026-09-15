@@ -85,9 +85,18 @@ namespace {
             /** @var array<string, mixed> */
             public static array $store = [];
 
+            /**
+             * Every key WRITTEN, in order — `$store` alone cannot tell "never
+             * written" from "written then deleted".
+             *
+             * @var list<string>
+             */
+            public static array $writes = [];
+
             public static function reset(): void
             {
-                self::$store = [];
+                self::$store  = [];
+                self::$writes = [];
             }
         }
     }
@@ -105,6 +114,7 @@ namespace {
         function wp_cache_set(string $key, $value, string $group = '', int $ttl = 0): bool
         {
             \BccTestObjectCache::$store[$group . ':' . $key] = $value;
+            \BccTestObjectCache::$writes[]                   = $group . ':' . $key;
             return true;
         }
     }
@@ -565,26 +575,16 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @var list<int> */
             public static array $checkedChains = [];
 
-            /** @var list<string> */
-            public static array $chainAddresses = [];
-
             public static function reset(): void
             {
                 self::$hasLinks       = true;
                 self::$checkedChains  = [];
-                self::$chainAddresses = [];
             }
 
             public static function hasAnyLinksForChain(int $chainId): bool
             {
                 self::$checkedChains[] = $chainId;
                 return self::$hasLinks;
-            }
-
-            /** @return list<string> */
-            public static function listAddressesForChain(int $chainId, int $limit = 200): array
-            {
-                return array_slice(self::$chainAddresses, 0, $limit);
             }
         }
     }
@@ -616,14 +616,30 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @var list<object{chain_id: string, contract_address: string, wallets: string}> */
             public static array $walletCounts = [];
 
+            /** Make the aggregate read FAIL, as a SQL error would. */
+            public static bool $readFails = false;
+
+            /** The LIMIT the caller asked for — proves truncation is probed. */
+            public static ?int $lastLimit = null;
+
             public static function reset(): void
             {
                 self::$walletCounts = [];
+                self::$readFails    = false;
+                self::$lastLimit    = null;
             }
 
-            /** @return list<object{chain_id: string, contract_address: string, wallets: string}> */
-            public static function countDistinctWalletsPerContract(int $limit = 500): array
+            /**
+             * Same contract as production: null on a failed read, never `[]`.
+             *
+             * @return list<object{chain_id: string, contract_address: string, wallets: string}>|null
+             */
+            public static function countDistinctWalletsPerContract(int $limit = 500): ?array
             {
+                self::$lastLimit = $limit;
+                if (self::$readFails) {
+                    return null;
+                }
                 return array_slice(self::$walletCounts, 0, $limit);
             }
         }
