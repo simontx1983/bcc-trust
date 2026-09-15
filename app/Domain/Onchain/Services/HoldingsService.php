@@ -746,8 +746,20 @@ final class HoldingsService
     // ── Internal helpers ───────────────────────────────────────────────────
 
     /**
+     * Walk a wallet's holdings, caching ONLY a complete walk.
+     *
+     * A provider outage, an open circuit breaker or a refused endpoint makes
+     * `list_holdings` return `complete: false` — a PARTIAL view shaped exactly
+     * like "this wallet owns nothing". Persisting that is what turned an
+     * unavailable LCD into a confident zero: the payload went into a 24h
+     * transient, `markHoldingsRefreshed` stamped it as a successful chain
+     * read, and `countFromCacheOrFetch` later read the empty list back as a
+     * real 0 and denied a holder gate. So an incomplete walk is returned to
+     * the caller for display and NOTHING ELSE: no transient, no freshness
+     * stamp. The next request retries instead of inheriting the outage.
+     *
      * @param ChainRow $chain
-     * @return array{items: list<array<string, mixed>>, truncated: bool}|null
+     * @return array{items: list<array<string, mixed>>, truncated: bool, complete: bool}|null
      */
     private static function fetchWalletHoldings(
         int $walletLinkId,
@@ -760,7 +772,14 @@ final class HoldingsService
         if (!$force) {
             $cached = get_transient($cacheKey);
             if (is_array($cached) && isset($cached['items'])) {
-                /** @var array{items: list<array<string, mixed>>, truncated: bool} $cached */
+                /** @var array{items: list<array<string, mixed>>, truncated: bool, complete?: bool} $cached */
+                // Only a complete walk is ever written below, so a hit is
+                // complete by construction. The key is still normalised
+                // rather than assumed, because a payload cached by the
+                // PREVIOUS release can still be inside its 24h window and
+                // carries no flag at all — and an unflagged payload is not
+                // evidence of a successful read.
+                $cached['complete'] = ($cached['complete'] ?? false) === true;
                 return $cached;
             }
         }
@@ -772,7 +791,9 @@ final class HoldingsService
         $fetcher = FetcherFactory::make_for_chain($chain);
         if (!$fetcher->supports_feature('holdings_list')) {
             // Cache an empty result so we don't re-check every page load.
-            $empty = ['items' => [], 'truncated' => false];
+            // `complete: true` — this driver enumerating nothing is a fact
+            // about the driver, not a failed read, so it is safe to store.
+            $empty = ['items' => [], 'truncated' => false, 'complete' => true];
             set_transient($cacheKey, $empty, self::CACHE_TTL);
             return $empty;
         }
@@ -785,11 +806,21 @@ final class HoldingsService
         $allItems   = [];
         $cursor     = null;
         $truncated  = false;
+        $complete   = true;
         $lastResult = null;
 
         for ($pageNum = 0; $pageNum < self::PER_WALLET_PAGE_CAP; $pageNum++) {
             $lastResult = $fetcher->list_holdings($walletAddress, $cursor);
             $items      = $lastResult['items'] ?? [];
+
+            // Fail CLOSED on a missing flag. Every driver in the tree sets
+            // it; an absent key means an unknown implementation whose
+            // completeness we cannot vouch for, and the cost of being wrong
+            // in that direction is one uncached walk — against a wrongly
+            // cached zero that survives for a day and denies a gate.
+            if (($lastResult['complete'] ?? false) !== true) {
+                $complete = false;
+            }
 
             foreach ($items as $item) {
                 if (count($allItems) >= self::PER_WALLET_ITEM_CAP) {
@@ -815,7 +846,21 @@ final class HoldingsService
         $payload = [
             'items'     => $allItems,
             'truncated' => $truncated,
+            'complete'  => $complete,
         ];
+
+        if (!$complete) {
+            // Partial read. Return what we have so the gallery can render
+            // it, but store nothing: an unavailable provider must not be
+            // able to write a wallet's holdings, and must not be able to
+            // claim a successful chain read on the freshness badge.
+            \BCC\Core\Log\Logger::warning('[HoldingsService] incomplete holdings walk; not cached', [
+                'chain_id'       => (int) ($chain->id ?? 0),
+                'wallet_link_id' => $walletLinkId,
+                'items_found'    => count($allItems),
+            ]);
+            return $payload;
+        }
 
         set_transient($cacheKey, $payload, self::CACHE_TTL);
 
@@ -852,6 +897,9 @@ final class HoldingsService
      *   - Cache hit, items truncated, 0 matches: a whale's target NFT
      *     could live in the truncated tail. We fall through to RPC for
      *     this case so whales aren't false-negatives.
+     *   - Cache hit, `complete !== true`, 0 matches: the list was assembled
+     *     over a failed provider read (or predates the flag), so its
+     *     absence proves nothing. Falls through to RPC for the same reason.
      *   - Cache miss: RPC fallback (same as the old path).
      *
      * ERC-1155 short-circuit: when `$tokenStandard` matches /1155/i,
@@ -921,15 +969,29 @@ final class HoldingsService
             }
 
             $truncated = !empty($cached['truncated']);
-            // Trust the cache when complete, OR when it has any matches
-            // (any matches means the user already passes a default
-            // min_balance=1 gate — fine even if the truncated tail
-            // would have produced more matches). Only fall through to
-            // RPC for the false-negative-on-whales case: cache present,
-            // truncated, AND zero matches. A cache HIT is by definition a
-            // previously-SUCCESSFUL list walk, so its count is real.
-            if (!$truncated || $matches > 0) {
+            // A found token is positive evidence no matter how the list was
+            // assembled: a partial or truncated walk that DID turn up a match
+            // has proved ownership, and the user already passes a default
+            // min_balance=1 gate (the tail could only add more).
+            if ($matches > 0) {
                 return $matches;
+            }
+
+            // A zero, on the other hand, is only real if the list it came
+            // from was whole. Two ways it might not be:
+            //   - truncated → the whale case: the target could live in the
+            //     tail we deliberately stopped before;
+            //   - complete !== true → the walk hit a provider failure, or the
+            //     payload predates this flag (an older release cached it and
+            //     it is still inside the 24h window). Either way the absence
+            //     is not evidence of absence.
+            // Both fall through to the fetcher, which answers null (UNKNOWN)
+            // rather than inventing a zero. This costs one RPC per wallet
+            // while pre-flag payloads age out; it buys back the guarantee
+            // that the CACHE never manufactures a gate denial.
+            $complete = ($cached['complete'] ?? false) === true;
+            if (!$truncated && $complete) {
+                return 0;
             }
         }
 

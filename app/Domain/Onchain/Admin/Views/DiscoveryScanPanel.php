@@ -68,6 +68,10 @@ final class DiscoveryScanPanel
             // reason line is not the place to teach them to.
             'not_opted_in'               => 'Scanning has not been switched on for this chain yet.',
             'paused'                     => 'Scanning is paused for this chain.',
+            // Names an action the operator can take from this screen, and
+            // says nothing about which host is configured or what it replied
+            // — an endpoint URL and a provider sentence are both leaks.
+            'endpoint_unverified'        => 'This chain\'s data source has not been confirmed. Switch scanning on again to re-check it.',
             'allowlist_excluded'         => 'This chain is outside the current scanning rollout.',
             'nft_discovery_unsupported'  => 'BCC does not offer NFT collection discovery on this chain.',
             'discovery_globally_disabled' => 'On-chain discovery is switched off for this environment.',

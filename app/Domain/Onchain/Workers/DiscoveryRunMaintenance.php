@@ -84,6 +84,21 @@ final class DiscoveryRunMaintenance
      * chain-selection logic and cannot create a run, so scheduling it can
      * never amount to unattended scanning — the property the CW-721 comment
      * in bcc-trust.php protects.
+     *
+     * ── AND IT CANNOT RESUME AN UNPROVEN ENDPOINT EITHER ────────────────
+     * A re-dispatched run does not go straight to a provider: it re-enters
+     * {@see DiscoveryRunExecutor}, which re-asks
+     * {@see \BCC\Trust\Onchain\Support\DiscoveryReadiness::forExecution()}
+     * before any request. If the chain has been repointed since the run was
+     * authorized, the recorded endpoint fingerprint no longer matches the
+     * configured one, readiness answers `endpoint_unverified`, and the run
+     * terminalizes with that reason having contacted nothing.
+     *
+     * ⚠ Deliberately NOT re-checked here as well. The executor already owns
+     * that decision at the last possible moment; a copy in this sweep would
+     * be a second authority for one rule — and the weaker one, since it
+     * would decide five minutes before the work rather than immediately
+     * before it. This class re-dispatches; it does not adjudicate.
      */
     public static function register(): void
     {

@@ -62,7 +62,7 @@ final class DiscoveryExecutorReadinessRecheckTest extends TestCase
      */
     private function queueRun(): int
     {
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 1);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 1);
 
         $result = (new DiscoveryRunService())->request(self::CHAIN, self::OPERATOR);
 
@@ -91,7 +91,7 @@ final class DiscoveryExecutorReadinessRecheckTest extends TestCase
         $runId = $this->queueRun();
 
         // The administrator turns product support off while the run waits.
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 0);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 0);
 
         $result = DiscoveryRunExecutor::execute($runId);
 
@@ -114,7 +114,7 @@ final class DiscoveryExecutorReadinessRecheckTest extends TestCase
     {
         $runId = $this->queueRun();
 
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 0, 1);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 0, 1);
 
         $result = DiscoveryRunExecutor::execute($runId);
 
@@ -140,7 +140,7 @@ final class DiscoveryExecutorReadinessRecheckTest extends TestCase
     public function testARefusedExecutionIsNeverASuccessfulZero(): void
     {
         $runId = $this->queueRun();
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 0);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 0);
 
         DiscoveryRunExecutor::execute($runId);
 
@@ -165,7 +165,7 @@ final class DiscoveryExecutorReadinessRecheckTest extends TestCase
     public function testARefusalDoesNotCreateASecondRun(): void
     {
         $runId = $this->queueRun();
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 0);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 0);
 
         DiscoveryRunExecutor::execute($runId);
         DiscoveryRunExecutor::execute($runId);
@@ -180,7 +180,7 @@ final class DiscoveryExecutorReadinessRecheckTest extends TestCase
     public function testARefusalChangesNoDiscoveredState(): void
     {
         $runId = $this->queueRun();
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 0);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 0);
 
         DiscoveryRunExecutor::execute($runId);
 

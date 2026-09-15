@@ -83,7 +83,7 @@ final class DiscoverySessionAuditTotalsTest extends TestCase
 
     private function queueRun(): int
     {
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 1);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 1);
 
         $result = (new DiscoveryRunService())->request(self::CHAIN, self::OPERATOR);
         self::assertTrue($result['ok'], 'precondition: the run must be genuinely queued');
@@ -319,7 +319,7 @@ final class DiscoverySessionAuditTotalsTest extends TestCase
         $this->carryPreviousChunks($runId);
 
         // The administrator withdraws product support mid-session.
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 0);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 0);
         AuditLogger::reset();
 
         DiscoveryRunExecutor::execute($runId);

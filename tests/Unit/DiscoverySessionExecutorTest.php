@@ -49,7 +49,7 @@ final class DiscoverySessionExecutorTest extends TestCase
 
     private function queueRun(): int
     {
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 1);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 1);
 
         $result = (new DiscoveryRunService())->request(self::CHAIN, self::OPERATOR);
         self::assertTrue($result['ok'], 'precondition: the run must be genuinely queued');
@@ -284,7 +284,7 @@ final class DiscoverySessionExecutorTest extends TestCase
         $this->elapse($runId);
 
         // The administrator turns product support off mid-session.
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 0);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 0);
 
         $before = count($this->scheduled());
         DiscoveryRunExecutor::execute($runId);
@@ -304,7 +304,7 @@ final class DiscoverySessionExecutorTest extends TestCase
         $this->elapse($runId);
 
         // A narrowed canary allowlist that no longer names this chain.
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 0, 1);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 0, 1);
 
         DiscoveryRunExecutor::execute($runId);
 
@@ -408,7 +408,7 @@ final class DiscoverySessionExecutorTest extends TestCase
 
         // The administrator turns support off partway through the pass.
         ApiRetry::$responder = static function (string $url): array {
-            ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 0);
+            ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 0);
 
             if (str_contains($url, '/contracts')) {
                 return ['code' => 200, 'body' => '{"contracts":[],"pagination":{"next_key":null}}'];

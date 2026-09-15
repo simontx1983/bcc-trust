@@ -57,7 +57,7 @@ final class DiscoveryExecutorFrozenModeTest extends TestCase
         define('BCC_COSMWASM_BACKFILL_ENABLED', false);
 
         // Supported, active, opted in — so nothing else can be the reason.
-        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://lcd.example', 'cosmos', 1, 1);
+        ChainRepository::seed(self::CHAIN, 'dungeon', 'https://cosmos-api.polkachu.com', 'cosmos', 1, 1);
     }
 
     /**

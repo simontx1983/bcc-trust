@@ -261,6 +261,25 @@ final class CosmosEndpointTransition
         // host, effective port, base path and expected network.
         $endpointFp = CosmosEndpointPolicy::fingerprint($plan['slug'], (string) $plan['to']);
 
+        // ⚠ RECORDED FROM THE PROOF ALREADY MADE ABOVE, not re-proven. The
+        // destination was verified live before the row moved, and the row now
+        // demonstrably points at it — so the same administrator gesture that
+        // moved the endpoint carries its authorization across.
+        //
+        // Without this, an audited switch would leave the chain refusing
+        // every scan as `endpoint_unverified` until somebody pressed a
+        // different button, and the proof that WAS performed would be thrown
+        // away. It is recorded AFTER the post-write read-back and the cursor
+        // checks, so a switch that failed any of them records nothing.
+        if ($endpointFp !== null) {
+            \BCC\Trust\Onchain\Support\CosmosEndpointAuthorization::record(
+                $chainId,
+                $endpointFp,
+                is_string($verification['network']) ? $verification['network'] : '',
+                $actorId
+            );
+        }
+
         self::audit(
             $chainId,
             $plan,

@@ -54,7 +54,18 @@ final class CosmwasmChainEligibilityTest extends TestCase
     private const CHAIN_A = 8;
     private const CHAIN_B = 9;
 
-    private const REST_A = 'https://a.example';
+    /**
+     * ⚠ CHAIN A IS THE GOVERNED SLUG, so it must sit on an APPROVED
+     * endpoint. A governed chain pointed anywhere else is excluded by the
+     * endpoint gate, which would make every assertion below pass for the
+     * wrong reason — the shape of false green this file's own header warns
+     * about. Chain B keeps an arbitrary host precisely because `osmosis` is
+     * ungoverned, which is what proves the gate leaves those alone.
+     */
+    private const REST_A = 'https://cosmos-api.polkachu.com';
+
+    /** The host half of REST_A — what `contactedHosts()` reports. */
+    private const HOST_A = 'cosmos-api.polkachu.com';
     private const REST_B = 'https://b.example';
 
     protected function setUp(): void
@@ -74,6 +85,13 @@ final class CosmwasmChainEligibilityTest extends TestCase
         \BccTestObjectCache::reset();
         \BccTestOptionStore::reset();
         \BccTestCronStore::reset();
+
+        // The recorded proof an administrator's Enable would have written.
+        // Recorded, NOT probed: eligibleChainIds() runs inside worker passes
+        // and must never contact anything, which the SafeHttpClient recorder
+        // staying empty demonstrates.
+        \BccTestEndpointProof::reset();
+        \BccTestEndpointProof::approve(self::CHAIN_A, 'cosmos', self::REST_A);
     }
 
     // ── helpers ─────────────────────────────────────────────────────────
@@ -154,7 +172,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         $this->driveEveryEntryPoint();
 
         self::assertSame([self::CHAIN_A], $this->reachedChainIds());
-        self::assertSame(['a.example'], $this->contactedHosts());
+        self::assertSame([self::HOST_A], $this->contactedHosts());
     }
 
     // ── (b) operator intent ─────────────────────────────────────────────
@@ -187,7 +205,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         $this->driveEveryEntryPoint();
 
         self::assertSame([self::CHAIN_A], $this->reachedChainIds());
-        self::assertSame(['a.example'], $this->contactedHosts(), 'b.example must never be contacted');
+        self::assertSame([self::HOST_A], $this->contactedHosts(), 'chain B must never be contacted');
     }
 
     public function testANonCosmosChainStaysExcludedEvenWhenTheFlagIsOn(): void
@@ -256,7 +274,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
 
         $this->driveEveryEntryPoint();
 
-        self::assertSame(['a.example'], $this->contactedHosts());
+        self::assertSame([self::HOST_A], $this->contactedHosts());
         self::assertNotContains(self::CHAIN_B, ChainCheckpointRepository::$discoveryTouches);
     }
 
@@ -287,7 +305,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
 
         $this->driveEveryEntryPoint();
 
-        self::assertSame(['a.example'], $this->contactedHosts(), 'b.example is paused and must not be contacted');
+        self::assertSame([self::HOST_A], $this->contactedHosts(), 'chain B is paused and must not be contacted');
         self::assertNotContains(
             self::CHAIN_B,
             ChainCheckpointRepository::$discoveryTouches,
@@ -372,7 +390,7 @@ final class CosmwasmChainEligibilityTest extends TestCase
         $this->driveEveryEntryPoint();
 
         self::assertSame([self::CHAIN_A], $this->reachedChainIds());
-        self::assertSame(['a.example'], $this->contactedHosts());
+        self::assertSame([self::HOST_A], $this->contactedHosts());
     }
 
     public function testAnAllowlistedButDisabledChainIsStillNotScanned(): void

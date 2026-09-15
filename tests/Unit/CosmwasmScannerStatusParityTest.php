@@ -459,13 +459,28 @@ final class CosmwasmScannerStatusParityTest extends TestCase
         }
 
         foreach ($fixture['chains'] as $chain) {
+            // ⚠ A GOVERNED slug needs an APPROVED endpoint AND a recorded
+            // proof, or the panel reports it as endpoint-unverified and every
+            // status expectation in this table shifts for a reason that has
+            // nothing to do with the parity being pinned. Ungoverned slugs
+            // keep their arbitrary host — which is what demonstrates that the
+            // endpoint gate leaves them alone.
+            $governed = \BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy::isGoverned($chain['slug']);
+            $rest     = $governed
+                ? \BccTestEndpointProof::APPROVED_PRIMARY
+                : 'https://' . $chain['slug'] . '.example';
+
             ChainRepository::seed(
                 $chain['id'],
                 $chain['slug'],
-                'https://' . $chain['slug'] . '.example',
+                $rest,
                 'cosmos',
                 $chain['opted_in']
             );
+
+            if ($governed) {
+                \BccTestEndpointProof::approve((int) $chain['id'], (string) $chain['slug'], $rest);
+            }
 
             if ($chain['state'] === null) {
                 continue; // No checkpoint row: nobody has measured it yet.

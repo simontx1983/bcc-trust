@@ -36,6 +36,20 @@ class CosmosFetcher implements FetcherInterface
 
     /** Complete normalized endpoint identity, or null when not governed. */
     private ?string $endpoint_fp = null;
+
+    /**
+     * Why every request on this fetcher must be refused, or null to proceed.
+     *
+     * Decided ONCE in the constructor, because both halves of the question —
+     * is an endpoint configured at all, and is this endpoint one the policy
+     * approves for THIS chain — are answered by data the constructor already
+     * holds. Enforced at the two request boundaries rather than thrown here:
+     * a fetcher is constructed on read paths (piece embeds, admin pages), and
+     * a constructor that throws would turn a misconfiguration into a fatal
+     * page instead of a refused request.
+     */
+    private ?string $endpoint_refusal = null;
+
     private int    $decimals;
     private int $timeout = 15;
 
@@ -61,8 +75,9 @@ class CosmosFetcher implements FetcherInterface
      * a TERMINAL classification. A substitution that changes the protocol is
      * not a fallback; it is a wrong answer delivered confidently.
      *
-     * An empty `rest_url` now yields an empty base, and {@see lcdGetResult()}
-     * refuses to issue the request rather than building a relative URL.
+     * An empty `rest_url` now yields an empty base, and BOTH request paths —
+     * {@see lcdGetResult()} and {@see lcdGetBatch()} — refuse to issue the
+     * request rather than building a relative URL.
      */
     public function __construct(object $chain)
     {
@@ -70,25 +85,64 @@ class CosmosFetcher implements FetcherInterface
         $this->rest_url = rtrim((string) ($chain->rest_url ?? ''), '/');
         $this->decimals = (int) ($chain->decimals ?? 6);
 
+        $slug = (string) ($chain->slug ?? '');
+
         // Computed ONCE here because this is the only place that holds both
         // halves of the identity — the slug (which fixes the expected
         // network) and the endpoint URL. Null for an ungoverned chain or an
         // unusable URL, in which case charges are recorded exactly as before.
-        $this->endpoint_fp = CosmosEndpointPolicy::fingerprint(
-            (string) ($chain->slug ?? ''),
-            $this->rest_url
-        );
+        $this->endpoint_fp = CosmosEndpointPolicy::fingerprint($slug, $this->rest_url);
+
+        $this->endpoint_refusal = self::refusalFor($slug, $this->rest_url);
     }
 
     /**
-     * Is this fetcher pointed at anything at all?
+     * PURE. Why this chain+endpoint pair may not be contacted, or null.
      *
-     * Callers that need to distinguish "no endpoint configured" from "the
-     * endpoint failed" ask here; the request paths fail closed on their own.
+     * ── TWO REFUSALS, ONE PLACE ─────────────────────────────────────────
+     * 1. NO ENDPOINT AT ALL. With the rest-to-rpc fallback gone, an
+     *    unconfigured chain leaves the base empty and `'' . $path` is a
+     *    RELATIVE url. `SafeHttpClient` rejects it (no host) — so nothing is
+     *    contacted either way — but the refusal still matters, because the
+     *    batch transport reads "every index failed" as a provider transport
+     *    fault and charges the breaker for OUR misconfiguration.
+     * 2. AN ENDPOINT THE POLICY DOES NOT APPROVE for this chain. The policy
+     *    was advisory before this: {@see CosmosEndpointPolicy} decided
+     *    breaker ATTRIBUTION and gated the admin switch, but no request path
+     *    ever asked whether the endpoint it was about to contact was allowed.
+     *
+     * ⚠ UNGOVERNED CHAINS ARE UNTOUCHED, BY CONSTRUCTION. `isGoverned()` is
+     * false for every slug without a policy entry (today that is every Cosmos
+     * chain except `cosmos`), so this returns null for them and their
+     * behaviour is byte-identical to before. This is deliberately NOT a
+     * second allowlist: the policy remains the only authority, and this asks
+     * it rather than restating it.
+     *
+     * ⚠ NO FAILOVER. A refused endpoint is refused. Nothing here substitutes
+     * an approved endpoint for an unapproved one — silently moving a chain to
+     * a different provider is exactly the surprise this codebase refuses to
+     * ship.
      */
-    public function hasEndpoint(): bool
+    private static function refusalFor(string $slug, string $restUrl): ?string
     {
-        return $this->rest_url !== '';
+        if ($restUrl === '') {
+            return 'no endpoint configured for this chain';
+        }
+
+        if (!CosmosEndpointPolicy::isGoverned($slug)) {
+            return null;
+        }
+
+        // `normalize()` is what rejects http, credentials, query strings,
+        // fragments, traversal and a bad port; `isApproved()` compares the
+        // normalized form against the exact approved set, so a lookalike host
+        // or the right host on the wrong path cannot pass.
+        $normalized = CosmosEndpointPolicy::normalize($restUrl);
+        if ($normalized === null || !CosmosEndpointPolicy::isApproved($slug, $normalized)) {
+            return 'endpoint not approved for this chain';
+        }
+
+        return null;
     }
 
     /** @return ChainRow */
@@ -467,11 +521,22 @@ class CosmosFetcher implements FetcherInterface
      * bounds each one). Returns null cursor on success — `truncated` flips
      * true when any contract hit PER_CONTRACT_TOKEN_CAP.
      *
-     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
+     * `complete` reports whether EVERY contract resolved. A contract whose
+     * first page (or walk) failed is still omitted from `items` — the
+     * gallery's long-standing fail-open display — but the omission is now
+     * ANNOUNCED instead of being indistinguishable from "owns none under
+     * this contract". Without it a refused endpoint, an open breaker or a
+     * provider outage produced a perfectly ordinary empty list that
+     * HoldingsService cached for 24h and the holder gate read back as a
+     * real zero.
+     *
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool}
      */
     public function list_holdings(string $wallet, ?string $cursor = null): array
     {
-        $empty = ['items' => [], 'truncated' => false, 'cursor' => null];
+        // A definite empty: no wallet to ask about / no verified collection
+        // to ask about. Nothing was read, so nothing failed to read.
+        $empty = ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true];
         if ($wallet === '') {
             return $empty;
         }
@@ -511,6 +576,9 @@ class CosmosFetcher implements FetcherInterface
 
         $items     = [];
         $truncated = false;
+        // Flips false the moment ANY contract's read cannot be resolved.
+        // Separate from $truncated, which reports a bounded success.
+        $complete  = true;
 
         foreach ($known as $coll) {
             $contract = (string) $coll->contract_address;
@@ -524,10 +592,19 @@ class CosmosFetcher implements FetcherInterface
             try {
                 $firstPage = $firstPages[$contract] ?? null;
                 // list_holdings is the gallery (cold) path — a failed or
-                // empty contract is simply omitted from the gallery (the
-                // pre-fail-open behaviour). The count (gate) path is where
-                // the null vs empty distinction is load-bearing.
-                if ($firstPage === null || $firstPage === []) {
+                // empty contract is still omitted from the rendered gallery.
+                // But the two are NOT the same fact, so they no longer share
+                // a return: null (query failed / breaker-open / refused
+                // endpoint) marks the whole enumeration incomplete, while []
+                // (the wallet owns none under this contract) leaves it
+                // complete. A missing key is a failure too — discoverFirstPages
+                // returns one entry per requested contract, so an absent key
+                // means the batch never resolved that contract.
+                if ($firstPage === null) {
+                    $complete = false;
+                    continue;
+                }
+                if ($firstPage === []) {
                     continue;
                 }
 
@@ -542,7 +619,15 @@ class CosmosFetcher implements FetcherInterface
                 // size) it IS the complete set — no walk needed.
                 if (count($firstPage) >= self::TOKENS_PAGE_SIZE) {
                     $walked = $this->cw721AllTokensForOwner($contract, $wallet);
-                    if ($walked === null || $walked === []) {
+                    if ($walked === null) {
+                        // A page of the walk failed. We already know this
+                        // wallet holds at least one token here (the first
+                        // page was non-empty), so dropping the contract is
+                        // provably lossy — say so.
+                        $complete = false;
+                        continue;
+                    }
+                    if ($walked === []) {
                         continue;
                     }
                     $tokenIds = $walked;
@@ -575,6 +660,10 @@ class CosmosFetcher implements FetcherInterface
                     ];
                 }
             } catch (\Throwable $e) {
+                // A contract we could not finish reading. The isolation is
+                // deliberate (one broken contract must not poison the batch)
+                // but the result is still a partial enumeration.
+                $complete = false;
                 \BCC\Core\Log\Logger::warning('[CosmosFetcher] cw721 contract failed', [
                     'chain_id' => $chainId,
                     'contract' => $contract,
@@ -588,6 +677,7 @@ class CosmosFetcher implements FetcherInterface
             'items'     => $items,
             'truncated' => $truncated,
             'cursor'    => null,
+            'complete'  => $complete,
         ];
     }
 
@@ -2140,16 +2230,14 @@ class CosmosFetcher implements FetcherInterface
         $classifier = \BCC\Trust\Onchain\Services\CosmwasmClassifier::class;
         $chainId    = (int) ($this->chain->id ?? 0);
 
-        // ⚠ FAIL CLOSED ON A MISSING ENDPOINT. With the rest-to-rpc fallback
-        // gone, an unconfigured chain leaves this empty — and `'' . $path`
-        // would be a RELATIVE url that `wp_remote_get` resolves against
-        // nothing, producing a transport error that reads like a provider
-        // outage and charges the breaker for our own misconfiguration.
-        // Reported as a transport-class failure with no request made, so
-        // nothing is contacted and nothing is blamed on a provider.
-        if ($this->rest_url === '') {
+        // ⚠ FAIL CLOSED ON A MISSING OR UNAPPROVED ENDPOINT. Reported as a
+        // transport-class failure with no request made, so nothing is
+        // contacted and nothing is blamed on a provider. The reason comes
+        // from {@see refusalFor()} so this path and {@see lcdGetBatch()}
+        // refuse on exactly the same rule.
+        if ($this->endpoint_refusal !== null) {
             \BCC\Core\Log\Logger::error(
-                '[Cosmos Fetcher] no rest_url configured for chain ' . $chainId . '; refusing ' . $path
+                '[Cosmos Fetcher] ' . $this->endpoint_refusal . ' (chain ' . $chainId . '); refusing ' . $path
             );
 
             return [
@@ -2157,7 +2245,7 @@ class CosmosFetcher implements FetcherInterface
                 'data'            => null,
                 'http_code'       => 0,
                 'error_kind'      => $classifier::KIND_TRANSPORT,
-                'message_excerpt' => 'no endpoint configured for this chain',
+                'message_excerpt' => $this->endpoint_refusal,
             ];
         }
 
@@ -2384,7 +2472,32 @@ class CosmosFetcher implements FetcherInterface
         }
 
         $chainId = (int) ($this->chain->id ?? 0);
-        $urls    = [];
+
+        // ⚠ THE SAME FAIL-CLOSED RULE AS THE SINGLE PATH, AND FOR A SHARPER
+        // REASON. Without this, `'' . $path` produced hostless URLs that
+        // `SafeHttpClient` rejects one by one — so nothing was contacted, but
+        // {@see ApiRetry::getBatchSameHost()} saw EVERY index fail, read that
+        // as a host-level transport fault and charged the breaker
+        // (TRANSPORT / BATCH_REQUEST) for our own misconfiguration. Worse, it
+        // asks `isOpen()` first, which CLAIMS the half-open probe — so a
+        // misconfigured chain could consume the recovery attempt of a healthy
+        // one. Refusing here happens BEFORE any of that: no request, no
+        // retry, no breaker charge, no probe consumed, and no fake success.
+        //
+        // The return is the shape every caller already handles: one null per
+        // requested path, identical to a decoded failure. Callers must treat
+        // null as UNKNOWN, never as "none" — see the completeness signal in
+        // {@see discoverFirstPages()} and {@see list_holdings()}.
+        if ($this->endpoint_refusal !== null) {
+            \BCC\Core\Log\Logger::error(
+                '[Cosmos Fetcher] ' . $this->endpoint_refusal . ' (chain ' . $chainId
+                . '); refusing a batch of ' . count($paths) . ' paths'
+            );
+
+            return array_fill(0, count($paths), null);
+        }
+
+        $urls = [];
         foreach ($paths as $path) {
             $urls[] = $this->rest_url . $path;
         }

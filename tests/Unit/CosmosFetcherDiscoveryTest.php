@@ -49,7 +49,7 @@ final class CosmosFetcherDiscoveryTest extends TestCase
             'id'         => $id,
             'slug'       => $slug,
             'chain_type' => 'cosmos',
-            'rest_url'   => 'https://lcd.example',
+            'rest_url'   => 'https://cosmos-api.polkachu.com',
             'decimals'   => 6,
         ]);
     }

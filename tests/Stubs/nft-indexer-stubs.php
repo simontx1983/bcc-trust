@@ -732,3 +732,10 @@ namespace BCC\Trust\Onchain\Factories {
         }
     }
 }
+
+namespace {
+    // The endpoint-proof seam (option store, SafeHttpClient recorder,
+    // BccTestEndpointProof). Required LAST so its guarded declarations defer
+    // to anything this file already defined.
+    require_once __DIR__ . '/endpoint-proof-stubs.php';
+}

@@ -1541,7 +1541,7 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function seed(
                 int $id,
                 string $slug,
-                string $rest = 'https://lcd.example',
+                string $rest = 'https://cosmos-api.polkachu.com',
                 string $type = 'cosmos',
                 int $cosmwasmNftDiscoveryEnabled = 1,
                 ?int $supportsNft = 1
@@ -1576,7 +1576,7 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function seedWithoutDiscoveryColumn(
                 int $id,
                 string $slug,
-                string $rest = 'https://lcd.example',
+                string $rest = 'https://cosmos-api.polkachu.com',
                 string $type = 'cosmos'
             ): void {
                 self::$chains[$id] = (object) [

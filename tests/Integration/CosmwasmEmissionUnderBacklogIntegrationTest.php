@@ -221,7 +221,7 @@ final class CosmwasmEmissionUnderBacklogIntegrationTest extends TestCase
     {
         return new class ((object) [
             'id' => self::CHAIN, 'slug' => 'testchain', 'chain_type' => 'cosmos',
-            'rest_url' => 'https://lcd.example', 'rpc_url' => '', 'is_active' => 1, 'decimals' => 6,
+            'rest_url' => 'https://cosmos-api.polkachu.com', 'rpc_url' => '', 'is_active' => 1, 'decimals' => 6,
         ]) extends \BCC\Trust\Onchain\Fetchers\CosmosFetcher {
             /**
              * ⚠ THE AUTHORIZER IS HONOURED, not ignored. Emission charges its

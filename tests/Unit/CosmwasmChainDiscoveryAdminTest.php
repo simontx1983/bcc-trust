@@ -70,6 +70,16 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     private const CHAIN_ID = 8;
     private const SLUG     = 'cosmos';
 
+    /**
+     * ⚠ AN APPROVED ENDPOINT, BECAUSE THE SLUG IS A GOVERNED ONE.
+     *
+     * `cosmos` is subject to endpoint policy, so a chain row pointed at an
+     * arbitrary host is refused before any of the behaviour below runs —
+     * every test in this file would then be asserting about the endpoint
+     * gate rather than about the opt-in toggle it was written for.
+     */
+    private const REST     = 'https://cosmos-api.polkachu.com';
+
     /** A second chain, so "only the one you named" is checkable. */
     private const OTHER_CHAIN_ID = 9;
     private const OTHER_SLUG     = 'juno';
@@ -89,9 +99,19 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         \BccTestCronStore::reset();
         \BccTestCapabilities::reset();
 
+        // The enable route proves the endpoint live before it writes. The
+        // fake SafeHttpClient answers with a valid node_info; the refusal
+        // path is pinned separately.
+        \BccTestEndpointProof::reset();
+        \BccTestEndpointProof::scriptNodeInfo();
+
+        // The panel and the worker read the RECORD, never a probe, so the
+        // chain also needs the proof an administrator's Enable would have left.
+        \BccTestEndpointProof::approve(self::CHAIN_ID, self::SLUG, self::REST);
+
         // Both chains ship DISABLED, which is the production default the
         // migration guarantees. A test that wants one enabled says so.
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 0);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 0);
         ChainRepository::seed(self::OTHER_CHAIN_ID, self::OTHER_SLUG, 'https://b.example', 'cosmos', 0);
 
         $_POST = [];
@@ -281,7 +301,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         // …and named explicitly, because these are the ones whose loss
         // would break something far away from this page.
         self::assertSame('1', (string) $after['is_active'], 'the chain must stay active');
-        self::assertSame('https://a.example', (string) $after['rest_url'], 'the endpoint must be untouched');
+        self::assertSame(self::REST, (string) $after['rest_url'], 'the endpoint must be untouched');
         self::assertSame('https://cdn.example/cosmos.png', (string) $after['icon_url'], 'Hall identity: icon');
         self::assertSame('#123456', (string) $after['color'], 'Hall identity: colour');
         self::assertSame('About cosmos.', (string) $after['description'], 'Hall identity: description');
@@ -289,7 +309,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
 
     public function test_disabling_moves_the_opt_in_and_nothing_else_on_the_row(): void
     {
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 1);
         $before = $this->rowSnapshot(self::CHAIN_ID);
 
         $notices = $this->post('cw_discovery_off_' . self::CHAIN_ID);
@@ -495,7 +515,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     public function test_the_discovery_row_reports_an_eligible_chain(): void
     {
         ChainRepository::reset();
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 1);
 
         $html = $this->renderDiscovery();
 
@@ -516,7 +536,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     public function test_the_panel_keeps_the_scanner_wide_eligible_count(): void
     {
         ChainRepository::reset();
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 1);
 
         $html = $this->renderPanel();
 
@@ -554,7 +574,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     public function test_the_discovery_row_reports_a_chain_nobody_opted_in(): void
     {
         ChainRepository::reset();
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 0);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 0);
 
         $html = $this->renderDiscovery();
 
@@ -579,7 +599,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     public function test_the_discovery_row_reports_a_chain_with_no_wasm_module(): void
     {
         ChainRepository::reset();
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 1);
         ChainCheckpointRepository::setCwDiscoveryState(
             self::CHAIN_ID,
             ChainCheckpointRepository::CW_STATE_UNSUPPORTED
@@ -637,7 +657,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         define('BCC_COSMWASM_CHAIN_ALLOWLIST', '4321');
 
         ChainRepository::reset();
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 1);
 
         $html = $this->renderDiscovery();
 
@@ -748,7 +768,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
      */
     public function test_an_opted_in_chain_with_no_wasm_module_reports_blocked(): void
     {
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 1);
         ChainCheckpointRepository::setCwDiscoveryState(
             self::CHAIN_ID,
             ChainCheckpointRepository::CW_STATE_UNSUPPORTED
@@ -771,7 +791,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
      */
     public function test_the_blocked_panel_says_what_to_do_without_calling_it_a_failure(): void
     {
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 1);
         ChainCheckpointRepository::setCwDiscoveryState(
             self::CHAIN_ID,
             ChainCheckpointRepository::CW_STATE_UNSUPPORTED
@@ -833,7 +853,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
      */
     public function test_one_scannable_opt_in_takes_the_panel_out_of_blocked(): void
     {
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 1);
         ChainCheckpointRepository::setCwDiscoveryState(
             self::CHAIN_ID,
             ChainCheckpointRepository::CW_STATE_UNSUPPORTED
@@ -944,7 +964,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     public function test_the_panel_still_reports_unavailable_when_a_required_read_fails(): void
     {
         ChainRepository::reset();
-        ChainRepository::seed(self::CHAIN_ID, self::SLUG, 'https://a.example', 'cosmos', 1);
+        ChainRepository::seed(self::CHAIN_ID, self::SLUG, self::REST, 'cosmos', 1);
         ChainCheckpointRepository::$failGetAll = true;
 
         $summary = CosmwasmDiscoveryHealthSnapshot::buildSummary();

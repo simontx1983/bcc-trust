@@ -11,6 +11,7 @@ use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
+use BCC\Trust\Onchain\Support\CosmosEndpointAuthorization;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
@@ -1133,7 +1134,13 @@ final class CosmwasmDiscoveryWorker
                 $chainId,
                 $stateByChain[$chainId] ?? null,
                 self::discoveryOptInState($chain),
-                $allowlist
+                $allowlist,
+                // ⚠ THE RECORDED PROOF, NOT A PROBE. This loop runs inside
+                // worker passes; verifying here would put outbound identity
+                // requests on the scanning path itself, once per chain per
+                // pass. The proof is made once, by an administrator, in the
+                // action that asks for the scan.
+                CosmosEndpointAuthorization::isAuthorized($chain)
             );
             if (!CosmwasmScanEligibility::isScannable($verdict)) {
                 continue;

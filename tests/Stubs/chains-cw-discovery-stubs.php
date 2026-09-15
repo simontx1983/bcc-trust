@@ -217,7 +217,17 @@ namespace BCC\Trust\Onchain\Repositories {
                     'name'                                => ucfirst($slug),
                     'chain_type'                          => 'cosmos',
                     'is_active'                           => 1,
-                    'rest_url'                            => 'https://' . $slug . '.example',
+                    // ⚠ A GOVERNED slug gets an APPROVED endpoint, because a
+                    // governed chain pointed anywhere else is refused before
+                    // it reaches the behaviour these suites pin — every test
+                    // would then pass or fail on the endpoint gate rather
+                    // than on its own subject. Ungoverned slugs keep the
+                    // arbitrary host, which is exactly what they are for.
+                    // Derived from the policy so the fixture cannot drift
+                    // away from the allowlist it has to satisfy.
+                    'rest_url'                            => \BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy::isGoverned($slug)
+                        ? \BccTestEndpointProof::APPROVED_PRIMARY
+                        : 'https://' . $slug . '.example',
                     'description'                         => 'About ' . $slug . '.',
                     'icon_url'                            => 'https://cdn.example/' . $slug . '.png',
                     'color'                               => '#123456',
@@ -492,4 +502,7 @@ namespace {
     // stubs fill in only what is still missing (wp_die, wp_safe_redirect,
     // check_admin_referer, Logger, AuditLogger, BccAdminTestState).
     require_once __DIR__ . '/onchain-admin-action-stubs.php';
+    // The endpoint-proof seam. This tree has no option store of its own,
+    // and the proof lives in an option.
+    require_once __DIR__ . '/endpoint-proof-stubs.php';
 }

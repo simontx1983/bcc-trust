@@ -54,7 +54,13 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/../Stubs/chains-cw-operations-stubs.php';
 
-        \BccAdminTestState::reset();
+        \BccAdminTestState::reset();
+
+        // Backfill proves the chain's endpoint live before it runs. The fake
+        // SafeHttpClient answers with a valid node_info, and the recorded
+        // proof is what the worker's own filter reads.
+        \BccTestEndpointProof::reset();
+        \BccTestEndpointProof::scriptNodeInfo();
         \BCC\Core\Log\Logger::reset();
         \BCC\Trust\Core\Security\AuditLogger::reset();
         ChainRepository::reset();
@@ -70,6 +76,7 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
         $_SERVER['REQUEST_METHOD'] = 'POST';
 
         ChainRepository::seed(self::CHAIN_ID, 'cosmos', true);
+        \BccTestEndpointProof::approve(self::CHAIN_ID, 'cosmos', \BccTestEndpointProof::APPROVED_PRIMARY);
         ChainRepository::seed(self::OTHER_CHAIN_ID, 'juno', true);
         ChainCheckpointRepository::seed(self::CHAIN_ID);
         ChainCheckpointRepository::seed(self::OTHER_CHAIN_ID);

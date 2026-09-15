@@ -16,6 +16,8 @@ use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Services\NftCapabilityEditor;
 use BCC\Trust\Onchain\Services\NftDiscoveryControlPlaneSnapshot;
+use BCC\Trust\Onchain\Support\CosmosEndpointAuthorization;
+use BCC\Trust\Onchain\Support\CosmosEndpointVerifier;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmPassStopReason;
@@ -660,6 +662,33 @@ class NftDiscoveryPage
             return 'backfill_paused';
         }
 
+        // ── THE ENDPOINT GATE ───────────────────────────────────────────
+        //
+        // ⚠ THIS CONTROL DOES NOT GO THROUGH THE RUN LEDGER. It calls
+        // `runBackfillForChain()` directly, so it never passes
+        // `eligibleChainIds()` and never passes `DiscoveryReadiness` — the
+        // two places the endpoint proof is otherwise enforced. Without this
+        // line it would be the one surviving way to spend provider budget on
+        // a chain whose endpoint has never been proven, which is exactly the
+        // hole the rest of this work closes everywhere else.
+        //
+        // Asked LAST, after every cheaper refusal, so a chain that is
+        // capability-refused, gate-refused or paused costs no outbound
+        // request. Live is correct here: this is a capability-checked,
+        // nonce-checked administrator POST that is about to contact the very
+        // endpoint being proven, many times.
+        $unproven = self::prove_endpoint($chainId, $chain);
+        if ($unproven !== null) {
+            AdminActionSupport::audit(
+                'admin_chain_cw_backfill_refused',
+                'chain',
+                $chainId,
+                ['reason' => $unproven]
+            );
+
+            return 'backfill_endpoint_unverified';
+        }
+
         // Deltas come from the SAME aggregate the engine section prints, so
         // the run report and the table under it cannot disagree about what
         // this chain holds.
@@ -954,7 +983,38 @@ class NftDiscoveryPage
             // audits nothing. This is also what makes a stale tab safe: the
             // route names its direction, so a second submit of an already
             // applied direction lands here instead of flipping it back.
+            //
+            // ⚠ ENABLE IS THE EXCEPTION, AND ON PURPOSE. Re-pressing Enable on
+            // an already-enabled chain re-proves the endpoint, which is the
+            // ONLY operator gesture that clears `endpoint_unverified` — the
+            // notice the scan panel shows points here. Without this, a chain
+            // whose proof had lapsed would be stuck: Enable would answer
+            // "already enabled, nothing changed" and change nothing, forever.
+            // It still writes no chain state and still audits no transition.
+            if ($enable) {
+                self::prove_endpoint($chainId, $chain);
+            }
+
             return $enable ? 'noop_enabled' : 'noop_disabled';
+        }
+
+        // ⚠ PROVEN BEFORE THE FLAG MOVES, not after. Opting a chain in is the
+        // decision that puts it into the scanner's rotation, so it is exactly
+        // where the endpoint has to earn its place. A live check here — one
+        // request, no retries, no breaker charge — is an administrator asking
+        // for it; the same check on a render or a cron tick would be
+        // unattended outbound traffic, which is why every other surface reads
+        // the RECORD this writes.
+        $unproven = $enable ? self::prove_endpoint($chainId, $chain) : null;
+        if ($unproven !== null) {
+            AdminActionSupport::audit(
+                'admin_chain_cw_discovery_enable_refused',
+                'chain',
+                $chainId,
+                ['chain' => $slug, 'reason' => $unproven]
+            );
+
+            return 'enable_endpoint_unverified';
         }
 
         if (!ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, $enable)) {
@@ -1025,7 +1085,61 @@ class NftDiscoveryPage
             'operator'       => get_current_user_id(),
         ]);
 
+        if (!$enable) {
+            // Opting a chain OUT withdraws the authorization with it. The
+            // record would be invalidated anyway the moment the endpoint
+            // changed, but leaving it behind would let a later re-enable
+            // inherit a proof nobody re-made — and re-enabling is precisely
+            // the moment we want the endpoint asked again.
+            CosmosEndpointAuthorization::forget($chainId);
+        }
+
         return $enable ? 'enabled' : 'disabled';
+    }
+
+    /**
+     * Prove this chain's endpoint, live, and record the proof.
+     *
+     * ⚠ THE ONLY OUTBOUND REQUEST ON THIS PAGE, and it happens only inside a
+     * capability-checked, POST-only, nonce-checked administrator action.
+     * Rendering this page — any tab of it — performs no verification and
+     * writes nothing; that is pinned by a test.
+     *
+     * An UNGOVERNED chain has no endpoint policy to satisfy, so there is
+     * nothing to prove and nothing to refuse: it returns null without
+     * contacting anything. That keeps every non-`cosmos` Cosmos-family chain
+     * behaving exactly as it did.
+     *
+     * ⚠ REPORTS THE VERIFIER'S REASON, NOT AN ELIGIBILITY VERDICT. This page
+     * is forbidden — by `ChainsNftDiscoveryTabTest` — from naming
+     * `CosmwasmScanEligibility` anywhere, because a page that speaks the
+     * eligibility vocabulary is a page that can grow a second opinion about
+     * eligibility. The bounded reason vocabulary here belongs to
+     * {@see CosmosEndpointVerifier} and says something this page IS entitled
+     * to know: what its own request found.
+     *
+     * @return string|null null when the endpoint is proven (or not governed);
+     *                     otherwise the bounded reason it was not
+     */
+    private static function prove_endpoint(int $chainId, object $chain): ?string
+    {
+        $verification = CosmosEndpointAuthorization::authorize($chain, get_current_user_id());
+
+        if ($verification['ok'] || $verification['reason'] === CosmosEndpointVerifier::NOT_GOVERNED) {
+            return null;
+        }
+
+        // ⚠ The REASON is logged, never the endpoint and never the provider's
+        // own words. The reason vocabulary is bounded and written by us; a URL
+        // and a response body are not.
+        \BCC\Core\Log\Logger::warning('[bcc-trust] CosmWasm discovery refused: endpoint unproven', [
+            'action'   => 'cosmwasm_chain_endpoint_unverified',
+            'chain_id' => $chainId,
+            'reason'   => $verification['reason'],
+            'operator' => get_current_user_id(),
+        ]);
+
+        return $verification['reason'];
     }
 
     /**
@@ -3144,6 +3258,15 @@ class NftDiscoveryPage
                 return ['type' => 'warning', 'message' =>
                     'That chain is paused, so no slice was run. Resume it first. Nothing was started.'];
 
+            // The identity check is the ONE request this refusal made, and
+            // it failed. Nothing was enumerated, so "nothing was scanned" is
+            // an honest claim rather than a hopeful one.
+            case 'backfill_endpoint_unverified':
+                return ['type' => 'error', 'message' =>
+                    'That chain\'s data source could not be confirmed as an approved endpoint serving the '
+                    . 'expected network, so no slice was run and nothing was scanned. Check the chain\'s '
+                    . 'endpoint setting, then try again.'];
+
             case 'backfill_driver_not_ready':
                 return ['type' => 'error', 'message' =>
                     'The CosmWasm enumeration driver is not ready for that chain, so no slice was run and '
@@ -3271,6 +3394,15 @@ class NftDiscoveryPage
             // way leaves the operator unable to tell what the chain is now.
             // The write returned false, so nothing moved and the previous
             // state genuinely does still stand — that is safe to assert.
+            // Refused BEFORE the write, so the previous state genuinely
+            // still stands. Says what was checked and what to do, and names
+            // neither the endpoint nor what it replied.
+            case 'enable_endpoint_unverified':
+                return ['type' => 'error', 'message' =>
+                    'Automatic CW-721 discovery was NOT enabled — this chain\'s data source could not be '
+                    . 'confirmed as an approved endpoint serving the expected network. Nothing was changed and '
+                    . 'nothing was scanned. Check the chain\'s endpoint setting, then try again.'];
+
             case 'enable_write_failed':
                 return ['type' => 'error', 'message' =>
                     'Automatic CW-721 discovery could NOT be enabled — the database write failed and nothing '
