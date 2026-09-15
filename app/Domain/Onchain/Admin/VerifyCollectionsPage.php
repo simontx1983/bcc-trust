@@ -1042,10 +1042,17 @@ final class VerifyCollectionsPage
         //   1. Waitlist count — EXPLICIT user opt-ins ("activate this and
         //      count me in"). Airdrop-proof: a scammer can put tokens in
         //      every wallet but can't check the box for anyone.
-        //   2. Linked holders — passive holdings (EVM/SOL from the
-        //      holdings index; Cosmos Hub from marketplace rollups).
-        //      Forgeable by airdrop, so it's the tiebreaker, not the rank.
+        //   2. Linked holders — passive holdings, from BCC's own holdings
+        //      index ONLY (EVM/SOL). Forgeable by airdrop, so it's the
+        //      tiebreaker, not the rank.
         // Spam flags render red and sort flagged rows to the bottom.
+        //
+        // ⚠ NOTHING HERE LEAVES THE SERVER. Cosmos Hub counts used to be
+        // built from a third-party marketplace API at render time, which
+        // sent every linked Hub wallet address off-platform whenever this
+        // page was opened. They are now NOT CALCULATED, and the cell says
+        // so — see CollectionDemandService. Rendering this page must make no
+        // outbound request; `VerifyCollectionsRenderIsolationTest` pins it.
         $demand  = CollectionDemandService::linkedHolderCounts();
         $signals = [];
         foreach (\BCC\Trust\Onchain\Repositories\CollectionSignalRepository::countsByCollection() as $t) {
@@ -1104,8 +1111,13 @@ final class VerifyCollectionsPage
                 if ($sa['waitlist'] !== $sb['waitlist']) {
                     return $sb['waitlist'] <=> $sa['waitlist'];
                 }
-                $da = $demand[$ka] ?? 0;
-                $db = $demand[$kb] ?? 0;
+                // Rows with MORE indexed linked holders sort first. A row with
+                // no indexed count — not calculated, unavailable, or none in
+                // the index — carries no evidence either way and ties here;
+                // the ordering uses what is known and asserts nothing about
+                // what is not. The CELL is what must never show a zero.
+                $da = $demand['counts'][$ka] ?? 0;
+                $db = $demand['counts'][$kb] ?? 0;
                 if ($da !== $db) {
                     return $db <=> $da;
                 }
@@ -1366,7 +1378,9 @@ final class VerifyCollectionsPage
             <?php if ($vstate === CollectionStateClassifier::TAB_DISCOVERED_UNVERIFIED && $demandRanked): ?>
                 <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
                     Queue ranked by <strong>Linked holders</strong> — collections that
-                    real platform wallets hold sort first.
+                    real platform wallets hold sort first. Linked holders are counted from
+                    BCC's own holdings index, which covers EVM and Solana; other chains show
+                    <em>Not calculated</em>.
                 </p>
             <?php endif; ?>
 
@@ -1540,7 +1554,7 @@ final class VerifyCollectionsPage
                                 Flags
                             </th>
                             <th style="width:110px;"
-                                title="Linked platform wallets currently holding this collection (passive — airdrops inflate it; tiebreaker only).">
+                                title="Linked platform wallets BCC's holdings index records as holding this collection (EVM and Solana only; passive — airdrops inflate it; tiebreaker only). Never fetched from outside services while this page loads.">
                                 Linked holders
                             </th>
                             <th style="width:100px;" title="Marketplace-wide unique holders (upstream metadata).">Holders</th>
@@ -1668,12 +1682,29 @@ final class VerifyCollectionsPage
                                 </td>
                                 <td>
                                     <?php
-                                    $demandCount = $demand[$rowKey] ?? 0;
-                                    if ($demandCount > 0): ?>
-                                        <strong style="color:#00a32a;"><?php echo number_format_i18n($demandCount); ?></strong>
-                                    <?php else: ?>
-                                        <span style="color:#999;">&mdash;</span>
-                                    <?php endif; ?>
+                                    // ⚠ FOUR STATES, AND NONE OF THEM IS A FABRICATED ZERO.
+                                    // The dash this cell used to print for "no count" meant
+                                    // "nobody holds it" to a reader, whether the truth was
+                                    // that, a failed read, or a chain BCC never counts.
+                                    $demandCell = CollectionDemandService::rowState(
+                                        $demand,
+                                        (string) ($row->chain_type ?? ''),
+                                        (int) $row->chain_id,
+                                        (string) $row->contract_address
+                                    );
+                                    switch ($demandCell['state']):
+                                        case CollectionDemandService::STATE_COUNTED: ?>
+                                        <strong style="color:#00a32a;"><?php echo number_format_i18n((int) $demandCell['count']); ?></strong>
+                                        <?php break;
+                                        case CollectionDemandService::STATE_NONE_INDEXED: ?>
+                                        <span style="color:#646970;" title="No linked wallet is recorded as holding this collection in BCC's holdings index. The index can lag behind the chain.">None indexed</span>
+                                        <?php break;
+                                        case CollectionDemandService::STATE_UNAVAILABLE: ?>
+                                        <span style="color:#646970;" title="Linked-holder counts could not be read completely just now, so this row's count is unknown.">Unavailable</span>
+                                        <?php break;
+                                        default: ?>
+                                        <span style="color:#646970;" title="BCC keeps no holdings index for this chain, so it does not count linked holders here. Counts are never fetched from outside services while this page loads.">Not calculated</span>
+                                    <?php endswitch; ?>
                                 </td>
                                 <td><?php echo number_format_i18n((int) ($row->unique_holders ?? 0)); ?></td>
                                 <td class="bcc-vc-community">

@@ -82,6 +82,8 @@ if (!defined('ABSPATH')) {
  */
 final class NftHoldingsRepository
 {
+    use GuardsReadFailures;
+
     public const STATUS_PENDING = 0;
     public const STATUS_OK      = 1;
     public const STATUS_SPAM    = 2;
@@ -152,14 +154,20 @@ final class NftHoldingsRepository
      * whole visible index — the demand signal behind the Verify
      * Collections queue: "N linked wallets hold this collection."
      *
-     * Aggregate over the indexed chains only (EVM/SOL persistence);
-     * Cosmos demand comes from CollectionDemandService's marketplace
-     * rollups. Bounded by LIMIT — beyond 500 distinct contracts the
-     * tail is noise for a curation queue (and the caller logs the cap).
+     * Aggregate over the indexed chains only (EVM/SOL persistence). Cosmos
+     * has no holdings index, so its demand is not calculated at all.
+     * Bounded by LIMIT; the caller asks for one row more than it keeps so a
+     * truncated result is detectable rather than silently complete.
      *
-     * @return list<object{chain_id: string, contract_address: string, wallets: string}>
+     * ⚠ NULL ON A FAILED READ, NOT `[]`. `[]` is an answer — "no linked
+     * wallet holds anything" — and the house `$rows ?: []` idiom used to
+     * give it after a SQL error too, which rendered every row of the admin
+     * queue as having no linked holders. The caller turns null into
+     * "unavailable".
+     *
+     * @return list<object{chain_id: string, contract_address: string, wallets: string}>|null
      */
-    public static function countDistinctWalletsPerContract(int $limit = 500): array
+    public static function countDistinctWalletsPerContract(int $limit = 500): ?array
     {
         $limit = max(1, min(2000, $limit));
 
@@ -179,6 +187,14 @@ final class NftHoldingsRepository
             self::STATUS_OK,
             $limit
         ));
+
+        // The house detector, not a second copy of it: it checks
+        // `last_error` rather than a null return, which is what works under
+        // real WordPress and under the integration harness's mysqli shim.
+        if (self::readFailed(__FUNCTION__)) {
+            return null;
+        }
+
         return $rows ?: [];
     }
 
