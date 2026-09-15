@@ -772,15 +772,19 @@ final class HoldingsService
         if (!$force) {
             $cached = get_transient($cacheKey);
             if (is_array($cached) && isset($cached['items'])) {
-                /** @var array{items: list<array<string, mixed>>, truncated: bool, complete?: bool} $cached */
-                // Only a complete walk is ever written below, so a hit is
-                // complete by construction. The key is still normalised
-                // rather than assumed, because a payload cached by the
-                // PREVIOUS release can still be inside its 24h window and
-                // carries no flag at all — and an unflagged payload is not
-                // evidence of a successful read.
-                $cached['complete'] = ($cached['complete'] ?? false) === true;
-                return $cached;
+                /** @var array{items: list<array<string, mixed>>, truncated?: bool, complete?: bool} $cached */
+                // REBUILT, not returned as found. Only a complete walk is
+                // ever written below, so a hit is complete by construction —
+                // but a payload cached by the PREVIOUS release can still be
+                // inside its 24h window and carries no flag at all, and an
+                // unflagged payload is not evidence of a successful read. So
+                // the shape is normalised on the way out and the missing flag
+                // reads as NOT complete.
+                return [
+                    'items'     => $cached['items'],
+                    'truncated' => !empty($cached['truncated']),
+                    'complete'  => ($cached['complete'] ?? false) === true,
+                ];
             }
         }
 

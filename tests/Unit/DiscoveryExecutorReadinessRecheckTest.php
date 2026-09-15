@@ -188,4 +188,93 @@ final class DiscoveryExecutorReadinessRecheckTest extends TestCase
         self::assertSame([], \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::$discoveryTouches);
         self::assertSame([], \BCC\Core\DB\AdvisoryLock::$acquired, 'the chain lock is never taken');
     }
+    // ── the endpoint moved under a run that was already authorised ──────
+
+    /**
+     * ⚠ THE CONTINUATION RULE. A run is authorised against the endpoint the
+     * chain was pointed at when an administrator asked for it. If the chain is
+     * repointed afterwards — by the audited switch, by a migration, or by hand
+     * in the database — the recorded proof no longer matches the configured
+     * endpoint, and the run may NOT be continued against a host nobody proved.
+     *
+     * This is what makes the five-minute maintenance sweep safe to keep: it
+     * re-dispatches by id, and the run then dies here rather than walking a
+     * new provider on the strength of yesterday's authorisation.
+     *
+     * ⚠ AND THE REFUSAL IS RECORDED. `endpoint_unverified` had to be added to
+     * `DiscoveryRunError::all()` for this to work: `markFailed()` refuses any
+     * code it does not recognise and writes NOTHING, so without that the run
+     * would keep its lease and the sweep would re-dispatch it every five
+     * minutes to be refused again — the refusal becoming the thing that
+     * repeats the work.
+     */
+    public function testAChainRepointedAfterAuthorisationCannotBeContinued(): void
+    {
+        $runId = $this->queueGovernedRun();
+
+        // Repointed to the OTHER approved endpoint. Still https, still
+        // approved, still the same chain — and not what was proven.
+        ChainRepository::seed(
+            self::CHAIN,
+            'cosmos',
+            'https://rest.cosmos.directory/cosmoshub',
+            'cosmos',
+            1,
+            1
+        );
+
+        $result = DiscoveryRunExecutor::execute($runId);
+
+        self::assertSame('failed', $result['status']);
+        self::assertSame(
+            \BCC\Trust\Onchain\Support\CosmwasmScanEligibility::ENDPOINT_UNVERIFIED,
+            $result['reason'],
+            'the refusal names the endpoint, not a global switch'
+        );
+        self::assertSame([], ApiRetry::$calls, 'the new host is never contacted');
+
+        $run = $this->theRun();
+        self::assertSame('failed', $run['status'], 'the run is terminal, not left leased');
+        self::assertSame(
+            \BCC\Trust\Onchain\Support\CosmwasmScanEligibility::ENDPOINT_UNVERIFIED,
+            $run['error_code'],
+            'the ledger records WHY, so the sweep does not re-dispatch it forever'
+        );
+    }
+
+    /**
+     * Anti-vacuity: the SAME run, with the endpoint left alone, continues
+     * normally. Without this, the test above would be satisfied by a governed
+     * chain that could never execute at all.
+     */
+    public function testAGovernedRunWhoseEndpointIsUnchangedStillExecutes(): void
+    {
+        $runId = $this->queueGovernedRun();
+
+        $result = DiscoveryRunExecutor::execute($runId);
+
+        self::assertNotSame(
+            \BCC\Trust\Onchain\Support\CosmwasmScanEligibility::ENDPOINT_UNVERIFIED,
+            $result['reason'] ?? '',
+            'an unchanged, proven endpoint is not a blocker'
+        );
+    }
+
+    /**
+     * Queue a run on the GOVERNED chain, with its endpoint proven exactly as
+     * an administrator's request would have proven it.
+     */
+    private function queueGovernedRun(): int
+    {
+        $approved = \BccTestEndpointProof::APPROVED_PRIMARY;
+
+        ChainRepository::seed(self::CHAIN, 'cosmos', $approved, 'cosmos', 1, 1);
+        \BccTestEndpointProof::reset();
+        \BccTestEndpointProof::scriptNodeInfo();
+
+        $result = (new DiscoveryRunService())->request(self::CHAIN, self::OPERATOR);
+        self::assertTrue($result['ok'], 'precondition: the run must be genuinely queued');
+
+        return (int) $result['run_id'];
+    }
 }

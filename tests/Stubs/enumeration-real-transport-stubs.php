@@ -228,6 +228,40 @@ namespace BCC\Core\Http {
         {
             return $args;
         }
+
+        /**
+         * The BATCH wire, scripted from the same queue as the single one.
+         *
+         * ⚠ ADDED SO THE BATCH PATH CAN BE DRIVEN END TO END. Everything
+         * above this line — the breaker's `isOpen()` probe claim, the
+         * one-charge-per-batch failure rule, `releaseProbe()` in the
+         * `finally` — is {@see \BCC\Trust\Onchain\Support\ApiRetry} running
+         * for real. Before this existed the batch path had no transport in
+         * any harness, so the only way to assert "a refused batch charges
+         * nothing" was to read the source and believe it. That is exactly
+         * the kind of proof PR 7.6 learned not to trust.
+         *
+         * ⚠ RECORDS EVERY URL, INCLUDING NONE. `BccWire::$urls` staying
+         * empty is the assertion that a guard returned before the wire, and
+         * it can only mean that if this method is the only way through.
+         *
+         * Index-aligned by construction: one answer per URL, in order.
+         *
+         * @param  list<string>         $urls
+         * @param  array<string, mixed> $args
+         * @return array<int, array<string, mixed>|\WP_Error>
+         */
+        public static function getBatchSameHost(array $urls, array $args = []): array
+        {
+            $out = [];
+            foreach (array_values($urls) as $i => $url) {
+                // `next()` is what records the URL, so a batch and a single
+                // request leave the same kind of trace in the same list.
+                $out[$i] = \BccWire::next($url);
+            }
+
+            return $out;
+        }
     }
 }
 

@@ -302,19 +302,30 @@ namespace BCC\Trust\Onchain\Repositories {
              *        is what a pre-migration install looks like and must
              *        read as "not supported", never as "supported".
              */
+            /**
+             * @param string $restUrl PR 7.11 — the configured endpoint.
+             *        Defaults to EMPTY, which is what every pre-7.11 caller
+             *        implicitly seeded and what an ungoverned slug is
+             *        unaffected by. A GOVERNED slug seeded without one is
+             *        `endpoint_unverified`, which is the correct answer and
+             *        the reason the parameter is explicit rather than
+             *        helpfully defaulted to something approved.
+             */
             public static function seed(
                 int $id,
                 string $slug,
                 string $type = 'cosmos',
                 int $active = 1,
                 int $discoveryEnabled = 1,
-                ?int $supportsNft = 1
+                ?int $supportsNft = 1,
+                string $restUrl = ''
             ): void {
                 $row = [
                     'id'                             => $id,
                     'slug'                           => $slug,
                     'chain_type'                     => $type,
                     'is_active'                      => (string) $active,
+                    'rest_url'                       => $restUrl,
                     'cosmwasm_nft_discovery_enabled' => (string) $discoveryEnabled,
                 ];
 
@@ -508,4 +519,10 @@ namespace BCC\Trust\Onchain\Repositories {
             }
         }
     }
+}
+
+namespace {
+    // The endpoint-proof seam: the option store the recorded proof lives in,
+    // the SafeHttpClient recorder, and BccTestEndpointProof.
+    require_once __DIR__ . '/endpoint-proof-stubs.php';
 }

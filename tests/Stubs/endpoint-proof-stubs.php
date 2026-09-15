@@ -39,6 +39,43 @@ namespace {
      * been bitten by before. Every declaration below is guarded, so a tree
      * that already has its own store keeps it.
      */
+    /**
+     * ⚠ Guarded like everything else here. A tree that never needed to script
+     * a transport failure never declared it, and `scriptUnreachable()` is the
+     * first thing that asks for one.
+     */
+    if (!class_exists('WP_Error', false)) {
+        class WP_Error
+        {
+            /** @var array<string, list<string>> */
+            private array $errors = [];
+
+            /** @param mixed $data */
+            public function __construct(string $code = '', string $message = '', $data = null)
+            {
+                if ($code !== '') {
+                    $this->errors[$code][] = $message;
+                }
+            }
+
+            public function get_error_code(): string
+            {
+                $keys = array_keys($this->errors);
+
+                return $keys === [] ? '' : (string) $keys[0];
+            }
+
+            public function get_error_message(): string
+            {
+                foreach ($this->errors as $messages) {
+                    return (string) ($messages[0] ?? '');
+                }
+
+                return '';
+            }
+        }
+    }
+
     if (!class_exists('BccTestOptionStore', false)) {
         final class BccTestOptionStore
         {
