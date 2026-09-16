@@ -10,7 +10,7 @@ declare(strict_types=1);
  * `VerifyCollectionsPage` itself (all of `render_page()` and its row
  * renderers), `CollectionDemandService`, `CollectionStateClassifier`,
  * `DiscoveryReadiness`, the provisioning value objects — and, crucially,
- * `StargazeMarketplaceApi`. The Stargaze client is left real ON PURPOSE: if
+ * the transports themselves. Every transport is recorded ON PURPOSE: if
  * anything on the render path ever calls it again, it genuinely issues its
  * request through the recording ApiRetry below and the test sees it. A fake
  * client would have to be told to record, and a test that only proves the

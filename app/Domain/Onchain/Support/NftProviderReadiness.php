@@ -108,11 +108,12 @@ final class NftProviderReadiness
             // Talis reads Injective's whitelist contract over the same LCD.
             NftDriverRegistry::DRIVER_TALIS_WHITELIST => $restUrl !== '',
 
-            // Stargaze's marketplace API is externally hosted and takes no
-            // per-chain credential, so there is nothing an operator could
-            // configure wrongly. Not "always true" as a shortcut — true
-            // because the prerequisite set is genuinely empty.
-            NftDriverRegistry::DRIVER_STARGAZE_MARKETPLACE => true,
+            // ⚠ The Stargaze marketplace driver was REMOVED in PR 7.12 —
+            // it is no longer a registry key, so it cannot reach this
+            // match. Cosmos wallet discovery has no driver at all now:
+            // wasmd has no owner→contracts index, and the marketplace API
+            // that papered over that gap was undocumented and took member
+            // wallet addresses off-platform.
 
             // ── EVM ─────────────────────────────────────────────────────
             // Both Alchemy drivers need a KEYED Alchemy endpoint. The

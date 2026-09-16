@@ -82,7 +82,7 @@ final class NftDriverRegistryTest extends TestCase
 
     // ── Chain targeting ─────────────────────────────────────────────────
 
-    public function testTalisIsInjectiveOnlyAndStargazeIsHubOnly(): void
+    public function testTalisIsInjectiveOnlyAndNoCosmosChainHasWalletDiscovery(): void
     {
         $injective = self::chain('cosmos', 'injective');
         $hub       = self::chain('cosmos', 'cosmos');
@@ -97,15 +97,34 @@ final class NftDriverRegistryTest extends TestCase
             'the Cosmos Hub has no curated feed'
         );
 
+        // ⚠ PR 7.12: the Hub's ONLY wallet-discovery driver was the
+        // Stargaze marketplace indexer, which answered "which collections
+        // does this wallet hold" by sending the member's address to an
+        // undocumented third party. It is gone, and nothing replaced it —
+        // wasmd has no owner→contracts index, so the honest answer is that
+        // NO Cosmos chain can enumerate a wallet's collections.
         self::assertSame(
-            [NftDriverRegistry::DRIVER_STARGAZE_MARKETPLACE],
-            NftDriverRegistry::driversFor($hub, NftDriverRegistry::OP_WALLET_DISCOVERY, [])
+            [],
+            NftDriverRegistry::driversFor($hub, NftDriverRegistry::OP_WALLET_DISCOVERY, []),
+            'the Cosmos Hub must have no wallet-discovery driver'
         );
         self::assertSame(
             [],
             NftDriverRegistry::driversFor($injective, NftDriverRegistry::OP_WALLET_DISCOVERY, []),
             'Injective has no per-wallet owner index'
         );
+    }
+
+    /** The removed driver key must not come back under any spelling. */
+    public function testNoDriverKeyNamesTheRemovedMarketplace(): void
+    {
+        $keys = NftDriverRegistry::driverKeys();
+        self::assertNotSame([], $keys, 'denominator: the registry must be populated');
+
+        foreach ($keys as $key) {
+            self::assertStringNotContainsString('stargaze', strtolower((string) $key));
+            self::assertStringNotContainsString('marketplace', strtolower((string) $key));
+        }
     }
 
     /**

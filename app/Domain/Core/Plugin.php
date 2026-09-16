@@ -2840,90 +2840,29 @@ final class Plugin
             );
         }, 10, 4);
 
-        // ── §H1 NFT gallery refresh ─────────────────────────────────────
+        // ── §H1 NFT gallery refresh — REMOVED in PR 7.12 ────────────────
         //
-        // Dispatched by CreatorGalleryEndpoint when the visible page has
-        // any expired collection rows (or the creator has wallets but no
-        // rows at all). Single-shot per request — the endpoint's
-        // 5-minute transient lock dedupes concurrent dispatches.
+        // There was an `bcc_onchain_holdings_refresh` handler here. It
+        // resolved a creator's wallets and called `fetch_collections()` on
+        // each, which for the Cosmos Hub sent the address to an
+        // undocumented marketplace API.
         //
-        // Per fetcher behaviour (see FetcherInterface): chains without
-        // an NFT data path return [] without burning API budget. Chains
-        // that DO support fetch_collections silently no-op when the
-        // required API key constant isn't defined — this lets the
-        // architecture ship now and key wiring land later without
-        // touching the dispatcher.
-
-        add_action(
-            \BCC\Trust\Core\REST\CreatorGalleryEndpoint::REFRESH_HOOK,
-            function (int $postId): void {
-                if ($postId <= 0) {
-                    return;
-                }
-                try {
-                    $wallets = \BCC\Trust\Onchain\Repositories\WalletRepository::getForProject($postId);
-                    if (empty($wallets)) {
-                        return;
-                    }
-                    foreach ($wallets as $wallet) {
-                        $chainId = isset($wallet->chain_id) ? (int) $wallet->chain_id : 0;
-                        $address = isset($wallet->wallet_address) && is_string($wallet->wallet_address)
-                            ? $wallet->wallet_address
-                            : '';
-                        $walletId = isset($wallet->id) ? (int) $wallet->id : 0;
-                        if ($chainId <= 0 || $address === '' || $walletId <= 0) {
-                            continue;
-                        }
-
-                        $chain = \BCC\Trust\Onchain\Repositories\ChainRepository::getById($chainId);
-                        if ($chain === null) {
-                            continue;
-                        }
-                        if (!\BCC\Trust\Onchain\Factories\FetcherFactory::has_driver(
-                            (string) $chain->chain_type
-                        )) {
-                            continue;
-                        }
-                        $fetcher = \BCC\Trust\Onchain\Factories\FetcherFactory::make_for_chain($chain);
-                        // Gate on 'collection' — the capability fetch_collections()
-                        // actually requires. No fetcher advertises 'nft' (the enum
-                        // key was never implemented), so the old gate skipped every
-                        // chain and this refresh silently no-op'd. [audit M]
-                        if (!$fetcher->supports_feature('collection')) {
-                            continue;
-                        }
-
-                        $collections = $fetcher->fetch_collections($address, $chainId);
-                        // #212: the result is load-bearing — a discarded
-                        // false is exactly how the dropped writes hid.
-                        $persisted = \BCC\Trust\Onchain\Services\CollectionPersistBatch::persist(
-                            $collections,
-                            $walletId,
-                            4 * HOUR_IN_SECONDS
-                        );
-
-                        if (\BCC\Trust\Onchain\Services\CollectionPersistBatch::allPersisted($persisted)) {
-                            \BCC\Trust\Onchain\Repositories\WalletRepository::markHoldingsRefreshed($walletId);
-                        } else {
-                            // Do NOT advance the watermark. Marking a wallet
-                            // refreshed after losing writes suppresses the next
-                            // attempt and makes the loss permanent — the same
-                            // "failure leaves no trace" shape as #212 itself.
-                            \BCC\Core\Log\Logger::warning('[bcc-trust] gallery_refresh could not persist every collection; leaving the wallet eligible for retry', [
-                                'post_id'        => $postId,
-                                'wallet_link_id' => $walletId,
-                                'chain_id'       => $chainId,
-                            ] + $persisted);
-                        }
-                    }
-                } catch (\Throwable $e) {
-                    \BCC\Core\Log\Logger::error('[bcc-trust] gallery_refresh failed', [
-                        'post_id' => $postId,
-                        'error'   => $e->getMessage(),
-                    ]);
-                }
-            }
-        );
+        // What made it indefensible was its trigger: the only thing that
+        // ever scheduled it was `CreatorGalleryEndpoint`, whose
+        // permission callback is `__return_true`. An anonymous page view
+        // arranged a third-party wallet-address disclosure moments later,
+        // outside the request anybody was reviewing.
+        //
+        // The endpoint no longer schedules it, so this handler had no
+        // caller left. Refreshing wallet-linked collection rows for the
+        // chains that still have a discovery driver (EVM, Solana) belongs
+        // to the four-hourly `bcc_refresh_collections` cron, which is
+        // unchanged and which no anonymous request can trigger.
+        //
+        // The hook name is not in `includes/cron-hooks.php`, so nothing
+        // contributes it to bcc-core's `bcc_expected_cron_hooks` drift
+        // detector and no unschedule migration is owed: it was only ever
+        // a single event, and any already-queued one is now a no-op.
 
         // ── System health filter ───────────────────────────────────────
         // Wire trust-engine health data into bcc-core's /system/health endpoint.

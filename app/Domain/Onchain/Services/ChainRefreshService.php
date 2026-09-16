@@ -339,6 +339,20 @@ class ChainRefreshService
                     $fetcher = FetcherFactory::make_for_chain($chain);
 
                     if (!$fetcher->supports_feature('collection')) {
+                        // The chain has no wallet-discovery driver — since
+                        // PR 7.12 that includes every Cosmos chain, whose
+                        // only driver was the Stargaze marketplace.
+                        //
+                        // ⚠ BACK THE ROW OFF, don't just `continue`. The
+                        // batch is selected by `expires_at < NOW()` ordered
+                        // oldest-first with LIMIT 50 and is chain-agnostic,
+                        // so a bare skip leaves these rows permanently at
+                        // the head of the queue and they crowd out the EVM
+                        // and Solana rows this cron exists to refresh.
+                        // Backing off moves the watermark WITHOUT claiming a
+                        // refresh happened — `markHoldingsRefreshed()` is
+                        // deliberately not called here.
+                        CollectionRepository::backoffRow((int) $row->id);
                         continue;
                     }
 

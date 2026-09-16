@@ -11,7 +11,6 @@ use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
-use BCC\Trust\Onchain\Support\StargazeMarketplaceApi;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -54,6 +53,82 @@ final class CollectionStanceService
     /** Panel row ceiling — response-size bound, largest surfaces first. */
     private const PANEL_ROW_CAP = 60;
 
+    /**
+     * ── THE HOLDINGS-STATUS VOCABULARY (closed set) ─────────────────────
+     *
+     * Rendered as `holdings_status` on `GET /me/collection-stances/panel`.
+     * It exists because `items: []` answered two different questions with
+     * the same silence, and the interface read that silence as a verdict:
+     * "No collections detected in your linked wallets yet."
+     *
+     *   complete    — every source this user has finished. An empty list is
+     *                 TRUSTWORTHY: they hold no verified collections.
+     *   partial     — at least one source finished and at least one did not.
+     *                 Anything present is real; ABSENCE PROVES NOTHING.
+     *   unavailable — no source finished. Nothing can be concluded at all.
+     *
+     * ⚠ `null` is not a member of this set. A nullable status would smuggle
+     * the old ambiguity back in under a new name. The field may be ABSENT
+     * only from an older backend mid-deploy, which is a deployment fact,
+     * not a state.
+     */
+    public const STATUS_COMPLETE    = 'complete';
+    public const STATUS_PARTIAL     = 'partial';
+    public const STATUS_UNAVAILABLE = 'unavailable';
+
+    /** The closed vocabulary, in the order the contract fixture pins it. */
+    public const HOLDINGS_STATUSES = [
+        self::STATUS_COMPLETE,
+        self::STATUS_PARTIAL,
+        self::STATUS_UNAVAILABLE,
+    ];
+
+    /**
+     * Chain types whose holdings BCC has already stored locally, so the
+     * panel reads rows instead of asking a provider.
+     *
+     * Everything else (Cosmos today) is read on demand, over the chain's
+     * own LCD, bounded to verified collections — never a marketplace.
+     *
+     * @var list<string>
+     */
+    private const STORED_INDEX_CHAIN_TYPES = ['evm', 'solana'];
+
+    /** PURE. Does this chain type answer from the stored holdings index? */
+    private static function readsFromStoredIndex(string $chainType): bool
+    {
+        return in_array($chainType, self::STORED_INDEX_CHAIN_TYPES, true);
+    }
+
+    /**
+     * PURE. Fold per-source outcomes into the closed vocabulary.
+     *
+     * A user with NO linked wallets has nothing that could fail, so the
+     * empty panel is complete — the honest answer is "no verified
+     * collections", not "we couldn't check".
+     *
+     * ⚠ POSITIVE EVIDENCE FORCES `partial`, NEVER `unavailable`. A walk can
+     * come back incomplete having ALREADY resolved some collections: those
+     * rows are real and are returned. `unavailable` claims no trustworthy
+     * determination was possible at all, which would be false while we are
+     * handing the caller collections we just proved. The distinction
+     * matters because the frontend renders `unavailable` as a blanket
+     * "temporarily unavailable" and would hide rows the user does hold.
+     *
+     * @param  bool $hasEvidence at least one collection was resolved
+     * @return self::STATUS_* the vocabulary is CLOSED. A fourth value must
+     *         be added to the constants, the shared contract fixture and
+     *         both repositories' drift tests — PHPStan fails here first.
+     */
+    private static function resolveStatus(int $sourcesOk, int $sourcesFailed, bool $hasEvidence): string
+    {
+        if ($sourcesFailed === 0) {
+            return self::STATUS_COMPLETE;
+        }
+
+        return ($sourcesOk > 0 || $hasEvidence) ? self::STATUS_PARTIAL : self::STATUS_UNAVAILABLE;
+    }
+
     public static function spamSoftHideThreshold(): int
     {
         return defined('BCC_COLLECTION_SPAM_SOFT_HIDE')
@@ -83,13 +158,19 @@ final class CollectionStanceService
         // Holder gate: a stance is testimony about a collection you hold
         // (waitlist = "I'd join as a holder", spam = "I received this").
         //
-        // Primary evidence = the SAME sources the panel rendered from
-        // (marketplace rollup / holdings index) — if we showed the user
-        // the row, we must accept their stance on it; some CW-721
-        // variants aren't enumerable via the LCD tokens{owner} walk that
-        // ownsAny uses, and rejecting those reads as a bug. ownsAny is
-        // the fallback for holdings fresher than the cached sources.
-        if (!self::holdsPerPanelSources($userId, (int) $chain->id, (string) $chain->slug, $contract)) {
+        // Primary evidence is BCC's STORED holdings index — the same rows
+        // the panel rendered from. If we showed the user the row, we must
+        // accept their stance on it.
+        //
+        // ⚠ Until PR 7.12 this sentence also named a "marketplace rollup",
+        // and for Cosmos that is exactly what it consulted: writing a
+        // stance sent the member's Hub address to an undocumented API. The
+        // rollup is gone. When the stored index is silent, the fallback is
+        // `ownsAny()`, which proves the SPECIFIC contract on-chain and
+        // already separates the two answers that must never be conflated:
+        // null → "could not verify" (503, retryable), 0 → "definitely not
+        // held" (403). Neither grants anything without positive proof.
+        if (!self::holdsPerPanelSources($userId, (int) $chain->id, $contract)) {
             $count = HoldingsService::ownsAny($userId, (string) $chain->slug, $contract);
             if ($count === null) {
                 return ['ok' => false, 'error' => 'bcc_unavailable'];
@@ -126,27 +207,38 @@ final class CollectionStanceService
     }
 
     /**
-     * Does the viewer hold this collection per the panel's own sources
-     * (cosmos marketplace rollup / EVM holdings index)? Cheap: cached
-     * rollups + bounded index reads, no LCD walk.
+     * Does the viewer hold this collection per BCC's STORED evidence?
+     * One bounded index read per linked wallet — no provider call.
+     *
+     * The chain slug is gone from the signature on purpose: it existed
+     * only to route `cosmos` into the Stargaze marketplace rollup, and a
+     * parameter that no longer decides anything is an invitation to
+     * re-add the branch that used it. When stored evidence is silent the
+     * caller falls through to `HoldingsService::ownsAny()`, which proves
+     * the specific contract on-chain and keeps "definitely not held"
+     * (403) distinct from "could not verify" (503).
      */
-    private static function holdsPerPanelSources(int $userId, int $chainId, string $chainSlug, string $contract): bool
+    private static function holdsPerPanelSources(int $userId, int $chainId, string $contract): bool
     {
         foreach (WalletRepository::getForUser($userId) as $wallet) {
             if ((int) $wallet->chain_id !== $chainId) {
                 continue;
             }
 
-            if ($chainSlug === 'cosmos') {
-                $rollup = StargazeMarketplaceApi::profileCollections((string) $wallet->wallet_address);
-                foreach ($rollup ?? [] as $c) {
-                    if ($c['contract_address'] === $contract) {
-                        return true;
-                    }
-                }
-                continue;
-            }
-
+            // ⚠ NO CHAIN IS SPECIAL-CASED HERE ANY MORE.
+            //
+            // Until PR 7.12 the `cosmos` slug short-circuited into the
+            // Stargaze marketplace rollup, so writing a stance sent the
+            // member's Hub address to an undocumented third party. That
+            // branch is gone, and nothing replaces it inside this method:
+            // when the stored index has no row, the caller falls through
+            // to `HoldingsService::ownsAny()`, which proves ownership of
+            // the SPECIFIC contract on-chain and already distinguishes
+            // "definitely not held" (403) from "could not verify" (503).
+            //
+            // That is strictly safer than the old shortcut: a stance write
+            // now requires positive proof, and an unreadable provider can
+            // no longer be mistaken for either an entitlement or a denial.
             foreach (NftHoldingsRepository::findVisibleForWallet((int) $wallet->id, $chainId) as $row) {
                 if (strtolower((string) $row->contract_address) === $contract) {
                     return true;
@@ -169,33 +261,47 @@ final class CollectionStanceService
      * stance on known junk. The viewer's own current stance rides each
      * row so the UI renders toggles, not one-way buttons.
      *
-     * Sources are the same ones discovery uses (holdings index for
-     * EVM/SOL, cached marketplace rollups for the Hub) — no fresh RPC
-     * walks; the panel is cheap enough for wallet-link time.
+     * Sources: the stored holdings index for EVM/Solana, and for Cosmos a
+     * bounded LCD `tokens{owner}` walk over VERIFIED collections only. The
+     * cached Stargaze marketplace rollup this sentence used to name is gone
+     * (PR 7.12) — no wallet address leaves BCC for a third party here.
      *
-     * @return list<array{
-     *     chain_id: int,
-     *     chain_slug: string,
-     *     contract_address: string,
-     *     name: ?string,
-     *     image_url: ?string,
-     *     collection_verified: bool,
-     *     state: string,
-     *     group_id: ?int,
-     *     waitlist_count: int,
-     *     viewer_stance: ?string
-     * }>
+     * Every source reports whether it COMPLETED. `items` alone cannot say
+     * WHY it is empty, so the envelope carries `holdings_status`: only
+     * `complete` licenses reading `items: []` as "holds nothing".
+     *
+     * @return array{
+     *     items: list<array{
+     *         chain_id: int,
+     *         chain_slug: string,
+     *         contract_address: string,
+     *         name: ?string,
+     *         image_url: ?string,
+     *         collection_verified: bool,
+     *         state: string,
+     *         group_id: ?int,
+     *         waitlist_count: int,
+     *         viewer_stance: ?string
+     *     }>,
+     *     holdings_status: self::STATUS_*
+     * }
      */
     public static function panelForUser(int $userId): array
     {
         if ($userId <= 0) {
-            return [];
+            return ['items' => [], 'holdings_status' => self::STATUS_COMPLETE];
         }
 
-        // 1. Held collections per chain, from the cheap sources.
+        // 1. Held collections per chain, from the cheap sources — and, per
+        //    source, whether that read actually COMPLETED. An empty panel
+        //    means two completely different things depending on this, and
+        //    conflating them is what told users "you hold nothing" while a
+        //    provider was down.
         /** @var array<int, array<string, array{name: ?string, image_url: ?string}>> $byChain */
         $byChain    = [];
         $chainSlugs = [];
+        $sourcesOk     = 0;
+        $sourcesFailed = 0;
 
         foreach (WalletRepository::getForUser($userId) as $wallet) {
             $chain = ChainRepository::getById((int) $wallet->chain_id);
@@ -205,19 +311,55 @@ final class CollectionStanceService
             $chainId              = (int) $chain->id;
             $chainSlugs[$chainId] = (string) $chain->slug;
 
-            if ((string) $chain->slug === 'cosmos') {
-                $rollup = StargazeMarketplaceApi::profileCollections((string) $wallet->wallet_address);
-                foreach ($rollup ?? [] as $c) {
-                    $byChain[$chainId][$c['contract_address']] ??= [
-                        'name'      => $c['collection_name'],
-                        'image_url' => $c['image_url'],
+            if (!self::readsFromStoredIndex((string) ($chain->chain_type ?? ''))) {
+                // Cosmos and anything else without a persistent holdings
+                // index: a BOUNDED, MARKETPLACE-FREE on-chain read —
+                // `tokens{owner}` over VERIFIED collections only, through
+                // the same path the profile gallery uses. It reports its own
+                // completeness and never caches an incomplete walk.
+                //
+                // Until PR 7.12 this branch sent the member's address to the
+                // Stargaze marketplace API instead, and a `null` (provider
+                // down) was flattened by `?? []` into "holds nothing".
+                $read = HoldingsService::walletHoldingsWithCompleteness(
+                    (int) $wallet->id,
+                    (string) $wallet->wallet_address,
+                    $chain
+                );
+
+                if ($read === null) {
+                    // No driver at all — an unreadable source, not an empty
+                    // wallet.
+                    $sourcesFailed++;
+                    continue;
+                }
+
+                foreach ($read['items'] as $item) {
+                    $contract = strtolower((string) ($item['contract_address'] ?? ''));
+                    if ($contract === '') {
+                        continue;
+                    }
+                    $byChain[$chainId][$contract] ??= [
+                        'name'      => is_string($item['collection_name'] ?? null) ? $item['collection_name'] : null,
+                        'image_url' => is_string($item['image_url'] ?? null) ? $item['image_url'] : null,
                     ];
+                }
+
+                // `truncated` is a BOUNDED SUCCESS (a contract hit the
+                // per-contract token cap) — the collection is still in the
+                // list, so it does not make the collection set doubtful.
+                // Only `complete` does.
+                if ($read['complete'] === true) {
+                    $sourcesOk++;
+                } else {
+                    $sourcesFailed++;
                 }
                 continue;
             }
 
-            // Indexed chains: the persistent holdings rows already carry
-            // collection names/images from enrichment.
+            // Indexed chains (EVM, Solana): the persistent holdings rows
+            // already carry collection names/images from enrichment. This
+            // is a local read of stored evidence — unchanged by PR 7.12.
             foreach (NftHoldingsRepository::findVisibleForWallet((int) $wallet->id, $chainId) as $row) {
                 $contract = strtolower((string) $row->contract_address);
                 if ($contract === '') {
@@ -228,10 +370,16 @@ final class CollectionStanceService
                     'image_url' => is_string($row->image_url ?? null) ? $row->image_url : null,
                 ];
             }
+            $sourcesOk++;
         }
 
+        // `$byChain !== []` is the "we resolved something positive" signal:
+        // a walk that failed AFTER finding collections still hands the
+        // caller real rows, and calling that `unavailable` would hide them.
+        $status = self::resolveStatus($sourcesOk, $sourcesFailed, $byChain !== []);
+
         if ($byChain === []) {
-            return [];
+            return ['items' => [], 'holdings_status' => $status];
         }
 
         // 2. Signal tallies (waitlist counts + soft-hide input), one read.
@@ -301,6 +449,9 @@ final class CollectionStanceService
             return strcmp($a['contract_address'], $b['contract_address']);
         });
 
-        return array_slice($rows, 0, self::PANEL_ROW_CAP);
+        return [
+            'items'           => array_slice($rows, 0, self::PANEL_ROW_CAP),
+            'holdings_status' => $status,
+        ];
     }
 }

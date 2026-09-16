@@ -167,12 +167,24 @@ class CosmosFetcher implements FetcherInterface
             // posture means non-NFT-active Cosmos chains naturally produce
             // empty results — no per-chain blocklist needed in this method.
             //
-            // 'collection' (V1 wallet-link discovery) rides the Stargaze
-            // marketplace indexer and therefore only yields rows on the
-            // Cosmos Hub — fetch_collections itself gates on the slug, so
-            // advertising the feature chain-wide stays harmless (other
-            // cosmos chains return [] and WalletSeedService moves on).
-            ['validator', 'delegations', 'dao', 'collection', 'top_collections', 'holdings_count', 'holdings_list'],
+            // ⚠ 'collection' (V1 wallet-link discovery) is DELIBERATELY
+            // ABSENT since PR 7.12. It used to ride the Stargaze
+            // marketplace indexer, which meant a member's Cosmos address
+            // was sent to an undocumented third party by a wallet-verify
+            // seed, a four-hourly cron and a job an anonymous creator-page
+            // GET could schedule.
+            //
+            // Withdrawing the capability is what makes the removal
+            // STRUCTURAL: all three callers check this method first, so
+            // they skip Cosmos before a fetcher is constructed or an
+            // address is read. `fetch_collections()` also returns [] — two
+            // independent guards, because the capability check is the one
+            // a future caller is most likely to forget.
+            //
+            // Ownership of a KNOWN contract is untouched:
+            // 'holdings_count' / 'holdings_list' stay, and they answer
+            // over the LCD (`tokens{owner}`, verified collections only).
+            ['validator', 'delegations', 'dao', 'top_collections', 'holdings_count', 'holdings_list'],
             true
         );
     }
@@ -481,8 +493,11 @@ class CosmosFetcher implements FetcherInterface
     /** Default contract cap when BCC_COSMOS_HOLDINGS_CONTRACT_CAP is undefined. */
     private const DEFAULT_CONTRACT_CAP = 30;
 
-    /** Max discovery rows one wallet can land on the Verify queue. */
-    private const DISCOVERY_COLLECTION_CAP = 50;
+    // ⚠ `DISCOVERY_COLLECTION_CAP` was removed in PR 7.12. It bounded how
+    // many rows one wallet's Stargaze marketplace rollup could land on the
+    // Verify queue; with `fetch_collections()` returning [] there is no
+    // rollup to cap, and a cap left behind would imply a discovery path
+    // that no longer exists.
 
     /**
      * Count tokens this wallet holds in a single CW-721 contract on this chain.
@@ -1434,75 +1449,45 @@ class CosmosFetcher implements FetcherInterface
     // ── NFT Collections (per-chain discovery) ─────────────────────────────
 
     /**
-     * V1 wallet-link discovery: which CW-721 collections does this
-     * wallet hold?
+     * V1 wallet-link discovery on Cosmos: DELETED, and deliberately not
+     * replaced. Always `[]`, and never a transport call.
      *
-     * The LCD cannot answer this (wasmd has no owner→contracts index),
-     * so the Cosmos Hub rides the Stargaze marketplace indexer via
-     * {@see StargazeMarketplaceApi::profileCollections}. Other cosmos
-     * chains return [] — no indexer covers them.
+     * ── WHAT THIS USED TO DO ────────────────────────────────────────────
+     * It sent `$walletAddress` — in the URL path — to the Stargaze
+     * marketplace indexer, which Stargaze does not publish as a supported
+     * integration. (The hostname is deliberately not repeated here: a
+     * second written copy of an endpoint is a second way to reach it, and
+     * `StargazeCallerInventoryTest` pins that there is none.) Three
+     * callers reached it: the wallet-verify seed, the
+     * four-hourly `bcc_refresh_collections` cron, and a job that an
+     * ANONYMOUS creator-gallery GET could schedule. A stranger loading a
+     * public page could therefore put a member's Cosmos address on an
+     * undocumented third party's wire, with WordPress's default
+     * user-agent naming this site alongside it.
      *
-     * Called from WalletSeedService at wallet-verify time; rows land in
-     * wp_bcc_onchain_collections as source='discovery', is_verified=0
-     * (schema defaults), so a linked wallet's collections surface on the
-     * Verify Collections queue instead of staying invisible until the
-     * operator happens to know them. Verification stays operator-gated:
-     * a discovery row grants nothing until the admin flips it (and the
-     * Test CW-721 probe validates the contract against the LCD first).
+     * ── WHY NOTHING REPLACES IT ─────────────────────────────────────────
+     * wasmd has no owner→contracts index, so "every collection this
+     * wallet holds" is not a question the Hub LCD can answer. That gap is
+     * exactly what the marketplace dependency was papering over, and
+     * inventing a substitute (a longer cache, a cron, a queue) would keep
+     * the disclosure and only change when it happens. Unknown stays
+     * unknown.
      *
-     * Best-effort by design: API unreachable → [] (the seed path treats
-     * discovery as an enhancement, never a link-time dependency).
+     * ⚠ Ownership of a KNOWN contract is unaffected and still provable
+     * on-chain: {@see count_holdings()} and {@see list_holdings()} walk
+     * `tokens{owner}` against VERIFIED collections over the LCD. That is
+     * what the holder gate and the stance panel read, and no marketplace
+     * is involved in either.
      *
-     * @return array<int, array<string, mixed>> Normalized rows for CollectionRepository::upsert().
+     * The capability is withdrawn in {@see supports_feature()}, so the
+     * three callers skip Cosmos before a fetcher is even constructed.
+     * This empty return is the second line of defence, not the only one.
+     *
+     * @return array<int, array<string, mixed>> Always empty on Cosmos.
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
-        $chainId = $chainId ?: (int) $this->chain->id;
-
-        if ((string) ($this->chain->slug ?? '') !== 'cosmos') {
-            return [];
-        }
-
-        $rollup = \BCC\Trust\Onchain\Support\StargazeMarketplaceApi::profileCollections($walletAddress);
-        if ($rollup === null || $rollup === []) {
-            return [];
-        }
-
-        // Cap discovery per wallet — a junk-stuffed wallet shouldn't
-        // flood the admin queue. Largest holdings first: those are the
-        // collections the user demonstrably cares about.
-        usort($rollup, static fn(array $a, array $b): int => $b['owned_count'] <=> $a['owned_count']);
-        $rollup = array_slice($rollup, 0, self::DISCOVERY_COLLECTION_CAP);
-
-        $collections = [];
-        foreach ($rollup as $c) {
-            // Spam gate — parity with EvmFetcher's discovery pipeline
-            // (minus the upstream isSpam field Alchemy provides there).
-            // NftSpamFilter folds in the operator rule table: RULE_DENY
-            // drops unconditionally — this is what makes admin-hidden
-            // collections STAY hidden across rediscovery — RULE_ALLOW
-            // bypasses the name heuristics.
-            if (\BCC\Trust\Onchain\Services\NftSpamFilter::isSpam($chainId, $c['contract_address'], $c['collection_name'])) {
-                continue;
-            }
-            $collections[] = [
-                'contract_address'   => $c['contract_address'],
-                'collection_name'    => $c['collection_name'],
-                'chain_id'           => $chainId,
-                'token_standard'     => 'CW-721',
-                'total_supply'       => $c['total_supply'],
-                'floor_price'        => null,
-                'floor_currency'     => null,
-                'total_volume'       => null,
-                'unique_holders'     => null,
-                'listed_percentage'  => null,
-                'royalty_percentage' => null,
-                'metadata_storage'   => null,
-                'image_url'          => $c['image_url'],
-            ];
-        }
-
-        return $collections;
+        return [];
     }
 
     /**
