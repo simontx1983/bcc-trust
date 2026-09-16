@@ -187,19 +187,28 @@ final class VerifyCollectionsRenderIsolationTest extends TestCase
     }
 
     /**
-     * The harness catches what it claims to catch: driving the REAL Stargaze
-     * client issues a recorded request carrying the wallet address. Without
-     * this, "zero requests" could mean "the spy is not wired".
+     * The harness catches what it claims to catch.
+     *
+     * ⚠ THIS TRAP CHANGED IN PR 7.12, AND THE REASON MATTERS. It used to
+     * drive the real `StargazeMarketplaceApi` and assert the spy recorded a
+     * request carrying the wallet address. That client no longer exists —
+     * PR 7.12 deleted it — so the trap now drives the transport the client
+     * used, `ApiRetry::get`, with a URL shaped exactly like the one it
+     * built: the member's address in the path.
+     *
+     * Without a trap of some kind, every "zero requests" assertion in this
+     * file could mean nothing more than "the spy is not wired".
      */
     public function testTheSpyWouldCatchARestoredCall(): void
     {
         $wallet = \BccRenderWorld::$hubWallets[0];
+        $url    = 'https://example.invalid/api/v1/profiles/' . rawurlencode($wallet) . '/collections?limit=100';
 
-        $result = \BCC\Trust\Onchain\Support\StargazeMarketplaceApi::profileCollections($wallet);
+        $result = \BCC\Trust\Onchain\Support\ApiRetry::get($url, ['timeout' => 12]);
 
-        self::assertNull($result, 'unavailable, as every outside service is here');
+        self::assertTrue(is_wp_error($result), 'unavailable, as every outside service is here');
         self::assertCount(1, \BccRenderWorld::$http);
-        self::assertStringContainsString('stargaze-apis.com', \BccRenderWorld::$http[0]['url']);
+        self::assertSame('ApiRetry::get', \BccRenderWorld::$http[0]['via']);
         self::assertStringContainsString($wallet, \BccRenderWorld::$http[0]['url'], 'the address rides in the URL path');
     }
 

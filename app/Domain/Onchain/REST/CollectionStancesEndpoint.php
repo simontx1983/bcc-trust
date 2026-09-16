@@ -78,15 +78,28 @@ final class CollectionStancesEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        // The cosmos branch reads 6h-cached marketplace rollups and the
-        // EVM branch bounded holdings reads, but a hostile refresh loop
-        // still shouldn't get to hammer them.
+        // Every source is now either the stored holdings index (EVM/SOL)
+        // or a bounded LCD walk (Cosmos); the 6h-cached Stargaze
+        // marketplace rollup this comment used to name is gone (PR 7.12).
+        // Cheap reads, but a hostile refresh loop still shouldn't hammer
+        // them.
         if (!\BCC\Core\Security\Throttle::allow('collection_stance_panel:' . $userId, 20, 60)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
+        $panel = CollectionStanceService::panelForUser($userId);
+
+        // `items` is unchanged, field for field. `holdings_status` is
+        // ADDITIVE: an older frontend ignores it and behaves exactly as
+        // before, so either deployment order is safe.
+        //
+        // It exists because `items: []` used to answer two different
+        // questions with the same silence — "you hold nothing" and "we
+        // could not check" — and the interface rendered both as a verdict.
+        // Only `complete` licenses that reading.
         return ApiResponse::ok([
-            'items' => CollectionStanceService::panelForUser($userId),
+            'items'           => $panel['items'],
+            'holdings_status' => $panel['holdings_status'],
         ]);
     }
 

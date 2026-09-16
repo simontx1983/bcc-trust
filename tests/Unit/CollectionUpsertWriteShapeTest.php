@@ -33,10 +33,12 @@ final class CollectionUpsertWriteShapeTest extends TestCase
         __DIR__ . '/../../app/Domain/Onchain/Services/CollectionPersistBatch.php',
         __DIR__ . '/../../app/Domain/Onchain/Services/WalletSeedService.php',
         __DIR__ . '/../../app/Domain/Onchain/Services/ChainRefreshService.php',
-        __DIR__ . '/../../app/Domain/Core/Plugin.php',
     ];
 
     private const PLUGIN = __DIR__ . '/../../app/Domain/Core/Plugin.php';
+
+    /** Where the "holdings refreshed" watermark is written today. */
+    private const HOLDINGS_SERVICE = __DIR__ . '/../../app/Domain/Onchain/Services/HoldingsService.php';
 
     private function repoSource(): string
     {
@@ -207,20 +209,79 @@ final class CollectionUpsertWriteShapeTest extends TestCase
      * suppresses the next attempt and makes the loss permanent — the same
      * "failure leaves no trace" shape as #212 itself.
      */
-    public function testGalleryRefreshMarksHoldingsOnlyWhenFullyPersisted(): void
+    public function testTheGalleryRefreshTaskIsGoneFromThePlugin(): void
     {
-        $src = file_get_contents(self::PLUGIN);
+        $raw = file_get_contents(self::PLUGIN);
+        self::assertIsString($raw);
+        self::assertNotSame('', $raw, 'denominator: Plugin.php must actually be read');
+
+        // ⚠ COMMENTS ARE STRIPPED FIRST. Plugin.php still EXPLAINS the
+        // removal in prose — naming the hook it used to register is how the
+        // next reader learns why there is no handler and why an anonymous
+        // GET must never schedule one. A raw substring scan cannot tell a
+        // docblock from a call, and would force the explanation to be
+        // deleted to satisfy the guard.
+        $src = '';
+        foreach (token_get_all($raw) as $token) {
+            if (is_array($token) && ($token[0] === T_COMMENT || $token[0] === T_DOC_COMMENT)) {
+                continue;
+            }
+            $src .= is_array($token) ? $token[1] : $token;
+        }
+        self::assertStringContainsString(
+            'class Plugin',
+            $src,
+            'anti-vacuity: the comment strip must leave real code behind'
+        );
+
+        // PR 7.12 deleted the `bcc_onchain_holdings_refresh` handler. Its
+        // only scheduler was the creator-gallery endpoint, whose permission
+        // callback is `__return_true` — so an anonymous page view arranged a
+        // wallet-address disclosure moments later. The watermark it wrote
+        // went with it.
+        foreach ([
+            'markHoldingsRefreshed',
+            'bcc_onchain_holdings_refresh',
+            'CreatorGalleryEndpoint::REFRESH_HOOK',
+            'CollectionRepository::upsert(',
+            'CollectionPersistBatch::persist(',
+        ] as $needle) {
+            self::assertStringNotContainsString(
+                $needle,
+                $src,
+                "Plugin.php must not contain {$needle}: the anonymous-GET refresh path stays deleted"
+            );
+        }
+    }
+
+    /**
+     * THE WATERMARK GATE, at its surviving call site.
+     *
+     * The invariant did not go away with the gallery task — it moved. A
+     * watermark advanced after an incomplete read suppresses the next
+     * attempt and makes the loss permanent, the same "failure leaves no
+     * trace" shape as #212. Here the gate is completeness of the walk.
+     */
+    public function testTheSurvivingWatermarkIsGatedOnACompleteRead(): void
+    {
+        $src = file_get_contents(self::HOLDINGS_SERVICE);
         self::assertIsString($src);
 
-        $at = strpos($src, 'markHoldingsRefreshed($walletId)');
-        self::assertIsInt($at, 'the gallery-refresh task must still mark the wallet on success');
+        $at = strpos($src, 'WalletRepository::markHoldingsRefreshed(');
+        self::assertIsInt($at, 'the holdings walk must still stamp freshness on success');
 
-        // The 400 characters before the call must contain the success gate.
-        $preceding = substr($src, max(0, $at - 400), min($at, 400));
+        // The call sits after the early return for an incomplete walk, so
+        // the gate is structural: an incomplete read never reaches it.
+        $preceding = substr($src, max(0, $at - 1200), min($at, 1200));
         self::assertStringContainsString(
-            'CollectionPersistBatch::allPersisted($persisted)',
+            'if (!$complete) {',
             $preceding,
-            'markHoldingsRefreshed() must be gated on a fully-persisted batch, not called unconditionally'
+            'markHoldingsRefreshed() must be unreachable for an incomplete walk'
+        );
+        self::assertStringContainsString(
+            'return $payload;',
+            $preceding,
+            'the incomplete branch must return BEFORE the watermark is written'
         );
     }
 

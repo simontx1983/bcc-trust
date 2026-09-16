@@ -103,7 +103,6 @@ final class NftDriverRegistry
 
     public const DRIVER_COSMWASM_ENUMERATION = 'cosmwasm_enumeration';
     public const DRIVER_TALIS_WHITELIST      = 'talis_whitelist';
-    public const DRIVER_STARGAZE_MARKETPLACE = 'stargaze_marketplace';
     public const DRIVER_CW721_LCD            = 'cw721_lcd';
     public const DRIVER_ALCHEMY_NFT          = 'alchemy_nft';
     public const DRIVER_ALCHEMY_TRANSFERS    = 'alchemy_transfers';
@@ -112,8 +111,9 @@ final class NftDriverRegistry
     public const DRIVER_DAS_HELIUS           = 'das_helius';
     public const DRIVER_MAGICEDEN            = 'magiceden';
 
-    /** Chain slug of the Cosmos Hub — the only chain `stargaze_marketplace` serves. */
-    private const SLUG_COSMOS_HUB = 'cosmos';
+    // ⚠ `SLUG_COSMOS_HUB` went with the `stargaze_marketplace` driver in
+    // PR 7.12: it existed only to name the one chain that driver served.
+    // No driver is Hub-specific any more.
 
     /** Chain slug of Injective — the only chain `talis_whitelist` serves. */
     private const SLUG_INJECTIVE = 'injective';
@@ -158,11 +158,14 @@ final class NftDriverRegistry
             'operations' => [self::OP_CURATED_FEED],
             'priority'   => 10,
         ],
-        self::DRIVER_STARGAZE_MARKETPLACE => [
-            // StargazeMarketplaceApi::profileCollections — per-wallet, Hub only.
-            'operations' => [self::OP_WALLET_DISCOVERY],
-            'priority'   => 10,
-        ],
+        // ⚠ `stargaze_marketplace` was REMOVED in PR 7.12. It was the only
+        // WALLET_DISCOVERY driver Cosmos had, and it answered by sending a
+        // member's address to an undocumented marketplace API. Cosmos now
+        // has NO wallet-discovery driver, which is the honest state:
+        // wasmd has no owner→contracts index, so the question cannot be
+        // answered on-chain. Ownership of a KNOWN contract still can be,
+        // and that is `cw721_lcd` below (OP_OWNERSHIP).
+
         self::DRIVER_CW721_LCD => [
             // testCw721ContractInfo / fetchContractInfo / cw721Tokens.
             'operations' => [self::OP_VALIDATION, self::OP_METADATA, self::OP_OWNERSHIP],
@@ -318,7 +321,10 @@ final class NftDriverRegistry
             self::DRIVER_COSMWASM_ENUMERATION,
             self::DRIVER_CW721_LCD            => $type === 'cosmos',
             self::DRIVER_TALIS_WHITELIST      => $type === 'cosmos' && $slug === self::SLUG_INJECTIVE,
-            self::DRIVER_STARGAZE_MARKETPLACE => $type === 'cosmos' && $slug === self::SLUG_COSMOS_HUB,
+            // ⚠ No arm for the former `stargaze_marketplace` driver: PR
+            // 7.12 removed it, so Cosmos has no WALLET_DISCOVERY driver on
+            // any chain. An arm here would resurrect the key this match is
+            // meant to be exhaustive over.
             self::DRIVER_ALCHEMY_NFT,
             self::DRIVER_ALCHEMY_TRANSFERS,
             self::DRIVER_EVM_RPC              => $type === 'evm',

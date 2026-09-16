@@ -1,0 +1,77 @@
+{
+  "$comment": [
+    "SHARED CONTRACT FIXTURE — byte-identical copies live in two repositories:",
+    "  bcc-trust     tests/Fixtures/collection-stance-panel.contract.json",
+    "  bcc-frontend  src/lib/api/__contracts__/collection-stance-panel.contract.json",
+    "Each repository has a test that asserts ITS OWN implementation matches this",
+    "file, so vocabulary drift fails that repository's CI. Neither repo can see",
+    "the other at build time; the fixture is the shared written-down answer, and",
+    "`fixture_sha256` lets a reviewer confirm the two copies are the same bytes.",
+    "If you change this file, change it in both repositories in the same change."
+  ],
+  "contract": "GET /bcc/v1/me/collection-stances/panel",
+  "contract_version": 1,
+  "introduced_by": "PR 7.12 — remove the Stargaze wallet-address fan-out",
+
+  "response": {
+    "items": {
+      "changed": false,
+      "note": "Unchanged, field for field. An older frontend keeps working.",
+      "fields": [
+        "chain_id",
+        "chain_slug",
+        "contract_address",
+        "name",
+        "image_url",
+        "collection_verified",
+        "state",
+        "group_id",
+        "waitlist_count",
+        "viewer_stance"
+      ]
+    },
+
+    "holdings_status": {
+      "changed": true,
+      "kind": "additive",
+      "optional_in_frontend": true,
+      "absent_means": "an older backend during deployment — a deployment fact, not a state",
+      "nullable": false,
+      "null_is_forbidden_because": "null previously meant several different things at once; that ambiguity is the defect this field exists to remove",
+      "vocabulary": ["complete", "partial", "unavailable"],
+      "meanings": {
+        "complete": "every required holdings source completed successfully; an empty items array is trustworthy",
+        "partial": "some positive evidence may be available, but at least one required source was incomplete; absence is not proof",
+        "unavailable": "no trustworthy holdings determination could be completed"
+      },
+      "rules": [
+        "only complete + items=[] may mean the user has no detected verified collections",
+        "partial + items=[] must not be interpreted as zero holdings",
+        "unavailable + items=[] must not be interpreted as zero holdings",
+        "positive items must still be returned and displayed when the overall result is partial",
+        "an unavailable Cosmos lookup must not erase EVM or Solana results"
+      ]
+    }
+  },
+
+  "frontend_copy": {
+    "complete_with_items": "render the collections normally",
+    "complete_without_items": "No verified collections were detected in your linked wallets.",
+    "partial_with_items": "render the known collections plus a notice: Some linked wallets could not be fully checked.",
+    "partial_without_items": "We couldn’t finish checking all of your linked wallets. Try again later.",
+    "unavailable": "Collection holdings are temporarily unavailable. Please try again later.",
+    "absent": "legacy behaviour, retained only for deployment compatibility",
+    "forbidden": [
+      "showing “No collections detected” for partial or unavailable",
+      "exposing wallet addresses, provider names, request errors or internal status tokens"
+    ]
+  },
+
+  "unchanged_elsewhere": {
+    "set_stance_unavailable": "POST /bcc/v1/me/collection-stances still answers bcc_unavailable with HTTP 503 when holdings cannot be verified; it must NOT become a 200 body field, which the frontend would render as success",
+    "set_stance_not_owned": "bcc_nft_not_owned remains HTTP 403"
+  },
+
+  "fixture_sha256_note": "sha256 of the canonical vocabulary array, computed over the exact string: complete,partial,unavailable",
+  "fixture_sha256": "5ae20917c979f0349493030223546261c1948eaaa566fd1b803de4fc5ec76137"
+}

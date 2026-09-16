@@ -876,6 +876,37 @@ final class HoldingsService
         return $payload;
     }
 
+    /**
+     * One wallet's holdings WITH the completeness of the read that
+     * produced them. The stance panel's evidence source.
+     *
+     * Everything here already existed; what was missing was a way to ask
+     * for it from outside without losing the one fact that matters when
+     * the answer is empty — whether the empty is a MEASUREMENT or a
+     * FAILURE. {@see fetchWalletHoldings()} has always tracked that as
+     * `complete`, has always failed closed on a driver that omits the
+     * flag, and has always refused to cache an incomplete walk. This
+     * method exposes it; it adds no transport and no caching of its own.
+     *
+     * For Cosmos that resolves to {@see CosmosFetcher::list_holdings()} —
+     * a bounded LCD `tokens{owner}` walk over VERIFIED collections only.
+     * No marketplace, no wallet address in any cache key (the transient
+     * is keyed by wallet LINK ID), no third party.
+     *
+     * @param  ChainRow $chain
+     * @return array{items: list<array<string, mixed>>, truncated: bool, complete: bool}|null
+     *         null when the chain has no driver at all — which is an
+     *         unreadable source, not an empty wallet
+     */
+    public static function walletHoldingsWithCompleteness(int $walletLinkId, string $walletAddress, object $chain): ?array
+    {
+        if ($walletLinkId <= 0 || $walletAddress === '') {
+            return null;
+        }
+
+        return self::fetchWalletHoldings($walletLinkId, $walletAddress, $chain, false);
+    }
+
     private static function cacheKey(int $walletLinkId): string
     {
         return 'bcc_holdings_w_' . $walletLinkId;

@@ -6,26 +6,36 @@ namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Pins the V1 wallet-link discovery contract on
- * CosmosFetcher::fetch_collections.
+ * V1 wallet-link discovery on Cosmos is GONE, and this file pins that it
+ * stays gone — behaviourally, not by reading the source.
  *
- * Invariants under test:
- *   - Hub-only: any cosmos chain other than slug `cosmos` returns []
- *     without a transport call (the Stargaze marketplace indexes the
- *     Hub only).
- *   - API failure → [] (discovery is a best-effort enhancement; the
- *     wallet-link seed path must never see an exception or a lie).
- *   - Rows map to the CollectionRepository::upsert shape with
- *     CW-721 standard and the discovering chain id.
- *   - Per-wallet cap keeps the LARGEST holdings when a hoarder wallet
- *     exceeds it.
+ * ── WHAT THIS FILE USED TO ASSERT ───────────────────────────────────────
+ * It described a working Stargaze-marketplace discovery path: a rollup
+ * mapped into upsert rows, a spam gate, a 50-row cap. Every one of those
+ * cases required sending the member's Cosmos address — in a URL path — to
+ * `marketplace-api…` (deliberately not spelled here), an API Stargaze does
+ * not publish as a supported integration. PR 7.12 deleted the client.
  *
- * Isolation: resolver-stubs pattern (see EvmFetcherTransfersTest).
+ * ── WHY NOTHING REPLACES IT ─────────────────────────────────────────────
+ * wasmd has no owner→contracts index. "Which collections does this wallet
+ * hold" is not a question the Hub LCD can answer, and the marketplace was
+ * the only thing pretending otherwise. Unknown stays unknown.
+ *
+ * ⚠ THE TWO GUARANTEES, AND WHY THERE ARE TWO. The capability is withdrawn
+ * (`supports_feature('collection') === false`) AND the method returns [].
+ * Callers check the capability first, so the withdrawal is what actually
+ * prevents the work; the empty return is the backstop for a caller that
+ * forgets. A test for only one of them would pass while the other rotted.
+ *
+ * Ownership of a KNOWN contract is a different question and still works —
+ * see CosmosFetcher::count_holdings() / list_holdings(), which walk
+ * `tokens{owner}` over the LCD against verified collections.
  */
 #[CoversClass(CosmosFetcher::class)]
 #[RunTestsInSeparateProcesses]
@@ -54,125 +64,103 @@ final class CosmosFetcherDiscoveryTest extends TestCase
         ]);
     }
 
-    /** Distinct contract-shaped address per index ('1' isn't bech32 — map it). */
-    private static function contract(int $i): string
+    /**
+     * Every Cosmos chain, INCLUDING the Hub — the chain the marketplace
+     * used to serve, and the only one where a regression would actually
+     * transmit something.
+     *
+     * @return array<string, array{0: string, 1: int}>
+     */
+    public static function cosmosChains(): array
     {
-        return 'cosmos1' . str_pad(strtr((string) $i, ['1' => 'z']), 58, 'q', STR_PAD_LEFT);
-    }
-
-    /** @param array<string, mixed> $payload */
-    private function queueJson(array $payload): void
-    {
-        \BCC\Trust\Onchain\Support\ApiRetry::$queue[] = [
-            'body' => (string) json_encode($payload),
+        return [
+            'cosmos hub' => ['cosmos', 8],
+            'osmosis'    => ['osmosis', 9],
+            'injective'  => ['injective', 13],
+            'dungeon'    => ['dungeon', 17],
         ];
     }
 
-    public function testAdvertisesCollectionFeature(): void
+    // ═══════════════════════════════════════════════════════════════════
+    //  1. THE CAPABILITY IS WITHDRAWN — callers skip Cosmos entirely
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[DataProvider('cosmosChains')]
+    public function testCollectionCapabilityIsWithdrawn(string $slug, int $id): void
     {
-        self::assertTrue($this->makeFetcher()->supports_feature('collection'));
+        self::assertFalse(
+            $this->makeFetcher($slug, $id)->supports_feature('collection'),
+            'advertising "collection" is what made the three callers fan out'
+        );
     }
 
-    public function testNonHubCosmosChainReturnsEmptyWithoutTransport(): void
+    /**
+     * Anti-vacuity: the driver still advertises everything else it really
+     * does, so the assertion above is a withdrawal of ONE capability and
+     * not a fetcher that claims nothing.
+     */
+    #[DataProvider('cosmosChains')]
+    public function testOwnershipCapabilitiesSurvive(string $slug, int $id): void
     {
-        $result = $this->makeFetcher('osmosis', 9)->fetch_collections(self::WALLET);
+        $fetcher = $this->makeFetcher($slug, $id);
+
+        foreach (['validator', 'delegations', 'holdings_count', 'holdings_list'] as $feature) {
+            self::assertTrue($fetcher->supports_feature($feature), "{$feature} must still be supported");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  2. THE METHOD ITSELF TRANSMITS NOTHING
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[DataProvider('cosmosChains')]
+    public function testDiscoveryReturnsEmptyWithZeroTransport(string $slug, int $id): void
+    {
+        $result = $this->makeFetcher($slug, $id)->fetch_collections(self::WALLET);
 
         self::assertSame([], $result);
+        self::assertSame(
+            [],
+            \BCC\Trust\Onchain\Support\ApiRetry::$calls,
+            'no request may be issued — the address must not leave the process'
+        );
+    }
+
+    /**
+     * The address is not merely unsent — it is untouched. A queued response
+     * proves the fetcher never even reached for a transport: if it had, the
+     * fake would have handed it this payload and the row would appear.
+     */
+    public function testAQueuedResponseIsNeverConsumed(): void
+    {
+        \BCC\Trust\Onchain\Support\ApiRetry::$queue[] = [
+            'body' => (string) json_encode([
+                'total'       => 1,
+                'collections' => [[
+                    'contractAddress'  => 'cosmos1' . str_pad('z', 58, 'q', STR_PAD_LEFT),
+                    'name'             => 'Bad Kids',
+                    'ownedTokensCount' => 2,
+                ]],
+            ]),
+        ];
+
+        self::assertSame([], $this->makeFetcher()->fetch_collections(self::WALLET));
+        self::assertCount(
+            1,
+            \BCC\Trust\Onchain\Support\ApiRetry::$queue,
+            'the queued response is still queued: nothing consumed it'
+        );
         self::assertSame([], \BCC\Trust\Onchain\Support\ApiRetry::$calls);
     }
 
-    public function testApiFailureReturnsEmptyNotException(): void
+    /** An empty return is not licence to log the address either. */
+    public function testNothingIsLogged(): void
     {
-        \BCC\Trust\Onchain\Support\ApiRetry::$queue[] = new \WP_Error('down');
+        $this->makeFetcher()->fetch_collections(self::WALLET);
 
-        self::assertSame([], $this->makeFetcher()->fetch_collections(self::WALLET));
-    }
-
-    public function testMapsRollupToUpsertShape(): void
-    {
-        $this->queueJson([
-            'total'       => 1,
-            'collections' => [[
-                'contractAddress'  => self::contract(1),
-                'name'             => 'Bad Kids',
-                'ownedTokensCount' => 2,
-                'totalTokensCount' => 9999,
-                'media'            => ['url' => 'https://cdn.example/bk.png'],
-            ]],
-        ]);
-
-        $rows = $this->makeFetcher()->fetch_collections(self::WALLET);
-
-        self::assertCount(1, $rows);
-        $row = $rows[0];
-        self::assertSame(self::contract(1), $row['contract_address']);
-        self::assertSame('Bad Kids', $row['collection_name']);
-        self::assertSame(8, $row['chain_id']);
-        self::assertSame('CW-721', $row['token_standard']);
-        self::assertSame(9999, $row['total_supply']);
-        self::assertSame('https://cdn.example/bk.png', $row['image_url']);
-        self::assertNull($row['unique_holders']);
-    }
-
-    public function testOperatorDenyRuleBlocksRediscovery(): void
-    {
-        // The flag-don't-delete invariant: a RULE_DENY on the contract
-        // must keep the collection from ever landing again via
-        // wallet-link discovery — this is what makes the admin Hide
-        // button permanent where a row delete would silently resurrect.
-        \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::reset();
-        \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::$rules['8|' . self::contract(1)] =
-            \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::RULE_DENY;
-
-        $this->queueJson(['total' => 2, 'collections' => [
-            ['contractAddress' => self::contract(1), 'name' => 'Hidden Scam', 'ownedTokensCount' => 9],
-            ['contractAddress' => self::contract(2), 'name' => 'Fine Collection', 'ownedTokensCount' => 1],
-        ]]);
-
-        $rows = $this->makeFetcher()->fetch_collections(self::WALLET);
-
-        self::assertCount(1, $rows);
-        self::assertSame('Fine Collection', $rows[0]['collection_name']);
-    }
-
-    public function testSpamNameHeuristicDropsRow(): void
-    {
-        \BCC\Trust\Onchain\Repositories\NftSpamContractRepository::reset();
-
-        // NftSpamFilter's default patterns catch airdrop-bait names; a
-        // "$10,000 reward at site.com"-shaped name must not land.
-        $this->queueJson(['total' => 2, 'collections' => [
-            ['contractAddress' => self::contract(1), 'name' => 'Claim reward at freemint-usdt.com', 'ownedTokensCount' => 9],
-            ['contractAddress' => self::contract(2), 'name' => 'Fine Collection', 'ownedTokensCount' => 1],
-        ]]);
-
-        $rows = $this->makeFetcher()->fetch_collections(self::WALLET);
-
-        $names = array_column($rows, 'collection_name');
-        self::assertContains('Fine Collection', $names);
-        self::assertNotContains('Claim reward at freemint-usdt.com', $names);
-    }
-
-    public function testCapKeepsLargestHoldings(): void
-    {
-        // 60 collections, owned counts 1..60 — the cap (50) must keep
-        // the TOP 50 by owned count, i.e. counts 11..60.
-        $collections = [];
-        for ($i = 1; $i <= 60; $i++) {
-            $collections[] = [
-                'contractAddress'  => self::contract($i),
-                'name'             => 'C' . $i,
-                'ownedTokensCount' => $i,
-            ];
-        }
-        $this->queueJson(['total' => 60, 'collections' => $collections]);
-
-        $rows = $this->makeFetcher()->fetch_collections(self::WALLET);
-
-        self::assertCount(50, $rows);
-        self::assertSame('C60', $rows[0]['collection_name']); // biggest first
-        $names = array_column($rows, 'collection_name');
-        self::assertNotContains('C10', $names); // smallest fell off
-        self::assertContains('C11', $names);
+        $logged = json_encode(\BCC\Core\Log\Logger::$lines);
+        self::assertIsString($logged);
+        self::assertStringNotContainsString(self::WALLET, $logged, 'the wallet address must not reach the log');
+        self::assertStringNotContainsString('stargaze', strtolower($logged));
     }
 }

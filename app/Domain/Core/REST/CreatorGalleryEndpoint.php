@@ -66,13 +66,18 @@ final class CreatorGalleryEndpoint
         'optimism' => 'ETH',
     ];
 
-    /** Public hook for the async-refresh handler — registered in Plugin.php. */
-    public const REFRESH_HOOK = 'bcc_onchain_holdings_refresh';
-
-    /** TTL for the per-post "refresh in flight" transient — long enough
-     *  that a cold fetcher run finishes before a duplicate dispatch fires,
-     *  short enough that genuinely-stuck refreshes don't lock out forever. */
-    private const REFRESH_LOCK_TTL = 5 * MINUTE_IN_SECONDS;
+    // ⚠ `REFRESH_HOOK` ('bcc_onchain_holdings_refresh') and its
+    // `REFRESH_LOCK_TTL` in-flight lock were REMOVED in PR 7.12, together
+    // with the dispatch in handle() and the handler in Plugin.php.
+    //
+    // This endpoint's permission callback is `__return_true`. Scheduling
+    // work here meant an anonymous page view arranged a wallet-address
+    // transmission to a provider moments later — undocumented, in the
+    // Cosmos case — outside the request anyone was reviewing. Refreshing
+    // wallet-linked rows belongs to the four-hourly cron.
+    //
+    // The constants are gone rather than merely unused: one left behind is
+    // an invitation to wire a dispatch back in.
 
     public static function register(): void
     {
@@ -197,10 +202,22 @@ final class CreatorGalleryEndpoint
             }
         }
 
-        // ── Dispatch refresh if stale (rate-limited per post). ──────────
-        if ($isStale) {
-            self::maybeDispatchRefresh($postId);
-        }
+        // ── NO REFRESH IS DISPATCHED FROM HERE. ────────────────────────
+        //
+        // This endpoint is `permission_callback => '__return_true'`: a
+        // stranger, signed out, can call it. Until PR 7.12 a stale page
+        // scheduled `bcc_onchain_holdings_refresh`, which resolved the
+        // CREATOR's wallets and sent each address to a provider — for the
+        // Cosmos Hub, to an undocumented marketplace API. A read-only GET
+        // that arranges a third-party disclosure five seconds later is not
+        // read-only; it just moves the disclosure out of the request the
+        // reviewer is looking at.
+        //
+        // `is_stale` is still computed and still returned: it is a FACT
+        // about the stored rows (some are past `expires_at`), not a promise
+        // that a refresh was started. Refreshing wallet-linked rows remains
+        // the job of the four-hourly `bcc_refresh_collections` cron, which
+        // no anonymous request can trigger.
 
         $payload = [
             'items'             => $items,
@@ -222,22 +239,6 @@ final class CreatorGalleryEndpoint
         // badges (e.g. "you hold this") tighten this to private.
         $response->header('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
         return $response;
-    }
-
-    /**
-     * Schedule a single async refresh for a creator's wallets, gated
-     * by a 5-minute transient lock so concurrent requests don't pile
-     * up duplicate fetches.
-     */
-    private static function maybeDispatchRefresh(int $postId): void
-    {
-        $lock = 'bcc_gallery_refresh_lock_' . $postId;
-        if (get_transient($lock) !== false) {
-            return;
-        }
-        set_transient($lock, 1, self::REFRESH_LOCK_TTL);
-
-        wp_schedule_single_event(time(), self::REFRESH_HOOK, [$postId]);
     }
 
     /**
