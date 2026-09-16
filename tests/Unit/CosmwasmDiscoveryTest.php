@@ -47,7 +47,7 @@ final class CosmwasmDiscoveryTest extends TestCase
 {
     private const CHAIN_ID = 8;
     private const CHAIN_B  = 9;
-    private const REST     = 'https://lcd.example';
+    private const REST     = 'https://cosmos-api.polkachu.com';
 
     private const CONTRACT_A = 'cosmos1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     private const CONTRACT_B = 'cosmos1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -76,6 +76,13 @@ final class CosmwasmDiscoveryTest extends TestCase
         \BccTestCronStore::reset();
 
         ChainRepository::seed(self::CHAIN_ID, 'cosmos', self::REST);
+
+        // The recorded endpoint proof an administrator's Enable leaves behind.
+        // The worker's chain filter reads this RECORD and never probes, so
+        // without it this governed chain is excluded and every pass below
+        // does nothing — which would look like a discovery bug.
+        \BccTestEndpointProof::reset();
+        \BccTestEndpointProof::approve(self::CHAIN_ID, 'cosmos', self::REST);
     }
 
     // ── helpers ─────────────────────────────────────────────────────────

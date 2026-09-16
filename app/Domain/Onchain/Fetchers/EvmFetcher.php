@@ -195,11 +195,16 @@ class EvmFetcher implements FetcherInterface
      * Full NFT enumeration on EVM needs Alchemy getNFTs / Moralis / similar.
      * Stubbed until the provider decision lands — see HoldingsService.
      *
-     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
+     * `complete: true` because this contacts no provider: the empty list is
+     * this driver's definitional answer, never an unresolved read. EVM
+     * ownership is served from the persistent transfer index instead
+     * (see HoldingsService::countFromCacheOrFetch).
+     *
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool}
      */
     public function list_holdings(string $wallet, ?string $cursor = null): array
     {
-        return ['items' => [], 'truncated' => false, 'cursor' => null];
+        return ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true];
     }
 
     /**

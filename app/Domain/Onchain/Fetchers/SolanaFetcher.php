@@ -528,7 +528,13 @@ class SolanaFetcher implements FetcherInterface
      * Cursor is the DAS page number as a string. Filters out fungibles
      * (token_standard != NFT) since the gallery view is NFT-specific.
      *
-     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
+     * A non-array `rpcCall` result means the DAS query FAILED (transport,
+     * non-200, breaker-open, malformed JSON-RPC) — that returns
+     * `complete: false`, never a silent empty page. Before this flag existed
+     * the failure was shaped exactly like "this wallet owns no NFTs" and the
+     * caller cached it for 24h.
+     *
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool}
      */
     public function list_holdings(string $wallet, ?string $cursor = null): array
     {
@@ -543,7 +549,7 @@ class SolanaFetcher implements FetcherInterface
         ]);
 
         if (!is_array($items)) {
-            return ['items' => [], 'truncated' => false, 'cursor' => null];
+            return ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => false];
         }
 
         $chainId = (int) $this->chain->id;
@@ -602,6 +608,7 @@ class SolanaFetcher implements FetcherInterface
             'items'     => $result,
             'truncated' => $truncated,
             'cursor'    => $truncated ? (string) ($page + 1) : null,
+            'complete'  => true,
         ];
     }
 

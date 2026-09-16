@@ -37,7 +37,7 @@ final class CosmosFetcherListHoldingsTest extends TestCase
 {
     private const CHAIN_ID = 251;
     private const WALLET   = 'inj16naevyffqm33znyf5aky86z8s09zvpyg8u8vtl';
-    private const REST     = 'https://lcd.example';
+    private const REST     = 'https://cosmos-api.polkachu.com';
 
     private const CONTRACT_A = 'inj1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     private const CONTRACT_B = 'inj1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -212,7 +212,13 @@ final class CosmosFetcherListHoldingsTest extends TestCase
     public function testEmptyKnownSetReturnsEmpty(): void
     {
         $result = $this->makeFetcher()->list_holdings(self::WALLET);
-        self::assertSame(['items' => [], 'truncated' => false, 'cursor' => null], $result);
+        // `complete: true` — nothing was read, so nothing failed to read. An
+        // empty verified-collection set is a REAL empty, and the caller may
+        // safely cache it.
+        self::assertSame(
+            ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true],
+            $result
+        );
         self::assertSame([], \BCC\Trust\Onchain\Support\ApiRetry::$batchCalls);
     }
 }

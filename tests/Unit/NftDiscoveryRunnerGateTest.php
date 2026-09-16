@@ -57,6 +57,15 @@ final class NftDiscoveryRunnerGateTest extends TestCase
         require_once __DIR__ . '/../Stubs/chains-cw-operations-stubs.php';
 
         \BccAdminTestState::reset();
+
+        // THE ENDPOINT PROOF. These routes verify the chain's endpoint live,
+        // from inside the administrator action, before they act. The fake
+        // SafeHttpClient answers with a valid node_info so each test still
+        // exercises its own subject; the refusal path has its own tests.
+        \BccTestEndpointProof::reset();
+        \BccTestEndpointProof::scriptNodeInfo();
+
+        \BccTestEndpointProof::approve(self::CHAIN_ID, 'cosmos', \BccTestEndpointProof::APPROVED_PRIMARY);
         \BCC\Core\Log\Logger::reset();
         \BCC\Trust\Core\Security\AuditLogger::reset();
         ChainRepository::reset();
@@ -453,16 +462,42 @@ final class NftDiscoveryRunnerGateTest extends TestCase
         }
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * The parked run report.
+     *
+     * ⚠ NAMED BY ITS PREFIX, not taken as "the only transient". The
+     * endpoint verifier caches a successful proof in a transient too, and
+     * this store is shared, so `reset()` on the whole store used to return
+     * whichever entry happened to be written first.
+     *
+     * @return array<string, mixed>
+     */
     private function report(): array
     {
-        $stored = \BccNftDiscoveryTransientStore::$store;
-        $this->assertNotSame([], $stored, 'a finished run parks a report for the redirect landing');
+        $reports = $this->parkedReports();
+        $this->assertNotSame([], $reports, 'a finished run parks a report for the redirect landing');
 
         /** @var array<string, mixed> $report */
-        $report = reset($stored);
+        $report = reset($reports);
 
         return $report;
+    }
+
+    /**
+     * Every parked RUN REPORT, and nothing else in the shared store.
+     *
+     * @return array<string, mixed>
+     */
+    private function parkedReports(): array
+    {
+        $reports = [];
+        foreach (\BccNftDiscoveryTransientStore::$store as $key => $value) {
+            if (str_starts_with((string) $key, 'bcc_nftd_run_')) {
+                $reports[$key] = $value;
+            }
+        }
+
+        return $reports;
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -559,7 +594,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
 
         $this->assertArrayNotHasKey('bcc_run', $args);
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
-        $this->assertSame([], \BccNftDiscoveryTransientStore::$store, 'nothing was stored to be found');
+        $this->assertSame([], $this->parkedReports(), 'nothing was stored to be found');
     }
 
     /** An exception after the run does not hand out a reference. */
@@ -588,7 +623,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
         ]);
 
         $this->assertStringContainsString('ran to its own conclusion', $first);
-        $this->assertSame([], \BccNftDiscoveryTransientStore::$store, 'consumed on the one read');
+        $this->assertSame([], $this->parkedReports(), 'consumed on the one read');
     }
 
     /** And a refresh does not show it again. */
@@ -619,7 +654,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
     public function testAnUnrelatedResultCodeNeitherDisplaysNorConsumesAPendingReport(): void
     {
         $this->driveArgs();
-        $this->assertNotSame([], \BccNftDiscoveryTransientStore::$store, 'a report is pending');
+        $this->assertNotSame([], $this->parkedReports(), 'a report is pending');
 
         \BccAdminTestState::$can = true;
         $html = $this->land([
@@ -632,7 +667,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
         $this->assertStringNotContainsString('Pages fetched', $html);
         $this->assertNotSame(
             [],
-            \BccNftDiscoveryTransientStore::$store,
+            $this->parkedReports(),
             'an unrelated landing must not consume a report it had no right to'
         );
     }
@@ -655,7 +690,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
         $this->assertStringNotContainsString('ran to its own conclusion', $html);
         $this->assertNotSame(
             [],
-            \BccNftDiscoveryTransientStore::$store,
+            $this->parkedReports(),
             'and must not consume the owner\'s report on the way past'
         );
     }
@@ -679,7 +714,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
     public function testABadReferenceConsumesNothing(string $reference): void
     {
         $args = $this->driveArgs();
-        $this->assertNotSame([], \BccNftDiscoveryTransientStore::$store);
+        $this->assertNotSame([], $this->parkedReports());
 
         \BccAdminTestState::$can = true;
         $html = $this->land([
@@ -692,7 +727,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
         $this->assertStringNotContainsString('ran to its own conclusion', $html);
         $this->assertNotSame(
             [],
-            \BccNftDiscoveryTransientStore::$store,
+            $this->parkedReports(),
             'the real report must survive a bad reference untouched'
         );
     }

@@ -55,7 +55,7 @@ use PHPUnit\Framework\TestCase;
 final class CosmwasmBudgetFairnessTest extends TestCase
 {
     private const CHAIN  = 42;
-    private const REST   = 'https://lcd.example';
+    private const REST   = 'https://cosmos-api.polkachu.com';
     private const BUDGET = 50;
 
     /** The confirmed family whose sample contract is already emittable. */

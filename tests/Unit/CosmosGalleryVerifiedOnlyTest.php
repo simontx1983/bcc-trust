@@ -43,7 +43,7 @@ final class CosmosGalleryVerifiedOnlyTest extends TestCase
 {
     private const CHAIN_ID = 251;
     private const WALLET   = 'inj16naevyffqm33znyf5aky86z8s09zvpyg8u8vtl';
-    private const REST     = 'https://lcd.example';
+    private const REST     = 'https://cosmos-api.polkachu.com';
 
     /** Verified — the positive control. */
     private const VERIFIED = 'inj1vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv';
@@ -181,7 +181,15 @@ final class CosmosGalleryVerifiedOnlyTest extends TestCase
 
         $result = $this->makeFetcher()->list_holdings(self::WALLET);
 
-        self::assertSame(['items' => [], 'truncated' => false, 'cursor' => null], $result);
+        // ⚠ `complete: true` IS THE LOAD-BEARING HALF HERE. A chain whose
+        // collections are all unverified is not an outage: nothing was asked,
+        // so nothing went unanswered, and the caller is entitled to cache this
+        // empty. Contrast the failed-read case, which returns `complete: false`
+        // and must never be cached.
+        self::assertSame(
+            ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true],
+            $result
+        );
         self::assertSame([], \BCC\Trust\Onchain\Support\ApiRetry::$batchCalls, 'no batch may be issued');
         self::assertSame([], $this->requestedUrls(), 'no request of any kind may be issued');
     }

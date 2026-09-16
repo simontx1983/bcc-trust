@@ -187,6 +187,15 @@ final class DiscoveryReadiness
                 CosmwasmScanEligibility::NOT_OPTED_IN       => CosmwasmScanEligibility::NOT_OPTED_IN,
                 CosmwasmScanEligibility::PAUSED             => CosmwasmScanEligibility::PAUSED,
                 CosmwasmScanEligibility::ALLOWLIST_EXCLUDED => CosmwasmScanEligibility::ALLOWLIST_EXCLUDED,
+                // ⚠ Passed through, like the three above it. Folding it into
+                // the default arm would rename the one refusal an operator can
+                // actually act on ("prove this endpoint") into
+                // `discovery_disabled` — a sentence about a global switch,
+                // sending them to look for something that is not the problem.
+                // That is the exact indistinguishable-refusal defect this
+                // class was written to close, reintroduced one arm lower.
+                CosmwasmScanEligibility::ENDPOINT_UNVERIFIED
+                    => CosmwasmScanEligibility::ENDPOINT_UNVERIFIED,
                 // UNKNOWN, or a verdict from a newer build. Both mean
                 // "nobody could answer", which is a NO.
                 default                                     => DiscoveryRunError::DISCOVERY_DISABLED,
@@ -292,7 +301,8 @@ final class DiscoveryReadiness
                 $chainId,
                 $checkpoint !== null ? (string) ($checkpoint->cw_discovery_state ?? '') : null,
                 self::optInState($chain),
-                CosmwasmDiscoveryGate::chainAllowlist()
+                CosmwasmDiscoveryGate::chainAllowlist(),
+                CosmosEndpointAuthorization::isAuthorized($chain)
             ),
             $activeRun
         );
@@ -347,7 +357,17 @@ final class DiscoveryReadiness
             CosmwasmDiscoveryGate::discoveryEnabled(),
             CosmwasmDiscoveryGate::backfillEnabled(),
             $scanMode,
-            $verdict,
+            // ⚠ The summary row's verdict was built WITHOUT the endpoint
+            // dimension (the snapshot has the chain ids, not the chain rows),
+            // so it is re-asked here over the row this method already holds.
+            // Re-running the whole verdict would need the checkpoint state the
+            // summary row does not carry; refining an ELIGIBLE verdict with
+            // the one fact the snapshot could not supply keeps a single
+            // authority for each rule and adds no query.
+            $verdict === CosmwasmScanEligibility::ELIGIBLE
+                && CosmosEndpointAuthorization::isAuthorized($chain) === false
+                    ? CosmwasmScanEligibility::ENDPOINT_UNVERIFIED
+                    : $verdict,
             $activeRun
         );
 
@@ -423,7 +443,12 @@ final class DiscoveryReadiness
                 $chainId,
                 $checkpoint !== null ? (string) ($checkpoint->cw_discovery_state ?? '') : null,
                 self::optInState($chain),
-                CosmwasmDiscoveryGate::chainAllowlist()
+                CosmwasmDiscoveryGate::chainAllowlist(),
+                // ⚠ The RECORD, never a live probe. This method serves the
+                // executor on every chunk (forExecution) as well as the
+                // request path, so a probe here would turn one operator
+                // decision into hundreds of outbound requests.
+                CosmosEndpointAuthorization::isAuthorized($chain)
             ),
             $activeRun
         );

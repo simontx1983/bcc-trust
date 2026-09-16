@@ -225,7 +225,7 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
     public static function hostileErrors(): array
     {
         return [
-            'credentialed url' => ['GET https://lcd.example.com/path?api_key=SUPERSECRET99 failed', 'SUPERSECRET99'],
+            'credentialed url' => ['GET https://cosmos-api.polkachu.com.com/path?api_key=SUPERSECRET99 failed', 'SUPERSECRET99'],
             'bare url'         => ['could not reach https://rpc.internal.example:26657/status', 'rpc.internal.example'],
             'windows path'     => ['failed opening C:\\Users\\simon\\secrets\\key.pem', 'C:\\Users\\simon'],
             'posix path'       => ['include failed in /home/deploy/app/wp-config.php', '/home/deploy'],
@@ -278,7 +278,7 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
     public function testARedactedMessageStillTellsTheOperatorSomething(): void
     {
         $safe = \BCC\Trust\Onchain\Admin\AdminActionSupport::operatorSafeExcerpt(
-            'could not reach https://lcd.example.com/x?api_key=SECRET — node down'
+            'could not reach https://cosmos-api.polkachu.com.com/x?api_key=SECRET — node down'
         );
 
         $this->assertStringNotContainsString('SECRET', $safe);

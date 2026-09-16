@@ -54,7 +54,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
     private static function cosmos(
         bool $bccSupports = true,
         bool $manualEnabled = true,
-        string $rest = 'https://lcd.example'
+        string $rest = 'https://cosmos-api.polkachu.com'
     ): object {
         return (object) [
             'id'                                  => (string) self::CHAIN_ID,
@@ -598,7 +598,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
      */
     public function testAConfiguredProviderDoesNotSubstituteForThePermission(): void
     {
-        $row = self::op(self::cosmos(true, false, 'https://lcd.example'), NftDriverRegistry::OP_ENUMERATION);
+        $row = self::op(self::cosmos(true, false, 'https://cosmos-api.polkachu.com'), NftDriverRegistry::OP_ENUMERATION);
 
         self::assertSame(NftChainCapability::OP_MANUAL_DISABLED, $row['status']);
         self::assertSame(

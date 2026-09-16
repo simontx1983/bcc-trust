@@ -39,7 +39,7 @@ use ReflectionMethod;
 final class CosmosFetcherWasmWireTest extends TestCase
 {
     private const CHAIN_ID = 8;
-    private const REST     = 'https://lcd.example';
+    private const REST     = 'https://cosmos-api.polkachu.com';
 
     private const CURATED = 'cosmos12gsv9tmjhhg86wg9fnd9cnju28jx3fxva9cn8dh9meketkfxxajqmg3exz';
     private const FRESH   = 'cosmos1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq';

@@ -46,7 +46,7 @@ use PHPUnit\Framework\TestCase;
 final class BreakerStopsProviderWorkTest extends TestCase
 {
     private const CHAIN = 42;
-    private const REST  = 'https://lcd.example';
+    private const REST  = 'https://cosmos-api.polkachu.com';
 
     protected function setUp(): void
     {

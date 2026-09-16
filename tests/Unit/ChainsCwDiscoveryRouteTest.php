@@ -44,6 +44,13 @@ final class ChainsCwDiscoveryRouteTest extends TestCase
         require_once __DIR__ . '/../Stubs/chains-cw-discovery-stubs.php';
 
         \BccAdminTestState::reset();
+
+        // THE ENDPOINT PROOF. These routes verify the chain's endpoint live,
+        // from inside the administrator action, before they act. The fake
+        // SafeHttpClient answers with a valid node_info so each test still
+        // exercises its own subject; the refusal path has its own tests.
+        \BccTestEndpointProof::reset();
+        \BccTestEndpointProof::scriptNodeInfo();
         \BCC\Core\Log\Logger::reset();
         \BCC\Trust\Core\Security\AuditLogger::reset();
         ChainRepository::reset();

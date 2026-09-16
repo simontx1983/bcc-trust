@@ -9,6 +9,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
+use BCC\Trust\Onchain\Support\CosmosEndpointAuthorization;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
@@ -391,7 +392,12 @@ final class CosmwasmDiscoveryHealthSnapshot
                 // way could disagree with the chokepoint, and the operator
                 // would believe the panel.
                 CosmwasmDiscoveryWorker::discoveryOptInState($chain),
-                $allowlist
+                $allowlist,
+                // THE SAME READER THE WORKER AND THE REQUEST GATE USE. One
+                // option read per Cosmos chain, no HTTP: the panel reports
+                // whether the endpoint was PROVEN, and never proves it —
+                // rendering a page must not contact a provider.
+                CosmosEndpointAuthorization::isAuthorized($chain)
             );
 
             $chains[] = $row;
@@ -521,8 +527,22 @@ final class CosmwasmDiscoveryHealthSnapshot
      * @param  CheckpointRow|null           $checkpoint
      * @param  array<string, int>           $familyCounts
      * @param  array{total: int, inspected: int, denied: int, candidates: int, candidates_awaiting_emit: int, candidates_held_for_review: int, by_classification: array<string, int>}|null $contractStats
+     * ── AND THE THIRD IS "NOT MY JURISDICTION" ──────────────────────────
+     * `$endpointAuthorized` is also `?bool`, but its null means something
+     * different from the opt-in's: NOT GOVERNED by endpoint policy, which
+     * leaves the verdict exactly as it was. That is why its default is null
+     * and why that default is not a fail-open — a chain the policy does not
+     * govern has no endpoint proof to be missing. For a GOVERNED chain the
+     * caller supplies a real true/false, and false is a refusal.
+     *
+     * ⚠ It arrives as an argument rather than being read here because this
+     * method is PURE: {@see \BCC\Trust\Onchain\Support\CosmosEndpointAuthorization}
+     * reads an option, and a panel that renders one row per chain must not
+     * acquire a per-row read inside a "no I/O" derivation.
+     *
      * @param  bool|null                    $discoveryOptedIn null = the opt-in column is absent from the projection
      * @param  list<int>|null               $allowlist        null = BCC_COSMWASM_CHAIN_ALLOWLIST is undefined
+     * @param  bool|null                    $endpointAuthorized null = this chain is not governed by endpoint policy
      * @return ChainPanelRow
      */
     public static function deriveChainRow(
@@ -536,7 +556,8 @@ final class CosmwasmDiscoveryHealthSnapshot
         ?array $contractStats,
         int $now,
         ?bool $discoveryOptedIn = null,
-        ?array $allowlist = null
+        ?array $allowlist = null,
+        ?bool $endpointAuthorized = null
     ): array {
         $state = $checkpoint !== null
             ? (string) $checkpoint->cw_discovery_state
@@ -586,7 +607,8 @@ final class CosmwasmDiscoveryHealthSnapshot
             $chainId,
             $checkpoint !== null ? $state : null,
             $discoveryOptedIn,
-            $allowlist
+            $allowlist,
+            $endpointAuthorized
         );
 
         // Kept as their own row fields because they are FACTS the table

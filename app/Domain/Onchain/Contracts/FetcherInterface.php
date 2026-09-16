@@ -107,9 +107,32 @@ interface FetcherInterface
      * above the fetcher (see HoldingsService). Drivers paginate internally
      * up to a safety cap and flag `truncated: true` if more exist.
      *
+     * `truncated` and `complete` answer DIFFERENT questions and neither
+     * implies the other:
+     *   - `truncated: true`  → a bounded SUCCESS. Every read landed; we
+     *                          deliberately stopped at a cap and more exist.
+     *   - `complete: false`  → a FAILURE. At least one provider read behind
+     *                          this enumeration could not be resolved
+     *                          (transport error, non-200, breaker-open,
+     *                          refused endpoint), so `items` is a PARTIAL
+     *                          view of the wallet. An absence from `items`
+     *                          proves nothing: callers MUST NOT persist it,
+     *                          cache it, stamp a freshness marker from it, or
+     *                          read a zero out of it. This is the list-shaped
+     *                          twin of `count_holdings`' null and of
+     *                          `fetch_transfers_since`' null.
+     *
+     * `complete: true` with an empty `items` is a real "wallet holds none" —
+     * that distinction is the whole point of the flag.
+     *
+     * Drivers that enumerate nothing by construction (validator-only chains,
+     * or EVM where ownership comes from the persistent transfer index rather
+     * than a live walk) return `complete: true`: their empty is definitional,
+     * not an outage.
+     *
      * @param string  $wallet Wallet / account address.
      * @param ?string $cursor Provider-specific pagination cursor. Pass null for first page.
-     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string}
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool}
      */
     public function list_holdings(string $wallet, ?string $cursor = null): array;
 

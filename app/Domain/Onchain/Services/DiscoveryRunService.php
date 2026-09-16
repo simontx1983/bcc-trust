@@ -15,9 +15,22 @@ declare(strict_types=1);
  *
  * User id 0 is not an administrator identity. It is the absence of one.
  *
- * ── NOTHING IS CONTACTED FROM HERE ──────────────────────────────────────
- * Requesting a run makes no provider call. It validates, inserts, audits
- * and dispatches. A refusal creates no row at all.
+ * ── THE ONE THING THIS CONTACTS, AND ONLY WHEN IT DECIDES ───────────────
+ * Requesting a run makes NO discovery call: no code listing, no contract
+ * query, no metadata read. It validates, inserts, audits and dispatches, and
+ * a refusal creates no row at all.
+ *
+ * The single exception is the endpoint identity check in
+ * {@see chainReadiness()} — one GET to the chain's own REST endpoint, with
+ * no retries and no circuit-breaker charge, reached only after a named
+ * administrator has been resolved AND only when an unproven endpoint is the
+ * last thing standing between the operator and the scan they asked for. It
+ * is a gate on the request, not work done by it.
+ *
+ * ⚠ This used to read "nothing is contacted from here", which stopped being
+ * true when the endpoint gate landed. The distinction that matters is not
+ * "zero requests" but "no request that is not the direct, bounded
+ * consequence of this administrator asking right now".
  *
  * @package BCC\Trust\Onchain\Services
  */
@@ -27,7 +40,10 @@ namespace BCC\Trust\Onchain\Services;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\TransactionManager;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
+use BCC\Trust\Onchain\Support\CosmosEndpointAuthorization;
+use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
 use BCC\Trust\Onchain\Support\DiscoveryReadiness;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryJobKind;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
@@ -106,7 +122,7 @@ final class DiscoveryRunService
         // this closes — a checkpoint completing between the two reads would
         // queue an INCREMENTAL run that was approved as HISTORICAL, against
         // a backfill switch that was never consulted for it.
-        $readiness = $this->chainReadiness($chainId, $forceScanMode);
+        $readiness = $this->chainReadiness($chainId, $operator, $forceScanMode);
         if (!$readiness['eligible']) {
             return $this->refuse($readiness['reason']);
         }
@@ -159,7 +175,7 @@ final class DiscoveryRunService
         // Re-gated, not trusted from the original: product support, the
         // environment switches and the per-chain opt-in may all have
         // changed since, and a retry is a fresh authorization.
-        $readiness = $this->chainReadiness($chainId);
+        $readiness = $this->chainReadiness($chainId, $operator);
         if (!$readiness['eligible']) {
             return $this->refuse($readiness['reason']);
         }
@@ -421,12 +437,60 @@ final class DiscoveryRunService
      * caller so the request and the run row cannot disagree about which
      * walk was authorised.
      *
+     * ── THE ONE PLACE AN ENDPOINT IS PROVEN LIVE ────────────────────────
+     * Every other reader of the endpoint proof — the panel, the health
+     * snapshot, the worker's chain filter, the executor on every chunk, the
+     * maintenance sweep — consults the RECORD and contacts nothing. This
+     * method is reached only from {@see request()} and {@see retry()}, i.e.
+     * from a capability-checked, nonce-checked administrator POST or a
+     * supervised WP-CLI command, so it is the one seam where an outbound
+     * identity request is a direct consequence of somebody asking for one.
+     *
+     * ⚠ THE PROBE IS ASKED SECOND, AND ONLY WHEN IT IS THE DECIDER. A chain
+     * that is unsupported, not opted in, paused, allowlist-excluded or
+     * already running is refused BEFORE anything is contacted — proving the
+     * endpoint of a chain that cannot scan anyway would spend a provider
+     * request to learn nothing. So readiness answers first, and the probe
+     * runs only when `endpoint_unverified` is the ONLY thing standing in the
+     * way. An already-proven endpoint costs nothing either: its record still
+     * matches, so readiness never returns that code.
+     *
+     * ⚠ AND THE SECOND ANSWER IS THE ANSWER. Readiness is re-asked after the
+     * probe rather than the result being spliced in, so the code that grants
+     * the request is the same code that would have refused it. A failed probe
+     * records nothing, readiness returns `endpoint_unverified` again, and the
+     * request is refused with that exact reason — the operator-facing name of
+     * the actual blocker.
+     *
+     * ⚠ AND IT IS UNREACHABLE WITHOUT A RESOLVED ADMINISTRATOR. Both callers
+     * run {@see resolveOperator()} — `get_userdata()` plus a `manage_options`
+     * check on a NAMED id — before they get here, so no anonymous request can
+     * cause an outbound request from this path.
+     *
      * @param string|null $forcedScanMode pinned by a supervised CLI caller only
+     * @param int         $actorId        the administrator already resolved by
+     *                                    the caller; recorded with the proof
      *
      * @return array{reason: string, eligible: bool, scan_mode: string}
      */
-    private function chainReadiness(int $chainId, ?string $forcedScanMode = null): array
+    private function chainReadiness(int $chainId, int $actorId, ?string $forcedScanMode = null): array
     {
+        $readiness = DiscoveryReadiness::forRequest($chainId, $forcedScanMode);
+
+        if ($readiness['reason'] !== CosmwasmScanEligibility::ENDPOINT_UNVERIFIED) {
+            return $readiness;
+        }
+
+        $chain = ChainRepository::getById($chainId);
+        if ($chain === null) {
+            return $readiness;
+        }
+
+        // LIVE: one request, no retries, no circuit-breaker charge, no
+        // redirects. Records the proven identity on success and nothing at
+        // all on failure.
+        CosmosEndpointAuthorization::authorize($chain, $actorId);
+
         return DiscoveryReadiness::forRequest($chainId, $forcedScanMode);
     }
 

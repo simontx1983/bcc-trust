@@ -130,10 +130,53 @@ final class DiscoveryRunError
     /** Not a requestable job kind, or an unknown scan mode. */
     public const UNSUPPORTED_REQUEST = 'unsupported_request';
 
+    /**
+     * Every refusal {@see \BCC\Trust\Onchain\Support\DiscoveryReadiness::evaluate()}
+     * can return that is not already a constant on this class.
+     *
+     * ── WHY THIS LIST HAS TO EXIST ──────────────────────────────────────
+     * The executor re-asks readiness immediately before provider work and, on
+     * a refusal, records THAT REASON VERBATIM as the run's `error_code`
+     * ({@see \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor} → `terminalFailure()`
+     * → {@see \BCC\Trust\Onchain\Repositories\DiscoveryRunRepository::markFailed()}).
+     * `markFailed()` refuses any code {@see isValid()} does not recognise —
+     * it returns false and writes NOTHING.
+     *
+     * ⚠ So a refusal code missing from here does not degrade gracefully: the
+     * run is not marked failed, it keeps its lease, and the five-minute
+     * maintenance sweep re-dispatches it to be refused again. The refusal
+     * that was supposed to stop the work becomes the thing that repeats it.
+     * Seven of the eleven reachable refusals were in that state — the four
+     * readiness verdicts borrowed from {@see \BCC\Trust\Onchain\Support\CosmwasmScanEligibility}
+     * and the three PR 7.1 codes above, which were declared as constants but
+     * never added to the vocabulary. `DiscoveryRunErrorVocabularyTest` now
+     * drives every reachable verdict through `isValid()` so a new one cannot
+     * be added without landing here.
+     *
+     * ⚠ Borrowed, NOT re-spelled. These are the eligibility vocabulary's own
+     * values, referenced through it. Minting parallel `DiscoveryRunError`
+     * twins would give one fact two names — the drift both classes' headers
+     * already warn about.
+     *
+     * @return list<string>
+     */
+    public static function readinessRefusals(): array
+    {
+        return [
+            self::NFT_DISCOVERY_UNSUPPORTED,
+            self::DISCOVERY_GLOBALLY_DISABLED,
+            self::HISTORICAL_BACKFILL_DISABLED,
+            \BCC\Trust\Onchain\Support\CosmwasmScanEligibility::NOT_OPTED_IN,
+            \BCC\Trust\Onchain\Support\CosmwasmScanEligibility::PAUSED,
+            \BCC\Trust\Onchain\Support\CosmwasmScanEligibility::ALLOWLIST_EXCLUDED,
+            \BCC\Trust\Onchain\Support\CosmwasmScanEligibility::ENDPOINT_UNVERIFIED,
+        ];
+    }
+
     /** @return list<string> */
     public static function all(): array
     {
-        return [
+        return array_merge([
             self::MAX_ATTEMPTS_EXHAUSTED,
             self::EXECUTION_FAILED,
             self::READ_UNAVAILABLE,
@@ -148,7 +191,7 @@ final class DiscoveryRunError
             self::QUEUE_WRITE_FAILED,
             self::AUDIT_UNCOMMITTED,
             self::UNSUPPORTED_REQUEST,
-        ];
+        ], self::readinessRefusals());
     }
 
     public static function isValid(string $code): bool
