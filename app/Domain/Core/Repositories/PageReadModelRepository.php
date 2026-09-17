@@ -71,6 +71,7 @@ class PageReadModelRepository
      */
     private const FAILURE_AGGREGATE_READ = 'aggregate_score_read_failed';
     private const FAILURE_FALLBACK_READ  = 'fallback_score_read_failed';
+    private const FAILURE_UPSERT         = 'read_model_upsert_failed';
     private const FAILURE_PAGE_LIST_READ = 'page_list_read_failed';
     private const FAILURE_OTHER          = 'sync_failed';
 
@@ -409,7 +410,7 @@ class PageReadModelRepository
             ));
         }
 
-        $wpdb->query($wpdb->prepare(
+        $upserted = $wpdb->query($wpdb->prepare(
             "INSERT INTO {$this->table}
                 (page_id, owner_id, trust_score, reputation_tier, confidence_score,
                  positive_score, negative_score, onchain_bonus, attestation_bonus,
@@ -465,6 +466,16 @@ class PageReadModelRepository
             $score && !empty($score->last_vote_at) ? $score->last_vote_at : null,
             $lastEndorsementAt
         ));
+
+        // The write fails closed too. An unchecked failed upsert used to let
+        // TransactionManager commit nothing and report success, so syncAll()
+        // counted the page as synced and the dirty queue deleted its entry —
+        // leaving a stale row with nothing left to retry it. Only `false` is
+        // a failure: an ON DUPLICATE KEY UPDATE that changes nothing reports
+        // 0 affected rows, which is a success.
+        if ($upserted === false) {
+            throw new RepositoryException(self::FAILURE_UPSERT);
+        }
             });
         } catch (\Throwable $e) {
             if ($logFailure && class_exists('\\BCC\\Core\\Log\\Logger')) {
@@ -618,7 +629,7 @@ class PageReadModelRepository
     private static function failureReason(\Throwable $e): string
     {
         if ($e instanceof RepositoryException
-            && in_array($e->getMessage(), [self::FAILURE_AGGREGATE_READ, self::FAILURE_FALLBACK_READ], true)
+            && in_array($e->getMessage(), [self::FAILURE_AGGREGATE_READ, self::FAILURE_FALLBACK_READ, self::FAILURE_UPSERT], true)
         ) {
             return $e->getMessage();
         }

@@ -256,9 +256,12 @@ final class PageReadModelSyncIntegrationTest extends TestCase
 
         $failure = $this->captureFailure(fn () => $this->repo()->syncPage(self::PAGE_AGGREGATE));
 
+        // Statement count FIRST: once the upsert result is checked, an upsert
+        // attempted after an undetected read failure also throws — so "did it
+        // throw?" alone can no longer tell the two defects apart.
+        self::assertSame(1, $wpdb->injectedFailures, 'exactly ONE statement may fail: the read. A second means the read-model upsert was still attempted');
         self::assertInstanceOf(RepositoryException::class, $failure, 'a failed aggregate score read must throw, not fall through to neutral defaults');
         self::assertSame('aggregate_score_read_failed', $failure->getMessage(), 'the failure must carry only its bounded reason code');
-        self::assertSame(1, $wpdb->injectedFailures, 'exactly ONE statement may fail: the read. A second means the read-model upsert was still attempted');
         self::assertSame($sentinel, $this->fullReadModelRow(self::PAGE_AGGREGATE), 'the existing read-model row must be untouched, including updated_at');
         self::assertSame($scores, $this->scoresFingerprint(), 'the source score rows must be untouched');
     }
@@ -273,9 +276,9 @@ final class PageReadModelSyncIntegrationTest extends TestCase
 
         $failure = $this->captureFailure(fn () => $this->repo()->syncPage(self::PAGE_CATEGORY_ONLY));
 
+        self::assertSame(1, $wpdb->injectedFailures, 'exactly ONE statement may fail: the fallback read. A second means the upsert was still attempted');
         self::assertInstanceOf(RepositoryException::class, $failure, 'a failed fallback score read must throw, not fall through to neutral defaults');
         self::assertSame('fallback_score_read_failed', $failure->getMessage(), 'the failure must carry only its bounded reason code');
-        self::assertSame(1, $wpdb->injectedFailures, 'exactly ONE statement may fail: the fallback read. A second means the upsert was still attempted');
         self::assertSame($sentinel, $this->fullReadModelRow(self::PAGE_CATEGORY_ONLY), 'the existing read-model row must be untouched, including updated_at');
         self::assertSame($scores, $this->scoresFingerprint(), 'the source score rows must be untouched');
     }
@@ -428,13 +431,127 @@ final class PageReadModelSyncIntegrationTest extends TestCase
         self::assertSame($scores, $this->scoresFingerprint(), 'syncing must never write the source scores');
     }
 
+    // ── a failed WRITE is a failed sync ────────────────────────────────────
+    //
+    // Before this was checked, a read-model upsert that failed after a good
+    // score read was invisible: syncPage() returned normally, syncAll() counted
+    // the page as synced, and the dirty queue deleted the entry — measured on
+    // both engines, for an injected failure and for a genuine lock-wait
+    // timeout alike. The stale row then stayed stale with nothing left to
+    // retry it.
+
+    public function testFailedUpsertThrowsAndLeavesTheExistingRowUntouched(): void
+    {
+        $sentinel = $this->plantSentinelRow(self::PAGE_AGGREGATE);
+        $scores   = $this->scoresFingerprint();
+
+        $wpdb = $GLOBALS['wpdb'];
+        $wpdb->failQueriesMatching = '/' . $this->readModelUpsertPattern() . '/';
+
+        $failure = $this->captureFailure(fn () => $this->repo()->syncPage(self::PAGE_AGGREGATE));
+
+        self::assertSame(1, $wpdb->injectedFailures, 'precondition: exactly the upsert must have failed');
+        self::assertInstanceOf(RepositoryException::class, $failure, 'a failed read-model upsert must throw, not report the page as synced');
+        self::assertSame('read_model_upsert_failed', $failure->getMessage(), 'the failure must carry only its bounded reason code — never the driver error');
+        self::assertSame($sentinel, $this->fullReadModelRow(self::PAGE_AGGREGATE), 'the existing read-model row must be untouched, including updated_at');
+        self::assertSame($scores, $this->scoresFingerprint(), 'the source score rows must be untouched');
+
+        $errors = $this->logLines('error');
+        self::assertCount(1, $errors, 'a single-page upsert failure must log exactly once');
+        self::assertSame('read_model_upsert_failed', $errors[0]['context']['error'] ?? null, 'the logged error must be the bounded reason code');
+    }
+
+    public function testUpsertBlockedByARealRowLockFailsClosed(): void
+    {
+        $sentinel = $this->plantSentinelRow(self::PAGE_AGGREGATE);
+
+        $failure = $this->whileRowIsExclusivelyLocked(
+            TableRegistry::pageReadModel(),
+            'page_id = ' . self::PAGE_AGGREGATE,
+            fn () => $this->captureFailure(fn () => $this->repo()->syncPage(self::PAGE_AGGREGATE))
+        );
+
+        self::assertInstanceOf(RepositoryException::class, $failure, 'an upsert that genuinely fails on the engine (lock-wait timeout, no injection) must throw');
+        self::assertSame('read_model_upsert_failed', $failure->getMessage());
+        self::assertSame($sentinel, $this->fullReadModelRow(self::PAGE_AGGREGATE), 'the stale row must stay exactly as it was');
+
+        $this->repo()->syncPage(self::PAGE_AGGREGATE);
+        self::assertSame('61.25', $this->readModelRow(self::PAGE_AGGREGATE)['trust_score'] ?? null, 'once the lock is released the same sync must succeed');
+    }
+
+    public function testBatchCountsAFailedUpsertAsAFailure(): void
+    {
+        $scores = $this->scoresFingerprint();
+        $GLOBALS['wpdb']->failQueriesMatching = '/' . $this->readModelUpsertPattern() . '.*VALUES \(' . self::PAGE_AGGREGATE . ',/s';
+
+        $synced = $this->repo()->syncAll();
+
+        self::assertSame(2, $synced, 'a page whose upsert failed must not be counted as synced');
+        self::assertNull($this->readModelRow(self::PAGE_AGGREGATE), 'the page whose upsert failed must have no row');
+        self::assertSame('58.40', $this->readModelRow(self::PAGE_CATEGORY_ONLY)['trust_score'] ?? null, 'a later page must still sync');
+        self::assertSame('50.00', $this->readModelRow(self::PAGE_UNSCORED)['trust_score'] ?? null, 'the last page must still sync');
+
+        self::assertSame([], $this->logLines('info'), 'a run with a failed upsert must not log an info summary');
+        $errors = $this->logLines('error');
+        self::assertCount(1, $errors, 'one bounded summary per run');
+        self::assertSame(
+            ['pages_synced' => 2, 'pages_failed' => 1, 'failure_reasons' => ['read_model_upsert_failed' => 1]],
+            $errors[0]['context'],
+            'the summary must attribute the failure to its own bounded reason code'
+        );
+        self::assertSame($scores, $this->scoresFingerprint(), 'the source score rows must be untouched');
+    }
+
+    public function testDirtyQueueKeepsAPageWhoseUpsertFailed(): void
+    {
+        PageReadModelRepository::enqueueDirty(self::PAGE_AGGREGATE);
+        $GLOBALS['wpdb']->failQueriesMatching = '/' . $this->readModelUpsertPattern() . '/';
+
+        PageReadModelSync::processDirtyPages();
+
+        self::assertSame(1, $this->dirtyRowCount(self::PAGE_AGGREGATE), 'a page whose upsert failed must stay queued for retry');
+        self::assertSame(1, get_transient('bcc_sync_fail_' . self::PAGE_AGGREGATE), 'the upsert failure must be counted toward quarantine');
+        self::assertNull($this->readModelRow(self::PAGE_AGGREGATE), 'no read-model row may exist for the failed page');
+    }
+
+    public function testUnchangedResyncIsNotMistakenForAFailedUpsert(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+
+        // Pin the session clock so NOW() cannot move between the two syncs:
+        // the second upsert then writes identical values, which the engine
+        // reports as ZERO affected rows — a success that is falsy in PHP.
+        $wpdb->query('SET SESSION timestamp = 1789000000');
+        try {
+            $this->repo()->syncPage(self::PAGE_AGGREGATE);
+            $first = $this->fullReadModelRow(self::PAGE_AGGREGATE);
+
+            // Engine precondition, on this exact row: an ON DUPLICATE KEY
+            // UPDATE that changes nothing returns 0, not false.
+            $noChange = $wpdb->query($wpdb->prepare(
+                'INSERT INTO `' . TableRegistry::pageReadModel() . '` (page_id, trust_score) VALUES (%d, %s)
+                 ON DUPLICATE KEY UPDATE trust_score = VALUES(trust_score)',
+                self::PAGE_AGGREGATE,
+                (string) ($first['trust_score'] ?? '')
+            ));
+            self::assertSame(0, $noChange, 'precondition: an unchanged upsert must report 0 affected rows on this engine');
+
+            $failure = $this->captureFailure(fn () => $this->repo()->syncPage(self::PAGE_AGGREGATE));
+        } finally {
+            $wpdb->query('SET SESSION timestamp = DEFAULT');
+        }
+
+        self::assertNull($failure, 'an upsert that changed nothing (0 affected rows) is a success, not a failure');
+        self::assertSame($first, $this->fullReadModelRow(self::PAGE_AGGREGATE), 'the row must be identical, updated_at included');
+    }
+
     // ── 11: the lock is real on this engine ────────────────────────────────
 
     public function testAggregateReadTakesARealSharedLock(): void
     {
         $sentinel = $this->plantSentinelRow(self::PAGE_AGGREGATE);
 
-        $failure = $this->whileRowIsExclusivelyLocked(self::PAGE_AGGREGATE, 0, fn () => $this->captureFailure(
+        $failure = $this->whileRowIsExclusivelyLocked(TableRegistry::scores(), 'page_id = ' . self::PAGE_AGGREGATE . ' AND category_id = 0', fn () => $this->captureFailure(
             fn () => $this->repo()->syncPage(self::PAGE_AGGREGATE)
         ));
 
@@ -448,7 +565,7 @@ final class PageReadModelSyncIntegrationTest extends TestCase
 
     public function testFallbackReadTakesARealSharedLock(): void
     {
-        $failure = $this->whileRowIsExclusivelyLocked(self::PAGE_CATEGORY_ONLY, 4, fn () => $this->captureFailure(
+        $failure = $this->whileRowIsExclusivelyLocked(TableRegistry::scores(), 'page_id = ' . self::PAGE_CATEGORY_ONLY . ' AND category_id = 4', fn () => $this->captureFailure(
             fn () => $this->repo()->syncPage(self::PAGE_CATEGORY_ONLY)
         ));
 
@@ -634,14 +751,16 @@ final class PageReadModelSyncIntegrationTest extends TestCase
     }
 
     /**
-     * Hold an exclusive lock on one score row from a SECOND connection while
+     * Hold an exclusive lock on one existing row from a SECOND connection while
      * $action runs on the harness connection with a 1-second lock wait.
      *
      * @template T
+     * @param  string        $table   fully-prefixed table name
+     * @param  string        $rowWhere a condition matching exactly one row (test constants only)
      * @param  callable(): T $action
      * @return T
      */
-    private function whileRowIsExclusivelyLocked(int $pageId, int $categoryId, callable $action)
+    private function whileRowIsExclusivelyLocked(string $table, string $rowWhere, callable $action)
     {
         $wpdb   = $GLOBALS['wpdb'];
         $holder = mysqli_connect(
@@ -656,12 +775,7 @@ final class PageReadModelSyncIntegrationTest extends TestCase
         $originalWait = (string) $wpdb->get_var('SELECT @@SESSION.innodb_lock_wait_timeout');
 
         self::assertTrue($holder->query('START TRANSACTION'));
-        $locked = $holder->query(sprintf(
-            'SELECT page_id FROM `%s` WHERE page_id = %d AND category_id = %d FOR UPDATE',
-            TableRegistry::scores(),
-            $pageId,
-            $categoryId
-        ));
+        $locked = $holder->query(sprintf('SELECT page_id FROM `%s` WHERE %s FOR UPDATE', $table, $rowWhere));
         self::assertInstanceOf(\mysqli_result::class, $locked, 'the holder must acquire the exclusive row lock');
         self::assertSame(1, $locked->num_rows, 'the holder must actually lock an existing row');
 
