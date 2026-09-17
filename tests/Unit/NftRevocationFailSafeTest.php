@@ -855,16 +855,52 @@ final class NftRevocationFailSafeTest extends TestCase
         self::assertSame($wallets[0], $this->askedWallets()[0]);
     }
 
-    public function testTheSweepNeverReadsOrWritesJoinContinuation(): void
+    /**
+     * A member with five wallets at 100 units each: the 300-unit tick runs out
+     * after the third wallet. A resumable check would store position 3 here.
+     * (The first version of this test gave each member ONE wallet, where a
+     * resumable check never makes progress and so never writes — mutation
+     * control #29 survived it.)
+     */
+    public function testTheSweepNeverWritesJoinContinuation(): void
     {
         \BccRevokeWorld::$maxRequestsPerRead = 100;
         $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
-        $this->seedMembersWithCompleteZeros(5);
+        for ($i = 0; $i < 5; $i++) {
+            $address = 'cosmos1' . str_pad((string) $i, 38, 'v', STR_PAD_LEFT);
+            \BccRevokeWorld::linkWallet(self::USER, self::LINK + $i, self::COSMOS_CHAIN, $address);
+            $this->answer($address, self::COSMOS_CONTRACT, 'exact', 0);
+        }
+        \BccRevokeWorld::$members[self::GROUP] = [$this->member(self::OWNER, 'member_owner'), $this->member(self::USER)];
 
         $stats = (new NftGroupRevokeService())->sweep();
 
-        self::assertTrue($stats['stopped_on_budget']);
-        self::assertSame([], \BccRevokeWorld::$userMetaWrites, 'a cron sweep must not write members\' user meta');
+        self::assertSame(3, \BccRevokeWorld::providerCalls(), 'the budget ran out part-way through the member\'s wallets');
+        self::assertSame(['verification_budget_exhausted' => 1], $stats['skipped_reasons']);
+        self::assertSame([], \BccRevokeWorld::$userMetaWrites, 'a cron sweep must not write a member\'s user meta');
+    }
+
+    /** A stored join continuation must not change where the sweep starts reading. */
+    public function testTheSweepIgnoresAStoredJoinContinuation(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $wallets = [];
+        for ($i = 0; $i < 3; $i++) {
+            $address = 'cosmos1' . str_pad((string) $i, 38, 'u', STR_PAD_LEFT);
+            \BccRevokeWorld::linkWallet(self::USER, self::LINK + $i, self::COSMOS_CHAIN, $address);
+            $this->answer($address, self::COSMOS_CONTRACT, 'exact', 0);
+            $wallets[] = $address;
+        }
+        \BccRevokeWorld::$userMeta[self::USER]['_bcc_ownership_wallet_rotation'] = [
+            self::COSMOS_CHAIN . ':' . sha1(self::COSMOS_CONTRACT) => ['offset' => 2, 'at' => time() - 60],
+        ];
+        \BccRevokeWorld::$members[self::GROUP] = [$this->member(self::OWNER, 'member_owner'), $this->member(self::USER)];
+
+        $stats = (new NftGroupRevokeService())->sweep();
+
+        self::assertSame($wallets, $this->askedWallets(), 'the sweep reads from the first wallet, whatever a join stored');
+        self::assertSame(1, $stats['revoked']);
+        self::assertSame([], \BccRevokeWorld::$userMetaWrites);
     }
 
     // ════════════════════════════════════════════════════════════════════

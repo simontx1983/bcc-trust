@@ -327,7 +327,7 @@ control 28 "Stored holdings rows accepted as ownership evidence" "$HOLDINGS" \
 
 control 29 "The sweep uses (and writes) join continuation" "$REVOKE" \
   "s = s.replace('                \$config->minBalance,\n                \$budget\n            );', '                \$config->minBalance,\n                \$budget,\n                true\n            );')" \
-  "testTheSweepNeverReadsOrWritesJoinContinuation" \
+  "testTheSweepNeverWritesJoinContinuation|testTheSweepIgnoresAStoredJoinContinuation" \
   -
 
 echo "──────────────────────────────────────────────────────────────"
