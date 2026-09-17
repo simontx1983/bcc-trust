@@ -174,13 +174,15 @@ final class CollectionStanceService
         // PR 7.14: an inactive chain, a driver that cannot count, a failed
         // read or incomplete evidence is now null (503) as well — none of
         // them proves the member does not hold it. Reads are bounded by the
-        // stance budget.
+        // stance budget, and a retry resumes with the wallets the previous
+        // attempt did not reach.
         if (!self::holdsPerPanelSources($userId, (int) $chain->id, $contract)) {
             $count = HoldingsService::ownsAny(
                 $userId,
                 (string) $chain->slug,
                 $contract,
-                HoldingsService::verificationBudget(HoldingsService::SURFACE_STANCE)
+                HoldingsService::verificationBudget(HoldingsService::SURFACE_STANCE),
+                true
             );
             if ($count === null) {
                 return ['ok' => false, 'error' => 'bcc_unavailable'];

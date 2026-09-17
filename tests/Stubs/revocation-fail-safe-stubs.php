@@ -131,12 +131,23 @@ namespace {
             public static array $userMeta = [];
             /** @var list<string> "userId|chainId|contract|stance" */
             public static array $stanceWrites = [];
+            /** @var list<string> "update|delete:userId:key" for every user-meta write */
+            public static array $userMetaWrites = [];
+
+            // ── Stored holdings index (the stance panel's evidence) ─────
+            /** @var array<int, list<object>> walletLinkId => visible stored rows */
+            public static array $storedRows = [];
+            /** @var list<int> walletLinkIds whose stored rows were read */
+            public static array $storedReads = [];
 
             public static function reset(): void
             {
-                self::$currentUser  = 0;
-                self::$userMeta     = [];
-                self::$stanceWrites = [];
+                self::$currentUser    = 0;
+                self::$userMeta       = [];
+                self::$stanceWrites   = [];
+                self::$userMetaWrites = [];
+                self::$storedRows     = [];
+                self::$storedReads    = [];
                 self::$transients = self::$options = self::$filters = [];
                 self::$transientWrites = [];
                 self::$now = 1_800_000_000;
@@ -295,12 +306,18 @@ namespace {
     if (!function_exists('update_user_meta')) {
         function update_user_meta(int $userId, string $key, $value): bool
         {
+            \BccRevokeWorld::$userMeta[$userId][$key] = $value;
+            \BccRevokeWorld::$userMetaWrites[]        = 'update:' . $userId . ':' . $key;
+
             return true;
         }
     }
     if (!function_exists('delete_user_meta')) {
         function delete_user_meta(int $userId, string $key): bool
         {
+            unset(\BccRevokeWorld::$userMeta[$userId][$key]);
+            \BccRevokeWorld::$userMetaWrites[] = 'delete:' . $userId . ':' . $key;
+
             return true;
         }
     }
@@ -664,10 +681,12 @@ namespace BCC\Trust\Onchain\Repositories {
                 return array_intersect_key(\BccRevokeWorld::$index, array_flip($walletLinkIds));
             }
 
-            /** The stance panel's stored-index lookup: nothing is stored here. @return list<object> */
+            /** The stance panel's stored-index lookup. Every read is recorded. @return list<object> */
             public static function findVisibleForWallet(int $walletLinkId, int $chainId): array
             {
-                return [];
+                \BccRevokeWorld::$storedReads[] = $walletLinkId;
+
+                return \BccRevokeWorld::$storedRows[$walletLinkId] ?? [];
             }
         }
     }

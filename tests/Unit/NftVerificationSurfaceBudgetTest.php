@@ -199,6 +199,47 @@ final class NftVerificationSurfaceBudgetTest extends TestCase
         self::assertSame([], \BccRevokeWorld::$stanceWrites);
     }
 
+    public function testAStanceRetryResumesWithTheWalletsTheBudgetDidNotReach(): void
+    {
+        // Seven wallets per attempt at four units; only wallet 9 holds it.
+        \BccRevokeWorld::$maxRequestsPerRead = 4;
+        for ($i = 0; $i < 10; $i++) {
+            $address = 'cosmos1' . str_pad((string) $i, 38, 'r', STR_PAD_LEFT);
+            \BccRevokeWorld::linkWallet(self::USER, self::LINK + $i, self::COSMOS, $address);
+            \BccRevokeWorld::$answers[$address . '|' . self::contract(0)] = ['exact', $i === 8 ? 1 : 0];
+        }
+
+        $first = CollectionStanceService::setStance(self::USER, self::COSMOS, self::contract(0), 'waitlist');
+        self::assertSame(['ok' => false, 'error' => 'bcc_unavailable'], $first);
+
+        \BccRevokeWorld::$fetcherCalls = [];
+        $second = CollectionStanceService::setStance(self::USER, self::COSMOS, self::contract(0), 'waitlist');
+
+        self::assertSame(['ok' => true], $second);
+        self::assertSame(2, \BccRevokeWorld::providerCalls(), 'the retry read wallets 8 and 9 only');
+    }
+
+    /**
+     * THE CONSEQUENCE, stated as a test so it cannot drift silently: the
+     * stance panel's stored rows have no freshness bound, and a stored row
+     * still lets a user who has since SOLD the NFT write a stance, with no
+     * provider call. That is testimony (waitlist / spam flag), not access —
+     * NftRevocationFailSafeTest §7 proves the same row decides no join,
+     * membership or revocation.
+     */
+    public function testAStaleStoredRowStillLetsASellerWriteAStance(): void
+    {
+        \BccRevokeWorld::linkWallet(self::USER, self::LINK, self::COSMOS, self::WALLET);
+        \BccRevokeWorld::$storedRows[self::LINK] = [(object) ['contract_address' => self::contract(0), 'token_id' => '1']];
+        \BccRevokeWorld::$answers[self::WALLET . '|' . self::contract(0)] = ['exact', 0];
+
+        $result = CollectionStanceService::setStance(self::USER, self::COSMOS, self::contract(0), 'waitlist');
+
+        self::assertSame(['ok' => true], $result);
+        self::assertSame(0, \BccRevokeWorld::providerCalls());
+        self::assertSame([self::LINK], \BccRevokeWorld::$storedReads);
+    }
+
     public function testAStanceWithProofIsWritten(): void
     {
         $this->gates(1);

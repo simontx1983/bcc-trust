@@ -86,13 +86,17 @@ final class NftGroupGateService {
         // Three-outcome verdict. JOIN fails CLOSED: on UNKNOWN (provider
         // outage, unavailable chain, failed read, incomplete evidence, or
         // the join budget running out) we refuse to add the user — never
-        // bring someone into a gated group without proof. They retry.
+        // bring someone into a gated group without proof. They retry, and a
+        // retry resumes with the wallets the previous attempt's budget did
+        // not reach, so a holder whose qualifying wallet sits past the budget
+        // is found in a later attempt instead of getting 503 forever.
         $verdict = HoldingsService::eligibilityVerdict(
             $userId,
             $identity->chainSlug(),
             $identity->canonical(),
             $config->minBalance,
-            HoldingsService::verificationBudget(HoldingsService::SURFACE_JOIN)
+            HoldingsService::verificationBudget(HoldingsService::SURFACE_JOIN),
+            true
         );
         if ($verdict->isUnknown()) {
             return JoinResult::verifyUnavailable($config->minBalance);

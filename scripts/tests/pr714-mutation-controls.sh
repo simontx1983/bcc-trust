@@ -40,7 +40,7 @@ WALLETS="app/Domain/Onchain/Repositories/WalletRepository.php"
 LISTING="app/Domain/Onchain/REST/HolderGroupsEndpoint.php"
 FILES=("$HOLDINGS" "$REVOKE" "$COUNT" "$COSMOS" "$SOLANA" "$WALLETS" "$LISTING")
 
-UNIT_CLASSES="NftRevocationFailSafeTest|HoldingsEvidenceIncompleteTest|NftVerificationSurfaceBudgetTest|HoldingsCompletenessTest|StargazeFanOutRemovedTest|CosmosFetcherListHoldingsTest|CosmosGalleryVerifiedOnlyTest"
+UNIT_CLASSES="NftRevocationFailSafeTest|HoldingsEvidenceIncompleteTest|NftVerificationSurfaceBudgetTest|HoldingsCompletenessTest|StargazeFanOutRemovedTest|CosmosFetcherListHoldingsTest|CosmosGalleryVerifiedOnlyTest|StoredHoldingsAccessIsolationTest"
 INTEGRATION_CLASS="NftRevocationFailSafeIntegrationTest"
 
 if [ -n "$(git status --porcelain -- "${FILES[@]}")" ]; then
@@ -296,6 +296,38 @@ control 22 "A cached complete zero answers the gate again" "$HOLDINGS" \
 control 23 "A member too expensive for a whole tick stalls the rotation" "$REVOKE" \
   "s = s.replace('if (\$verdict->isBudgetExhausted() && \$stats[\\'checked\\'] > 0) {', 'if (\$verdict->isBudgetExhausted()) {')" \
   "testAMemberTooExpensiveForAWholeTickCannotStallTheRotation" \
+  -
+
+# ── Follow-up: starvation and stored-evidence isolation ─────────────────
+
+control 24 "Join continuation never stored" "$HOLDINGS" \
+  "s = s.replace(\"                \$rotation[\$key] = ['offset' => \$resumeAt, 'at' => time()];\n                self::writeWalletRotation(\$userId, \$rotation);\", \"                \$rotation[\$key] = ['offset' => \$resumeAt, 'at' => time()];\")" \
+  "testAQualifyingWalletPastTheJoinBudgetIsReachedByARetry|testRepeatedJoinAttemptsReadEveryWalletAndNeverDeny|testJoinContinuationAtCosmosCostReachesALateWallet|testAStanceRetryResumesWithTheWalletsTheBudgetDidNotReach" \
+  -
+
+control 25 "Join continuation start ignored" "$HOLDINGS" \
+  "s = s.replace(\"        \$startAt  = \$rotation[\$key]['offset'] ?? 0;\", '        \$startAt  = 0;')" \
+  "testAQualifyingWalletPastTheJoinBudgetIsReachedByARetry|testRepeatedJoinAttemptsReadEveryWalletAndNeverDeny|testJoinContinuationAtCosmosCostReachesALateWallet|testAStanceRetryResumesWithTheWalletsTheBudgetDidNotReach" \
+  -
+
+control 26 "Continuation measured from the first wallet instead of where the attempt started" "$HOLDINGS" \
+  "s = s.replace('                \$resumeAt ??= (\$start + \$i) % \$count;', '                \$resumeAt ??= \$i % \$count;')" \
+  "testRepeatedJoinAttemptsReadEveryWalletAndNeverDeny" \
+  -
+
+control 27 "Budget-stopped sweep rewinds to the start of its group" "$REVOKE" \
+  "s = s.replace(\"\$this->writeCursor(['group_id' => \$groupId, 'offset' => \$position]);\", \"\$this->writeCursor(['group_id' => \$groupId, 'offset' => 0]);\")" \
+  "testSuccessiveTicksReachEveryMemberBeforeRevisitingAny" \
+  "testSuccessiveTicksReachEveryMemberBeforeRevisitingAny"
+
+control 28 "Stored holdings rows accepted as ownership evidence" "$HOLDINGS" \
+  "s = s.replace('        \$evidenceCapable = \$fetcher instanceof CountsHoldingsWithCompleteness;', '        foreach (NftHoldingsRepository::findVisibleForWallet(\$walletLinkId, \$chainId) as \$storedRow) {\n            if (strtolower((string) \$storedRow->contract_address) === strtolower(\$contract)) {\n                return HoldingsCount::atLeast(1);\n            }\n        }\n        \$evidenceCapable = \$fetcher instanceof CountsHoldingsWithCompleteness;')" \
+  "testAStoredHoldingsRowNeverSatisfiesAJoin|testAStoredHoldingsRowNeverKeepsAMember|testAStoredHoldingsRowNeverMakesAGroupEligibleForAutoJoin|testStoredRowsAreReadOnlyByDisplayAndTestimonyCode" \
+  -
+
+control 29 "The sweep uses (and writes) join continuation" "$REVOKE" \
+  "s = s.replace('                \$config->minBalance,\n                \$budget\n            );', '                \$config->minBalance,\n                \$budget,\n                true\n            );')" \
+  "testTheSweepNeverReadsOrWritesJoinContinuation" \
   -
 
 echo "──────────────────────────────────────────────────────────────"

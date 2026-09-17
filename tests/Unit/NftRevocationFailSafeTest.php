@@ -738,4 +738,243 @@ final class NftRevocationFailSafeTest extends TestCase
         $unknown = array_filter($balances, static fn(?int $b): bool => $b === null);
         self::assertGreaterThanOrEqual(8, count($unknown), 'pairs the budget could not reach are unknown, not zero');
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // 5. Join fair continuation — no holder starves behind the budget
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // There is no per-chain wallet cap, and the join budget reads a bounded
+    // number of wallets (30 at one unit, 7 at Cosmos's four, 3 at Solana's
+    // ten). Each budget-exhausted attempt stores where it stopped; the next
+    // attempt by the same user on the same gate starts there.
+
+    private function linkEvmWallets(int $count): array
+    {
+        $addresses = [];
+        for ($i = 0; $i < $count; $i++) {
+            $address = '0x' . str_pad(dechex($i + 1), 40, '0', STR_PAD_LEFT);
+            \BccRevokeWorld::linkWallet(self::USER, self::LINK + $i, self::EVM_CHAIN, $address);
+            $this->answer($address, self::EVM_CONTRACT, 'exact', 0);
+            $addresses[] = $address;
+        }
+
+        return $addresses;
+    }
+
+    /** @return list<string> wallet addresses asked about, in order */
+    private function askedWallets(): array
+    {
+        $out = [];
+        foreach (\BccRevokeWorld::$fetcherCalls as $call) {
+            if (str_starts_with($call, 'count_holdings_evidence:')) {
+                $out[] = explode('|', substr($call, strlen('count_holdings_evidence:')))[0];
+            }
+        }
+
+        return $out;
+    }
+
+    public function testAQualifyingWalletPastTheJoinBudgetIsReachedByARetry(): void
+    {
+        // 40 wallets at one unit each; only wallet 31 holds the token.
+        $this->gate('ethereum', self::EVM_CHAIN, self::EVM_CONTRACT);
+        $wallets = $this->linkEvmWallets(40);
+        $this->answer($wallets[30], self::EVM_CONTRACT, 'exact', 1);
+
+        $first = (new NftGroupGateService())->joinIfEligible(self::USER, self::GROUP);
+
+        self::assertSame(JoinResult::CODE_VERIFY_UNAVAILABLE, $first->code, 'the budget ran out: 503, never 403');
+        self::assertSame(array_slice($wallets, 0, 30), $this->askedWallets());
+        self::assertSame([], \BccRevokeWorld::$joins);
+
+        \BccRevokeWorld::$fetcherCalls = [];
+        $second = (new NftGroupGateService())->joinIfEligible(self::USER, self::GROUP);
+
+        self::assertSame(JoinResult::CODE_OK, $second->code);
+        self::assertSame([$wallets[30]], $this->askedWallets(), 'the retry started with wallet 31');
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$joins);
+        self::assertSame(
+            [],
+            \BccRevokeWorld::$userMeta[self::USER]['_bcc_ownership_wallet_rotation'] ?? [],
+            'a decided check clears its continuation'
+        );
+    }
+
+    public function testRepeatedJoinAttemptsReadEveryWalletAndNeverDeny(): void
+    {
+        $this->gate('ethereum', self::EVM_CHAIN, self::EVM_CONTRACT);
+        $wallets = $this->linkEvmWallets(70);
+
+        $asked = [];
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            \BccRevokeWorld::$fetcherCalls = [];
+            $result = (new NftGroupGateService())->joinIfEligible(self::USER, self::GROUP);
+
+            self::assertSame(JoinResult::CODE_VERIFY_UNAVAILABLE, $result->code, "attempt {$attempt}: not every wallet was read in one request, so no denial");
+            self::assertCount(30, $this->askedWallets(), "attempt {$attempt} is still bounded by the budget");
+            $asked = array_merge($asked, $this->askedWallets());
+        }
+
+        self::assertSame($wallets, array_slice($asked, 0, 70), 'three attempts read wallets 1–70 in order, none twice');
+        self::assertSame(array_slice($wallets, 0, 20), array_slice($asked, 70), 'then the rotation wrapped to the first wallet');
+        self::assertSame([], \BccRevokeWorld::$joins);
+    }
+
+    public function testJoinContinuationAtCosmosCostReachesALateWallet(): void
+    {
+        // Four units per read: seven wallets per attempt. Wallet 9 holds it.
+        \BccRevokeWorld::$maxRequestsPerRead = 4;
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $wallets = [];
+        for ($i = 0; $i < 10; $i++) {
+            $address = 'cosmos1' . str_pad((string) $i, 38, 'j', STR_PAD_LEFT);
+            \BccRevokeWorld::linkWallet(self::USER, self::LINK + $i, self::COSMOS_CHAIN, $address);
+            $this->answer($address, self::COSMOS_CONTRACT, 'exact', $i === 8 ? 1 : 0);
+            $wallets[] = $address;
+        }
+
+        self::assertSame(JoinResult::CODE_VERIFY_UNAVAILABLE, (new NftGroupGateService())->joinIfEligible(self::USER, self::GROUP)->code);
+        self::assertSame(array_slice($wallets, 0, 7), $this->askedWallets());
+
+        \BccRevokeWorld::$fetcherCalls = [];
+        self::assertSame(JoinResult::CODE_OK, (new NftGroupGateService())->joinIfEligible(self::USER, self::GROUP)->code);
+        self::assertSame([$wallets[7], $wallets[8]], $this->askedWallets());
+    }
+
+    public function testAnExpiredContinuationStartsFromTheFirstWalletAgain(): void
+    {
+        $this->gate('ethereum', self::EVM_CHAIN, self::EVM_CONTRACT);
+        $wallets = $this->linkEvmWallets(40);
+        $key = self::EVM_CHAIN . ':' . sha1(self::EVM_CONTRACT);
+        \BccRevokeWorld::$userMeta[self::USER]['_bcc_ownership_wallet_rotation'] = [
+            $key => ['offset' => 25, 'at' => time() - 8 * 86400],
+        ];
+
+        (new NftGroupGateService())->joinIfEligible(self::USER, self::GROUP);
+
+        self::assertSame($wallets[0], $this->askedWallets()[0]);
+    }
+
+    public function testTheSweepNeverReadsOrWritesJoinContinuation(): void
+    {
+        \BccRevokeWorld::$maxRequestsPerRead = 100;
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->seedMembersWithCompleteZeros(5);
+
+        $stats = (new NftGroupRevokeService())->sweep();
+
+        self::assertTrue($stats['stopped_on_budget']);
+        self::assertSame([], \BccRevokeWorld::$userMetaWrites, 'a cron sweep must not write members\' user meta');
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // 6. The sweep reaches every member across ticks
+    // ════════════════════════════════════════════════════════════════════
+
+    public function testSuccessiveTicksReachEveryMemberBeforeRevisitingAny(): void
+    {
+        // 2 groups × 120 members at 4 units = 960 units against 300 per tick,
+        // so 75 checks per tick. Every fifth member is a complete zero
+        // (removed), the rest are proven holders (kept).
+        \BccRevokeWorld::$maxRequestsPerRead = 4;
+        $expected = [];
+        foreach ([8101, 8102] as $g => $gid) {
+            $contract = 'cosmos1' . str_pad((string) $gid, 58, 't', STR_PAD_LEFT);
+            $this->gate('cosmos', self::COSMOS_CHAIN, $contract, 1, $gid);
+            $rows = [$this->member(self::OWNER, 'member_owner')];
+            for ($i = 0; $i < 120; $i++) {
+                $uid     = 20_000 + $g * 1000 + $i;
+                $address = 'cosmos1' . str_pad((string) $uid, 38, 'x', STR_PAD_LEFT);
+                \BccRevokeWorld::linkWallet($uid, 60_000 + $g * 1000 + $i, self::COSMOS_CHAIN, $address);
+                $this->answer($address, $contract, 'exact', $i % 5 === 0 ? 0 : 1);
+                $rows[]     = $this->member($uid);
+                $expected[] = $address . '|' . $contract;
+            }
+            \BccRevokeWorld::$members[$gid] = $rows;
+        }
+
+        $sequence = [];
+        for ($tick = 1; $tick <= 5; $tick++) {
+            \BccRevokeWorld::$fetcherCalls = [];
+            (new NftGroupRevokeService())->sweep();
+            $calls = array_values(array_filter(
+                \BccRevokeWorld::$fetcherCalls,
+                static fn(string $c): bool => str_starts_with($c, 'count_holdings_evidence:')
+            ));
+            self::assertLessThanOrEqual(75, count($calls), "tick {$tick} stayed inside its budget");
+            foreach ($calls as $call) {
+                $sequence[] = substr($call, strlen('count_holdings_evidence:'));
+            }
+        }
+
+        $firstRepeat = count($sequence);
+        $seen = [];
+        foreach ($sequence as $i => $pair) {
+            if (isset($seen[$pair])) {
+                $firstRepeat = $i;
+                break;
+            }
+            $seen[$pair] = true;
+        }
+
+        self::assertSame($expected, array_slice($sequence, 0, $firstRepeat), 'every member of both groups, in order, before anyone was checked twice');
+        self::assertCount(48, \BccRevokeWorld::$leaves, 'exactly the 48 complete zeros were removed');
+        self::assertSame(
+            192,
+            count(\BccRevokeWorld::$members[8101]) + count(\BccRevokeWorld::$members[8102]) - 2,
+            'the 192 proven holders are all still members'
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // 7. The stance panel's stored rows never decide membership
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // `NftHoldingsRepository::findVisibleForWallet` rows have no freshness
+    // bound (an indexer that stops leaves them in place). They back the stance
+    // panel and the stance write gate only.
+
+    private function storeStaleRow(): void
+    {
+        \BccRevokeWorld::$storedRows[self::LINK] = [
+            (object) ['contract_address' => self::COSMOS_CONTRACT, 'token_id' => '1', 'collection_name' => 'Sold long ago', 'image_url' => null],
+        ];
+    }
+
+    public function testAStoredHoldingsRowNeverSatisfiesAJoin(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->storeStaleRow();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+
+        self::assertSame(JoinResult::CODE_NOT_ELIGIBLE, (new NftGroupGateService())->joinIfEligible(self::USER, self::GROUP)->code);
+        self::assertSame([], \BccRevokeWorld::$joins);
+        self::assertSame([], \BccRevokeWorld::$storedReads, 'the join never looked at stored rows');
+    }
+
+    public function testAStoredHoldingsRowNeverKeepsAMember(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->storeStaleRow();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+        \BccRevokeWorld::$members[self::GROUP] = [$this->member(self::OWNER, 'member_owner'), $this->member(self::USER)];
+
+        $stats = (new NftGroupRevokeService())->sweep();
+
+        self::assertSame(1, $stats['revoked'], 'the stale stored row did not preserve the membership');
+        self::assertSame([], \BccRevokeWorld::$storedReads);
+    }
+
+    public function testAStoredHoldingsRowNeverMakesAGroupEligibleForAutoJoin(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->storeStaleRow();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+
+        self::assertSame([], (new NftGroupGateService())->findEligibleGroups(self::USER));
+        self::assertSame([], \BccRevokeWorld::$storedReads);
+    }
 }

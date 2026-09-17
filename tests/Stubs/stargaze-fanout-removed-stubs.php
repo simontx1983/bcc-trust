@@ -235,6 +235,17 @@ namespace {
     if (!function_exists('get_current_user_id')) {
         function get_current_user_id(): int { return \BccFanOutWorld::$currentUserId ?? 0; }
     }
+    // PR 7.14: a stance write resumes its wallet walk from user meta. In-memory,
+    // per test process; nothing here asserts on it.
+    if (!function_exists('get_user_meta')) {
+        function get_user_meta(int $userId, string $key = '', bool $single = false) { return $GLOBALS['__bcc_fanout_user_meta'][$userId][$key] ?? ''; }
+    }
+    if (!function_exists('update_user_meta')) {
+        function update_user_meta(int $userId, string $key, $value): bool { $GLOBALS['__bcc_fanout_user_meta'][$userId][$key] = $value; return true; }
+    }
+    if (!function_exists('delete_user_meta')) {
+        function delete_user_meta(int $userId, string $key): bool { unset($GLOBALS['__bcc_fanout_user_meta'][$userId][$key]); return true; }
+    }
 
     // ⚠ The transports. Each one is REAL enough to succeed, so a surviving
     // caller produces a visible record instead of a silent failure that

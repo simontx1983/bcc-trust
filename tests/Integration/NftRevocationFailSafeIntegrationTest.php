@@ -508,6 +508,83 @@ namespace BCC\Trust\Tests\Integration {
             self::assertSame($kept, $this->remainingMembers(), 'exactly the unverifiable members and the holders were kept');
         }
 
+        public function testSuccessiveTicksReachEveryMemberBeforeRevisitingAny(): void
+        {
+            // 160 members at 4 units = 640 units against 300 per tick: 75
+            // checks per tick, three ticks to cover the group. Every fourth
+            // member is a complete zero (removed underneath the paging), the
+            // rest are proven holders (kept).
+            RevocationScriptedFetcher::$maxRequestsPerRead = 4;
+            $addresses = $this->seedGroup(160);
+            foreach ($addresses as $i => $address) {
+                RevocationScriptedFetcher::$answers[$address] = $i % 4 === 0 ? 0 : 1;
+            }
+
+            $perTick = [];
+            for ($tick = 1; $tick <= 4; $tick++) {
+                $before = count(RevocationScriptedFetcher::$asked);
+                (new NftGroupRevokeService())->sweep();
+                $perTick[] = count(RevocationScriptedFetcher::$asked) - $before;
+            }
+
+            foreach ($perTick as $tick => $calls) {
+                self::assertLessThanOrEqual(75, $calls, 'tick ' . ($tick + 1) . ' stayed inside its budget');
+            }
+
+            $asked       = RevocationScriptedFetcher::$asked;
+            $firstRepeat = count($asked);
+            $seen        = [];
+            foreach ($asked as $i => $address) {
+                if (isset($seen[$address])) {
+                    $firstRepeat = $i;
+                    break;
+                }
+                $seen[$address] = true;
+            }
+
+            self::assertSame($addresses, array_slice($asked, 0, $firstRepeat), 'every member, in order, before anyone was checked twice');
+            self::assertCount(120, $this->remainingMembers(), 'the 40 complete zeros were removed, the 120 holders kept');
+        }
+
+        public function testWalletOrderIsDeterministicAmongWalletsLinkedInTheSameSecond(): void
+        {
+            // A resumed join depends on position N meaning the same wallet next
+            // time. 40 wallets share one created_at; the primary has the
+            // highest id. Order must be: primary, then ascending id.
+            $wpdb    = $GLOBALS['wpdb'];
+            $chainId = $this->chainId('cosmos');
+            $this->insertCollection(self::COLLECTION, $chainId, self::CONTRACT);
+
+            $ids = [];
+            for ($i = 0; $i < 40; $i++) {
+                $address = self::cosmosAddress(50_000 + $i);
+                $ok = $wpdb->query($wpdb->prepare(
+                    'INSERT INTO `' . WalletRepository::table() . "` (user_id, post_id, wallet_address, chain_id, verified_at, is_primary, created_at)
+                     VALUES (%d, 0, %s, %d, '2026-09-01 00:00:00', %d, '2026-09-01 00:00:00')",
+                    self::FIRST_USER,
+                    $address,
+                    $chainId,
+                    $i === 39 ? 1 : 0
+                ));
+                self::assertNotFalse($ok, $wpdb->last_error);
+                $ids[(int) $wpdb->insert_id] = $address;
+                RevocationScriptedFetcher::$answers[$address] = 0;
+            }
+            ksort($ids);
+            $primary  = array_pop($ids);
+            $expected = array_merge([$primary], array_values($ids));
+
+            HoldingsService::eligibilityVerdict(
+                self::FIRST_USER,
+                'cosmos',
+                self::CONTRACT,
+                1,
+                new \BCC\Trust\Onchain\Support\CosmwasmTickBudget(40, 30)
+            );
+
+            self::assertSame($expected, RevocationScriptedFetcher::$asked);
+        }
+
         public function testATickThatRunsOutOfBudgetResumesOnTheFirstUnevaluatedMember(): void
         {
             // 300 units per tick, 100 per read: three members per tick.

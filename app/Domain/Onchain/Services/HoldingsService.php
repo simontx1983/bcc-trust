@@ -87,6 +87,27 @@ final class HoldingsService
     private const UNDECLARED_READ_COST = 10;
 
     /**
+     * Fair continuation for a user's OWN repeated attempts (join, stance).
+     *
+     * A budget covers a bounded number of wallets per request, and there is no
+     * per-chain wallet cap. Without continuation every retry re-read the same
+     * first wallets, so a holder whose qualifying wallet came later got 503
+     * forever. When a resumable check runs out of budget, the position of the
+     * first wallet it could not read is stored here and the next attempt starts
+     * there, wrapping around. The key is per (chain, contract); the value is
+     * `['offset' => int, 'at' => unix time]`. Entries older than
+     * WALLET_ROTATION_MAX_AGE are ignored, at most WALLET_ROTATION_MAX are kept,
+     * and a decided verdict clears its entry.
+     *
+     * Continuation only changes the ORDER wallets are read in. A shortfall is
+     * still decided only from one request that read every wallet completely, so
+     * running out of budget stays UNKNOWN (503) and can never become a 403.
+     */
+    private const WALLET_ROTATION_META    = '_bcc_ownership_wallet_rotation';
+    private const WALLET_ROTATION_MAX     = 32;
+    private const WALLET_ROTATION_MAX_AGE = 7 * DAY_IN_SECONDS;
+
+    /**
      * Shape returned to consumers.
      *
      * @phpstan-type HoldingItem array{
@@ -131,15 +152,22 @@ final class HoldingsService
      *
      * Reduces {@see eligibilityVerdict()} at a minimum of one, so it shares the
      * same evidence rules and stops at the first wallet that proves ownership.
+     * `$resumeAcrossRequests` — see {@see eligibilityVerdict()}.
      */
-    public static function ownsAny(int $userId, string $chainSlug, string $contract, ?CosmwasmTickBudget $budget = null): ?int
-    {
+    public static function ownsAny(
+        int $userId,
+        string $chainSlug,
+        string $contract,
+        ?CosmwasmTickBudget $budget = null,
+        bool $resumeAcrossRequests = false
+    ): ?int {
         $verdict = self::eligibilityVerdict(
             $userId,
             $chainSlug,
             $contract,
             1,
-            $budget ?? self::verificationBudget(self::SURFACE_STANCE)
+            $budget ?? self::verificationBudget(self::SURFACE_STANCE),
+            $resumeAcrossRequests
         );
 
         return $verdict->isUnknown() ? null : ($verdict->bestKnownBalance ?? 0);
@@ -170,13 +198,20 @@ final class HoldingsService
      * wallet query all returned INELIGIBLE — the verdict the sweep removes on.
      *
      * `$budget` bounds provider reads; omitted, the join budget applies.
+     *
+     * `$resumeAcrossRequests` is for a user's OWN explicit retries (join,
+     * stance write): the check starts where that user's previous
+     * budget-exhausted check on this (chain, contract) stopped, so repeated
+     * attempts eventually read every wallet. See WALLET_ROTATION_META. It is
+     * never set by the sweep or by read-only surfaces, which must not write.
      */
     public static function eligibilityVerdict(
         int $userId,
         string $chainSlug,
         string $contract,
         int $minBalance,
-        ?CosmwasmTickBudget $budget = null
+        ?CosmwasmTickBudget $budget = null,
+        bool $resumeAcrossRequests = false
     ): EligibilityVerdict {
         $min = max(1, $minBalance);
 
@@ -185,15 +220,81 @@ final class HoldingsService
             return EligibilityVerdict::unknownBecause($min, null, $context);
         }
         [$chain, $fetcher, $wallets] = $context;
+        $chainId = (int) $chain->id;
+        $budget ??= self::verificationBudget(self::SURFACE_JOIN);
 
-        return self::verdictForWallets(
-            $fetcher,
-            $wallets,
-            $contract,
-            (int) $chain->id,
-            $min,
-            $budget ?? self::verificationBudget(self::SURFACE_JOIN)
-        );
+        if (!$resumeAcrossRequests || $wallets === []) {
+            return self::verdictForWallets($fetcher, $wallets, $contract, $chainId, $min, $budget);
+        }
+
+        $key      = self::walletRotationKey($chainId, $contract);
+        $rotation = self::readWalletRotation($userId);
+        $startAt  = $rotation[$key]['offset'] ?? 0;
+        $resumeAt = null;
+
+        $verdict = self::verdictForWallets($fetcher, $wallets, $contract, $chainId, $min, $budget, $startAt, $resumeAt);
+
+        if ($verdict->isBudgetExhausted()) {
+            // Only a real step forward is worth a write: no step means even the
+            // first wallet did not fit (the wall clock ran out).
+            if ($resumeAt !== null && $resumeAt !== $startAt % count($wallets)) {
+                $rotation[$key] = ['offset' => $resumeAt, 'at' => time()];
+                self::writeWalletRotation($userId, $rotation);
+            }
+        } elseif (!$verdict->isUnknown() && isset($rotation[$key])) {
+            // Decided: the next check starts from the first wallet again.
+            unset($rotation[$key]);
+            self::writeWalletRotation($userId, $rotation);
+        }
+
+        return $verdict;
+    }
+
+    private static function walletRotationKey(int $chainId, string $contract): string
+    {
+        return $chainId . ':' . sha1($contract);
+    }
+
+    /**
+     * @return array<string, array{offset: int, at: int}> only well-formed, unexpired entries
+     */
+    private static function readWalletRotation(int $userId): array
+    {
+        $raw = get_user_meta($userId, self::WALLET_ROTATION_META, true);
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $now = time();
+        $out = [];
+        foreach ($raw as $key => $entry) {
+            if (!is_string($key) || !is_array($entry)) {
+                continue;
+            }
+            $offset = $entry['offset'] ?? null;
+            $at     = $entry['at'] ?? null;
+            if (!is_int($offset) || $offset < 0 || !is_int($at) || $at > $now || $now - $at > self::WALLET_ROTATION_MAX_AGE) {
+                continue;
+            }
+            $out[$key] = ['offset' => $offset, 'at' => $at];
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param array<string, array{offset: int, at: int}> $rotation
+     */
+    private static function writeWalletRotation(int $userId, array $rotation): void
+    {
+        if ($rotation === []) {
+            delete_user_meta($userId, self::WALLET_ROTATION_META);
+            return;
+        }
+
+        // Newest first, bounded.
+        uasort($rotation, static fn(array $a, array $b): int => $b['at'] <=> $a['at']);
+        update_user_meta($userId, self::WALLET_ROTATION_META, array_slice($rotation, 0, self::WALLET_ROTATION_MAX, true));
     }
 
     /**
@@ -232,6 +333,11 @@ final class HoldingsService
     }
 
     /**
+     * `$startAt` rotates the wallet order (wallet `$startAt` is read first,
+     * wrapping around). `$resumeAt` is set to the position, in the unrotated
+     * list, of the first wallet the budget could not cover — where a resumed
+     * check should start next time — or left null when every wallet was read.
+     *
      * @param list<WalletWithChain> $wallets
      */
     private static function verdictForWallets(
@@ -240,7 +346,9 @@ final class HoldingsService
         string $contract,
         int $chainId,
         int $min,
-        CosmwasmTickBudget $budget
+        CosmwasmTickBudget $budget,
+        int $startAt = 0,
+        ?int &$resumeAt = null
     ): EligibilityVerdict {
         if ($wallets === []) {
             // Read successfully, and there is none: a complete answer.
@@ -254,9 +362,13 @@ final class HoldingsService
             return EligibilityVerdict::unknownBecause($min, null, EligibilityVerdict::REASON_READ_FAILED);
         }
 
+        $count   = count($wallets);
+        $start   = max(0, $startAt) % $count;
+        $ordered = array_merge(array_slice($wallets, $start), array_slice($wallets, 0, $start));
+
         $best   = null;  // highest count any wallet actually showed
         $reason = null;  // why a wallet could not settle the question
-        foreach ($wallets as $w) {
+        foreach ($ordered as $i => $w) {
             $evidence = self::countFromCacheOrFetch(
                 $fetcher,
                 (int) $w->id,
@@ -266,6 +378,10 @@ final class HoldingsService
                 $tokenStandard,
                 $budget
             );
+
+            if ($evidence === EligibilityVerdict::REASON_BUDGET_EXHAUSTED) {
+                $resumeAt ??= ($start + $i) % $count;
+            }
 
             if (is_string($evidence)) {
                 $reason = self::strongerReason($reason, $evidence);
@@ -1181,6 +1297,12 @@ final class HoldingsService
      * query throws instead of looking like "no wallets", which the evaluator
      * would otherwise have to read as a complete INELIGIBLE.
      *
+     * The order is made fully deterministic here (primary first, then oldest,
+     * then lowest id). The query's own ORDER BY leaves wallets linked in the
+     * same second in no guaranteed order, and a resumed check (see
+     * WALLET_ROTATION_META) needs position N to mean the same wallet on the next
+     * request.
+     *
      * @return list<WalletWithChain>
      * @throws RepositoryReadFailure when the wallet read did not run
      */
@@ -1193,6 +1315,17 @@ final class HoldingsService
                 $filtered[] = $w;
             }
         }
+
+        usort($filtered, static fn(object $a, object $b): int => [
+            -(int) ($a->is_primary ?? 0),
+            (string) ($a->created_at ?? ''),
+            (int) $a->id,
+        ] <=> [
+            -(int) ($b->is_primary ?? 0),
+            (string) ($b->created_at ?? ''),
+            (int) $b->id,
+        ]);
+
         return $filtered;
     }
 
