@@ -45,6 +45,7 @@ namespace BCC\Trust\Onchain\Services;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
+use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\ValueObjects\EligibilityVerdict;
 use BCC\Trust\Onchain\ValueObjects\GatedGroupConfig;
 
@@ -86,7 +87,18 @@ final class NftGroupRevokeService
     /**
      * Run one bounded, rotated revoke tick.
      *
-     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int}
+     * PR 7.14:
+     *   - one provider budget per tick (HoldingsService::SURFACE_REVOKE). When
+     *     a member's check no longer fits, the tick stops and the cursor points
+     *     at THAT member, so the next tick starts with them. A member whose
+     *     check alone exceeds a whole tick is skipped as unknown instead, so
+     *     one member cannot stall the rotation;
+     *   - the member offset advances past KEPT members only. A removal shifts
+     *     every later row up by one, so adding the full page size skipped as
+     *     many members as were removed;
+     *   - `skipped_reasons` counts skips by bounded reason code.
+     *
+     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool}
      */
     public function sweep(): array
     {
@@ -96,10 +108,19 @@ final class NftGroupRevokeService
         }
 
         $groupIds = GatedGroupRepository::listAllGatedGroupIds();
-        $stats = ['checked' => 0, 'revoked' => 0, 'skipped_unknown' => 0, 'groups_touched' => 0];
+        $stats = [
+            'checked'           => 0,
+            'revoked'           => 0,
+            'skipped_unknown'   => 0,
+            'groups_touched'    => 0,
+            'skipped_reasons'   => [],
+            'stopped_on_budget' => false,
+        ];
         if ($groupIds === []) {
             return $stats;
         }
+
+        $budget = HoldingsService::verificationBudget(HoldingsService::SURFACE_REVOKE);
 
         // Resolve the rotation cursor → (groupIndex, memberOffset). The
         // cursor is a flat "global member offset" we walk forward; when it
@@ -181,43 +202,65 @@ final class NftGroupRevokeService
                     break; // End of this group's member list.
                 }
 
+                // Where the member being looked at sits in the list AS IT IS
+                // NOW. It moves past a member who stays; it does not move
+                // past one who was removed, because the next row has taken
+                // that place.
+                $position = $offset;
+
                 foreach ($members as $member) {
                     $userId = (int) $member->user_id;
-                    if ($userId <= 0) {
-                        continue;
-                    }
 
                     // Owners are never revoked. PeepSoGroupWriter::leave
                     // also refuses them, but short-circuiting here avoids a
                     // pointless eligibility RPC for the owner row.
-                    if ($this->isOwnerRole((string) $member->role)) {
+                    if ($userId <= 0 || $this->isOwnerRole((string) $member->role)) {
+                        $position++;
                         continue;
+                    }
+
+                    $verdict = $this->verdictForMember($userId, $chainSlug, $canonical, $config, $budget);
+
+                    if ($verdict->isBudgetExhausted() && $stats['checked'] > 0) {
+                        // Out of provider budget before this member could be
+                        // decided. Nothing was done to them; the next tick
+                        // starts here.
+                        $stats['stopped_on_budget'] = true;
+                        $this->writeCursor(['group_id' => $groupId, 'offset' => $position]);
+                        if ($touchedThisGroup) {
+                            $stats['groups_touched']++;
+                        }
+                        return $stats;
                     }
 
                     $touchedThisGroup = true;
                     $stats['checked']++;
                     $processed++;
 
-                    $verdict = $this->verdictForMember($userId, $chainSlug, $canonical, $config);
-
                     if ($verdict->isUnknown()) {
-                        // Provider couldn't verify (timeout / 429 /
-                        // breaker-open). FAIL OPEN — skip, retry next tick.
-                        // Never revoke on a hiccup.
+                        // Not proven either way: a failed read, an unavailable
+                        // chain, incomplete evidence, a provider outage — or a
+                        // single member too expensive for a whole tick. FAIL
+                        // OPEN — skip, retry next tick. Never revoke without
+                        // proof.
                         $stats['skipped_unknown']++;
+                        $stats['skipped_reasons'][$verdict->reason] = ($stats['skipped_reasons'][$verdict->reason] ?? 0) + 1;
+                        $position++;
                         continue;
                     }
 
-                    if ($verdict->isIneligible()) {
-                        if ($this->revokeMember($userId, $groupId, $config, $verdict)) {
-                            $stats['revoked']++;
-                        }
-                        continue;
+                    if ($verdict->isIneligible()
+                        && $this->revokeMember($userId, $groupId, $config, $verdict)
+                    ) {
+                        $stats['revoked']++;
+                        continue; // removed: the next row now sits at $position
                     }
-                    // ELIGIBLE → keep, nothing to do.
+
+                    // ELIGIBLE, or a removal PeepSo refused → still listed.
+                    $position++;
                 }
 
-                $offset += count($members);
+                $offset = $position;
                 if (count($members) < $pageSize) {
                     break; // Short page = end of group.
                 }
@@ -257,7 +300,8 @@ final class NftGroupRevokeService
         int $userId,
         string $chainSlug,
         string $canonicalIdentifier,
-        GatedGroupConfig $config
+        GatedGroupConfig $config,
+        CosmwasmTickBudget $budget
     ): EligibilityVerdict {
         try {
             // PR 5b: the CANONICAL identity from the linked collection row,
@@ -269,13 +313,16 @@ final class NftGroupRevokeService
                 $userId,
                 $chainSlug,
                 $canonicalIdentifier,
-                $config->minBalance
+                $config->minBalance,
+                $budget
             );
         } catch (\Throwable $e) {
+            // Bounded: the exception class, never its message (which can
+            // carry an endpoint, an address or provider text).
             \BCC\Core\Log\Logger::warning('[bcc-trust] revoke-sweep eligibility check failed', [
-                'user_id'  => $userId,
-                'group_id' => $config->groupId,
-                'error'    => $e->getMessage(),
+                'user_id'     => $userId,
+                'group_id'    => $config->groupId,
+                'error_class' => get_class($e),
             ]);
             // Treat an unexpected throw as UNKNOWN — fail open (skip),
             // never revoke on an error we didn't anticipate.

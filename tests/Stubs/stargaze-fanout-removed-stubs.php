@@ -235,6 +235,17 @@ namespace {
     if (!function_exists('get_current_user_id')) {
         function get_current_user_id(): int { return \BccFanOutWorld::$currentUserId ?? 0; }
     }
+    // PR 7.14: a stance write resumes its wallet walk from user meta. In-memory,
+    // per test process; nothing here asserts on it.
+    if (!function_exists('get_user_meta')) {
+        function get_user_meta(int $userId, string $key = '', bool $single = false) { return $GLOBALS['__bcc_fanout_user_meta'][$userId][$key] ?? ''; }
+    }
+    if (!function_exists('update_user_meta')) {
+        function update_user_meta(int $userId, string $key, $value): bool { $GLOBALS['__bcc_fanout_user_meta'][$userId][$key] = $value; return true; }
+    }
+    if (!function_exists('delete_user_meta')) {
+        function delete_user_meta(int $userId, string $key): bool { unset($GLOBALS['__bcc_fanout_user_meta'][$userId][$key]); return true; }
+    }
 
     // ⚠ The transports. Each one is REAL enough to succeed, so a surviving
     // caller produces a visible record instead of a silent failure that
@@ -644,6 +655,17 @@ namespace BCC\Trust\Onchain\Repositories {
                 return self::$byUser[$userId] ?? [];
             }
 
+            /**
+             * PR 7.14 fail-closed sibling (the ownership evaluator reads
+             * wallets through it); this stub world never fails a read.
+             *
+             * @return list<object>
+             */
+            public static function getForUserOrThrow(int $userId, ?string $type = null, bool $withChain = false): array
+            {
+                return self::getForUser($userId, $type, $withChain);
+            }
+
             /** @return list<object> */
             public static function getForProject(int $postId, ?string $walletType = null): array
             {
@@ -764,6 +786,16 @@ namespace BCC\Trust\Onchain\Repositories {
             }
 
             /**
+             * PR 7.14 fail-closed sibling; this stub world never fails a read.
+             *
+             * @return list<object>
+             */
+            public static function listVerifiedByChainOrThrow(int $chainId, int $limit = 30): array
+            {
+                return self::listVerifiedByChain($chainId, $limit);
+            }
+
+            /**
              * @param  list<string> $contracts
              * @return array<string, bool>
              */
@@ -782,6 +814,12 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function findTokenStandard(int $chainId, string $contract): ?string
             {
                 return null;
+            }
+
+            /** PR 7.14 fail-closed sibling; never fails here. */
+            public static function findTokenStandardOrThrow(int $chainId, string $contract): ?string
+            {
+                return self::findTokenStandard($chainId, $contract);
             }
         }
     }
@@ -998,7 +1036,9 @@ namespace {
          * test can flip 'collection' back on for a chain to prove the
          * CALLER (not the fetcher) is what refuses.
          */
-        final class BccRecordingFetcher implements \BCC\Trust\Onchain\Contracts\FetcherInterface
+        final class BccRecordingFetcher implements
+            \BCC\Trust\Onchain\Contracts\FetcherInterface,
+            \BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness
         {
             public function __construct(private object $chain) {}
 
@@ -1077,6 +1117,25 @@ namespace {
             public function count_holdings(string $wallet, string $contract): ?int
             {
                 return \BccFanOutWorld::$counts[$wallet . '|' . strtolower($contract)] ?? null;
+            }
+
+            /**
+             * PR 7.14: like the real CosmosFetcher this double stands in for,
+             * a seeded count is a COMPLETE answer — a seeded 0 means the chain
+             * answered "holds none". Without the interface a 0 could not
+             * prove anything, and the stance refusal would turn into a 503.
+             */
+            public function count_holdings_evidence(string $wallet, string $contract): ?\BCC\Trust\Onchain\ValueObjects\HoldingsCount
+            {
+                $count = $this->count_holdings($wallet, $contract);
+
+                return $count === null ? null : \BCC\Trust\Onchain\ValueObjects\HoldingsCount::exact($count);
+            }
+
+            /** CosmosFetcher's worst case: ceil(100 / 30) pages. */
+            public function max_requests_per_evidence_read(): int
+            {
+                return 4;
             }
 
             /** @return array<string, mixed> */

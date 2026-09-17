@@ -102,7 +102,10 @@ final class CanonicalIdentifierDriftGuardTest extends TestCase
                 'ensureExistsBatch',
                 // Readers keyed on (chain, identifier).
                 'findByChainContract',
-                'findTokenStandard',
+                // PR 7.14: `findTokenStandard` and its fail-closed sibling
+                // `findTokenStandardOrThrow` are now two-line wrappers over
+                // this one query body, which is where identity is decided.
+                'readTokenStandard',
             ],
             'app/Domain/Onchain/Services/NftPieceViewModelBuilder.php' => [
                 'build',
@@ -130,7 +133,10 @@ final class CanonicalIdentifierDriftGuardTest extends TestCase
                 'writeGateConfig',
             ],
             'app/Domain/Onchain/Fetchers/SolanaFetcher.php' => [
-                'count_holdings',
+                // PR 7.14: the identity check and the walk moved into
+                // `count_holdings_evidence`; `count_holdings` now only
+                // reduces its result to an exact count or null.
+                'count_holdings_evidence',
                 'fetch_collections',
             ],
             // The transient-cache count. NOT in the 5a list because it is

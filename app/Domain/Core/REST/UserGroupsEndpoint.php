@@ -234,13 +234,19 @@ final class UserGroupsEndpoint
                 continue;
             }
             $balanceKeyByGroup[$cfg->groupId] = $identity->chainSlug() . ':' . $identity->canonical();
-            $pairs[] = [$identity->chainSlug(), $identity->canonical()];
+            $pairs[] = [$identity->chainSlug(), $identity->canonical(), $cfg->minBalance];
         }
         if ($pairs === []) {
             return [];
         }
 
-        $balances = HoldingsService::ownsAnyMany($viewerId, $pairs);
+        // PR 7.14: a profile render gets the profile budget. A group it cannot
+        // reach comes back null and renders `eligible: false`.
+        $balances = HoldingsService::ownsAnyMany(
+            $viewerId,
+            $pairs,
+            HoldingsService::verificationBudget(HoldingsService::SURFACE_PROFILE)
+        );
 
         $out = [];
         foreach ($configs as $groupId => $cfg) {

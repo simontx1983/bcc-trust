@@ -209,6 +209,34 @@ final class NftHoldingsRepository
      */
     public static function countVisibleByContract(int $chainId, string $contract, array $walletLinkIds): array
     {
+        return self::readVisibleByContract($chainId, $contract, $walletLinkIds, false);
+    }
+
+    /**
+     * FAIL-CLOSED sibling of {@see countVisibleByContract()} — one query,
+     * two policies.
+     *
+     * PR 7.14: the ERC-1155 holder gate read this map and turned a MISSING
+     * wallet key into a balance of 0. A failed query produced exactly that
+     * missing key, and the revoke sweep removed the member. Ownership
+     * decisions call this, so a failed read arrives as an exception.
+     *
+     * @param list<int> $walletLinkIds
+     * @return array<int, int>  wallet_link_id => max balance among held tokens
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function countVisibleByContractOrThrow(int $chainId, string $contract, array $walletLinkIds): array
+    {
+        return self::readVisibleByContract($chainId, $contract, $walletLinkIds, true);
+    }
+
+    /**
+     * @param list<int> $walletLinkIds
+     * @return array<int, int>
+     * @throws RepositoryReadFailure when $failClosed and the read did not run
+     */
+    private static function readVisibleByContract(int $chainId, string $contract, array $walletLinkIds, bool $failClosed): array
+    {
         if ($chainId <= 0 || $contract === '' || $walletLinkIds === []) {
             return [];
         }
@@ -239,6 +267,12 @@ final class NftHoldingsRepository
         );
 
         $rows = $wpdb->get_results($sql);
+        if ($failClosed) {
+            self::guardReadOrThrow('countVisibleByContractOrThrow');
+        } else {
+            self::guardRead('countVisibleByContract');
+        }
+
         $out  = [];
         if (is_array($rows)) {
             foreach ($rows as $row) {

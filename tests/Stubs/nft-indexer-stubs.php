@@ -415,9 +415,20 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @var array<int, array<int, object>> chainId → known collection rows */
             public static array $knownByChain = [];
 
+            /**
+             * PR 7.14: simulate the verified-collection read FAILING.
+             *
+             * The fail-safe reader folds a failure to `[]` exactly as
+             * production's `$rows ?: []` does; the fail-closed reader throws
+             * the real {@see RepositoryReadFailure}. A test can therefore
+             * prove which of the two a caller consults.
+             */
+            public static bool $failVerifiedRead = false;
+
             public static function reset(): void
             {
-                self::$knownByChain = [];
+                self::$knownByChain     = [];
+                self::$failVerifiedRead = false;
             }
 
             /**
@@ -430,6 +441,10 @@ namespace BCC\Trust\Onchain\Repositories {
              */
             public static function listVerifiedByChain(int $chainId, int $limit): array
             {
+                if (self::$failVerifiedRead) {
+                    return [];
+                }
+
                 $verified = [];
                 foreach (self::$knownByChain[$chainId] ?? [] as $row) {
                     if ((int) ($row->is_verified ?? 0) === 1) {
@@ -438,6 +453,19 @@ namespace BCC\Trust\Onchain\Repositories {
                 }
 
                 return array_slice($verified, 0, $limit);
+            }
+
+            /**
+             * @return array<int, object>
+             * @throws RepositoryReadFailure
+             */
+            public static function listVerifiedByChainOrThrow(int $chainId, int $limit): array
+            {
+                if (self::$failVerifiedRead) {
+                    throw new RepositoryReadFailure(self::class, 'listVerifiedByChainOrThrow', 'injected fault');
+                }
+
+                return self::listVerifiedByChain($chainId, $limit);
             }
 
             /**

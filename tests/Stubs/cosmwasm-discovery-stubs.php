@@ -1021,6 +1021,16 @@ namespace BCC\Trust\Onchain\Repositories {
             }
 
             /**
+             * PR 7.14 fail-closed sibling; this stub world never fails a read.
+             *
+             * @return array<int, object>
+             */
+            public static function listVerifiedByChainOrThrow(int $chainId, int $limit): array
+            {
+                return self::listVerifiedByChain($chainId, $limit);
+            }
+
+            /**
              * @param  list<string> $contracts
              * @return array<string, bool>
              */

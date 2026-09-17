@@ -6,6 +6,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness;
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
@@ -16,6 +17,7 @@ use BCC\Trust\Onchain\Support\AlchemyEndpoint;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
+use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
 
 /**
  * EVM Chain Fetcher
@@ -66,7 +68,7 @@ use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
  *     }|null
  * }
  */
-class EvmFetcher implements FetcherInterface
+class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
 {
     private const HTTP_TIMEOUT          = 12;
     private const ALCHEMY_MAX_COUNT     = 1000; // alchemy_getAssetTransfers per-page cap (spike 1)
@@ -153,16 +155,33 @@ class EvmFetcher implements FetcherInterface
      */
     public function count_holdings(string $wallet, string $contract): ?int
     {
+        $evidence = $this->count_holdings_evidence($wallet, $contract);
+
+        return $evidence === null ? null : $evidence->count;
+    }
+
+    /**
+     * PR 7.14: `balanceOf(address)` is a direct read of the WHOLE balance, so a
+     * well-formed answer is always exact — including a genuine zero.
+     *
+     * What is NOT a balance, and is therefore null (UNKNOWN):
+     *   - a stored wallet or contract that is not an EVM address. Nothing
+     *     can be asked, and "we could not ask" is not "they hold none";
+     *   - a result that is not a 32-byte ABI word. `"0x"` in particular is
+     *     what a node answers for an address with NO CODE — an EOA, a
+     *     mistyped contract, or an RPC on the wrong network. It used to
+     *     decode to 0 and revoke every holder of that gate.
+     */
+    public function count_holdings_evidence(string $wallet, string $contract): ?HoldingsCount
+    {
         $addr = strtolower($wallet);
         if (!preg_match('/^0x[a-f0-9]{40}$/', $addr)) {
-            // Malformed input, not a provider outage — a definite "no
-            // holdings for this nonsense address." Stays a real 0.
-            return 0;
+            return null;
         }
 
         $to = strtolower($contract);
         if (!preg_match('/^0x[a-f0-9]{40}$/', $to)) {
-            return 0;
+            return null;
         }
 
         // balanceOf(address) selector = first 4 bytes of keccak256("balanceOf(address)")
@@ -171,40 +190,50 @@ class EvmFetcher implements FetcherInterface
         $data = '0x' . $selector . $paddedWallet;
 
         // ethCall returns null ONLY on transport/RPC error (WP_Error,
-        // non-200, JSON-RPC error envelope, unparseable body). A
-        // SUCCESSFUL balanceOf always returns a hex string — "0x0" decodes
-        // to a real zero below. So null here = UNKNOWN, never "owns none".
+        // non-200, JSON-RPC error envelope, unparseable body).
         $result = $this->ethCall($to, $data);
         if ($result === null) {
             return null;
         }
 
-        $hex = ltrim(substr($result, 2), '0');
+        // A uint256 return is exactly one 32-byte word: 64 hex digits.
+        if (preg_match('/^0x([0-9a-fA-F]{64})/', $result, $word) !== 1) {
+            return null;
+        }
+
+        $hex = ltrim($word[1], '0');
         if ($hex === '') {
-            // Successful call, all-zero hex word = genuine balance of 0.
-            return 0;
+            // A well-formed all-zero word = a genuine balance of 0.
+            return HoldingsCount::exact(0);
         }
 
         // Realistic NFT balances fit in PHP_INT_MAX comfortably.
         // A pathological return > 2^63 would wrap, but that's
         // a broken contract, not user data worth preserving.
-        return (int) hexdec($hex);
+        return HoldingsCount::exact((int) hexdec($hex));
+    }
+
+    /** One `eth_call` per read. */
+    public function max_requests_per_evidence_read(): int
+    {
+        return 1;
     }
 
     /**
      * Full NFT enumeration on EVM needs Alchemy getNFTs / Moralis / similar.
      * Stubbed until the provider decision lands — see HoldingsService.
      *
-     * `complete: true` because this contacts no provider: the empty list is
-     * this driver's definitional answer, never an unresolved read. EVM
-     * ownership is served from the persistent transfer index instead
-     * (see HoldingsService::countFromCacheOrFetch).
+     * PR 7.14: `complete: false`. This driver cannot enumerate a wallet, so
+     * its empty list is not a read of an empty wallet — and labelling it
+     * complete is what let HoldingsService cache "owns nothing" for a day
+     * and answer an ERC-721 gate with it. EVM ownership is decided by a
+     * direct `balanceOf` read instead (see count_holdings_evidence).
      *
-     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool}
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool, served_from_cache: bool}
      */
     public function list_holdings(string $wallet, ?string $cursor = null): array
     {
-        return ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true];
+        return ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => false, 'served_from_cache' => false];
     }
 
     /**

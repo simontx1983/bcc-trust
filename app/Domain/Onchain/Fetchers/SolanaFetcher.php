@@ -6,6 +6,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness;
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
@@ -13,6 +14,7 @@ use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\Support\SolanaEndpoints;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
+use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
 
 /**
  * Solana Chain Fetcher
@@ -23,9 +25,28 @@ use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
  *
  * @phpstan-import-type ChainRow from ChainRepository
  */
-class SolanaFetcher implements FetcherInterface
+class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
 {
     private const HTTP_TIMEOUT = 30;
+
+    /** count_holdings walk: DAS page size and page ceiling (10 × 1000 assets). */
+    private const COUNT_PAGE_LIMIT = 1000;
+    private const COUNT_PAGE_CAP   = 10;
+
+    /**
+     * DAS interfaces the gallery renders as NFTs.
+     *
+     * @var list<string>
+     */
+    private const LIST_NFT_INTERFACES = ['V1_NFT', 'ProgrammableNFT', 'LEGACY_NFT', 'Custom'];
+
+    /**
+     * DAS interfaces that are not NFTs at all. Skipping these does not make a
+     * holdings list incomplete; skipping anything else does.
+     *
+     * @var list<string>
+     */
+    private const LIST_NON_NFT_INTERFACES = ['FungibleToken', 'FungibleAsset', 'Identity', 'Executable'];
 
     /** @var ChainRow */
     private object $chain;
@@ -416,8 +437,35 @@ class SolanaFetcher implements FetcherInterface
      * didn't surface in the first 1000 results would fail the gate.
      * Cap exists so a malicious wallet stuffed with millions of assets
      * can't run our RPC budget into the ground.
+     *
+     * Returns an EXACT count or null — see count_holdings_evidence() for the
+     * lower bound a capped walk can still prove.
      */
     public function count_holdings(string $wallet, string $contract): ?int
+    {
+        $evidence = $this->count_holdings_evidence($wallet, $contract);
+
+        return ($evidence !== null && $evidence->complete) ? $evidence->count : null;
+    }
+
+    /** Worst case: every page of the walk. */
+    public function max_requests_per_evidence_read(): int
+    {
+        return self::COUNT_PAGE_CAP;
+    }
+
+    /**
+     * PR 7.14: the count WITH whether the walk saw the whole wallet.
+     *
+     *   - exact    → the walk reached a short page (the real end);
+     *   - atLeast  → the walk stopped at COUNT_PAGE_CAP with the last page
+     *                still full, so the target may sit on the next page. It
+     *                used to return this partial number as if it were the
+     *                whole answer, and a 0 there revoked a holder;
+     *   - null     → a page failed, came back without an `items` list, or
+     *                the identifier could not be asked about at all.
+     */
+    public function count_holdings_evidence(string $wallet, string $contract): ?HoldingsCount
     {
         // ── PR 5b: THIS IS WHERE THE DEFECT LIVED ───────────────────────
         // `$target = strtolower($contract)` compared a case-FOLDED value
@@ -462,16 +510,18 @@ class SolanaFetcher implements FetcherInterface
         $target  = $identity->canonical();
         $count   = 0;
         $page    = 1;
-        $limit   = 1000;
-        $maxPage = 10; // 10 × 1000 = 10,000 assets scanned per wallet — realistic upper bound.
+        $limit   = self::COUNT_PAGE_LIMIT;
+        $maxPage = self::COUNT_PAGE_CAP;
+        // True until a page proves the walk reached the wallet's real end.
+        $cutOff  = true;
 
         while ($page <= $maxPage) {
-            // rpcCall returns null ONLY on a failed call (WP_Error,
-            // non-200, JSON-RPC error envelope, unparseable body); a
-            // SUCCESSFUL "owns nothing" response yields an EMPTY ARRAY.
-            // We must NOT conflate the two: break-on-error → UNKNOWN
-            // (return null), break-on-empty → real end of the wallet.
-            $items = $this->rpcCall('getAssetsByOwner', [
+            // dasItems returns null on a failed call (WP_Error, non-200,
+            // JSON-RPC error envelope, unparseable body) AND on a `result`
+            // that carries no `items` list — a response we do not understand
+            // is not an empty wallet. A SUCCESSFUL "owns nothing" response
+            // yields an EMPTY ARRAY.
+            $items = $this->dasItems([
                 'ownerAddress'   => $wallet,
                 'displayOptions' => ['showCollectionMetadata' => false],
                 'limit'          => $limit,
@@ -488,12 +538,13 @@ class SolanaFetcher implements FetcherInterface
 
             if ($items === []) {
                 // Successful response, no (more) assets — genuine end.
+                $cutOff = false;
                 break;
             }
 
             foreach ($items as $raw) {
                 $asset = (object) $raw;
-                foreach ($asset->grouping ?? [] as $g) {
+                foreach ((array) ($asset->grouping ?? []) as $g) {
                     $g = (object) $g;
                     // Chain-aware equality through the one shared rule.
                     // `$target` is already canonical (validated above), so
@@ -514,12 +565,41 @@ class SolanaFetcher implements FetcherInterface
             // DAS returns up to `limit` items per page. A short page
             // means we're at the end of the wallet's assets.
             if (count($items) < $limit) {
+                $cutOff = false;
                 break;
             }
             $page++;
         }
 
-        return $count;
+        // Stopped at the page ceiling with the last page still full: what was
+        // counted is real, but the rest of the wallet was never read.
+        return $cutOff
+            ? HoldingsCount::atLeast($count)
+            : HoldingsCount::exact($count);
+    }
+
+    /**
+     * One DAS `getAssetsByOwner` page as a LIST of assets, or null.
+     *
+     * {@see rpcCall()} hands back `result` itself when it has no `items`,
+     * which is right for its other callers (e.g. `getVoteAccounts`) but means
+     * a DAS response missing its `items` list would be iterated as if its
+     * scalar fields were assets. For ownership, that response did not answer
+     * the question, so it is null here.
+     *
+     * @param array<string, mixed> $params
+     * @return list<mixed>|null
+     */
+    private function dasItems(array $params): ?array
+    {
+        $result = $this->rpcResult('getAssetsByOwner', $params);
+        if (!is_array($result) || !array_key_exists('items', $result)) {
+            return null;
+        }
+
+        $items = $result['items'];
+
+        return (is_array($items) && array_is_list($items)) ? $items : null;
     }
 
     /**
@@ -534,33 +614,43 @@ class SolanaFetcher implements FetcherInterface
      * the failure was shaped exactly like "this wallet owns no NFTs" and the
      * caller cached it for 24h.
      *
-     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool}
+     * PR 7.14: a `result` without an `items` list is also a failure, and a
+     * page that drops an asset whose interface is neither a known NFT nor a
+     * known non-NFT (e.g. `MplCoreAsset`) is `complete: false` — the list may
+     * be missing a holding, so it cannot stand in for "owns none". Nothing
+     * here reads a cache, so `served_from_cache` is always false.
+     *
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool, served_from_cache: bool}
      */
     public function list_holdings(string $wallet, ?string $cursor = null): array
     {
         $page  = max(1, (int) ($cursor ?: 1));
         $limit = 500;
 
-        $items = $this->rpcCall('getAssetsByOwner', [
+        $items = $this->dasItems([
             'ownerAddress'   => $wallet,
             'displayOptions' => ['showCollectionMetadata' => true],
             'limit'          => $limit,
             'page'           => $page,
         ]);
 
-        if (!is_array($items)) {
-            return ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => false];
+        if ($items === null) {
+            return ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => false, 'served_from_cache' => false];
         }
 
-        $chainId = (int) $this->chain->id;
-        $nftInterfaces = ['V1_NFT', 'ProgrammableNFT', 'LEGACY_NFT', 'Custom'];
+        $chainId  = (int) $this->chain->id;
+        $complete = true;
 
         $result = [];
         foreach ($items as $raw) {
             $asset = (object) $raw;
 
             $iface = $asset->interface ?? '';
-            if (!in_array($iface, $nftInterfaces, true)) {
+            if (!in_array($iface, self::LIST_NFT_INTERFACES, true)) {
+                if (!in_array($iface, self::LIST_NON_NFT_INTERFACES, true)) {
+                    // Not rendered, and not known to be a non-NFT either.
+                    $complete = false;
+                }
                 continue;
             }
 
@@ -605,10 +695,11 @@ class SolanaFetcher implements FetcherInterface
         $truncated = count($items) >= $limit;
 
         return [
-            'items'     => $result,
-            'truncated' => $truncated,
-            'cursor'    => $truncated ? (string) ($page + 1) : null,
-            'complete'  => true,
+            'items'             => $result,
+            'truncated'         => $truncated,
+            'cursor'            => $truncated ? (string) ($page + 1) : null,
+            'complete'          => $complete,
+            'served_from_cache' => false,
         ];
     }
 
@@ -932,6 +1023,30 @@ class SolanaFetcher implements FetcherInterface
      */
     private function rpcCall(string $method, array $params): ?array
     {
+        $result = $this->rpcResult($method, $params);
+        if (!is_array($result)) {
+            return null;
+        }
+
+        if (isset($result['items']) && is_array($result['items'])) {
+            return $result['items'];
+        }
+
+        return $result;
+    }
+
+    /**
+     * The decoded JSON-RPC `result`, untouched, or null on any failure.
+     *
+     * Split out of {@see rpcCall()} (whose behaviour is unchanged) so the DAS
+     * ownership walk can tell a `result` WITH an `items` list from one
+     * without — see {@see dasItems()}.
+     *
+     * @param array<string, mixed> $params
+     * @return mixed
+     */
+    private function rpcResult(string $method, array $params)
+    {
         $chainId  = (int) $this->chain->id;
         $body     = wp_json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => $method, 'params' => $params]);
 
@@ -992,12 +1107,7 @@ class SolanaFetcher implements FetcherInterface
             return null;
         }
 
-        // DAS returns { result: { items: [...] } }
-        if (isset($json['result']['items']) && is_array($json['result']['items'])) {
-            return $json['result']['items'];
-        }
-
-        return is_array($json['result']) ? $json['result'] : null;
+        return $json['result'];
     }
 
     /**

@@ -26,14 +26,21 @@ if (!defined('ABSPATH')) {
  * Every successful return shape is preserved: nothing about the happy
  * path changes, so no caller had to be rewritten to adopt this.
  *
- * CAUGHT IN EXACTLY TWO PLACES, both deliberate:
+ * CAUGHT ONLY WHERE THE FAILURE BECOMES AN EXPLICIT STATE, never the empty
+ * shape again. Among them:
  *   - {@see \BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot::buildSummary()}
  *     and the Verify Collections page, which degrade to an explicit
  *     "unavailable" panel rather than a panel full of zeroes;
  *   - {@see ChainCheckpointRepository::addCuUsage()}, where the read is
  *     INSIDE a transaction and the catch already rolls back and logs —
  *     so the worker keeps running, but a read error can no longer
- *     masquerade as "that chain has no checkpoint row".
+ *     masquerade as "that chain has no checkpoint row";
+ *   - PR 7.14: {@see \BCC\Trust\Onchain\Services\HoldingsService}'s
+ *     ownership evaluator (wallets, token standard, ERC-1155 index), where
+ *     a failed read is an UNKNOWN verdict (`repository_read_failed`) —
+ *     never INELIGIBLE, which the revoke sweep removes members on — and
+ *     {@see \BCC\Trust\Onchain\Fetchers\CosmosFetcher::list_holdings()},
+ *     where an unreadable verified-collection list is `complete: false`.
  *
  * PII: carries a method name and a MySQL error string (SQL structure,
  * never member data). Safe to log; still never rendered raw to a page.

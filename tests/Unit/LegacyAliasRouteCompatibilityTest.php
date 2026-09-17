@@ -219,23 +219,30 @@ final class LegacyAliasRouteCompatibilityTest extends TestCase
      * only via `stripos($tokenStandard, '1155')`, so `null` (this branch)
      * and `'Metaplex'` (main) both fall through to the identical
      * `count_holdings()` path. No holder-gate outcome changes.
+     *
+     * PR 7.14: HoldingsService now reads it through the fail-closed sibling
+     * `findTokenStandardOrThrow()` (same query, a failed read throws instead
+     * of returning null). The inventory covers both names, so moving a caller
+     * between them is still visible here.
      */
     public function testTheTokenStandardCallerInventoryIsUnchanged(): void
     {
-        $callers = self::grepProduction('::findTokenStandard(');
-
-        $files = array_values(array_unique(array_map(
-            static fn (string $line): string => strtok($line, ':') ?: $line,
-            $callers
-        )));
-        sort($files);
+        $inventory = [];
+        foreach (['::findTokenStandard(', '::findTokenStandardOrThrow('] as $needle) {
+            $files = array_values(array_unique(array_map(
+                static fn (string $line): string => strtok($line, ':') ?: $line,
+                self::grepProduction($needle)
+            )));
+            sort($files);
+            $inventory[$needle] = $files;
+        }
 
         self::assertSame(
             [
-                'app/Domain/Core/Services/wallet/BlockchainQueryService.php',
-                'app/Domain/Onchain/Services/HoldingsService.php',
+                '::findTokenStandard('        => ['app/Domain/Core/Services/wallet/BlockchainQueryService.php'],
+                '::findTokenStandardOrThrow(' => ['app/Domain/Onchain/Services/HoldingsService.php'],
             ],
-            $files,
+            $inventory,
             'a new caller of findTokenStandard() must be assessed for legacy-alias exposure'
         );
     }
