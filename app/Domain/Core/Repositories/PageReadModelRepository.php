@@ -16,6 +16,7 @@
 namespace BCC\Trust\Core\Repositories;
 
 use BCC\Trust\Core\Database\TableRegistry;
+use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\WalletSignalRepository;
 
 if (!defined('ABSPATH')) {
@@ -62,6 +63,17 @@ class PageReadModelRepository
 
     /** @var int Cache TTL in seconds (10 minutes). */
     private const CACHE_TTL = 600;
+
+    /**
+     * Bounded reason codes for a sync that did not complete. A code is the
+     * ENTIRE failure message — never SQL, never the driver's error text, never
+     * a page id — so it is safe to log and to count.
+     */
+    private const FAILURE_AGGREGATE_READ = 'aggregate_score_read_failed';
+    private const FAILURE_FALLBACK_READ  = 'fallback_score_read_failed';
+    private const FAILURE_UPSERT         = 'read_model_upsert_failed';
+    private const FAILURE_PAGE_LIST_READ = 'page_list_read_failed';
+    private const FAILURE_OTHER          = 'sync_failed';
 
     /** @var string Explicit column list — must match schema-project.php. */
     private const COLUMNS = 'page_id, owner_id, trust_score, reputation_tier, confidence_score,
@@ -196,8 +208,23 @@ class PageReadModelRepository
      * Pulls trust score, votes, endorsements from bcc_trust_page_scores,
      * owner from PageOwnerResolver, followers from usermeta, page_type
      * from postmeta, verified status from user_info.
+     *
+     * @throws \Throwable when the sync did not complete. Nothing was written:
+     *                    a score read that did not run is never mistaken for
+     *                    "this page has no score".
      */
     public function syncPage(int $pageId): void
+    {
+        $this->syncPageInternal($pageId, true);
+    }
+
+    /**
+     * The sync itself. `$logFailure` is false only for batch callers, which
+     * summarise every failure in one bounded line instead of one per page.
+     *
+     * @throws \Throwable when the sync did not complete; see syncPage().
+     */
+    private function syncPageInternal(int $pageId, bool $logFailure): void
     {
         global $wpdb;
 
@@ -217,7 +244,7 @@ class PageReadModelRepository
         // ── Pre-fetch WP meta outside the transaction ────────────────
         // These WP API calls may run uncached queries against wp_postmeta /
         // wp_usermeta. Fetching them before the transaction avoids holding
-        // FOR SHARE locks while WordPress resolves meta caches.
+        // shared score-row locks while WordPress resolves meta caches.
         $pageType = get_post_meta($pageId, '_bcc_page_type', true) ?: 'builder';
 
         // Pre-resolve owner so we can fetch follower count before locking.
@@ -244,25 +271,34 @@ class PageReadModelRepository
         // Try the aggregate row (category_id=0) first; fall back to the
         // highest-voted category row so pages with only category-specific
         // scores are not silently stuck at the 50.00 default.
-        // FOR SHARE: acquire a shared lock on the score row so it cannot
-        // be modified between this read and the read-model upsert below.
-        // Concurrent reads (other syncPage calls for different pages) are
-        // unaffected. Concurrent writes (vote deltas) will block until we
+        // LOCK IN SHARE MODE: acquire a shared lock on the score row so it
+        // cannot be modified between this read and the read-model upsert
+        // below. Concurrent reads (other syncPage calls for different pages)
+        // are unaffected. Concurrent writes (vote deltas) will block until we
         // commit — ensuring the snapshot we write to the read model is
         // consistent with the score row at commit time.
-        $score = $wpdb->get_row($wpdb->prepare(
+        //
+        // ⚠ NOT `FOR SHARE`. That is MySQL 8 syntax; production MariaDB 11.8
+        // rejects it (errno 1064), and a rejected read used to fall through
+        // to the neutral defaults below — overwriting every page's real score.
+        // `LOCK IN SHARE MODE` takes the same lock on both engines. Guarded by
+        // NoForShareLockingClauseTest.
+        //
+        // Each read FAILS CLOSED: null from get_row() is "no score row" only
+        // when the statement actually ran. See readScoreRowOrThrow().
+        $score = self::readScoreRowOrThrow($wpdb->prepare(
             "SELECT total_score, reputation_tier, confidence_score,
                     positive_score, negative_score, onchain_bonus,
                     attestation_bonus, vote_count, unique_voters,
                     endorsement_count, page_owner_id, last_vote_at
              FROM {$scores_table}
              WHERE page_id = %d AND category_id = 0
-             FOR SHARE",
+             LOCK IN SHARE MODE",
             $pageId
-        ));
+        ), self::FAILURE_AGGREGATE_READ);
 
-        if (!$score) {
-            $score = $wpdb->get_row($wpdb->prepare(
+        if ($score === null) {
+            $score = self::readScoreRowOrThrow($wpdb->prepare(
                 "SELECT total_score, reputation_tier, confidence_score,
                         positive_score, negative_score, onchain_bonus,
                         attestation_bonus, vote_count, unique_voters,
@@ -271,9 +307,9 @@ class PageReadModelRepository
                  WHERE page_id = %d AND vote_count > 0
                  ORDER BY vote_count DESC
                  LIMIT 1
-                 FOR SHARE",
+                 LOCK IN SHARE MODE",
                 $pageId
-            ));
+            ), self::FAILURE_FALLBACK_READ);
         }
 
         // ── Resolve owner ───────────────────────────────────────────────
@@ -374,7 +410,7 @@ class PageReadModelRepository
             ));
         }
 
-        $wpdb->query($wpdb->prepare(
+        $upserted = $wpdb->query($wpdb->prepare(
             "INSERT INTO {$this->table}
                 (page_id, owner_id, trust_score, reputation_tier, confidence_score,
                  positive_score, negative_score, onchain_bonus, attestation_bonus,
@@ -430,9 +466,19 @@ class PageReadModelRepository
             $score && !empty($score->last_vote_at) ? $score->last_vote_at : null,
             $lastEndorsementAt
         ));
+
+        // The write fails closed too. An unchecked failed upsert used to let
+        // TransactionManager commit nothing and report success, so syncAll()
+        // counted the page as synced and the dirty queue deleted its entry —
+        // leaving a stale row with nothing left to retry it. Only `false` is
+        // a failure: an ON DUPLICATE KEY UPDATE that changes nothing reports
+        // 0 affected rows, which is a success.
+        if ($upserted === false) {
+            throw new RepositoryException(self::FAILURE_UPSERT);
+        }
             });
         } catch (\Throwable $e) {
-            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            if ($logFailure && class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error('[bcc-trust] syncPage transaction failed', [
                     'page_id' => $pageId,
                     'error'   => $e->getMessage(),
@@ -457,18 +503,76 @@ class PageReadModelRepository
     }
 
     /**
-     * Bulk-sync all active pages. Intended for cron or WP-CLI.
+     * Run ONE score read and fail closed if the statement did not run.
      *
-     * @return int Number of pages synced.
+     * `$wpdb->get_row()` returns null both for "this page has no score row"
+     * and for "the statement failed" — a rejected `FOR SHARE`, a lock-wait
+     * timeout, a dropped connection. Treating the second as the first is what
+     * wrote neutral defaults over every page's real score. `last_error` is the
+     * only thing that separates them.
+     *
+     * Scoping — an error can only be THIS read's error:
+     *   - it is cleared here immediately before the read, so a stale error
+     *     left by an unrelated earlier query cannot be attributed to it
+     *     (WordPress's own `wpdb::query()` also `flush()`es it first);
+     *   - an empty statement (prepare() refused to build it) is a failure in
+     *     its own right, because WordPress returns null for it WITHOUT setting
+     *     any error.
+     *
+     * Same idiom as RateLimitRepository::getBucketCount(). Deliberately not
+     * GuardsReadFailures: that trait logs every failed read with the driver's
+     * error text, and a batch over thousands of pages must log once.
+     *
+     * @param  string|null $sql        the prepared statement
+     * @param  string      $reasonCode one of the FAILURE_* codes
+     * @return \stdClass|null the score row (OBJECT output), or null when there
+     *                        genuinely is none
+     * @throws RepositoryException carrying only $reasonCode
+     */
+    private static function readScoreRowOrThrow(?string $sql, string $reasonCode): ?\stdClass
+    {
+        global $wpdb;
+
+        if ($sql === null || $sql === '') {
+            throw new RepositoryException($reasonCode);
+        }
+
+        $wpdb->last_error = '';
+        $row = $wpdb->get_row($sql);
+
+        // Local copy + strlen: PHPStan's wpdb stub narrows last_error to the
+        // literal '' (see RateLimitRepository::getBucketCount()).
+        $lastError = (string) $wpdb->last_error;
+        if (strlen($lastError) > 0) {
+            throw new RepositoryException($reasonCode);
+        }
+
+        return $row instanceof \stdClass ? $row : null;
+    }
+
+    /**
+     * Bulk-sync all published pages. Intended for cron or WP-CLI.
+     *
+     * One broken page never stops the rest: each page is synced on its own
+     * and a failure is COUNTED, not thrown. The run ends with ONE summary line
+     * carrying only numeric counts and bounded reason codes — no page ids, no
+     * SQL, no scores — so a systematic failure costs one log line, not one per
+     * page. (It used to be 5,688 SQL errors a day, all reported as success.)
+     *
+     * @return int Number of pages that ACTUALLY synced — failures excluded.
      */
     public function syncAll(int $batchSize = 200): int
     {
         global $wpdb;
 
-        $count  = 0;
+        $synced = 0;
+        $failed = 0;
+        /** @var array<string, int> $failureReasons */
+        $failureReasons = [];
         $offset = 0;
 
         do {
+            $wpdb->last_error = '';
             $pageIds = $wpdb->get_col($wpdb->prepare(
                 "SELECT ID FROM {$wpdb->posts}
                  WHERE post_type = 'peepso-page' AND post_status = 'publish'
@@ -478,17 +582,59 @@ class PageReadModelRepository
                 $offset
             ));
 
+            // A page list that could not be read is not an empty site.
+            $listError = (string) $wpdb->last_error;
+            if (strlen($listError) > 0) {
+                $failureReasons[self::FAILURE_PAGE_LIST_READ] = ($failureReasons[self::FAILURE_PAGE_LIST_READ] ?? 0) + 1;
+                break;
+            }
+
             foreach ($pageIds as $id) {
-                $this->syncPage((int) $id);
-                $count++;
+                try {
+                    $this->syncPageInternal((int) $id, false);
+                    $synced++;
+                } catch (\Throwable $e) {
+                    $failed++;
+                    $reason = self::failureReason($e);
+                    $failureReasons[$reason] = ($failureReasons[$reason] ?? 0) + 1;
+                }
             }
 
             $offset += $batchSize;
         } while (count($pageIds) === $batchSize);
 
-        wp_cache_set('rm_has_data', $count > 0 ? 1 : 0, self::CACHE_GROUP, 3600);
+        wp_cache_set('rm_has_data', $synced > 0 ? 1 : 0, self::CACHE_GROUP, 3600);
 
-        return $count;
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            $summary = [
+                'pages_synced'    => $synced,
+                'pages_failed'    => $failed,
+                'failure_reasons' => $failureReasons,
+            ];
+            if ($failureReasons === []) {
+                \BCC\Core\Log\Logger::info('[bcc-trust] read model full sync finished', $summary);
+            } else {
+                \BCC\Core\Log\Logger::error('[bcc-trust] read model full sync finished with failures', $summary);
+            }
+        }
+
+        return $synced;
+    }
+
+    /**
+     * Map a sync failure to a bounded reason code. Anything that is not one
+     * of the score-read codes collapses to FAILURE_OTHER, so an exception's
+     * free text can never reach the summary.
+     */
+    private static function failureReason(\Throwable $e): string
+    {
+        if ($e instanceof RepositoryException
+            && in_array($e->getMessage(), [self::FAILURE_AGGREGATE_READ, self::FAILURE_FALLBACK_READ, self::FAILURE_UPSERT], true)
+        ) {
+            return $e->getMessage();
+        }
+
+        return self::FAILURE_OTHER;
     }
 
     /**

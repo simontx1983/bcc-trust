@@ -192,3 +192,70 @@ jobs:
         run: composer update --no-interaction --no-progress --prefer-dist
       - name: Integration tests (real $wpdb vs MySQL)
         run: composer test:integration
+
+  # Production runs MariaDB 11.8, not MySQL 8, and the two engines do not
+  # accept the same SQL. `FOR SHARE` is valid MySQL 8 and a parse error on
+  # MariaDB: it passed the job above for months while production logged
+  # 5,688 SQL errors a day and overwrote every page's read model with neutral
+  # defaults. This job runs the engine-compatibility group against the
+  # production engine AND production's server settings. It adds to the MySQL
+  # job; it does not replace it.
+  integration-mariadb:
+    name: PHP integration (MariaDB 11.8 — production engine)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/public/wp-content/plugins/bcc-trust
+    env:
+      BCC_TEST_DB_HOST: 127.0.0.1
+      BCC_TEST_DB_PORT: '3306'
+      BCC_TEST_DB_USER: root
+      BCC_TEST_DB_PASS: root
+      BCC_TEST_DB_NAME: bcc_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app/public/wp-content/plugins/bcc-trust
+
+      - uses: actions/checkout@v4
+        with:
+          repository: simontx1983/bcc-core
+          path: app/public/wp-content/plugins/bcc-core
+
+      # `docker run`, not a service container: services cannot pass server
+      # arguments, and production's non-strict sql_mode and READ-COMMITTED
+      # isolation are part of what is under test.
+      - name: Start MariaDB 11.8.9 with production settings
+        working-directory: .
+        run: |
+          docker run -d --name mariadb -p 3306:3306 -e MARIADB_ROOT_PASSWORD=root \
+            mariadb:11.8.9 \
+            --sql-mode=NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION \
+            --transaction-isolation=READ-COMMITTED \
+            --innodb-lock-wait-timeout=50 \
+            --character-set-server=utf8mb4 \
+            --collation-server=utf8mb4_unicode_ci
+          for i in $(seq 1 90); do
+            if docker exec mariadb healthcheck.sh --connect --innodb_initialized >/dev/null 2>&1; then
+              echo "MariaDB ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          docker exec mariadb mariadb -uroot -proot -e \
+            "SELECT VERSION(), @@GLOBAL.sql_mode, @@GLOBAL.transaction_isolation, @@GLOBAL.innodb_lock_wait_timeout"
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: gmp, mbstring, mysqli
+          tools: composer:v2
+          coverage: none
+      - name: Install dependencies
+        run: composer update --no-interaction --no-progress --prefer-dist
+      - name: Integration tests — MariaDB compatibility group
+        run: |
+          vendor/bin/phpunit -c phpunit-integration.xml.dist --group mariadb \
+            --fail-on-empty-test-suite --log-junit "$RUNNER_TEMP/mariadb-junit.xml"
+          # A group filter that matches nothing must not pass as a green run.
+          php -r '$n = count(simplexml_load_file($argv[1])->xpath("//testcase")); echo "MariaDB compatibility tests executed: {$n}\n"; exit($n >= 18 ? 0 : 1);' "$RUNNER_TEMP/mariadb-junit.xml"
