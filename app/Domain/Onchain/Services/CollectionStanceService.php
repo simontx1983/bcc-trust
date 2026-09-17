@@ -170,8 +170,18 @@ final class CollectionStanceService
         // already separates the two answers that must never be conflated:
         // null → "could not verify" (503, retryable), 0 → "definitely not
         // held" (403). Neither grants anything without positive proof.
+        //
+        // PR 7.14: an inactive chain, a driver that cannot count, a failed
+        // read or incomplete evidence is now null (503) as well — none of
+        // them proves the member does not hold it. Reads are bounded by the
+        // stance budget.
         if (!self::holdsPerPanelSources($userId, (int) $chain->id, $contract)) {
-            $count = HoldingsService::ownsAny($userId, (string) $chain->slug, $contract);
+            $count = HoldingsService::ownsAny(
+                $userId,
+                (string) $chain->slug,
+                $contract,
+                HoldingsService::verificationBudget(HoldingsService::SURFACE_STANCE)
+            );
             if ($count === null) {
                 return ['ok' => false, 'error' => 'bcc_unavailable'];
             }

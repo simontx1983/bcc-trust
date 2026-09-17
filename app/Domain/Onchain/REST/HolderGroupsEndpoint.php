@@ -169,9 +169,20 @@ final class HolderGroupsEndpoint
         // facts, true regardless of whether the gate can be evaluated) but
         // can never appear under `eligible_to_join`, because we have no
         // basis to claim the viewer qualifies.
+        //
+        // PR 7.14: only groups that can land in `eligible_to_join` are asked
+        // about. A joined or opted-out group's balance was never read below,
+        // yet each one used to cost a provider walk per wallet. The listing
+        // budget bounds what is left; a group it cannot reach is simply not
+        // suggested this poll.
+        $gateService = OnchainPlugin::instance()->nftGroupGateService();
+
         $balanceKeyByGroup = [];
         $pairs             = [];
         foreach ($configs as $cfg) {
+            if (isset($memberships[$cfg->groupId]) || $gateService->isOptOutActive($userId, $cfg->groupId)) {
+                continue;
+            }
             $identity = GateIdentityResolver::resolve($cfg);
             if (!$identity->isResolved()) {
                 continue;
@@ -179,11 +190,15 @@ final class HolderGroupsEndpoint
             $slug      = $identity->chainSlug();
             $canonical = $identity->canonical();
             $balanceKeyByGroup[$cfg->groupId] = $slug . ':' . $canonical;
-            $pairs[] = [$slug, $canonical];
+            $pairs[] = [$slug, $canonical, $cfg->minBalance];
         }
-        $balances = HoldingsService::ownsAnyMany($userId, $pairs);
-
-        $gateService = OnchainPlugin::instance()->nftGroupGateService();
+        $balances = $pairs === []
+            ? []
+            : HoldingsService::ownsAnyMany(
+                $userId,
+                $pairs,
+                HoldingsService::verificationBudget(HoldingsService::SURFACE_LISTING)
+            );
 
         $joined    = [];
         $eligible  = [];

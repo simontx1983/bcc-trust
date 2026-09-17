@@ -21,6 +21,7 @@ namespace BCC\Trust\Onchain\Services;
 
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
+use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\ValueObjects\GatedGroupConfig;
 use BCC\Trust\Onchain\ValueObjects\JoinResult;
 
@@ -83,14 +84,15 @@ final class NftGroupGateService {
         }
 
         // Three-outcome verdict. JOIN fails CLOSED: on UNKNOWN (provider
-        // outage) we refuse to add the user — never bring someone into a
-        // gated group during an RPC hiccup, since we can't actually prove
-        // they qualify. They retry once the provider recovers.
+        // outage, unavailable chain, failed read, incomplete evidence, or
+        // the join budget running out) we refuse to add the user — never
+        // bring someone into a gated group without proof. They retry.
         $verdict = HoldingsService::eligibilityVerdict(
             $userId,
             $identity->chainSlug(),
             $identity->canonical(),
-            $config->minBalance
+            $config->minBalance,
+            HoldingsService::verificationBudget(HoldingsService::SURFACE_JOIN)
         );
         if ($verdict->isUnknown()) {
             return JoinResult::verifyUnavailable($config->minBalance);
@@ -124,9 +126,12 @@ final class NftGroupGateService {
      * wallet fetches are amortized across all gated groups. The
      * per-(wallet, contract) RPC count_holdings remains unavoidable.
      *
+     * PR 7.14: provider reads are bounded by `$budget` — the reconcile budget
+     * when omitted. A group the budget could not reach is not eligible.
+     *
      * @return list<GatedGroupConfig>
      */
-    public function findEligibleGroups(int $userId): array {
+    public function findEligibleGroups(int $userId, ?CosmwasmTickBudget $budget = null): array {
         if ($userId <= 0) {
             return [];
         }
@@ -168,14 +173,18 @@ final class NftGroupGateService {
             $slug         = $identity->chainSlug();
             $canonical    = $identity->canonical();
             $candidates[] = [$cfg, $slug, $canonical];
-            $pairs[]      = [$slug, $canonical];
+            $pairs[]      = [$slug, $canonical, $cfg->minBalance];
         }
 
         if ($candidates === []) {
             return [];
         }
 
-        $balances = HoldingsService::ownsAnyMany($userId, $pairs);
+        $balances = HoldingsService::ownsAnyMany(
+            $userId,
+            $pairs,
+            $budget ?? HoldingsService::verificationBudget(HoldingsService::SURFACE_RECONCILE)
+        );
 
         $eligible = [];
         foreach ($candidates as [$cfg, $slug, $canonical]) {

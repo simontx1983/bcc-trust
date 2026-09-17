@@ -28,6 +28,8 @@ if (!defined('ABSPATH')) {
  */
 final class WalletRepository
 {
+    use GuardsReadFailures;
+
     public static function table(): string
     {
         return DB::table('wallet_links');
@@ -176,8 +178,42 @@ final class WalletRepository
         return true;
     }
 
-    /** @return list<WalletWithChain> */
+    /**
+     * A user's wallets. FAIL-SAFE: a failed read is logged and yields `[]`,
+     * which is the right answer for display surfaces (profile, picker).
+     *
+     * ⚠ Never use this to decide AGAINST a user. An empty list here cannot
+     * tell "no wallets" from "the query did not run" — use
+     * {@see getForUserOrThrow()} for any ownership decision.
+     *
+     * @return list<WalletWithChain>
+     */
     public static function getForUser(int $userId, ?string $walletType = null, bool $verifiedOnly = false): array
+    {
+        return self::readForUser($userId, $walletType, $verifiedOnly, false);
+    }
+
+    /**
+     * FAIL-CLOSED sibling of {@see getForUser()} — one query, two policies.
+     *
+     * PR 7.14: the holder-group revoke sweep read "no wallets" after a failed
+     * query as a member who holds nothing, and removed them. Ownership
+     * decisions call this instead, so a failed read reaches the verdict as
+     * an exception and becomes UNKNOWN.
+     *
+     * @return list<WalletWithChain>
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function getForUserOrThrow(int $userId, ?string $walletType = null, bool $verifiedOnly = false): array
+    {
+        return self::readForUser($userId, $walletType, $verifiedOnly, true);
+    }
+
+    /**
+     * @return list<WalletWithChain>
+     * @throws RepositoryReadFailure when $failClosed and the read did not run
+     */
+    private static function readForUser(int $userId, ?string $walletType, bool $verifiedOnly, bool $failClosed): array
     {
         global $wpdb;
         $table  = self::table();
@@ -213,6 +249,12 @@ final class WalletRepository
              LIMIT 200",
             ...$args
         ));
+
+        if ($failClosed) {
+            self::guardReadOrThrow('getForUserOrThrow');
+        } else {
+            self::guardRead('getForUser');
+        }
 
         return $rows ?: [];
     }

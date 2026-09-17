@@ -84,12 +84,19 @@ final class HoldingsCompletenessTest extends TestCase
         return $r;
     }
 
+    /**
+     * PR 7.14: `countFromCacheOrFetch()` now returns a HoldingsCount or an
+     * UNKNOWN reason and takes a provider budget. This helper keeps the old
+     * reading so the cases below still say what they said:
+     *   - a decisive count (exact, or a positive lower bound) → that int;
+     *   - anything that cannot prove a number (a reason, or `atLeast(0)`) → null.
+     */
     private function gateCount(): ?int
     {
         $m = new \ReflectionMethod(HoldingsService::class, 'countFromCacheOrFetch');
         $m->setAccessible(true);
 
-        /** @var int|null $r */
+        /** @var \BCC\Trust\Onchain\ValueObjects\HoldingsCount|string $r */
         $r = $m->invoke(
             null,
             new \BCC\Trust\Onchain\Fetchers\BccScriptedFetcher(),
@@ -97,10 +104,15 @@ final class HoldingsCompletenessTest extends TestCase
             self::WALLET,
             self::CONTRACT,
             self::CHAIN_ID,
-            null
+            null,
+            HoldingsService::verificationBudget(HoldingsService::SURFACE_JOIN)
         );
 
-        return $r;
+        if (is_string($r)) {
+            return null;
+        }
+
+        return ($r->complete || $r->count > 0) ? $r->count : null;
     }
 
     /** @param list<array<string, mixed>> $items */
@@ -302,11 +314,18 @@ final class HoldingsCompletenessTest extends TestCase
     }
 
     /**
-     * A COMPLETE list with zero matches IS a real zero, and is answered from
-     * the cache without a request. Without this the fix would have cost an
-     * RPC on every gate check forever.
+     * ⚠ PR 7.14 REVERSED THIS. It was "a COMPLETE list with zero matches IS a
+     * real zero, answered from the cache". It is not: a complete walk of the
+     * GALLERY does not cover every gate contract (Cosmos walks only the top
+     * verified collections; EVM cannot enumerate at all and used to cache
+     * exactly this empty payload), and it can be a day old. Owner decision:
+     * never trust a cached zero. The accepted cost is one provider count per
+     * non-holding wallet per gate check.
+     *
+     * Old expectation: 0, and no request. New: the chain is asked; this
+     * fetcher cannot answer, so the result is UNKNOWN, never 0.
      */
-    public function testACompleteCachedListStillAnswersAGateZeroFromCache(): void
+    public function testACompleteCachedListNoLongerAnswersAGateZeroFromCache(): void
     {
         \BccHoldingsWorld::$transients[self::CACHE_KEY] = [
             'items'     => [],
@@ -314,18 +333,41 @@ final class HoldingsCompletenessTest extends TestCase
             'complete'  => true,
         ];
 
-        self::assertSame(0, $this->gateCount());
-        self::assertNotContains('count_holdings', \BccHoldingsWorld::$fetcherCalls, 'no request was needed');
+        self::assertNull($this->gateCount(), 'a cached empty list is not proof of an empty wallet');
+        self::assertContains('count_holdings', \BccHoldingsWorld::$fetcherCalls, 'the chain was asked');
     }
 
     /**
-     * ⚠ POSITIVE EVIDENCE SURVIVES INCOMPLETENESS. A partial list that DID
-     * turn up the target proves ownership — the tail could only have added
-     * more. Falling through here would spend a request to re-learn something
-     * already known, and would risk answering UNKNOWN for a holder we can
-     * see is a holder.
+     * ⚠ POSITIVE EVIDENCE SURVIVES INCOMPLETENESS — WHILE IT IS RECENT AND
+     * FIRST-HAND. A partial list that DID turn up the target proves ownership
+     * — the tail could only have added more. Falling through here would
+     * spend a request to re-learn something already known.
+     *
+     * PR 7.14 input: the same list, stamped the way a post-7.14 walk stamps it.
      */
     public function testAMatchInAnIncompleteListStillCounts(): void
+    {
+        \BccHoldingsWorld::$transients[self::CACHE_KEY] = [
+            'items'             => [$this->item(self::CONTRACT, '1'), $this->item(self::CONTRACT, '2')],
+            'truncated'         => false,
+            'complete'          => false,
+            'observed_at'       => time() - 60,
+            'served_from_cache' => false,
+        ];
+
+        self::assertSame(2, $this->gateCount());
+        self::assertNotContains('count_holdings', \BccHoldingsWorld::$fetcherCalls);
+    }
+
+    /**
+     * PR 7.14, safeguard 1: the ORIGINAL input of the case above — a list
+     * with no `observed_at`, as every pre-7.14 payload is. Its age is
+     * unknown, so its positive cannot keep anyone in; the chain is asked.
+     *
+     * Old expectation: 2 with no request. New: a request, and this fetcher's
+     * UNKNOWN.
+     */
+    public function testAMatchInAnUnstampedListIsReVerified(): void
     {
         \BccHoldingsWorld::$transients[self::CACHE_KEY] = [
             'items'     => [$this->item(self::CONTRACT, '1'), $this->item(self::CONTRACT, '2')],
@@ -333,8 +375,8 @@ final class HoldingsCompletenessTest extends TestCase
             'complete'  => false,
         ];
 
-        self::assertSame(2, $this->gateCount());
-        self::assertNotContains('count_holdings', \BccHoldingsWorld::$fetcherCalls);
+        self::assertNull($this->gateCount());
+        self::assertContains('count_holdings', \BccHoldingsWorld::$fetcherCalls);
     }
 
     /**

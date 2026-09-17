@@ -2,13 +2,19 @@
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness;
+use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
+use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
+use BCC\Trust\Onchain\ValueObjects\EligibilityVerdict;
+use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -47,6 +53,40 @@ final class HoldingsService
     private const PER_WALLET_PAGE_CAP = 10;
 
     /**
+     * PR 7.14 — the oldest a cached POSITIVE may be and still keep or grant
+     * membership, measured from `observed_at` (when the walk that produced it
+     * began). Older, or of unknown age, and the evaluator asks the chain. The
+     * ERC-1155 index is held to the same limit through its checkpoint's
+     * `last_run_at`.
+     */
+    private const POSITIVE_EVIDENCE_MAX_AGE = DAY_IN_SECONDS;
+
+    /**
+     * PR 7.14 — every surface that asks the evaluator gets a hard provider
+     * budget: [provider page requests before retries, wall-clock seconds].
+     * Each read is charged the fetcher's declared worst case up front. When a
+     * read no longer fits, the answer is UNKNOWN (`verification_budget_exhausted`).
+     */
+    public const SURFACE_JOIN      = 'join';
+    public const SURFACE_STANCE    = 'stance';
+    public const SURFACE_LISTING   = 'listing';
+    public const SURFACE_PROFILE   = 'profile';
+    public const SURFACE_RECONCILE = 'reconcile';
+    public const SURFACE_REVOKE    = 'revoke';
+
+    private const SURFACE_BUDGETS = [
+        self::SURFACE_JOIN      => [30, 10],
+        self::SURFACE_STANCE    => [30, 10],
+        self::SURFACE_LISTING   => [40, 8],
+        self::SURFACE_PROFILE   => [20, 6],
+        self::SURFACE_RECONCILE => [60, 15],
+        self::SURFACE_REVOKE    => [300, 20],
+    ];
+
+    /** Charged per read to a fetcher that does not declare its own worst case. */
+    private const UNDECLARED_READ_COST = 10;
+
+    /**
      * Shape returned to consumers.
      *
      * @phpstan-type HoldingItem array{
@@ -65,166 +105,200 @@ final class HoldingsService
      */
 
     /**
-     * Count holdings across all connected wallets for a specific collection.
+     * A fresh provider budget for one request on one surface.
      *
-     * Gate path. Returns the highest single-wallet balance (not the sum),
-     * because NFT gates typically mean "owns ≥ N in one wallet" — summing
-     * across wallets would let a user split one NFT across two wallets
-     * to "double" their count, which is incorrect.
-     *
-     * Token-standard branch:
-     *   - ERC-721 / unknown → existing path: gallery transient cache,
-     *     falling through to `EvmFetcher::count_holdings()` (eth_call
-     *     `balanceOf(address)`) on miss.
-     *   - ERC-1155          → reads from `NftHoldingsRepository::countVisibleByContract()`
-     *     (the persistent transfer index, populated by EvmFetcher's
-     *     `fetch_transfers_since` ingestion). Skips eth_call entirely
-     *     because ERC-1155 uses `balanceOf(address, uint256)` which
-     *     requires a token_id — and the chosen gate semantic is
-     *     "any token under the contract" so per-token-id RPC isn't
-     *     applicable. Trade-off: indexer-cadence freshness lag (~1 min);
-     *     acceptable for the soft-gate UX.
-     *
-     * Returns:
-     *   - `int >= 0` → highest REAL single-wallet balance (0 if no wallet
-     *                  holds any, OR if the chain/driver is unsupported or
-     *                  no wallet is connected — those are definite zeros).
-     *   - `null`     → every wallet that COULD have qualified failed to
-     *                  verify (provider outage). Caller must fail open /
-     *                  fail closed per its own posture — never read null
-     *                  as a real zero.
-     *
-     * For a three-way verdict (ELIGIBLE / INELIGIBLE / UNKNOWN) prefer
-     * {@see eligibilityVerdict}; this method is the raw nullable balance.
+     * Units are provider page requests before retries (see SURFACE_BUDGETS).
+     * An unknown surface gets the join budget — small, never unbounded.
      */
-    public static function ownsAny(int $userId, string $chainSlug, string $contract): ?int
+    public static function verificationBudget(string $surface): CosmwasmTickBudget
     {
-        $chain = ChainRepository::getBySlug($chainSlug);
-        if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
-            return 0;
-        }
+        [$requests, $seconds] = self::SURFACE_BUDGETS[$surface] ?? self::SURFACE_BUDGETS[self::SURFACE_JOIN];
 
-        $fetcher = FetcherFactory::make_for_chain($chain);
-        if (!$fetcher->supports_feature('holdings_count')) {
-            return 0;
-        }
+        return new CosmwasmTickBudget($requests, $seconds);
+    }
 
-        $wallets = self::walletsForUserOnChain($userId, (int) $chain->id);
-        if (empty($wallets)) {
-            return 0;
-        }
+    /**
+     * Does the user hold at least one token of this collection?
+     *
+     * Stance path. Returns:
+     *   - `int >= 1` → proven: a wallet holds at least this many;
+     *   - `0`        → every linked wallet on the chain gave a complete,
+     *                  successful answer below one (or none is linked);
+     *   - `null`     → not decided: the chain is missing or inactive, there
+     *                  is no driver that can count, a read failed, the
+     *                  evidence was incomplete, or the budget ran out. Never
+     *                  read null as a zero.
+     *
+     * Reduces {@see eligibilityVerdict()} at a minimum of one, so it shares the
+     * same evidence rules and stops at the first wallet that proves ownership.
+     */
+    public static function ownsAny(int $userId, string $chainSlug, string $contract, ?CosmwasmTickBudget $budget = null): ?int
+    {
+        $verdict = self::eligibilityVerdict(
+            $userId,
+            $chainSlug,
+            $contract,
+            1,
+            $budget ?? self::verificationBudget(self::SURFACE_STANCE)
+        );
 
-        $chainId       = (int) $chain->id;
-        $tokenStandard = CollectionRepository::findTokenStandard($chainId, $contract);
-
-        $max     = null; // highest REAL count seen
-        $sawNull = false; // at least one wallet couldn't verify
-        foreach ($wallets as $w) {
-            $count = self::countFromCacheOrFetch(
-                $fetcher,
-                (int) $w->id,
-                $w->wallet_address,
-                $contract,
-                $chainId,
-                $tokenStandard
-            );
-            if ($count === null) {
-                $sawNull = true;
-                continue;
-            }
-            if ($max === null || $count > $max) {
-                $max = $count;
-            }
-        }
-
-        // If we have any real count, that's the answer (a real ≥ threshold
-        // wallet makes the unknown wallets moot). If every wallet failed,
-        // return null (UNKNOWN). $max === null && !$sawNull can't happen
-        // (the empty-wallets case returned 0 above).
-        if ($max !== null) {
-            return $max;
-        }
-        return $sawNull ? null : 0;
+        return $verdict->isUnknown() ? null : ($verdict->bestKnownBalance ?? 0);
     }
 
     /**
      * Reduce a user's wallet set on one (chain, contract) to a single
-     * three-outcome verdict. This is the canonical gate decision used by
-     * both the JOIN path (fail CLOSED on UNKNOWN — never add during an
-     * outage) and the REVOKE sweep (fail OPEN on UNKNOWN — never evict on
-     * a hiccup; the next sweep retries).
+     * three-outcome verdict — the one ownership authority. JOIN fails CLOSED
+     * on UNKNOWN (never add without proof); the REVOKE sweep fails OPEN on
+     * UNKNOWN (never remove without proof).
      *
-     * Outcomes:
-     *   - ELIGIBLE   → some wallet's REAL count ≥ minBalance.
-     *   - INELIGIBLE → every wallet returned a REAL count and none reached
-     *                  minBalance (certain non-qualification).
-     *   - UNKNOWN    → no wallet reached minBalance AND at least one wallet
-     *                  could not be verified (provider error).
+     * PR 7.14 truth table:
+     *   - ELIGIBLE   → some wallet PROVED a count ≥ minBalance. A capped or
+     *                  cached count proves "at least N" and is enough.
+     *   - INELIGIBLE → the wallet list was read, and every wallet gave a
+     *                  COMPLETE, successful count below minBalance. An empty
+     *                  wallet list is INELIGIBLE with reason ''.
+     *   - UNKNOWN    → anything else, with a bounded reason: the chain is
+     *                  missing or inactive (`chain_unavailable`), no driver can
+     *                  count (`holdings_driver_unsupported`), a repository read
+     *                  failed (`repository_read_failed`), a provider could not
+     *                  answer or threw (`provider_unavailable`), a count could
+     *                  not prove a shortfall (`evidence_incomplete`), index
+     *                  evidence was too old (`evidence_stale`), or the budget
+     *                  ran out (`verification_budget_exhausted`).
      *
-     * Unsupported chain / no connected wallet → INELIGIBLE (a definite
-     * "not a holder here," not an outage).
+     * Before this, a missing or inactive chain, a missing driver and a failed
+     * wallet query all returned INELIGIBLE — the verdict the sweep removes on.
+     *
+     * `$budget` bounds provider reads; omitted, the join budget applies.
      */
     public static function eligibilityVerdict(
         int $userId,
         string $chainSlug,
         string $contract,
-        int $minBalance
-    ): \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict {
+        int $minBalance,
+        ?CosmwasmTickBudget $budget = null
+    ): EligibilityVerdict {
         $min = max(1, $minBalance);
 
+        $context = self::chainContext($userId, $chainSlug);
+        if (is_string($context)) {
+            return EligibilityVerdict::unknownBecause($min, null, $context);
+        }
+        [$chain, $fetcher, $wallets] = $context;
+
+        return self::verdictForWallets(
+            $fetcher,
+            $wallets,
+            $contract,
+            (int) $chain->id,
+            $min,
+            $budget ?? self::verificationBudget(self::SURFACE_JOIN)
+        );
+    }
+
+    /**
+     * The chain, a fetcher that can count holdings on it, and the user's
+     * linked wallets there — or the UNKNOWN reason one of them could not be
+     * established. None of these failures says anything about what the
+     * member holds.
+     *
+     * @return array{0: ChainRow, 1: FetcherInterface, 2: list<WalletWithChain>}|string
+     */
+    private static function chainContext(int $userId, string $chainSlug): array|string
+    {
+        // getBySlug answers from the ACTIVE set, so a missing slug, an
+        // inactive chain and an unreadable registry all arrive here as null.
         $chain = ChainRepository::getBySlug($chainSlug);
-        if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
-            return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::ineligible($min, 0);
+        if ($chain === null) {
+            return EligibilityVerdict::REASON_CHAIN_UNAVAILABLE;
+        }
+
+        if (!FetcherFactory::has_driver($chain->chain_type)) {
+            return EligibilityVerdict::REASON_DRIVER_UNSUPPORTED;
         }
 
         $fetcher = FetcherFactory::make_for_chain($chain);
         if (!$fetcher->supports_feature('holdings_count')) {
-            return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::ineligible($min, 0);
+            return EligibilityVerdict::REASON_DRIVER_UNSUPPORTED;
         }
 
-        $wallets = self::walletsForUserOnChain($userId, (int) $chain->id);
-        if (empty($wallets)) {
-            return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::ineligible($min, 0);
+        try {
+            $wallets = self::walletsForUserOnChain($userId, (int) $chain->id);
+        } catch (RepositoryReadFailure $e) {
+            return EligibilityVerdict::REASON_READ_FAILED;
         }
 
-        $chainId       = (int) $chain->id;
-        $tokenStandard = CollectionRepository::findTokenStandard($chainId, $contract);
+        return [$chain, $fetcher, $wallets];
+    }
 
-        $bestReal = null; // highest REAL count
-        $sawNull  = false;
+    /**
+     * @param list<WalletWithChain> $wallets
+     */
+    private static function verdictForWallets(
+        FetcherInterface $fetcher,
+        array $wallets,
+        string $contract,
+        int $chainId,
+        int $min,
+        CosmwasmTickBudget $budget
+    ): EligibilityVerdict {
+        if ($wallets === []) {
+            // Read successfully, and there is none: a complete answer.
+            return EligibilityVerdict::ineligible($min, 0);
+        }
+
+        try {
+            $tokenStandard = CollectionRepository::findTokenStandardOrThrow($chainId, $contract);
+        } catch (RepositoryReadFailure $e) {
+            // Without the standard we cannot tell which evidence source applies.
+            return EligibilityVerdict::unknownBecause($min, null, EligibilityVerdict::REASON_READ_FAILED);
+        }
+
+        $best   = null;  // highest count any wallet actually showed
+        $reason = null;  // why a wallet could not settle the question
         foreach ($wallets as $w) {
-            $count = self::countFromCacheOrFetch(
+            $evidence = self::countFromCacheOrFetch(
                 $fetcher,
                 (int) $w->id,
                 $w->wallet_address,
                 $contract,
                 $chainId,
-                $tokenStandard
+                $tokenStandard,
+                $budget
             );
-            if ($count === null) {
-                $sawNull = true;
+
+            if (is_string($evidence)) {
+                $reason = self::strongerReason($reason, $evidence);
                 continue;
             }
-            if ($bestReal === null || $count > $bestReal) {
-                $bestReal = $count;
+
+            $best     = max($best ?? 0, $evidence->count);
+            $decision = $evidence->decide($min);
+            if ($decision === true) {
+                // Proof in one wallet settles it, whatever the others say.
+                return EligibilityVerdict::eligible($min, $evidence->count);
             }
-            if ($count >= $min) {
-                // A real wallet clears the bar — definitively eligible,
-                // regardless of any unknown siblings.
-                return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::eligible($min, $count);
+            if ($decision === null) {
+                $reason = self::strongerReason($reason, EligibilityVerdict::REASON_EVIDENCE_INCOMPLETE);
             }
         }
 
-        // No wallet cleared the bar.
-        if ($sawNull) {
-            // Some wallet couldn't be verified — we can't be SURE they
-            // don't qualify. UNKNOWN.
-            return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::unknown($min, $bestReal);
+        if ($reason !== null) {
+            return EligibilityVerdict::unknownBecause($min, $best, $reason);
         }
 
-        // Every wallet returned a real count and none reached the bar —
-        // certain non-qualification.
-        return \BCC\Trust\Onchain\ValueObjects\EligibilityVerdict::ineligible($min, $bestReal ?? 0);
+        // Every wallet answered completely and none reached the bar.
+        return EligibilityVerdict::ineligible($min, $best ?? 0);
+    }
+
+    /**
+     * The reason reported when several wallets could not decide. The first
+     * one wins, except that an exhausted budget always surfaces: it is the
+     * one a caller acts on (the sweep stops its tick on it).
+     */
+    private static function strongerReason(?string $current, string $new): string
+    {
+        return ($current === null || $new === EligibilityVerdict::REASON_BUDGET_EXHAUSTED) ? $new : $current;
     }
 
     /**
@@ -417,29 +491,37 @@ final class HoldingsService
     /**
      * Batched ownership check across multiple (chain, contract) pairs.
      *
-     * Returns a map keyed `"<chain_slug>:<contract>"` of nullable
-     * max-balance ints (same semantics as ownsAny — highest REAL
-     * single-wallet balance, not sum):
-     *   - `int >= 0` → real count (0 = definite none / unsupported chain /
-     *                  no connected wallet).
-     *   - `null`     → every candidate wallet failed to verify (UNKNOWN);
-     *                  caller must not read this as a zero.
-     * Unknown keys are absent from the result.
+     * Returns a map keyed `"<chain_slug>:<contract>"`, one entry per distinct
+     * pair, each reduced from {@see eligibilityVerdict()}'s evidence rules:
+     *   - `int >= min` → proven: a wallet holds at least this many;
+     *   - `int <  min` → every wallet answered completely and none reached the
+     *                    pair's minimum (0 when no wallet is linked);
+     *   - `null`       → not decided (chain unavailable, no counting driver,
+     *                    failed read, incomplete evidence, budget exhausted).
+     *                    Callers must not read this as a zero.
      *
-     * Amortizes ChainRepository, FetcherFactory, and walletsForUserOnChain
-     * lookups across all pairs sharing a chain. The per-(wallet, contract)
-     * RPC count_holdings call is unavoidable but is the same as the
-     * unbatched path.
+     * Each pair may carry the minimum balance its caller will compare against
+     * (default 1) so a wallet that proves it ends the search. When the same
+     * pair is asked with different minimums, the highest one is used; a lower
+     * minimum is then still answered correctly by any int, and a null stays
+     * "not eligible" on every fail-closed surface that uses this.
      *
-     * @param list<array{0: string, 1: string}> $pairs
+     * Chain, driver and wallet lookups are amortised across pairs on a chain.
+     * Provider reads are bounded by `$budget`; omitted, the listing budget
+     * applies. Pairs the budget cannot reach come back null.
+     *
+     * @param list<array{0: string, 1: string, 2?: int}> $pairs  [chain slug, contract, min balance]
      * @return array<string, ?int>
      */
-    public static function ownsAnyMany(int $userId, array $pairs): array
+    public static function ownsAnyMany(int $userId, array $pairs, ?CosmwasmTickBudget $budget = null): array
     {
         if ($pairs === [] || $userId <= 0) {
             return [];
         }
 
+        $budget ??= self::verificationBudget(self::SURFACE_LISTING);
+
+        /** @var array<string, array<string, int>> $byChain slug => contract => highest minimum */
         $byChain = [];
         foreach ($pairs as $pair) {
             $chainSlug = (string) ($pair[0] ?? '');
@@ -447,58 +529,27 @@ final class HoldingsService
             if ($chainSlug === '' || $contract === '') {
                 continue;
             }
-            $byChain[$chainSlug][] = $contract;
+            $min = max(1, (int) ($pair[2] ?? 1));
+            $byChain[$chainSlug][$contract] = max($byChain[$chainSlug][$contract] ?? 1, $min);
         }
 
         $result = [];
         foreach ($byChain as $chainSlug => $contracts) {
-            $chain = ChainRepository::getBySlug($chainSlug);
-            if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
-                // Unsupported chain — definite 0, not an outage.
-                foreach ($contracts as $c) {
-                    $result[$chainSlug . ':' . $c] = 0;
-                }
-                continue;
-            }
+            $chainSlug = (string) $chainSlug;
+            $context   = self::chainContext($userId, $chainSlug);
 
-            $fetcher = FetcherFactory::make_for_chain($chain);
-            if (!$fetcher->supports_feature('holdings_count')) {
-                foreach ($contracts as $c) {
-                    $result[$chainSlug . ':' . $c] = 0;
-                }
-                continue;
-            }
+            foreach ($contracts as $contract => $min) {
+                $contract = (string) $contract;
+                $key      = $chainSlug . ':' . $contract;
 
-            $chainId = (int) $chain->id;
-            $wallets = self::walletsForUserOnChain($userId, $chainId);
-            foreach ($contracts as $contract) {
-                $key = $chainSlug . ':' . $contract;
-                if ($wallets === []) {
-                    $result[$key] = 0;
+                if (is_string($context)) {
+                    $result[$key] = null;
                     continue;
                 }
-                $tokenStandard = CollectionRepository::findTokenStandard($chainId, $contract);
-                $max     = null;
-                $sawNull = false;
-                foreach ($wallets as $w) {
-                    $count = self::countFromCacheOrFetch(
-                        $fetcher,
-                        (int) $w->id,
-                        $w->wallet_address,
-                        $contract,
-                        $chainId,
-                        $tokenStandard
-                    );
-                    if ($count === null) {
-                        $sawNull = true;
-                        continue;
-                    }
-                    if ($max === null || $count > $max) {
-                        $max = $count;
-                    }
-                }
-                // Any real count wins; all-failed → null (UNKNOWN).
-                $result[$key] = $max !== null ? $max : ($sawNull ? null : 0);
+                [$chain, $fetcher, $wallets] = $context;
+
+                $verdict      = self::verdictForWallets($fetcher, $wallets, $contract, (int) $chain->id, $min, $budget);
+                $result[$key] = $verdict->isUnknown() ? null : ($verdict->bestKnownBalance ?? 0);
             }
         }
 
@@ -758,6 +809,13 @@ final class HoldingsService
      * the caller for display and NOTHING ELSE: no transient, no freshness
      * stamp. The next request retries instead of inheriting the outage.
      *
+     * PR 7.14: a stored walk also carries `observed_at` (when the walk began)
+     * and `served_from_cache` (whether any page the fetcher used came from
+     * its own cache instead of the provider, or the fetcher did not say). The
+     * evaluator trusts a cached POSITIVE only while `observed_at` is at most
+     * POSITIVE_EVIDENCE_MAX_AGE old and `served_from_cache` is false — see
+     * {@see cachedPositiveIsTrusted()}. The returned shape is unchanged.
+     *
      * @param ChainRow $chain
      * @return array{items: list<array<string, mixed>>, truncated: bool, complete: bool}|null
      */
@@ -794,12 +852,13 @@ final class HoldingsService
 
         $fetcher = FetcherFactory::make_for_chain($chain);
         if (!$fetcher->supports_feature('holdings_list')) {
-            // Cache an empty result so we don't re-check every page load.
-            // `complete: true` — this driver enumerating nothing is a fact
-            // about the driver, not a failed read, so it is safe to store.
-            $empty = ['items' => [], 'truncated' => false, 'complete' => true];
-            set_transient($cacheKey, $empty, self::CACHE_TTL);
-            return $empty;
+            // PR 7.14: this used to cache `{items: [], complete: true}` for a
+            // day. A driver that cannot enumerate has not read an empty
+            // wallet, and the gate read that cached empty back as "owns
+            // none". Nothing was read, so nothing is stored or claimed. The
+            // re-check on the next load is a local capability test, not a
+            // provider call.
+            return ['items' => [], 'truncated' => false, 'complete' => false];
         }
 
         // Paginate until the fetcher reports no more pages or until we hit
@@ -807,11 +866,15 @@ final class HoldingsService
         // wallet with > 500 NFTs would silently see only page 1 cached for
         // 24h. Cap exists so a whale with 10k NFTs doesn't blow up the
         // transient + the picker grid.
-        $allItems   = [];
-        $cursor     = null;
-        $truncated  = false;
-        $complete   = true;
-        $lastResult = null;
+        $allItems        = [];
+        $cursor          = null;
+        $truncated       = false;
+        $complete        = true;
+        $lastResult      = null;
+        // Taken BEFORE the first page, so the stamp is never younger than
+        // the oldest page it covers.
+        $observedAt      = time();
+        $servedFromCache = false;
 
         for ($pageNum = 0; $pageNum < self::PER_WALLET_PAGE_CAP; $pageNum++) {
             $lastResult = $fetcher->list_holdings($walletAddress, $cursor);
@@ -824,6 +887,10 @@ final class HoldingsService
             // cached zero that survives for a day and denies a gate.
             if (($lastResult['complete'] ?? false) !== true) {
                 $complete = false;
+            }
+            // Same posture for age: an unflagged page may be cached.
+            if (($lastResult['served_from_cache'] ?? true) !== false) {
+                $servedFromCache = true;
             }
 
             foreach ($items as $item) {
@@ -866,7 +933,10 @@ final class HoldingsService
             return $payload;
         }
 
-        set_transient($cacheKey, $payload, self::CACHE_TTL);
+        set_transient($cacheKey, $payload + [
+            'observed_at'       => $observedAt,
+            'served_from_cache' => $servedFromCache,
+        ], self::CACHE_TTL);
 
         // Persist "when did we last hit chain" so the UI can render a
         // freshness badge even after the transient expires. Only stamp on
@@ -913,55 +983,62 @@ final class HoldingsService
     }
 
     /**
-     * Count target-contract holdings for a single wallet — cache-first
-     * with RPC fallback on cache miss.
+     * One wallet's ownership evidence for a target contract: a
+     * {@see HoldingsCount}, or the EligibilityVerdict::REASON_* explaining
+     * why there is none.
      *
-     * The gallery cache (set by getForUser/fetchWalletHoldings, 24h TTL,
-     * keyed per wallet_link) carries the enumerated NFT items for that
-     * wallet. For a token-gate check, counting target-contract matches
-     * in that already-cached list avoids a fresh RPC roundtrip per gate
-     * call — the dominant cost on profile/discovery renders + the
-     * reconcile sweep.
+     * Sources, in order:
      *
-     * Tradeoffs vs the old direct-RPC path:
-     *   - Cache hit: returns cached count. Up-to-24h stale; for soft-gate
-     *     (suggest-don't-auto-join) semantics this lag is acceptable.
-     *     If the user just acquired an NFT they'll appear ineligible
-     *     until next gallery refresh — they can hit the gallery refresh
-     *     button (force=true) or wait for the daily transient expiry.
-     *   - Cache hit, items truncated, 0 matches: a whale's target NFT
-     *     could live in the truncated tail. We fall through to RPC for
-     *     this case so whales aren't false-negatives.
-     *   - Cache hit, `complete !== true`, 0 matches: the list was assembled
-     *     over a failed provider read (or predates the flag), so its
-     *     absence proves nothing. Falls through to RPC for the same reason.
-     *   - Cache miss: RPC fallback (same as the old path).
+     *   1. ERC-1155 (`$tokenStandard` matches /1155/i) → the persistent
+     *      transfer index. The 721 `balanceOf(address)` selector does not work
+     *      on 1155 contracts, and the gate semantic ("any token under the
+     *      contract") is what the index aggregates. The index starts at chain
+     *      head with no backfill, so ABSENCE proves nothing (`atLeast(0)`); a
+     *      positive counts only while the chain's checkpoint is healthy and
+     *      ran within POSITIVE_EVIDENCE_MAX_AGE (`evidence_stale` otherwise).
+     *      A failed index read is `repository_read_failed`, never a zero.
      *
-     * ERC-1155 short-circuit: when `$tokenStandard` matches /1155/i,
-     * skip the gallery transient and the eth_call fallback entirely
-     * and read from the persistent NFT-holdings index. The 721 RPC
-     * selector `balanceOf(address)` does not work on 1155 contracts
-     * (those expose `balanceOf(address, uint256)` and would revert /
-     * return 0), and the gate semantic is "any token under contract"
-     * which the index already aggregates via SUM(balance).
+     *   2. The per-wallet gallery transient → POSITIVE evidence only, and only
+     *      while {@see cachedPositiveIsTrusted()}. A cached ZERO is never
+     *      decisive: the list may not cover the target (Cosmos walks only the
+     *      top verified collections; EVM cannot enumerate at all), and it may
+     *      be a day old.
+     *
+     *   3. The fetcher, after charging `$budget` its declared worst case.
+     *      A fetcher implementing {@see CountsHoldingsWithCompleteness} says
+     *      whether its count is exact or a lower bound; one that does not is
+     *      positive-only (`atLeast`). null or a throw is `provider_unavailable`;
+     *      a read that no longer fits the budget is
+     *      `verification_budget_exhausted` and is not attempted.
      */
     private static function countFromCacheOrFetch(
-        \BCC\Trust\Onchain\Contracts\FetcherInterface $fetcher,
+        FetcherInterface $fetcher,
         int $walletLinkId,
         string $walletAddress,
         string $contract,
         int $chainId,
-        ?string $tokenStandard
-    ): ?int {
+        ?string $tokenStandard,
+        CosmwasmTickBudget $budget
+    ): HoldingsCount|string {
         if ($tokenStandard !== null && stripos($tokenStandard, '1155') !== false) {
             if ($walletLinkId <= 0 || $chainId <= 0) {
-                return 0;
+                return EligibilityVerdict::REASON_EVIDENCE_INCOMPLETE;
             }
-            // ERC-1155 reads the persistent transfer index (DB), never an
-            // RPC — there is no provider-outage failure mode here, so a 0
-            // is always a real 0.
-            $byWallet = NftHoldingsRepository::countVisibleByContract($chainId, $contract, [$walletLinkId]);
-            return (int) ($byWallet[$walletLinkId] ?? 0);
+            try {
+                $byWallet = NftHoldingsRepository::countVisibleByContractOrThrow($chainId, $contract, [$walletLinkId]);
+            } catch (RepositoryReadFailure $e) {
+                return EligibilityVerdict::REASON_READ_FAILED;
+            }
+            $indexed = (int) ($byWallet[$walletLinkId] ?? 0);
+            if ($indexed <= 0) {
+                // A pre-link holding, or a relink under a new wallet id, is
+                // simply not in the index.
+                return HoldingsCount::atLeast(0);
+            }
+
+            return self::transferIndexIsFresh($chainId)
+                ? HoldingsCount::atLeast($indexed)
+                : EligibilityVerdict::REASON_EVIDENCE_STALE;
         }
 
         // PR 5b: the cache scan compares identities, so it uses the one
@@ -1003,51 +1080,113 @@ final class HoldingsService
                 }
             }
 
-            $truncated = !empty($cached['truncated']);
-            // A found token is positive evidence no matter how the list was
-            // assembled: a partial or truncated walk that DID turn up a match
-            // has proved ownership, and the user already passes a default
-            // min_balance=1 gate (the tail could only add more).
-            if ($matches > 0) {
-                return $matches;
+            // A found token proves ownership however the list was assembled —
+            // a partial or truncated walk can only have missed MORE. But only
+            // while the observation is recent and first-hand: a positive with
+            // no bounded age would keep a member in after they sold.
+            if ($matches > 0 && self::cachedPositiveIsTrusted($cached)) {
+                return HoldingsCount::atLeast($matches);
             }
 
-            // A zero, on the other hand, is only real if the list it came
-            // from was whole. Two ways it might not be:
-            //   - truncated → the whale case: the target could live in the
-            //     tail we deliberately stopped before;
-            //   - complete !== true → the walk hit a provider failure, or the
-            //     payload predates this flag (an older release cached it and
-            //     it is still inside the 24h window). Either way the absence
-            //     is not evidence of absence.
-            // Both fall through to the fetcher, which answers null (UNKNOWN)
-            // rather than inventing a zero. This costs one RPC per wallet
-            // while pre-flag payloads age out; it buys back the guarantee
-            // that the CACHE never manufactures a gate denial.
-            $complete = ($cached['complete'] ?? false) === true;
-            if (!$truncated && $complete) {
-                return 0;
-            }
+            // PR 7.14: a zero is no longer answered from here, complete or
+            // not. "The list has none" is only "the wallet has none" if the
+            // list covers the target, which a gallery walk does not promise.
         }
 
-        // Cache miss (or truncated-with-zero-matches whale fallback).
-        // Fresh RPC — threads the fetcher's nullable fail-open result:
-        //   null  → provider could not verify (UNKNOWN) — propagate null,
-        //           and (critically) do NOT write any transient, so a
-        //           failed fetch never poisons the 24h holdings cache.
-        //   int   → real count (0 included).
-        // count_holdings is a read-only RPC; it writes no transient on
-        // its own, so the no-poison guarantee holds simply by NOT
-        // caching the result here.
-        return $fetcher->count_holdings($walletAddress, $contract);
+        $evidenceCapable = $fetcher instanceof CountsHoldingsWithCompleteness;
+        $cost            = $evidenceCapable
+            ? max(1, $fetcher->max_requests_per_evidence_read())
+            : self::UNDECLARED_READ_COST;
+        if (!$budget->canSpend($cost)) {
+            return EligibilityVerdict::REASON_BUDGET_EXHAUSTED;
+        }
+        // Charged up front at the worst case, whatever the read then costs.
+        $budget->spend($cost);
+
+        // No transient is written on any of these paths, so a failed read can
+        // never poison the 24h holdings cache.
+        try {
+            if ($evidenceCapable) {
+                return $fetcher->count_holdings_evidence($walletAddress, $contract)
+                    ?? EligibilityVerdict::REASON_PROVIDER_UNAVAILABLE;
+            }
+            $count = $fetcher->count_holdings($walletAddress, $contract);
+        } catch (\Throwable $e) {
+            // Bounded: no address, no provider text.
+            \BCC\Core\Log\Logger::warning('[HoldingsService] ownership read threw; treated as unavailable', [
+                'chain_id'       => $chainId,
+                'wallet_link_id' => $walletLinkId,
+                'error_class'    => get_class($e),
+            ]);
+            return EligibilityVerdict::REASON_PROVIDER_UNAVAILABLE;
+        }
+
+        // A driver that never vouched for completeness can prove ownership,
+        // never its absence.
+        return $count === null
+            ? EligibilityVerdict::REASON_PROVIDER_UNAVAILABLE
+            : HoldingsCount::atLeast($count);
     }
 
     /**
+     * Safeguard 1: may this cached positive keep or grant membership?
+     *
+     * Only when the walk that produced it (a) was stamped with `observed_at`
+     * no more than POSITIVE_EVIDENCE_MAX_AGE ago and not in the future, and
+     * (b) read every page from the provider (`served_from_cache === false`),
+     * so no page inside it can be older than the stamp. A payload from before
+     * PR 7.14 has neither key and is never trusted; it expires within its own
+     * 24h TTL.
+     *
+     * @param array<mixed> $cached
+     */
+    private static function cachedPositiveIsTrusted(array $cached): bool
+    {
+        $observedAt = $cached['observed_at'] ?? null;
+        if (!is_int($observedAt) || ($cached['served_from_cache'] ?? null) !== false) {
+            return false;
+        }
+
+        $age = time() - $observedAt;
+
+        return $age >= 0 && $age <= self::POSITIVE_EVIDENCE_MAX_AGE;
+    }
+
+    /**
+     * May a positive from the ERC-1155 transfer index be trusted? Only while
+     * the chain's indexer checkpoint is healthy and last ran within
+     * POSITIVE_EVIDENCE_MAX_AGE. A disabled, degraded or silent indexer
+     * cannot see a sale.
+     */
+    private static function transferIndexIsFresh(int $chainId): bool
+    {
+        $checkpoint = ChainCheckpointRepository::get($chainId);
+        if ($checkpoint === null || (string) $checkpoint->state !== ChainCheckpointRepository::STATE_HEALTHY) {
+            return false;
+        }
+
+        $lastRunAt = $checkpoint->last_run_at ?? null;
+        $ranAt     = is_string($lastRunAt) && $lastRunAt !== '' ? strtotime($lastRunAt . ' UTC') : false;
+        if ($ranAt === false) {
+            return false;
+        }
+
+        $age = time() - $ranAt;
+
+        return $age >= 0 && $age <= self::POSITIVE_EVIDENCE_MAX_AGE;
+    }
+
+    /**
+     * The user's verified wallets on one chain, read FAIL-CLOSED: a failed
+     * query throws instead of looking like "no wallets", which the evaluator
+     * would otherwise have to read as a complete INELIGIBLE.
+     *
      * @return list<WalletWithChain>
+     * @throws RepositoryReadFailure when the wallet read did not run
      */
     private static function walletsForUserOnChain(int $userId, int $chainId): array
     {
-        $all = WalletRepository::getForUser($userId, null, true);
+        $all = WalletRepository::getForUserOrThrow($userId, null, true);
         $filtered = [];
         foreach ($all as $w) {
             if ((int) $w->chain_id === $chainId) {

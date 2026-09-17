@@ -54,6 +54,47 @@ final class EligibilityVerdict
      */
     public const REASON_IDENTITY_UNRESOLVED = 'collection_identity_unresolved';
 
+    // ── PR 7.14: every other way the check could not finish ──────────────
+    // Each of these used to return INELIGIBLE — the one verdict the revoke
+    // sweep acts on. None of them is evidence that the member holds nothing;
+    // each is evidence that we did not find out. They are split so an
+    // operator reading sweep stats can tell a misconfiguration (needs a
+    // repair) from an outage (clears itself) from a read the budget cut off.
+
+    /** The chain row is missing, inactive, or its read failed. */
+    public const REASON_CHAIN_UNAVAILABLE = 'chain_unavailable';
+
+    /** No fetcher driver, or the driver cannot count holdings. */
+    public const REASON_DRIVER_UNSUPPORTED = 'holdings_driver_unsupported';
+
+    /** A repository read (wallets, token standard, holdings index) failed. */
+    public const REASON_READ_FAILED = 'repository_read_failed';
+
+    /** The read finished but could not see everything (capped, filtered, index without history). */
+    public const REASON_EVIDENCE_INCOMPLETE = 'evidence_incomplete';
+
+    /** The only positive evidence is older than it may be trusted. */
+    public const REASON_EVIDENCE_STALE = 'evidence_stale';
+
+    /** The caller's provider budget ran out before this wallet was asked. */
+    public const REASON_BUDGET_EXHAUSTED = 'verification_budget_exhausted';
+
+    /**
+     * The closed set of UNKNOWN reasons. A reason outside it is refused and
+     * recorded as a provider failure, so a typo can never mint a new,
+     * unmonitored cause.
+     */
+    private const UNKNOWN_REASONS = [
+        self::REASON_PROVIDER_UNAVAILABLE,
+        self::REASON_IDENTITY_UNRESOLVED,
+        self::REASON_CHAIN_UNAVAILABLE,
+        self::REASON_DRIVER_UNSUPPORTED,
+        self::REASON_READ_FAILED,
+        self::REASON_EVIDENCE_INCOMPLETE,
+        self::REASON_EVIDENCE_STALE,
+        self::REASON_BUDGET_EXHAUSTED,
+    ];
+
     /**
      * @param self::ELIGIBLE|self::INELIGIBLE|self::UNKNOWN $outcome
      * @param int|null $bestKnownBalance Highest REAL (non-null) single-wallet
@@ -99,6 +140,28 @@ final class EligibilityVerdict
     public static function identityUnresolved(int $minBalance): self
     {
         return new self(self::UNKNOWN, $minBalance, null, self::REASON_IDENTITY_UNRESOLVED);
+    }
+
+    /**
+     * UNKNOWN for one of the bounded {@see UNKNOWN_REASONS}.
+     *
+     * `bestKnownBalance` stays whatever was genuinely observed (null when
+     * nothing was) — it is diagnostic only and never widens the outcome.
+     */
+    public static function unknownBecause(int $minBalance, ?int $bestKnownBalance, string $reason): self
+    {
+        if (!in_array($reason, self::UNKNOWN_REASONS, true)) {
+            $reason = self::REASON_PROVIDER_UNAVAILABLE;
+        }
+
+        return new self(self::UNKNOWN, $minBalance, $bestKnownBalance, $reason);
+    }
+
+    /** True when the caller's provider budget, not the evidence, stopped this check. */
+    public function isBudgetExhausted(): bool
+    {
+        return $this->outcome === self::UNKNOWN
+            && $this->reason === self::REASON_BUDGET_EXHAUSTED;
     }
 
     /** True when this UNKNOWN was caused by an unresolvable gate identity. */

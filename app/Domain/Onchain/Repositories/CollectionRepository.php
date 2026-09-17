@@ -176,6 +176,8 @@ if (!defined('ABSPATH')) {
  */
 final class CollectionRepository
 {
+    use GuardsReadFailures;
+
     /** @var string Explicit column list — must match schema-collections.php. */
     private const COLUMNS = 'id, wallet_link_id, contract_address, canonical_identifier, chain_id, collection_name,
                  token_standard, total_supply, floor_price, floor_currency, unique_holders,
@@ -1400,6 +1402,28 @@ final class CollectionRepository
      */
     public static function findTokenStandard(int $chainId, string $contract): ?string
     {
+        return self::readTokenStandard($chainId, $contract, false);
+    }
+
+    /**
+     * FAIL-CLOSED sibling of {@see findTokenStandard()} — one query, two
+     * policies.
+     *
+     * PR 7.14: the standard picks the holder gate's evidence route (direct
+     * `balanceOf` vs the ERC-1155 index). A failed read here is not
+     * "standard unknown"; it means the gate cannot know which question to
+     * ask, so an ownership decision must not proceed on a guess.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function findTokenStandardOrThrow(int $chainId, string $contract): ?string
+    {
+        return self::readTokenStandard($chainId, $contract, true);
+    }
+
+    /** @throws RepositoryReadFailure when $failClosed and the read did not run */
+    private static function readTokenStandard(int $chainId, string $contract, bool $failClosed): ?string
+    {
         if ($chainId <= 0 || $contract === '') {
             return null;
         }
@@ -1425,6 +1449,11 @@ final class CollectionRepository
             $chainId,
             $identity->canonical()
         ));
+        if ($failClosed) {
+            self::guardReadOrThrow('findTokenStandardOrThrow');
+        } else {
+            self::guardRead('findTokenStandard');
+        }
 
         if ($value === null) {
             return null;
@@ -1667,6 +1696,49 @@ final class CollectionRepository
      */
     public static function listVerifiedByChain(int $chainId, int $limit = 30): array
     {
+        return self::readVerifiedByChain($chainId, $limit, false);
+    }
+
+    /**
+     * FAIL-CLOSED sibling of {@see listVerifiedByChain()} — one query, two
+     * policies.
+     *
+     * PR 7.14: the Cosmos holdings walk treated `[]` as "no verified
+     * collections on this chain" and reported the walk complete. After a
+     * failed query that `[]` meant nothing was read at all.
+     *
+     * @return list<object{
+     *     id: string,
+     *     chain_id: string,
+     *     contract_address: string,
+     *     canonical_identifier: string|null,
+     *     collection_name: string|null,
+     *     image_url: string|null,
+     *     chain_slug: string,
+     *     chain_type: string
+     * }>
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function listVerifiedByChainOrThrow(int $chainId, int $limit = 30): array
+    {
+        return self::readVerifiedByChain($chainId, $limit, true);
+    }
+
+    /**
+     * @return list<object{
+     *     id: string,
+     *     chain_id: string,
+     *     contract_address: string,
+     *     canonical_identifier: string|null,
+     *     collection_name: string|null,
+     *     image_url: string|null,
+     *     chain_slug: string,
+     *     chain_type: string
+     * }>
+     * @throws RepositoryReadFailure when $failClosed and the read did not run
+     */
+    private static function readVerifiedByChain(int $chainId, int $limit, bool $failClosed): array
+    {
         if ($chainId <= 0) {
             return [];
         }
@@ -1701,6 +1773,11 @@ final class CollectionRepository
             $chainId,
             $limit
         ));
+        if ($failClosed) {
+            self::guardReadOrThrow('listVerifiedByChainOrThrow');
+        } else {
+            self::guardRead('listVerifiedByChain');
+        }
 
         return $rows ?: [];
     }

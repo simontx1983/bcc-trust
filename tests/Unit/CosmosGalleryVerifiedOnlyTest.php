@@ -186,8 +186,9 @@ final class CosmosGalleryVerifiedOnlyTest extends TestCase
         // so nothing went unanswered, and the caller is entitled to cache this
         // empty. Contrast the failed-read case, which returns `complete: false`
         // and must never be cached.
+        // PR 7.14: `served_from_cache` is additive — nothing was read at all.
         self::assertSame(
-            ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true],
+            ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true, 'served_from_cache' => false],
             $result
         );
         self::assertSame([], \BCC\Trust\Onchain\Support\ApiRetry::$batchCalls, 'no batch may be issued');

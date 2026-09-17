@@ -6,13 +6,17 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness;
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\CollectionRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\Bech32;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
 use BCC\Trust\Onchain\ValueObjects\DelegatorCount;
+use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
 
 /**
  * Cosmos Chain Fetcher
@@ -28,7 +32,7 @@ use BCC\Trust\Onchain\ValueObjects\DelegatorCount;
  *
  * @phpstan-import-type ChainRow from ChainRepository
  */
-class CosmosFetcher implements FetcherInterface
+class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
 {
     /** @var ChainRow */
     private object $chain;
@@ -52,6 +56,12 @@ class CosmosFetcher implements FetcherInterface
 
     private int    $decimals;
     private int $timeout = 15;
+
+    /**
+     * `tokens{owner}` pages answered from the object cache instead of the LCD.
+     * list_holdings() reads it to report `served_from_cache`.
+     */
+    private int $tokensCacheHits = 0;
 
     /**
      * Static caches keyed by chain ID — shared across instances within the
@@ -505,6 +515,10 @@ class CosmosFetcher implements FetcherInterface
      * Used by the gate fast-path. Walks the `tokens { owner }` query up to
      * PER_CONTRACT_TOKEN_CAP and returns the count. Does NOT fetch per-token
      * metadata — count-only path stays cheap.
+     *
+     * PR 7.14: membership decisions no longer come through here. They use
+     * {@see count_holdings_evidence()}, which reads fresh pages and says when
+     * the walk was capped. This cached count is kept for non-deciding callers.
      */
     public function count_holdings(string $wallet, string $contract): ?int
     {
@@ -519,6 +533,46 @@ class CosmosFetcher implements FetcherInterface
         // than reading a breaker-open LCD as "owns none."
         $tokenIds = $this->cw721AllTokensForOwner($contract, $wallet);
         return $tokenIds === null ? null : count($tokenIds);
+    }
+
+    /** Worst case: every page of one capped walk. */
+    public function max_requests_per_evidence_read(): int
+    {
+        return (int) ceil(self::PER_CONTRACT_TOKEN_CAP / self::TOKENS_PAGE_SIZE);
+    }
+
+    /**
+     * PR 7.14: the count WITH whether the walk saw every token.
+     *
+     *   - exact   → the walk reached the owner's last page;
+     *   - atLeast → the walk stopped at PER_CONTRACT_TOKEN_CAP. That still
+     *               proves ownership, but it never proves a shortfall;
+     *   - null    → a page failed (transport, non-200, breaker open, refused
+     *               endpoint), came back without a `tokens` list, or there was
+     *               nothing to ask about.
+     *
+     * Every page is read from the LCD, never from the `cw721_tokens_*` cache.
+     * A cached page can be a day old, and a day-old empty page is not proof
+     * that a member owns nothing today. Successful pages are still written
+     * back, so the gallery keeps its warm cache.
+     */
+    public function count_holdings_evidence(string $wallet, string $contract): ?HoldingsCount
+    {
+        if ($wallet === '' || $contract === '') {
+            // Nothing could be asked, so nothing was learned about the member.
+            return null;
+        }
+
+        $tokenIds = $this->cw721AllTokensForOwner($contract, $wallet, false);
+        if ($tokenIds === null) {
+            return null;
+        }
+
+        // The walk returns early once it reaches the cap, so a cap-sized list
+        // may be cut off.
+        return count($tokenIds) >= self::PER_CONTRACT_TOKEN_CAP
+            ? HoldingsCount::atLeast(count($tokenIds))
+            : HoldingsCount::exact(count($tokenIds));
     }
 
     /**
@@ -545,19 +599,29 @@ class CosmosFetcher implements FetcherInterface
      * HoldingsService cached for 24h and the holder gate read back as a
      * real zero.
      *
-     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool}
+     * PR 7.14 — two more omissions are announced the same way:
+     *   - the verified-collection list is read fail-closed: a failed query is
+     *     not "no verified collections";
+     *   - more verified collections than contractCap() means some were never
+     *     asked about, so the walk is `complete: false`. The list is read with
+     *     one row beyond the cap to tell "exactly at the cap" from "over it".
+     * `served_from_cache` reports whether any `tokens{owner}` page came from
+     * the object cache (up to TOKENS_CACHE_TTL old) rather than the LCD.
+     *
+     * @return array{items: list<array{contract_address: string, token_id: string, chain_id: int, collection_name: ?string, name: ?string, image_url: ?string, metadata_uri: ?string, token_standard: ?string}>, truncated: bool, cursor: ?string, complete: bool, served_from_cache: bool}
      */
     public function list_holdings(string $wallet, ?string $cursor = null): array
     {
         // A definite empty: no wallet to ask about / no verified collection
         // to ask about. Nothing was read, so nothing failed to read.
-        $empty = ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true];
+        $empty = ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true, 'served_from_cache' => false];
         if ($wallet === '') {
             return $empty;
         }
 
         $chainId = (int) $this->chain->id;
         $cap     = self::contractCap();
+        $this->tokensCacheHits = 0;
         // VERIFIED-ONLY, and the filter belongs HERE — before the walk, not
         // after it. Discovery writes unverified rows into
         // `bcc_onchain_collections` as an OPERATOR INTAKE QUEUE; a row
@@ -573,9 +637,22 @@ class CosmosFetcher implements FetcherInterface
         //
         // GATING is unaffected either way: ownsAny/count_holdings resolve per
         // gate contract, and gates only exist on verified collections.
-        $known = \BCC\Trust\Onchain\Repositories\CollectionRepository::listVerifiedByChain($chainId, $cap);
+        //
+        // The repository clamps a limit to 200, so at a cap of 200 an extra
+        // row cannot be asked for; a full 200 is then treated as possibly over.
+        $probe = min($cap + 1, 200);
+        try {
+            $known = CollectionRepository::listVerifiedByChainOrThrow($chainId, $probe);
+        } catch (RepositoryReadFailure $e) {
+            return array_replace($empty, ['complete' => false]);
+        }
         if ($known === []) {
             return $empty;
+        }
+
+        $collectionsOmitted = count($known) > $cap || ($probe <= $cap && count($known) >= $probe);
+        if ($collectionsOmitted) {
+            $known = array_slice($known, 0, $cap);
         }
 
         // ── Phase A: parallel first-page discovery ───────────────────────
@@ -591,9 +668,10 @@ class CosmosFetcher implements FetcherInterface
 
         $items     = [];
         $truncated = false;
-        // Flips false the moment ANY contract's read cannot be resolved.
+        // Flips false the moment ANY contract's read cannot be resolved, and
+        // starts false when verified collections were left out by the cap.
         // Separate from $truncated, which reports a bounded success.
-        $complete  = true;
+        $complete  = !$collectionsOmitted;
 
         foreach ($known as $coll) {
             $contract = (string) $coll->contract_address;
@@ -689,10 +767,11 @@ class CosmosFetcher implements FetcherInterface
         }
 
         return [
-            'items'     => $items,
-            'truncated' => $truncated,
-            'cursor'    => null,
-            'complete'  => $complete,
+            'items'             => $items,
+            'truncated'         => $truncated,
+            'cursor'            => null,
+            'complete'          => $complete,
+            'served_from_cache' => $this->tokensCacheHits > 0,
         ];
     }
 
@@ -716,6 +795,8 @@ class CosmosFetcher implements FetcherInterface
      *
      * @param array<int, object> $known collection rows (contract_address, …)
      * @return array<string, list<string>|null> keyed by contract_address
+     *
+     * @phpstan-impure Network and cache I/O; counts cache hits in $tokensCacheHits.
      */
     private function discoverFirstPages(array $known, string $wallet): array
     {
@@ -735,6 +816,7 @@ class CosmosFetcher implements FetcherInterface
             if (is_array($cached)) {
                 /** @var list<string> $cached */
                 $result[$contract] = $cached;
+                $this->tokensCacheHits++;
                 continue;
             }
 
@@ -900,7 +982,12 @@ class CosmosFetcher implements FetcherInterface
     /**
      * Parse a CW-721 `tokens` smart-query `data` envelope into a list of
      * token_id strings. Null-in → null (preserve the failed-query signal);
-     * a successful envelope with no/empty `tokens` → `[]` (owns none).
+     * a successful envelope with an empty `tokens` list → `[]` (owns none).
+     *
+     * PR 7.14: an envelope with no `tokens` field, or one that is not a list
+     * of token-id strings, is null. A CW-721 `TokensResponse` always carries
+     * `tokens`; without it the answer is unreadable, and it used to parse as
+     * "owns none" and be cached for a day.
      *
      * @param array<string, mixed>|null $data unwrapped `data` from the smart query
      * @return list<string>|null
@@ -910,14 +997,16 @@ class CosmosFetcher implements FetcherInterface
         if ($data === null) {
             return null;
         }
-        if (!isset($data['tokens']) || !is_array($data['tokens'])) {
-            return [];
+        if (!array_key_exists('tokens', $data) || !is_array($data['tokens']) || !array_is_list($data['tokens'])) {
+            return null;
         }
         $out = [];
         foreach ($data['tokens'] as $t) {
-            if (is_string($t) && $t !== '') {
-                $out[] = $t;
+            if (!is_string($t) || $t === '') {
+                // Dropping it would undercount the owner.
+                return null;
             }
+            $out[] = $t;
         }
         return $out;
     }
@@ -934,9 +1023,12 @@ class CosmosFetcher implements FetcherInterface
      *     unparseable body, or breaker-open). Caller must treat this as
      *     "unknown," never as "owns none."
      *
+     * `$readCache = false` always asks the LCD (the ownership evidence path);
+     * a successful page is still written to the cache.
+     *
      * @return list<string>|null
      */
-    private function cw721Tokens(string $contract, string $owner, ?string $startAfter = null, int $limit = self::TOKENS_PAGE_SIZE): ?array
+    private function cw721Tokens(string $contract, string $owner, ?string $startAfter = null, int $limit = self::TOKENS_PAGE_SIZE, bool $readCache = true): ?array
     {
         if ($contract === '' || $owner === '') {
             return [];
@@ -950,9 +1042,10 @@ class CosmosFetcher implements FetcherInterface
         //   gallery load and this single/gate path never diverge.
         $cacheKey = $this->cw721TokensCacheKey($contract, $owner, $startAfter);
 
-        $cached = wp_cache_get($cacheKey, 'bcc_onchain');
+        $cached = $readCache ? wp_cache_get($cacheKey, 'bcc_onchain') : false;
         if (is_array($cached)) {
             /** @var list<string> $cached */
+            $this->tokensCacheHits++;
             return $cached;
         }
 
@@ -990,14 +1083,18 @@ class CosmosFetcher implements FetcherInterface
      * BEFORE any later-page failure can matter — once we know the owner
      * holds at least the cap, the gate verdict is already decided.
      *
+     * `$readCache` is passed to every page read — see {@see cw721Tokens()}.
+     *
      * @return list<string>|null
+     *
+     * @phpstan-impure Network and cache I/O; counts cache hits in $tokensCacheHits.
      */
-    private function cw721AllTokensForOwner(string $contract, string $owner): ?array
+    private function cw721AllTokensForOwner(string $contract, string $owner, bool $readCache = true): ?array
     {
         $all       = [];
         $cursor    = null;
         for ($page = 0; $page < ceil(self::PER_CONTRACT_TOKEN_CAP / self::TOKENS_PAGE_SIZE); $page++) {
-            $pageResult = $this->cw721Tokens($contract, $owner, $cursor, self::TOKENS_PAGE_SIZE);
+            $pageResult = $this->cw721Tokens($contract, $owner, $cursor, self::TOKENS_PAGE_SIZE, $readCache);
             if ($pageResult === null) {
                 // LCD query failed mid-walk — cannot complete verification.
                 return null;

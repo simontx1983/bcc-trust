@@ -215,8 +215,9 @@ final class CosmosFetcherListHoldingsTest extends TestCase
         // `complete: true` — nothing was read, so nothing failed to read. An
         // empty verified-collection set is a REAL empty, and the caller may
         // safely cache it.
+        // PR 7.14: `served_from_cache` is additive — nothing was read at all.
         self::assertSame(
-            ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true],
+            ['items' => [], 'truncated' => false, 'cursor' => null, 'complete' => true, 'served_from_cache' => false],
             $result
         );
         self::assertSame([], \BCC\Trust\Onchain\Support\ApiRetry::$batchCalls);
