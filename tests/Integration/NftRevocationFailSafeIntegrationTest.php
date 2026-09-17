@@ -52,6 +52,7 @@ namespace BCC\Trust\Tests\Integration {
     use BCC\Trust\Onchain\Support\Bech32;
     use BCC\Trust\Onchain\ValueObjects\EligibilityVerdict;
     use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
+    use PHPUnit\Framework\Attributes\Group;
     use PHPUnit\Framework\TestCase;
 
     /**
@@ -130,7 +131,12 @@ namespace BCC\Trust\Tests\Integration {
      * LIMIT/OFFSET) while bcc-core's real `PeepSoGroupWriter::leave()` deletes
      * rows underneath it — the exact shape that made the old `$offset +=
      * count($members)` skip one member per removal.
+     *
+     * In the `mariadb` group: production runs MariaDB with READ-COMMITTED, and
+     * paging a table while deleting from it is exactly the engine-shaped
+     * behaviour that group exists to check.
      */
+    #[Group('mariadb')]
     final class NftRevocationFailSafeIntegrationTest extends TestCase
     {
         private const GROUP      = 71400;
