@@ -40,6 +40,20 @@ use PHPUnit\Framework\TestCase;
 #[Group('integration')]
 final class DiscoveryUnresolvedFamiliesIntegrationTest extends TestCase
 {
+
+    /**
+     * The scan panel's markup, driven directly.
+     *
+     * The public entry point is frozen (ScannerFreeze) and emits nothing, so these
+     * assertions read the preserved private renderer that still ships. That the entry
+     * point itself emits nothing is pinned by ScannerEntryPointsAreFrozenTest.
+     */
+    private static function renderScanPanelMarkup(object $chain, bool $scannable, string $whyNot = ''): void
+    {
+        $method = new \ReflectionMethod(\BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel::class, 'renderMarkup');
+        $method->setAccessible(true);
+        $method->invoke(null, $chain, $scannable, $whyNot);
+    }
     private const CHAIN = 90805;
 
     private const OPERATOR = 4245;
@@ -117,7 +131,7 @@ final class DiscoveryUnresolvedFamiliesIntegrationTest extends TestCase
     private function render(): string
     {
         ob_start();
-        DiscoveryScanPanel::render(
+        self::renderScanPanelMarkup(
             (object) ['id' => self::CHAIN, 'slug' => 'cosmos', 'name' => 'Cosmos Hub'],
             true,
             ''

@@ -2182,10 +2182,14 @@ if (defined('WP_CLI') && WP_CLI) {
     // passes were retired it is also the only way an incremental pass runs
     // at all — an operator names a chain, watches it, and reads a summary
     // that pass alone produced.
-    \WP_CLI::add_command(
-        'bcc-trust cosmwasm',
-        \BCC\Trust\Onchain\CLI\CosmwasmOneShotDiscoveryCommand::class
-    );
+    // FROZEN (see ScannerFreeze): the one-shot pass is the last way to START a full-chain
+    // discovery run, so the command is not registered. The class is untouched and still tested.
+    if (!\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+        \WP_CLI::add_command(
+            'bcc-trust cosmwasm',
+            \BCC\Trust\Onchain\CLI\CosmwasmOneShotDiscoveryCommand::class
+        );
+    }
     // PR 5b — the eight-row Solana gate-identity repair. THIS IS ITS ONLY
     // ENTRY POINT: there is deliberately no REST route, no admin-post
     // handler, no AJAX action and no cron hook that reaches it. It writes

@@ -67,6 +67,22 @@ use ReflectionMethod;
 #[PreserveGlobalState(false)]
 final class CosmwasmChainDiscoveryAdminTest extends TestCase
 {
+
+    /**
+     * The panel markup, driven directly.
+     *
+     * `CosmwasmScannerPanel::render()` is frozen (ScannerFreeze) and now emits nothing, so
+     * these markup assertions read the preserved private renderer that still ships. That the
+     * public entry point emits nothing is pinned by ScannerEntryPointsAreFrozenTest.
+     *
+     * @param array<string, mixed> $summary
+     */
+    private static function renderPanelMarkup(array $summary): void
+    {
+        $method = new \ReflectionMethod(\BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel::class, 'renderMarkup');
+        $method->setAccessible(true);
+        $method->invoke(null, $summary);
+    }
     private const CHAIN_ID = 8;
     private const SLUG     = 'cosmos';
 
@@ -216,7 +232,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     private function renderPanel(): string
     {
         ob_start();
-        CosmwasmScannerPanel::render(CosmwasmDiscoveryHealthSnapshot::buildSummary());
+        self::renderPanelMarkup(CosmwasmDiscoveryHealthSnapshot::buildSummary());
         $html = ob_get_clean();
 
         self::assertIsString($html);
@@ -1014,7 +1030,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     private function renderPanelWithChain(array $chain): string
     {
         ob_start();
-        CosmwasmScannerPanel::render([
+        self::renderPanelMarkup([
             'discovery_enabled'    => true,
             'backfill_enabled'     => true,
             'disabled_reason'      => null,

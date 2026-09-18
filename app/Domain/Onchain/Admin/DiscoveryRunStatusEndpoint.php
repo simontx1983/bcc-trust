@@ -37,6 +37,12 @@ final class DiscoveryRunStatusEndpoint
 
     public static function register(): void
     {
+        // FROZEN: see ScannerFreeze. The implementation below is intact and still
+        // tested; only the way to reach it is withdrawn.
+        if (\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+            return;
+        }
+
         add_action('wp_ajax_' . self::AJAX_ACTION, [self::class, 'handle']);
     }
 

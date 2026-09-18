@@ -34,7 +34,7 @@ if (!defined('ABSPATH')) {
  * regex: one fact, one home, both callers pointed at it.
  *
  * ── THE CLOCK IS CHECKED BEFORE THE BUDGET ──────────────────────────────
- * Same ordering as {@see CosmwasmTickBudget::exhausted()}, and for the same
+ * Same ordering as {@see ProviderRequestBudget::exhausted()}, and for the same
  * reason: a pass with requests left but no time left stopped because of the
  * clock. Reporting `request_budget_exhausted` there would send an operator
  * to raise a ceiling that was never the constraint.
@@ -80,7 +80,7 @@ final class CosmwasmPassStopReason
      *
      * @param string $outcome one of the `CosmwasmDiscoveryWorker::PASS_*` constants
      */
-    public static function forOutcome(string $outcome, CosmwasmTickBudget $budget): string
+    public static function forOutcome(string $outcome, ProviderRequestBudget $budget): string
     {
         if ($outcome === CosmwasmDiscoveryWorker::PASS_LOCKED) {
             return self::LOCK_CONTENDED;

@@ -21,7 +21,7 @@ namespace BCC\Trust\Onchain\Services;
 
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\GatedGroupConfig;
 use BCC\Trust\Onchain\ValueObjects\JoinResult;
 
@@ -135,7 +135,7 @@ final class NftGroupGateService {
      *
      * @return list<GatedGroupConfig>
      */
-    public function findEligibleGroups(int $userId, ?CosmwasmTickBudget $budget = null): array {
+    public function findEligibleGroups(int $userId, ?ProviderRequestBudget $budget = null): array {
         if ($userId <= 0) {
             return [];
         }

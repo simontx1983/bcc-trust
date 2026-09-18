@@ -29,6 +29,20 @@ use PHPUnit\Framework\TestCase;
 #[Group('integration')]
 final class DiscoverySessionPanelIntegrationTest extends TestCase
 {
+
+    /**
+     * The scan panel's markup, driven directly.
+     *
+     * The public entry point is frozen (ScannerFreeze) and emits nothing, so these
+     * assertions read the preserved private renderer that still ships. That the entry
+     * point itself emits nothing is pinned by ScannerEntryPointsAreFrozenTest.
+     */
+    private static function renderScanPanelMarkup(object $chain, bool $scannable, string $whyNot = ''): void
+    {
+        $method = new \ReflectionMethod(\BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel::class, 'renderMarkup');
+        $method->setAccessible(true);
+        $method->invoke(null, $chain, $scannable, $whyNot);
+    }
     private const CHAIN = 90804;
 
     private const OPERATOR = 4244;
@@ -54,7 +68,7 @@ final class DiscoverySessionPanelIntegrationTest extends TestCase
     private function render(): string
     {
         ob_start();
-        DiscoveryScanPanel::render($this->chain(), true, '');
+        self::renderScanPanelMarkup($this->chain(), true, '');
 
         return (string) ob_get_clean();
     }

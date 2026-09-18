@@ -11,7 +11,7 @@ use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
@@ -85,9 +85,9 @@ final class SmartQueryOptInWiringTest extends TestCase
         ]);
     }
 
-    private function budget(int $requests = 100): CosmwasmTickBudget
+    private function budget(int $requests = 100): ProviderRequestBudget
     {
-        return new CosmwasmTickBudget($requests, 60);
+        return new ProviderRequestBudget($requests, 60);
     }
 
     /** @param array<string,mixed> $payload */

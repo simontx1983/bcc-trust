@@ -6,7 +6,7 @@ namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Services\DiscoveryScanSession;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -49,7 +49,7 @@ final class DiscoveryPacingTest extends TestCase
     {
         self::assertSame(25, CosmwasmDiscoveryGate::DEFAULT_REQUEST_BUDGET);
         self::assertSame(25, CosmwasmDiscoveryGate::requestBudget(), 'no override defined');
-        self::assertSame(25, (new CosmwasmTickBudget())->remaining(), 'the budget object agrees');
+        self::assertSame(25, (new ProviderRequestBudget(CosmwasmDiscoveryGate::requestBudget(), CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS))->remaining(), 'a budget built from the gate agrees');
     }
 
     public function testTheSessionRequestCeilingIsSixTwentyFive(): void
@@ -220,7 +220,7 @@ final class DiscoveryPacingTest extends TestCase
             'executor' => ['app/Domain/Onchain/Workers/DiscoveryRunExecutor.php'],
             'worker'   => ['app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php'],
             'gate'     => ['app/Domain/Onchain/Support/CosmwasmDiscoveryGate.php'],
-            'budget'   => ['app/Domain/Onchain/Support/CosmwasmTickBudget.php'],
+            'budget'   => ['app/Domain/Onchain/Support/ProviderRequestBudget.php'],
             'fetcher'  => ['app/Domain/Onchain/Fetchers/CosmosFetcher.php'],
         ];
     }

@@ -9,7 +9,7 @@
  *
  * The REAL classes under test load via PSR-4 in the subprocess:
  *   CosmosFetcher, CosmwasmClassifier, CosmwasmDiscoveryService,
- *   CosmwasmDiscoveryGate, CosmwasmTickBudget, CosmwasmDiscoveryWorker,
+ *   CosmwasmDiscoveryGate, ProviderRequestBudget, CosmwasmDiscoveryWorker,
  *   NftSpamFilter.
  *
  * Everything they touch that would need a database or a network — the two

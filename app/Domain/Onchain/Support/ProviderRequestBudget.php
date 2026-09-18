@@ -7,26 +7,42 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Per-invocation budget for a CosmWasm discovery tick.
+ * Per-invocation ceiling on provider work: how many requests, and for how long.
+ *
+ * ── WHY THIS IS NOT A SCANNER TYPE ──────────────────────────────────────
+ * This began as the CosmWasm discovery tick's budget and read its two
+ * defaults from `CosmwasmDiscoveryGate`. That made every ownership surface
+ * that bounds provider work — join, stance, the eligible-group listing, the
+ * profile badge, reconciliation and the revoke sweep — depend on the
+ * full-chain scanner for a number that has nothing to do with scanning.
+ * Ownership must keep working with the scanner frozen, so the primitive is
+ * neutral: it holds no scanner constant, names no scanner class, and both
+ * ceilings are supplied BY THE CALLER.
+ *
+ * Every caller therefore states its own ceiling: the ownership surfaces from
+ * `HoldingsService::SURFACE_BUDGETS`, the scanner from `CosmwasmDiscoveryGate`.
+ * Neither can silently inherit the other's number. Guarded by
+ * ProviderRequestBudgetIsNeutralTest.
  *
  * TWO independent ceilings, and the WALL CLOCK ALWAYS WINS.
  *
- *   1. Wall clock — {@see CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS}.
- *      Hostinger Business shared caps PHP `max_execution_time` at 30s.
- *      Being killed mid-write is the failure mode that actually costs
- *      progress, so the tick stops on the deadline EVEN IF requests
- *      remain. {@see exhausted()} checks the clock first for exactly
- *      that reason.
- *   2. Request/page budget — a configurable ceiling (default 50 per
- *      invocation, `BCC_COSMWASM_REQUEST_BUDGET`) so a fast node cannot
- *      turn a 20-second window into hundreds of LCD calls.
+ *   1. Wall clock — seconds from construction. Hostinger Business shared caps
+ *      PHP `max_execution_time` at 30s. Being killed mid-write is the failure
+ *      mode that actually costs progress, so work stops on the deadline EVEN
+ *      IF requests remain. {@see exhausted()} checks the clock first for
+ *      exactly that reason.
+ *   2. Request/page budget — so a fast node cannot turn a 20-second window
+ *      into hundreds of provider calls.
  *
- * The object is intentionally dumb and injectable: the worker builds
- * one, hands it to every step, and tests construct one with a tiny
- * budget to pin "the backfill stops at its budget" without any timing
- * dependency.
+ * ⚠ A budget that runs out is NOT evidence about what a member holds. Callers
+ * must surface an exhausted budget as UNKNOWN (fail open), never as a
+ * non-holding — see `EligibilityVerdict::REASON_BUDGET_EXHAUSTED`.
+ *
+ * The object is intentionally dumb and injectable: a caller builds one, hands
+ * it to every step, and tests construct one with a tiny budget to pin "this
+ * stops at its budget" without any timing dependency.
  */
-final class CosmwasmTickBudget
+final class ProviderRequestBudget
 {
     private float $deadline;
     private int $remaining;
@@ -62,11 +78,19 @@ final class CosmwasmTickBudget
      */
     private int $reserve = 0;
 
-    public function __construct(?int $requests = null, ?int $runtimeSeconds = null)
+    /**
+     * Both ceilings are REQUIRED. There is deliberately no default: a default
+     * here could only come from one subsystem, and that is exactly the
+     * coupling this type was split out of. A caller that does not know its own
+     * ceiling does not have one.
+     *
+     * @param int $requests       Provider calls this invocation may spend.
+     * @param int $runtimeSeconds Wall-clock seconds from now; at least 1.
+     */
+    public function __construct(int $requests, int $runtimeSeconds)
     {
-        $this->remaining = $requests ?? CosmwasmDiscoveryGate::requestBudget();
-        $seconds         = $runtimeSeconds ?? CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS;
-        $this->deadline  = microtime(true) + (float) max(1, $seconds);
+        $this->remaining = $requests;
+        $this->deadline  = microtime(true) + (float) max(1, $runtimeSeconds);
     }
 
     /**

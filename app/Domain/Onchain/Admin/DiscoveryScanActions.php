@@ -60,6 +60,12 @@ final class DiscoveryScanActions
 
     public static function register(): void
     {
+        // FROZEN: see ScannerFreeze. The implementation below is intact and still
+        // tested; only the way to reach it is withdrawn.
+        if (\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+            return;
+        }
+
         foreach ([self::ACTION_REQUEST, self::ACTION_RETRY, self::ACTION_CANCEL] as $action) {
             add_action('admin_post_' . $action, [self::class, 'handle']);
         }

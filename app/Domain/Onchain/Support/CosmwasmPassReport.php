@@ -33,7 +33,7 @@ if (!defined('ABSPATH')) {
  * immutable value object: it is written from four call sites inside a
  * single pass and read once at the end, and threading a return value back
  * out of `classifyAndEnumerate()` would have changed the shared
- * `callable(int, CosmosFetcher, CosmwasmTickBudget): void` step contract
+ * `callable(int, CosmosFetcher, ProviderRequestBudget): void` step contract
  * that all four passes are typed against.
  */
 final class CosmwasmPassReport

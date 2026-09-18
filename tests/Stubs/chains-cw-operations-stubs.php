@@ -14,7 +14,7 @@
  * ── WHAT THE FAKES ARE FOR ──────────────────────────────────────────────
  * Two claims in this batch cannot be checked by looking at output:
  *
- *   1. The handler constructs ONE CosmwasmTickBudget(20, 8) and hands it
+ *   1. The handler constructs ONE ProviderRequestBudget(20, 8) and hands it
  *      over. PR #200 owns the reserve sequence inside the worker, so this
  *      handler must never call reserve() or available() — a second opinion
  *      about the budget at the boundary is how two copies drift apart.
@@ -31,7 +31,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Support {
 
-    if (!class_exists(CosmwasmTickBudget::class, false)) {
+    if (!class_exists(ProviderRequestBudget::class, false)) {
         /**
          * Faked at its production FQN so the handler's `new` lands here.
          *
@@ -39,7 +39,7 @@ namespace BCC\Trust\Onchain\Support {
          * this is the only place that can prove the admin boundary did not
          * reach into the sequence PR #200 owns.
          */
-        final class CosmwasmTickBudget
+        final class ProviderRequestBudget
         {
             /** @var list<array{requests: int, seconds: int}> */
             public static array $constructions = [];
@@ -363,7 +363,7 @@ namespace BCC\Trust\Onchain\Repositories {
 
 namespace BCC\Trust\Onchain\Workers {
 
-    use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+    use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 
     if (!class_exists(CosmwasmDiscoveryWorker::class, false)) {
         /**
@@ -397,7 +397,7 @@ namespace BCC\Trust\Onchain\Workers {
 
             public static int $passes = 0;
 
-            /** @var list<?CosmwasmTickBudget> */
+            /** @var list<?ProviderRequestBudget> */
             public static array $budgets = [];
 
             public static ?\Throwable $throws = null;
@@ -423,7 +423,7 @@ namespace BCC\Trust\Onchain\Workers {
 
             public static function runBackfillForChain(
                 int $chainId,
-                ?CosmwasmTickBudget $budget = null,
+                ?ProviderRequestBudget $budget = null,
                 ?object $report = null
             ): string {
                 self::$passes++;

@@ -6,7 +6,7 @@ declare(strict_types=1);
  * Doubles for running the REAL {@see \BCC\Trust\Onchain\Services\CosmwasmDiscoveryService::emitCollections()}
  * against the REAL {@see \BCC\Trust\Onchain\Fetchers\CosmosFetcher},
  * {@see \BCC\Trust\Onchain\Support\ApiRetry}, {@see \BCC\Trust\Onchain\Support\OnchainCircuitBreaker},
- * {@see \BCC\Trust\Onchain\Support\CosmwasmTickBudget}, {@see \BCC\Trust\Onchain\Services\CosmwasmClassifier}
+ * {@see \BCC\Trust\Onchain\Support\ProviderRequestBudget}, {@see \BCC\Trust\Onchain\Services\CosmwasmClassifier}
  * and {@see \BCC\Trust\Onchain\Services\NftSpamFilter}.
  *
  * ── WHAT IS FAKED, AND WHY ONLY THIS ────────────────────────────────────

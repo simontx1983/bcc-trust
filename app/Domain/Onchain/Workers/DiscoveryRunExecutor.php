@@ -29,7 +29,8 @@ use BCC\Trust\Onchain\Services\DiscoveryScanProgress;
 use BCC\Trust\Onchain\Services\DiscoveryScanSession;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmPassStopReason;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\DiscoveryReadiness;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryJobKind;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
@@ -64,15 +65,16 @@ final class DiscoveryRunExecutor
     // ceilings, "which is the entire point of running it", and an executor
     // with its own numbers would have silently made that untrue.
     //
-    // `new CosmwasmTickBudget()` takes the canonical
-    // CosmwasmDiscoveryGate ceilings, so every ledger-backed pass is
-    // bounded by the same two numbers an operator can read and override.
+    // The executor passes the canonical CosmwasmDiscoveryGate ceilings to
+    // ProviderRequestBudget explicitly (the primitive is neutral and holds no
+    // scanner default), so every ledger-backed pass is still bounded by the
+    // same two numbers an operator can read and override.
 
     /**
      * Execute one run by id.
      *
      * @return array{status: string, reason?: string, run_id: int,
-     *               report?: CosmwasmPassReport, budget?: CosmwasmTickBudget}
+     *               report?: CosmwasmPassReport, budget?: ProviderRequestBudget}
      *
      * ⚠ `report` and `budget` are returned for an IN-PROCESS caller only
      * (the supervised CLI, which prints a summary in the same request).
@@ -178,7 +180,7 @@ final class DiscoveryRunExecutor
 
         // ── ⚠ THE SESSION'S REMAINDER, NOT JUST THE PER-CHUNK BUDGET ────
         //
-        // `new CosmwasmTickBudget()` takes the gate's per-chunk ceiling,
+        // The gate's per-chunk ceiling, passed explicitly below,
         // which an operator can raise to 500. Twenty-five such chunks would
         // authorize 12,500 requests against a provider whose breaker already
         // opened at 772 (run 5, 2026-09-07). Asking the session what it has
@@ -187,8 +189,9 @@ final class DiscoveryRunExecutor
         //
         // For a first chunk this is exactly the per-chunk budget: the
         // allowance is `min(budget, 625 - 0)`.
-        $budget = new CosmwasmTickBudget(
-            DiscoveryScanSession::chunkRequestAllowance((int) ($run->requests_used ?? 0))
+        $budget = new ProviderRequestBudget(
+            DiscoveryScanSession::chunkRequestAllowance((int) ($run->requests_used ?? 0)),
+            CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS
         );
         $report = new CosmwasmPassReport();
 

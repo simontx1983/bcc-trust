@@ -9,7 +9,7 @@ use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainNftCapabilityRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
 use BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides;
@@ -72,7 +72,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
         ChainNftCapabilityRepository::reset();
         ChainCheckpointRepository::reset();
         CosmwasmDiscoveryWorker::reset();
-        CosmwasmTickBudget::reset();
+        ProviderRequestBudget::reset();
         CosmwasmDiscoveryGate::reset();
         \BccNftDiscoveryTransientStore::reset();
 
@@ -138,7 +138,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
     private function assertNothingRan(string $why): void
     {
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, $why . ' — no provider work');
-        $this->assertSame([], CosmwasmTickBudget::$constructions, $why . ' — no budget even built');
+        $this->assertSame([], ProviderRequestBudget::$constructions, $why . ' — no budget even built');
         $this->assertSame([], $this->audits(), $why . ' — no durable row');
         $this->assertSame([], ChainRepository::$discoveryWrites, $why . ' — no settings write');
         $this->assertSame(0, ChainRepository::$cacheBusts, $why . ' — no cache bust');
@@ -357,7 +357,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
      */
     public function testARunCutShortByItsBudgetIsMarkedPartial(): void
     {
-        CosmwasmTickBudget::$spent = 20;   // the whole admin allowance
+        ProviderRequestBudget::$spent = 20;   // the whole admin allowance
 
         $this->drive();
 
@@ -368,7 +368,7 @@ final class NftDiscoveryRunnerGateTest extends TestCase
 
     public function testARunCutShortByTheClockNamesTheClockNotTheBudget(): void
     {
-        CosmwasmTickBudget::$timedOut = true;
+        ProviderRequestBudget::$timedOut = true;
 
         $this->drive();
 
@@ -434,10 +434,10 @@ final class NftDiscoveryRunnerGateTest extends TestCase
 
         $this->assertSame(
             [['requests' => 20, 'seconds' => 8]],
-            CosmwasmTickBudget::$constructions
+            ProviderRequestBudget::$constructions
         );
-        $this->assertSame(0, CosmwasmTickBudget::$reserveCalls, 'the worker owns the reserve sequence');
-        $this->assertSame(0, CosmwasmTickBudget::$availableCalls);
+        $this->assertSame(0, ProviderRequestBudget::$reserveCalls, 'the worker owns the reserve sequence');
+        $this->assertSame(0, ProviderRequestBudget::$availableCalls);
     }
 
     /** The run report never travels in the URL. */
