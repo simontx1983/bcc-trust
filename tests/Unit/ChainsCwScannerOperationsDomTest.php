@@ -125,6 +125,42 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
         return $out;
     }
 
+    /**
+     * The four controls as the PRESERVED markup renders them.
+     *
+     * The section no longer emits them — ScannerFreeze withdrew the entry point — so the
+     * markup contract below is asserted against the private renderer that still ships and
+     * that the retirement PR deletes. Freezing the surface therefore costs no coverage of
+     * the markup, while `testTheSectionOffersNoRunControl*` pins that nothing reaches it.
+     *
+     * @param list<string> $routes
+     */
+    private function controlsDom(array $routes = []): \DOMDocument
+    {
+        $routes = $routes !== [] ? $routes : [
+            NftDiscoveryPage::ACTION_CW_PAUSE,
+            NftDiscoveryPage::ACTION_CW_RESUME,
+            NftDiscoveryPage::ACTION_CW_BACKFILL,
+            NftDiscoveryPage::ACTION_CW_RETRY,
+        ];
+
+        $method = new \ReflectionMethod(NftDiscoveryPage::class, 'render_cw_operation_control_markup');
+        $method->setAccessible(true);
+
+        ob_start();
+        foreach ($routes as $route) {
+            $method->invoke(null, $route, self::CHAIN_ID, 'osmosis');
+        }
+        $html = (string) ob_get_clean();
+
+        $doc = new \DOMDocument();
+        libxml_use_internal_errors(true);
+        $doc->loadHTML('<!DOCTYPE html><html><body>' . $html . '</body></html>');
+        libxml_clear_errors();
+
+        return $doc;
+    }
+
     private function hiddenValue(\DOMElement $form, string $name): ?string
     {
         foreach ($form->getElementsByTagName('input') as $i) {
@@ -151,7 +187,7 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
 
     public function testEveryOperationFormPostsToAdminPostWithItsOwnScopedNonce(): void
     {
-        $forms = $this->operationForms($this->dom());
+        $forms = $this->operationForms($this->controlsDom());
 
         $this->assertNotSame([], $forms);
 
@@ -173,7 +209,7 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
 
     public function testEveryFormIdIsUniqueAndNamesItsOperationAndChain(): void
     {
-        $doc = $this->dom();
+        $doc = $this->controlsDom();
 
         $ids = [];
         foreach ($this->elements($doc, 'form') as $form) {
@@ -196,7 +232,7 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
 
     public function testNoFormIsNested(): void
     {
-        foreach ($this->elements($this->dom(), 'form') as $form) {
+        foreach ($this->elements($this->controlsDom(), 'form') as $form) {
             $this->assertCount(
                 0,
                 iterator_to_array($form->getElementsByTagName('form')),
@@ -207,7 +243,7 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
 
     public function testEachOperationFormCarriesExactlyOneSubmitButton(): void
     {
-        foreach ($this->operationForms($this->dom()) as $route => $form) {
+        foreach ($this->operationForms($this->controlsDom()) as $route => $form) {
             $buttons = 0;
             foreach ($form->getElementsByTagName('button') as $b) {
                 if ($b instanceof \DOMElement && $b->getAttribute('type') === 'submit') {
@@ -224,10 +260,8 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
     /** A running chain offers Pause — never Resume as well. */
     public function testARunningChainOffersPauseAndNotResume(): void
     {
-        $forms = $this->operationForms($this->dom(['paused' => false]));
-
-        $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_PAUSE, $forms);
-        $this->assertArrayNotHasKey(NftDiscoveryPage::ACTION_CW_RESUME, $forms);
+        // FROZEN: a running chain used to be offered Pause. No run control is reachable now.
+        $this->assertSame([], $this->operationForms($this->dom(['paused' => false])));
     }
 
     /**
@@ -238,10 +272,8 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
      */
     public function testAPausedChainOffersResumeAndNotPause(): void
     {
-        $forms = $this->operationForms($this->dom(['paused' => true]));
-
-        $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_RESUME, $forms);
-        $this->assertArrayNotHasKey(NftDiscoveryPage::ACTION_CW_PAUSE, $forms);
+        // FROZEN: a paused chain used to be offered Resume. No run control is reachable now.
+        $this->assertSame([], $this->operationForms($this->dom(['paused' => true])));
     }
 
     /** Backfill is refused while paused, so it is not offered while paused. */
@@ -274,14 +306,13 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
         CosmwasmDiscoveryGate::$discovery = $discovery;
         CosmwasmDiscoveryGate::$backfill  = $backfill;
 
+        // FROZEN: whatever the gates say, the section offers no run control. The matrix is kept
+        // so every gate combination still renders the section and is proven to emit nothing.
         $forms = $this->operationForms($this->dom());
 
-        $this->assertSame($offersBackfill, isset($forms[NftDiscoveryPage::ACTION_CW_BACKFILL]));
-        $this->assertSame($offersRetry, isset($forms[NftDiscoveryPage::ACTION_CW_RETRY]));
-
-        // Pause is a local hold and never depends on the environment gate:
-        // a chain must remain pausable even with discovery switched off.
-        $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_PAUSE, $forms);
+        $this->assertSame([], $forms, "discovery={$discovery} backfill={$backfill}");
+        $this->assertFalse($offersBackfill && isset($forms[NftDiscoveryPage::ACTION_CW_BACKFILL]));
+        $this->assertFalse($offersRetry && isset($forms[NftDiscoveryPage::ACTION_CW_RETRY]));
     }
 
     /**
@@ -312,13 +343,8 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
         ] as $status) {
             $forms = $this->operationForms($this->dom(['enumeration_status' => $status]));
 
-            $this->assertArrayNotHasKey(
-                NftDiscoveryPage::ACTION_CW_BACKFILL,
-                $forms,
-                "status {$status} must not offer a provider-consuming control"
-            );
-            $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_PAUSE, $forms);
-            $this->assertArrayHasKey(NftDiscoveryPage::ACTION_CW_RETRY, $forms);
+            // FROZEN: not merely "no provider-consuming control" — no run control at all.
+            $this->assertSame([], $forms, "status {$status} must offer no run control");
         }
     }
 
@@ -410,7 +436,7 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
         $seen = [];
 
         foreach ([false, true] as $paused) {
-            foreach ($this->operationForms($this->dom(['paused' => $paused])) as $route => $form) {
+            foreach ($this->operationForms($this->controlsDom()) as $route => $form) {
                 $button = $form->getElementsByTagName('button')->item(0);
                 $this->assertInstanceOf(\DOMElement::class, $button);
 
@@ -442,7 +468,7 @@ final class ChainsCwScannerOperationsDomTest extends TestCase
     {
         $labels = [];
         foreach ([false, true] as $paused) {
-            foreach ($this->operationForms($this->dom(['paused' => $paused])) as $route => $form) {
+            foreach ($this->operationForms($this->controlsDom()) as $route => $form) {
                 $button = $form->getElementsByTagName('button')->item(0);
                 $this->assertInstanceOf(\DOMElement::class, $button);
                 $labels[$route] = trim($button->textContent);

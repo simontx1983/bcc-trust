@@ -21,7 +21,7 @@ use BCC\Trust\Onchain\Support\CosmosEndpointVerifier;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmPassStopReason;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
 use BCC\Trust\Onchain\Services\ManualCollectionIntakeService;
@@ -253,10 +253,15 @@ class NftDiscoveryPage
             [self::class, 'handle_cw_discovery_disable']
         );
 
-        add_action('admin_post_' . self::ACTION_CW_PAUSE,    [self::class, 'handle_cw_pause']);
-        add_action('admin_post_' . self::ACTION_CW_RESUME,   [self::class, 'handle_cw_resume']);
-        add_action('admin_post_' . self::ACTION_CW_BACKFILL, [self::class, 'handle_cw_backfill']);
-        add_action('admin_post_' . self::ACTION_CW_RETRY,    [self::class, 'handle_cw_retry']);
+        // FROZEN (see ScannerFreeze): pause, resume, backfill-slice and retry all continue or
+        // re-drive a full-chain pass. The handlers are intact and still tested; they are simply
+        // not reachable. Chain enable/disable above is NOT frozen — it configures, it starts nothing.
+        if (!\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+            add_action('admin_post_' . self::ACTION_CW_PAUSE,    [self::class, 'handle_cw_pause']);
+            add_action('admin_post_' . self::ACTION_CW_RESUME,   [self::class, 'handle_cw_resume']);
+            add_action('admin_post_' . self::ACTION_CW_BACKFILL, [self::class, 'handle_cw_backfill']);
+            add_action('admin_post_' . self::ACTION_CW_RETRY,    [self::class, 'handle_cw_retry']);
+        }
 
         // Bookmarks, browser history and any link written before the move.
         add_action('admin_init', [self::class, 'maybe_redirect_legacy_url']);
@@ -694,7 +699,7 @@ class NftDiscoveryPage
         // this chain holds.
         $before = CosmwasmDiscoveryService::chainSummary($chainId);
 
-        $budget  = new CosmwasmTickBudget(self::ADMIN_BACKFILL_REQUESTS, self::ADMIN_BACKFILL_SECONDS);
+        $budget  = new ProviderRequestBudget(self::ADMIN_BACKFILL_REQUESTS, self::ADMIN_BACKFILL_SECONDS);
         $report  = new CosmwasmPassReport();
         $outcome = CosmwasmDiscoveryWorker::runBackfillForChain($chainId, $budget, $report);
 
@@ -1609,7 +1614,7 @@ class NftDiscoveryPage
     private static function store_run_report(
         int $chainId,
         string $outcome,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         CosmwasmPassReport $report,
         array $before,
         array $after
@@ -2867,6 +2872,26 @@ class NftDiscoveryPage
      * rather than a copy of it.
      */
     public static function render_cw_operation_control(string $route, int $chainId, string $slug = ''): void
+    {
+        // FROZEN (see ScannerFreeze): this is the one renderer behind all four CosmWasm run
+        // controls, so the buttons, their forms and their nonces all stop here. The markup and
+        // the handlers below are intact and still tested — nothing renders to reach them.
+        if (\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+            return;
+        }
+
+        self::render_cw_operation_control_markup($route, $chainId, $slug);
+    }
+
+    /**
+     * The markup itself, unreachable while the scanner is frozen.
+     *
+     * Kept private rather than deleted: this PR withdraws the SURFACE, and the
+     * retirement PR that deletes the scanner deletes this with it. Its existing
+     * DOM tests still drive it directly, so freezing the entry point costs no
+     * coverage of the markup that is still shipped.
+     */
+    private static function render_cw_operation_control_markup(string $route, int $chainId, string $slug = ''): void
     {
         $chainId = (int) $chainId;
         $name    = $slug !== '' ? $slug : ('chain ' . $chainId);

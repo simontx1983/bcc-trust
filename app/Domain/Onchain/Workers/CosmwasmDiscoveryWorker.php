@@ -15,7 +15,7 @@ use BCC\Trust\Onchain\Support\CosmosEndpointAuthorization;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure;
 
@@ -140,7 +140,7 @@ final class CosmwasmDiscoveryWorker
     // ── DOWNSTREAM BUDGET RESERVES ──────────────────────────────────────
     //
     // The pass runs four stages in a fixed order against ONE shared
-    // CosmwasmTickBudget. Nothing stopped the first stage spending all 50
+    // ProviderRequestBudget. Nothing stopped the first stage spending all 50
     // requests, and on a chain with a classification backlog it reliably
     // did. Measured on Dungeon: a confirmed CW-721 family and an
     // already-emittable contract sat untouched while the queue ahead of
@@ -237,7 +237,7 @@ final class CosmwasmDiscoveryWorker
      */
     public static function runBackfillForChain(
         int $chainId,
-        ?CosmwasmTickBudget $budget = null,
+        ?ProviderRequestBudget $budget = null,
         ?CosmwasmPassReport $report = null
     ): string {
         if ($chainId <= 0 || !CosmwasmDiscoveryGate::backfillEnabled()) {
@@ -277,7 +277,12 @@ final class CosmwasmDiscoveryWorker
         }
 
         try {
-            return self::backfillInsideLock($chainId, $budget ?? new CosmwasmTickBudget(), $report);
+            // Unchanged ceilings, now stated rather than inherited from the primitive.
+            $budget ??= new ProviderRequestBudget(
+                CosmwasmDiscoveryGate::requestBudget(),
+                CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS
+            );
+            return self::backfillInsideLock($chainId, $budget, $report);
         } finally {
             \BCC\Core\DB\AdvisoryLock::release($lockKey);
         }
@@ -289,7 +294,7 @@ final class CosmwasmDiscoveryWorker
      */
     private static function backfillInsideLock(
         int $chainId,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         ?CosmwasmPassReport $report = null
     ): string {
         $context = self::prepareChain($chainId, $refusal);
@@ -471,7 +476,7 @@ final class CosmwasmDiscoveryWorker
     private static function dailyChainStep(
         int $chainId,
         CosmosFetcher $fetcher,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         ?CosmwasmPassReport $report = null
     ): void {
         // A caller may hand in a budget that already carries a reserve
@@ -687,7 +692,7 @@ final class CosmwasmDiscoveryWorker
     private static function classifyAndEnumerate(
         int $chainId,
         CosmosFetcher $fetcher,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         ?CosmwasmPassReport $report = null
     ): void {
         $priority = CosmwasmDiscoveryGate::priorityCodeIds(self::chainSlug($chainId));
@@ -808,10 +813,10 @@ final class CosmwasmDiscoveryWorker
      * its own first statement — the pre-lock call was always redundant
      * there, and only ever observable on the path that does no work.
      *
-     * @param callable(int, CosmosFetcher, CosmwasmTickBudget): void $step
+     * @param callable(int, CosmosFetcher, ProviderRequestBudget): void $step
      * @return string one of the PASS_* constants
      */
-    private static function runChainPass(int $chainId, callable $step, CosmwasmTickBudget $budget): string
+    private static function runChainPass(int $chainId, callable $step, ProviderRequestBudget $budget): string
     {
         $lockKey = self::ADVISORY_LOCK_PREFIX . $chainId;
         if (!\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
@@ -902,7 +907,7 @@ final class CosmwasmDiscoveryWorker
      */
     public static function runSupervisedSingleChainPass(
         int $chainId,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         CosmwasmPassReport $report
     ): string {
         if ($chainId <= 0) {
@@ -911,7 +916,7 @@ final class CosmwasmDiscoveryWorker
 
         return self::runChainPass(
             $chainId,
-            static function (int $id, CosmosFetcher $fetcher, CosmwasmTickBudget $tickBudget) use ($report): void {
+            static function (int $id, CosmosFetcher $fetcher, ProviderRequestBudget $tickBudget) use ($report): void {
                 self::dailyChainStep($id, $fetcher, $tickBudget, $report);
             },
             $budget

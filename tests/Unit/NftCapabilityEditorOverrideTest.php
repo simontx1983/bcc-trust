@@ -895,7 +895,7 @@ final class NftCapabilityEditorOverrideTest extends TestCase
         NftCapabilityEditor::inheritDriver(self::CHAIN_ID, self::OP, self::DRV);
 
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
-        $this->assertSame([], \BCC\Trust\Onchain\Support\CosmwasmTickBudget::$constructions);
+        $this->assertSame([], \BCC\Trust\Onchain\Support\ProviderRequestBudget::$constructions);
         $this->assertSame([], ChainRepository::$discoveryWrites);
         $this->assertSame([], ChainRepository::$capabilityWrites, 'an override edit touches no chain flag');
     }

@@ -9,7 +9,7 @@ declare(strict_types=1);
  * ── WHAT IS REAL ────────────────────────────────────────────────────────
  * `HoldingsService`, `NftGroupGateService`, `NftGroupRevokeService`,
  * `EligibilityVerdict`, `HoldingsCount`, `JoinResult`, `GatedGroupConfig`,
- * `GateIdentity`, `NftCollectionIdentifier` and `CosmwasmTickBudget`. Nothing
+ * `GateIdentity`, `NftCollectionIdentifier` and `ProviderRequestBudget`. Nothing
  * that decides is faked.
  *
  * ── WHAT IS FAKED, AND WHY ──────────────────────────────────────────────

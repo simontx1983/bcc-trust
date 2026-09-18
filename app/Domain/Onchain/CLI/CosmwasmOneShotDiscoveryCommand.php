@@ -10,7 +10,7 @@ use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmPassStopReason;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 
 if (!defined('ABSPATH')) {
@@ -79,7 +79,7 @@ if (!defined('ABSPATH')) {
  *   - the measured `unsupported` state and the operator `paused` state;
  *   - `BCC_COSMWASM_CHAIN_ALLOWLIST`;
  *   - the request budget and the wall-clock deadline
- *     ({@see CosmwasmTickBudget});
+ *     ({@see ProviderRequestBudget});
  *   - the per-chain `bcc_cosmwasm_chain_<id>` advisory lock;
  *   - the fail-closed repository read guards (a checkpoint read that did
  *     not run yields no eligible chain, so this command refuses).
@@ -121,7 +121,7 @@ if (!defined('ABSPATH')) {
  *   LOGICAL requests per invocation (`BCC_COSMWASM_REQUEST_BUDGET`
  *   overrides it within 1..500). For this command per-invocation and
  *   per-chain are the same number, because it builds one
- *   {@see CosmwasmTickBudget} for exactly one chain.
+ *   {@see ProviderRequestBudget} for exactly one chain.
  *
  *   HTTP RETRIES ARE ATTEMPTS INSIDE A LOGICAL REQUEST AND ARE NOT
  *   CHARGED SEPARATELY. One logical request is one `spend()`. Beneath it
@@ -597,7 +597,7 @@ final class CosmwasmOneShotDiscoveryCommand
         // persist (free text is exactly what PR 5b removed from durable
         // storage). The ledger-derived versions are the fallback for a run
         // this process did not execute itself.
-        $budget = ($execution['budget'] ?? null) instanceof CosmwasmTickBudget
+        $budget = ($execution['budget'] ?? null) instanceof ProviderRequestBudget
             ? $execution['budget']
             : self::budgetFromLedger($ledgerRun);
         $report = ($execution['report'] ?? null) instanceof CosmwasmPassReport
@@ -845,9 +845,15 @@ final class CosmwasmOneShotDiscoveryCommand
      *
      * @param DiscoveryRunRow|null $run
      */
-    private static function budgetFromLedger(?object $run): CosmwasmTickBudget
+    private static function budgetFromLedger(?object $run): ProviderRequestBudget
     {
-        $budget = new CosmwasmTickBudget();
+        // The scanner states its OWN ceiling: the budget primitive no longer
+        // reads CosmwasmDiscoveryGate, so the number must be passed here. Same
+        // values as before the split — gate budget, gate runtime.
+        $budget = new ProviderRequestBudget(
+            CosmwasmDiscoveryGate::requestBudget(),
+            CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS
+        );
 
         if ($run === null) {
             return $budget;
@@ -888,7 +894,7 @@ final class CosmwasmOneShotDiscoveryCommand
      * never ran.
      */
     /** @param DiscoveryRunRow|null $run */
-    private static function stopReasonFromLedger(?object $run, string $outcome, CosmwasmTickBudget $budget): string
+    private static function stopReasonFromLedger(?object $run, string $outcome, ProviderRequestBudget $budget): string
     {
         if ($run !== null) {
             $stored = $run->stop_reason ?? null;
@@ -1126,7 +1132,7 @@ final class CosmwasmOneShotDiscoveryCommand
         string $stopReason,
         int $exitCode,
         float $elapsed,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         CosmwasmPassReport $report,
         array $before,
         array $after
@@ -1214,7 +1220,7 @@ final class CosmwasmOneShotDiscoveryCommand
      * Every emitted token is byte-identical to the one this command emitted
      * before the extraction.
      */
-    private static function stopReason(string $outcome, CosmwasmTickBudget $budget): string
+    private static function stopReason(string $outcome, ProviderRequestBudget $budget): string
     {
         return CosmwasmPassStopReason::forOutcome($outcome, $budget);
     }

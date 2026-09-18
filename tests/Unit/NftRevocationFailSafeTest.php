@@ -732,7 +732,7 @@ final class NftRevocationFailSafeTest extends TestCase
             $this->answer(self::COSMOS_WALLET, $contract, 'exact', 0);
         }
 
-        $balances = HoldingsService::ownsAnyMany(self::USER, $pairs, new \BCC\Trust\Onchain\Support\CosmwasmTickBudget(8, 30));
+        $balances = HoldingsService::ownsAnyMany(self::USER, $pairs, new \BCC\Trust\Onchain\Support\ProviderRequestBudget(8, 30));
 
         self::assertLessThanOrEqual(2, \BccRevokeWorld::providerCalls());
         $unknown = array_filter($balances, static fn(?int $b): bool => $b === null);

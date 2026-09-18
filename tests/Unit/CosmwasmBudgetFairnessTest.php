@@ -13,7 +13,7 @@ use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -49,7 +49,7 @@ use PHPUnit\Framework\TestCase;
  * generic success.
  */
 #[CoversClass(CosmwasmDiscoveryWorker::class)]
-#[CoversClass(CosmwasmTickBudget::class)]
+#[CoversClass(ProviderRequestBudget::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class CosmwasmBudgetFairnessTest extends TestCase
@@ -265,10 +265,10 @@ final class CosmwasmBudgetFairnessTest extends TestCase
         $this->respond($contractsPerFamily);
     }
 
-    /** @return array{outcome:string,spent:int,remaining:int,budget:CosmwasmTickBudget} */
+    /** @return array{outcome:string,spent:int,remaining:int,budget:ProviderRequestBudget} */
     private function runPass(int $budget = self::BUDGET): array
     {
-        $b       = new CosmwasmTickBudget($budget, 120);
+        $b       = new ProviderRequestBudget($budget, 120);
         $outcome = CosmwasmDiscoveryWorker::runSupervisedSingleChainPass(self::CHAIN, $b, new CosmwasmPassReport());
 
         return ['outcome' => $outcome, 'spent' => $b->spent(), 'remaining' => $b->remaining(), 'budget' => $b];
@@ -398,7 +398,7 @@ final class CosmwasmBudgetFairnessTest extends TestCase
 
     public function testReserveZeroIsTheOriginalBehaviour(): void
     {
-        $b = new CosmwasmTickBudget(10, 120);
+        $b = new ProviderRequestBudget(10, 120);
         $b->reserve(0);
         self::assertSame(10, $b->available());
         self::assertTrue($b->canSpend(10));
@@ -411,7 +411,7 @@ final class CosmwasmBudgetFairnessTest extends TestCase
 
     public function testANegativeReserveCannotIncreaseCapacity(): void
     {
-        $b = new CosmwasmTickBudget(10, 120);
+        $b = new ProviderRequestBudget(10, 120);
         $b->reserve(-5);
         self::assertSame(10, $b->available(), 'clamped to 0, never negative');
         self::assertFalse($b->canSpend(11), 'cannot exceed the real ceiling');
@@ -419,7 +419,7 @@ final class CosmwasmBudgetFairnessTest extends TestCase
 
     public function testAnOversizedReserveYieldsZeroSafely(): void
     {
-        $b = new CosmwasmTickBudget(3, 120);
+        $b = new ProviderRequestBudget(3, 120);
         $b->reserve(99);
         self::assertSame(0, $b->available());
         self::assertTrue($b->exhausted());
@@ -429,7 +429,7 @@ final class CosmwasmBudgetFairnessTest extends TestCase
 
     public function testLoweringAReserveNeverRestoresSpentRequests(): void
     {
-        $b = new CosmwasmTickBudget(10, 120);
+        $b = new ProviderRequestBudget(10, 120);
         $b->reserve(4);
         $b->spend(6);
         self::assertSame(0, $b->available());
@@ -440,7 +440,7 @@ final class CosmwasmBudgetFairnessTest extends TestCase
 
     public function testCanSpendAndExhaustedBothRespectTheReserve(): void
     {
-        $b = new CosmwasmTickBudget(10, 120);
+        $b = new ProviderRequestBudget(10, 120);
         $b->reserve(8);
         self::assertTrue($b->canSpend(2));
         self::assertFalse($b->canSpend(3));
@@ -461,7 +461,7 @@ final class CosmwasmBudgetFairnessTest extends TestCase
      */
     public function testSpendRecordsHonestlyAndNeverGoesNegativeAvailable(): void
     {
-        $b = new CosmwasmTickBudget(10, 120);
+        $b = new ProviderRequestBudget(10, 120);
         $b->reserve(6);
         $b->spend(9);
         self::assertSame(9, $b->spent(), 'the request happened and is counted');
@@ -494,7 +494,7 @@ final class CosmwasmBudgetFairnessTest extends TestCase
 
     public function testTheRuntimeDeadlineStillWins(): void
     {
-        $b = new CosmwasmTickBudget(50, 1);
+        $b = new ProviderRequestBudget(50, 1);
         $b->reserve(0);
         usleep(1_100_000);
         self::assertTrue($b->timedOut());
@@ -551,7 +551,7 @@ final class CosmwasmBudgetFairnessTest extends TestCase
         self::assertLessThan($c3, $c2, 'then enumeration');
         self::assertLessThan($d, $c3, 'then contract classification, then emission');
 
-        self::assertSame(1, substr_count($src, 'new CosmwasmTickBudget'),
+        self::assertSame(1, substr_count($src, 'new ProviderRequestBudget'),
             'the backfill default only — no hidden second allowance');
         self::assertStringContainsString('$budget->reserve(0);' , $body, 'released before emission');
     }

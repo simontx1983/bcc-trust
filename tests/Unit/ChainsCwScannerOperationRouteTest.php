@@ -11,7 +11,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -68,7 +68,7 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
         CosmwasmCodeFamilyRepository::reset();
         CosmwasmContractRepository::reset();
         CosmwasmDiscoveryWorker::reset();
-        CosmwasmTickBudget::reset();
+        ProviderRequestBudget::reset();
         CosmwasmDiscoveryGate::reset();
 
         $_POST = [];
@@ -138,7 +138,7 @@ final class ChainsCwScannerOperationRouteTest extends TestCase
         $this->assertSame([], CosmwasmCodeFamilyRepository::$retryCalls, $why . ' — no family requeue');
         $this->assertSame([], CosmwasmContractRepository::$retryCalls, $why . ' — no contract requeue');
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, $why . ' — no scanner work');
-        $this->assertSame([], CosmwasmTickBudget::$constructions, $why . ' — no provider budget taken');
+        $this->assertSame([], ProviderRequestBudget::$constructions, $why . ' — no provider budget taken');
         $this->assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions(), $why . ' — no durable row');
     }
 

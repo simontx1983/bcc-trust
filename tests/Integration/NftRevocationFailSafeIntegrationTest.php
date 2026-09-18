@@ -579,7 +579,7 @@ namespace BCC\Trust\Tests\Integration {
                 'cosmos',
                 self::CONTRACT,
                 1,
-                new \BCC\Trust\Onchain\Support\CosmwasmTickBudget(40, 30)
+                new \BCC\Trust\Onchain\Support\ProviderRequestBudget(40, 30)
             );
 
             self::assertSame($expected, RevocationScriptedFetcher::$asked);

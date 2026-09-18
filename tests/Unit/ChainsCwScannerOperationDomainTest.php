@@ -10,7 +10,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -36,7 +36,7 @@ use PHPUnit\Framework\TestCase;
  * actually stand behind.
  *
  * ── AND THE ONE IT MUST NOT CROSS ───────────────────────────────────────
- * PR #200 owns the CosmwasmTickBudget reserve sequence inside the worker.
+ * PR #200 owns the ProviderRequestBudget reserve sequence inside the worker.
  * This handler constructs the budget once and hands it over. The fake
  * budget counts reserve()/available() so "the boundary did not reach into
  * that sequence" is a measured zero rather than a reading of the source.
@@ -70,7 +70,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         CosmwasmCodeFamilyRepository::reset();
         CosmwasmContractRepository::reset();
         CosmwasmDiscoveryWorker::reset();
-        CosmwasmTickBudget::reset();
+        ProviderRequestBudget::reset();
         CosmwasmDiscoveryGate::reset();
 
         $_POST = [];
@@ -141,7 +141,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         $this->drive(NftDiscoveryPage::ACTION_CW_PAUSE);
 
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
-        $this->assertSame([], CosmwasmTickBudget::$constructions);
+        $this->assertSame([], ProviderRequestBudget::$constructions);
     }
 
     /** Already paused: no write, no durable row — nothing changed. */
@@ -259,7 +259,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         $this->drive(NftDiscoveryPage::ACTION_CW_RESUME);
 
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, 'resume starts nothing');
-        $this->assertSame([], CosmwasmTickBudget::$constructions);
+        $this->assertSame([], ProviderRequestBudget::$constructions);
     }
 
     /** @return array<string, array{0: string}> */
@@ -332,13 +332,13 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
 
         $this->assertSame(
             [['requests' => 20, 'seconds' => 8]],
-            CosmwasmTickBudget::$constructions,
+            ProviderRequestBudget::$constructions,
             'exactly one budget, at the documented admin bound'
         );
 
         $this->assertSame(1, CosmwasmDiscoveryWorker::$passes, 'the worker is invoked at most once');
         $this->assertCount(1, CosmwasmDiscoveryWorker::$budgets);
-        $this->assertInstanceOf(CosmwasmTickBudget::class, CosmwasmDiscoveryWorker::$budgets[0]);
+        $this->assertInstanceOf(ProviderRequestBudget::class, CosmwasmDiscoveryWorker::$budgets[0]);
         $this->assertSame(20, CosmwasmDiscoveryWorker::$budgets[0]->requests);
         $this->assertSame(8, CosmwasmDiscoveryWorker::$budgets[0]->seconds);
     }
@@ -350,8 +350,8 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
 
         $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL);
 
-        $this->assertSame(0, CosmwasmTickBudget::$reserveCalls, 'reserve() belongs to the worker');
-        $this->assertSame(0, CosmwasmTickBudget::$availableCalls, 'available() belongs to the worker');
+        $this->assertSame(0, ProviderRequestBudget::$reserveCalls, 'reserve() belongs to the worker');
+        $this->assertSame(0, ProviderRequestBudget::$availableCalls, 'available() belongs to the worker');
     }
 
     /**
@@ -440,7 +440,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
 
         $this->assertSame($expected, $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL));
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, 'no pass may start');
-        $this->assertSame([], CosmwasmTickBudget::$constructions, 'no provider budget taken');
+        $this->assertSame([], ProviderRequestBudget::$constructions, 'no provider budget taken');
         $this->assertSame([], $this->audits(), 'a refused gate is not a state change');
     }
 
@@ -450,7 +450,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
 
         $this->assertSame('backfill_paused', $this->drive(NftDiscoveryPage::ACTION_CW_BACKFILL));
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
-        $this->assertSame([], CosmwasmTickBudget::$constructions);
+        $this->assertSame([], ProviderRequestBudget::$constructions);
         $this->assertSame([], $this->audits());
     }
 
@@ -501,7 +501,7 @@ final class ChainsCwScannerOperationDomainTest extends TestCase
         $this->drive(NftDiscoveryPage::ACTION_CW_RETRY);
 
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes);
-        $this->assertSame([], CosmwasmTickBudget::$constructions);
+        $this->assertSame([], ProviderRequestBudget::$constructions);
     }
 
     /**
