@@ -120,12 +120,21 @@ final class ManualOnlyDiscoveryTest extends TestCase
 
         $result = DiscoveryRunMaintenance::tick();
 
-        self::assertSame([41], \BccMaintenanceWorld::$dispatched, 'the EXISTING row, by id');
-        self::assertSame(1, $result['redispatched']);
+        // FROZEN: nothing is dispatched, and the row is neither recreated nor changed.
+        self::assertSame([], \BccMaintenanceWorld::$dispatched);
+        self::assertSame(0, $result['redispatched']);
         self::assertCount(1, \BccMaintenanceWorld::$rows, 'still exactly the one row');
+        self::assertSame('queued', \BccMaintenanceWorld::$rows[41]->status);
     }
 
-    /** A run whose worker died comes back — that is the sweep's whole job. */
+    /**
+     * A run whose worker died used to come back — that was the sweep's whole job.
+     *
+     * ⚠ FROZEN (ScannerFreeze): the sweep no longer re-dispatches or requeues anything.
+     * The fixture and its selectors are kept so the state still EXISTS and is still the
+     * kind the sweep used to act on; what is asserted now is that it is left untouched.
+     * ScannerBackgroundEntryPointsAreFrozenTest proves the same rows are still selectable.
+     */
     public function testAnExpiredLeaseIsRequeuedAndPickedUpInTheSameTick(): void
     {
         \BccMaintenanceWorld::seedRun(42, self::CHAIN, 'running', [
@@ -135,10 +144,12 @@ final class ManualOnlyDiscoveryTest extends TestCase
 
         $result = DiscoveryRunMaintenance::tick();
 
-        self::assertSame([42], \BccMaintenanceWorld::$requeued);
-        self::assertSame([42], \BccMaintenanceWorld::$dispatched, 'requeued first, so it moves this tick');
-        self::assertSame(1, $result['requeued']);
+        // FROZEN: the dead worker's run is left exactly as it was.
+        self::assertSame([], \BccMaintenanceWorld::$requeued);
+        self::assertSame([], \BccMaintenanceWorld::$dispatched);
+        self::assertSame(0, $result['requeued']);
         self::assertCount(1, \BccMaintenanceWorld::$rows);
+        self::assertSame('running', \BccMaintenanceWorld::$rows[42]->status);
     }
 
     /**
@@ -156,10 +167,12 @@ final class ManualOnlyDiscoveryTest extends TestCase
 
         $result = DiscoveryRunMaintenance::tick();
 
-        self::assertSame([43], \BccMaintenanceWorld::$exhausted);
+        // FROZEN: not terminalised either — no run state changes at all.
+        self::assertSame([], \BccMaintenanceWorld::$exhausted);
         self::assertSame([], \BccMaintenanceWorld::$requeued);
-        self::assertSame([], \BccMaintenanceWorld::$dispatched, 'a terminal run is not dispatched');
-        self::assertSame(1, $result['exhausted']);
+        self::assertSame([], \BccMaintenanceWorld::$dispatched);
+        self::assertSame(0, $result['exhausted']);
+        self::assertSame('running', \BccMaintenanceWorld::$rows[43]->status);
     }
 
     /**

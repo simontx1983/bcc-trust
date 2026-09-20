@@ -35,6 +35,7 @@ namespace BCC\Trust\Onchain\Workers;
 use BCC\Core\Cron\AsyncDispatcher;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
+use BCC\Trust\Onchain\Support\ScannerFreeze;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -128,6 +129,16 @@ final class DiscoveryRunMaintenance
     public static function tick(): array
     {
         $result = ['redispatched' => 0, 'requeued' => 0, 'exhausted' => 0, 'pruned' => 0];
+
+        // FROZEN (see ScannerFreeze). This sweep is a BACKGROUND entry point into a run: it
+        // requeues expired leases, terminalizes exhausted ones, finds dispatchable runs and
+        // enqueues DiscoveryRunExecutor. Registration alone would therefore keep the scanner
+        // reachable every five minutes, so the tick returns its zero counts and touches nothing.
+        // A complete no-op is deliberate: pruning is skipped too, which RETAINS run history for
+        // the retirement PR rather than deleting rows while the surface is frozen.
+        if (ScannerFreeze::frozen()) {
+            return $result;
+        }
 
         // ── 1 + 2. Triage expired leases FIRST ──────────────────────────
         // Before re-dispatching, so a run whose worker died is already back

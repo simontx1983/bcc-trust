@@ -294,7 +294,8 @@ add_action('plugins_loaded', 'bcc_trust_run_pending_migrations', 20, 0);
 add_action(
     \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::HOOK,
     static function ($runId = 0): void {
-        \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::execute((int) $runId);
+        // The FROZEN entry point, not execute() itself — see ScannerFreeze.
+        \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::handleQueuedAction((int) $runId);
     },
     10,
     1

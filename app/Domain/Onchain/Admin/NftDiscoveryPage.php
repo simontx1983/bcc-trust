@@ -8,6 +8,7 @@ if (!defined('ABSPATH')) {
 
 use BCC\Trust\Onchain\Admin\Views\NftCapabilityEditorPanel;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
+use BCC\Trust\Onchain\Support\ScannerFreeze;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
@@ -244,14 +245,22 @@ class NftDiscoveryPage
         add_action('admin_post_' . self::ACTION_CAP_STALE_REMOVE,    [self::class, 'handle_cap_stale_remove']);
         add_action('admin_post_' . self::ACTION_ADD_COLLECTION,      [self::class, 'handle_add_collection']);
 
-        add_action(
-            'admin_post_' . self::ACTION_CW_DISCOVERY_ENABLE,
-            [self::class, 'handle_cw_discovery_enable']
-        );
-        add_action(
-            'admin_post_' . self::ACTION_CW_DISCOVERY_DISABLE,
-            [self::class, 'handle_cw_discovery_disable']
-        );
+        // FROZEN (see ScannerFreeze): `cosmwasm_nft_discovery_enabled` is consumed only by the
+        // scanner — CosmwasmDiscoveryGate, CosmwasmScanEligibility, the one-shot CLI and the
+        // scanner health snapshot. No ownership, manual-intake or capability path reads it, so
+        // these two routes configure a retired subsystem and nothing else. The SEPARATE manual
+        // controls (`bcc_supports_nft_collections`, `manual_collection_discovery_enabled`) are
+        // different columns with their own routes and are deliberately untouched.
+        if (!ScannerFreeze::frozen()) {
+            add_action(
+                'admin_post_' . self::ACTION_CW_DISCOVERY_ENABLE,
+                [self::class, 'handle_cw_discovery_enable']
+            );
+            add_action(
+                'admin_post_' . self::ACTION_CW_DISCOVERY_DISABLE,
+                [self::class, 'handle_cw_discovery_disable']
+            );
+        }
 
         // FROZEN (see ScannerFreeze): pause, resume, backfill-slice and retry all continue or
         // re-drive a full-chain pass. The handlers are intact and still tested; they are simply
@@ -2754,6 +2763,9 @@ class NftDiscoveryPage
                 <div style="font-size:12px;color:#646970;"><?php echo esc_html($reason); ?></div>
             </td>
             <td>
+                <?php if (ScannerFreeze::frozen()): ?>
+                    <span style="color:#646970;font-size:12px;">Scanner frozen</span>
+                <?php else: ?>
                 <form id="<?php echo esc_attr($formId); ?>" method="post"
                       action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0;">
                     <input type="hidden" name="action" value="<?php echo esc_attr($route); ?>">
@@ -2761,6 +2773,7 @@ class NftDiscoveryPage
                     <?php wp_nonce_field($route . '_' . $chainId); ?>
                     <?php self::render_cw_discovery_button($chainId, $optedIn, $slug); ?>
                 </form>
+                <?php endif; ?>
             </td>
         </tr>
         <?php

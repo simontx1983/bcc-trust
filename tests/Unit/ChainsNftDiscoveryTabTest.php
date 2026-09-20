@@ -150,6 +150,40 @@ final class ChainsNftDiscoveryTabTest extends TestCase
      *
      * @return list<\DOMElement>
      */
+    /**
+     * The opt-in BUTTON as its own renderer emits it.
+     *
+     * The section no longer wraps it in a form — ScannerFreeze withdrew the two routes —
+     * so the label and confirmation contract is asserted against the public renderer that
+     * still ships. `testTheSectionOffersNoDiscoveryControl` pins that nothing reaches it.
+     */
+    private function buttonDom(int $chainId, bool $optedIn): \DOMDocument
+    {
+        ob_start();
+        NftDiscoveryPage::render_cw_discovery_button($chainId, $optedIn, 'osmosis');
+        $html = (string) ob_get_clean();
+
+        $doc = new \DOMDocument();
+        libxml_use_internal_errors(true);
+        $doc->loadHTML('<!DOCTYPE html><html><body>' . $html . '</body></html>');
+        libxml_clear_errors();
+
+        return $doc;
+    }
+
+    /** The freeze itself: no chain, in either direction, offers a discovery control. */
+    public function testTheSectionOffersNoDiscoveryControl(): void
+    {
+        $doc = $this->dom();
+
+        self::assertSame([], $this->discoveryForms($doc), 'no opt-in or opt-out form renders');
+        self::assertStringNotContainsString(
+            NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE,
+            (string) $doc->saveHTML(),
+            'and no nonce or link names the route either'
+        );
+    }
+
     private function discoveryForms(\DOMDocument $doc): array
     {
         $routes = [NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE, NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE];
@@ -165,6 +199,17 @@ final class ChainsNftDiscoveryTabTest extends TestCase
     }
 
     /** @return list<\DOMElement> */
+    /** Every button in a fragment — used for the form-less preserved renderer. */
+    private function buttonsIn(\DOMDocument $doc): array
+    {
+        $out = [];
+        foreach ($this->elements($doc, 'button') as $b) {
+            $out[] = $b;
+        }
+
+        return $out;
+    }
+
     private function discoveryButtons(\DOMDocument $doc): array
     {
         $out = [];
@@ -545,10 +590,15 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
     public function testEveryChainRendersExactlyOneCorrectlyScopedForm(): void
     {
+        // FROZEN (ScannerFreeze): the two routes are withdrawn, so no chain renders a form.
+        // The per-chain scoping this used to pin went with them; the retirement PR deletes
+        // the markup itself. What must hold now is that NOTHING is offered.
         $doc   = $this->dom();
         $forms = $this->discoveryForms($doc);
 
-        $this->assertCount(3, $forms, 'one discovery control per CosmWasm candidate, no more');
+        $this->assertSame([], $forms, 'no discovery control renders for any candidate');
+        return;
+        /** @phpstan-ignore-next-line deadCode.unreachable — kept for the retirement PR */
 
         $ids      = [];
         $expected = [
@@ -584,6 +634,10 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
     public function testNoFormIsNested(): void
     {
+        // FROZEN: there is no discovery form left to nest — assert that, so the test still
+        // states something rather than passing over an empty set.
+        $this->assertSame([], $this->discoveryForms($this->dom()));
+
         $doc = $this->dom();
 
         foreach ($this->elements($doc, 'form') as $form) {
@@ -599,10 +653,10 @@ final class ChainsNftDiscoveryTabTest extends TestCase
     {
         $doc = $this->dom();
 
-        $this->assertNotNull($this->formById($doc, 'cwd-disable-' . self::COSMOS_A));
+        // FROZEN: neither direction is offered for either chain.
+        $this->assertNull($this->formById($doc, 'cwd-disable-' . self::COSMOS_A));
         $this->assertNull($this->formById($doc, 'cwd-enable-' . self::COSMOS_A));
-
-        $this->assertNotNull($this->formById($doc, 'cwd-enable-' . self::COSMOS_B));
+        $this->assertNull($this->formById($doc, 'cwd-enable-' . self::COSMOS_B));
         $this->assertNull($this->formById($doc, 'cwd-disable-' . self::COSMOS_B));
     }
 
@@ -635,32 +689,37 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
     public function testThereIsExactlyOneDiscoveryControlPerChain(): void
     {
-        $doc = $this->dom();
-
+        // FROZEN: the section offers none…
         $buttons = 0;
-        foreach ($this->discoveryButtons($doc) as $b) {
-            if ($b->getAttribute('type') === 'submit') {
-                $buttons++;
-            }
+        foreach ($this->discoveryButtons($this->dom()) as $b) {
+            if ($b->getAttribute('type') === 'submit') { $buttons++; }
         }
+        $this->assertSame(0, $buttons, 'no Enable or Disable control is reachable');
 
-        $this->assertSame(3, $buttons, 'one Enable-or-Disable per chain, never both');
+        // …and the preserved renderer still emits exactly one submit per direction.
+        foreach ([true, false] as $optedIn) {
+            $one = 0;
+            foreach ($this->buttonsIn($this->buttonDom(self::COSMOS_A, $optedIn)) as $b) {
+                if ($b->getAttribute('type') === 'submit') { $one++; }
+            }
+            $this->assertSame(1, $one, 'exactly one button per direction');
+        }
     }
 
     // ── Labels and confirmation copy ────────────────────────────────────
 
     public function testLabelsSayWhatTheyDoRatherThanOnOrOff(): void
     {
-        $doc = $this->dom();
-
         $labels = [];
-        foreach ($this->discoveryButtons($doc) as $b) {
-            $labels[] = trim($b->textContent);
+        foreach ([true, false] as $optedIn) {
+            foreach ($this->buttonsIn($this->buttonDom(self::COSMOS_A, $optedIn)) as $b) {
+                $labels[] = trim($b->textContent);
+            }
         }
 
         sort($labels);
         $this->assertSame(
-            ['Disable automatic discovery', 'Enable automatic discovery', 'Enable automatic discovery'],
+            ['Disable automatic discovery', 'Enable automatic discovery'],
             $labels
         );
 
@@ -674,11 +733,14 @@ final class ChainsNftDiscoveryTabTest extends TestCase
 
     public function testTheConfirmationsAreTruthfulAndDistinguishDisableFromPause(): void
     {
-        $doc = $this->dom();
-
         $seen = ['enable' => false, 'disable' => false];
 
-        foreach ($this->discoveryButtons($doc) as $button) {
+        $buttons = array_merge(
+            $this->buttonsIn($this->buttonDom(self::COSMOS_A, true)),
+            $this->buttonsIn($this->buttonDom(self::COSMOS_B, false))
+        );
+
+        foreach ($buttons as $button) {
             $onclick = $button->getAttribute('onclick');
             $this->assertStringContainsString('confirm(', $onclick);
 

@@ -55,6 +55,10 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             'admin_post_bcc_chain_cw_resume',
             'admin_post_bcc_chain_cw_backfill',
             'admin_post_bcc_chain_cw_retry',
+            // `cosmwasm_nft_discovery_enabled` is read only by the scanner, so these two
+            // configure a retired subsystem. The manual controls below are different columns.
+            'admin_post_bcc_chain_cw_discovery_enable',
+            'admin_post_bcc_chain_cw_discovery_disable',
         ];
 
         /** Hooks that must SURVIVE the freeze — none of them starts a run. */
@@ -64,8 +68,6 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             'admin_post_bcc_nft_cap_manual_enable',
             'admin_post_bcc_nft_cap_driver_inherit',
             'admin_post_bcc_nft_cap_stale_remove',
-            'admin_post_bcc_chain_cw_discovery_enable',
-            'admin_post_bcc_chain_cw_discovery_disable',
         ];
 
         /** @return list<string> */
@@ -106,9 +108,12 @@ namespace BCC\Trust\Onchain\Tests\Unit {
 
         public function testTheFrozenEntryPointInventoryMatchesWhatIsAsserted(): void
         {
+            // Only the `add_action` hooks are comparable here; `cli:`, `cron:` and `async:`
+            // entries name entry points that are not WordPress action hooks and are asserted
+            // by ScannerBackgroundEntryPointsAreFrozenTest instead.
             $declared = array_values(array_filter(
                 ScannerFreeze::FROZEN_ENTRY_POINTS,
-                static fn(string $e): bool => !str_starts_with($e, 'cli:')
+                static fn(string $e): bool => !preg_match('/^(cli|cron|async):/', $e)
             ));
             sort($declared);
             $asserted = self::FROZEN_HOOKS;

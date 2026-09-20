@@ -653,10 +653,13 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertStringContainsString('no control on this page clears it', $flat);
         self::assertStringContainsString('only a direct database change would', $flat);
 
-        // Still reversible: an opted-in unsupported chain must not be
-        // stranded with no way to switch it back off. The opt-out control
-        // is present — on the canonical surface, and only there.
-        self::assertStringContainsString(NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE, $html);
+        // FROZEN (ScannerFreeze): the opt-out control is gone with the rest of the scanner
+        // surface. An opted-in chain is no longer "stranded" in any meaningful sense —
+        // `cosmwasm_nft_discovery_enabled` is read only by frozen paths (the gate, the
+        // eligibility verdict, the one-shot CLI and the health snapshot), so a flag left on
+        // cannot cause a pass. The retirement PR drops the column with the scanner.
+        self::assertStringNotContainsString(NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE, $html);
+        self::assertStringContainsString('Scanner frozen', $html, 'and the row says so');
 
         $panel = $this->renderPanel();
         self::assertStringNotContainsString('cw_discovery_off_', $panel);

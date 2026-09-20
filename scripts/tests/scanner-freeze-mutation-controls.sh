@@ -26,9 +26,12 @@ PHPUNIT="vendor/bin/phpunit"
 SCAN_ACTIONS="app/Domain/Onchain/Admin/DiscoveryScanActions.php"
 BUDGET="app/Domain/Onchain/Support/ProviderRequestBudget.php"
 HOLDINGS="app/Domain/Onchain/Services/HoldingsService.php"
+MAINTENANCE="app/Domain/Onchain/Workers/DiscoveryRunMaintenance.php"
+EXECUTOR="app/Domain/Onchain/Workers/DiscoveryRunExecutor.php"
+PAGE="app/Domain/Onchain/Admin/NftDiscoveryPage.php"
 
 SNAPDIR="$(mktemp -d)"
-for f in "$SCAN_ACTIONS" "$BUDGET" "$HOLDINGS"; do
+for f in "$SCAN_ACTIONS" "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR" "$PAGE"; do
     cp "$f" "$SNAPDIR/$(basename "$f").orig" || { echo "FATAL: snapshot failed for $f"; exit 2; }
 done
 
@@ -49,7 +52,14 @@ mutate () {
     local before after
 
     before="$($PHP -r 'echo md5_file($argv[1]);' "$file")"
-    $PHP -r "$replacement" "$file" || { echo "  $label → mutation script failed"; restore "$file"; return; }
+    # A mutation script that fails has tested NOTHING. Count it as broken: silently
+    # skipping it would let a control that never ran look like a clean sheet.
+    if ! $PHP -r "$replacement" "$file"; then
+        echo "  broken       $label (mutation script failed — the control tested nothing)"
+        broken=$((broken + 1))
+        restore "$file"
+        return
+    fi
     after="$($PHP -r 'echo md5_file($argv[1]);' "$file")"
 
     if [ "$before" = "$after" ]; then
@@ -111,12 +121,36 @@ if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'NftRevocationFailSafeTest::testJoinStopsAtItsBudgetAndFailsClosed' 'M4 budget exhaustion becomes INELIGIBLE'
 
+# 5. Restore the maintenance sweep's redispatch: the background freeze test must notice.
+mutate "$MAINTENANCE" '
+$f = $argv[1]; $s = file_get_contents($f);
+$old = "        if (ScannerFreeze::frozen()) {\r\n            return \$result;\r\n        }\r\n";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, "", $s));
+' 'ScannerBackgroundEntryPointsAreFrozenTest' 'M5 the five-minute sweep requeues and re-dispatches again'
+
+# 6. Restore executor execution: a pending Action Scheduler action would run again.
+mutate "$EXECUTOR" '
+$f = $argv[1]; $s = file_get_contents($f);
+$old = "        if (ScannerFreeze::frozen()) {\r\n            return [\x27status\x27 => \x27frozen\x27, \x27run_id\x27 => \$runId];\r\n        }\r\n";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, "", $s));
+' 'ScannerBackgroundEntryPointsAreFrozenTest' 'M6 a queued executor action claims and runs again'
+
+# 7. Restore the two per-chain scanner opt-in routes.
+mutate "$PAGE" '
+$f = $argv[1]; $s = file_get_contents($f);
+$old = "        if (!ScannerFreeze::frozen()) {\r\n            add_action(\r\n                \x27admin_post_\x27 . self::ACTION_CW_DISCOVERY_ENABLE,";
+$new = "        if (true) {\r\n            add_action(\r\n                \x27admin_post_\x27 . self::ACTION_CW_DISCOVERY_ENABLE,";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'ScannerEntryPointsAreFrozenTest' 'M7 the per-chain scanner opt-in routes register again'
 echo "──────────────────────────────────────────────────────────────────────────"
 echo "killed=$killed survived=$survived wrong_reason=$wrong broken=$broken"
 
 # Every file must be byte-identical to its pre-run snapshot.
 clean=1
-for f in "$SCAN_ACTIONS" "$BUDGET" "$HOLDINGS"; do
+for f in "$SCAN_ACTIONS" "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR" "$PAGE"; do
     if ! cmp -s "$SNAPDIR/$(basename "$f").orig" "$f"; then
         echo "FATAL: $f is NOT byte-identical to its snapshot"
         clean=0
