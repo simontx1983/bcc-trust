@@ -10,7 +10,7 @@ use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Support\ApiRetry;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -76,9 +76,9 @@ final class ContractListTelemetryWiringTest extends TestCase
         ]);
     }
 
-    private function budget(int $requests = 50): CosmwasmTickBudget
+    private function budget(int $requests = 50): ProviderRequestBudget
     {
-        return new CosmwasmTickBudget($requests, 60);
+        return new ProviderRequestBudget($requests, 60);
     }
 
     private function queue(int $code, string $body): void

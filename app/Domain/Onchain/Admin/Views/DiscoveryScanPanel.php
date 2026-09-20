@@ -138,6 +138,25 @@ final class DiscoveryScanPanel
      */
     public static function render(object $chain, bool $scannable, string $whyNot = ''): void
     {
+        // FROZEN: see ScannerFreeze. The implementation below is intact and still
+        // tested; only the way to reach it is withdrawn.
+        if (\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+            return;
+        }
+
+        self::renderMarkup($chain, $scannable, $whyNot);
+    }
+
+    /**
+     * The markup itself, unreachable while the scanner is frozen.
+     *
+     * Kept private rather than deleted: this PR withdraws the SURFACE, and the
+     * retirement PR that deletes the scanner deletes this with it. Its existing
+     * DOM tests still drive it directly, so freezing the entry point costs no
+     * coverage of the markup that is still shipped.
+     */
+    private static function renderMarkup(object $chain, bool $scannable, string $whyNot = ''): void
+    {
         $chainId   = (int) ($chain->id ?? 0);
         $chainName = (string) ($chain->name ?? $chain->slug ?? 'Unknown chain');
 

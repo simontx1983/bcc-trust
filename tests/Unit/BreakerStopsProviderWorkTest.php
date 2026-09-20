@@ -13,7 +13,8 @@ use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -79,7 +80,7 @@ final class BreakerStopsProviderWorkTest extends TestCase
     {
         return CosmwasmDiscoveryWorker::runSupervisedSingleChainPass(
             self::CHAIN,
-            new CosmwasmTickBudget(),
+            new ProviderRequestBudget(CosmwasmDiscoveryGate::requestBudget(), CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS),
             new CosmwasmPassReport()
         );
     }

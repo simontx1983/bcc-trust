@@ -82,7 +82,7 @@ final class NftCapabilityEditorFlagTest extends TestCase
     private function assertNoWorkRan(): void
     {
         $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, 'no discovery ran');
-        $this->assertSame([], \BCC\Trust\Onchain\Support\CosmwasmTickBudget::$constructions, 'no budget built');
+        $this->assertSame([], \BCC\Trust\Onchain\Support\ProviderRequestBudget::$constructions, 'no budget built');
         $this->assertSame([], ChainRepository::$discoveryWrites, 'the CosmWasm opt-in was not touched');
     }
 

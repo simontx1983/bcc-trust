@@ -89,6 +89,27 @@ final class CosmwasmScannerPanel
      */
     public static function render(array $summary): void
     {
+        // FROZEN: see ScannerFreeze. The implementation below is intact and still
+        // tested; only the way to reach it is withdrawn.
+        if (\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+            return;
+        }
+
+        self::renderMarkup($summary);
+    }
+
+    /**
+     * The markup itself, unreachable while the scanner is frozen.
+     *
+     * Kept private rather than deleted: this PR withdraws the SURFACE, and the
+     * retirement PR that deletes the scanner deletes this with it. Its existing
+     * DOM tests still drive it directly, so freezing the entry point costs no
+     * coverage of the markup that is still shipped.
+     *
+     * @param array<string, mixed> $summary {@see CosmwasmDiscoveryHealthSnapshot::buildSummary()}
+     */
+    private static function renderMarkup(array $summary): void
+    {
         $status  = is_string($summary['status'] ?? null) ? (string) $summary['status'] : CosmwasmDiscoveryHealthSnapshot::STATUS_DISABLED;
         $enabled = (bool) ($summary['discovery_enabled'] ?? false);
         $color   = self::STATUS_COLOR[$status] ?? '#646970';
@@ -509,6 +530,50 @@ final class CosmwasmScannerPanel
      * @param object{checksum: string|null, classification: string}|null $family
      */
     public static function renderCandidateDetail(
+        object $collection,
+        object $candidate,
+        ?object $family,
+        bool $isVerified,
+        int $colspan
+    ): void {
+        // FROZEN: see ScannerFreeze. The implementation below is intact and still
+        // tested; only the way to reach it is withdrawn.
+        if (\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+            return;
+        }
+
+        self::renderCandidateDetailMarkup($collection, $candidate, $family, $isVerified, $colspan);
+    }
+
+    /**
+     * The markup itself, unreachable while the scanner is frozen.
+     *
+     * Kept private rather than deleted: this PR withdraws the SURFACE, and the
+     * retirement PR that deletes the scanner deletes this with it. Its existing
+     * DOM tests still drive it directly, so freezing the entry point costs no
+     * coverage of the markup that is still shipped.
+     *
+     * @param object{
+     *     contract_address: string,
+     *     collection_name: string|null,
+     *     token_standard: string|null,
+     *     total_supply: string|null,
+     *     chain_slug: string,
+     *     explorer_url?: string|null
+     * } $collection
+     * @param object{
+     *     code_id: string,
+     *     classification: string,
+     *     classification_reason: string|null,
+     *     probes_ok: string|null,
+     *     probes_failed: string|null,
+     *     last_error: string|null,
+     *     denied: string,
+     *     discovered_at: string
+     * } $candidate
+     * @param object{checksum: string|null, classification: string}|null $family
+     */
+    private static function renderCandidateDetailMarkup(
         object $collection,
         object $candidate,
         ?object $family,

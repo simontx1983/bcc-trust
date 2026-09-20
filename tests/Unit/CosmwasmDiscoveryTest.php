@@ -16,7 +16,7 @@ use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -39,7 +39,7 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(CosmwasmDiscoveryService::class)]
 #[CoversClass(CosmwasmDiscoveryWorker::class)]
 #[CoversClass(CosmwasmDiscoveryGate::class)]
-#[CoversClass(CosmwasmTickBudget::class)]
+#[CoversClass(ProviderRequestBudget::class)]
 #[CoversClass(CosmosFetcher::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
@@ -128,9 +128,9 @@ final class CosmwasmDiscoveryTest extends TestCase
         return array_map(static fn(array $c): string => $c['url'], ApiRetry::$calls);
     }
 
-    private function budget(int $requests = 100): CosmwasmTickBudget
+    private function budget(int $requests = 100): ProviderRequestBudget
     {
-        return new CosmwasmTickBudget($requests, 60);
+        return new ProviderRequestBudget($requests, 60);
     }
 
     /**
@@ -145,7 +145,7 @@ final class CosmwasmDiscoveryTest extends TestCase
     {
         CosmwasmDiscoveryWorker::runSupervisedSingleChainPass(
             $chainId,
-            new CosmwasmTickBudget(),
+            new ProviderRequestBudget(CosmwasmDiscoveryGate::requestBudget(), CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS),
             new CosmwasmPassReport()
         );
     }
@@ -1056,7 +1056,7 @@ final class CosmwasmDiscoveryTest extends TestCase
             ]);
         }
 
-        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_ID, new CosmwasmTickBudget(3, 60));
+        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_ID, new ProviderRequestBudget(3, 60));
 
         self::assertCount(3, ApiRetry::$calls, 'exactly the request budget, then stop');
     }
@@ -1075,7 +1075,7 @@ final class CosmwasmDiscoveryTest extends TestCase
             'pagination' => ['next_key' => null],
         ]);
 
-        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_ID, new CosmwasmTickBudget(1, 60));
+        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_ID, new ProviderRequestBudget(1, 60));
 
         self::assertStringContainsString('pagination.key=RESUME%3D%3D', $this->urls()[0]);
         // Safe progress is durable and the walk is now complete.
@@ -1171,7 +1171,7 @@ final class CosmwasmDiscoveryTest extends TestCase
             'pagination' => ['next_key' => 'MORE=='],
         ]);
 
-        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_ID, new CosmwasmTickBudget(1, 60));
+        CosmwasmDiscoveryWorker::runBackfillForChain(self::CHAIN_ID, new ProviderRequestBudget(1, 60));
 
         $last = end(ChainCheckpointRepository::$codeProgress);
         self::assertIsArray($last);
@@ -1497,7 +1497,7 @@ final class CosmwasmDiscoveryTest extends TestCase
     public function testWallClockDeadlineWinsOverTheRequestBudget(): void
     {
         // 1000 requests left, zero seconds. The clock must still stop it.
-        $budget = new CosmwasmTickBudget(1000, 1);
+        $budget = new ProviderRequestBudget(1000, 1);
         usleep(1_100_000);
 
         self::assertTrue($budget->timedOut());

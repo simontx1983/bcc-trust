@@ -67,6 +67,22 @@ use ReflectionMethod;
 #[PreserveGlobalState(false)]
 final class CosmwasmChainDiscoveryAdminTest extends TestCase
 {
+
+    /**
+     * The panel markup, driven directly.
+     *
+     * `CosmwasmScannerPanel::render()` is frozen (ScannerFreeze) and now emits nothing, so
+     * these markup assertions read the preserved private renderer that still ships. That the
+     * public entry point emits nothing is pinned by ScannerEntryPointsAreFrozenTest.
+     *
+     * @param array<string, mixed> $summary
+     */
+    private static function renderPanelMarkup(array $summary): void
+    {
+        $method = new \ReflectionMethod(\BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel::class, 'renderMarkup');
+        $method->setAccessible(true);
+        $method->invoke(null, $summary);
+    }
     private const CHAIN_ID = 8;
     private const SLUG     = 'cosmos';
 
@@ -216,7 +232,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     private function renderPanel(): string
     {
         ob_start();
-        CosmwasmScannerPanel::render(CosmwasmDiscoveryHealthSnapshot::buildSummary());
+        self::renderPanelMarkup(CosmwasmDiscoveryHealthSnapshot::buildSummary());
         $html = ob_get_clean();
 
         self::assertIsString($html);
@@ -637,10 +653,13 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
         self::assertStringContainsString('no control on this page clears it', $flat);
         self::assertStringContainsString('only a direct database change would', $flat);
 
-        // Still reversible: an opted-in unsupported chain must not be
-        // stranded with no way to switch it back off. The opt-out control
-        // is present — on the canonical surface, and only there.
-        self::assertStringContainsString(NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE, $html);
+        // FROZEN (ScannerFreeze): the opt-out control is gone with the rest of the scanner
+        // surface. An opted-in chain is no longer "stranded" in any meaningful sense —
+        // `cosmwasm_nft_discovery_enabled` is read only by frozen paths (the gate, the
+        // eligibility verdict, the one-shot CLI and the health snapshot), so a flag left on
+        // cannot cause a pass. The retirement PR drops the column with the scanner.
+        self::assertStringNotContainsString(NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE, $html);
+        self::assertStringContainsString('Scanner frozen', $html, 'and the row says so');
 
         $panel = $this->renderPanel();
         self::assertStringNotContainsString('cw_discovery_off_', $panel);
@@ -1014,7 +1033,7 @@ final class CosmwasmChainDiscoveryAdminTest extends TestCase
     private function renderPanelWithChain(array $chain): string
     {
         ob_start();
-        CosmwasmScannerPanel::render([
+        self::renderPanelMarkup([
             'discovery_enabled'    => true,
             'backfill_enabled'     => true,
             'disabled_reason'      => null,

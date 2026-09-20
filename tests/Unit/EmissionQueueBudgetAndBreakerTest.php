@@ -7,7 +7,7 @@ namespace BCC\Trust\Onchain\Tests\Unit;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -110,7 +110,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         \BccEmissionWorld::candidate(2, self::GOOD);
         \BccWire::$queue = [self::success(['name' => 'Good Collection', 'symbol' => 'GOOD'])];
 
-        $budget = new CosmwasmTickBudget(25, 20);
+        $budget = new ProviderRequestBudget(25, 20);
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
 
         self::assertSame(1, $result['held_for_review'], 'the poison pill is counted, not silently dropped');
@@ -134,7 +134,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         );
         \BccWire::$always = self::refusal(CosmwasmClassifier::PROBE_CONTRACT_INFO);
 
-        $budget = new CosmwasmTickBudget(25, 20);
+        $budget = new ProviderRequestBudget(25, 20);
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
 
         self::assertSame(2, $result['held_for_review']);
@@ -155,7 +155,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         self::seedHeldHead();
         \BccWire::$always = self::refusal(CosmwasmClassifier::PROBE_CONTRACT_INFO);
 
-        CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new CosmwasmTickBudget(25, 20), 25);
+        CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new ProviderRequestBudget(25, 20), 25);
 
         self::assertSame([], \BccEmissionWorld::$writes, 'no write touched the row');
         self::assertSame([], \BccEmissionWorld::$upserts, 'no collection was created from it');
@@ -177,7 +177,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         \BccEmissionWorld::candidate(1, self::GOOD, CosmwasmClassifier::PROBABLE, 'info_only');
         \BccWire::$queue = [self::success(['name' => 'Info Only Collection'])];
 
-        $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new CosmwasmTickBudget(25, 20), 25);
+        $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new ProviderRequestBudget(25, 20), 25);
 
         self::assertSame(0, $result['held_for_review']);
         self::assertSame(1, $result['emitted']);
@@ -232,7 +232,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         \BccEmissionWorld::candidate(1, self::GOOD);
         \BccWire::$queue = [self::success(['name' => 'Answered First Try'])];
 
-        $budget = new CosmwasmTickBudget(25, 20);
+        $budget = new ProviderRequestBudget(25, 20);
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
 
         self::assertCount(1, \BccWire::$urls);
@@ -249,7 +249,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
             self::success(['name' => 'Answered On Fallback']),
         ];
 
-        $budget = new CosmwasmTickBudget(25, 20);
+        $budget = new ProviderRequestBudget(25, 20);
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
 
         self::assertCount(2, \BccWire::$urls, 'two requests were really made');
@@ -269,13 +269,13 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         \BccEmissionWorld::candidate(1, self::GOOD);
         \BccWire::$queue = [self::success(['name' => 'Cached Collection'])];
 
-        $first = new CosmwasmTickBudget(25, 20);
+        $first = new ProviderRequestBudget(25, 20);
         CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $first, 25);
         self::assertSame(1, $first->spent());
 
         \BccEmissionWorld::$writes  = [];
         \BccEmissionWorld::$upserts = [];
-        $second = new CosmwasmTickBudget(25, 20);
+        $second = new ProviderRequestBudget(25, 20);
         CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $second, 25);
 
         self::assertCount(1, \BccWire::$urls, 'still ONE request in total — the second pass asked nothing');
@@ -293,7 +293,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         \BccEmissionWorld::candidate(1, self::GOOD);
         \BccWire::$always = self::refusal(CosmwasmClassifier::PROBE_CONTRACT_INFO);
 
-        $budget = new CosmwasmTickBudget(1, 20);
+        $budget = new ProviderRequestBudget(1, 20);
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
 
         self::assertCount(1, \BccWire::$urls, 'exactly one request — the fallback was refused');
@@ -310,7 +310,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         \BccEmissionWorld::candidate(1, self::GOOD);
         \BccWire::$always = self::success(['name' => 'Never Asked']);
 
-        $budget = new CosmwasmTickBudget(1, 20);
+        $budget = new ProviderRequestBudget(1, 20);
         $budget->spend();
 
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
@@ -332,7 +332,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
             self::refusal(CosmwasmClassifier::PROBE_COLLECTION_INFO),
         ];
 
-        $budget = new CosmwasmTickBudget(25, 20);
+        $budget = new ProviderRequestBudget(25, 20);
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
 
         self::assertSame(0, $result['emitted'], 'no name, no row');
@@ -355,7 +355,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
             'body' => '{"code":13,"message":"rpc error: code = Internal desc = Querier system error"}',
         ];
 
-        $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new CosmwasmTickBudget(25, 20), 25);
+        $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new ProviderRequestBudget(25, 20), 25);
 
         self::assertSame(0, $result['emitted']);
         self::assertGreaterThanOrEqual(
@@ -380,7 +380,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         \BccEmissionWorld::$rules[strtolower(self::GOOD)] = 'deny';
         \BccWire::$always = self::success(['name' => 'Denied Collection']);
 
-        $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new CosmwasmTickBudget(25, 20), 25);
+        $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new ProviderRequestBudget(25, 20), 25);
 
         self::assertSame(1, $result['denied']);
         self::assertSame(0, $result['emitted']);
@@ -393,7 +393,7 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         \BccEmissionWorld::candidate(1, self::GOOD);
         \BccEmissionWorld::$known[strtolower(self::GOOD)] = true;
 
-        $budget = new CosmwasmTickBudget(25, 20);
+        $budget = new ProviderRequestBudget(25, 20);
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
 
         self::assertSame(1, $result['skipped_known']);

@@ -14,7 +14,7 @@ use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -181,8 +181,9 @@ final class CosmwasmCliPreflightAccuracyTest extends TestCase
     /** The budget object the command builds really does start at the canonical ceiling. */
     public function testTheDefaultTickBudgetIsTheCanonicalCeiling(): void
     {
-        self::assertSame(25, (new CosmwasmTickBudget())->remaining());
-        self::assertSame(0, (new CosmwasmTickBudget())->spent());
+        $budget = new ProviderRequestBudget(CosmwasmDiscoveryGate::requestBudget(), CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS);
+        self::assertSame(25, $budget->remaining());
+        self::assertSame(0, $budget->spent());
     }
 
     /**
@@ -210,11 +211,14 @@ final class CosmwasmCliPreflightAccuracyTest extends TestCase
             $code .= $token;
         }
 
-        self::assertStringContainsString('new CosmwasmTickBudget()', $code, 'the default budget is built');
+        // The budget primitive no longer carries a scanner default, so the command must NAME the canonical
+        // ceilings. Passing a literal here would be the CLI-only ceiling this test exists to forbid.
+        self::assertStringContainsString('CosmwasmDiscoveryGate::requestBudget()', $code, 'the canonical request ceiling is named');
+        self::assertStringContainsString('CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS', $code, 'the canonical runtime ceiling is named');
         self::assertSame(
             1,
-            substr_count($code, 'new CosmwasmTickBudget'),
-            'exactly one budget is constructed, and it takes no arguments'
+            substr_count($code, 'new ProviderRequestBudget'),
+            'exactly one budget is constructed, from the gate constants and no literal of its own'
         );
         self::assertStringNotContainsString(
             'BCC_COSMWASM_REQUEST_BUDGET',

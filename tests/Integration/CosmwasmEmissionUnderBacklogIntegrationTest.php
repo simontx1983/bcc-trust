@@ -8,7 +8,7 @@ use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
@@ -33,7 +33,7 @@ use PHPUnit\Framework\TestCase;
 #[Group('integration')]
 #[CoversClass(CosmwasmCodeFamilyRepository::class)]
 #[CoversClass(CosmwasmContractRepository::class)]
-#[CoversClass(CosmwasmTickBudget::class)]
+#[CoversClass(ProviderRequestBudget::class)]
 final class CosmwasmEmissionUnderBacklogIntegrationTest extends TestCase
 {
     private const CHAIN          = 4242;
@@ -170,7 +170,7 @@ final class CosmwasmEmissionUnderBacklogIntegrationTest extends TestCase
     /** One shared budget, and the reserve holds a real request back. */
     public function testOneSharedBudgetEnforcesTheDownstreamFloor(): void
     {
-        $b = new CosmwasmTickBudget(50, 120);
+        $b = new ProviderRequestBudget(50, 120);
         $b->reserve(5);
         $b->spend(45);
 
@@ -189,7 +189,7 @@ final class CosmwasmEmissionUnderBacklogIntegrationTest extends TestCase
         $wpdb  = $GLOBALS['wpdb'];
         $table = $wpdb->prefix . 'bcc_onchain_collections';
 
-        $budget = new CosmwasmTickBudget(50, 120);
+        $budget = new ProviderRequestBudget(50, 120);
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), $budget, 25);
 
         self::assertSame(1, $result['emitted']);
@@ -209,7 +209,7 @@ final class CosmwasmEmissionUnderBacklogIntegrationTest extends TestCase
 
         // Second invocation: collection_row_written now blocks it.
         self::assertSame([], CosmwasmContractRepository::findEmittable(self::CHAIN, 25), 'no longer emittable');
-        $again = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new CosmwasmTickBudget(50, 120), 25);
+        $again = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new ProviderRequestBudget(50, 120), 25);
         self::assertSame(0, $again['emitted'], 'idempotent — no duplicate');
         self::assertSame('1', (string) $wpdb->get_var(
             'SELECT COUNT(*) FROM `' . $table . '` WHERE chain_id = ' . self::CHAIN

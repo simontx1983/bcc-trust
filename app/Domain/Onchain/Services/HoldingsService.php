@@ -11,7 +11,7 @@ use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\ValueObjects\EligibilityVerdict;
 use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
@@ -131,11 +131,11 @@ final class HoldingsService
      * Units are provider page requests before retries (see SURFACE_BUDGETS).
      * An unknown surface gets the join budget — small, never unbounded.
      */
-    public static function verificationBudget(string $surface): CosmwasmTickBudget
+    public static function verificationBudget(string $surface): ProviderRequestBudget
     {
         [$requests, $seconds] = self::SURFACE_BUDGETS[$surface] ?? self::SURFACE_BUDGETS[self::SURFACE_JOIN];
 
-        return new CosmwasmTickBudget($requests, $seconds);
+        return new ProviderRequestBudget($requests, $seconds);
     }
 
     /**
@@ -158,7 +158,7 @@ final class HoldingsService
         int $userId,
         string $chainSlug,
         string $contract,
-        ?CosmwasmTickBudget $budget = null,
+        ?ProviderRequestBudget $budget = null,
         bool $resumeAcrossRequests = false
     ): ?int {
         $verdict = self::eligibilityVerdict(
@@ -210,7 +210,7 @@ final class HoldingsService
         string $chainSlug,
         string $contract,
         int $minBalance,
-        ?CosmwasmTickBudget $budget = null,
+        ?ProviderRequestBudget $budget = null,
         bool $resumeAcrossRequests = false
     ): EligibilityVerdict {
         $min = max(1, $minBalance);
@@ -346,7 +346,7 @@ final class HoldingsService
         string $contract,
         int $chainId,
         int $min,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         int $startAt = 0,
         ?int &$resumeAt = null
     ): EligibilityVerdict {
@@ -629,7 +629,7 @@ final class HoldingsService
      * @param list<array{0: string, 1: string, 2?: int}> $pairs  [chain slug, contract, min balance]
      * @return array<string, ?int>
      */
-    public static function ownsAnyMany(int $userId, array $pairs, ?CosmwasmTickBudget $budget = null): array
+    public static function ownsAnyMany(int $userId, array $pairs, ?ProviderRequestBudget $budget = null): array
     {
         if ($pairs === [] || $userId <= 0) {
             return [];
@@ -1134,7 +1134,7 @@ final class HoldingsService
         string $contract,
         int $chainId,
         ?string $tokenStandard,
-        CosmwasmTickBudget $budget
+        ProviderRequestBudget $budget
     ): HoldingsCount|string {
         if ($tokenStandard !== null && stripos($tokenStandard, '1155') !== false) {
             if ($walletLinkId <= 0 || $chainId <= 0) {

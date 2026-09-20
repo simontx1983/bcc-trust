@@ -8,7 +8,7 @@ use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure;
 
 if (!defined('ABSPATH')) {
@@ -78,7 +78,7 @@ final class CosmwasmDiscoveryService
         int $chainId,
         CosmosFetcher $fetcher,
         ?string $pageKey,
-        CosmwasmTickBudget $budget
+        ProviderRequestBudget $budget
     ): array {
         if (!$budget->canSpend()) {
             return [
@@ -163,7 +163,7 @@ final class CosmwasmDiscoveryService
         int $chainId,
         CosmosFetcher $fetcher,
         int $watermark,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         int $maxPages
     ): array {
         $result = [
@@ -287,7 +287,7 @@ final class CosmwasmDiscoveryService
         int $chainId,
         CosmosFetcher $fetcher,
         object $family,
-        CosmwasmTickBudget $budget
+        ProviderRequestBudget $budget
     ): array {
         $codeId     = (int) $family->code_id;
         $checksum   = is_string($family->checksum ?? null) ? (string) $family->checksum : '';
@@ -478,7 +478,7 @@ final class CosmwasmDiscoveryService
         int $chainId,
         CosmosFetcher $fetcher,
         object $family,
-        CosmwasmTickBudget $budget
+        ProviderRequestBudget $budget
     ): array {
         $codeId = (int) $family->code_id;
         $cursor = is_string($family->contracts_cursor ?? null) && $family->contracts_cursor !== ''
@@ -602,7 +602,7 @@ final class CosmwasmDiscoveryService
         int $chainId,
         CosmosFetcher $fetcher,
         object $family,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         int $maxPages
     ): array {
         $codeId   = (int) $family->code_id;
@@ -754,7 +754,7 @@ final class CosmwasmDiscoveryService
         int $chainId,
         CosmosFetcher $fetcher,
         object $row,
-        CosmwasmTickBudget $budget
+        ProviderRequestBudget $budget
     ): array {
         $contract   = (string) $row->contract_address;
         $retryCount = (int) $row->retry_count;
@@ -818,7 +818,7 @@ final class CosmwasmDiscoveryService
     public static function emitCollections(
         int $chainId,
         CosmosFetcher $fetcher,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         int $limit
     ): array {
         $result = ['emitted' => 0, 'denied' => 0, 'skipped_known' => 0, 'held_for_review' => 0];
@@ -1043,7 +1043,7 @@ final class CosmwasmDiscoveryService
         int $chainId,
         CosmosFetcher $fetcher,
         object $family,
-        CosmwasmTickBudget $budget
+        ProviderRequestBudget $budget
     ): array {
         $sample = is_string($family->sample_contract ?? null) ? (string) $family->sample_contract : '';
         $codeId = (int) $family->code_id;

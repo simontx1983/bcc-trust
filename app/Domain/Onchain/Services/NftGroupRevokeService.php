@@ -45,7 +45,7 @@ namespace BCC\Trust\Onchain\Services;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\EligibilityVerdict;
 use BCC\Trust\Onchain\ValueObjects\GatedGroupConfig;
 
@@ -301,7 +301,7 @@ final class NftGroupRevokeService
         string $chainSlug,
         string $canonicalIdentifier,
         GatedGroupConfig $config,
-        CosmwasmTickBudget $budget
+        ProviderRequestBudget $budget
     ): EligibilityVerdict {
         try {
             // PR 5b: the CANONICAL identity from the linked collection row,

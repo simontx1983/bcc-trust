@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Support\CosmwasmPassStopReason;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\DiscoveryRunError;
 use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -29,9 +30,9 @@ use PHPUnit\Framework\TestCase;
 #[PreserveGlobalState(false)]
 final class CircuitOpenReasonTest extends TestCase
 {
-    private function budget(): CosmwasmTickBudget
+    private function budget(): ProviderRequestBudget
     {
-        return new CosmwasmTickBudget(25);
+        return new ProviderRequestBudget(25, CosmwasmDiscoveryGate::MAX_RUNTIME_SECONDS);
     }
 
     // ── the mapping ─────────────────────────────────────────────────────

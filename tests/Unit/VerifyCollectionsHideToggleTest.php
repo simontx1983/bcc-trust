@@ -13,7 +13,7 @@ use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryService;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -686,7 +686,7 @@ final class VerifyCollectionsHideToggleTest extends TestCase
         $emit = CosmwasmDiscoveryService::emitCollections(
             self::CHAIN_ID,
             new CosmosFetcher($chain),
-            new CosmwasmTickBudget(100, 60),
+            new ProviderRequestBudget(100, 60),
             10
         );
 

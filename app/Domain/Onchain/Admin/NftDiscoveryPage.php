@@ -8,6 +8,7 @@ if (!defined('ABSPATH')) {
 
 use BCC\Trust\Onchain\Admin\Views\NftCapabilityEditorPanel;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
+use BCC\Trust\Onchain\Support\ScannerFreeze;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
@@ -21,7 +22,7 @@ use BCC\Trust\Onchain\Support\CosmosEndpointVerifier;
 use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;
 use BCC\Trust\Onchain\Support\CosmwasmPassReport;
 use BCC\Trust\Onchain\Support\CosmwasmPassStopReason;
-use BCC\Trust\Onchain\Support\CosmwasmTickBudget;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
 use BCC\Trust\Onchain\Services\ManualCollectionIntakeService;
@@ -244,19 +245,32 @@ class NftDiscoveryPage
         add_action('admin_post_' . self::ACTION_CAP_STALE_REMOVE,    [self::class, 'handle_cap_stale_remove']);
         add_action('admin_post_' . self::ACTION_ADD_COLLECTION,      [self::class, 'handle_add_collection']);
 
-        add_action(
-            'admin_post_' . self::ACTION_CW_DISCOVERY_ENABLE,
-            [self::class, 'handle_cw_discovery_enable']
-        );
-        add_action(
-            'admin_post_' . self::ACTION_CW_DISCOVERY_DISABLE,
-            [self::class, 'handle_cw_discovery_disable']
-        );
+        // FROZEN (see ScannerFreeze): `cosmwasm_nft_discovery_enabled` is consumed only by the
+        // scanner — CosmwasmDiscoveryGate, CosmwasmScanEligibility, the one-shot CLI and the
+        // scanner health snapshot. No ownership, manual-intake or capability path reads it, so
+        // these two routes configure a retired subsystem and nothing else. The SEPARATE manual
+        // controls (`bcc_supports_nft_collections`, `manual_collection_discovery_enabled`) are
+        // different columns with their own routes and are deliberately untouched.
+        if (!ScannerFreeze::frozen()) {
+            add_action(
+                'admin_post_' . self::ACTION_CW_DISCOVERY_ENABLE,
+                [self::class, 'handle_cw_discovery_enable']
+            );
+            add_action(
+                'admin_post_' . self::ACTION_CW_DISCOVERY_DISABLE,
+                [self::class, 'handle_cw_discovery_disable']
+            );
+        }
 
-        add_action('admin_post_' . self::ACTION_CW_PAUSE,    [self::class, 'handle_cw_pause']);
-        add_action('admin_post_' . self::ACTION_CW_RESUME,   [self::class, 'handle_cw_resume']);
-        add_action('admin_post_' . self::ACTION_CW_BACKFILL, [self::class, 'handle_cw_backfill']);
-        add_action('admin_post_' . self::ACTION_CW_RETRY,    [self::class, 'handle_cw_retry']);
+        // FROZEN (see ScannerFreeze): pause, resume, backfill-slice and retry all continue or
+        // re-drive a full-chain pass. The handlers are intact and still tested; they are simply
+        // not reachable. Chain enable/disable above is NOT frozen — it configures, it starts nothing.
+        if (!\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+            add_action('admin_post_' . self::ACTION_CW_PAUSE,    [self::class, 'handle_cw_pause']);
+            add_action('admin_post_' . self::ACTION_CW_RESUME,   [self::class, 'handle_cw_resume']);
+            add_action('admin_post_' . self::ACTION_CW_BACKFILL, [self::class, 'handle_cw_backfill']);
+            add_action('admin_post_' . self::ACTION_CW_RETRY,    [self::class, 'handle_cw_retry']);
+        }
 
         // Bookmarks, browser history and any link written before the move.
         add_action('admin_init', [self::class, 'maybe_redirect_legacy_url']);
@@ -694,7 +708,7 @@ class NftDiscoveryPage
         // this chain holds.
         $before = CosmwasmDiscoveryService::chainSummary($chainId);
 
-        $budget  = new CosmwasmTickBudget(self::ADMIN_BACKFILL_REQUESTS, self::ADMIN_BACKFILL_SECONDS);
+        $budget  = new ProviderRequestBudget(self::ADMIN_BACKFILL_REQUESTS, self::ADMIN_BACKFILL_SECONDS);
         $report  = new CosmwasmPassReport();
         $outcome = CosmwasmDiscoveryWorker::runBackfillForChain($chainId, $budget, $report);
 
@@ -1609,7 +1623,7 @@ class NftDiscoveryPage
     private static function store_run_report(
         int $chainId,
         string $outcome,
-        CosmwasmTickBudget $budget,
+        ProviderRequestBudget $budget,
         CosmwasmPassReport $report,
         array $before,
         array $after
@@ -2749,6 +2763,9 @@ class NftDiscoveryPage
                 <div style="font-size:12px;color:#646970;"><?php echo esc_html($reason); ?></div>
             </td>
             <td>
+                <?php if (ScannerFreeze::frozen()): ?>
+                    <span style="color:#646970;font-size:12px;">Scanner frozen</span>
+                <?php else: ?>
                 <form id="<?php echo esc_attr($formId); ?>" method="post"
                       action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0;">
                     <input type="hidden" name="action" value="<?php echo esc_attr($route); ?>">
@@ -2756,6 +2773,7 @@ class NftDiscoveryPage
                     <?php wp_nonce_field($route . '_' . $chainId); ?>
                     <?php self::render_cw_discovery_button($chainId, $optedIn, $slug); ?>
                 </form>
+                <?php endif; ?>
             </td>
         </tr>
         <?php
@@ -2867,6 +2885,26 @@ class NftDiscoveryPage
      * rather than a copy of it.
      */
     public static function render_cw_operation_control(string $route, int $chainId, string $slug = ''): void
+    {
+        // FROZEN (see ScannerFreeze): this is the one renderer behind all four CosmWasm run
+        // controls, so the buttons, their forms and their nonces all stop here. The markup and
+        // the handlers below are intact and still tested — nothing renders to reach them.
+        if (\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
+            return;
+        }
+
+        self::render_cw_operation_control_markup($route, $chainId, $slug);
+    }
+
+    /**
+     * The markup itself, unreachable while the scanner is frozen.
+     *
+     * Kept private rather than deleted: this PR withdraws the SURFACE, and the
+     * retirement PR that deletes the scanner deletes this with it. Its existing
+     * DOM tests still drive it directly, so freezing the entry point costs no
+     * coverage of the markup that is still shipped.
+     */
+    private static function render_cw_operation_control_markup(string $route, int $chainId, string $slug = ''): void
     {
         $chainId = (int) $chainId;
         $name    = $slug !== '' ? $slug : ('chain ' . $chainId);

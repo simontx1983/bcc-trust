@@ -40,6 +40,22 @@ use PHPUnit\Framework\TestCase;
 #[PreserveGlobalState(false)]
 final class CosmwasmScannerPanelOwnershipTest extends TestCase
 {
+
+    /**
+     * The panel markup, driven directly.
+     *
+     * `CosmwasmScannerPanel::render()` is frozen (ScannerFreeze) and now emits nothing, so
+     * these markup assertions read the preserved private renderer that still ships. That the
+     * public entry point emits nothing is pinned by ScannerEntryPointsAreFrozenTest.
+     *
+     * @param array<string, mixed> $summary
+     */
+    private static function renderPanelMarkup(array $summary): void
+    {
+        $method = new \ReflectionMethod(\BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel::class, 'renderMarkup');
+        $method->setAccessible(true);
+        $method->invoke(null, $summary);
+    }
     protected function setUp(): void
     {
         parent::setUp();
@@ -93,7 +109,7 @@ final class CosmwasmScannerPanelOwnershipTest extends TestCase
     private function render(array $overrides = []): string
     {
         ob_start();
-        CosmwasmScannerPanel::render($this->summary($overrides));
+        self::renderPanelMarkup($this->summary($overrides));
         $html = ob_get_clean();
 
         self::assertIsString($html);
@@ -456,7 +472,7 @@ final class CosmwasmScannerPanelOwnershipTest extends TestCase
         );
 
         foreach ([
-            'use BCC\Trust\Onchain\Support\CosmwasmTickBudget;',
+            'use BCC\Trust\Onchain\Support\ProviderRequestBudget;',
             'use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;',
             'use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;',
             'use BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate;',
