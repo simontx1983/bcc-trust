@@ -42,6 +42,13 @@ jobs:
           tools: composer:v2
           coverage: none
 
+      # ⚠ BEFORE `composer update`, and deliberately so. The committed vendor/ is
+      # what the deploy rsyncs to staging and production; `composer update` would
+      # regenerate the classmap in the runner and the guard would then pass over
+      # freshly written files instead of the ones this commit actually ships.
+      - name: Composer classmap parity (committed vendor, pre-install)
+        run: php scripts/composer-classmap-guard.php
+
       # composer.lock is gitignored in this repo (production vendor/ is committed,
       # dev deps restored on demand), so resolve from composer.json.
       - name: Install dependencies
