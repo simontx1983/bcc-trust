@@ -149,7 +149,13 @@ final class EnrichmentScheduler
                 // │ explicitly warns against.                              │
                 // └────────────────────────────────────────────────────────┘
                 $chainId = (int) ($row->chain_id ?? 0);
-                if ($chainId > 0 && (self::isChainBudgetExceeded($chainId) || OnchainCircuitBreaker::isOpen($chainId))) {
+                // ⚠ NON-MUTATING, AND EVALUATED PER ROW. This gate runs once
+                // for every row in the batch and skips rows without
+                // contacting anything, so claiming the half-open recovery
+                // probe here consumed it for a request that might never
+                // happen — and did so repeatedly. ApiRetry owns the claim;
+                // see issue #264.
+                if ($chainId > 0 && (self::isChainBudgetExceeded($chainId) || OnchainCircuitBreaker::isResting($chainId))) {
                     $result['skipped']++;
                     continue;
                 }

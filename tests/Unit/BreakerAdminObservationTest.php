@@ -369,14 +369,19 @@ final class BreakerAdminObservationTest extends TestCase
         $root = dirname(__DIR__, 2) . '/app';
         self::assertDirectoryExists($root);
 
-        // The complete OPERATIONAL ADMISSION allow-list. Each one gates work
-        // that immediately goes on to contact a provider.
+        // The complete OPERATIONAL ADMISSION allow-list.
+        //
+        // ⚠ NARROWED TO ONE FILE BY ISSUE #264. This list used to hold the
+        // four outer preflights as well, on the reasoning that each "gates
+        // work that immediately goes on to contact a provider". That was not
+        // true: every one of them could return after the check — exhausted
+        // budget, missing chain row, missing driver, unsupported capability,
+        // placeholder endpoint — having already consumed the one probe the
+        // half-open window allows, and nothing released it. They now use the
+        // non-mutating `isResting()`; only the transport layer claims, and it
+        // claims immediately before the request it is about to make.
         $operational = [
-            'Domain/Onchain/Services/ChainRefreshService.php',  // gates a validator-index fetch
-            'Domain/Onchain/Services/EnrichmentScheduler.php',  // gates an enrichment call
             'Domain/Onchain/Support/ApiRetry.php',              // the transport itself
-            'Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php',
-            'Domain/Onchain/Workers/NftEthIndexerWorker.php',
         ];
         sort($operational);
 

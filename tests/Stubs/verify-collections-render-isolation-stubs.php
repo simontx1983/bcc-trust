@@ -379,6 +379,7 @@ namespace BCC\Trust\Onchain\Support {
         final class OnchainCircuitBreaker
         {
             public static function isOpen(int $chainId): bool { \BccRenderWorld::$probes[] = 'isOpen:' . $chainId; return false; }
+            public static function isResting(int $chainId): bool { \BccRenderWorld::$probes[] = 'isResting:' . $chainId; return false; }
         }
     }
 }

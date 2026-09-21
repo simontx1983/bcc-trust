@@ -101,6 +101,43 @@ final class OnchainCircuitBreaker
         return true; // Another worker is probing → still blocked.
     }
 
+    /**
+     * Is this chain tripped and still inside its cooldown? NON-MUTATING.
+     *
+     * ── WHAT THIS IS FOR, AND WHY IT IS NOT {@see isOpen()} ─────────────
+     * `isOpen()` CLAIMS the half-open recovery probe, and the caller that
+     * wins it is expected to go and contact the provider. Four callers used
+     * it as an outer preflight — before they knew whether they would make a
+     * request at all — and each of them can return afterwards for a reason
+     * that never reaches the wire: an exhausted CU budget, a missing chain
+     * row, a missing driver, an unsupported capability, a placeholder
+     * endpoint. Nothing releases the lock on those paths, so the chain could
+     * not be probed by ANY worker until that PHP process's database session
+     * closed. `GET_LOCK` is reentrant per session, so the outer claim also
+     * meant the transport layer's own claim needed two releases and got one
+     * — stranding the probe even when the request succeeded.
+     *
+     * So an outer check asks THIS question instead. It reads the same state
+     * through the same {@see phaseFor()} arithmetic and takes no lock.
+     *
+     * ── HALF-OPEN IS DELIBERATELY *NOT* "RESTING" ───────────────────────
+     * A half-open chain is eligible for exactly one probe, and deciding who
+     * takes it belongs to the layer that is about to make the request. So
+     * this returns FALSE for HALF-OPEN: the preflight lets the caller
+     * continue, and {@see ApiRetry} either wins the probe and calls out, or
+     * loses it and returns `circuit_breaker_open` without charging anything.
+     * Several workers may therefore reach the transport layer during a
+     * half-open window; at most one of them reaches the provider.
+     *
+     * Pinned by {@see \BCC\Trust\Onchain\Tests\Unit\HalfOpenProbeOwnershipTest}
+     * and measured against a real MySQL/MariaDB advisory lock by
+     * {@see \BCC\Trust\Tests\Integration\HalfOpenProbeOwnershipIntegrationTest}.
+     */
+    public static function isResting(int $chainId): bool
+    {
+        return self::phaseFor(self::getState($chainId), time()) === self::PHASE_OPEN;
+    }
+
     /** The breaker is passing traffic. */
     public const PHASE_CLOSED = 'closed';
 
