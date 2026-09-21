@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Services\NftHoldingsIndexer;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -228,7 +229,16 @@ final class NftEthIndexerWorker
         $headResult = self::fetchHeadBlock($fetcher);
         $headBlock  = $headResult['block'];
         if ($headBlock <= 0) {
-            OnchainCircuitBreaker::recordFailure($chainId);
+            // ⚠ ONE CHARGE FOR ONE LOGICAL REQUEST. When the head poll reached
+            // the wire and failed, ApiRetry already charged the breaker once
+            // for it; charging again here is the same failure counted twice,
+            // and 4 + 1 used to be the whole threshold. When the poll never
+            // reached the wire (no rpc_url) or came back 200 with an
+            // unusable body, nothing was charged and this verdict is the
+            // operation's only charge — which is the point, not an exception.
+            if ($headResult['outcome']->domainMayCharge()) {
+                OnchainCircuitBreaker::recordFailure($chainId);
+            }
             ChainCheckpointRepository::recordFailure(
                 $chainId,
                 ChainCheckpointRepository::STATE_DEGRADED,
@@ -314,6 +324,12 @@ final class NftEthIndexerWorker
         // Step-8 advance is skipped in favor of the error path below.
         $fetchFailed = false;
 
+        // The receipt of the page that FAILED, and only that page. It is
+        // assigned from a receipt constructed inside the loop body, so it can
+        // never carry a previous page's outcome: each iteration gets its own
+        // object and the loop breaks the moment one fails.
+        $failedPageOutcome = null;
+
         // Boundary-block carry buffer. Holds the transfers of the highest
         // block seen so far that we CANNOT yet prove is complete — the
         // next page may carry more of the same block (Alchemy paginates
@@ -337,7 +353,12 @@ final class NftEthIndexerWorker
                 break;
             }
 
-            $page = $fetcher->fetch_transfers_since($rangeFrom, $rangeTo, $pageKey);
+            // ⚠ CONSTRUCTED INSIDE THE LOOP, DELIBERATELY. One page is one
+            // logical provider request; a receipt hoisted above the loop
+            // would let page 1's transport failure suppress the verdict on
+            // page 2, which is exactly the leak this design exists to avoid.
+            $pageOutcome = new ProviderOutcomeReceipt();
+            $page = $fetcher->fetch_transfers_since($rangeFrom, $rangeTo, $pageKey, $pageOutcome);
             // Charge CU unconditionally — a failed call may still have
             // hit the provider (same posture as before this error path
             // existed; under-counting risks budget overrun).
@@ -347,6 +368,7 @@ final class NftEthIndexerWorker
 
             if ($page === null) {
                 $fetchFailed = true;
+                $failedPageOutcome = $pageOutcome;
                 break; // $carry intentionally discarded — see Step 7.5.
             }
 
@@ -428,7 +450,16 @@ final class NftEthIndexerWorker
             }
             // recordFailure after the (optional) advance so the row ends
             // degraded with last_error set, but keeps the advanced block.
-            OnchainCircuitBreaker::recordFailure($chainId);
+            //
+            // ⚠ ONLY IF THE FAILING PAGE DID NOT ALREADY CHARGE. A page that
+            // died on the wire was charged once by ApiRetry; adding this
+            // verdict made one failed page cost 5, the entire threshold. A
+            // page rejected before the wire (bad rpc_url, invalid range) or
+            // returned as a malformed 200 charged nothing, and then this
+            // verdict is the tick's only charge.
+            if ($failedPageOutcome === null || $failedPageOutcome->domainMayCharge()) {
+                OnchainCircuitBreaker::recordFailure($chainId);
+            }
             ChainCheckpointRepository::recordFailure(
                 $chainId,
                 ChainCheckpointRepository::STATE_DEGRADED,
@@ -566,17 +597,28 @@ final class NftEthIndexerWorker
      * method only normalises whitespace + strips control chars so the
      * stored value renders cleanly in the admin table and log lines.
      *
-     * @return array{block: int, error: ?string}
+     * ── THE RECEIPT ─────────────────────────────────────────────────────
+     * The head poll is ONE logical provider request, and {@see ApiRetry}
+     * settles it on the breaker exactly once. The caller still has to decide
+     * what a zero head block means, so the outcome comes back with the
+     * result: a caller that charges its own verdict on top would charge the
+     * same failed request twice. The two configuration refusals above never
+     * touch the wire, so their receipt stays empty and the caller's verdict
+     * IS the only charge — which is correct, because nothing else recorded
+     * that this tick failed.
+     *
+     * @return array{block: int, error: ?string, outcome: ProviderOutcomeReceipt}
      */
     private static function fetchHeadBlock(EvmFetcher $fetcher): array
     {
+        $outcome = new ProviderOutcomeReceipt();
         $chain  = $fetcher->get_chain();
         $rpcUrl = (string) ($chain->rpc_url ?? '');
         if ($rpcUrl === '') {
-            return ['block' => 0, 'error' => 'eth_blockNumber: rpc_url not configured for this chain'];
+            return ['block' => 0, 'error' => 'eth_blockNumber: rpc_url not configured for this chain', 'outcome' => $outcome];
         }
         if (str_ends_with($rpcUrl, '/v2/')) {
-            return ['block' => 0, 'error' => 'eth_blockNumber: rpc_url missing Alchemy API key suffix (ends with /v2/)'];
+            return ['block' => 0, 'error' => 'eth_blockNumber: rpc_url missing Alchemy API key suffix (ends with /v2/)', 'outcome' => $outcome];
         }
 
         $body = wp_json_encode([
@@ -594,12 +636,20 @@ final class NftEthIndexerWorker
         ], [
             'label'    => 'EVM eth_blockNumber',
             'chain_id' => (int) $chain->id,
+            'outcome'  => $outcome,
+            // ⚠ THE BREAKER OUTCOME IS DECIDED HERE, NOT AT THE STATUS LINE.
+            // Alchemy answers "MATIC_MAINNET is not enabled for this app" with
+            // HTTP 200 and a JSON-RPC error object. Letting that settle as a
+            // success credited a recovery that never happened.
+            'validate_success' => static fn(string $body, int $code): bool
+                => self::headPollPayloadIsUsable($body),
         ]);
 
         if (is_wp_error($response)) {
             return [
                 'block' => 0,
                 'error' => 'eth_blockNumber transport: ' . self::cleanErrorBody($response->get_error_message()),
+                'outcome' => $outcome,
             ];
         }
 
@@ -615,6 +665,7 @@ final class NftEthIndexerWorker
             return [
                 'block' => 0,
                 'error' => 'eth_blockNumber non-JSON response: ' . self::cleanErrorBody($rawBody),
+                'outcome' => $outcome,
             ];
         }
 
@@ -626,6 +677,7 @@ final class NftEthIndexerWorker
             return [
                 'block' => 0,
                 'error' => 'eth_blockNumber RPC error: ' . self::cleanErrorBody($msg),
+                'outcome' => $outcome,
             ];
         }
 
@@ -633,14 +685,51 @@ final class NftEthIndexerWorker
             return [
                 'block' => 0,
                 'error' => 'eth_blockNumber missing result field: ' . self::cleanErrorBody($rawBody),
+                'outcome' => $outcome,
             ];
         }
 
         $hex = ltrim($json['result'], '0x');
         if ($hex === '') {
-            return ['block' => 0, 'error' => 'eth_blockNumber result was empty string'];
+            return ['block' => 0, 'error' => 'eth_blockNumber result was empty string', 'outcome' => $outcome];
         }
-        return ['block' => (int) hexdec($hex), 'error' => null];
+        return ['block' => (int) hexdec($hex), 'error' => null, 'outcome' => $outcome];
+    }
+
+    /**
+     * Is an `eth_blockNumber` 200 body a USABLE head poll?
+     *
+     * ── WHY THIS IS PUBLIC, AND WHY IT IS ONE FUNCTION ──────────────────
+     * Two things need the same answer: {@see ApiRetry}'s `validate_success`
+     * hook, which decides the BREAKER outcome for the request, and
+     * {@see fetchHeadBlock()}, which decides what to tell the operator. If
+     * they could disagree, the breaker would record a success for a response
+     * the worker then treated as a failure — which is exactly the defect this
+     * predicate exists to close. One function, one verdict.
+     *
+     * It is also the seam a test drives, so the rule under test is the rule
+     * that ships rather than a copy of it written in the test.
+     *
+     * A body is usable only when it is JSON, carries no JSON-RPC `error`
+     * member, and has a non-empty string `result`. Everything else — a
+     * plain-text "not enabled for this app", a JSON-RPC error object, a
+     * missing or empty result — means the host answered and we still have no
+     * head block.
+     */
+    public static function headPollPayloadIsUsable(string $body): bool
+    {
+        $json = json_decode($body, true);
+        if (!is_array($json)) {
+            return false;
+        }
+        if (isset($json['error']) && is_array($json['error'])) {
+            return false;
+        }
+        if (!isset($json['result']) || !is_string($json['result'])) {
+            return false;
+        }
+
+        return ltrim($json['result'], '0x') !== '';
     }
 
     /**

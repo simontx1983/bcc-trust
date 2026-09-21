@@ -28,34 +28,57 @@ final class ApiRetry
 {
     // ── Defaults ────────────────────────────────────────────────────────────
     /**
-     * ── ⚠ RETRY ACCOUNTING IS PER ATTEMPT, DELIBERATELY, FOR NOW ─────────
+     * ── ⚠ RETRY ACCOUNTING IS PER LOGICAL REQUEST, NOT PER ATTEMPT ───────
      *
-     * One failing logical request calls
-     * {@see OnchainCircuitBreaker::recordFailure()} up to FOUR times — the
-     * initial attempt plus three retries — against a threshold of five. Two
-     * failing requests therefore open the breaker. That is not a bug that
-     * crept in; it is what this constant means, and the 2026-09-08 audit
-     * measured it exactly: chain 8 opened on a counter of 8, which is 2 x 4,
-     * inside a 23-second window.
+     * ONE logical provider request — one endpoint, one subject, one API or
+     * RPC operation, including every retry of that same operation — charges
+     * {@see OnchainCircuitBreaker::recordFailure()} AT MOST ONCE, when the
+     * attempt sequence ends. A sequence that eventually succeeds charges
+     * nothing and credits one success; a fully exhausted sequence charges
+     * exactly one failure, carrying the kind of the attempt that exhausted
+     * it.
      *
-     * ── WHY PR 7.6 DID NOT CHANGE IT ────────────────────────────────────
-     * One-failure-per-exhausted-operation is the more defensible semantic,
-     * and it is written down as the recommendation. But this breaker is
-     * keyed by chain id ALONE and is shared by four independent callers —
-     * CosmWasm discovery, {@see \BCC\Trust\Onchain\Services\NftEnrichmentService},
-     * {@see \BCC\Trust\Onchain\Services\ChainRefreshService} and
-     * {@see \BCC\Trust\Onchain\Workers\NftEthIndexerWorker}. Dividing the
-     * effective failure count by four would quietly quadruple how long each
-     * of those keeps hammering a failing provider before it backs off, and
-     * PR 7.6 gathered evidence about exactly ONE of them.
+     * ── WHAT IT USED TO DO, AND WHAT THAT COST ──────────────────────────
+     * Until PR B this class called `recordFailure()` once PER ATTEMPT, so a
+     * single failing request charged FOUR against a threshold of five. The
+     * 2026-09-08 audit measured it exactly: chain 8 opened on a counter of
+     * 8 — 2 x 4 — inside a 23-second window.
      *
-     * Changing a shared safety threshold for three services whose failure
-     * profiles nobody has measured, inside a PR about Cosmos classification,
-     * is how an unrelated outage gets introduced by a fix. So the behaviour
-     * is UNCHANGED and now PINNED by tests
-     * ({@see \BCC\Trust\Onchain\Tests\Unit\BreakerRetryAccountingTest}) so
-     * it can never drift silently, and the change is written up as its own
-     * scoped follow-up with per-service evidence as its entry price.
+     * ⚠ THE OLD ARITHMETIC WAS NOT UNIFORM, AND THE DIFFERENCE MATTERS:
+     *   - a TRANSPORT-ONLY failing request charged 4, so TWO of them (8)
+     *     opened a threshold-five breaker;
+     *   - the head-poll and transfer-page paths added their own domain
+     *     verdict on top, charging 4 + 1 = 5, so ONE of them opened the
+     *     chain-wide breaker by itself.
+     * Both now charge exactly one, so both take five.
+     *
+     * ── WHAT DID NOT CHANGE, DELIBERATELY ───────────────────────────────
+     * The retry COUNT and the backoff delays are untouched: a half-open
+     * probe still gets its full 1 + DEFAULT_MAX_RETRIES attempts, because
+     * reducing a recovery probe to a single HTTP attempt would be a
+     * different behaviour change with a different risk profile. Nor is
+     * there an {@see OnchainCircuitBreaker::isOpen()} re-check between
+     * attempts: with the charge deferred to exhaustion, the breaker can no
+     * longer open midway through this loop, so there is nothing for such a
+     * check to catch.
+     *
+     * Intermediate failures are LOCAL RETRY STATE ONLY. Nothing is written
+     * to the breaker and then cancelled — there is no pending charge, which
+     * is why an eventual success cannot leave a stale increment behind.
+     *
+     * ── THE OUTCOME IS DECIDED AFTER SEMANTIC VALIDATION ────────────────
+     * A 2xx is not automatically a success. A caller that can tell a usable
+     * payload from an error carried inside a 200 supplies `validate_success`
+     * (see the parameter docs), and an unusable payload settles as the one
+     * failure for that request. Crediting at the status line and letting the
+     * caller charge afterwards is a different thing entirely: it cleared the
+     * open state, the counter and the probe first, so a failed recovery
+     * probe read as recovery and 200-level semantic failures could never
+     * accumulate past one.
+     *
+     * Pinned by {@see \BCC\Trust\Onchain\Tests\Unit\BreakerRetryAccountingTest}
+     * and measured against the real counter by
+     * {@see \BCC\Trust\Onchain\Tests\Unit\BreakerChargePerLogicalRequestTest}.
      */
     const DEFAULT_MAX_RETRIES   = 3;
     const DEFAULT_BACKOFF_BASE  = 2;      // seconds
@@ -74,7 +97,41 @@ final class ApiRetry
      *     @type int    $chain_id      Chain ID for circuit breaker integration.
      *     @type callable $application_error  OPTIONAL. See below. Absent =
      *                                 today's behaviour, exactly.
+     *     @type callable $validate_success  OPTIONAL. See below. Absent =
+     *                                 today's behaviour, exactly: any 2xx is a
+     *                                 success and no response body is read.
+     *     @type ProviderOutcomeReceipt $outcome  OPTIONAL. A receipt the CALLER
+     *                                 owns, for THIS logical request. Filled in
+     *                                 with whatever this method settles on the
+     *                                 breaker, so a later domain verdict about
+     *                                 the same request can avoid charging it a
+     *                                 second time. Never read by this class.
      * }
+     *
+     * ── `validate_success`: WHEN A 200 IS NOT A SUCCESS ────────────────
+     * Alchemy answers `MATIC_MAINNET is not enabled for this app` with HTTP
+     * 200 and a JSON-RPC error object; a public RPC that does not implement
+     * an Alchemy-proprietary method does the same. The host answered, so the
+     * status line says success — and the operation failed.
+     *
+     * That mattered most on a HALF-OPEN recovery probe. `recordSuccess()`
+     * clears the open state, deletes the counter, releases the probe and
+     * advances `bcc_onchain_last_success_*`. Crediting it at the status line
+     * therefore accepted a broken provider as recovered, and then the
+     * caller's verdict added one failure to a freshly-cleared counter — so
+     * the chain sat CLOSED at failures=1 and 200-level semantic failures
+     * could NEVER reach the threshold, however long the provider stayed
+     * broken.
+     *
+     * So the CALLER may supply `fn(string $body, int $code): bool` returning
+     * TRUE when the payload is USABLE. When it returns FALSE this method
+     * settles the request as its one failure: not retried (a payload-level
+     * refusal is deterministic) and not attributed (there is no wire fault to
+     * name, so the kind stays null, exactly as the domain sites record).
+     *
+     * IT IS OPT-IN AND NARROW, and it is consulted ONLY for a 2xx — never
+     * for WP_Error, 429, 4xx or 5xx, so it cannot reclassify a transport
+     * failure or collide with `application_error`.
      *
      * ── `application_error`: WHEN A 5xx IS NOT A SERVER PROBLEM ─────────
      * A cosmos LCD reports CONTRACT-level errors as HTTP 500. Asking a
@@ -112,6 +169,13 @@ final class ApiRetry
             ? $options['application_error']
             : null;
 
+        // OPT-IN semantic validation of a 2xx body. `fn(string $body, int $code): bool`
+        // returning TRUE when the payload is USABLE. Absent = today's behaviour
+        // exactly: any 2xx is a success and no body is ever read.
+        $isUsablePayload = isset($options['validate_success']) && is_callable($options['validate_success'])
+            ? $options['validate_success']
+            : null;
+
         // ⚠ DERIVED FROM OPTIONS, NEVER FROM THE URL. The only signal read is
         // whether the caller opted into application-error handling, which
         // already distinguishes a question addressed to a CONTRACT from one
@@ -125,9 +189,17 @@ final class ApiRetry
             ? $options['endpoint_fp']
             : null;
 
+        // The caller's receipt for THIS logical request, if it wants one.
+        // Write-only from here: this method records what it settled and never
+        // consults it, so passing one cannot change transport behaviour.
+        $receipt = isset($options['outcome']) && $options['outcome'] instanceof ProviderOutcomeReceipt
+            ? $options['outcome']
+            : null;
+
         // Circuit breaker: check before attempting
         if ($chainId > 0 && OnchainCircuitBreaker::isOpen($chainId)) {
             self::log("BLOCKED by circuit breaker: {$label} (chain {$chainId})");
+            $receipt?->recordBlockedByOpenBreaker();
             return new \WP_Error('circuit_breaker_open', "Circuit breaker open for chain {$chainId}");
         }
 
@@ -217,10 +289,47 @@ final class ApiRetry
                 $code = (int) wp_remote_retrieve_response_code($lastResponse);
 
                 if ($code >= 200 && $code < 300) {
-                    // Success — record for circuit breaker
-                    if ($chainId > 0) {
-                        OnchainCircuitBreaker::recordSuccess($chainId);
+                    // ⚠ THE OUTCOME IS DECIDED AFTER SEMANTIC VALIDATION, NOT
+                    // AT THE STATUS LINE. A caller that can tell a usable
+                    // payload from an error carried inside a 200 supplies
+                    // `validate_success`; when it says the body is unusable,
+                    // this request FAILED and settles as a failure.
+                    //
+                    // Crediting first and letting the caller charge afterwards
+                    // is not the same thing and was a real defect: the credit
+                    // cleared the open state, the counter and the probe, and
+                    // advanced `bcc_onchain_last_success_*`, so a failed
+                    // recovery probe was accepted as recovery and 200-level
+                    // semantic failures could never accumulate past one.
+                    if ($isUsablePayload !== null
+                        && !$isUsablePayload((string) wp_remote_retrieve_body($lastResponse), $code)) {
+                        self::log(sprintf(
+                            'SEMANTIC FAILURE (%d) %s — the host answered with an unusable payload',
+                            $code, $label
+                        ));
+
+                        // ⚠ NOT RETRIED, DELIBERATELY. The host answered; a
+                        // payload-level refusal ("this chain is not enabled
+                        // for this app") is deterministic, and retrying it
+                        // three more times is the exact waste the 2026-08-19
+                        // Dungeon measurement recorded on the 5xx path.
+                        //
+                        // ⚠ AND NOT ATTRIBUTED. There is no wire fault to
+                        // name — no transport error, no HTTP status outside
+                        // 2xx — so the kind stays null, which is what the
+                        // eight domain sites already record when they have no
+                        // wire outcome. Inventing a token here would be the
+                        // fabricated diagnosis PR 7.8 removed.
+                        self::settleFailure($chainId, null, $requestClass, $endpointFp, $receipt);
+
+                        return $lastResponse;
                     }
+
+                    // Success — record for circuit breaker. This is the ONLY
+                    // outcome for the whole sequence: any earlier failed
+                    // attempt was local retry state and charged nothing, so
+                    // there is no accumulated failure left to undo.
+                    self::settleSuccess($chainId, $receipt);
                     return $lastResponse;
                 }
 
@@ -232,14 +341,15 @@ final class ApiRetry
                         $label, $attempt + 1, $maxRetries + 1, $delay
                     ));
 
-                    if ($chainId > 0) {
-                        OnchainCircuitBreaker::recordFailure(
-                            $chainId,
-                            ProviderFailureKind::RATE_LIMITED,
-                            $requestClass,
-                            $endpointFp
-                        );
-                    }
+                    // TERMINAL by design — a 429 is never retried, so this IS
+                    // the end of the logical request and its single charge.
+                    self::settleFailure(
+                        $chainId,
+                        ProviderFailureKind::RATE_LIMITED,
+                        $requestClass,
+                        $endpointFp,
+                        $receipt
+                    );
 
                     // Do NOT sleep — return immediately and let the caller
                     // (EnrichmentScheduler) decide whether to skip this chain.
@@ -268,15 +378,11 @@ final class ApiRetry
                         $code, $label, $attempt + 1, $maxRetries + 1
                     ));
 
-                    if ($chainId > 0) {
-                        OnchainCircuitBreaker::recordFailure(
-                            $chainId,
-                            ProviderFailureKind::HTTP_5XX,
-                            $requestClass,
-                            $endpointFp
-                        );
-                    }
-
+                    // ⚠ NOT CHARGED HERE. A retryable 5xx is local retry state
+                    // until the sequence ends: if a later attempt succeeds the
+                    // logical request succeeded, and nothing should have been
+                    // written to the breaker in the meantime.
+                    //
                     // Retryable: exhaust attempts before returning the failure.
                     if ($attempt < $maxRetries) {
                         $attempt++;
@@ -292,6 +398,16 @@ final class ApiRetry
                         }
                         continue;
                     }
+
+                    // Attempts exhausted on a 5xx — the logical request has
+                    // failed, and this is its one and only charge.
+                    self::settleFailure(
+                        $chainId,
+                        ProviderFailureKind::HTTP_5XX,
+                        $requestClass,
+                        $endpointFp,
+                        $receipt
+                    );
                     return $lastResponse;
                 }
 
@@ -315,15 +431,7 @@ final class ApiRetry
                 $label, $attempt + 1, $maxRetries + 1, $errorMsg
             ));
 
-            if ($chainId > 0) {
-                OnchainCircuitBreaker::recordFailure(
-                    $chainId,
-                    ProviderFailureKind::TRANSPORT,
-                    $requestClass,
-                    $endpointFp
-                );
-            }
-
+            // ⚠ NOT CHARGED HERE — same reasoning as the 5xx branch above.
             // Retryable: exhaust attempts before returning the failure.
             if ($attempt < $maxRetries) {
                 $attempt++;
@@ -337,6 +445,16 @@ final class ApiRetry
                 }
                 continue;
             }
+
+            // Attempts exhausted on a transport error — one charge for the
+            // whole logical request.
+            self::settleFailure(
+                $chainId,
+                ProviderFailureKind::TRANSPORT,
+                $requestClass,
+                $endpointFp,
+                $receipt
+            );
             break;
         }
 
@@ -471,8 +589,16 @@ final class ApiRetry
             ? $options['endpoint_fp']
             : null;
 
+        // Same write-only receipt contract as request(). The wave is ONE
+        // logical request for the breaker's purposes, and it already charged
+        // once — this only lets a caller see which way it settled.
+        $receipt = isset($options['outcome']) && $options['outcome'] instanceof ProviderOutcomeReceipt
+            ? $options['outcome']
+            : null;
+
         if ($chainId > 0 && OnchainCircuitBreaker::isOpen($chainId)) {
             self::log("BLOCKED by circuit breaker: {$label} (chain {$chainId}, {" . count($urls) . '} urls)');
+            $receipt?->recordBlockedByOpenBreaker();
             $err = new \WP_Error('circuit_breaker_open', "Circuit breaker open for chain {$chainId}");
             return self::failEveryBatchIndex($urls, $err);
         }
@@ -492,6 +618,7 @@ final class ApiRetry
                 if ($anyResponse) {
                     // Host answered at least once → reachable → success.
                     OnchainCircuitBreaker::recordSuccess($chainId);
+                    $receipt?->recordTransportSuccessCredit();
                 } else {
                     // Every URL failed at transport → host-level failure.
                     self::log(sprintf(
@@ -508,6 +635,7 @@ final class ApiRetry
                         ProviderRequestClass::BATCH_REQUEST,
                         $endpointFp
                     );
+                    $receipt?->recordTransportFailureCharge(ProviderFailureKind::TRANSPORT);
                 }
             }
 
@@ -522,6 +650,48 @@ final class ApiRetry
     }
 
     // ── Internal ────────────────────────────────────────────────────────────
+
+    /**
+     * Settle ONE logical request as a failure: exactly one breaker charge.
+     *
+     * Every failure exit in {@see request()} funnels through here, which is
+     * what makes "at most one charge per logical request" a property of the
+     * code rather than a promise in a comment. It is called at a TERMINAL
+     * point only — a 429 (never retried) or an exhausted retry sequence —
+     * so there is no pending state and nothing to cancel.
+     */
+    private static function settleFailure(
+        int $chainId,
+        ?string $kind,
+        ?string $requestClass,
+        ?string $endpointFp,
+        ?ProviderOutcomeReceipt $receipt
+    ): void {
+        if ($chainId <= 0) {
+            return; // No chain, no breaker — and no receipt entry to mislead a caller.
+        }
+
+        OnchainCircuitBreaker::recordFailure($chainId, $kind, $requestClass, $endpointFp);
+        $receipt?->recordTransportFailureCharge($kind);
+    }
+
+    /**
+     * Settle ONE logical request as a success: exactly one breaker credit.
+     *
+     * The credit clears the chain's failure counter, exactly as before. What
+     * changed is what it has to clear: earlier attempts in this sequence no
+     * longer wrote anything, so a retry that eventually succeeds now leaves
+     * the breaker in the state a first-attempt success would have.
+     */
+    private static function settleSuccess(int $chainId, ?ProviderOutcomeReceipt $receipt): void
+    {
+        if ($chainId <= 0) {
+            return;
+        }
+
+        OnchainCircuitBreaker::recordSuccess($chainId);
+        $receipt?->recordTransportSuccessCredit();
+    }
 
     /**
      * Build an index-aligned WP_Error result array for a whole batch —

@@ -165,7 +165,7 @@ final class ApiRetryApplicationErrorTest extends TestCase
         );
 
         self::assertSame(4, $out['attempts'], '1 + 3 retries');
-        self::assertCount(4, OnchainCircuitBreaker::$failureChains);
+        self::assertCount(1, OnchainCircuitBreaker::$failureChains, 'four attempts, one logical request, one charge');
         self::assertSame([2, 3, 3], \BccSleepSpy::$slept, 'the documented capped backoff');
     }
 
@@ -178,7 +178,7 @@ final class ApiRetryApplicationErrorTest extends TestCase
         );
 
         self::assertSame(4, $out['attempts']);
-        self::assertCount(4, OnchainCircuitBreaker::$failureChains);
+        self::assertCount(1, OnchainCircuitBreaker::$failureChains);
     }
 
     /** An unrecognisable 500 body FAILS SAFE — it is treated as a node fault. */
@@ -194,7 +194,7 @@ final class ApiRetryApplicationErrorTest extends TestCase
             );
 
             self::assertSame(2, $out['attempts'], sprintf('body %s must still retry', var_export($body, true)));
-            self::assertCount(2, OnchainCircuitBreaker::$failureChains, 'and must still blame the chain');
+            self::assertCount(1, OnchainCircuitBreaker::$failureChains, 'and must still blame the chain, once');
         }
     }
 
@@ -207,7 +207,7 @@ final class ApiRetryApplicationErrorTest extends TestCase
         );
 
         self::assertSame(2, $out['attempts'], 'timeouts still retry');
-        self::assertCount(2, OnchainCircuitBreaker::$failureChains);
+        self::assertCount(1, OnchainCircuitBreaker::$failureChains);
     }
 
     /** 429 keeps its own path: immediate return, blamed, never slept on. */
@@ -262,7 +262,7 @@ final class ApiRetryApplicationErrorTest extends TestCase
         );
 
         self::assertSame(4, $out['attempts'], 'unchanged legacy behaviour');
-        self::assertCount(4, OnchainCircuitBreaker::$failureChains);
+        self::assertCount(1, OnchainCircuitBreaker::$failureChains);
     }
 
     /** A non-callable option is ignored rather than fatal. */
@@ -274,6 +274,6 @@ final class ApiRetryApplicationErrorTest extends TestCase
         );
 
         self::assertSame(2, $out['attempts'], 'falls back to strict behaviour');
-        self::assertCount(2, OnchainCircuitBreaker::$failureChains);
+        self::assertCount(1, OnchainCircuitBreaker::$failureChains);
     }
 }

@@ -15,6 +15,7 @@ use BCC\Trust\Onchain\Services\NftSpamFilter;
 use BCC\Trust\Onchain\Services\V1FetchFailureTracker;
 use BCC\Trust\Onchain\Support\AlchemyEndpoint;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
@@ -114,7 +115,7 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     }
 
     /** @return array<int, array<string, mixed>> */
-    public function fetch_all_validators(): array
+    public function fetch_all_validators(?ProviderOutcomeReceipt $outcome = null): array
     {
         // EVM chains have no indexable validator enumeration in BCC's model.
         // The supports_feature('validator') gate above keeps callers from
@@ -237,6 +238,34 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     }
 
     /**
+     * Is an `alchemy_getAssetTransfers` 200 body a USABLE page?
+     *
+     * The same "one verdict, one function" discipline as
+     * {@see NftEthIndexerWorker::headPollPayloadIsUsable()}: this decides the
+     * BREAKER outcome via `validate_success`, and {@see fetch_transfers_since()}
+     * decides what the caller is told. If the two could disagree, the breaker
+     * would record a success for a page the worker treats as a failed fetch —
+     * clearing the counter for a tick that failed.
+     *
+     * Mirrors exactly the conditions under which that method returns `null`
+     * after a 2xx: non-JSON body, a JSON-RPC `error` member, a missing or
+     * non-array `result`, and a `result.transfers` that is not an array. A
+     * genuinely EMPTY page is usable — an empty range is a real answer.
+     */
+    public static function transferPagePayloadIsUsable(string $body): bool
+    {
+        $json = json_decode($body, true);
+        if (!is_array($json) || isset($json['error'])) {
+            return false;
+        }
+        if (!isset($json['result']) || !is_array($json['result'])) {
+            return false;
+        }
+
+        return is_array($json['result']['transfers'] ?? []);
+    }
+
+    /**
      * Fetch ERC-721/1155 Transfer events between two block heights via
      * Alchemy's `alchemy_getAssetTransfers`. Used by NftEthIndexerWorker
      * to ingest confirmation-gated mints/transfers/burns.
@@ -264,10 +293,22 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * Returns events in the indexer's normalized TransferEvent shape:
      * see NftHoldingsIndexer phpstan-type for the contract.
      *
+     * ── $outcome ────────────────────────────────────────────────────────
+     * ONE page is ONE logical provider request. The caller may hand in a
+     * receipt for THAT page so it can tell a transport failure the breaker
+     * has already been charged for from a misconfiguration or a malformed
+     * body that charged nothing. A receipt must belong to a single page: one
+     * constructed outside the caller's paging loop would carry the previous
+     * page's outcome into the next one.
+     *
      * @return array{transfers: list<array<string, mixed>>, page_key: string|null}|null
      */
-    public function fetch_transfers_since(int $fromBlock, int $toBlock, ?string $pageKey = null): ?array
-    {
+    public function fetch_transfers_since(
+        int $fromBlock,
+        int $toBlock,
+        ?string $pageKey = null,
+        ?ProviderOutcomeReceipt $outcome = null
+    ): ?array {
         $chainIdForLog = (int) ($this->chain->id ?? 0);
 
         $rpcUrl = (string) ($this->chain->rpc_url ?? '');
@@ -319,6 +360,14 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         ], [
             'label'    => 'EVM alchemy_getAssetTransfers',
             'chain_id' => $chainId,
+            'outcome'  => $outcome,
+            // ⚠ SAME RULE AS THE HEAD POLL. A public RPC that does not
+            // implement this Alchemy-proprietary method answers HTTP 200 with
+            // a JSON-RPC error member. Settling that as a success credited a
+            // recovery, cleared the counter and made the failure untrippable:
+            // every tick reset to zero before the worker's verdict added one.
+            'validate_success' => static fn(string $body, int $code): bool
+                => self::transferPagePayloadIsUsable($body),
         ]);
 
         if (is_wp_error($response)) {

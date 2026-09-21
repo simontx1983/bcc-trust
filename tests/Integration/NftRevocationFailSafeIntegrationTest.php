@@ -111,7 +111,7 @@ namespace BCC\Trust\Tests\Integration {
         }
 
         public function fetch_validator(string $address): array { return []; }
-        public function fetch_all_validators(): array { return []; }
+        public function fetch_all_validators(?\BCC\Trust\Onchain\Support\ProviderOutcomeReceipt $outcome = null): array { return []; }
         public function enrich_validator(string $address, ?object $existingRow = null): array { return []; }
         public function fetch_delegations(string $delegatorAddress): array { return []; }
         public function fetch_collections(string $walletAddress, int $chainId = 0): array { return []; }

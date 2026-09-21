@@ -9,6 +9,7 @@ if (!defined('ABSPATH')) {
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 
 /**
  * THORChain Node Fetcher
@@ -102,9 +103,9 @@ class ThorchainFetcher implements FetcherInterface
      *
      * @return array<int, array<string, mixed>>
      */
-    public function fetch_all_validators(): array
+    public function fetch_all_validators(?ProviderOutcomeReceipt $outcome = null): array
     {
-        $nodes = $this->apiGet('/thorchain/nodes');
+        $nodes = $this->apiGet('/thorchain/nodes', $outcome);
         if (!is_array($nodes)) {
             return [];
         }
@@ -231,7 +232,7 @@ class ThorchainFetcher implements FetcherInterface
      *
      * @return array<string, mixed>|null
      */
-    private function apiGet(string $path): ?array
+    private function apiGet(string $path, ?ProviderOutcomeReceipt $outcome = null): ?array
     {
         $url     = $this->base_url . $path;
         $chainId = (int) $this->chain->id;
@@ -245,6 +246,7 @@ class ThorchainFetcher implements FetcherInterface
         ], [
             'label'    => 'THORNode ' . $path,
             'chain_id' => $chainId,
+            'outcome'  => $outcome,
         ]);
 
         if (is_wp_error($response)) {

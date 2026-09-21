@@ -178,13 +178,18 @@ final class CollectionMetadataApplicationErrorTest extends TestCase
             self::assertNull($legacy->invoke($fetcher, self::CONTRACT, [$variant => new \stdClass()]));
         }
 
-        self::assertSame(8, $this->charges(), '2 requests x 4 attempts — the measured pre-fix cost');
-        self::assertCount(8, \BccWire::$urls, 'every attempt really went to the wire');
+        // ⚠ THE WIRE COST IS UNCHANGED; THE BREAKER COST IS NOT. The legacy
+        // path still burns 8 HTTP attempts on a contract that simply does not
+        // answer CW-721 — that waste is the point of this test and PR 7.6's
+        // application_error fix. What PR B changed is the accounting on top:
+        // two logical requests now cost two charges, not eight.
+        self::assertSame(2, $this->charges(), '2 logical requests, 1 charge each');
+        self::assertCount(8, \BccWire::$urls, '2 requests x 4 attempts still went to the wire');
         self::assertNotSame([], \BccWire::$sleeps, 'the legacy path backs off between attempts');
-        self::assertGreaterThanOrEqual(
+        self::assertLessThan(
             OnchainCircuitBreaker::FAILURE_THRESHOLD,
             $this->charges(),
-            'which is why the breaker opened on every pass'
+            'and no longer opens the breaker on a single pass'
         );
     }
 
@@ -196,7 +201,7 @@ final class CollectionMetadataApplicationErrorTest extends TestCase
 
         self::assertNull($this->fetcher()->fetchContractInfo(self::CONTRACT));
 
-        self::assertSame(8, $this->charges(), 'four charges per variant, unchanged');
+        self::assertSame(2, $this->charges(), 'one charge per variant — two logical requests');
         self::assertCount(8, \BccWire::$urls, 'four attempts per variant, unchanged');
         self::assertNotSame([], \BccWire::$sleeps, 'a node fault is still retried with backoff');
         $attribution = OnchainCircuitBreaker::attribution(self::CHAIN);

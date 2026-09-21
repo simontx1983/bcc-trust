@@ -203,7 +203,7 @@ namespace BCC\Trust\Onchain\Fetchers {
             }
 
             /** @return array<int, array<string, mixed>> */
-            public function fetch_all_validators(): array
+            public function fetch_all_validators(?\BCC\Trust\Onchain\Support\ProviderOutcomeReceipt $outcome = null): array
             {
                 return [];
             }

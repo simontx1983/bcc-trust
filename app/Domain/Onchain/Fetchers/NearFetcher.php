@@ -9,6 +9,7 @@ if (!defined('ABSPATH')) {
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 
 /**
  * NEAR Protocol Validator Fetcher
@@ -98,9 +99,9 @@ class NearFetcher implements FetcherInterface
      *
      * @return array<int, array<string, mixed>>
      */
-    public function fetch_all_validators(): array
+    public function fetch_all_validators(?ProviderOutcomeReceipt $outcome = null): array
     {
-        $validators = $this->getCurrentValidators();
+        $validators = $this->getCurrentValidators($outcome);
 
         if (empty($validators)) {
             return [];
@@ -152,9 +153,9 @@ class NearFetcher implements FetcherInterface
      *
      * @return array<int, array<string, mixed>>
      */
-    private function getCurrentValidators(): array
+    private function getCurrentValidators(?ProviderOutcomeReceipt $outcome = null): array
     {
-        $result = $this->rpcCall('validators', [null]);
+        $result = $this->rpcCall('validators', [null], $outcome);
 
         if (!is_array($result) || !isset($result['current_validators'])) {
             return [];
@@ -223,7 +224,7 @@ class NearFetcher implements FetcherInterface
      * @param array<int, mixed> $params
      * @return array<string, mixed>|null
      */
-    private function rpcCall(string $method, array $params): ?array
+    private function rpcCall(string $method, array $params, ?ProviderOutcomeReceipt $outcome = null): ?array
     {
         $chainId = (int) $this->chain->id;
         $body    = wp_json_encode([
@@ -240,6 +241,7 @@ class NearFetcher implements FetcherInterface
         ], [
             'label'    => 'NEAR RPC ' . $method,
             'chain_id' => $chainId,
+            'outcome'  => $outcome,
         ]);
 
         if (is_wp_error($response)) {

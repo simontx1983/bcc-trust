@@ -646,6 +646,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Support\\NftDriverRegistry' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/NftDriverRegistry.php',
         'BCC\\Trust\\Onchain\\Support\\NftProviderReadiness' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/NftProviderReadiness.php',
         'BCC\\Trust\\Onchain\\Support\\OnchainCircuitBreaker' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/OnchainCircuitBreaker.php',
+        'BCC\\Trust\\Onchain\\Support\\ProviderOutcomeReceipt' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ProviderOutcomeReceipt.php',
         'BCC\\Trust\\Onchain\\Support\\ProviderRequestBudget' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ProviderRequestBudget.php',
         'BCC\\Trust\\Onchain\\Support\\ScannerFreeze' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ScannerFreeze.php',
         'BCC\\Trust\\Onchain\\Support\\SolanaEndpoints' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/SolanaEndpoints.php',

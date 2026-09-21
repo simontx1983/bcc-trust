@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness;
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\Support\SolanaEndpoints;
@@ -708,9 +709,9 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array<int, array<string, mixed>>
      */
-    public function fetch_all_validators(): array
+    public function fetch_all_validators(?ProviderOutcomeReceipt $outcome = null): array
     {
-        $accounts = $this->getVoteAccounts();
+        $accounts = $this->getVoteAccounts($outcome);
 
         if (empty($accounts)) {
             return [];
@@ -943,14 +944,14 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array<int, array<string, mixed>>
      */
-    private function getVoteAccounts(): array
+    private function getVoteAccounts(?ProviderOutcomeReceipt $outcome = null): array
     {
         $cacheKey = $this->rpcUrl();
         if (isset(self::$voteAccountsCache[$cacheKey])) {
             return self::$voteAccountsCache[$cacheKey];
         }
 
-        $result = $this->rpcCall('getVoteAccounts', []);
+        $result = $this->rpcCall('getVoteAccounts', [], $outcome);
 
         if (!is_array($result)) {
             self::$voteAccountsCache[$cacheKey] = [];
@@ -1021,9 +1022,9 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * @param array<string, mixed> $params
      * @return array<string, mixed>|null
      */
-    private function rpcCall(string $method, array $params): ?array
+    private function rpcCall(string $method, array $params, ?ProviderOutcomeReceipt $outcome = null): ?array
     {
-        $result = $this->rpcResult($method, $params);
+        $result = $this->rpcResult($method, $params, $outcome);
         if (!is_array($result)) {
             return null;
         }
@@ -1045,7 +1046,7 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * @param array<string, mixed> $params
      * @return mixed
      */
-    private function rpcResult(string $method, array $params)
+    private function rpcResult(string $method, array $params, ?ProviderOutcomeReceipt $outcome = null)
     {
         $chainId  = (int) $this->chain->id;
         $body     = wp_json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => $method, 'params' => $params]);
@@ -1058,6 +1059,7 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         ], [
             'label'    => 'Solana RPC ' . $method,
             'chain_id' => $chainId,
+            'outcome'  => $outcome,
         ]);
 
         if (is_wp_error($response)) {
