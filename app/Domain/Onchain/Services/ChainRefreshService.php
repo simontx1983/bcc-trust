@@ -14,6 +14,7 @@ use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Services\CollectionService;
 use BCC\Trust\Onchain\Services\ValidatorPageMinter;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 
 /**
  * Chain Refresh Cron
@@ -167,6 +168,13 @@ class ChainRefreshService
                     continue;
                 }
 
+                // ⚠ ONE RECEIPT PER CHAIN, CONSTRUCTED INSIDE THE LOOP AND
+                // ABOVE THE try. Inside the loop so the next chain cannot
+                // inherit this one's outcome; above the try so the catch
+                // below can always read it, including when the throw happened
+                // before the fetch.
+                $indexOutcome = new ProviderOutcomeReceipt();
+
                 try {
                     if (!FetcherFactory::has_driver($chain->chain_type)) {
                         continue;
@@ -178,7 +186,7 @@ class ChainRefreshService
                         continue;
                     }
 
-                    $validators = $fetcher->fetch_all_validators();
+                    $validators = $fetcher->fetch_all_validators($indexOutcome);
 
                     if (!empty($validators)) {
                         $returnedCount = count($validators);
@@ -233,12 +241,35 @@ class ChainRefreshService
                     } else {
                         // Empty result from an active chain is suspicious
                         $hasPartialFetch = true;
-                        OnchainCircuitBreaker::recordFailure($chainId);
+
+                        // ⚠ EMPTY IS TWO DIFFERENT FACTS, AND ONLY ONE OF THEM
+                        // IS THIS VERDICT'S TO CHARGE. If the index came back
+                        // empty because the provider failed, ApiRetry already
+                        // charged that request once and this would be the same
+                        // failure counted twice. If the provider ANSWERED and
+                        // the answer was an empty validator set — a 200 with no
+                        // rows, a cached-empty set, a driver that never called
+                        // out — nothing was charged, the answer is unusable, and
+                        // this verdict is correctly the operation's one charge.
+                        if ($indexOutcome->domainMayCharge()) {
+                            OnchainCircuitBreaker::recordFailure($chainId);
+                        }
                         \BCC\Core\Log\Logger::warning('[Onchain] Validator index returned empty for ' . $chain->name);
                     }
                 } catch (\Exception $e) {
                     $hasPartialFetch = true;
-                    OnchainCircuitBreaker::recordFailure($chainId);
+
+                    // ⚠ THIS CATCH SPANS MORE THAN ONE PROVIDER REQUEST — the
+                    // whole index for this chain, plus the bulk upsert and the
+                    // option writes after it. Most throws reaching here are
+                    // therefore NOT provider faults at all, and the ones that
+                    // are have already been charged once by ApiRetry. The
+                    // receipt keeps this verdict from becoming that failure's
+                    // second charge; a throw after a healthy request, or before
+                    // any request, still charges exactly once.
+                    if ($indexOutcome->domainMayCharge()) {
+                        OnchainCircuitBreaker::recordFailure($chainId);
+                    }
                     \BCC\Core\Log\Logger::error('[Onchain] Validator index failed for ' . $chain->name . ': ' . $e->getMessage());
                 }
             }

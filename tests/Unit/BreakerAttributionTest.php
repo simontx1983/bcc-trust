@@ -79,16 +79,21 @@ final class BreakerAttributionTest extends TestCase
     public static function chargingOutcomes(): array
     {
         return [
+            // ⚠ EVERY CHARGING OUTCOME IS WORTH EXACTLY ONE. PR B moved the
+            // accounting to the logical-request boundary, so a retried 5xx and
+            // a never-retried 429 now cost the same: one charge for one
+            // request. The retry COUNT is unchanged and asserted separately by
+            // BreakerRetryAccountingTest — this column is charges, not attempts.
             'HTTP 429 rate limit'  => [['code' => 429, 'body' => '{}'], 1, ProviderFailureKind::RATE_LIMITED],
-            'HTTP 500'             => [['code' => 500, 'body' => '{}'], 4, ProviderFailureKind::HTTP_5XX],
-            'HTTP 502'             => [['code' => 502, 'body' => '{}'], 4, ProviderFailureKind::HTTP_5XX],
-            'HTTP 503'             => [['code' => 503, 'body' => '{}'], 4, ProviderFailureKind::HTTP_5XX],
-            'HTTP 504'             => [['code' => 504, 'body' => '{}'], 4, ProviderFailureKind::HTTP_5XX],
+            'HTTP 500'             => [['code' => 500, 'body' => '{}'], 1, ProviderFailureKind::HTTP_5XX],
+            'HTTP 502'             => [['code' => 502, 'body' => '{}'], 1, ProviderFailureKind::HTTP_5XX],
+            'HTTP 503'             => [['code' => 503, 'body' => '{}'], 1, ProviderFailureKind::HTTP_5XX],
+            'HTTP 504'             => [['code' => 504, 'body' => '{}'], 1, ProviderFailureKind::HTTP_5XX],
             // ⚠ 501 IS A 5xx AND CHARGES. It is a durable "unsupported" state
             // on the CosmWasm code path, which is a different question; here
-            // it is simply a server error that cost four charges.
-            'HTTP 501'             => [['code' => 501, 'body' => '{}'], 4, ProviderFailureKind::HTTP_5XX],
-            'wire failure'         => [self::WIRE_FAILURE, 4, ProviderFailureKind::TRANSPORT],
+            // it is simply a server error that cost one charge.
+            'HTTP 501'             => [['code' => 501, 'body' => '{}'], 1, ProviderFailureKind::HTTP_5XX],
+            'wire failure'         => [self::WIRE_FAILURE, 1, ProviderFailureKind::TRANSPORT],
         ];
     }
 
@@ -176,7 +181,7 @@ final class BreakerAttributionTest extends TestCase
             ['application_error' => static fn(string $body, int $code): bool => false]
         );
 
-        self::assertSame(4, $this->charges());
+        self::assertSame(1, $this->charges());
         $attr = OnchainCircuitBreaker::attribution(self::CHAIN);
         self::assertSame(ProviderFailureKind::HTTP_5XX, $attr['kind']);
         // The opt-in is present, so this WAS a smart query.
@@ -237,7 +242,7 @@ final class BreakerAttributionTest extends TestCase
     public function testASuccessClearsCounterOpenStateAndAttributionTogether(): void
     {
         $this->fire(['code' => 503, 'body' => '{}']);
-        self::assertSame(4, $this->charges());
+        self::assertSame(1, $this->charges());
         self::assertSame(ProviderFailureKind::HTTP_5XX, OnchainCircuitBreaker::attribution(self::CHAIN)['kind']);
 
         \BccWire::reset();
@@ -402,11 +407,24 @@ final class BreakerAttributionTest extends TestCase
     /**
      * ⚠ THE COVERAGE CLAIM, MADE EXPLICIT.
      *
-     * Twelve executable call sites charge this breaker. Four are inside
-     * ApiRetry and MUST now pass a kind; eight are domain judgements with no
-     * wire outcome and MUST NOT invent one. This test fails when a new charge
-     * site appears anywhere, so "which callers are attributed?" can never
-     * again be answered by reading and hoping.
+     * TEN executable call sites charge this breaker. TWO are inside ApiRetry
+     * and MUST pass a kind; eight are domain judgements with no wire outcome
+     * and MUST NOT invent one. This test fails when a new charge site appears
+     * anywhere, so "which callers are attributed?" can never again be
+     * answered by reading and hoping.
+     *
+     * ── WHY TWO, WHERE PR 7.8 COUNTED FOUR ──────────────────────────────
+     * ApiRetry used to charge from three places in `request()` — 429, 5xx and
+     * transport — plus once in the batch path. PR B funnelled the first three
+     * into ONE private settlement helper, which is what makes "at most one
+     * charge per logical request" structural rather than a promise. Fewer
+     * charge sites is the fix, visible here as a number.
+     *
+     * ── HOW A SITE IS CLASSIFIED ────────────────────────────────────────
+     * By counting the arguments actually passed, with paren depth tracked
+     * across lines. The previous version asked "does the call close on this
+     * line?", which read the one-line settlement helper — four arguments and
+     * all — as a bare chain-id call.
      */
     public function testEveryExecutableBreakerChargeSiteIsAccountedFor(): void
     {
@@ -441,36 +459,46 @@ final class BreakerAttributionTest extends TestCase
             if (strpos($code, 'recordFailure(') === false) {
                 continue;
             }
-            $rel = str_replace('\\', '/', substr($file->getPathname(), strlen($root) + 1));
-            foreach (explode("\n", $code) as $i => $line) {
-                if (strpos($line, 'OnchainCircuitBreaker::recordFailure(') === false) {
-                    continue;
+            $rel    = str_replace('\\', '/', substr($file->getPathname(), strlen($root) + 1));
+            $needle = 'OnchainCircuitBreaker::recordFailure(';
+            $offset = 0;
+            while (($pos = strpos($code, $needle, $offset)) !== false) {
+                $offset = $pos + strlen($needle);
+                $site   = $rel . ':' . (substr_count($code, "\n", 0, $pos) + 1);
+
+                // ⚠ STRUCTURAL, NOT A REGEX OVER ARGUMENT SHAPES. Walk the
+                // argument list with paren depth so a cast, a property access
+                // or a nested call cannot be mistaken for an extra argument,
+                // and so a call formatted on one line is read the same way as
+                // one spread over five.
+                $depth  = 1;
+                $commas = 0;
+                $len    = strlen($code);
+                for ($p = $offset; $p < $len && $depth > 0; $p++) {
+                    $ch = $code[$p];
+                    if ($ch === '(' || $ch === '[') {
+                        $depth++;
+                    } elseif ($ch === ')' || $ch === ']') {
+                        $depth--;
+                    } elseif ($ch === ',' && $depth === 1) {
+                        $commas++;
+                    }
                 }
-                // A site is "attributed" when the argument list spans more
-                // than one line — the multi-argument form. A single-argument
-                // call closes on the same line.
-                //
-                // ⚠ STRUCTURAL, NOT A REGEX OVER ARGUMENT SHAPES. An earlier
-                // version matched the argument text and misread
-                // `recordFailure((int) $row->chain_id)` as attributed, because
-                // its character class happened to omit `$`. Asking "does the
-                // call close on this line?" cannot be defeated by a cast, a
-                // property access or a nested call.
-                $site  = $rel . ':' . ($i + 1);
-                $after = substr($line, strpos($line, 'recordFailure(') + strlen('recordFailure('));
-                if (strpos($after, ')') === false) {
-                    $attributed[] = $site;
+                self::assertSame(0, $depth, "unbalanced argument list at {$site}");
+
+                if ($commas > 0) {
+                    $attributed[] = $site;   // chain id PLUS a bounded kind
                 } else {
-                    $unattributed[] = $site;
+                    $unattributed[] = $site; // chain id alone — a domain judgement
                 }
             }
         }
 
         self::assertNotSame([], $attributed, 'anti-vacuity: some site must be attributed');
         self::assertCount(
-            4,
+            2,
             $attributed,
-            "exactly the four ApiRetry sites carry attribution; got:\n  " . implode("\n  ", $attributed)
+            "exactly the two ApiRetry sites carry attribution; got:\n  " . implode("\n  ", $attributed)
         );
         foreach ($attributed as $site) {
             self::assertStringContainsString('Support/ApiRetry.php', $site);
@@ -512,20 +540,44 @@ final class BreakerAttributionTest extends TestCase
     }
 
     /**
-     * The Run 8 arithmetic, pinned: ONE failing request charges FOUR times,
-     * so TWO open a threshold-five breaker. Not a change request — a pin, so
-     * that any future retuning of per-attempt accounting is deliberate.
+     * ⚠ THE RUN 8 ARITHMETIC, REPLACED — MEASURED ON THE REAL COUNTER.
+     *
+     * This test used to pin `8 = 2 x 4`: one failing request charged four
+     * times, so two failing requests opened a threshold-five breaker. That
+     * was the defect, pinned deliberately until per-service evidence existed.
+     *
+     * Now one failing request costs exactly one, and it takes the full five
+     * to open the breaker. Every number here is read from the real
+     * `_bcc_cb_counter_<id>` option through the real breaker, not from a
+     * mock's call list, so a regression to per-attempt charging cannot pass
+     * this file by counting something else.
      */
-    public function testOneFailingRequestStillChargesFourTimes(): void
+    public function testFailingRequestsChargeOnceEachAndOpenAtTheThreshold(): void
     {
         $this->fire(['code' => 503, 'body' => '{}']);
-        self::assertSame(4, $this->charges());
+        self::assertSame(1, $this->charges(), 'one logical request, one charge');
         self::assertSame(OnchainCircuitBreaker::PHASE_CLOSED, OnchainCircuitBreaker::phase(self::CHAIN));
 
         \BccWire::reset();
         $this->fire(['code' => 503, 'body' => '{}']);
-        self::assertSame(8, $this->charges(), 'the 8 = 2 x 4 the canary measured');
-        self::assertSame(OnchainCircuitBreaker::PHASE_OPEN, OnchainCircuitBreaker::phase(self::CHAIN));
+        self::assertSame(2, $this->charges(), 'two requests, two charges — where 8 used to be');
+        self::assertSame(
+            OnchainCircuitBreaker::PHASE_CLOSED,
+            OnchainCircuitBreaker::phase(self::CHAIN),
+            'two failing requests must no longer open a five-failure breaker'
+        );
+
+        for ($i = 0; $i < 3; $i++) {
+            \BccWire::reset();
+            $this->fire(['code' => 503, 'body' => '{}']);
+        }
+
+        self::assertSame(OnchainCircuitBreaker::FAILURE_THRESHOLD, $this->charges());
+        self::assertSame(
+            OnchainCircuitBreaker::PHASE_OPEN,
+            OnchainCircuitBreaker::phase(self::CHAIN),
+            'a chain that fails five requests in a row still trips, on the fifth'
+        );
         self::assertSame(ProviderFailureKind::HTTP_5XX, OnchainCircuitBreaker::attribution(self::CHAIN)['kind']);
     }
 

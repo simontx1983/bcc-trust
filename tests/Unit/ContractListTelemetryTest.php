@@ -210,32 +210,46 @@ final class ContractListTelemetryTest extends TestCase
     }
 
     /**
-     * The canary's own arithmetic, reproduced: ONE failing request charges
-     * FOUR times, so TWO open a breaker whose threshold is five.
+     * The canary's arithmetic, retuned deliberately by PR B: ONE failing
+     * contract listing is ONE logical request and charges ONCE, where it
+     * used to charge four times and let two requests open a threshold-five
+     * breaker.
      *
-     * Not a change request — a pin. If retry accounting is ever retuned,
-     * this number must move deliberately and visibly.
+     * Still a pin. If retry accounting is ever retuned again, this number
+     * must move deliberately and visibly.
      */
-    public function testOneFailingContractListingChargesTheBreakerFourTimes(): void
+    public function testOneFailingContractListingChargesTheBreakerOnce(): void
     {
         \BccWire::$always = ['code' => 503, 'body' => ''];
 
         $this->fetcher()->listContractsForCodeId(7);
 
-        self::assertSame(4, \BccBreakerStore::counter(self::CHAIN));
+        self::assertSame(1, \BccBreakerStore::counter(self::CHAIN));
         self::assertSame(
             OnchainCircuitBreaker::PHASE_CLOSED,
             OnchainCircuitBreaker::phase(self::CHAIN),
-            'four is below the threshold of five, so one request must not open it'
+            'one is below the threshold of five, so one request must not open it'
         );
 
         $this->fetcher()->listContractsForCodeId(8);
 
-        self::assertSame(8, \BccBreakerStore::counter(self::CHAIN));
+        self::assertSame(2, \BccBreakerStore::counter(self::CHAIN), 'where the canary measured 8 = 2 x 4');
+        self::assertSame(
+            OnchainCircuitBreaker::PHASE_CLOSED,
+            OnchainCircuitBreaker::phase(self::CHAIN),
+            'two failing listings are two failures, and two is not five'
+        );
+
+        // …and the chain still trips when it keeps failing.
+        foreach ([9, 10, 11] as $codeId) {
+            $this->fetcher()->listContractsForCodeId($codeId);
+        }
+
+        self::assertSame(OnchainCircuitBreaker::FAILURE_THRESHOLD, \BccBreakerStore::counter(self::CHAIN));
         self::assertSame(
             OnchainCircuitBreaker::PHASE_OPEN,
             OnchainCircuitBreaker::phase(self::CHAIN),
-            'two failing requests reproduce the 8 = 2 x 4 the canary measured'
+            'five failing listings open it, which is what the threshold says'
         );
     }
 

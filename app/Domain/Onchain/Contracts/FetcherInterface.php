@@ -3,6 +3,7 @@
 namespace BCC\Trust\Onchain\Contracts;
 
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -41,9 +42,21 @@ interface FetcherInterface
      * the ValidatorRepository bulk upsert path (admin Refresh All
      * Chains + the per-chain refresh cron).
      *
+     * ── $outcome ────────────────────────────────────────────────────────
+     * An EMPTY result is ambiguous: the provider may have failed, or the
+     * chain may genuinely have returned nothing. The caller has to charge
+     * the circuit breaker for the first and not the second, and it cannot
+     * tell them apart from `[]`. An optional receipt lets the driver report
+     * what the transport layer already settled, so the caller's verdict is
+     * never a second charge for a failure ApiRetry has already recorded.
+     *
+     * Drivers that make no provider call (EVM) leave it untouched, which is
+     * the honest answer: nothing was charged, so the caller's verdict is the
+     * only charge there will be.
+     *
      * @return array<int, array<string, mixed>> Normalized validator rows.
      */
-    public function fetch_all_validators(): array;
+    public function fetch_all_validators(?ProviderOutcomeReceipt $outcome = null): array;
 
     /**
      * Enrich a single validator row with up-to-date provider data

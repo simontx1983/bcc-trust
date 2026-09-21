@@ -9,6 +9,7 @@ if (!defined('ABSPATH')) {
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 
 /**
  * Polkadot Validator Fetcher
@@ -97,7 +98,7 @@ class PolkadotFetcher implements FetcherInterface
      *
      * @return array<int, array<string, mixed>>
      */
-    public function fetch_all_validators(): array
+    public function fetch_all_validators(?ProviderOutcomeReceipt $outcome = null): array
     {
         $validators = [];
         $page       = 0;
@@ -110,7 +111,7 @@ class PolkadotFetcher implements FetcherInterface
                 'order_field' => 'bonded_total',
                 'row'        => $perPage,
                 'page'       => $page,
-            ]);
+            ], $outcome);
 
             $list = $data['list'] ?? [];
             if (empty($list)) {
@@ -253,7 +254,7 @@ class PolkadotFetcher implements FetcherInterface
      * @param array<string, mixed> $body
      * @return array<string, mixed>|null
      */
-    private function apiPost(string $path, array $body): ?array
+    private function apiPost(string $path, array $body, ?ProviderOutcomeReceipt $outcome = null): ?array
     {
         $apiKey = defined('BCC_SUBSCAN_API_KEY') ? BCC_SUBSCAN_API_KEY : '';
 
@@ -276,6 +277,7 @@ class PolkadotFetcher implements FetcherInterface
         ], [
             'label'    => 'Subscan ' . $path,
             'chain_id' => $chainId,
+            'outcome'  => $outcome,
         ]);
 
         if (is_wp_error($response)) {

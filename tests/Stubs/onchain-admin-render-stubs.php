@@ -187,7 +187,7 @@ namespace {
             }
 
             /** @return list<array<string, mixed>> */
-            public function fetch_all_validators(): array
+            public function fetch_all_validators(?\BCC\Trust\Onchain\Support\ProviderOutcomeReceipt $outcome = null): array
             {
                 if ($this->throws !== null) {
                     throw $this->throws;

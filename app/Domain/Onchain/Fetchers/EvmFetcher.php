@@ -15,6 +15,7 @@ use BCC\Trust\Onchain\Services\NftSpamFilter;
 use BCC\Trust\Onchain\Services\V1FetchFailureTracker;
 use BCC\Trust\Onchain\Support\AlchemyEndpoint;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 use BCC\Trust\Onchain\Workers\NftEthIndexerWorker;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
@@ -114,7 +115,7 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     }
 
     /** @return array<int, array<string, mixed>> */
-    public function fetch_all_validators(): array
+    public function fetch_all_validators(?ProviderOutcomeReceipt $outcome = null): array
     {
         // EVM chains have no indexable validator enumeration in BCC's model.
         // The supports_feature('validator') gate above keeps callers from
@@ -264,10 +265,22 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * Returns events in the indexer's normalized TransferEvent shape:
      * see NftHoldingsIndexer phpstan-type for the contract.
      *
+     * ── $outcome ────────────────────────────────────────────────────────
+     * ONE page is ONE logical provider request. The caller may hand in a
+     * receipt for THAT page so it can tell a transport failure the breaker
+     * has already been charged for from a misconfiguration or a malformed
+     * body that charged nothing. A receipt must belong to a single page: one
+     * constructed outside the caller's paging loop would carry the previous
+     * page's outcome into the next one.
+     *
      * @return array{transfers: list<array<string, mixed>>, page_key: string|null}|null
      */
-    public function fetch_transfers_since(int $fromBlock, int $toBlock, ?string $pageKey = null): ?array
-    {
+    public function fetch_transfers_since(
+        int $fromBlock,
+        int $toBlock,
+        ?string $pageKey = null,
+        ?ProviderOutcomeReceipt $outcome = null
+    ): ?array {
         $chainIdForLog = (int) ($this->chain->id ?? 0);
 
         $rpcUrl = (string) ($this->chain->rpc_url ?? '');
@@ -319,6 +332,7 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         ], [
             'label'    => 'EVM alchemy_getAssetTransfers',
             'chain_id' => $chainId,
+            'outcome'  => $outcome,
         ]);
 
         if (is_wp_error($response)) {

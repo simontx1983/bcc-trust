@@ -496,6 +496,7 @@ return array(
     'BCC\\Trust\\Onchain\\Support\\NftDriverRegistry' => $baseDir . '/app/Domain/Onchain/Support/NftDriverRegistry.php',
     'BCC\\Trust\\Onchain\\Support\\NftProviderReadiness' => $baseDir . '/app/Domain/Onchain/Support/NftProviderReadiness.php',
     'BCC\\Trust\\Onchain\\Support\\OnchainCircuitBreaker' => $baseDir . '/app/Domain/Onchain/Support/OnchainCircuitBreaker.php',
+    'BCC\\Trust\\Onchain\\Support\\ProviderOutcomeReceipt' => $baseDir . '/app/Domain/Onchain/Support/ProviderOutcomeReceipt.php',
     'BCC\\Trust\\Onchain\\Support\\ProviderRequestBudget' => $baseDir . '/app/Domain/Onchain/Support/ProviderRequestBudget.php',
     'BCC\\Trust\\Onchain\\Support\\ScannerFreeze' => $baseDir . '/app/Domain/Onchain/Support/ScannerFreeze.php',
     'BCC\\Trust\\Onchain\\Support\\SolanaEndpoints' => $baseDir . '/app/Domain/Onchain/Support/SolanaEndpoints.php',

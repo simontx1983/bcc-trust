@@ -358,10 +358,21 @@ final class EmissionQueueBudgetAndBreakerTest extends TestCase
         $result = CosmwasmDiscoveryService::emitCollections(self::CHAIN, $this->fetcher(), new ProviderRequestBudget(25, 20), 25);
 
         self::assertSame(0, $result['emitted']);
-        self::assertGreaterThanOrEqual(
-            OnchainCircuitBreaker::FAILURE_THRESHOLD,
+        // ⚠ STILL BLAMED, NO LONGER INSTANTLY FATAL. The node fault is still
+        // charged to the provider — two probe variants, two logical requests,
+        // two charges — but one emission pass against a broken node no longer
+        // exhausts a five-failure threshold on its own. That is PR B's
+        // intended effect: the breaker opens when a chain keeps failing, not
+        // when one pass retries.
+        self::assertSame(
+            2,
             $this->charges(),
-            'a real node fault still trips the protection it is meant to trip'
+            'a real node fault is still charged, once per logical request'
+        );
+        self::assertSame(
+            OnchainCircuitBreaker::PHASE_CLOSED,
+            OnchainCircuitBreaker::phase(self::CHAIN),
+            'two charges are below the threshold of five'
         );
         $attribution = OnchainCircuitBreaker::attribution(self::CHAIN);
         self::assertSame('http_5xx', $attribution['kind'], 'recorded as what it was');

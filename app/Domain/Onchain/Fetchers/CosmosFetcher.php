@@ -12,6 +12,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Support\ApiRetry;
+use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
 use BCC\Trust\Onchain\Support\Bech32;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
@@ -452,10 +453,10 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array<int, array<string, mixed>> Array of validator data arrays ready for bulkUpsert.
      */
-    public function fetch_all_validators(): array
+    public function fetch_all_validators(?ProviderOutcomeReceipt $outcome = null): array
     {
         // Reuse the cached bonded set (also populates cache for enrichment).
-        $vals = $this->getBondedValidators();
+        $vals = $this->getBondedValidators($outcome);
 
         if (empty($vals)) {
             return [];
@@ -2271,9 +2272,9 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * @param array<string, string|int> $params
      * @return array<string, mixed>|null
      */
-    private function lcdGet(string $path, array $params = []): ?array
+    private function lcdGet(string $path, array $params = [], ?ProviderOutcomeReceipt $outcome = null): ?array
     {
-        $result = $this->lcdGetResult($path, $params);
+        $result = $this->lcdGetResult($path, $params, false, $outcome);
 
         return $result['ok'] ? $result['data'] : null;
     }
@@ -2307,8 +2308,12 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * @param array<string, string|int> $params
      * @return array{ok: bool, data: array<string, mixed>|null, http_code: int, error_kind: string, message_excerpt: string}
      */
-    private function lcdGetResult(string $path, array $params = [], bool $smartQuery = false): array
-    {
+    private function lcdGetResult(
+        string $path,
+        array $params = [],
+        bool $smartQuery = false,
+        ?ProviderOutcomeReceipt $outcome = null
+    ): array {
         $classifier = \BCC\Trust\Onchain\Services\CosmwasmClassifier::class;
         $chainId    = (int) ($this->chain->id ?? 0);
 
@@ -2342,6 +2347,9 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             // So a breaker charge records WHICH endpoint earned it, and the
             // next provider is never described by the last one's failures.
             'endpoint_fp' => $this->endpoint_fp,
+            // Write-only: whatever the transport settles for THIS request, so a
+            // caller judging an empty result cannot charge the same failure twice.
+            'outcome'     => $outcome,
         ];
 
         // ONLY smart queries may reinterpret a 5xx. A code listing or a
@@ -2824,7 +2832,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array<int, array<string, mixed>>
      */
-    private function getBondedValidators(): array
+    private function getBondedValidators(?ProviderOutcomeReceipt $outcome = null): array
     {
         $chainId = (int) $this->chain->id;
 
@@ -2835,7 +2843,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         $response = $this->lcdGet('/cosmos/staking/v1beta1/validators', [
             'status'           => 'BOND_STATUS_BONDED',
             'pagination.limit' => 500,
-        ]);
+        ], $outcome);
 
         if (!$response || empty($response['validators'])) {
             self::$validatorListCache[$chainId] = [];
