@@ -698,6 +698,17 @@ namespace BCC\Trust\Onchain\Support {
             {
                 return self::$open;
             }
+            /**
+             * NON-MUTATING preflight reader (issue #264). The real class returns
+             * TRUE only while OPEN and inside its cooldown, and never touches the
+             * probe lock; this double models the same "is traffic blocked?" answer
+             * without a half-open window.
+             */
+            public static function isResting(int $chainId): bool
+            {
+                return self::$open;
+            }
+
 
             public static function recordSuccess(int $chainId): void
             {

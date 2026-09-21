@@ -990,7 +990,13 @@ final class CosmwasmDiscoveryWorker
             return null; // No wasm module — durable, never retried.
         }
 
-        if (OnchainCircuitBreaker::isOpen($chainId)) {
+        // ⚠ NON-MUTATING. This preflight is followed by a missing-chain,
+        // missing-driver and wrong-fetcher gate that each return without
+        // contacting anything, so it must not consume the half-open recovery
+        // probe — see issue #264. The entry points that reach this method
+        // remain FROZEN by ScannerFreeze; this changes how the check reads
+        // breaker state, not whether the scanner may run.
+        if (OnchainCircuitBreaker::isResting($chainId)) {
             // The ONE refusal that is temporary, self-clearing, and about
             // the provider rather than the chain's configuration.
             $refusal = self::PASS_CIRCUIT_OPEN;

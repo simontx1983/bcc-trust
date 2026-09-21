@@ -163,7 +163,11 @@ class ChainRefreshService
                 $chainId = (int) $chain->id;
 
                 // Skip chains whose circuit breaker is open (consistently failing).
-                if (OnchainCircuitBreaker::isOpen($chainId)) {
+                //
+                // ⚠ NON-MUTATING. The driver and capability gates below can
+                // `continue` without contacting anything, so this must not
+                // consume the half-open recovery probe — see issue #264.
+                if (OnchainCircuitBreaker::isResting($chainId)) {
                     \BCC\Core\Log\Logger::info('[Onchain] Skipping index for ' . $chain->name . ' — circuit breaker open');
                     continue;
                 }
